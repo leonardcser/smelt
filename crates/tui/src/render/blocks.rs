@@ -256,13 +256,7 @@ pub(super) fn render_tool(
             .and_then(|v| v.as_u64())
             .unwrap_or(120_000);
         let secs = ms / 1000;
-        Some(if secs.is_multiple_of(60) {
-            format!("timeout {}m", secs / 60)
-        } else if secs >= 60 {
-            format!("timeout {}m{}s", secs / 60, secs % 60)
-        } else {
-            format!("timeout {}s", secs)
-        })
+        Some(format!("timeout: {}", format_duration(secs)))
     } else {
         None
     };
