@@ -1,5 +1,5 @@
 use crate::config;
-use crate::provider::{Message, ReasoningEffort};
+use protocol::{Message, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;

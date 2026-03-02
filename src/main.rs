@@ -1,25 +1,6 @@
-mod agent;
-mod app;
-pub mod completer;
-mod config;
-pub mod input;
-mod instructions;
-mod log;
-pub mod perf;
-mod permissions;
-mod provider;
-pub mod render;
-mod session;
-mod state;
-mod theme;
-mod tools;
-pub mod vim;
-
-pub use app::App;
-
 use clap::Parser;
 use crossterm::ExecutableCommand;
-use session::Session;
+use protocol::Mode;
 use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
@@ -59,8 +40,8 @@ async fn main() {
     }));
 
     let args = Args::parse();
-    let cfg = config::Config::load();
-    let app_state = state::State::load();
+    let cfg = tui::config::Config::load();
+    let app_state = tui::state::State::load();
     let available_models = cfg.resolve_models();
 
     // Resolve the active model: CLI flags > cached selection > default_model > first in config
@@ -88,7 +69,6 @@ async fn main() {
             let key = std::env::var(&key_env).unwrap_or_default();
             (base, key, r.model_name.clone(), r.config.clone())
         } else {
-            // Fallback: pure CLI flags, no config providers
             let base = args
                 .api_base
                 .clone()
@@ -99,12 +79,12 @@ async fn main() {
                 .model
                 .clone()
                 .expect("model must be set via --model or config file");
-            (base, key, model, config::ModelConfig::default())
+            (base, key, model, tui::config::ModelConfig::default())
         }
     };
 
-    if let Some(level) = log::parse_level(&args.log_level) {
-        log::set_level(level);
+    if let Some(level) = engine::log::parse_level(&args.log_level) {
+        engine::log::set_level(level);
     } else {
         eprintln!(
             "warning: invalid --log-level {}, defaulting to info",
@@ -113,7 +93,7 @@ async fn main() {
     }
 
     if args.bench {
-        perf::enable();
+        tui::perf::enable();
     }
 
     if args.headless && args.message.is_none() {
@@ -122,16 +102,17 @@ async fn main() {
     }
 
     let mode_override = args.mode.as_deref().map(|s| {
-        input::Mode::parse(s).unwrap_or_else(|| {
+        Mode::parse(s).unwrap_or_else(|| {
             eprintln!("warning: unknown --mode '{s}', defaulting to normal");
-            input::Mode::Normal
+            Mode::Normal
         })
     });
 
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
     let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
-    let shared_session: Arc<Mutex<Option<Session>>> = Arc::new(Mutex::new(None));
+    let shared_session: Arc<Mutex<Option<tui::session::Session>>> = Arc::new(Mutex::new(None));
 
+    // Signal handler for graceful shutdown
     {
         let shared = shared_session.clone();
         let is_headless = args.headless;
@@ -154,7 +135,7 @@ async fn main() {
             }
             let session_id = if let Ok(guard) = shared.lock() {
                 if let Some(ref s) = *guard {
-                    session::save(s);
+                    tui::session::save(s);
                     if !s.messages.is_empty() {
                         Some(s.id.clone())
                     } else {
@@ -171,18 +152,63 @@ async fn main() {
             println!();
             if !is_headless {
                 if let Some(id) = session_id {
-                    session::print_resume_hint(&id);
+                    tui::session::print_resume_hint(&id);
                 }
             }
             std::process::exit(0);
         });
     }
 
-    let mut app = App::new(
+    // Assemble the system prompt
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let instructions = tui::instructions::load();
+    let initial_mode = mode_override.unwrap_or(protocol::Mode::Normal);
+    let system_prompt = engine::build_system_prompt(initial_mode, &cwd, instructions.as_deref());
+
+    // Start the engine
+    let permissions = engine::Permissions::load();
+    let engine_handle = engine::start(engine::EngineConfig {
         api_base,
         api_key,
+        model_config: engine::ModelConfig {
+            name: model_config.name.clone(),
+            temperature: model_config.temperature,
+            top_p: model_config.top_p,
+            top_k: model_config.top_k,
+            min_p: model_config.min_p,
+            repeat_penalty: model_config.repeat_penalty,
+        },
+        system_prompt,
+        cwd,
+        permissions,
+    });
+
+    // Fetch context window in background (before moving available_models)
+    let ctx_rx = {
+        let ctx_api_base = args
+            .api_base
+            .clone()
+            .or_else(|| available_models.first().map(|m| m.api_base.clone()))
+            .unwrap_or_default();
+        let ctx_api_key = args
+            .api_key_env
+            .as_deref()
+            .or_else(|| available_models.first().map(|m| m.api_key_env.as_str()))
+            .map(|env| std::env::var(env).unwrap_or_default())
+            .unwrap_or_default();
+        let ctx_model = model.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let provider = engine::Provider::new(ctx_api_base, ctx_api_key, reqwest::Client::new());
+            let _ = tx.send(provider.fetch_context_window(&ctx_model).await);
+        });
+        Some(rx)
+    };
+
+    // Build the TUI app
+    let mut app = tui::app::App::new(
         model,
-        model_config,
+        engine_handle,
         vim_enabled,
         auto_compact,
         shared_session,
@@ -192,21 +218,10 @@ async fn main() {
         app.mode = mode;
     }
 
-    // Fetch context window in background so startup isn't blocked by the network call.
-    let ctx_rx = {
-        let provider = app.build_provider();
-        let model = app.model.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let _ = tx.send(provider.fetch_context_window(&model).await);
-        });
-        Some(rx)
-    };
-
     if let Some(ref resume_val) = args.resume {
         if resume_val.is_empty() {
             app.resume_session_before_run();
-        } else if let Some(loaded) = session::load(resume_val) {
+        } else if let Some(loaded) = tui::session::load(resume_val) {
             app.load_session(loaded);
         } else {
             eprintln!("error: session '{}' not found", resume_val);
@@ -220,50 +235,8 @@ async fn main() {
         println!();
         app.run(ctx_rx, args.message).await;
         if !app.session.messages.is_empty() {
-            session::print_resume_hint(&app.session.id);
+            tui::session::print_resume_hint(&app.session.id);
         }
     }
-    perf::print_summary();
-}
-
-/// Expand `@path` references in user input by appending file contents.
-pub fn expand_at_refs(input: &str) -> String {
-    let mut refs: Vec<String> = Vec::new();
-    let mut chars = input.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if c != '@' {
-            continue;
-        }
-        // Collect non-whitespace chars after @
-        let start = i + 1;
-        let mut end = start;
-        while let Some(&(j, nc)) = chars.peek() {
-            if nc.is_whitespace() {
-                break;
-            }
-            end = j + nc.len_utf8();
-            chars.next();
-        }
-        if end > start {
-            let path = &input[start..end];
-            if std::path::Path::new(path).exists() {
-                refs.push(path.to_string());
-            }
-        }
-    }
-
-    if refs.is_empty() {
-        return input.to_string();
-    }
-
-    let mut result = input.to_string();
-    for path in &refs {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            result.push_str(&format!(
-                "\n\nContents of {}:\n```\n{}\n```",
-                path, contents
-            ));
-        }
-    }
-    result
+    tui::perf::print_summary();
 }

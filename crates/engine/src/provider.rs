@@ -1,112 +1,15 @@
 use crate::log;
+use protocol::{Message, ReasoningEffort, Role, ToolCall};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffort {
-    #[default]
-    Off,
-    Low,
-    Medium,
-    High,
-}
-
-impl ReasoningEffort {
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Off => Self::Low,
-            Self::Low => Self::Medium,
-            Self::Medium => Self::High,
-            Self::High => Self::Off,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-
-    pub fn color(self) -> crossterm::style::Color {
-        use crate::theme;
-        match self {
-            Self::Off => theme::REASON_OFF,
-            Self::Low => theme::REASON_LOW,
-            Self::Medium => theme::REASON_MED,
-            Self::High => theme::REASON_HIGH,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    #[serde(rename = "type")]
-    call_type: AlwaysFunction,
-    pub function: FunctionCall,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionCall {
-    pub name: String,
-    pub arguments: String,
-}
-
-/// Serde helper: always serializes as "function", accepts "function" on deserialize.
-#[derive(Debug, Clone, Copy)]
-struct AlwaysFunction;
-
-impl Serialize for AlwaysFunction {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str("function")
-    }
-}
-
-impl<'de> Deserialize<'de> for AlwaysFunction {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = String::deserialize(d)?;
-        if v == "function" {
-            Ok(AlwaysFunction)
-        } else {
-            Err(serde::de::Error::custom(format!(
-                "expected \"function\", got \"{}\"",
-                v
-            )))
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
-    def_type: AlwaysFunction,
+    def_type: AlwaysFunctionDef,
     pub function: FunctionSchema,
 }
 
@@ -117,10 +20,20 @@ pub struct FunctionSchema {
     pub parameters: serde_json::Value,
 }
 
+/// Serde helper: always serializes as "function" for tool definition type field.
+#[derive(Debug, Clone, Copy)]
+struct AlwaysFunctionDef;
+
+impl Serialize for AlwaysFunctionDef {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("function")
+    }
+}
+
 impl ToolDefinition {
     pub fn new(function: FunctionSchema) -> Self {
         Self {
-            def_type: AlwaysFunction,
+            def_type: AlwaysFunctionDef,
             function,
         }
     }

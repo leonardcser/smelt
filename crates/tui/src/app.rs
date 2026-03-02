@@ -1,14 +1,12 @@
-use crate::agent::{run_agent, AgentContext, AgentEvent};
-use crate::input::{
-    resolve_agent_esc, Action, EscAction, History, InputState, MenuResult, Mode, SharedMode,
-};
-use crate::provider::{Message, Provider, Role};
+use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
 use crate::render::{
     tool_arg_summary, Block, ConfirmChoice, ConfirmDialog, FramePrompt, QuestionDialog,
     ResumeEntry, Screen, ToolOutput, ToolStatus,
 };
 use crate::session::Session;
-use crate::{permissions, render, session, state, tools, vim};
+use crate::{render, session, state, vim};
+use engine::EngineHandle;
+use protocol::{EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
     event::{
@@ -22,20 +20,13 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 // ── App ──────────────────────────────────────────────────────────────────────
 
 pub struct App {
-    pub api_base: String,
-    pub api_key: String,
     pub model: String,
-    pub model_config: crate::config::ModelConfig,
-    pub reasoning_effort: crate::provider::ReasoningEffort,
-    pub client: reqwest::Client,
+    pub reasoning_effort: ReasoningEffort,
     pub mode: Mode,
-    pub permissions: permissions::Permissions,
     pub screen: Screen,
     pub history: Vec<Message>,
     pub input_history: History,
@@ -47,19 +38,14 @@ pub struct App {
     pub context_window: Option<u32>,
     pub auto_compact: bool,
     pub available_models: Vec<crate::config::ResolvedModel>,
-    pending_title: Option<tokio::sync::oneshot::Receiver<String>>,
+    pub engine: EngineHandle,
+    pending_title: bool,
+    ps_requested: bool,
     last_width: u16,
     last_height: u16,
-    processes: tools::ProcessRegistry,
-    proc_done_tx: mpsc::UnboundedSender<(String, Option<i32>)>,
-    proc_done_rx: mpsc::UnboundedReceiver<(String, Option<i32>)>,
 }
 
-struct AgentState {
-    cancel: CancellationToken,
-    handle: tokio::task::JoinHandle<Vec<Message>>,
-    steering: Arc<Mutex<Vec<String>>>,
-    shared_mode: SharedMode,
+struct TurnState {
     pending: Option<PendingTool>,
     steered_count: usize,
     _perf: Option<crate::perf::Guard>,
@@ -135,11 +121,11 @@ enum ActiveDialog {
     Confirm {
         dialog: ConfirmDialog,
         tool_name: String,
-        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
+        request_id: u64,
     },
     AskQuestion {
         dialog: QuestionDialog,
-        reply: tokio::sync::oneshot::Sender<String>,
+        request_id: u64,
     },
     Ps(render::PsDialog),
     Rewind(render::RewindDialog),
@@ -223,23 +209,20 @@ enum DeferredDialog {
         args: HashMap<String, serde_json::Value>,
         approval_pattern: Option<String>,
         summary: Option<String>,
-        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
+        request_id: u64,
     },
     AskQuestion {
         args: HashMap<String, serde_json::Value>,
-        reply: tokio::sync::oneshot::Sender<String>,
+        request_id: u64,
     },
 }
 
 // ── App impl ─────────────────────────────────────────────────────────────────
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        api_base: String,
-        api_key: String,
         model: String,
-        model_config: crate::config::ModelConfig,
+        engine: EngineHandle,
         vim_from_config: bool,
         auto_compact: bool,
         shared_session: Arc<Mutex<Option<Session>>>,
@@ -256,16 +239,10 @@ impl App {
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
-        let (proc_done_tx, proc_done_rx) = mpsc::unbounded_channel();
         Self {
-            api_base,
-            api_key,
             model,
-            model_config,
             reasoning_effort,
-            client: reqwest::Client::new(),
             mode,
-            permissions: permissions::Permissions::load(),
             screen,
             history: Vec::new(),
             input_history: History::load(),
@@ -277,12 +254,11 @@ impl App {
             context_window: None,
             auto_compact,
             available_models,
-            pending_title: None,
+            engine,
+            pending_title: false,
+            ps_requested: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
-            processes: tools::ProcessRegistry::new(),
-            proc_done_tx,
-            proc_done_rx,
         }
     }
 
@@ -304,9 +280,7 @@ impl App {
             .draw_prompt(&self.input, self.mode, render::term_width());
 
         let mut term_events = EventStream::new();
-        let mut agent: Option<AgentState> = None;
-        // Dummy receiver — replaced with the real one each time an agent starts.
-        let mut agent_rx: mpsc::UnboundedReceiver<AgentEvent> = mpsc::unbounded_channel().1;
+        let mut agent: Option<TurnState> = None;
 
         let mut active_dialog: Option<ActiveDialog> = None;
 
@@ -330,9 +304,7 @@ impl App {
                 self.screen.flush_blocks();
             } else {
                 self.screen.erase_prompt();
-                let (rx, ag) = self.begin_agent_turn(&msg);
-                agent_rx = rx;
-                agent = Some(ag);
+                agent = Some(self.begin_agent_turn(&msg));
             }
         }
 
@@ -346,7 +318,6 @@ impl App {
 
         'main: loop {
             // ── Background polls ─────────────────────────────────────────
-            self.poll_pending_title();
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
                     self.context_window = result;
@@ -354,29 +325,48 @@ impl App {
                 }
             }
 
-            // ── Drain agent events (paused only for Confirm/AskQuestion) ──
-            if agent.is_some() && !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) {
+            // ── Drain engine events (paused only for Confirm/AskQuestion) ──
+            if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) {
                 loop {
-                    let ev = match agent_rx.try_recv() {
+                    let ev = match self.engine.try_recv() {
                         Ok(ev) => ev,
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            crate::log::entry(
-                                crate::log::Level::Warn,
-                                "agent_stop",
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            engine::log::entry(
+                                engine::log::Level::Warn,
+                                "engine_stop",
                                 &serde_json::json!({
                                     "reason": "channel_disconnected",
                                     "source": "try_recv_drain",
                                 }),
                             );
-                            self.finish_agent(agent.take().unwrap(), false).await;
+                            if agent.is_some() {
+                                self.finish_turn(false);
+                                agent = None;
+                            }
                             break;
                         }
                     };
-                    let action = {
-                        let ag = agent.as_mut().unwrap();
+                    // Handle ProcessList event for /ps command.
+                    if let EngineEvent::ProcessList { ref processes } = ev {
+                        if self.ps_requested {
+                            self.ps_requested = false;
+                            if processes.is_empty() {
+                                self.screen.push(Block::Error {
+                                    message: "no background processes".into(),
+                                });
+                                self.screen.flush_blocks();
+                            } else {
+                                active_dialog = Some(ActiveDialog::Ps(render::PsDialog::new(
+                                    processes.clone(),
+                                )));
+                            }
+                            continue;
+                        }
+                    }
+                    let action = if let Some(ref mut ag) = agent {
                         let ctrl =
-                            self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
+                            self.handle_engine_event(ev, &mut ag.pending, &mut ag.steered_count);
                         self.dispatch_control(
                             ctrl,
                             &mut ag.pending,
@@ -384,11 +374,16 @@ impl App {
                             &mut active_dialog,
                             t.last_keypress,
                         )
+                    } else {
+                        // No active turn — handle out-of-band events.
+                        self.handle_engine_event_idle(ev);
+                        LoopAction::Continue
                     };
                     match action {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
-                            self.finish_agent(agent.take().unwrap(), false).await;
+                            self.finish_turn(false);
+                            agent = None;
                             break;
                         }
                     }
@@ -398,8 +393,9 @@ impl App {
             // ── Sync steering ────────────────────────────────────────────
             if let Some(ref mut ag) = agent {
                 if self.queued_messages.len() > ag.steered_count {
-                    let new = self.queued_messages[ag.steered_count..].to_vec();
-                    ag.steering.lock().unwrap().extend(new);
+                    for msg in &self.queued_messages[ag.steered_count..] {
+                        self.engine.send(UiCommand::Steer { text: msg.clone() });
+                    }
                     ag.steered_count = self.queued_messages.len();
                 }
             }
@@ -417,9 +413,7 @@ impl App {
                     self.screen.erase_prompt();
                     match self.process_input(&text) {
                         InputOutcome::StartAgent => {
-                            let (rx, ag) = self.begin_agent_turn(&text);
-                            agent_rx = rx;
-                            agent = Some(ag);
+                            agent = Some(self.begin_agent_turn(&text));
                         }
                         InputOutcome::Compact => {
                             if self.history.is_empty() {
@@ -428,7 +422,7 @@ impl App {
                                 });
                                 self.screen.flush_blocks();
                             } else {
-                                self.compact_history().await;
+                                self.compact_history();
                             }
                         }
                         InputOutcome::Continue | InputOutcome::Quit => {}
@@ -448,9 +442,14 @@ impl App {
             if deferred_dialog.is_some() && active_dialog.is_none() && agent.is_some() {
                 // Auto-approve deferred confirms in Yolo mode.
                 if self.mode == Mode::Yolo {
-                    if let Some(DeferredDialog::Confirm { reply, .. }) = deferred_dialog.take() {
+                    if let Some(DeferredDialog::Confirm { request_id, .. }) = deferred_dialog.take()
+                    {
                         self.screen.set_pending_dialog(false);
-                        let _ = reply.send((true, None));
+                        self.engine.send(UiCommand::PermissionDecision {
+                            request_id,
+                            approved: true,
+                            message: None,
+                        });
                     }
                 }
 
@@ -468,7 +467,7 @@ impl App {
                             args,
                             approval_pattern,
                             summary,
-                            reply,
+                            request_id,
                         } => {
                             self.screen.set_active_status(ToolStatus::Confirm);
                             self.render_screen();
@@ -481,15 +480,15 @@ impl App {
                                     summary.as_deref(),
                                 ),
                                 tool_name,
-                                reply,
+                                request_id,
                             });
                         }
-                        DeferredDialog::AskQuestion { args, reply } => {
+                        DeferredDialog::AskQuestion { args, request_id } => {
                             self.render_screen();
                             let questions = render::parse_questions(&args);
                             active_dialog = Some(ActiveDialog::AskQuestion {
                                 dialog: QuestionDialog::new(questions),
-                                reply,
+                                request_id,
                             });
                         }
                     }
@@ -499,7 +498,9 @@ impl App {
             // ── Render ───────────────────────────────────────────────────
             let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
             if let Some(d) = active_dialog.as_mut() {
-                if redirtied { d.mark_dirty(); }
+                if redirtied {
+                    d.mark_dirty();
+                }
                 d.draw();
             }
 
@@ -509,8 +510,8 @@ impl App {
 
                 Some(Ok(ev)) = term_events.next() => {
                     if self.dispatch_terminal_event(
-                        ev, &mut agent, &mut agent_rx, &mut t, &mut active_dialog,
-                    ).await {
+                        ev, &mut agent, &mut t, &mut active_dialog,
+                    ) {
                         break 'main;
                     }
 
@@ -518,24 +519,24 @@ impl App {
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
                             if self.dispatch_terminal_event(
-                                ev, &mut agent, &mut agent_rx, &mut t, &mut active_dialog,
-                            ).await {
+                                ev, &mut agent, &mut t, &mut active_dialog,
+                            ) {
                                 break 'main;
                             }
                         }
                     }
 
-                    // Keep the agent's shared mode in sync with app mode.
-                    if let Some(ag) = agent.as_ref() {
-                        ag.shared_mode.store(self.mode);
-                    }
-
                     // If we just switched to Yolo, auto-approve any deferred confirm.
                     if self.mode == Mode::Yolo {
-                        if let Some(DeferredDialog::Confirm { reply, .. }) = deferred_dialog.take()
+                        if let Some(DeferredDialog::Confirm { request_id, .. }) =
+                            deferred_dialog.take()
                         {
                             self.screen.set_pending_dialog(false);
-                            let _ = reply.send((true, None));
+                            self.engine.send(UiCommand::PermissionDecision {
+                                request_id,
+                                approved: true,
+                                message: None,
+                            });
                         }
                     }
 
@@ -547,65 +548,41 @@ impl App {
                     }
                 }
 
-                Some(ev) = agent_rx.recv(), if agent.is_some() && !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) => {
-                    let action = {
-                        let ag = agent.as_mut().unwrap();
-                        let ctrl = self.handle_agent_event(ev, &mut ag.pending, &mut ag.steered_count);
-                        self.dispatch_control(
+                Some(ev) = self.engine.recv(), if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) => {
+                    // Handle ProcessList event for /ps command.
+                    if let EngineEvent::ProcessList { ref processes } = ev {
+                        if self.ps_requested {
+                            self.ps_requested = false;
+                            if processes.is_empty() {
+                                self.screen.push(Block::Error {
+                                    message: "no background processes".into(),
+                                });
+                                self.screen.flush_blocks();
+                            } else {
+                                active_dialog = Some(ActiveDialog::Ps(
+                                    render::PsDialog::new(processes.clone()),
+                                ));
+                            }
+                        }
+                    } else if let Some(ref mut ag) = agent {
+                        let ctrl = self.handle_engine_event(ev, &mut ag.pending, &mut ag.steered_count);
+                        let action = self.dispatch_control(
                             ctrl,
                             &mut ag.pending,
                             &mut deferred_dialog,
                             &mut active_dialog,
                             t.last_keypress,
-                        )
-                    };
-                    match action {
-                        LoopAction::Continue => {}
-                        LoopAction::Done => {
-                            self.finish_agent(agent.take().unwrap(), false).await;
-                        }
-                    }
-                    let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
-                    if let Some(d) = active_dialog.as_mut() {
-                        if redirtied { d.mark_dirty(); }
-                        d.draw();
-                    }
-                }
-
-                Some((id, code)) = self.proc_done_rx.recv() => {
-                    let msg = match code {
-                        Some(0) => format!("Background process {id} has finished."),
-                        Some(c) => format!("Background process {id} exited with code {c}."),
-                        None => format!("Background process {id} exited."),
-                    };
-                    if agent.is_none() {
-                        // Agent is idle — start a new turn so the LLM can react.
-                        self.screen.erase_prompt();
-                        self.push_user_message(msg);
-                        self.save_session();
-                        self.screen.set_throbber(render::Throbber::Working);
-                        let (tx, rx) = mpsc::unbounded_channel();
-                        let cancel = CancellationToken::new();
-                        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-                        let shared_mode = SharedMode::new(self.mode);
-                        let ctx = self.build_agent_context(
-                            cancel.clone(), steering.clone(), shared_mode.clone(),
                         );
-                        let handle = self.spawn_agent(tx, ctx);
-                        agent_rx = rx;
-                        agent = Some(AgentState {
-                            cancel,
-                            handle,
-                            steering,
-                            shared_mode,
-                            pending: None,
-                            steered_count: 0,
-                            _perf: crate::perf::begin("agent_turn"),
-                        });
+                        match action {
+                            LoopAction::Continue => {}
+                            LoopAction::Done => {
+                                self.finish_turn(false);
+                                agent = None;
+                            }
+                        }
                     } else {
-                        // Agent is running — just show a notification, it'll
-                        // see the completed process on its next tool call.
-                        self.screen.push(Block::Text { content: msg });
+                        // No active turn — handle out-of-band events.
+                        self.handle_engine_event_idle(ev);
                     }
                     let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
                     if let Some(d) = active_dialog.as_mut() {
@@ -625,8 +602,8 @@ impl App {
         }
 
         // Cleanup
-        if let Some(ag) = agent {
-            self.finish_agent(ag, true).await;
+        if agent.is_some() {
+            self.finish_turn(true);
         }
         self.save_session();
 
@@ -668,57 +645,61 @@ impl App {
 
         self.push_user_message(message.clone());
         if self.session.first_user_message.is_none() {
-            self.session.first_user_message = Some(message);
+            self.session.first_user_message = Some(message.clone());
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let shared_mode = SharedMode::new(self.mode);
-        let ctx = self.build_agent_context(cancel, steering, shared_mode);
-        let handle = self.spawn_agent(tx, ctx);
+        self.engine.send(UiCommand::StartTurn {
+            input: message,
+            mode: self.mode,
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort,
+            history: self.history.clone(),
+        });
 
         // Drain events, printing text to stdout.
-        while let Some(ev) = rx.recv().await {
+        while let Some(ev) = self.engine.recv().await {
             match ev {
-                AgentEvent::Thinking(content) => {
+                EngineEvent::Thinking { content } => {
                     eprintln!("[thinking] {content}");
                 }
-                AgentEvent::Text(content) => {
+                EngineEvent::Text { content } => {
                     print!("{content}");
                     let _ = io::stdout().flush();
                 }
-                AgentEvent::ToolCall { name, args } => {
-                    let summary = tool_arg_summary(&name, &args);
-                    eprintln!("[tool: {name}] {summary}");
-                }
-                AgentEvent::ToolResult {
-                    content, is_error, ..
+                EngineEvent::ToolStarted {
+                    tool_name, summary, ..
                 } => {
-                    if is_error {
-                        eprintln!("[tool error] {content}");
+                    eprintln!("[tool: {tool_name}] {summary}");
+                }
+                EngineEvent::ToolFinished { result, .. } => {
+                    if result.is_error {
+                        eprintln!("[tool error] {}", result.content);
                     }
                 }
-                AgentEvent::Confirm { reply, .. } => {
-                    // No user to ask — deny. (Allow/Deny are already
-                    // resolved by the agent; only Ask reaches here.)
-                    let _ = reply.send((false, None));
+                EngineEvent::RequestPermission { request_id, .. } => {
+                    self.engine.send(UiCommand::PermissionDecision {
+                        request_id,
+                        approved: false,
+                        message: None,
+                    });
                 }
-                AgentEvent::AskQuestion { reply, .. } => {
-                    let _ = reply.send("User is not available (headless mode).".into());
+                EngineEvent::RequestAnswer { request_id, .. } => {
+                    self.engine.send(UiCommand::QuestionAnswer {
+                        request_id,
+                        answer: Some("User is not available (headless mode).".into()),
+                    });
                 }
-                AgentEvent::Error(e) => {
-                    eprintln!("[error] {e}");
+                EngineEvent::TurnError { message } => {
+                    eprintln!("[error] {message}");
                 }
-                AgentEvent::Done => break,
+                EngineEvent::TurnComplete { messages } => {
+                    self.history = messages;
+                    break;
+                }
                 _ => {}
             }
         }
 
-        // Wait for the agent task to finish and collect messages.
-        if let Ok(msgs) = handle.await {
-            self.history = msgs;
-        }
         self.save_session();
 
         // Ensure output ends with a newline.
@@ -729,11 +710,10 @@ impl App {
 
     /// Handle a single terminal event, potentially starting/stopping agents.
     /// Returns `true` if the app should quit.
-    async fn dispatch_terminal_event(
+    fn dispatch_terminal_event(
         &mut self,
         ev: Event,
-        agent: &mut Option<AgentState>,
-        agent_rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
+        agent: &mut Option<TurnState>,
         t: &mut Timers,
         active_dialog: &mut Option<ActiveDialog>,
     ) -> bool {
@@ -755,11 +735,9 @@ impl App {
             {
                 match active_dialog.take().unwrap() {
                     ActiveDialog::Ps(mut d) => {
-                        if let Some(killed) = d.handle_key(code, modifiers) {
+                        if let Some(_killed) = d.handle_key(code, modifiers) {
                             d.cleanup();
-                            for id in &killed {
-                                let _ = self.processes.stop(id);
-                            }
+                            // Process killing is now handled by the engine.
                             self.screen.redraw(self.screen.has_scrollback);
                         } else {
                             *active_dialog = Some(ActiveDialog::Ps(d));
@@ -803,40 +781,47 @@ impl App {
                     ActiveDialog::Confirm {
                         mut dialog,
                         tool_name,
-                        reply,
+                        request_id,
                     } => {
                         if let Some((choice, message)) = dialog.handle_key(code, modifiers) {
                             dialog.cleanup();
-                            let should_cancel =
-                                self.resolve_confirm((choice, message), reply, &tool_name, agent);
+                            let should_cancel = self.resolve_confirm(
+                                (choice, message),
+                                request_id,
+                                &tool_name,
+                                agent,
+                            );
                             self.screen.redraw(self.screen.has_scrollback);
                             if should_cancel {
-                                if let Some(ag) = agent.take() {
-                                    self.finish_agent(ag, true).await;
+                                if agent.is_some() {
+                                    self.finish_turn(true);
+                                    *agent = None;
                                 }
                             }
                         } else {
                             *active_dialog = Some(ActiveDialog::Confirm {
                                 dialog,
                                 tool_name,
-                                reply,
+                                request_id,
                             });
                         }
                     }
                     ActiveDialog::AskQuestion {
-                        mut dialog, reply, ..
+                        mut dialog,
+                        request_id,
                     } => {
                         if let Some(answer) = dialog.handle_key(code, modifiers) {
                             dialog.cleanup();
-                            let should_cancel = self.resolve_question(answer, reply, agent);
+                            let should_cancel = self.resolve_question(answer, request_id, agent);
                             self.screen.redraw(self.screen.has_scrollback);
                             if should_cancel {
-                                if let Some(ag) = agent.take() {
-                                    self.finish_agent(ag, true).await;
+                                if agent.is_some() {
+                                    self.finish_turn(true);
+                                    *agent = None;
                                 }
                             }
                         } else {
-                            *active_dialog = Some(ActiveDialog::AskQuestion { dialog, reply });
+                            *active_dialog = Some(ActiveDialog::AskQuestion { dialog, request_id });
                         }
                     }
                 }
@@ -853,34 +838,37 @@ impl App {
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
-                if let Some(ag) = agent.take() {
-                    self.finish_agent(ag, true).await;
+                if agent.is_some() {
+                    self.finish_turn(true);
+                    *agent = None;
                 }
                 true
             }
             EventOutcome::CancelAgent => {
-                crate::log::entry(
-                    crate::log::Level::Info,
+                engine::log::entry(
+                    engine::log::Level::Info,
                     "agent_stop",
                     &serde_json::json!({
                         "reason": "user_cancel",
                     }),
                 );
-                if let Some(ag) = agent.take() {
-                    self.finish_agent(ag, true).await;
+                if agent.is_some() {
+                    self.finish_turn(true);
+                    *agent = None;
                 }
                 false
             }
             EventOutcome::CancelAndClear => {
-                crate::log::entry(
-                    crate::log::Level::Info,
+                engine::log::entry(
+                    engine::log::Level::Info,
                     "agent_stop",
                     &serde_json::json!({
                         "reason": "user_cancel_and_clear",
                     }),
                 );
-                if let Some(ag) = agent.take() {
-                    self.finish_agent(ag, true).await;
+                if agent.is_some() {
+                    self.finish_turn(true);
+                    *agent = None;
                 }
                 self.reset_session();
                 false
@@ -896,9 +884,6 @@ impl App {
                         if let Some(resolved) = self.available_models.iter().find(|m| m.key == key)
                         {
                             self.model = resolved.model_name.clone();
-                            self.model_config = resolved.config.clone();
-                            self.api_base = resolved.api_base.clone();
-                            self.api_key = std::env::var(&resolved.api_key_env).unwrap_or_default();
                             self.screen.set_model_label(resolved.model_name.clone());
                             state::set_selected_model(key);
                         }
@@ -919,9 +904,7 @@ impl App {
                     self.screen.erase_prompt();
                     match self.process_input(&text) {
                         InputOutcome::StartAgent => {
-                            let (rx, ag) = self.begin_agent_turn(&text);
-                            *agent_rx = rx;
-                            *agent = Some(ag);
+                            *agent = Some(self.begin_agent_turn(&text));
                         }
                         InputOutcome::Compact => {
                             if self.history.is_empty() {
@@ -930,7 +913,7 @@ impl App {
                                 });
                                 self.screen.flush_blocks();
                             } else {
-                                self.compact_history().await;
+                                self.compact_history();
                             }
                         }
                         InputOutcome::Continue => {}
@@ -1280,10 +1263,7 @@ impl App {
 
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
-    fn begin_agent_turn(
-        &mut self,
-        input: &str,
-    ) -> (mpsc::UnboundedReceiver<AgentEvent>, AgentState) {
+    fn begin_agent_turn(&mut self, input: &str) -> TurnState {
         self.screen.begin_turn();
         self.show_user_message(input);
         if self.session.first_user_message.is_none() {
@@ -1291,41 +1271,29 @@ impl App {
         }
         self.push_user_message(input.to_string());
         self.save_session();
-
         self.screen.set_throbber(render::Throbber::Working);
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let shared_mode = SharedMode::new(self.mode);
-        let ctx = self.build_agent_context(cancel.clone(), steering.clone(), shared_mode.clone());
-        let handle = self.spawn_agent(tx, ctx);
+        self.engine.send(UiCommand::StartTurn {
+            input: input.to_string(),
+            mode: self.mode,
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort,
+            history: self.history.clone(),
+        });
 
-        let state = AgentState {
-            cancel,
-            handle,
-            steering,
-            shared_mode,
+        TurnState {
             pending: None,
             steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
-        };
-        (rx, state)
+        }
     }
 
-    async fn finish_agent(&mut self, agent: AgentState, cancelled: bool) {
+    fn finish_turn(&mut self, cancelled: bool) {
         self.screen.flush_blocks();
         if cancelled {
-            crate::log::entry(
-                crate::log::Level::Info,
-                "finish_agent",
-                &serde_json::json!({
-                    "cancelled": true,
-                }),
-            );
+            self.engine.send(UiCommand::Cancel);
             self.screen.set_throbber(render::Throbber::Interrupted);
-            let mut leftover: Vec<String> = agent.steering.lock().unwrap().drain(..).collect();
-            leftover.append(&mut self.queued_messages);
+            let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
                 let mut combined = leftover.join("\n");
                 if !self.input.buf.is_empty() {
@@ -1335,41 +1303,13 @@ impl App {
                 self.input.buf = combined;
                 self.input.cpos = self.input.buf.len();
             }
-            agent.cancel.cancel();
-            agent.handle.abort();
         } else {
             self.screen.set_throbber(render::Throbber::Done);
-            match agent.handle.await {
-                Ok(new_messages) => {
-                    crate::log::entry(
-                        crate::log::Level::Info,
-                        "finish_agent",
-                        &serde_json::json!({
-                            "cancelled": false,
-                            "result": "ok",
-                            "messages": new_messages.len(),
-                        }),
-                    );
-                    self.history = new_messages;
-                }
-                Err(e) => {
-                    crate::log::entry(
-                        crate::log::Level::Error,
-                        "finish_agent",
-                        &serde_json::json!({
-                            "cancelled": false,
-                            "result": "join_error",
-                            "panic": e.is_panic(),
-                            "error": e.to_string(),
-                        }),
-                    );
-                }
-            }
         }
         self.save_session();
         self.maybe_generate_title();
         state::set_mode(self.mode);
-        self.maybe_auto_compact().await;
+        self.maybe_auto_compact();
     }
 
     // ── Commands ─────────────────────────────────────────────────────────
@@ -1411,18 +1351,9 @@ impl App {
                 CommandAction::Continue
             }
             "/ps" => {
-                let list = self.processes.list();
-                if list.is_empty() {
-                    self.screen.push(Block::Error {
-                        message: "no background processes".into(),
-                    });
-                    self.screen.flush_blocks();
-                    CommandAction::Continue
-                } else {
-                    CommandAction::OpenDialog(Box::new(ActiveDialog::Ps(render::PsDialog::new(
-                        list,
-                    ))))
-                }
+                self.ps_requested = true;
+                self.engine.send(UiCommand::ListProcesses);
+                CommandAction::Continue
             }
             _ if input.starts_with('!') => {
                 self.run_shell_escape(&input[1..]);
@@ -1501,7 +1432,7 @@ impl App {
     pub fn load_session(&mut self, loaded: session::Session) {
         // Restore per-session settings
         if let Some(ref mode_str) = loaded.mode {
-            if let Some(mode) = crate::input::Mode::parse(mode_str) {
+            if let Some(mode) = Mode::parse(mode_str) {
                 self.mode = mode;
             }
         }
@@ -1516,9 +1447,6 @@ impl App {
                 .find(|m| m.key == *model_key || m.model_name == *model_key)
             {
                 self.model = resolved.model_name.clone();
-                self.model_config = resolved.config.clone();
-                self.api_base = resolved.api_base.clone();
-                self.api_key = std::env::var(&resolved.api_key_env).unwrap_or_default();
                 self.screen.set_model_label(resolved.model_name.clone());
             }
         }
@@ -1678,129 +1606,27 @@ impl App {
         }
     }
 
-    pub fn maybe_generate_title(&mut self) {
-        let has_title = self
-            .session
-            .title
-            .as_ref()
-            .is_some_and(|t| !t.trim().is_empty());
-        if has_title || self.pending_title.is_some() {
+    fn maybe_generate_title(&mut self) {
+        if self.session.title.is_some() || self.pending_title {
             return;
         }
-        let Some(first) = self.session.first_user_message.clone() else {
-            return;
-        };
-        let provider = self.build_provider();
-        let model = self.model.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_title = Some(rx);
-        tokio::spawn(async move {
-            let title = match provider.complete_title(&first, &model).await {
-                Ok(t) if !t.is_empty() => t,
-                _ => {
-                    let fallback = first.lines().next().unwrap_or("Untitled");
-                    let mut trimmed = fallback.to_string();
-                    if trimmed.len() > 48 {
-                        trimmed.truncate(48);
-                        trimmed = trimmed.trim().to_string();
-                    }
-                    trimmed
-                }
-            };
-            let _ = tx.send(title);
+        if let Some(ref msg) = self.session.first_user_message {
+            self.pending_title = true;
+            self.engine.send(UiCommand::GenerateTitle {
+                first_message: msg.clone(),
+            });
+        }
+    }
+
+    pub fn compact_history(&mut self) {
+        self.screen.set_throbber(render::Throbber::Compacting);
+        self.engine.send(UiCommand::Compact {
+            keep_turns: 3,
+            history: self.history.clone(),
         });
     }
 
-    pub fn poll_pending_title(&mut self) {
-        if let Some(ref mut rx) = self.pending_title {
-            match rx.try_recv() {
-                Ok(title) => {
-                    self.session.title = Some(title);
-                    self.pending_title = None;
-                    self.save_session();
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.pending_title = None;
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-            }
-        }
-    }
-
-    pub async fn compact_history(&mut self) {
-        const KEEP_TURNS: usize = 2;
-
-        let cut = {
-            let mut turns_seen = 0;
-            let mut idx = self.history.len();
-            for (i, msg) in self.history.iter().enumerate().rev() {
-                if matches!(msg.role, Role::User) {
-                    turns_seen += 1;
-                    if turns_seen == KEEP_TURNS {
-                        idx = i;
-                        break;
-                    }
-                }
-            }
-            idx
-        };
-
-        if cut == 0 {
-            self.screen.push(Block::Error {
-                message: "not enough history to compact".into(),
-            });
-            self.screen.flush_blocks();
-            return;
-        }
-
-        let to_summarize = self.history[..cut].to_vec();
-
-        let provider = self.build_provider();
-        let model = self.model.clone();
-        let cancel = CancellationToken::new();
-        let task =
-            tokio::spawn(async move { provider.compact(&to_summarize, &model, &cancel).await });
-
-        self.screen.set_throbber(render::Throbber::Compacting);
-        loop {
-            self.render_screen();
-            if task.is_finished() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(80)).await;
-        }
-
-        let result = task.await.unwrap_or_else(|_| Err("task panicked".into()));
-
-        match result {
-            Ok(summary) => {
-                let summary_msg = Message {
-                    role: Role::System,
-                    content: Some(format!("Summary of prior conversation:\n\n{}", summary)),
-                    tool_calls: None,
-                    tool_call_id: None,
-                };
-                let tail = self.history[cut..].to_vec();
-                self.history = vec![summary_msg];
-                self.history.extend(tail);
-                self.save_session();
-                self.screen.clear();
-                self.screen.push(Block::Text {
-                    content: summary.clone(),
-                });
-                self.screen.flush_blocks();
-                self.screen.set_throbber(render::Throbber::Done);
-            }
-            Err(e) => {
-                self.screen.push(Block::Error {
-                    message: format!("compact failed: {}", e),
-                });
-                self.screen.flush_blocks();
-            }
-        }
-    }
-
-    pub async fn maybe_auto_compact(&mut self) {
+    fn maybe_auto_compact(&mut self) {
         if !self.auto_compact {
             return;
         }
@@ -1811,7 +1637,7 @@ impl App {
             return;
         };
         if tokens as u64 * 100 >= ctx as u64 * 80 {
-            self.compact_history().await;
+            self.compact_history();
         }
     }
 
@@ -1861,52 +1687,14 @@ impl App {
         });
     }
 
-    pub fn build_provider(&self) -> Provider {
-        Provider::new(
-            self.api_base.clone(),
-            self.api_key.clone(),
-            self.client.clone(),
-        )
-        .with_model_config(self.model_config.clone())
-        .with_reasoning_effort(self.reasoning_effort)
-    }
-
-    fn build_agent_context(
-        &self,
-        cancel: CancellationToken,
-        steering: Arc<Mutex<Vec<String>>>,
-        shared_mode: SharedMode,
-    ) -> AgentContext {
-        AgentContext {
-            provider: self.build_provider(),
-            model: self.model.clone(),
-            registry: tools::build_tools(self.processes.clone()),
-            permissions: self.permissions.clone(),
-            shared_mode,
-            cancel,
-            steering,
-            processes: self.processes.clone(),
-            proc_done_tx: self.proc_done_tx.clone(),
-        }
-    }
-
-    fn spawn_agent(
-        &self,
-        tx: mpsc::UnboundedSender<AgentEvent>,
-        ctx: AgentContext,
-    ) -> tokio::task::JoinHandle<Vec<Message>> {
-        let mode = self.mode;
-        let history = self.history.clone();
-        tokio::spawn(async move { run_agent(&ctx, mode, &history, &tx).await })
-    }
-
     fn toggle_mode(&mut self) {
         self.mode = self.mode.toggle();
         state::set_mode(self.mode);
+        self.engine.send(UiCommand::SetMode { mode: self.mode });
         self.screen.mark_dirty();
     }
 
-    fn set_reasoning_effort(&mut self, effort: crate::provider::ReasoningEffort) {
+    fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.reasoning_effort = effort;
         self.screen.set_reasoning_effort(effort);
         state::set_reasoning_effort(effort);
@@ -1923,84 +1711,154 @@ impl App {
         );
     }
 
-    pub fn handle_agent_event(
+    pub fn handle_engine_event(
         &mut self,
-        ev: AgentEvent,
+        ev: EngineEvent,
         pending: &mut Option<PendingTool>,
         steered_count: &mut usize,
     ) -> SessionControl {
         match ev {
-            AgentEvent::TokenUsage { prompt_tokens } => {
+            EngineEvent::Ready => SessionControl::Continue,
+            EngineEvent::TokenUsage { prompt_tokens } => {
                 if prompt_tokens > 0 {
                     self.screen.set_context_tokens(prompt_tokens);
                 }
                 self.screen.set_throbber(render::Throbber::Working);
                 SessionControl::Continue
             }
-            AgentEvent::ToolOutputChunk(chunk) => {
+            EngineEvent::ToolOutput { chunk, .. } => {
                 self.screen.append_active_output(&chunk);
                 SessionControl::Continue
             }
-            AgentEvent::Steered { text, count } => {
+            EngineEvent::Steered { text, count } => {
                 let drain_n = count.min(self.queued_messages.len());
                 self.queued_messages.drain(..drain_n);
                 *steered_count = steered_count.saturating_sub(drain_n);
                 self.screen.push(Block::User { text });
                 SessionControl::Continue
             }
-            AgentEvent::Thinking(content) => {
+            EngineEvent::Thinking { content } => {
                 self.screen.push(Block::Thinking { content });
                 SessionControl::Continue
             }
-            AgentEvent::Text(content) => {
+            EngineEvent::Text { content } => {
                 self.screen.push(Block::Text { content });
                 SessionControl::Continue
             }
-            AgentEvent::ToolCall { name, args } => {
-                let summary = tool_arg_summary(&name, &args);
-                self.screen.start_tool(name.clone(), summary, args);
-                *pending = Some(PendingTool { name });
+            EngineEvent::ToolStarted {
+                tool_name,
+                args,
+                summary,
+                ..
+            } => {
+                self.screen.start_tool(tool_name.clone(), summary, args);
+                *pending = Some(PendingTool { name: tool_name });
                 SessionControl::Continue
             }
-            AgentEvent::ToolResult { content, is_error } => {
+            EngineEvent::ToolFinished { result, .. } => {
                 if pending.is_some() {
-                    let status = if is_error {
+                    let status = if result.is_error {
                         ToolStatus::Err
                     } else {
                         ToolStatus::Ok
                     };
-                    let output = Some(ToolOutput { content, is_error });
+                    let output = Some(ToolOutput {
+                        content: result.content,
+                        is_error: result.is_error,
+                    });
                     self.screen.finish_tool(status, output);
                 }
                 *pending = None;
                 SessionControl::Continue
             }
-            AgentEvent::Confirm {
-                desc,
+            EngineEvent::RequestPermission {
+                request_id,
+                tool_name,
                 args,
+                confirm_message,
                 approval_pattern,
                 summary,
-                reply,
+                ..
             } => SessionControl::NeedsConfirm {
-                desc,
+                tool_name,
+                desc: confirm_message,
                 args,
                 approval_pattern,
                 summary,
-                reply,
+                request_id,
             },
-            AgentEvent::AskQuestion { args, reply } => {
-                SessionControl::NeedsAskQuestion { args, reply }
+            EngineEvent::RequestAnswer { request_id, args } => {
+                SessionControl::NeedsAskQuestion { args, request_id }
             }
-            AgentEvent::Retrying { delay, attempt } => {
-                self.screen
-                    .set_throbber(render::Throbber::Retrying { delay, attempt });
+            EngineEvent::Retrying { delay_ms, attempt } => {
+                self.screen.set_throbber(render::Throbber::Retrying {
+                    delay: Duration::from_millis(delay_ms),
+                    attempt,
+                });
                 SessionControl::Continue
             }
-            AgentEvent::Done => SessionControl::Done,
-            AgentEvent::Error(e) => {
-                self.screen.push(Block::Error { message: e });
+            EngineEvent::ProcessCompleted { id, exit_code } => {
+                let msg = match exit_code {
+                    Some(0) => format!("Background process {id} has finished."),
+                    Some(c) => format!("Background process {id} exited with code {c}."),
+                    None => format!("Background process {id} exited."),
+                };
+                self.screen.push(Block::Text { content: msg });
+                SessionControl::Continue
+            }
+            EngineEvent::CompactionComplete { messages } => {
+                self.history = messages;
+                self.save_session();
+                self.screen.push(Block::Text {
+                    content: "conversation compacted".into(),
+                });
+                self.screen.set_throbber(render::Throbber::Done);
+                SessionControl::Continue
+            }
+            EngineEvent::TitleGenerated { title } => {
+                self.session.title = Some(title);
+                self.pending_title = false;
+                self.save_session();
+                SessionControl::Continue
+            }
+            EngineEvent::TurnComplete { messages } => {
+                self.history = messages;
                 SessionControl::Done
             }
+            EngineEvent::TurnError { message } => {
+                self.screen.push(Block::Error { message });
+                SessionControl::Done
+            }
+            EngineEvent::Shutdown { .. } => SessionControl::Done,
+            _ => SessionControl::Continue,
+        }
+    }
+
+    /// Handle engine events that arrive when no agent turn is active.
+    fn handle_engine_event_idle(&mut self, ev: EngineEvent) {
+        match ev {
+            EngineEvent::CompactionComplete { messages } => {
+                self.history = messages;
+                self.save_session();
+                self.screen.push(Block::Text {
+                    content: "conversation compacted".into(),
+                });
+                self.screen.set_throbber(render::Throbber::Done);
+            }
+            EngineEvent::TitleGenerated { title } => {
+                self.session.title = Some(title);
+                self.pending_title = false;
+                self.save_session();
+            }
+            EngineEvent::ProcessCompleted { id, exit_code } => {
+                let msg = match exit_code {
+                    Some(0) => format!("Background process {id} has finished."),
+                    Some(c) => format!("Background process {id} exited with code {c}."),
+                    None => format!("Background process {id} exited."),
+                };
+                self.screen.push(Block::Text { content: msg });
+            }
+            _ => {}
         }
     }
 
@@ -2009,9 +1867,9 @@ impl App {
     fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
-        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
+        request_id: u64,
         tool_name: &str,
-        agent: &mut Option<AgentState>,
+        agent: &mut Option<TurnState>,
     ) -> bool {
         let label = match &choice {
             ConfirmChoice::Yes => "approved",
@@ -2026,13 +1884,21 @@ impl App {
         match choice {
             ConfirmChoice::Yes => {
                 self.screen.set_active_status(ToolStatus::Pending);
-                let _ = reply.send((true, message));
+                self.engine.send(UiCommand::PermissionDecision {
+                    request_id,
+                    approved: true,
+                    message,
+                });
                 false
             }
             ConfirmChoice::Always => {
                 self.auto_approved.insert(tool_name.to_string(), vec![]);
                 self.screen.set_active_status(ToolStatus::Pending);
-                let _ = reply.send((true, message));
+                self.engine.send(UiCommand::PermissionDecision {
+                    request_id,
+                    approved: true,
+                    message,
+                });
                 false
             }
             ConfirmChoice::AlwaysPattern(ref pattern) => {
@@ -2043,19 +1909,27 @@ impl App {
                         .push(compiled);
                 }
                 self.screen.set_active_status(ToolStatus::Pending);
-                let _ = reply.send((true, message));
+                self.engine.send(UiCommand::PermissionDecision {
+                    request_id,
+                    approved: true,
+                    message,
+                });
                 false
             }
             ConfirmChoice::No => {
-                crate::log::entry(
-                    crate::log::Level::Info,
+                engine::log::entry(
+                    engine::log::Level::Info,
                     "agent_stop",
                     &serde_json::json!({
                         "reason": "confirm_denied",
                         "tool": tool_name,
                     }),
                 );
-                let _ = reply.send((false, message));
+                self.engine.send(UiCommand::PermissionDecision {
+                    request_id,
+                    approved: false,
+                    message,
+                });
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if let Some(ref mut ag) = agent {
                     ag.pending = None;
@@ -2071,23 +1945,29 @@ impl App {
     fn resolve_question(
         &mut self,
         answer: Option<String>,
-        reply: tokio::sync::oneshot::Sender<String>,
-        agent: &mut Option<AgentState>,
+        request_id: u64,
+        agent: &mut Option<TurnState>,
     ) -> bool {
         match answer {
             Some(json) => {
-                let _ = reply.send(json);
+                self.engine.send(UiCommand::QuestionAnswer {
+                    request_id,
+                    answer: Some(json),
+                });
                 false
             }
             None => {
-                crate::log::entry(
-                    crate::log::Level::Info,
+                engine::log::entry(
+                    engine::log::Level::Info,
                     "agent_stop",
                     &serde_json::json!({
                         "reason": "question_cancelled",
                     }),
                 );
-                let _ = reply.send("User cancelled the question.".into());
+                self.engine.send(UiCommand::QuestionAnswer {
+                    request_id,
+                    answer: None,
+                });
                 self.screen.finish_tool(ToolStatus::Denied, None);
                 if let Some(ref mut ag) = agent {
                     ag.pending = None;
@@ -2109,24 +1989,37 @@ impl App {
             SessionControl::Continue => LoopAction::Continue,
             SessionControl::Done => LoopAction::Done,
             SessionControl::NeedsConfirm {
+                tool_name,
                 desc,
                 args,
                 approval_pattern,
                 summary,
-                reply,
+                request_id,
             } => {
                 // Yolo mode: auto-approve everything.
                 if self.mode == Mode::Yolo {
-                    let _ = reply.send((true, None));
+                    self.engine.send(UiCommand::PermissionDecision {
+                        request_id,
+                        approved: true,
+                        message: None,
+                    });
                     return LoopAction::Continue;
                 }
 
-                let tool_name = pending.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                let tool_name = if tool_name.is_empty() {
+                    pending.as_ref().map(|p| p.name.clone()).unwrap_or_default()
+                } else {
+                    tool_name
+                };
 
                 // Check auto-approvals first (doesn't need UI).
                 if let Some(patterns) = self.auto_approved.get(&tool_name) {
                     if patterns.is_empty() || patterns.iter().any(|p| p.matches(&desc)) {
-                        let _ = reply.send((true, None));
+                        self.engine.send(UiCommand::PermissionDecision {
+                            request_id,
+                            approved: true,
+                            message: None,
+                        });
                         return LoopAction::Continue;
                     }
                 }
@@ -2143,7 +2036,7 @@ impl App {
                         args,
                         approval_pattern,
                         summary,
-                        reply,
+                        request_id,
                     });
                     return LoopAction::Continue;
                 }
@@ -2164,17 +2057,17 @@ impl App {
                         summary.as_deref(),
                     ),
                     tool_name,
-                    reply,
+                    request_id,
                 });
                 LoopAction::Continue
             }
-            SessionControl::NeedsAskQuestion { args, reply } => {
+            SessionControl::NeedsAskQuestion { args, request_id } => {
                 // If the user is actively typing, defer the dialog.
                 let recently_typed = last_keypress
                     .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
                 if recently_typed && !self.input.buf.is_empty() {
                     self.screen.set_pending_dialog(true);
-                    *deferred_dialog = Some(DeferredDialog::AskQuestion { args, reply });
+                    *deferred_dialog = Some(DeferredDialog::AskQuestion { args, request_id });
                     return LoopAction::Continue;
                 }
 
@@ -2187,7 +2080,7 @@ impl App {
                 let questions = render::parse_questions(&args);
                 *active_dialog = Some(ActiveDialog::AskQuestion {
                     dialog: QuestionDialog::new(questions),
-                    reply,
+                    request_id,
                 });
                 LoopAction::Continue
             }
@@ -2197,8 +2090,6 @@ impl App {
     /// Returns true if a dialog overlay needs to be re-dirtied (because
     /// `draw_frame` cleared the area underneath it).
     fn tick(&mut self, agent_running: bool, has_dialog: bool) -> bool {
-        self.screen
-            .set_running_procs(self.processes.running_count());
         let w = render::term_width();
         if has_dialog {
             // Render blocks + active tool but skip the prompt — the dialog
@@ -2289,15 +2180,16 @@ impl App {
 pub enum SessionControl {
     Continue,
     NeedsConfirm {
+        tool_name: String,
         desc: String,
         args: HashMap<String, serde_json::Value>,
         approval_pattern: Option<String>,
         summary: Option<String>,
-        reply: tokio::sync::oneshot::Sender<(bool, Option<String>)>,
+        request_id: u64,
     },
     NeedsAskQuestion {
         args: HashMap<String, serde_json::Value>,
-        reply: tokio::sync::oneshot::Sender<String>,
+        request_id: u64,
     },
     Done,
 }

@@ -1,6 +1,7 @@
-use crate::input::Mode;
+use protocol::Mode;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -156,9 +157,22 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     }
 }
 
+fn config_dir() -> PathBuf {
+    const APP_NAME: &str = "agent";
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config")
+        })
+        .join(APP_NAME)
+}
+
 impl Permissions {
     pub fn load() -> Self {
-        let path = crate::config::config_dir().join("config.yaml");
+        let path = config_dir().join("config.yaml");
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         let raw: RawConfig = serde_yml::from_str(&contents).unwrap_or_default();
         Self {

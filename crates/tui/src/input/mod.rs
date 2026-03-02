@@ -8,89 +8,9 @@ use crate::completer::{Completer, CompleterKind};
 use crate::render;
 use crate::vim::{self, ViMode, Vim};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
 
-/// Object Replacement Character — inline placeholder for large pastes.
 pub const PASTE_MARKER: char = '\u{FFFC}';
-
 const PASTE_LINE_THRESHOLD: usize = 12;
-
-// ── Mode ─────────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum Mode {
-    Normal,
-    Plan,
-    Apply,
-    Yolo,
-}
-
-impl Mode {
-    pub fn toggle(self) -> Self {
-        match self {
-            Mode::Normal => Mode::Plan,
-            Mode::Plan => Mode::Apply,
-            Mode::Apply => Mode::Yolo,
-            Mode::Yolo => Mode::Normal,
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "normal" => Some(Mode::Normal),
-            "plan" => Some(Mode::Plan),
-            "apply" => Some(Mode::Apply),
-            "yolo" => Some(Mode::Yolo),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Mode::Normal => "normal",
-            Mode::Plan => "plan",
-            Mode::Apply => "apply",
-            Mode::Yolo => "yolo",
-        }
-    }
-
-    fn to_u8(self) -> u8 {
-        match self {
-            Mode::Normal => 0,
-            Mode::Plan => 1,
-            Mode::Apply => 2,
-            Mode::Yolo => 3,
-        }
-    }
-
-    fn from_u8(v: u8) -> Self {
-        match v {
-            0 => Mode::Normal,
-            1 => Mode::Plan,
-            2 => Mode::Apply,
-            _ => Mode::Yolo,
-        }
-    }
-}
-
-/// Thread-safe shared mode for live communication between app and agent.
-#[derive(Clone)]
-pub struct SharedMode(Arc<AtomicU8>);
-
-impl SharedMode {
-    pub fn new(mode: Mode) -> Self {
-        Self(Arc::new(AtomicU8::new(mode.to_u8())))
-    }
-
-    pub fn load(&self) -> Mode {
-        Mode::from_u8(self.0.load(Ordering::Relaxed))
-    }
-
-    pub fn store(&self, mode: Mode) {
-        self.0.store(mode.to_u8(), Ordering::Relaxed);
-    }
-}
 
 // ── Shared input state ───────────────────────────────────────────────────────
 

@@ -26,7 +26,7 @@ use blocks::{gap_between, render_block, render_tool, Element};
 /// When `None` is passed instead, only content (blocks + active tool) is drawn.
 pub struct FramePrompt<'a> {
     pub state: &'a InputState,
-    pub mode: super::input::Mode,
+    pub mode: protocol::Mode,
     pub queued: &'a [String],
 }
 
@@ -39,6 +39,15 @@ pub(super) fn crlf(out: &mut io::Stdout) {
 }
 
 const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
+
+fn reasoning_color(effort: protocol::ReasoningEffort) -> Color {
+    match effort {
+        protocol::ReasoningEffort::Off => theme::REASON_OFF,
+        protocol::ReasoningEffort::Low => theme::REASON_LOW,
+        protocol::ReasoningEffort::Medium => theme::REASON_MED,
+        protocol::ReasoningEffort::High => theme::REASON_HIGH,
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ToolStatus {
@@ -357,7 +366,7 @@ pub struct Screen {
     working: WorkingState,
     context_tokens: Option<u32>,
     model_label: Option<String>,
-    reasoning_effort: crate::provider::ReasoningEffort,
+    reasoning_effort: protocol::ReasoningEffort,
     /// True once terminal auto-scrolling has pushed content into scrollback.
     pub has_scrollback: bool,
     /// Terminal row where block content starts (top of conversation).
@@ -511,7 +520,7 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    pub fn set_reasoning_effort(&mut self, effort: crate::provider::ReasoningEffort) {
+    pub fn set_reasoning_effort(&mut self, effort: protocol::ReasoningEffort) {
         self.reasoning_effort = effort;
         self.prompt.dirty = true;
     }
@@ -661,7 +670,7 @@ impl Screen {
         self.redraw(self.has_scrollback);
     }
 
-    pub fn draw_prompt(&mut self, state: &InputState, mode: super::input::Mode, width: usize) {
+    pub fn draw_prompt(&mut self, state: &InputState, mode: protocol::Mode, width: usize) {
         self.draw_frame(
             width,
             Some(FramePrompt {
@@ -676,11 +685,7 @@ impl Screen {
     /// then either the prompt (`Some`) or nothing (`None` = dialog covers it).
     /// Returns `true` when content-only mode drew something (caller should
     /// re-dirty any overlay dialog so it repaints on top).
-    pub fn draw_frame(
-        &mut self,
-        width: usize,
-        prompt: Option<FramePrompt>,
-    ) -> bool {
+    pub fn draw_frame(&mut self, width: usize, prompt: Option<FramePrompt>) -> bool {
         let _perf = crate::perf::begin("draw_frame");
 
         if let Some(start) = self.working.since {
@@ -837,7 +842,7 @@ impl Screen {
         &self,
         out: &mut io::Stdout,
         state: &InputState,
-        mode: super::input::Mode,
+        mode: protocol::Mode,
         width: usize,
         queued: &[String],
         prev_rows: u16,
@@ -866,11 +871,11 @@ impl Screen {
                 color: theme::MUTED,
                 attr: None,
             });
-            if self.reasoning_effort != crate::provider::ReasoningEffort::Off {
+            if self.reasoning_effort != protocol::ReasoningEffort::Off {
                 let effort = self.reasoning_effort;
                 right_spans.push(BarSpan {
                     text: format!(" {}", effort.label()),
-                    color: effort.color(),
+                    color: reasoning_color(effort),
                     attr: None,
                 });
             }
@@ -1031,22 +1036,22 @@ impl Screen {
         }
 
         let mode_spans: Vec<BarSpan> = match mode {
-            super::input::Mode::Plan => vec![BarSpan {
+            protocol::Mode::Plan => vec![BarSpan {
                 text: " plan ".into(),
                 color: theme::PLAN,
                 attr: None,
             }],
-            super::input::Mode::Apply => vec![BarSpan {
+            protocol::Mode::Apply => vec![BarSpan {
                 text: " apply ".into(),
                 color: theme::APPLY,
                 attr: None,
             }],
-            super::input::Mode::Yolo => vec![BarSpan {
+            protocol::Mode::Yolo => vec![BarSpan {
                 text: " yolo ".into(),
                 color: theme::YOLO,
                 attr: None,
             }],
-            super::input::Mode::Normal => vec![],
+            protocol::Mode::Normal => vec![],
         };
         draw_bar(
             out,
@@ -1666,7 +1671,7 @@ fn draw_menu(
     out: &mut io::Stdout,
     ms: &crate::input::MenuState,
     max_rows: usize,
-    reasoning_effort: crate::provider::ReasoningEffort,
+    reasoning_effort: protocol::ReasoningEffort,
 ) -> usize {
     if max_rows == 0 {
         return 0;
@@ -1728,7 +1733,7 @@ fn draw_menu(
                 let _ = out.queue(SetAttribute(Attribute::Dim));
                 let _ = out.queue(Print("  thinking: "));
                 let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(SetForegroundColor(reasoning_effort.color()));
+                let _ = out.queue(SetForegroundColor(reasoning_color(reasoning_effort)));
                 let _ = out.queue(Print(reasoning_effort.label()));
                 let _ = out.queue(ResetColor);
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));

@@ -13,9 +13,9 @@ mod web_search;
 mod web_shared;
 mod write_file;
 
-use crate::input::Mode;
 use crate::permissions::{Decision, Permissions};
 use crate::provider::{FunctionSchema, ToolDefinition};
+use protocol::Mode;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -95,6 +95,23 @@ pub fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> String {
+    match tool_name {
+        "bash" => str_arg(args, "command")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string(),
+        "read_file" | "write_file" | "edit_file" => str_arg(args, "file_path"),
+        "glob" => str_arg(args, "pattern"),
+        "grep" => str_arg(args, "pattern"),
+        "web_fetch" => str_arg(args, "url"),
+        "web_search" => str_arg(args, "query"),
+        "read_process_output" | "stop_process" => str_arg(args, "id"),
+        _ => String::new(),
+    }
 }
 
 pub(crate) fn int_arg(args: &HashMap<String, Value>, key: &str) -> usize {

@@ -1,12 +1,12 @@
 use crate::session;
 use crate::theme;
-use crate::tools::ProcessInfo;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{
     cursor,
     style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal, QueueableCommand,
 };
+use protocol::ProcessInfo;
 use std::collections::HashMap;
 use std::io::{self, Write};
 
@@ -1199,7 +1199,7 @@ impl PsDialog {
                 let _ = out.queue(cursor::MoveTo(0, row));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
                 let status = if proc.running { "running" } else { "done" };
-                let elapsed_secs = proc.started_at.elapsed().as_secs();
+                let elapsed_secs = proc.elapsed_ms / 1000;
                 let time = if elapsed_secs >= 60 {
                     format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
                 } else {

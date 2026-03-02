@@ -1,6 +1,5 @@
 use crate::config;
-use crate::input::Mode;
-use crate::provider::ReasoningEffort;
+use protocol::{Mode, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
