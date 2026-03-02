@@ -3,7 +3,7 @@ mod dialogs;
 mod highlight;
 
 pub use dialogs::{
-    parse_questions, show_resume, show_rewind, ConfirmDialog, Question, QuestionDialog,
+    parse_questions, show_ps, show_resume, show_rewind, ConfirmDialog, Question, QuestionDialog,
     QuestionOption,
 };
 
@@ -59,7 +59,7 @@ pub struct ActiveTool {
 
 impl ActiveTool {
     fn elapsed(&self) -> Option<Duration> {
-        if matches!(self.name.as_str(), "bash" | "web_fetch") {
+        if matches!(self.name.as_str(), "bash" | "web_fetch" | "read_process_output" | "stop_process") {
             Some(self.start_time.elapsed())
         } else {
             None
@@ -354,6 +354,7 @@ pub struct Screen {
     content_start_row: Option<u16>,
     /// A permission dialog is waiting for the user to stop typing.
     pending_dialog: bool,
+    running_procs: usize,
 }
 
 impl Default for Screen {
@@ -375,6 +376,14 @@ impl Screen {
             has_scrollback: false,
             content_start_row: None,
             pending_dialog: false,
+            running_procs: 0,
+        }
+    }
+
+    pub fn set_running_procs(&mut self, count: usize) {
+        if count != self.running_procs {
+            self.running_procs = count;
+            self.prompt.dirty = true;
         }
     }
 
@@ -583,7 +592,7 @@ impl Screen {
         self.prompt.prev_rows = 0;
         if purge {
             self.has_scrollback = false;
-            self.content_start_row = None;
+            self.content_start_row = Some(0);
             self.prompt.fallback_row = Some(block_rows);
         } else {
             let start = self.content_start_row.unwrap_or(0);
@@ -825,6 +834,25 @@ impl Screen {
             right_spans.push(BarSpan {
                 text: " ".into(),
                 color: theme::MUTED,
+                attr: None,
+            });
+        }
+        if self.running_procs > 0 {
+            if !right_spans.is_empty() {
+                right_spans.push(BarSpan {
+                    text: " · ".into(),
+                    color: bar_color,
+                    attr: None,
+                });
+            }
+            let label = if self.running_procs == 1 {
+                "1 proc".to_string()
+            } else {
+                format!("{} procs", self.running_procs)
+            };
+            right_spans.push(BarSpan {
+                text: format!("{label} "),
+                color: theme::ACCENT,
                 attr: None,
             });
         }
@@ -1194,6 +1222,9 @@ pub fn tool_arg_summary(name: &str, args: &HashMap<String, serde_json::Value>) -
             }
         }
         "web_fetch" => args.get("url").and_then(|v| v.as_str()).unwrap_or("").into(),
+        "read_process_output" | "stop_process" => {
+            args.get("id").and_then(|v| v.as_str()).unwrap_or("").into()
+        }
         "ask_user_question" => {
             let count = args
                 .get("questions")

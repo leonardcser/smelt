@@ -238,7 +238,7 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => theme::ACCENT,
         ToolStatus::Pending => theme::TOOL_PENDING,
     };
-    let time = if matches!(name, "bash" | "web_fetch") && status != ToolStatus::Confirm {
+    let time = if matches!(name, "bash" | "web_fetch" | "read_process_output" | "stop_process") && status != ToolStatus::Confirm {
         elapsed
     } else {
         None
@@ -264,6 +264,15 @@ pub(super) fn render_tool(
     if name == "web_fetch" {
         if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
             for seg in &wrap_line(prompt, width.saturating_sub(3)) {
+                print_dim(out, &format!("   {seg}"));
+                crlf(out);
+                rows += 1;
+            }
+        }
+    }
+    if name == "bash" {
+        if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
+            for seg in &wrap_line(desc, width.saturating_sub(3)) {
                 print_dim(out, &format!("   {seg}"));
                 crlf(out);
                 rows += 1;
@@ -411,8 +420,10 @@ fn print_tool_output(
         "edit_file" if !is_error => render_edit_output(out, args),
         "write_file" if !is_error => render_write_output(out, args),
         "ask_user_question" if !is_error => render_question_output(out, content, width),
-        "bash" if content.is_empty() => 0,
-        "bash" => render_bash_output(out, content, is_error, width),
+        "bash" | "read_process_output" | "stop_process" if content.is_empty() => 0,
+        "bash" | "read_process_output" | "stop_process" => {
+            render_bash_output(out, content, is_error, width)
+        }
         _ => render_default_output(out, content, is_error, width),
     }
 }

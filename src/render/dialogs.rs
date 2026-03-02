@@ -1,5 +1,6 @@
 use crate::session;
 use crate::theme;
+use crate::tools::ProcessInfo;
 use crossterm::{
     cursor,
     style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor},
@@ -1046,6 +1047,224 @@ pub fn show_resume(entries: &[ResumeEntry], current_cwd: &str) -> Option<String>
     dialog_cleanup(last_bar_row);
 
     result
+}
+
+// ── Process list dialog ──────────────────────────────────────────────────────
+
+/// Returns the IDs of processes the user chose to kill (via `k`), or empty vec.
+pub fn show_ps(procs: &[ProcessInfo]) -> Vec<String> {
+    if procs.is_empty() {
+        return vec![];
+    }
+
+    let mut out = io::stdout();
+    let (_, mut height) = terminal::size().unwrap_or((80, 24));
+
+    let mut selected: usize = 0;
+    let mut killed: Vec<String> = Vec::new();
+    let mut live: Vec<&ProcessInfo> = procs.iter().collect();
+
+    // 4 = bar + header + blank + hint
+    let max_vis =
+        |h: u16, count: usize| -> usize { (h as usize).saturating_sub(7).min(count.max(1)) };
+    let mut max_visible = max_vis(height, live.len());
+    let mut scroll_offset: usize = 0;
+    let mut bar_row = height.saturating_sub((max_visible + 4) as u16);
+    let mut last_bar_row = bar_row;
+
+    let _ = out.queue(cursor::Hide);
+    let _ = out.flush();
+
+    let draw = |bar_row: u16,
+                last_bar_row: u16,
+                max_visible: usize,
+                selected: usize,
+                scroll_offset: usize,
+                live: &[&ProcessInfo]| {
+        let mut out = io::stdout();
+        let (width, _) = terminal::size().unwrap_or((80, 24));
+        let w = width as usize;
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let clear_from = bar_row.min(last_bar_row);
+        let _ = out.queue(cursor::MoveTo(0, clear_from));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+        let _ = out.queue(cursor::MoveTo(0, bar_row));
+
+        let mut row = bar_row;
+
+        let _ = out.queue(cursor::MoveTo(0, row));
+        draw_bar(&mut out, w, None, None, theme::ACCENT);
+        row = row.saturating_add(1);
+
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" Background Processes"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        row = row.saturating_add(1);
+
+        if live.is_empty() {
+            let _ = out.queue(cursor::MoveTo(0, row));
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print("  No processes"));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            row = row.saturating_add(1);
+        } else {
+            let end = (scroll_offset + max_visible).min(live.len());
+            for (i, proc) in live.iter().enumerate().take(end).skip(scroll_offset) {
+                let _ = out.queue(cursor::MoveTo(0, row));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+
+                let status = if proc.running { "running" } else { "done" };
+                let elapsed_secs = proc.elapsed.as_secs();
+                let time = if elapsed_secs >= 60 {
+                    format!("{}m{}s", elapsed_secs / 60, elapsed_secs % 60)
+                } else {
+                    format!("{}s", elapsed_secs)
+                };
+
+                // Truncate command to fit
+                let meta = format!(" {} {} {}", status, time, proc.id);
+                let meta_len = meta.chars().count() + 1;
+                let prefix_len = 4;
+                let max_cmd = w.saturating_sub(meta_len + prefix_len);
+                let cmd_display = truncate_str_local(&proc.command, max_cmd);
+
+                if i == selected {
+                    let _ = out.queue(Print("  "));
+                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(Print(&cmd_display));
+                    let _ = out.queue(ResetColor);
+                } else {
+                    let _ = out.queue(Print("  "));
+                    let _ = out.queue(Print(&cmd_display));
+                }
+
+                let _ = out.queue(Print(" "));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                if proc.running {
+                    let _ = out.queue(SetForegroundColor(theme::ACCENT));
+                    let _ = out.queue(Print(status));
+                    let _ = out.queue(ResetColor);
+                } else {
+                    let _ = out.queue(Print(status));
+                }
+                let _ = out.queue(Print(format!(" {time}")));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                row = row.saturating_add(1);
+            }
+        }
+
+        // Blank line
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        row = row.saturating_add(1);
+
+        // Hint line
+        let _ = out.queue(cursor::MoveTo(0, row));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" esc: close  k: kill selected"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+
+        let _ = out.queue(terminal::EndSynchronizedUpdate);
+        let _ = out.flush();
+    };
+
+    draw(
+        bar_row,
+        last_bar_row,
+        max_visible,
+        selected,
+        scroll_offset,
+        &live,
+    );
+    last_bar_row = bar_row;
+
+    terminal::enable_raw_mode().ok();
+    let _ = out.flush();
+
+    loop {
+        let has_event = event::poll(Duration::from_millis(500)).unwrap_or(false);
+        if has_event {
+            match event::read() {
+                Ok(Event::Resize(_, h)) => {
+                    height = h;
+                    max_visible = max_vis(height, live.len());
+                    bar_row = height.saturating_sub((max_visible + 4) as u16);
+                    if live.is_empty() {
+                        selected = 0;
+                        scroll_offset = 0;
+                    } else {
+                        selected = selected.min(live.len().saturating_sub(1));
+                        scroll_offset =
+                            scroll_offset.min(live.len().saturating_sub(max_visible));
+                    }
+                }
+                Ok(Event::Key(KeyEvent {
+                    code, modifiers, ..
+                })) => {
+                    match (code, modifiers) {
+                        (KeyCode::Esc, _) => {
+                            break;
+                        }
+                        (KeyCode::Char('c'), m)
+                            if m.contains(KeyModifiers::CONTROL) =>
+                        {
+                            break;
+                        }
+                        (KeyCode::Up, _) => {
+                            if selected > 0 {
+                                selected -= 1;
+                                if selected < scroll_offset {
+                                    scroll_offset = selected;
+                                }
+                            }
+                        }
+                        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                            if selected + 1 < live.len() {
+                                selected += 1;
+                                if selected >= scroll_offset + max_visible {
+                                    scroll_offset = selected + 1 - max_visible;
+                                }
+                            }
+                        }
+                        (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                            if let Some(p) = live.get(selected) {
+                                if p.running {
+                                    killed.push(p.id.clone());
+                                    live.remove(selected);
+                                    if !live.is_empty() {
+                                        selected = selected.min(live.len().saturating_sub(1));
+                                    } else {
+                                        selected = 0;
+                                    }
+                                    max_visible = max_vis(height, live.len());
+                                    bar_row =
+                                        height.saturating_sub((max_visible + 4) as u16);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        draw(
+            bar_row,
+            last_bar_row,
+            max_visible,
+            selected,
+            scroll_offset,
+            &live,
+        );
+        last_bar_row = bar_row;
+    }
+
+    dialog_cleanup(last_bar_row);
+
+    killed
 }
 
 /// Non-blocking question dialog state machine.

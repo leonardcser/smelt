@@ -10,7 +10,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command"
+        "Execute a bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Use run_in_background for long-running processes."
     }
 
     fn parameters(&self) -> Value {
@@ -18,7 +18,9 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
-                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default: 120000)"}
+                "description": {"type": "string", "description": "Short description of what this command does"},
+                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default: 120000, max: 600000)"},
+                "run_in_background": {"type": "boolean", "description": "Run the command in the background and return a process ID. Use read_process_output to check output and stop_process to kill it."}
             },
             "required": ["command"]
         })

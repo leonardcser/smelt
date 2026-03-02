@@ -59,6 +59,8 @@ pub struct AgentContext {
     pub shared_mode: SharedMode,
     pub cancel: CancellationToken,
     pub steering: Arc<Mutex<Vec<String>>>,
+    pub processes: tools::ProcessRegistry,
+    pub proc_done_tx: mpsc::UnboundedSender<(String, Option<i32>)>,
 }
 
 fn system_prompt(mode: Mode) -> String {
@@ -279,6 +281,86 @@ pub async fn run_agent(
                 ToolResult {
                     content: answer,
                     is_error: false,
+                }
+            } else if tc.function.name == "bash" && tools::bool_arg(&args, "run_in_background") {
+                let command = tools::str_arg(&args, "command");
+                match tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => {
+                        let id = ctx.processes.next_id();
+                        ctx.processes.spawn(
+                            id.clone(),
+                            &command,
+                            child,
+                            ctx.proc_done_tx.clone(),
+                        );
+                        ToolResult {
+                            content: format!("background process started with id: {id}"),
+                            is_error: false,
+                        }
+                    }
+                    Err(e) => ToolResult {
+                        content: e.to_string(),
+                        is_error: true,
+                    },
+                }
+            } else if tc.function.name == "read_process_output"
+                && args.get("block").and_then(|v| v.as_bool()).unwrap_or(true)
+            {
+                let id = tools::str_arg(&args, "id");
+                let timeout_ms = args
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000)
+                    .min(600_000);
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+                let mut accumulated = String::new();
+                loop {
+                    match ctx.processes.read(&id) {
+                        Ok((output, running, exit_code)) => {
+                            if !output.is_empty() {
+                                for line in output.lines() {
+                                    let _ = tx.send(AgentEvent::ToolOutputChunk(
+                                        line.to_string(),
+                                    ));
+                                }
+                                if !accumulated.is_empty() {
+                                    accumulated.push('\n');
+                                }
+                                accumulated.push_str(&output);
+                            }
+                            if !running {
+                                break tools::format_read_result(
+                                    accumulated, false, exit_code,
+                                );
+                            }
+                            if ctx.cancel.is_cancelled() {
+                                let _ = ctx.processes.stop(&id);
+                                break tools::format_read_result(
+                                    accumulated, false, None,
+                                );
+                            }
+                            if tokio::time::Instant::now() >= deadline {
+                                break tools::format_read_result(
+                                    accumulated, true, None,
+                                );
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                        Err(e) => {
+                            break tools::ToolResult {
+                                content: e,
+                                is_error: true,
+                            };
+                        }
+                    }
                 }
             } else if tc.function.name == "bash" {
                 let _perf = crate::perf::begin("tool_bash");

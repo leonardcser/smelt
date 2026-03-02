@@ -1,5 +1,7 @@
 mod ask_user_question;
+pub(crate) mod background;
 mod bash;
+mod bash_background;
 mod edit_file;
 mod exit_plan_mode;
 mod glob;
@@ -20,7 +22,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use ask_user_question::AskUserQuestionTool;
+pub use background::{ProcessInfo, ProcessRegistry};
 pub use bash::BashTool;
+pub use bash_background::{format_read_result, ReadProcessOutputTool, StopProcessTool};
 pub use edit_file::EditFileTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use glob::GlobTool;
@@ -101,11 +105,14 @@ pub(crate) fn bool_arg(args: &HashMap<String, Value>, key: &str) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+const MAX_TIMEOUT_MS: u64 = 600_000;
+
 pub fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> Duration {
     let ms = args
         .get("timeout_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(default_secs * 1000);
+        .unwrap_or(default_secs * 1000)
+        .min(MAX_TIMEOUT_MS);
     Duration::from_millis(ms)
 }
 
@@ -173,7 +180,7 @@ pub fn new_file_hashes() -> FileHashes {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub fn build_tools() -> ToolRegistry {
+pub fn build_tools(processes: ProcessRegistry) -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
     r.register(Box::new(ReadFileTool {
@@ -192,5 +199,11 @@ pub fn build_tools() -> ToolRegistry {
     r.register(Box::new(AskUserQuestionTool));
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(WebSearchTool));
+    r.register(Box::new(ReadProcessOutputTool {
+        registry: processes.clone(),
+    }));
+    r.register(Box::new(StopProcessTool {
+        registry: processes,
+    }));
     r
 }

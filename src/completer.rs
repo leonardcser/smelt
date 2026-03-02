@@ -63,6 +63,7 @@ impl Completer {
             ("settings", "open settings menu"),
             ("compact", "compact conversation history"),
             ("export", "copy conversation to clipboard"),
+            ("ps", "manage background processes"),
             ("exit", "exit the app"),
             ("quit", "exit the app"),
         ]

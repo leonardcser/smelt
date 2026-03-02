@@ -50,6 +50,9 @@ pub struct App {
     pending_title: Option<tokio::sync::oneshot::Receiver<String>>,
     last_width: u16,
     last_height: u16,
+    processes: tools::ProcessRegistry,
+    proc_done_tx: mpsc::UnboundedSender<(String, Option<i32>)>,
+    proc_done_rx: mpsc::UnboundedReceiver<(String, Option<i32>)>,
 }
 
 struct AgentState {
@@ -84,7 +87,7 @@ enum RunningCommandResult {
 /// Classify input for when the agent is running. Pure function, no side effects.
 fn classify_running_command(input: &str) -> RunningCommandResult {
     match input {
-        "/vim" | "/export" => RunningCommandResult::Executed,
+        "/vim" | "/export" | "/ps" => RunningCommandResult::Executed,
         "/exit" | "/quit" => RunningCommandResult::Quit,
         "/clear" | "/new" => RunningCommandResult::Cancel,
         "/compact" => RunningCommandResult::Blocked("cannot compact while agent is working".into()),
@@ -187,6 +190,7 @@ impl App {
         let mut screen = Screen::new();
         screen.set_model_label(model.clone());
         screen.set_reasoning_effort(reasoning_effort);
+        let (proc_done_tx, proc_done_rx) = mpsc::unbounded_channel();
         Self {
             api_base,
             api_key,
@@ -210,6 +214,9 @@ impl App {
             pending_title: None,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
+            processes: tools::ProcessRegistry::new(),
+            proc_done_tx,
+            proc_done_rx,
         }
     }
 
@@ -471,6 +478,44 @@ impl App {
                     }
                     self.tick(agent.is_some(), active_dialog.is_some());
                     draw_active_dialog(&mut active_dialog);
+                }
+
+                Some((id, code)) = self.proc_done_rx.recv() => {
+                    let msg = match code {
+                        Some(0) => format!("Background process {id} has finished."),
+                        Some(c) => format!("Background process {id} exited with code {c}."),
+                        None => format!("Background process {id} exited."),
+                    };
+                    if agent.is_none() {
+                        // Agent is idle — start a new turn so the LLM can react.
+                        self.screen.erase_prompt();
+                        self.push_user_message(msg);
+                        self.save_session();
+                        self.screen.set_throbber(render::Throbber::Working);
+                        let (tx, rx) = mpsc::unbounded_channel();
+                        let cancel = CancellationToken::new();
+                        let steering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+                        let shared_mode = SharedMode::new(self.mode);
+                        let ctx = self.build_agent_context(
+                            cancel.clone(), steering.clone(), shared_mode.clone(),
+                        );
+                        let handle = self.spawn_agent(tx, ctx);
+                        agent_rx = rx;
+                        agent = Some(AgentState {
+                            cancel,
+                            handle,
+                            steering,
+                            shared_mode,
+                            pending: None,
+                            steered_count: 0,
+                            _perf: crate::perf::begin("agent_turn"),
+                        });
+                    } else {
+                        // Agent is running — just show a notification, it'll
+                        // see the completed process on its next tool call.
+                        self.screen.push(Block::Text { content: msg });
+                    }
+                    self.tick(agent.is_some(), active_dialog.is_some());
                 }
 
                 _ = tokio::time::sleep(Duration::from_millis(80)) => {
@@ -1177,6 +1222,9 @@ impl App {
             "/export" => {
                 self.export_to_clipboard();
             }
+            "/ps" => {
+                self.show_processes();
+            }
             _ => {}
         }
         true
@@ -1194,6 +1242,9 @@ impl App {
                 }
                 "/export" => {
                     self.export_to_clipboard();
+                }
+                "/ps" => {
+                    self.show_processes();
                 }
                 _ if input.starts_with('!') => {
                     self.run_shell_escape(&input[1..]);
@@ -1632,11 +1683,13 @@ impl App {
         AgentContext {
             provider: self.build_provider(),
             model: self.model.clone(),
-            registry: tools::build_tools(),
+            registry: tools::build_tools(self.processes.clone()),
             permissions: self.permissions.clone(),
             shared_mode,
             cancel,
             steering,
+            processes: self.processes.clone(),
+            proc_done_tx: self.proc_done_tx.clone(),
         }
     }
 
@@ -1925,11 +1978,20 @@ impl App {
         if has_dialog {
             return;
         }
+        self.screen.set_running_procs(self.processes.running_count());
         if agent_running {
             self.render_screen();
         } else {
             self.screen
                 .draw_prompt(&self.input, self.mode, render::term_width());
+        }
+    }
+
+    fn show_processes(&mut self) {
+        let list = self.processes.list();
+        let killed = render::show_ps(&list);
+        for id in &killed {
+            let _ = self.processes.stop(id);
         }
     }
 
