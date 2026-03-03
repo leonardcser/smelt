@@ -548,9 +548,8 @@ impl ConfirmDialog {
         let base_rows: u16 =
             4 + title_rows + summary_rows + 1 + self.options.len() as u16 + ta_extra;
 
-        let max_avail = max_dialog_height(start_row, height) as u16;
-        let max_preview = max_avail.saturating_sub(base_rows + 2);
-        let preview_rows = self.total_preview.min(max_preview);
+        // No height limit for confirm dialogs - show full preview
+        let preview_rows = self.total_preview;
         let has_preview = preview_rows > 0;
         let preview_extra = if has_preview {
             // top separator + content + bottom separator
@@ -627,7 +626,7 @@ impl ConfirmDialog {
                 let _ = out.queue(ResetColor);
                 crlf(&mut out);
                 row += 1;
-                render_confirm_preview(&mut out, &self.tool_name, &self.args, max_preview);
+                render_confirm_preview(&mut out, &self.tool_name, &self.args, preview_rows);
                 row += preview_rows;
                 let _ = out.queue(SetForegroundColor(theme::BAR));
                 let _ = out.queue(Print(&separator));
@@ -1813,6 +1812,12 @@ pub struct HelpDialog {
     dirty: bool,
 }
 
+impl Default for HelpDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HelpDialog {
     pub fn new() -> Self {
         Self { dirty: true }
@@ -1833,10 +1838,7 @@ impl HelpDialog {
         }
         matches!(
             code,
-            KeyCode::Esc
-                | KeyCode::Enter
-                | KeyCode::Char('q')
-                | KeyCode::Char('?')
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
         )
     }
 
@@ -1857,7 +1859,10 @@ impl HelpDialog {
             (
                 "prefixes",
                 &[
-                    ("/command", "slash commands  (try /resume, /compact, /fork, /ps, /vim…)"),
+                    (
+                        "/command",
+                        "slash commands  (try /resume, /compact, /fork, /ps, /vim…)",
+                    ),
                     ("@<path>", "attach a file or URL"),
                     ("!<cmd>", "run a shell command"),
                 ],

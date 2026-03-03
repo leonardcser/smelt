@@ -459,8 +459,7 @@ impl InputState {
                 code: KeyCode::Char('v'),
                 modifiers,
                 ..
-            }) if modifiers.contains(KeyModifiers::SUPER) =>
-            {
+            }) if modifiers.contains(KeyModifiers::SUPER) => {
                 if let Some(url) = clipboard_image_to_data_url() {
                     if let Some(ref mut vim) = self.vim {
                         vim.save_undo(&self.buf, self.cpos, &self.attachments);

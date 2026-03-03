@@ -113,7 +113,11 @@ pub struct MenuState {
 
 /// Domain-specific result returned to the app after a menu closes.
 pub enum MenuResult {
-    Settings { vim: bool, auto_compact: bool, show_speed: bool },
+    Settings {
+        vim: bool,
+        auto_compact: bool,
+        show_speed: bool,
+    },
     ModelSelect(String),
     Stats,
     Dismissed,

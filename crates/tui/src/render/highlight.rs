@@ -333,7 +333,7 @@ pub(super) fn print_inline_diff(
                     pending_ellipsis = false;
                     let _ = out.queue(Print(indent));
                     let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-                    let _ = out.queue(Print(format!(" {:>w$}   ...", " ", w = gutter_width)));
+                    let _ = out.queue(Print(format!(" {:>w$}...", " ", w = gutter_width)));
                     let _ = out.queue(ResetColor);
                     crlf(out);
                     rows += 1;
@@ -355,7 +355,7 @@ pub(super) fn print_inline_diff(
                     pending_ellipsis = false;
                     let _ = out.queue(Print(indent));
                     let _ = out.queue(SetForegroundColor(Color::DarkGrey));
-                    let _ = out.queue(Print(format!(" {:>w$}   ...", " ", w = gutter_width)));
+                    let _ = out.queue(Print(format!(" {:>w$}...", " ", w = gutter_width)));
                     let _ = out.queue(ResetColor);
                     crlf(out);
                     rows += 1;

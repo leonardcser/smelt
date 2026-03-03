@@ -339,8 +339,11 @@ impl App {
                     active_dialog = Some(*dlg);
                 }
             } else if trimmed == "/settings" {
-                self.input
-                    .open_settings(self.input.vim_enabled(), self.auto_compact, self.show_speed);
+                self.input.open_settings(
+                    self.input.vim_enabled(),
+                    self.auto_compact,
+                    self.show_speed,
+                );
                 self.screen.mark_dirty();
             } else if let Some(reason) = classify_startup_command(trimmed) {
                 self.screen.push(Block::Error {
@@ -895,7 +898,11 @@ impl App {
             }
             EventOutcome::MenuResult(result) => {
                 match result {
-                    MenuResult::Settings { vim, auto_compact, show_speed } => {
+                    MenuResult::Settings {
+                        vim,
+                        auto_compact,
+                        show_speed,
+                    } => {
                         self.input.set_vim_enabled(vim);
                         state::set_vim_enabled(vim);
                         self.auto_compact = auto_compact;
@@ -1122,8 +1129,11 @@ impl App {
                 EventOutcome::Redraw
             }
             Action::Submit { ref content, .. } if content.as_text().trim() == "/settings" => {
-                self.input
-                    .open_settings(self.input.vim_enabled(), self.auto_compact, self.show_speed);
+                self.input.open_settings(
+                    self.input.vim_enabled(),
+                    self.auto_compact,
+                    self.show_speed,
+                );
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
