@@ -1334,6 +1334,9 @@ impl App {
         if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
             return InputOutcome::Continue;
         }
+        if trimmed.starts_with('!') {
+            return InputOutcome::Continue;
+        }
 
         // Regular user message → start agent
         InputOutcome::StartAgent
