@@ -21,10 +21,7 @@ pub fn fuzzy_score(text: &str, query: &str) -> Option<u32> {
     }
 
     // Find match positions greedily, preferring separator-boundary hits.
-    let positions = match find_best_positions(&hay_lower, &need_lower) {
-        Some(p) => p,
-        None => return None,
-    };
+    let positions = find_best_positions(&hay_lower, &need_lower)?;
 
     let mut score: u32 = 0;
 
@@ -84,7 +81,7 @@ fn find_best_positions(hay: &[char], need: &[char]) -> Option<Vec<usize>> {
             }
             hi += 1;
         }
-        if positions.len() < need.len() - (need.len() - positions.len() - 0) + 0 {
+        if positions.len() < need.len() - (need.len() - positions.len()) {
             // still matching
         }
     }

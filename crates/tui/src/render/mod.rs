@@ -1520,7 +1520,7 @@ fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
             Span::Paste(t) => (t.as_str(), SpanKind::Paste),
             Span::AtRef(t) => (t.as_str(), SpanKind::AtRef),
         };
-        kinds.extend(std::iter::repeat(kind).take(text.chars().count()));
+        kinds.extend(std::iter::repeat_n(kind, text.chars().count()));
     }
     kinds
 }
