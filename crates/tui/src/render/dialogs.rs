@@ -1803,3 +1803,129 @@ fn truncate_str_local(s: &str, max: usize) -> String {
     truncated.push('…');
     truncated
 }
+
+// ── HelpDialog ────────────────────────────────────────────────────────────────
+
+pub struct HelpDialog {
+    dirty: bool,
+}
+
+impl HelpDialog {
+    pub fn new() -> Self {
+        Self { dirty: true }
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn handle_resize(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Returns true when the dialog should close.
+    pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+            return true;
+        }
+        matches!(
+            code,
+            KeyCode::Esc
+                | KeyCode::Enter
+                | KeyCode::Char('q')
+                | KeyCode::Char('?')
+        )
+    }
+
+    pub fn draw(&mut self, start_row: u16) -> u16 {
+        if !self.dirty {
+            return 0;
+        }
+        self.dirty = false;
+
+        let mut out = io::stdout();
+        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let w = width as usize;
+
+        // Each section renders as a heading row followed by entry rows.
+        // Entries use the same draw_menu_row style as the model/settings pickers:
+        //   "  label<padding>dim detail"
+        let sections: &[(&str, &[(&str, &str)])] = &[
+            (
+                "prefixes",
+                &[
+                    ("/command", "slash commands  (try /resume, /compact, /fork, /ps, /vim…)"),
+                    ("@<path>", "attach a file or URL"),
+                    ("!<cmd>", "run a shell command"),
+                ],
+            ),
+            (
+                "keys",
+                &[
+                    ("enter", "send message"),
+                    ("ctrl+j  shift+enter", "insert newline"),
+                    ("ctrl+c", "cancel / interrupt"),
+                    ("ctrl+r", "search input history"),
+                    ("ctrl+t", "cycle reasoning effort"),
+                    ("shift+tab", "cycle mode  (normal → plan → apply → yolo)"),
+                    ("ctrl+u / ctrl+d", "scroll up / down"),
+                    ("ctrl+a / ctrl+e", "line start / end"),
+                    ("ctrl+w  alt+bs", "delete word backward"),
+                    ("tab", "autocomplete"),
+                    ("esc  ctrl+c", "cancel / close dialog"),
+                ],
+            ),
+        ];
+
+        // Compute label column width (same as draw_menu_row: label + 4 spaces min gap).
+        let label_col = sections
+            .iter()
+            .flat_map(|(_, entries)| entries.iter().map(|(k, _)| k.len()))
+            .max()
+            .unwrap_or(0)
+            + 4;
+
+        // Count total display rows: per section = entries + 1 blank.
+        let content_rows: usize = sections
+            .iter()
+            .map(|(_, entries)| entries.len() + 1)
+            .sum::<usize>()
+            .saturating_sub(1); // no trailing blank after last section
+
+        // bar(1) + title(1) + blank(1) + content
+        let total_rows = (1 + 1 + 1 + content_rows) as u16;
+
+        begin_dialog_draw(&mut out, start_row);
+
+        draw_bar(&mut out, w, None, None, super::theme::ACCENT);
+        crlf(&mut out);
+
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(" help"));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        crlf(&mut out);
+        crlf(&mut out);
+
+        for (si, (_, entries)) in sections.iter().enumerate() {
+            for (label, detail) in entries.iter() {
+                let _ = out.queue(Print("  "));
+                let _ = out.queue(SetForegroundColor(super::theme::MUTED));
+                let _ = out.queue(Print(label));
+                let _ = out.queue(ResetColor);
+                let padding = " ".repeat(label_col.saturating_sub(label.len()));
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+                let _ = out.queue(Print(format!("{padding}{detail}")));
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+                crlf(&mut out);
+            }
+
+            // blank line between sections (not after last)
+            if si + 1 < sections.len() {
+                crlf(&mut out);
+            }
+        }
+
+        end_dialog_draw(&mut out, start_row, total_rows, height)
+    }
+}

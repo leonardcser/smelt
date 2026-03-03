@@ -191,6 +191,7 @@ enum ActiveDialog {
     Ps(render::PsDialog),
     Rewind(render::RewindDialog),
     Resume(render::ResumeDialog),
+    Help(render::HelpDialog),
 }
 
 impl ActiveDialog {
@@ -210,6 +211,7 @@ impl ActiveDialog {
             ActiveDialog::Ps(d) => d.mark_dirty(),
             ActiveDialog::Rewind(d) => d.mark_dirty(),
             ActiveDialog::Resume(d) => d.mark_dirty(),
+            ActiveDialog::Help(d) => d.mark_dirty(),
         }
     }
 
@@ -220,6 +222,7 @@ impl ActiveDialog {
             ActiveDialog::Ps(d) => d.draw(start_row),
             ActiveDialog::Rewind(d) => d.draw(start_row),
             ActiveDialog::Resume(d) => d.draw(start_row),
+            ActiveDialog::Help(d) => d.draw(start_row),
         }
     }
 
@@ -230,6 +233,7 @@ impl ActiveDialog {
             ActiveDialog::Ps(d) => d.handle_resize(h),
             ActiveDialog::Rewind(d) => d.handle_resize(h),
             ActiveDialog::Resume(d) => d.handle_resize(h),
+            ActiveDialog::Help(d) => d.handle_resize(),
         }
     }
 }
@@ -828,6 +832,14 @@ impl App {
                             *active_dialog = Some(ActiveDialog::AskQuestion { dialog, request_id });
                         }
                     }
+                    ActiveDialog::Help(mut d) => {
+                        if d.handle_key(code, modifiers) {
+                            self.screen.clear_dialog_area();
+                        } else {
+                            *active_dialog = Some(ActiveDialog::Help(d));
+                        }
+                        return false;
+                    }
                 }
             }
             return false;
@@ -1012,6 +1024,22 @@ impl App {
             }
             t.last_ctrlc = Some(Instant::now());
             return EventOutcome::Quit;
+        }
+
+        // ?: open help dialog (only when input is empty so it doesn't interfere with typing).
+        if self.input.buf.is_empty()
+            && matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('?'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                })
+            )
+        {
+            return EventOutcome::OpenDialog(Box::new(ActiveDialog::Help(
+                render::HelpDialog::new(),
+            )));
         }
 
         // Ctrl+S: toggle stash.

@@ -451,13 +451,12 @@ impl InputState {
                 self.insert_paste(data);
                 Action::Redraw
             }
-            // Ctrl+V / Cmd+V: read image from clipboard.
+            // Cmd+V: read image from clipboard.
             Event::Key(KeyEvent {
                 code: KeyCode::Char('v'),
                 modifiers,
                 ..
-            }) if modifiers.contains(KeyModifiers::CONTROL)
-                || modifiers.contains(KeyModifiers::SUPER) =>
+            }) if modifiers.contains(KeyModifiers::SUPER) =>
             {
                 if let Some(url) = clipboard_image_to_data_url() {
                     if let Some(ref mut vim) = self.vim {
@@ -475,8 +474,9 @@ impl InputState {
             }) => Action::ToggleMode,
             Event::Key(KeyEvent {
                 code: KeyCode::Enter,
+                modifiers,
                 ..
-            }) => {
+            }) if !modifiers.contains(KeyModifiers::SHIFT) => {
                 if self.buf.is_empty() && self.attachments.is_empty() {
                     Action::Noop
                 } else {
@@ -539,6 +539,11 @@ impl InputState {
             Event::Key(KeyEvent {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::CONTROL,
+                ..
+            })
+            | Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::SHIFT,
                 ..
             }) => {
                 self.buf.insert(self.cpos, '\n');

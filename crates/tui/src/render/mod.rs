@@ -3,7 +3,7 @@ mod dialogs;
 mod highlight;
 
 pub use dialogs::{
-    parse_questions, ConfirmDialog, PsDialog, Question, QuestionDialog, QuestionOption,
+    parse_questions, ConfirmDialog, HelpDialog, PsDialog, Question, QuestionDialog, QuestionOption,
     ResumeDialog, RewindDialog,
 };
 
