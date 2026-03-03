@@ -1878,24 +1878,31 @@ impl App {
                 false
             }
             ConfirmChoice::No => {
-                engine::log::entry(
-                    engine::log::Level::Info,
-                    "agent_stop",
-                    &serde_json::json!({
-                        "reason": "confirm_denied",
-                        "tool": tool_name,
-                    }),
-                );
+                let has_message = message.is_some();
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
                     approved: false,
                     message,
                 });
                 self.screen.finish_tool(ToolStatus::Denied, None);
-                if let Some(ref mut ag) = agent {
-                    ag.pending = None;
+                if has_message {
+                    // Deny with feedback — let the agent continue with the message.
+                    false
+                } else {
+                    // Deny without message — stop the agent.
+                    engine::log::entry(
+                        engine::log::Level::Info,
+                        "agent_stop",
+                        &serde_json::json!({
+                            "reason": "confirm_denied",
+                            "tool": tool_name,
+                        }),
+                    );
+                    if let Some(ref mut ag) = agent {
+                        ag.pending = None;
+                    }
+                    true
                 }
-                true
             }
         }
     }

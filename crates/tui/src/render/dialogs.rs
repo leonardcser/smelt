@@ -10,6 +10,7 @@ use crossterm::{
 use engine::tools::ProcessInfo;
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::time::Instant;
 
 use super::blocks::wrap_line;
 use super::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_file};
@@ -863,6 +864,7 @@ pub struct ResumeDialog {
     max_visible: usize,
     dirty: bool,
     pending_d: bool,
+    last_drawn: Instant,
 }
 
 impl ResumeDialog {
@@ -881,6 +883,7 @@ impl ResumeDialog {
             max_visible,
             dirty: true,
             pending_d: false,
+            last_drawn: Instant::now(),
         }
     }
 
@@ -1027,9 +1030,18 @@ impl ResumeDialog {
 
     pub fn draw(&mut self, start_row: u16) -> u16 {
         if !self.dirty {
+            let freshest = self.filtered.iter().map(resume_ts).max().unwrap_or(0);
+            let age_s = session::now_ms().saturating_sub(freshest) / 1000;
+            let interval = if age_s < 60 { 1 } else if age_s < 3600 { 30 } else { 60 };
+            if self.last_drawn.elapsed().as_secs() >= interval {
+                self.dirty = true;
+            }
+        }
+        if !self.dirty {
             return 0;
         }
         self.dirty = false;
+        self.last_drawn = Instant::now();
 
         let mut out = io::stdout();
         let (width, height) = terminal::size().unwrap_or((80, 24));

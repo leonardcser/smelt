@@ -882,13 +882,12 @@ impl Screen {
                 self.has_scrollback = true;
                 self.prompt.redraw_row = height.saturating_sub(active_rows + gap);
             } else {
-                self.prompt.redraw_row = draw_start_row + content_rows;
+                self.prompt.redraw_row = draw_start_row + block_rows;
             }
-            self.prompt.dialog_row = self.prompt.redraw_row;
+            self.prompt.dialog_row = self.prompt.redraw_row + active_rows + gap;
             self.prompt.prev_rows = active_rows + gap;
             self.prompt.drawn = true;
-            // Keep dirty so prompt re-renders immediately when dialog closes.
-            self.prompt.dirty = true;
+            self.prompt.dirty = false;
 
             // Leave the synchronized update open — the dialog that
             // follows will end the sync and flush, so the terminal paints
