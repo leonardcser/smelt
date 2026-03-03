@@ -159,6 +159,8 @@ async fn run_turn(
 
     let tool_defs: Vec<ToolDefinition> = registry.definitions(permissions, mode);
     let mut first = true;
+    let mut empty_retries: u8 = 0;
+    const MAX_EMPTY_RETRIES: u8 = 2;
 
     // Send a snapshot of the current messages (minus the system prompt) to the TUI.
     let send_snapshot = |msgs: &[Message], tx: &mpsc::UnboundedSender<EngineEvent>| {
@@ -244,10 +246,15 @@ async fn run_turn(
         };
 
         if let Some(tokens) = resp.prompt_tokens {
+            let tokens_per_sec = if resp.completion_tokens.unwrap_or(0) >= 5 {
+                resp.tokens_per_sec
+            } else {
+                None
+            };
             let _ = event_tx.send(EngineEvent::TokenUsage {
                 prompt_tokens: tokens,
                 completion_tokens: resp.completion_tokens,
-                tokens_per_sec: resp.tokens_per_sec,
+                tokens_per_sec,
             });
         }
 
@@ -273,6 +280,26 @@ async fn run_turn(
         let reasoning = resp.reasoning_content;
 
         if tool_calls.is_empty() {
+            // If the response is completely empty and the last message was a
+            // tool result, this is likely a model glitch — retry instead of
+            // stopping the turn.
+            let is_empty = content.is_none()
+                && reasoning.is_none()
+                && messages
+                    .last()
+                    .map(|m| m.role == Role::Tool)
+                    .unwrap_or(false);
+
+            if is_empty && empty_retries < MAX_EMPTY_RETRIES {
+                empty_retries += 1;
+                log::entry(
+                    log::Level::Warn,
+                    "empty_response_retry",
+                    &serde_json::json!({ "attempt": empty_retries }),
+                );
+                continue;
+            }
+
             messages.push(Message {
                 role: Role::Assistant,
                 content,
@@ -286,6 +313,7 @@ async fn run_turn(
             return;
         }
 
+        empty_retries = 0;
         messages.push(Message {
             role: Role::Assistant,
             content,
