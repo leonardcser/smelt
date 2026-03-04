@@ -448,13 +448,7 @@ impl App {
 
             // ── Auto-start from leftover queued messages ─────────────────
             if agent.is_none() && !self.queued_messages.is_empty() {
-                let mut parts = std::mem::take(&mut self.queued_messages);
-                let buf = std::mem::take(&mut self.input.buf);
-                self.input.cpos = 0;
-                if !buf.trim().is_empty() {
-                    parts.push(buf);
-                }
-                let text = parts.join("\n");
+                let text = std::mem::take(&mut self.queued_messages).join("\n");
                 if !text.is_empty() {
                     self.screen.erase_prompt();
                     match self.process_input(&text) {
