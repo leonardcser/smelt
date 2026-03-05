@@ -685,7 +685,6 @@ impl App {
             std::process::exit(1);
         }
 
-        self.push_user_message(Content::text(message.clone()));
         if self.session.first_user_message.is_none() {
             self.session.first_user_message = Some(message.clone());
         }
@@ -1376,8 +1375,6 @@ impl App {
         if self.session.first_user_message.is_none() {
             self.session.first_user_message = Some(text.clone());
         }
-        self.push_user_message(content);
-        self.save_session();
         self.screen.set_throbber(render::Throbber::Working);
 
         self.engine.send(UiCommand::StartTurn {
