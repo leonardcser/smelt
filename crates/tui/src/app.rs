@@ -807,14 +807,18 @@ impl App {
                     }
                     ActiveDialog::Resume(mut d) => {
                         if let Some(maybe_id) = d.handle_key(code, modifiers) {
+                            let mut clear = true;
                             if let Some(id) = maybe_id {
                                 if let Some(loaded) = session::load(&id) {
                                     self.load_session(loaded);
                                     self.rebuild_screen_from_history();
                                     self.screen.flush_blocks();
+                                    clear = false;
                                 }
                             }
-                            self.screen.clear_dialog_area();
+                            if clear {
+                                self.screen.clear_dialog_area();
+                            }
                         } else {
                             *active_dialog = Some(ActiveDialog::Resume(d));
                         }
