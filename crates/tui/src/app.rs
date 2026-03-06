@@ -1593,6 +1593,9 @@ impl App {
         self.input.clear();
         self.engine.processes.clear();
         self.session = session::Session::new();
+        // Drain stale engine events so old Messages snapshots don't
+        // restore history into the freshly cleared session.
+        while self.engine.try_recv().is_ok() {}
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
@@ -2074,9 +2077,10 @@ impl App {
     /// Handle engine events that arrive when no agent turn is active.
     fn handle_engine_event_idle(&mut self, ev: EngineEvent) {
         match ev {
-            EngineEvent::Messages { messages } => {
-                self.history = messages;
-            }
+            // Ignore stale Messages snapshots from cancelled/completed turns.
+            // These would overwrite a freshly cleared history (e.g. after /clear).
+            EngineEvent::Messages { .. } => {}
+            EngineEvent::TurnComplete { .. } => {}
             EngineEvent::CompactionComplete { messages } => {
                 self.history = messages;
                 self.save_session();
