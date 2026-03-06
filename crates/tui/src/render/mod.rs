@@ -811,8 +811,17 @@ impl Screen {
 
     pub fn erase_prompt(&mut self) {
         if self.prompt.drawn {
-            if let Some(row) = self.prompt.anchor_row {
-                erase_prompt_at(row);
+            if let Some(anchor) = self.prompt.anchor_row {
+                let end = anchor + self.prompt.prev_rows;
+                let mut out = RenderOut::scroll();
+                let _ = out.queue(terminal::BeginSynchronizedUpdate);
+                for r in anchor..=end {
+                    let _ = out.queue(cursor::MoveTo(0, r));
+                    let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+                }
+                let _ = out.queue(cursor::MoveTo(0, anchor));
+                let _ = out.queue(terminal::EndSynchronizedUpdate);
+                let _ = out.flush();
             }
             self.prompt.drawn = false;
             self.prompt.dirty = true;
@@ -1510,14 +1519,6 @@ pub(super) fn chunk_line(line: &str, width: usize) -> Vec<String> {
     chars.chunks(width).map(|c| c.iter().collect()).collect()
 }
 
-pub fn erase_prompt_at(row: u16) {
-    let mut out = RenderOut::scroll();
-    let _ = out.queue(terminal::BeginSynchronizedUpdate);
-    let _ = out.queue(cursor::MoveTo(0, row));
-    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    let _ = out.queue(terminal::EndSynchronizedUpdate);
-    let _ = out.flush();
-}
 
 fn make_relative(path: &str) -> String {
     if let Ok(cwd) = std::env::current_dir() {
