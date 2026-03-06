@@ -1052,17 +1052,20 @@ impl InputState {
         // newlines in bracketed paste mode.  Convert \r\n and lone \r to \n
         // so that line counting and display work correctly.
         let data = data.replace("\r\n", "\n").replace('\r', "\n");
-        
+
         // Don't set from_paste for empty pastes
         if data.is_empty() {
             return;
         }
-        
+
         let lines = data.lines().count();
         let char_threshold = PASTE_LINE_THRESHOLD * (crate::render::term_width().saturating_sub(1));
         // Mark as from_paste if inserting at the beginning of the current line.
         // This prevents pasted content starting with '!' from being treated as a shell escape.
-        let line_start = self.buf[..self.cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_start = self.buf[..self.cpos]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         if self.cpos == line_start {
             self.from_paste = true;
         }
@@ -1337,7 +1340,10 @@ mod tests {
     fn paste_into_empty_buffer_sets_from_paste() {
         let mut input = InputState::new();
         input.insert_paste("!echo hello".to_string());
-        assert!(input.skip_shell_escape(), "Paste at buffer start should set from_paste");
+        assert!(
+            input.skip_shell_escape(),
+            "Paste at buffer start should set from_paste"
+        );
         assert_eq!(input.buf, "!echo hello");
     }
 
@@ -1346,7 +1352,10 @@ mod tests {
         let mut input = InputState::new();
         input.insert_char('!');
         input.insert_char('e');
-        assert!(!input.skip_shell_escape(), "Manual typing should clear from_paste");
+        assert!(
+            !input.skip_shell_escape(),
+            "Manual typing should clear from_paste"
+        );
     }
 
     #[test]
@@ -1361,7 +1370,10 @@ mod tests {
         input.buf.clear();
         input.cpos = 0;
         input.insert_paste("echo hello".to_string());
-        assert!(input.skip_shell_escape(), "Paste at line start should set from_paste");
+        assert!(
+            input.skip_shell_escape(),
+            "Paste at line start should set from_paste"
+        );
         assert_eq!(input.buf, "echo hello");
     }
 
@@ -1371,7 +1383,10 @@ mod tests {
         input.buf = "hello ".to_string();
         input.cpos = 6; // After "hello "
         input.insert_paste("!world".to_string());
-        assert!(!input.skip_shell_escape(), "Paste in middle of line should not set from_paste");
+        assert!(
+            !input.skip_shell_escape(),
+            "Paste in middle of line should not set from_paste"
+        );
         assert_eq!(input.buf, "hello !world");
     }
 
@@ -1381,7 +1396,10 @@ mod tests {
         input.buf = "hello".to_string();
         input.cpos = 5; // At end
         input.insert_paste(" world".to_string());
-        assert!(!input.skip_shell_escape(), "Paste at end of line should not set from_paste");
+        assert!(
+            !input.skip_shell_escape(),
+            "Paste at end of line should not set from_paste"
+        );
         assert_eq!(input.buf, "hello world");
     }
 
@@ -1391,7 +1409,10 @@ mod tests {
         input.buf = "line1\nline2".to_string();
         input.cpos = 0; // At very start
         input.insert_paste("!command".to_string());
-        assert!(input.skip_shell_escape(), "Paste at buffer start should set from_paste");
+        assert!(
+            input.skip_shell_escape(),
+            "Paste at buffer start should set from_paste"
+        );
         assert_eq!(input.buf, "!commandline1\nline2");
     }
 
@@ -1401,7 +1422,10 @@ mod tests {
         input.buf = "line1\n".to_string();
         input.cpos = 6; // Start of second line
         input.insert_paste("!command".to_string());
-        assert!(input.skip_shell_escape(), "Paste at line start should set from_paste");
+        assert!(
+            input.skip_shell_escape(),
+            "Paste at line start should set from_paste"
+        );
         assert_eq!(input.buf, "line1\n!command");
     }
 
@@ -1411,7 +1435,10 @@ mod tests {
         input.buf = "line1\nhello".to_string();
         input.cpos = 8; // Insert at byte position 8 (before first 'l' of "hello")
         input.insert_paste(" world".to_string());
-        assert!(!input.skip_shell_escape(), "Paste in middle of line should not set from_paste");
+        assert!(
+            !input.skip_shell_escape(),
+            "Paste in middle of line should not set from_paste"
+        );
         assert_eq!(input.buf, "line1\nhe worldllo");
     }
 
@@ -1422,7 +1449,10 @@ mod tests {
         assert!(input.skip_shell_escape());
 
         input.insert_char('x');
-        assert!(!input.skip_shell_escape(), "Manual character after paste should clear from_paste");
+        assert!(
+            !input.skip_shell_escape(),
+            "Manual character after paste should clear from_paste"
+        );
     }
 
     #[test]
@@ -1432,11 +1462,14 @@ mod tests {
         assert!(input.skip_shell_escape());
 
         input.backspace(); // Deletes last character
-        assert!(input.skip_shell_escape(), "Backspace not at start should not clear from_paste");
+        assert!(
+            input.skip_shell_escape(),
+            "Backspace not at start should not clear from_paste"
+        );
 
         input.cpos = 0;
         input.backspace(); // Now at position 0
-        // Can't backspace further, but the logic would clear it if we could
+                           // Can't backspace further, but the logic would clear it if we could
     }
 
     #[test]
@@ -1448,7 +1481,10 @@ mod tests {
         // Move cursor to end
         input.cpos = input.buf.len();
         input.delete_word_backward(); // Deletes "hello"
-        assert!(input.skip_shell_escape(), "Delete word not at start should not clear from_paste");
+        assert!(
+            input.skip_shell_escape(),
+            "Delete word not at start should not clear from_paste"
+        );
 
         // Move to after "echo " and delete word
         input.cpos = 5; // After "echo"
@@ -1457,7 +1493,10 @@ mod tests {
 
         input.cpos = 1; // After "!"
         input.delete_word_backward(); // Would delete to start, which should clear from_paste
-        assert!(!input.skip_shell_escape(), "Delete word to start should clear from_paste");
+        assert!(
+            !input.skip_shell_escape(),
+            "Delete word to start should clear from_paste"
+        );
     }
 
     #[test]
@@ -1474,20 +1513,38 @@ mod tests {
     fn large_paste_creates_attachment() {
         let mut input = InputState::new();
         // Use multi-line paste which definitely creates an attachment
-        let multi_line = (0..PASTE_LINE_THRESHOLD).map(|i| format!("!line{}", i)).collect::<Vec<_>>().join("\n");
+        let multi_line = (0..PASTE_LINE_THRESHOLD)
+            .map(|i| format!("!line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         input.insert_paste(multi_line);
-        assert!(input.skip_shell_escape(), "Multi-line paste should set from_paste");
-        assert!(!input.attachments.is_empty(), "Multi-line paste above threshold should create attachment");
+        assert!(
+            input.skip_shell_escape(),
+            "Multi-line paste should set from_paste"
+        );
+        assert!(
+            !input.attachments.is_empty(),
+            "Multi-line paste above threshold should create attachment"
+        );
         assert_eq!(input.buf, "\u{FFFC}"); // Should be just the marker
     }
 
     #[test]
     fn multi_line_paste_above_threshold_creates_attachment() {
         let mut input = InputState::new();
-        let multi_line = (0..PASTE_LINE_THRESHOLD).map(|i| format!("!line{}", i)).collect::<Vec<_>>().join("\n");
+        let multi_line = (0..PASTE_LINE_THRESHOLD)
+            .map(|i| format!("!line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         input.insert_paste(multi_line);
-        assert!(input.skip_shell_escape(), "Multi-line paste should set from_paste");
-        assert!(!input.attachments.is_empty(), "Multi-line paste should create attachment");
+        assert!(
+            input.skip_shell_escape(),
+            "Multi-line paste should set from_paste"
+        );
+        assert!(
+            !input.attachments.is_empty(),
+            "Multi-line paste should create attachment"
+        );
     }
 
     #[test]
@@ -1495,8 +1552,14 @@ mod tests {
         let mut input = InputState::new();
         let multi_line = "!line1\nline2\nline3".to_string();
         input.insert_paste(multi_line);
-        assert!(input.skip_shell_escape(), "Small multi-line paste should set from_paste");
-        assert!(input.attachments.is_empty(), "Small multi-line paste should not create attachment");
+        assert!(
+            input.skip_shell_escape(),
+            "Small multi-line paste should set from_paste"
+        );
+        assert!(
+            input.attachments.is_empty(),
+            "Small multi-line paste should not create attachment"
+        );
         assert_eq!(input.buf, "!line1\nline2\nline3");
     }
 
@@ -1508,8 +1571,14 @@ mod tests {
 
         // Stash: saves from_paste to snapshot, but doesn't clear it in active buffer
         input.toggle_stash();
-        assert!(input.skip_shell_escape(), "Stash saves from_paste to snapshot but keeps it in buffer");
-        assert!(input.buf.is_empty(), "Buffer should be empty after stashing");
+        assert!(
+            input.skip_shell_escape(),
+            "Stash saves from_paste to snapshot but keeps it in buffer"
+        );
+        assert!(
+            input.buf.is_empty(),
+            "Buffer should be empty after stashing"
+        );
 
         // Restore: restores from_paste from snapshot
         input.toggle_stash();
@@ -1530,7 +1599,10 @@ mod tests {
         // Paste again at start of line
         input.cpos = 0;
         input.insert_paste("!second".to_string());
-        assert!(input.skip_shell_escape(), "Second paste at start should set from_paste again");
+        assert!(
+            input.skip_shell_escape(),
+            "Second paste at start should set from_paste again"
+        );
     }
 
     #[test]
@@ -1538,7 +1610,10 @@ mod tests {
         let mut input = InputState::new();
         input.insert_paste("!line1\r\nline2\rline3".to_string());
         assert!(input.skip_shell_escape());
-        assert!(!input.buf.contains('\r'), "Carriage returns should be normalized");
+        assert!(
+            !input.buf.contains('\r'),
+            "Carriage returns should be normalized"
+        );
         assert_eq!(input.buf, "!line1\nline2\nline3");
     }
 
@@ -1546,14 +1621,20 @@ mod tests {
     fn empty_paste_does_not_set_from_paste() {
         let mut input = InputState::new();
         input.insert_paste("".to_string());
-        assert!(!input.skip_shell_escape(), "Empty paste should not set from_paste");
+        assert!(
+            !input.skip_shell_escape(),
+            "Empty paste should not set from_paste"
+        );
     }
 
     #[test]
     fn whitespace_only_paste_at_start_sets_from_paste() {
         let mut input = InputState::new();
         input.insert_paste("   ".to_string());
-        assert!(input.skip_shell_escape(), "Whitespace paste at start should set from_paste");
+        assert!(
+            input.skip_shell_escape(),
+            "Whitespace paste at start should set from_paste"
+        );
     }
 
     #[test]
@@ -1563,10 +1644,13 @@ mod tests {
         input.buf = String::new();
         input.cpos = 0;
         input.insert_paste("!ls -la".to_string());
-        
-        assert!(input.skip_shell_escape(), "Paste at start of line should set from_paste");
+
+        assert!(
+            input.skip_shell_escape(),
+            "Paste at start of line should set from_paste"
+        );
         assert_eq!(input.buf, "!ls -la");
-        
+
         // The expanded text should not be treated as shell command
         let text = input.expanded_text();
         assert_eq!(text, "!ls -la");

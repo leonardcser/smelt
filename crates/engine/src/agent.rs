@@ -397,9 +397,14 @@ async fn run_turn(
                         summary: cmd_summary,
                     });
 
-                    let (approved, user_msg) =
-                        wait_for_permission(cmd_rx, request_id, &mut mode, &mut reasoning_effort, &cancel)
-                            .await;
+                    let (approved, user_msg) = wait_for_permission(
+                        cmd_rx,
+                        request_id,
+                        &mut mode,
+                        &mut reasoning_effort,
+                        &cancel,
+                    )
+                    .await;
                     if !approved {
                         let denial = if let Some(ref msg) = user_msg {
                             format!("The user denied this tool call with message: {msg}")
@@ -420,8 +425,14 @@ async fn run_turn(
                     request_id,
                     args: args.clone(),
                 });
-                let answer =
-                    wait_for_answer(cmd_rx, request_id, &mut mode, &mut reasoning_effort, &cancel).await;
+                let answer = wait_for_answer(
+                    cmd_rx,
+                    request_id,
+                    &mut mode,
+                    &mut reasoning_effort,
+                    &cancel,
+                )
+                .await;
                 ToolResult {
                     content: answer.unwrap_or_else(|| "no response".into()),
                     is_error: false,

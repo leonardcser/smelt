@@ -224,12 +224,14 @@ impl BlockHistory {
 struct PromptState {
     drawn: bool,
     dirty: bool,
-    redraw_row: u16,
-    /// Row where a dialog should start rendering (after active tool + gap).
-    dialog_row: u16,
     prev_rows: u16,
-    /// Cursor row to use when `drawn` is false, avoiding racy cursor::position() queries.
-    fallback_row: Option<u16>,
+    /// Where the next frame starts drawing. Updated at the end of every
+    /// `draw_frame` call (always fresh). On first frame or after clear,
+    /// falls back to `cursor::position()` once.
+    anchor_row: Option<u16>,
+    /// Computed each frame inside `draw_frame`, exposed via `dialog_row()`
+    /// getter for the app loop.
+    prev_dialog_row: Option<u16>,
 }
 
 impl PromptState {
@@ -237,10 +239,9 @@ impl PromptState {
         Self {
             drawn: false,
             dirty: true,
-            redraw_row: 0,
-            dialog_row: 0,
             prev_rows: 0,
-            fallback_row: None,
+            anchor_row: None,
+            prev_dialog_row: None,
         }
     }
 }
@@ -480,48 +481,32 @@ impl Screen {
         }
     }
 
-    /// Row where the prompt section starts (includes active tool + gap).
-    pub fn redraw_row(&self) -> u16 {
-        self.prompt.redraw_row
-    }
-
     /// Row where a dialog should start rendering (lines up with the prompt bar).
     pub fn dialog_row(&self) -> u16 {
-        self.prompt.dialog_row
-    }
-
-    /// Adjust internal row positions after a dialog push caused terminal scroll.
-    pub fn adjust_for_dialog_scroll(&mut self, scroll: u16) {
-        if scroll == 0 {
-            return;
-        }
-        self.prompt.redraw_row = self.prompt.redraw_row.saturating_sub(scroll);
-        self.prompt.dialog_row = self.prompt.dialog_row.saturating_sub(scroll);
-        if let Some(ref mut row) = self.content_start_row {
-            *row = row.saturating_sub(scroll);
-        }
+        self.prompt.prev_dialog_row.unwrap_or(0)
     }
 
     /// Clear the area occupied by a dismissed dialog and prepare the prompt
     /// for re-rendering on the next tick.  Scrollback is never touched.
     pub fn clear_dialog_area(&mut self) {
-        let row = self.prompt.redraw_row;
-        let mut out = io::stdout();
-        let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        let _ = out.queue(cursor::MoveTo(0, row));
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        let _ = out.queue(terminal::EndSynchronizedUpdate);
-        let _ = out.flush();
+        if let Some(row) = self.prompt.anchor_row {
+            let mut out = io::stdout();
+            let _ = out.queue(terminal::BeginSynchronizedUpdate);
+            let _ = out.queue(cursor::MoveTo(0, row));
+            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+            let _ = out.queue(terminal::EndSynchronizedUpdate);
+            let _ = out.flush();
+        }
         self.prompt.drawn = false;
         self.prompt.dirty = true;
-        self.prompt.fallback_row = Some(row);
         self.prompt.prev_rows = 0;
     }
 
     /// Move the cursor to the line after the prompt so the shell resumes cleanly.
     pub fn move_cursor_past_prompt(&self) {
         if self.prompt.drawn {
-            let end_row = self.prompt.redraw_row + self.prompt.prev_rows;
+            let anchor = self.prompt.anchor_row.unwrap_or(0);
+            let end_row = anchor + self.prompt.prev_rows;
             let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
             let mut out = io::stdout();
             let _ = out.queue(cursor::MoveTo(0, end_row));
@@ -685,27 +670,28 @@ impl Screen {
         let mut out = io::stdout();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let start_row = if self.prompt.drawn {
-            let row = self.prompt.redraw_row;
+            let row = self.prompt.anchor_row.unwrap_or(0);
             let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
             self.prompt.drawn = false;
             row
         } else {
             self.prompt
-                .fallback_row
+                .anchor_row
                 .take()
                 .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0))
         };
         let block_rows = self.history.render(&mut out, term_width());
-        self.prompt.fallback_row = Some(start_row + block_rows);
+        self.prompt.anchor_row = Some(start_row + block_rows);
         let _ = out.queue(terminal::EndSynchronizedUpdate);
         let _ = out.flush();
     }
 
     pub fn erase_prompt(&mut self) {
         if self.prompt.drawn {
-            erase_prompt_at(self.prompt.redraw_row);
-            self.prompt.fallback_row = Some(self.prompt.redraw_row);
+            if let Some(row) = self.prompt.anchor_row {
+                erase_prompt_at(row);
+            }
             self.prompt.drawn = false;
             self.prompt.dirty = true;
         }
@@ -738,10 +724,10 @@ impl Screen {
         if purge {
             self.has_scrollback = false;
             self.content_start_row = Some(0);
-            self.prompt.fallback_row = Some(block_rows);
+            self.prompt.anchor_row = Some(block_rows);
         } else {
             let start = self.content_start_row.unwrap_or(0);
-            self.prompt.fallback_row = Some(start + block_rows);
+            self.prompt.anchor_row = Some(start + block_rows);
         }
     }
 
@@ -749,7 +735,7 @@ impl Screen {
         self.history.clear();
         self.active_tool = None;
         self.prompt = PromptState::new();
-        self.prompt.fallback_row = Some(0);
+        self.prompt.anchor_row = Some(0);
         self.working.clear();
         self.context_tokens = None;
         self.has_scrollback = false;
@@ -787,7 +773,7 @@ impl Screen {
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
         self.active_tool = None;
-        self.redraw(self.has_scrollback);
+        self.redraw(true);
     }
 
     pub fn draw_prompt(&mut self, state: &InputState, mode: protocol::Mode, width: usize) {
@@ -833,23 +819,17 @@ impl Screen {
         let mut out = io::stdout();
 
         // ── Position cursor ─────────────────────────────────────────────
-        let draw_start_row = if self.prompt.drawn {
-            let _ = out.queue(terminal::BeginSynchronizedUpdate);
-            let _ = out.queue(cursor::Hide);
-            let _ = out.queue(cursor::MoveTo(0, self.prompt.redraw_row));
-            self.prompt.redraw_row
-        } else {
-            // Use tracked row when available to avoid cursor::position() which
-            // races with pending keystrokes in stdin and can return wrong values.
-            let row = self
-                .prompt
-                .fallback_row
-                .take()
-                .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0));
-            let _ = out.queue(terminal::BeginSynchronizedUpdate);
-            let _ = out.queue(cursor::Hide);
-            row
-        };
+        let draw_start_row = self
+            .prompt
+            .anchor_row
+            .take()
+            .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0));
+
+        let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        let _ = out.queue(cursor::Hide);
+        if self.prompt.drawn {
+            let _ = out.queue(cursor::MoveTo(0, draw_start_row));
+        }
 
         // ── Render blocks ───────────────────────────────────────────────
         let block_rows = self.history.render(&mut out, width);
@@ -913,19 +893,20 @@ impl Screen {
             }
             self.prompt.prev_rows = (pre_prompt - block_rows) + new_rows;
 
-            // redraw_row: where the next frame starts drawing (prompt section).
+            // anchor_row: where the next frame starts drawing (prompt section).
             // When blocks overflow, top_row + block_rows overshoots — compute
             // from the bottom of the viewport instead.
             let prompt_section_rows = active_rows + gap + new_rows;
             if scrolled {
                 let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
-                self.prompt.redraw_row = height.saturating_sub(prompt_section_rows);
+                self.prompt.anchor_row = Some(height.saturating_sub(prompt_section_rows));
             } else {
-                self.prompt.redraw_row = top_row + block_rows;
+                self.prompt.anchor_row = Some(top_row + block_rows);
             }
-            // dialog_row: where the prompt bar actually starts (after active
+            // prev_dialog_row: where the prompt bar actually starts (after active
             // tool + gap).  Dialogs render here to line up with the prompt.
-            self.prompt.dialog_row = self.prompt.redraw_row + active_rows + gap;
+            let anchor = self.prompt.anchor_row.unwrap_or(0);
+            self.prompt.prev_dialog_row = Some(anchor + active_rows + gap);
             self.prompt.drawn = true;
             self.prompt.dirty = false;
 
@@ -937,7 +918,7 @@ impl Screen {
             // ── Content-only mode (dialog inline) ───────────────────────
             // Render blocks + active tool, then leave a gap line before
             // the dialog that follows.  The dialog renders inline at
-            // `redraw_row`, pushing conversation up via terminal scroll
+            // `anchor_row`, pushing conversation up via terminal scroll
             // rather than overlaying it.
             let gap: u16 = if block_rows > 0 || active_rows > 0 {
                 let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
@@ -952,13 +933,14 @@ impl Screen {
             let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
             let scrolled = draw_start_row + content_rows > height;
 
-            if scrolled {
+            let anchor = if scrolled {
                 self.has_scrollback = true;
-                self.prompt.redraw_row = height.saturating_sub(active_rows + gap);
+                height.saturating_sub(active_rows + gap)
             } else {
-                self.prompt.redraw_row = draw_start_row + block_rows;
-            }
-            self.prompt.dialog_row = self.prompt.redraw_row + active_rows + gap;
+                draw_start_row + block_rows
+            };
+            self.prompt.anchor_row = Some(anchor);
+            self.prompt.prev_dialog_row = Some(anchor + active_rows + gap);
             self.prompt.prev_rows = active_rows + gap;
             self.prompt.drawn = true;
             self.prompt.dirty = false;

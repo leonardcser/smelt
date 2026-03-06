@@ -419,14 +419,14 @@ fn render_edit_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::V
     if new.is_empty() {
         print_dim_count(out, old.lines().count(), "line deleted", "lines deleted")
     } else {
-        print_inline_diff(out, old, new, path, new, 0)
+        print_inline_diff(out, old, new, path, new, 0, 0)
     }
 }
 
 fn render_write_output(out: &mut io::Stdout, args: &HashMap<String, serde_json::Value>) -> u16 {
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-    print_syntax_file(out, content, path, 0)
+    print_syntax_file(out, content, path, 0, 0)
 }
 
 fn render_question_output(out: &mut io::Stdout, content: &str, width: usize) -> u16 {

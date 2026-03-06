@@ -17,20 +17,15 @@ use super::highlight::{count_inline_diff_rows, print_inline_diff, print_syntax_f
 use super::{chunk_line, crlf, draw_bar, ConfirmChoice, ResumeEntry};
 
 /// Maximum number of scrollable list items in a dialog.
-///
-/// The dialog starts at `start_row` and can push content into scrollback
-/// by up to `height / 2` rows. This gives a max dialog height of
-/// `(height - start_row) + min(start_row, height / 2)`, minus overhead.
+/// Subtracts 4 rows of overhead (bar, title, blank, footer).
 fn max_dialog_items(start_row: u16, height: u16) -> usize {
     max_dialog_height(start_row, height).saturating_sub(4)
 }
 
-/// Maximum total rows a dialog may occupy, accounting for push-up into
-/// scrollback (capped at half the terminal height).
+/// Maximum total rows a dialog may occupy. Clamped to the viewport so
+/// dialogs never push content into terminal scrollback.
 fn max_dialog_height(start_row: u16, height: u16) -> usize {
-    let space_below = height.saturating_sub(start_row) as usize;
-    let max_push = start_row.min(height / 2) as usize;
-    (space_below + max_push).min(height as usize)
+    height.saturating_sub(start_row) as usize
 }
 
 // ── TextArea ──────────────────────────────────────────────────────────────────
@@ -259,12 +254,11 @@ fn begin_dialog_draw(out: &mut io::Stdout, start_row: u16) {
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 }
 
-/// End a dialog frame: clear remainder, end sync update, flush, return scroll.
-fn end_dialog_draw(out: &mut io::Stdout, start_row: u16, total_rows: u16, height: u16) -> u16 {
+/// End a dialog frame: clear remainder, end sync update, flush.
+fn end_dialog_draw(out: &mut io::Stdout) {
     let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
     let _ = out.queue(terminal::EndSynchronizedUpdate);
     let _ = out.flush();
-    (start_row + total_rows).saturating_sub(height)
 }
 
 /// Finish a dialog frame: optionally show cursor, end synchronized update, flush.
@@ -353,11 +347,13 @@ fn confirm_preview_row_count(tool_name: &str, args: &HashMap<String, serde_json:
 }
 
 /// Render the syntax-highlighted preview for the confirm dialog.
+/// Renders at most `viewport` rows starting from `skip` into the full preview.
 fn render_confirm_preview(
     out: &mut io::Stdout,
     tool_name: &str,
     args: &HashMap<String, serde_json::Value>,
-    max_rows: u16,
+    skip: u16,
+    viewport: u16,
 ) {
     match tool_name {
         "edit_file" => {
@@ -370,12 +366,12 @@ fn render_confirm_preview(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_inline_diff(out, old, new, path, old, max_rows);
+            print_inline_diff(out, old, new, path, old, skip, viewport);
         }
         "write_file" => {
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            print_syntax_file(out, content, path, max_rows);
+            print_syntax_file(out, content, path, skip, viewport);
         }
         _ => {}
     }
@@ -389,6 +385,7 @@ pub struct ConfirmDialog {
     args: HashMap<String, serde_json::Value>,
     options: Vec<(String, ConfirmChoice)>,
     total_preview: u16,
+    preview_scroll: usize,
     selected: usize,
     textarea: TextArea,
     editing: bool,
@@ -432,6 +429,7 @@ impl ConfirmDialog {
             args: args.clone(),
             options,
             total_preview,
+            preview_scroll: 0,
             selected: 0,
             textarea: TextArea::new(),
             editing: false,
@@ -496,6 +494,26 @@ impl ConfirmDialog {
                 return Some((ConfirmChoice::No, None));
             }
             (KeyCode::Esc, _) => return Some((ConfirmChoice::No, None)),
+            // Preview scrolling
+            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
+                if self.total_preview > 0 {
+                    let half = 10usize;
+                    self.preview_scroll =
+                        (self.preview_scroll + half).min(self.total_preview as usize);
+                }
+            }
+            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+            }
+            (KeyCode::PageDown, _) => {
+                if self.total_preview > 0 {
+                    self.preview_scroll =
+                        (self.preview_scroll + 20).min(self.total_preview as usize);
+                }
+            }
+            (KeyCode::PageUp, _) => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(20);
+            }
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
                 self.selected = if self.selected == 0 {
                     self.options.len() - 1
@@ -511,11 +529,9 @@ impl ConfirmDialog {
         None
     }
 
-    /// Render the dialog inline at `start_row`, pushing content into
-    /// scrollback if needed. Returns how many rows the terminal scrolled.
-    pub fn draw(&mut self, start_row: u16) -> u16 {
+    pub fn draw(&mut self, start_row: u16) {
         if !self.dirty {
-            return 0;
+            return;
         }
         self.dirty = false;
 
@@ -544,21 +560,32 @@ impl ConfirmDialog {
             .as_ref()
             .map(|s| wrap_line(s, w.saturating_sub(1)).len() as u16)
             .unwrap_or(0);
-        // 4 = bar + blank-before-allow + allow-label + bottom-pad; title_rows replaces the old fixed 1
-        let base_rows: u16 =
-            4 + title_rows + summary_rows + 1 + self.options.len() as u16 + ta_extra;
+        let has_preview = self.total_preview > 0;
+        // Fixed rows: bar + title + summary + separators(if preview) +
+        //             blank + "Allow?" + options + ta_extra + footer
+        let fixed_rows: u16 = 1
+            + title_rows
+            + summary_rows
+            + if has_preview { 2 } else { 0 }
+            + 1
+            + 1
+            + self.options.len() as u16
+            + ta_extra
+            + 1;
 
-        // No height limit for confirm dialogs - show full preview
-        let preview_rows = self.total_preview;
-        let has_preview = preview_rows > 0;
-        let preview_extra = if has_preview {
-            // top separator + content + bottom separator
-            preview_rows + 2
+        let available = max_dialog_height(start_row, height) as u16;
+        let viewport_rows: u16 = if has_preview {
+            let space = available.saturating_sub(fixed_rows);
+            space.max(1).min(self.total_preview)
         } else {
             0
         };
 
-        let total_rows = base_rows + preview_extra;
+        // Clamp scroll
+        let max_scroll = (self.total_preview as usize).saturating_sub(viewport_rows as usize);
+        self.preview_scroll = self.preview_scroll.min(max_scroll);
+
+        let total_rows = fixed_rows + viewport_rows;
         let bar_row = start_row;
 
         // Partial redraw: when editing and the dialog height hasn't changed,
@@ -621,15 +648,35 @@ impl ConfirmDialog {
 
             if has_preview {
                 let separator: String = "╌".repeat(w);
+                // Top separator — show scroll position when clipped
                 let _ = out.queue(SetForegroundColor(theme::BAR));
                 let _ = out.queue(Print(&separator));
                 let _ = out.queue(ResetColor);
                 crlf(&mut out);
                 row += 1;
-                render_confirm_preview(&mut out, &self.tool_name, &self.args, preview_rows);
-                row += preview_rows;
+                render_confirm_preview(
+                    &mut out,
+                    &self.tool_name,
+                    &self.args,
+                    self.preview_scroll as u16,
+                    viewport_rows,
+                );
+                row += viewport_rows;
+                // Bottom separator — show scroll indicator when content is clipped
                 let _ = out.queue(SetForegroundColor(theme::BAR));
-                let _ = out.queue(Print(&separator));
+                if self.total_preview > viewport_rows {
+                    let pos = format!(
+                        " [{}/{}]",
+                        self.preview_scroll + viewport_rows as usize,
+                        self.total_preview
+                    );
+                    let sep_len = w.saturating_sub(pos.len());
+                    let _ = out.queue(Print("╌".repeat(sep_len)));
+                    let _ = out.queue(SetForegroundColor(theme::MUTED));
+                    let _ = out.queue(Print(&pos));
+                } else {
+                    let _ = out.queue(Print(&separator));
+                }
                 let _ = out.queue(SetAttribute(Attribute::Reset));
                 crlf(&mut out);
                 row += 1;
@@ -702,14 +749,6 @@ impl ConfirmDialog {
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         finish_dialog_frame(&mut out, cursor_pos, self.editing);
-
-        // Compute how much the terminal scrolled and adjust stored positions.
-        let scroll = (bar_row + total_rows).saturating_sub(height);
-        if scroll > 0 {
-            self.last_bar_row = self.last_bar_row.saturating_sub(scroll);
-            self.options_row = self.options_row.saturating_sub(scroll);
-        }
-        scroll
     }
 }
 
@@ -781,9 +820,9 @@ impl RewindDialog {
         None
     }
 
-    pub fn draw(&mut self, start_row: u16) -> u16 {
+    pub fn draw(&mut self, start_row: u16) {
         if !self.dirty {
-            return 0;
+            return;
         }
         self.dirty = false;
 
@@ -795,9 +834,6 @@ impl RewindDialog {
         self.scroll_offset = self
             .scroll_offset
             .min(self.turns.len().saturating_sub(self.max_visible));
-
-        // total_rows = bar(1) + title(1) + items + blank(1) + footer(1)
-        let total_rows = (self.max_visible as u16) + 4;
 
         begin_dialog_draw(&mut out, start_row);
 
@@ -843,7 +879,7 @@ impl RewindDialog {
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let _ = out.queue(Print(" enter: select  esc: cancel"));
         let _ = out.queue(SetAttribute(Attribute::Reset));
-        end_dialog_draw(&mut out, start_row, total_rows, height)
+        end_dialog_draw(&mut out);
     }
 }
 
@@ -1024,7 +1060,7 @@ impl ResumeDialog {
         }
     }
 
-    pub fn draw(&mut self, start_row: u16) -> u16 {
+    pub fn draw(&mut self, start_row: u16) {
         if !self.dirty {
             let freshest = self.filtered.iter().map(resume_ts).max().unwrap_or(0);
             let age_s = session::now_ms().saturating_sub(freshest) / 1000;
@@ -1040,7 +1076,7 @@ impl ResumeDialog {
             }
         }
         if !self.dirty {
-            return 0;
+            return;
         }
         self.dirty = false;
         self.last_drawn = Instant::now();
@@ -1059,14 +1095,6 @@ impl ResumeDialog {
                 .scroll_offset
                 .min(self.filtered.len().saturating_sub(self.max_visible));
         }
-
-        // total_rows = bar(1) + title(1) + items + blank(1) + footer(1)
-        let item_rows = if self.filtered.is_empty() {
-            1
-        } else {
-            self.max_visible as u16
-        };
-        let total_rows = item_rows + 4;
 
         begin_dialog_draw(&mut out, start_row);
 
@@ -1136,7 +1164,7 @@ impl ResumeDialog {
             ));
         }
         let _ = out.queue(SetAttribute(Attribute::Reset));
-        end_dialog_draw(&mut out, start_row, total_rows, height)
+        end_dialog_draw(&mut out);
     }
 }
 
@@ -1241,9 +1269,9 @@ impl PsDialog {
         None
     }
 
-    pub fn draw(&mut self, start_row: u16) -> u16 {
+    pub fn draw(&mut self, start_row: u16) {
         if !self.dirty {
-            return 0;
+            return;
         }
         self.dirty = false;
 
@@ -1264,14 +1292,6 @@ impl PsDialog {
                 .scroll_offset
                 .min(self.procs.len().saturating_sub(self.max_visible));
         }
-
-        // total_rows = bar(1) + title(1) + items + blank(1) + footer(1)
-        let item_rows = if self.procs.is_empty() {
-            1
-        } else {
-            self.max_visible as u16
-        };
-        let total_rows = item_rows + 4;
 
         begin_dialog_draw(&mut out, start_row);
 
@@ -1323,7 +1343,7 @@ impl PsDialog {
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let _ = out.queue(Print(" esc: close  k: kill selected"));
         let _ = out.queue(SetAttribute(Attribute::Reset));
-        end_dialog_draw(&mut out, start_row, total_rows, height)
+        end_dialog_draw(&mut out);
     }
 }
 
@@ -1331,7 +1351,6 @@ impl PsDialog {
 pub struct QuestionDialog {
     questions: Vec<Question>,
     has_tabs: bool,
-    max_options: usize,
     active_tab: usize,
     selections: Vec<usize>,
     multi_toggles: Vec<Vec<bool>>,
@@ -1345,7 +1364,6 @@ pub struct QuestionDialog {
 impl QuestionDialog {
     pub fn new(questions: Vec<Question>) -> Self {
         let n = questions.len();
-        let max_options = questions.iter().map(|q| q.options.len()).max().unwrap_or(0) + 1;
         let has_tabs = n > 1;
         Self {
             multi_toggles: questions
@@ -1354,7 +1372,6 @@ impl QuestionDialog {
                 .collect(),
             questions,
             has_tabs,
-            max_options,
             active_tab: 0,
             selections: vec![0; n],
             other_areas: (0..n).map(|_| TextArea::new()).collect(),
@@ -1470,18 +1487,16 @@ impl QuestionDialog {
         None
     }
 
-    /// Render the dialog inline at `start_row`, pushing content into
-    /// scrollback if needed. Returns how many rows the terminal scrolled.
-    pub fn draw(&mut self, start_row: u16) -> u16 {
+    pub fn draw(&mut self, start_row: u16) {
         if !self.dirty {
-            return 0;
+            return;
         }
         self.dirty = false;
 
         let mut out = io::stdout();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::Hide);
-        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let (width, _height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
 
         let ta = &self.other_areas[self.active_tab];
@@ -1494,22 +1509,8 @@ impl QuestionDialog {
             (2 + digits + 2 + 5 + 2) as u16
         };
         let other_wrap_w = width.saturating_sub(other_text_col) as usize;
-        let ta_extra: u16 = if ta_visible {
-            ta.visual_row_count(other_wrap_w).saturating_sub(1)
-        } else {
-            0
-        };
 
         let q = &self.questions[self.active_tab];
-        let suffix_len = if q.multi_select {
-            " (space to toggle)".len()
-        } else {
-            0
-        };
-        let q_rows = wrap_line(&q.question, w.saturating_sub(1 + suffix_len)).len() as u16;
-        // 1=bar, 1=blank, q_rows=question, 1=blank, 2=other+bottom
-        let fixed_rows =
-            1 + (self.has_tabs as u16) + 1 + q_rows + 1 + self.max_options as u16 + 2 + ta_extra;
         let bar_row = start_row;
 
         let _ = out.queue(cursor::MoveTo(0, bar_row));
@@ -1687,8 +1688,6 @@ impl QuestionDialog {
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
 
         finish_dialog_frame(&mut out, cursor_pos, editing);
-
-        (bar_row + fixed_rows).saturating_sub(height)
     }
 
     fn build_answer(&self) -> String {
@@ -1810,6 +1809,7 @@ fn truncate_str_local(s: &str, max: usize) -> String {
 
 pub struct HelpDialog {
     dirty: bool,
+    scroll_offset: usize,
 }
 
 impl Default for HelpDialog {
@@ -1820,7 +1820,10 @@ impl Default for HelpDialog {
 
 impl HelpDialog {
     pub fn new() -> Self {
-        Self { dirty: true }
+        Self {
+            dirty: true,
+            scroll_offset: 0,
+        }
     }
 
     pub fn mark_dirty(&mut self) {
@@ -1836,15 +1839,27 @@ impl HelpDialog {
         if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
             return true;
         }
-        matches!(
-            code,
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
-        )
+        match code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => true,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.scroll_offset > 0 {
+                    self.scroll_offset -= 1;
+                    self.dirty = true;
+                }
+                false
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_offset += 1;
+                self.dirty = true;
+                false
+            }
+            _ => false,
+        }
     }
 
-    pub fn draw(&mut self, start_row: u16) -> u16 {
+    pub fn draw(&mut self, start_row: u16) {
         if !self.dirty {
-            return 0;
+            return;
         }
         self.dirty = false;
 
@@ -1853,8 +1868,6 @@ impl HelpDialog {
         let w = width as usize;
 
         // Each section renders as a heading row followed by entry rows.
-        // Entries use the same draw_menu_row style as the model/settings pickers:
-        //   "  label<padding>dim detail"
         let sections: &[(&str, &[(&str, &str)])] = &[
             (
                 "prefixes",
@@ -1885,7 +1898,6 @@ impl HelpDialog {
             ),
         ];
 
-        // Compute label column width (same as draw_menu_row: label + 4 spaces min gap).
         let label_col = sections
             .iter()
             .flat_map(|(_, entries)| entries.iter().map(|(k, _)| k.len()))
@@ -1893,15 +1905,27 @@ impl HelpDialog {
             .unwrap_or(0)
             + 4;
 
-        // Count total display rows: per section = entries + 1 blank.
-        let content_rows: usize = sections
-            .iter()
-            .map(|(_, entries)| entries.len() + 1)
-            .sum::<usize>()
-            .saturating_sub(1); // no trailing blank after last section
+        // Collect content lines for scrolling
+        let mut content_lines: Vec<(&str, &str)> = Vec::new();
+        for (si, (_, entries)) in sections.iter().enumerate() {
+            for &(label, detail) in *entries {
+                content_lines.push((label, detail));
+            }
+            if si + 1 < sections.len() {
+                content_lines.push(("", "")); // blank separator
+            }
+        }
+        let total_content = content_lines.len();
 
-        // bar(1) + title(1) + blank(1) + content + footer(1)
-        let total_rows = (1 + 1 + 1 + content_rows + 1) as u16;
+        // fixed rows: bar(1) + title(1) + blank(1) + footer(1) = 4
+        let fixed = 4usize;
+        let available = max_dialog_height(start_row, height);
+        let max_visible = available.saturating_sub(fixed);
+        let max_visible = max_visible.max(1).min(total_content);
+
+        // Clamp scroll
+        let max_scroll = total_content.saturating_sub(max_visible);
+        self.scroll_offset = self.scroll_offset.min(max_scroll);
 
         begin_dialog_draw(&mut out, start_row);
 
@@ -1914,8 +1938,14 @@ impl HelpDialog {
         crlf(&mut out);
         crlf(&mut out);
 
-        for (si, (_, entries)) in sections.iter().enumerate() {
-            for (label, detail) in entries.iter() {
+        for &(label, detail) in content_lines
+            .iter()
+            .skip(self.scroll_offset)
+            .take(max_visible)
+        {
+            if label.is_empty() && detail.is_empty() {
+                crlf(&mut out);
+            } else {
                 let _ = out.queue(Print("  "));
                 let _ = out.queue(SetForegroundColor(super::theme::MUTED));
                 let _ = out.queue(Print(label));
@@ -1927,16 +1957,11 @@ impl HelpDialog {
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
                 crlf(&mut out);
             }
-
-            // blank line between sections (not after last)
-            if si + 1 < sections.len() {
-                crlf(&mut out);
-            }
         }
 
         let _ = out.queue(SetAttribute(Attribute::Dim));
         let _ = out.queue(Print(" esc: close"));
         let _ = out.queue(SetAttribute(Attribute::Reset));
-        end_dialog_draw(&mut out, start_row, total_rows, height)
+        end_dialog_draw(&mut out);
     }
 }

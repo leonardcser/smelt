@@ -217,7 +217,7 @@ impl ActiveDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16) -> u16 {
+    fn draw(&mut self, start_row: u16) {
         match self {
             ActiveDialog::Confirm { dialog, .. } => dialog.draw(start_row),
             ActiveDialog::AskQuestion { dialog, .. } => dialog.draw(start_row),
@@ -558,8 +558,7 @@ impl App {
                 if redirtied {
                     d.mark_dirty();
                 }
-                let scroll = d.draw(self.screen.dialog_row());
-                self.screen.adjust_for_dialog_scroll(scroll);
+                d.draw(self.screen.dialog_row());
             }
 
             // ── Wait for next event ──────────────────────────────────────
@@ -602,8 +601,7 @@ impl App {
                     let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
                     if let Some(d) = active_dialog.as_mut() {
                         if redirtied { d.mark_dirty(); }
-                        let scroll = d.draw(self.screen.dialog_row());
-                        self.screen.adjust_for_dialog_scroll(scroll);
+                        d.draw(self.screen.dialog_row());
                     }
                 }
 
@@ -631,8 +629,7 @@ impl App {
                     let redirtied = self.tick(agent.is_some(), active_dialog.is_some());
                     if let Some(d) = active_dialog.as_mut() {
                         if redirtied { d.mark_dirty(); }
-                        let scroll = d.draw(self.screen.dialog_row());
-                        self.screen.adjust_for_dialog_scroll(scroll);
+                        d.draw(self.screen.dialog_row());
                     }
                 }
 
@@ -1625,7 +1622,7 @@ impl App {
         let mut dialog = render::ResumeDialog::new(entries, cwd);
         terminal::enable_raw_mode().ok();
         loop {
-            let _ = dialog.draw(0);
+            dialog.draw(0);
             match event::read() {
                 Ok(Event::Key(KeyEvent {
                     code, modifiers, ..
