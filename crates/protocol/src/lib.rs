@@ -376,7 +376,19 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
+    #[serde(deserialize_with = "deserialize_arguments")]
     pub arguments: String,
+}
+
+/// Accept `arguments` as either a JSON string or a JSON object.
+/// OpenAI returns a stringified JSON object, but llama.cpp and some other
+/// backends return a raw JSON object. Normalize to a string in both cases.
+fn deserialize_arguments<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::String(s) => Ok(s),
+        other => Ok(other.to_string()),
+    }
 }
 
 /// Serde helper: always serializes as "function".
