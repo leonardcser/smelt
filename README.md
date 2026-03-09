@@ -4,6 +4,10 @@ A Rust TUI coding agent. Connects to any OpenAI-compatible API (Ollama, OpenAI,
 etc.) and provides an interactive terminal interface for code generation,
 analysis, and assistance.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="demo" width="800">
+</p>
+
 ## Installation
 
 ```bash
