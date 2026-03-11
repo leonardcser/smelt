@@ -220,3 +220,19 @@ cargo test        # run tests
 cargo fmt         # format
 cargo clippy      # lint
 ```
+
+## Acknowledgments
+
+This project was inspired by
+[Claude Code](https://github.com/anthropics/claude-code).
+
+## Contributing
+
+Contributions are welcome! Please open an issue or a pull request.
+
+Feel free to open issues for bugs :)
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
+for details.
