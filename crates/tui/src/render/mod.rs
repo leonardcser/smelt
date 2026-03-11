@@ -1490,33 +1490,36 @@ pub(super) fn wrap_line(line: &str, width: usize) -> Vec<String> {
         return vec![line.to_string()];
     }
     let mut chunks: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut col = 0;
 
-    for word in line.split_inclusive(' ') {
-        let wlen = word.chars().count();
-        if col + wlen > width && col > 0 {
-            chunks.push(current);
-            current = String::new();
-            col = 0;
-        }
-        if wlen > width {
-            // Word is longer than the line — hard-wrap it character by character.
-            for ch in word.chars() {
-                if col >= width {
-                    chunks.push(current);
-                    current = String::new();
-                    col = 0;
-                }
-                current.push(ch);
-                col += 1;
+    // Handle embedded newlines: split into logical lines first, then wrap each.
+    for logical_line in line.split('\n') {
+        let mut current = String::new();
+        let mut col = 0;
+
+        for word in logical_line.split_inclusive(' ') {
+            let wlen = word.chars().count();
+            if col + wlen > width && col > 0 {
+                chunks.push(current);
+                current = String::new();
+                col = 0;
             }
-        } else {
-            current.push_str(word);
-            col += wlen;
+            if wlen > width {
+                // Word is longer than the line — hard-wrap it character by character.
+                for ch in word.chars() {
+                    if col >= width {
+                        chunks.push(current);
+                        current = String::new();
+                        col = 0;
+                    }
+                    current.push(ch);
+                    col += 1;
+                }
+            } else {
+                current.push_str(word);
+                col += wlen;
+            }
         }
-    }
-    if !current.is_empty() || chunks.is_empty() {
+        // Always emit at least one chunk per logical line (preserves blank lines).
         chunks.push(current);
     }
     chunks
