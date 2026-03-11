@@ -668,6 +668,7 @@ impl App {
             history: self.history.clone(),
             api_base: Some(self.api_base.clone()),
             api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
+            session_id: self.session.id.clone(),
         });
 
         // Drain events, printing text to stdout.

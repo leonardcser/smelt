@@ -29,6 +29,8 @@ enum ConfirmPreview {
         /// The full command — first line is rendered in the title, rest here.
         full_command: String,
     },
+    /// Plan summary rendered as markdown for exit_plan_mode.
+    PlanContent { summary: String },
 }
 
 impl ConfirmPreview {
@@ -68,6 +70,14 @@ impl ConfirmPreview {
             "bash" if desc.lines().count() > 1 => ConfirmPreview::BashBody {
                 full_command: desc.to_string(),
             },
+            "exit_plan_mode" => {
+                let summary = args
+                    .get("plan_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                ConfirmPreview::PlanContent { summary }
+            }
             _ => ConfirmPreview::None,
         }
     }
@@ -78,6 +88,7 @@ impl ConfirmPreview {
             ConfirmPreview::Diff { old, new, path } => count_inline_diff_rows(old, new, path, old),
             ConfirmPreview::FileContent { content, .. } => content.lines().count() as u16,
             ConfirmPreview::BashBody { full_command } => (full_command.lines().count() - 1) as u16,
+            ConfirmPreview::PlanContent { summary } => summary.lines().count() as u16,
         }
     }
 
@@ -123,6 +134,21 @@ impl ConfirmPreview {
                     emitted += 1;
                 }
             }
+            ConfirmPreview::PlanContent { summary } => {
+                let lines: Vec<&str> = summary.lines().collect();
+                let mut emitted = 0u16;
+                for (i, line) in lines.iter().enumerate() {
+                    if (i as u16) < skip {
+                        continue;
+                    }
+                    if emitted >= viewport {
+                        break;
+                    }
+                    let _ = out.queue(Print(format!(" {line}")));
+                    crlf(out);
+                    emitted += 1;
+                }
+            }
         }
     }
 }
@@ -138,6 +164,7 @@ struct ConfirmLayout {
 /// Non-blocking confirm dialog state machine.
 pub struct ConfirmDialog {
     tool_name: String,
+    display_name: String,
     desc: String,
     summary: Option<String>,
     preview: ConfirmPreview,
@@ -164,26 +191,32 @@ impl ConfirmDialog {
         summary: Option<&str>,
         request_id: u64,
     ) -> Self {
+        let is_plan = tool_name == "exit_plan_mode";
         let mut options: Vec<(String, ConfirmChoice)> = vec![
             ("yes".into(), ConfirmChoice::Yes),
             ("no".into(), ConfirmChoice::No),
         ];
-        if let Some(pattern) = approval_pattern {
-            let display = pattern.strip_suffix("/*").unwrap_or(pattern);
-            let display = display.split("://").nth(1).unwrap_or(display);
-            options.push((
-                format!("allow {display}"),
-                ConfirmChoice::AlwaysPattern(pattern.to_string()),
-            ));
-        } else {
-            options.push(("always allow".into(), ConfirmChoice::Always));
+        if !is_plan {
+            if let Some(pattern) = approval_pattern {
+                let display = pattern.strip_suffix("/*").unwrap_or(pattern);
+                let display = display.split("://").nth(1).unwrap_or(display);
+                options.push((
+                    format!("allow {display}"),
+                    ConfirmChoice::AlwaysPattern(pattern.to_string()),
+                ));
+            } else {
+                options.push(("always allow".into(), ConfirmChoice::Always));
+            }
         }
 
         let preview = ConfirmPreview::from_tool(tool_name, desc, args);
         let total_preview = preview.total_rows();
 
+        let display_name = if is_plan { "plan" } else { tool_name };
+
         Self {
             tool_name: tool_name.to_string(),
+            display_name: display_name.to_string(),
             desc: desc.to_string(),
             summary: summary.map(|s| s.to_string()),
             preview,
@@ -215,7 +248,7 @@ impl ConfirmDialog {
             0
         };
 
-        let prefix_len = 1 + self.tool_name.len() + 2;
+        let prefix_len = 1 + self.display_name.len() + 2;
         let title_rows = if matches!(self.preview, ConfirmPreview::BashBody { .. }) {
             // Only the first line goes in the title; the rest is scrollable preview.
             let first_line = self.desc.lines().next().unwrap_or("");
@@ -475,7 +508,7 @@ impl super::Dialog for ConfirmDialog {
             row += 1;
 
             // Title
-            let prefix_len = 1 + self.tool_name.len() + 2;
+            let prefix_len = 1 + self.display_name.len() + 2;
             let title_desc = if matches!(self.preview, ConfirmPreview::BashBody { .. }) {
                 self.desc.lines().next().unwrap_or("")
             } else {
@@ -493,7 +526,7 @@ impl super::Dialog for ConfirmDialog {
                 if i == 0 {
                     let _ = out.queue(Print(" "));
                     let _ = out.queue(SetForegroundColor(theme::accent()));
-                    let _ = out.queue(Print(&self.tool_name));
+                    let _ = out.queue(Print(&self.display_name));
                     let _ = out.queue(ResetColor);
                     let _ = out.queue(Print(": "));
                 } else {
@@ -559,9 +592,11 @@ impl super::Dialog for ConfirmDialog {
                 crlf(&mut out);
                 row += 1;
             }
-            // "Allow?"
+            // Action prompt
+            let is_plan = matches!(self.preview, ConfirmPreview::PlanContent { .. });
+            let prompt_text = if is_plan { " Implement?" } else { " Allow?" };
             let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(Print(" Allow?"));
+            let _ = out.queue(Print(prompt_text));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             crlf(&mut out);
             row += 1;

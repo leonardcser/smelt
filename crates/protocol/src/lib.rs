@@ -272,6 +272,8 @@ pub enum UiCommand {
         api_base: Option<String>,
         /// Override API key for this turn (uses engine default if None).
         api_key: Option<String>,
+        /// Session ID for plan file storage.
+        session_id: String,
     },
 
     /// Inject a message mid-turn (steering / type-ahead).

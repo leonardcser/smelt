@@ -54,6 +54,7 @@ pub struct ToolContext<'a> {
     pub proc_done_tx: &'a mpsc::UnboundedSender<(String, Option<i32>)>,
     pub provider: &'a Provider,
     pub model: &'a str,
+    pub session_id: &'a str,
 }
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
@@ -133,6 +134,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
         "grep" => str_arg(args, "pattern"),
         "web_fetch" => str_arg(args, "url"),
         "web_search" => str_arg(args, "query"),
+        "exit_plan_mode" => "plan".to_string(),
         "read_process_output" | "stop_process" => str_arg(args, "id"),
         "ask_user_question" => args
             .get("questions")

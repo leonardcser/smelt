@@ -24,6 +24,7 @@ impl App {
             history: self.history.clone(),
             api_base: Some(self.api_base.clone()),
             api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
+            session_id: self.session.id.clone(),
         });
 
         TurnState {
@@ -381,6 +382,13 @@ impl App {
                     approved: true,
                     message,
                 });
+                // Auto-switch to Apply mode when a plan is approved.
+                if tool_name == "exit_plan_mode" {
+                    self.mode = Mode::Apply;
+                    state::set_mode(self.mode);
+                    self.engine.send(UiCommand::SetMode { mode: self.mode });
+                    self.screen.mark_dirty();
+                }
                 false
             }
             ConfirmChoice::Always => {

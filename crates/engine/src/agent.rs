@@ -37,7 +37,7 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, input, mode, model, reasoning_effort, history, api_base, api_key } => {
+                    UiCommand::StartTurn { turn_id, input, mode, model, reasoning_effort, history, api_base, api_key, session_id } => {
                         last_model = model.clone();
                         let provider = build_provider_with_overrides(
                             &config, &client,
@@ -58,6 +58,7 @@ pub async fn engine_task(
                             turn_id,
                             model,
                             system_prompt: &config.system_prompt,
+                            session_id,
                         };
                         turn.run(input, history).await;
                     }
@@ -143,6 +144,7 @@ struct Turn<'a> {
     turn_id: u64,
     model: String,
     system_prompt: &'a str,
+    session_id: String,
 }
 
 impl<'a> Turn<'a> {
@@ -358,6 +360,7 @@ impl<'a> Turn<'a> {
                         proc_done_tx: self.proc_done_tx,
                         provider: &self.provider,
                         model: &self.model,
+                        session_id: &self.session_id,
                     };
                     tool.execute(args.clone(), &ctx).await
                 };
@@ -487,6 +490,15 @@ impl<'a> Turn<'a> {
         tool_name: &str,
         args: &HashMap<String, Value>,
     ) -> PermissionResult {
+        // Auto-allow edit_file on plan files in Plan mode.
+        if self.mode == Mode::Plan && tool_name == "edit_file" {
+            if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
+                if crate::plan::is_plan_file(&self.session_id, path) {
+                    return PermissionResult::Allow(None);
+                }
+            }
+        }
+
         let decision = self.permissions.decide(self.mode, tool_name, args);
 
         match decision {

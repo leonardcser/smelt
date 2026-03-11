@@ -26,16 +26,30 @@ impl Tool for ExitPlanModeTool {
         })
     }
 
+    fn needs_confirm(&self, _args: &HashMap<String, Value>) -> Option<String> {
+        Some("Implement this plan?".to_string())
+    }
+
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,
-        _ctx: &'a ToolContext<'a>,
+        ctx: &'a ToolContext<'a>,
     ) -> ToolFuture<'a> {
         Box::pin(async move {
             let summary = str_arg(&args, "plan_summary");
-            ToolResult {
-                content: summary,
-                is_error: false,
+
+            match crate::plan::save(ctx.session_id, &summary) {
+                Ok(path) => {
+                    let display_path = path.display().to_string();
+                    ToolResult {
+                        content: format!("Plan saved to {display_path}\n\n{summary}"),
+                        is_error: false,
+                    }
+                }
+                Err(e) => ToolResult {
+                    content: format!("Failed to save plan: {e}\n\n{summary}"),
+                    is_error: true,
+                },
             }
         })
     }

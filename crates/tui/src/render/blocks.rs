@@ -405,7 +405,7 @@ fn print_tool_output(
         "edit_file" if !is_error => render_edit_output(out, args),
         "write_file" if !is_error => render_write_output(out, args),
         "ask_user_question" if !is_error => render_question_output(out, content, width),
-        "bash" | "read_process_output" | "stop_process" if content.is_empty() => 0,
+        "exit_plan_mode" if !is_error => render_plan_output(out, content, width),
         "bash" | "read_process_output" | "stop_process" => {
             render_bash_output(out, content, is_error, width)
         }
@@ -540,6 +540,64 @@ fn render_markdown(
             rows += segments.len() as u16;
         }
     }
+    rows
+}
+
+fn render_plan_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {
+    // Skip the first line ("Plan saved to ...") for the bordered display.
+    let body = if let Some(pos) = content.find("\n\n") {
+        &content[pos + 2..]
+    } else {
+        content
+    };
+
+    if body.is_empty() {
+        return 0;
+    }
+
+    let inner_w = width.saturating_sub(6); // "   │ " prefix + " │" suffix area
+    let mut rows = 0u16;
+
+    // Top border: "   ┌─ Plan ─────┐"
+    let label = " Plan ";
+    let border_right = inner_w.saturating_sub(label.len() + 1);
+    let _ = out.queue(SetForegroundColor(theme::accent()));
+    let _ = out.queue(Print(format!(
+        "   \u{250c}\u{2500}{label}{}",
+        "\u{2500}".repeat(border_right)
+    )));
+    let _ = out.queue(ResetColor);
+    crlf(out);
+    rows += 1;
+
+    // Body lines
+    for line in body.lines() {
+        let segments = wrap_line(line, inner_w);
+        for seg in &segments {
+            let char_count = seg.chars().count();
+            let padding = inner_w.saturating_sub(char_count);
+            let _ = out.queue(SetForegroundColor(theme::accent()));
+            let _ = out.queue(Print("   \u{2502} "));
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(seg));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            let _ = out.queue(Print(" ".repeat(padding)));
+            crlf(out);
+            rows += 1;
+        }
+    }
+
+    // Bottom border: "   └─────────────┘"
+    let _ = out.queue(SetForegroundColor(theme::accent()));
+    let _ = out.queue(Print(format!(
+        "   \u{2514}{}",
+        "\u{2500}".repeat(inner_w + 1)
+    )));
+    let _ = out.queue(ResetColor);
+    crlf(out);
+    rows += 1;
+
     rows
 }
 

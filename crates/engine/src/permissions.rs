@@ -145,7 +145,7 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             .or_insert(Decision::Allow);
 
         let default_exit_plan = if mode == Mode::Plan {
-            Decision::Allow
+            Decision::Ask
         } else {
             Decision::Deny
         };
