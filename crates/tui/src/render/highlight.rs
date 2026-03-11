@@ -128,7 +128,7 @@ pub(super) fn render_highlighted(
 ) -> u16 {
     let indent = "   ";
     let theme = &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended];
-    let gutter_width = format!("{}", lines.len()).len().max(2);
+    let gutter_width = format!("{}", lines.len()).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let max_content = term_width().saturating_sub(prefix_len + 1);
     let limit = lines.len();
@@ -327,7 +327,7 @@ pub(super) fn print_inline_diff(
     let changes = &dv.changes;
 
     let max_lineno = dv.view_end;
-    let gutter_width = format!("{}", max_lineno).len().max(2);
+    let gutter_width = format!("{}", max_lineno).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
     let max_content = term_width().saturating_sub(prefix_len + right_margin);
@@ -538,7 +538,7 @@ pub(super) fn count_inline_diff_rows(old: &str, new: &str, path: &str, anchor: &
 
     let indent = "   ";
     let max_lineno = dv.view_end;
-    let gutter_width = format!("{}", max_lineno).len().max(2);
+    let gutter_width = format!("{}", max_lineno).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
     let max_content = term_width().saturating_sub(prefix_len + right_margin);
