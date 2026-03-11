@@ -50,21 +50,23 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Update version in Cargo.toml
+      - name: Update version in all Cargo.toml files
         run: |
           # Extract version from tag (remove 'v' prefix)
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Updating version to: $VERSION"
 
-          # Update version in Cargo.toml
-          sed -i.bak "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
-          rm -f Cargo.toml.bak
+          # Update version in all Cargo.toml files
+          for file in Cargo.toml crates/protocol/Cargo.toml crates/engine/Cargo.toml crates/tui/Cargo.toml; do
+            sed -i.bak "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" "$file"
+            rm -f "${file}.bak"
+          done
 
       - name: Commit and push version update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml
+          git add Cargo.toml crates/protocol/Cargo.toml crates/engine/Cargo.toml crates/tui/Cargo.toml
           if git diff --staged --quiet; then
             echo "Version already up to date"
           else
