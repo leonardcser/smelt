@@ -463,22 +463,7 @@ impl Provider {
             first_user_message.replace('\n', " ")
         );
 
-        log::entry(
-            log::Level::Debug,
-            "title_request",
-            &serde_json::json!({
-                "model": model,
-                "prompt_len": first_user_message.len(),
-            }),
-        );
-
         let title = self.complete_short(&prompt, model, 512, 0.2).await?;
-
-        log::entry(
-            log::Level::Debug,
-            "title_response",
-            &serde_json::json!({ "title": title }),
-        );
 
         Ok(title)
     }

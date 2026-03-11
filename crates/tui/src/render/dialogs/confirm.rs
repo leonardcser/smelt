@@ -439,14 +439,6 @@ impl super::Dialog for ConfirmDialog {
         let (width, height) = terminal::size().unwrap_or((80, 24));
         let w = width as usize;
 
-        let is_first_draw = self.anchor_row.is_none();
-
-        engine::log::entry(
-            engine::log::Level::Debug,
-            &format!("ConfirmDialog::draw start_row={start_row} height={height} first={is_first_draw} anchor={:?}", self.anchor_row),
-            &"",
-        );
-
         let ly = self.layout(width, height);
         let ta_visible = self.editing || !self.textarea.is_empty();
 
@@ -462,15 +454,6 @@ impl super::Dialog for ConfirmDialog {
             None,
             &mut self.anchor_row,
             sync_started,
-        );
-
-        engine::log::entry(
-            engine::log::Level::Debug,
-            &format!(
-                "ConfirmDialog: bar_row={bar_row} total_rows={} viewport={} preview={}",
-                ly.total_rows, ly.viewport_rows, self.total_preview
-            ),
-            &"",
         );
 
         // Where the options section should begin in the current layout.

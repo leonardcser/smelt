@@ -88,7 +88,6 @@ impl io::Write for RenderOut {
 /// *without* clearing it.  The next row's stale content is overwritten
 /// by the subsequent `Print`.  This avoids a visible blank→content
 /// flash on terminals that don't fully support synchronized updates.
-#[track_caller]
 pub(super) fn crlf(out: &mut RenderOut) {
     if out.row.is_some() {
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
@@ -99,20 +98,10 @@ pub(super) fn crlf(out: &mut RenderOut) {
         }
     } else {
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-        let caller = std::panic::Location::caller();
-        log(&format!(
-            "crlf SCROLL at {}:{}",
-            caller.file(),
-            caller.line()
-        ));
         let _ = out.queue(Print("\r\n"));
     }
 }
 
-#[track_caller]
-fn log(msg: &str) {
-    engine::log::entry(engine::log::Level::Debug, msg, &"");
-}
 
 pub(super) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 
@@ -267,11 +256,6 @@ impl BlockHistory {
 
     /// Render unflushed blocks. Returns total rows printed.
     fn render(&mut self, out: &mut RenderOut, width: usize) -> u16 {
-        log(&format!(
-            "History::render flushed={} blocks={}",
-            self.flushed,
-            self.blocks.len()
-        ));
         if !self.has_unflushed() {
             return 0;
         }
@@ -426,10 +410,6 @@ impl Screen {
         let adjusted_anchor = screen_anchor.saturating_sub(scroll_deficit);
 
         let clear_from = anchor.min(adjusted_anchor);
-        log(&format!(
-            "clear_dialog_area anchor={anchor} screen_anchor={screen_anchor} \
-             scroll_deficit={scroll_deficit} clear_from={clear_from}"
-        ));
 
         // Clear each row individually instead of using Clear(FromCursorDown).
         // Some terminals (e.g. Ghostty) push the viewport into scrollback
@@ -749,7 +729,6 @@ impl Screen {
         if !self.history.has_unflushed() {
             return;
         }
-        log("render_pending_blocks");
         let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let start_row = if self.prompt.drawn {
@@ -799,7 +778,6 @@ impl Screen {
         } else {
             purge
         };
-        log(&format!("redraw purge={purge}"));
         let mut out = RenderOut::scroll();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let start = if purge {
@@ -923,11 +901,6 @@ impl Screen {
         if !is_dialog && !has_new_blocks && !self.prompt.dirty {
             return false;
         }
-
-        log(&format!(
-            "draw_frame: is_dialog={is_dialog} has_new_blocks={has_new_blocks} dirty={}",
-            self.prompt.dirty
-        ));
 
         let mut out = RenderOut::scroll();
 
