@@ -64,9 +64,10 @@ pub(super) fn render_code_block(
     let block_w = if wraps { text_w + 1 } else { max_len + 1 };
     let mut rows = 0u16;
     let mut h = HighlightLines::new(syntax, theme);
-    // Top dashed border
+    // Top border (upper one eighth block - thin line at top of cell)
+    let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
     let _ = out.queue(SetForegroundColor(theme::BAR));
-    let _ = out.queue(Print("\u{254c}".repeat(block_w)));
+    let _ = out.queue(Print("\u{2594}".repeat(block_w)));
     let _ = out.queue(ResetColor);
     crlf(out);
     rows += 1;
@@ -77,14 +78,21 @@ pub(super) fn render_code_block(
             .unwrap_or_default();
         let visual_rows = split_regions_into_rows(&regions, text_w);
         for vrow in &visual_rows {
-            print_split_regions(out, vrow, None);
+            let cols = print_split_regions(out, vrow, Some(theme::CODE_BLOCK_BG));
+            let pad = block_w.saturating_sub(cols);
+            if pad > 0 {
+                let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
+                let _ = out.queue(Print(" ".repeat(pad)));
+            }
+            let _ = out.queue(ResetColor);
             crlf(out);
         }
         rows += visual_rows.len() as u16;
     }
-    // Bottom dashed border
+    // Bottom border (lower one eighth block - thin line at bottom of cell)
+    let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
     let _ = out.queue(SetForegroundColor(theme::BAR));
-    let _ = out.queue(Print("\u{254c}".repeat(block_w)));
+    let _ = out.queue(Print("\u{2581}".repeat(block_w)));
     let _ = out.queue(ResetColor);
     crlf(out);
     rows += 1;
