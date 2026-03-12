@@ -242,17 +242,19 @@ impl<'a> Turn<'a> {
             }
 
             if let Some(ref reasoning) = resp.reasoning_content {
-                if !reasoning.trim().is_empty() {
+                let trimmed = reasoning.trim();
+                if !trimmed.is_empty() {
                     self.emit(EngineEvent::Thinking {
-                        content: reasoning.clone(),
+                        content: trimmed.to_string(),
                     });
                 }
             }
 
             if let Some(ref content) = resp.content {
-                if !content.trim().is_empty() {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
                     self.emit(EngineEvent::Text {
-                        content: content.clone(),
+                        content: trimmed.to_string(),
                     });
                 }
             }

@@ -143,7 +143,7 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
             }
             rows
         }
-        Block::Text { content } => render_markdown(out, content.trim_end(), width, " ", false),
+        Block::Text { content } => render_markdown(out, content, width, " ", false),
         Block::ToolCall {
             name,
             summary,
@@ -1004,23 +1004,6 @@ mod tests {
         // But the gap from Text→ActiveTool should still be 1.
         assert_eq!(a.1, 1, "tool gap after text = 1");
         assert_eq!(a.2, b.2, "paths match with empty thinking");
-    }
-
-    #[test]
-    fn text_with_trailing_newlines() {
-        // LLM often sends trailing \n\n — trim_end handles it.
-        let blocks = vec![user("hello"), text("response\n\n")];
-        let trimmed_rows = block_rows(&text("response\n\n"));
-        let clean_rows = block_rows(&text("response"));
-        assert_eq!(
-            trimmed_rows, clean_rows,
-            "trailing newlines don't add rows (trim_end)"
-        );
-
-        let a = render_all_at_once(&blocks);
-        let b = render_split(&blocks);
-        assert_eq!(a.1, 1, "tool gap = 1");
-        assert_eq!(a.2, b.2);
     }
 
     #[test]
