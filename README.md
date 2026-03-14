@@ -238,11 +238,13 @@ bash:
 Create a conventional commit for the staged changes.
 
 Staged diff:
+
 ```!
 git diff --cached
 ```
 
 Recent commits for style reference:
+
 ```!
 git log --oneline -5
 ```
@@ -253,22 +255,22 @@ inlined, while the chat only shows `/commit`.
 
 **Frontmatter options** (all optional):
 
-| Key                | Description                                     |
-| ------------------ | ----------------------------------------------- |
+| Key                | Description                                       |
+| ------------------ | ------------------------------------------------- |
 | `description`      | Short description shown in the `/` command picker |
-| `model`            | Override model for this command                  |
-| `provider`         | Resolve `api_base`/`api_key` from this provider |
-| `temperature`      | Sampling temperature                            |
-| `top_p`            | Top-p (nucleus) sampling                        |
-| `top_k`            | Top-k sampling                                  |
-| `min_p`            | Min-p sampling                                  |
-| `repeat_penalty`   | Repetition penalty                              |
-| `reasoning_effort` | Thinking depth: off/low/medium/high             |
-| `tools`            | `allow`/`ask`/`deny` lists for tool permissions |
-| `bash`             | `allow`/`ask`/`deny` glob patterns for bash     |
-| `web_fetch`        | `allow`/`ask`/`deny` glob patterns for URLs     |
+| `model`            | Override model for this command                   |
+| `provider`         | Resolve `api_base`/`api_key` from this provider   |
+| `temperature`      | Sampling temperature                              |
+| `top_p`            | Top-p (nucleus) sampling                          |
+| `top_k`            | Top-k sampling                                    |
+| `min_p`            | Min-p sampling                                    |
+| `repeat_penalty`   | Repetition penalty                                |
+| `reasoning_effort` | Thinking depth: off/low/medium/high               |
+| `tools`            | `allow`/`ask`/`deny` lists for tool permissions   |
+| `bash`             | `allow`/`ask`/`deny` glob patterns for bash       |
+| `web_fetch`        | `allow`/`ask`/`deny` glob patterns for URLs       |
 
-**Executable code blocks**: fenced blocks starting with `` ```! `` are executed
+**Executable code blocks**: fenced blocks starting with ` ```! ` are executed
 via `sh -c` before sending. The block is replaced with the command output
 wrapped in a regular code block.
 
