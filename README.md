@@ -118,17 +118,35 @@ permissions:
 
 **Default permissions** (when `permissions` is omitted):
 
-| Tool                | Normal | Apply | Yolo  |
-| ------------------- | ------ | ----- | ----- |
-| `read_file`         | Allow  | Allow | Allow |
-| `edit_file`         | Ask    | Allow | Allow |
-| `write_file`        | Ask    | Allow | Allow |
-| `glob`              | Allow  | Allow | Allow |
-| `grep`              | Allow  | Allow | Allow |
-| `ask_user_question` | Allow  | Allow | Allow |
-| `bash`              | Ask    | Ask   | Allow |
-| `web_fetch`         | Ask    | Ask   | Allow |
-| `web_search`        | Ask    | Ask   | Allow |
+| Tool                  | Normal | Plan  | Apply | Yolo  |
+| --------------------- | ------ | ----- | ----- | ----- |
+| `read_file`           | Allow  | Allow | Allow | Allow |
+| `edit_file`           | Ask    | Ask   | Allow | Allow |
+| `write_file`          | Ask    | Ask   | Allow | Allow |
+| `glob`                | Allow  | Allow | Allow | Allow |
+| `grep`                | Allow  | Allow | Allow | Allow |
+| `bash`                | Ask    | Ask   | Ask   | Allow |
+| `web_fetch`           | Ask    | Ask   | Ask   | Allow |
+| `web_search`          | Ask    | Ask   | Ask   | Allow |
+| `ask_user_question`   | Allow  | Allow | Allow | Allow |
+| `exit_plan_mode`      | Deny   | Ask   | Deny  | Deny  |
+| `read_process_output` | Ask    | Ask   | Ask   | Allow |
+| `stop_process`        | Ask    | Ask   | Ask   | Allow |
+
+**Default bash patterns** (when `permissions.{mode}.bash` is omitted):
+
+| Pattern  | Normal | Plan  | Apply | Yolo  |
+| -------- | ------ | ----- | ----- | ----- |
+| `ls *`   | Allow  | Allow | Allow | Allow |
+| `grep *` | Allow  | Allow | Allow | Allow |
+| `find *` | Allow  | Allow | Allow | Allow |
+| `cat *`  | Allow  | Allow | Allow | Allow |
+| `tail *` | Allow  | Allow | Allow | Allow |
+| `head *` | Allow  | Allow | Allow | Allow |
+| _other_  | Ask    | Ask   | Ask   | Allow |
+
+> **Note:** in Normal and Plan modes, allowed commands that contain output
+> redirection (`>`, `>>`, `&>`) are automatically escalated to Ask.
 
 ## CLI Flags
 

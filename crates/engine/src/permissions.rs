@@ -259,12 +259,12 @@ impl Permissions {
     pub fn check_bash(&self, mode: Mode, command: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let command = command.trim();
+        // Escalate output redirection only in Normal/Plan modes.
+        let escalate_redirect = matches!(mode, Mode::Normal | Mode::Plan);
         let subcmds = split_shell_commands(command);
         if subcmds.len() <= 1 {
             let d = check_ruleset(&perms.bash, command);
-            // Auto-allowed commands that redirect output to a file are
-            // effectively write operations — require confirmation.
-            if d == Decision::Allow && has_output_redirection(command) {
+            if escalate_redirect && d == Decision::Allow && has_output_redirection(command) {
                 return Decision::Ask;
             }
             return d;
@@ -272,7 +272,8 @@ impl Permissions {
         let mut worst = Decision::Allow;
         for subcmd in subcmds {
             let d = check_ruleset(&perms.bash, &subcmd);
-            let d = if d == Decision::Allow && has_output_redirection(&subcmd) {
+            let d = if escalate_redirect && d == Decision::Allow && has_output_redirection(&subcmd)
+            {
                 Decision::Ask
             } else {
                 d
