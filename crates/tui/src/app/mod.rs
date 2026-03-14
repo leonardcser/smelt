@@ -187,6 +187,7 @@ enum InputOutcome {
     Compact,
     Quit,
     OpenDialog(Box<dyn render::Dialog>),
+    CustomCommand(Box<crate::custom_commands::CustomCommand>),
 }
 
 /// Mutable timer state shared across event handlers.
@@ -471,6 +472,9 @@ impl App {
                                 self.compact_history();
                             }
                         }
+                        InputOutcome::CustomCommand(cmd) => {
+                            agent = Some(self.begin_custom_command_turn(*cmd));
+                        }
                         InputOutcome::Continue | InputOutcome::Quit => {}
                         InputOutcome::OpenDialog(dlg) => {
                             active_dialog = Some(dlg);
@@ -669,6 +673,8 @@ impl App {
             api_base: Some(self.api_base.clone()),
             api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
             session_id: self.session.id.clone(),
+            model_config_overrides: None,
+            permission_overrides: None,
         });
 
         // Drain events, printing text to stdout.

@@ -37,16 +37,26 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, input, mode, model, reasoning_effort, history, api_base, api_key, session_id } => {
+                    UiCommand::StartTurn { turn_id, input, mode, model, reasoning_effort, history, api_base, api_key, session_id, model_config_overrides, permission_overrides } => {
                         last_model = model.clone();
-                        let provider = build_provider_with_overrides(
+                        let mut provider = build_provider_with_overrides(
                             &config, &client,
                             api_base.as_deref(), api_key.as_deref(),
                         );
+                        if let Some(overrides) = model_config_overrides {
+                            provider.apply_model_overrides(&overrides);
+                        }
+                        let turn_permissions: Permissions;
+                        let perm_ref: &Permissions = if let Some(ref perm_ovr) = permission_overrides {
+                            turn_permissions = config.permissions.with_overrides(perm_ovr);
+                            &turn_permissions
+                        } else {
+                            &config.permissions
+                        };
                         let mut turn = Turn {
                             provider,
                             registry: &registry,
-                            permissions: &config.permissions,
+                            permissions: perm_ref,
                             processes: &processes,
                             proc_done_tx: &proc_done_tx,
                             cmd_rx: &mut cmd_rx,

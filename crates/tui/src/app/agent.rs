@@ -25,6 +25,135 @@ impl App {
             api_base: Some(self.api_base.clone()),
             api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
             session_id: self.session.id.clone(),
+            model_config_overrides: None,
+            permission_overrides: None,
+        });
+
+        TurnState {
+            turn_id,
+            pending: None,
+            steered_count: 0,
+            _perf: crate::perf::begin("agent_turn"),
+        }
+    }
+
+    pub(super) fn begin_custom_command_turn(
+        &mut self,
+        cmd: crate::custom_commands::CustomCommand,
+    ) -> TurnState {
+        let evaluated = crate::custom_commands::evaluate(&cmd.body);
+        let display = format!("/{}", cmd.name);
+
+        // Resolve model/provider overrides
+        let (model, api_base, api_key) = if cmd.overrides.model.is_some()
+            || cmd.overrides.provider.is_some()
+        {
+            let target_model = cmd.overrides.model.as_deref();
+            let target_provider = cmd.overrides.provider.as_deref();
+            if let Some(resolved) = self.available_models.iter().find(|m| {
+                let model_match = target_model.is_none_or(|tm| m.model_name == tm || m.key == tm);
+                let prov_match = target_provider.is_none_or(|tp| m.provider_name == tp);
+                model_match && prov_match
+            }) {
+                (
+                    resolved.model_name.clone(),
+                    resolved.api_base.clone(),
+                    std::env::var(&resolved.api_key_env).unwrap_or_default(),
+                )
+            } else {
+                (
+                    self.model.clone(),
+                    self.api_base.clone(),
+                    std::env::var(&self.api_key_env).unwrap_or_default(),
+                )
+            }
+        } else {
+            (
+                self.model.clone(),
+                self.api_base.clone(),
+                std::env::var(&self.api_key_env).unwrap_or_default(),
+            )
+        };
+
+        let reasoning = cmd
+            .overrides
+            .reasoning_effort
+            .as_deref()
+            .map(|s| match s.to_lowercase().as_str() {
+                "low" => protocol::ReasoningEffort::Low,
+                "medium" => protocol::ReasoningEffort::Medium,
+                "high" => protocol::ReasoningEffort::High,
+                _ => protocol::ReasoningEffort::Off,
+            })
+            .unwrap_or(self.reasoning_effort);
+
+        let model_config_overrides = {
+            let o = &cmd.overrides;
+            if o.temperature.is_some()
+                || o.top_p.is_some()
+                || o.top_k.is_some()
+                || o.min_p.is_some()
+                || o.repeat_penalty.is_some()
+            {
+                Some(protocol::ModelConfigOverrides {
+                    temperature: o.temperature,
+                    top_p: o.top_p,
+                    top_k: o.top_k,
+                    min_p: o.min_p,
+                    repeat_penalty: o.repeat_penalty,
+                })
+            } else {
+                None
+            }
+        };
+
+        let permission_overrides = {
+            let o = &cmd.overrides;
+            if o.tools.is_some() || o.bash.is_some() || o.web_fetch.is_some() {
+                Some(protocol::PermissionOverrides {
+                    tools: o.tools.as_ref().map(|r| protocol::RuleSetOverride {
+                        allow: r.allow.clone(),
+                        ask: r.ask.clone(),
+                        deny: r.deny.clone(),
+                    }),
+                    bash: o.bash.as_ref().map(|r| protocol::RuleSetOverride {
+                        allow: r.allow.clone(),
+                        ask: r.ask.clone(),
+                        deny: r.deny.clone(),
+                    }),
+                    web_fetch: o.web_fetch.as_ref().map(|r| protocol::RuleSetOverride {
+                        allow: r.allow.clone(),
+                        ask: r.ask.clone(),
+                        deny: r.deny.clone(),
+                    }),
+                })
+            } else {
+                None
+            }
+        };
+
+        self.screen.begin_turn();
+        self.show_user_message(&display);
+        if self.session.first_user_message.is_none() {
+            self.session.first_user_message = Some(display.clone());
+        }
+        self.screen.set_throbber(render::Throbber::Working);
+
+        let turn_id = self.next_turn_id;
+        self.next_turn_id += 1;
+
+        self.engine.send(UiCommand::StartTurn {
+            turn_id,
+            input: evaluated,
+            mode: self.mode,
+            model,
+            reasoning_effort: reasoning,
+            history: self.history.clone(),
+            api_base: Some(api_base),
+            api_key: Some(api_key),
+            session_id: self.session.id.clone(),
+            model_config_overrides,
+            permission_overrides,
         });
 
         TurnState {

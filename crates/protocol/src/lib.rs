@@ -259,6 +259,7 @@ pub enum EngineEvent {
 
 /// Commands sent from the UI to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum UiCommand {
     /// Start a new agent turn.
     StartTurn {
@@ -274,6 +275,12 @@ pub enum UiCommand {
         api_key: Option<String>,
         /// Session ID for plan file storage.
         session_id: String,
+        /// Per-turn model parameter overrides (from custom commands).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        model_config_overrides: Option<ModelConfigOverrides>,
+        /// Per-turn permission overrides (from custom commands).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        permission_overrides: Option<PermissionOverrides>,
     },
 
     /// Inject a message mid-turn (steering / type-ahead).
@@ -460,6 +467,45 @@ impl ReasoningEffort {
             Self::High => "high",
         }
     }
+}
+
+// ── Per-turn overrides (for custom commands) ────────────────────────────────
+
+/// Model-parameter overrides applied to a single turn.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelConfigOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat_penalty: Option<f64>,
+}
+
+/// Permission rule-set override (allow / ask / deny glob patterns).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuleSetOverride {
+    pub allow: Vec<String>,
+    pub ask: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+/// Per-turn permission overrides for tools, bash, and web_fetch.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PermissionOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<RuleSetOverride>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bash: Option<RuleSetOverride>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_fetch: Option<RuleSetOverride>,
 }
 
 /// Metadata for a saved session (used by resume dialog).

@@ -171,6 +171,9 @@ impl App {
                         InputOutcome::StartAgent => {
                             *agent = Some(self.begin_agent_turn(&display, content));
                         }
+                        InputOutcome::CustomCommand(cmd) => {
+                            *agent = Some(self.begin_custom_command_turn(*cmd));
+                        }
                         InputOutcome::Compact => {
                             if self.history.is_empty() {
                                 self.screen.push(Block::Error {
@@ -559,8 +562,13 @@ impl App {
             CommandAction::OpenDialog(dlg) => return InputOutcome::OpenDialog(dlg),
             CommandAction::Continue => {}
         }
-        if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
-            return InputOutcome::Continue;
+        if trimmed.starts_with('/') {
+            if let Some(cmd) = crate::custom_commands::resolve(trimmed) {
+                return InputOutcome::CustomCommand(Box::new(cmd));
+            }
+            if crate::completer::Completer::is_command(trimmed) {
+                return InputOutcome::Continue;
+            }
         }
         // Skip starting agent for shell escapes, but NOT for pasted content
         if trimmed.starts_with('!') && !is_from_paste {

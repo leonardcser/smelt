@@ -27,6 +27,7 @@ analysis, and assistance.
 - **Reasoning effort** — configurable thinking depth (off/low/medium/high)
 - **File references** — attach file contents with `@path` syntax
 - **Background processes** — async bash execution with completion tracking
+- **Custom commands** — user-defined slash commands via markdown files
 - **Custom instructions** — project-level `AGENTS.md` files
 - **Image support** — paste images from clipboard or reference them in messages
 - **Shell escape** — run shell commands directly with `!<command>`
@@ -216,6 +217,60 @@ file picker opens automatically.
 ```
 explain @src/main.rs
 ```
+
+## Custom Commands
+
+Create markdown files in `~/.config/agent/commands/` to define reusable slash
+commands. Each `.md` file becomes a `/command` you can invoke from the TUI.
+
+**Example** — `~/.config/agent/commands/commit.md`:
+
+````markdown
+---
+description: commit staged changes
+model: gpt-4o
+temperature: 0.2
+reasoning_effort: low
+bash:
+  allow: ["git *"]
+---
+
+Create a conventional commit for the staged changes.
+
+Staged diff:
+```!
+git diff --cached
+```
+
+Recent commits for style reference:
+```!
+git log --oneline -5
+```
+````
+
+Type `/commit` and the agent receives the evaluated prompt with command outputs
+inlined, while the chat only shows `/commit`.
+
+**Frontmatter options** (all optional):
+
+| Key                | Description                                     |
+| ------------------ | ----------------------------------------------- |
+| `description`      | Short description shown in the `/` command picker |
+| `model`            | Override model for this command                  |
+| `provider`         | Resolve `api_base`/`api_key` from this provider |
+| `temperature`      | Sampling temperature                            |
+| `top_p`            | Top-p (nucleus) sampling                        |
+| `top_k`            | Top-k sampling                                  |
+| `min_p`            | Min-p sampling                                  |
+| `repeat_penalty`   | Repetition penalty                              |
+| `reasoning_effort` | Thinking depth: off/low/medium/high             |
+| `tools`            | `allow`/`ask`/`deny` lists for tool permissions |
+| `bash`             | `allow`/`ask`/`deny` glob patterns for bash     |
+| `web_fetch`        | `allow`/`ask`/`deny` glob patterns for URLs     |
+
+**Executable code blocks**: fenced blocks starting with `` ```! `` are executed
+via `sh -c` before sending. The block is replaced with the command output
+wrapped in a regular code block.
 
 ## Custom Instructions
 

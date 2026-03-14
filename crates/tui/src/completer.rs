@@ -51,6 +51,7 @@ impl Completer {
         Self::command_items()
             .iter()
             .any(|(label, _)| s == format!("/{}", label))
+            || crate::custom_commands::resolve(s).is_some()
     }
 
     fn command_items() -> Vec<(&'static str, &'static str)> {
@@ -73,13 +74,19 @@ impl Completer {
     }
 
     pub fn commands(anchor: usize) -> Self {
-        let all_items = Self::command_items()
+        let mut all_items: Vec<CompletionItem> = Self::command_items()
             .into_iter()
             .map(|(label, desc)| CompletionItem {
                 label: label.into(),
                 description: Some(desc.into()),
             })
-            .collect::<Vec<_>>();
+            .collect();
+        for (name, desc) in crate::custom_commands::list() {
+            all_items.push(CompletionItem {
+                label: name,
+                description: if desc.is_empty() { None } else { Some(desc) },
+            });
+        }
         let results = all_items.clone();
         Self {
             anchor,

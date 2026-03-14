@@ -216,6 +216,53 @@ impl Permissions {
         }
     }
 
+    /// Create a clone with per-turn permission overrides layered on top.
+    /// Override rules are prepended (checked first) to the existing rules
+    /// for every mode.
+    pub fn with_overrides(&self, overrides: &protocol::PermissionOverrides) -> Self {
+        let mut cloned = self.clone();
+        fn apply_to_mode(mode: &mut ModePerms, overrides: &protocol::PermissionOverrides) {
+            if let Some(ref tools) = overrides.tools {
+                for name in &tools.deny {
+                    mode.tools.insert(name.clone(), Decision::Deny);
+                }
+                for name in &tools.ask {
+                    mode.tools.entry(name.clone()).or_insert(Decision::Ask);
+                }
+                for name in &tools.allow {
+                    mode.tools.entry(name.clone()).or_insert(Decision::Allow);
+                }
+            }
+            if let Some(ref bash) = overrides.bash {
+                let mut allow = compile_patterns(&bash.allow);
+                allow.append(&mut mode.bash.allow);
+                mode.bash.allow = allow;
+                let mut ask = compile_patterns(&bash.ask);
+                ask.append(&mut mode.bash.ask);
+                mode.bash.ask = ask;
+                let mut deny = compile_patterns(&bash.deny);
+                deny.append(&mut mode.bash.deny);
+                mode.bash.deny = deny;
+            }
+            if let Some(ref wf) = overrides.web_fetch {
+                let mut allow = compile_patterns(&wf.allow);
+                allow.append(&mut mode.web_fetch.allow);
+                mode.web_fetch.allow = allow;
+                let mut ask = compile_patterns(&wf.ask);
+                ask.append(&mut mode.web_fetch.ask);
+                mode.web_fetch.ask = ask;
+                let mut deny = compile_patterns(&wf.deny);
+                deny.append(&mut mode.web_fetch.deny);
+                mode.web_fetch.deny = deny;
+            }
+        }
+        apply_to_mode(&mut cloned.normal, overrides);
+        apply_to_mode(&mut cloned.plan, overrides);
+        apply_to_mode(&mut cloned.apply, overrides);
+        apply_to_mode(&mut cloned.yolo, overrides);
+        cloned
+    }
+
     pub fn set_workspace(&mut self, path: PathBuf) {
         self.workspace = path;
     }

@@ -102,6 +102,24 @@ impl Provider {
         self
     }
 
+    pub fn apply_model_overrides(&mut self, overrides: &protocol::ModelConfigOverrides) {
+        if let Some(v) = overrides.temperature {
+            self.model_config.temperature = Some(v);
+        }
+        if let Some(v) = overrides.top_p {
+            self.model_config.top_p = Some(v);
+        }
+        if let Some(v) = overrides.top_k {
+            self.model_config.top_k = Some(v);
+        }
+        if let Some(v) = overrides.min_p {
+            self.model_config.min_p = Some(v);
+        }
+        if let Some(v) = overrides.repeat_penalty {
+            self.model_config.repeat_penalty = Some(v);
+        }
+    }
+
     pub async fn chat(
         &self,
         messages: &[Message],
