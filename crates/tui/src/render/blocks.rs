@@ -54,6 +54,8 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (_, Element::Block(Block::Hint { .. })) => 1,
         (Element::Block(Block::Error { .. }), _) => 1,
         (_, Element::Block(Block::Error { .. })) => 1,
+        (_, Element::Block(Block::Compacted { .. })) => 1,
+        (Element::Block(Block::Compacted { .. }), _) => 1,
         (Element::Block(_), Element::Prompt) => 1,
         (Element::ActiveTool, Element::Prompt) => 1,
         _ => 0,
@@ -180,6 +182,20 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
         Block::Error { message } => {
             print_error(out, message);
             1
+        }
+        Block::Compacted { summary } => {
+            let label = " compacted ";
+            let label_len = label.len();
+            let remaining = width.saturating_sub(label_len);
+            let left = remaining / 2;
+            let right = remaining - left;
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print("─".repeat(left)));
+            let _ = out.queue(Print(label));
+            let _ = out.queue(Print("─".repeat(right)));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+            crlf(out);
+            1 + render_markdown_inner(out, summary, width, " ", true, None)
         }
         Block::Exec { command, output } => {
             let w = width;

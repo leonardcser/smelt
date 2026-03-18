@@ -119,6 +119,12 @@ pub enum MenuKind {
         /// Original accent value to restore on dismiss.
         original: u8,
     },
+    Color {
+        /// (name, detail, ansi_value)
+        presets: Vec<(&'static str, &'static str, u8)>,
+        /// Original slug color value to restore on dismiss.
+        original: u8,
+    },
 }
 
 pub struct MenuState {
@@ -138,6 +144,7 @@ pub enum MenuResult {
     },
     ModelSelect(String),
     ThemeSelect(u8),
+    ColorSelect(u8),
     Stats,
     Dismissed,
 }

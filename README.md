@@ -191,7 +191,7 @@ Press `Shift+Tab` to cycle through modes:
 | `Ctrl+T`    | Cycle reasoning effort             |
 | `Shift+Tab` | Cycle mode (normal → plan → apply) |
 | `Esc`       | Unqueue messages or dismiss dialog |
-| `Esc Esc`   | Cancel running agent               |
+| `Esc Esc`   | Cancel agent / compaction / rewind |
 | `↑ / ↓`     | Navigate input history             |
 | `Tab`       | Accept completion                  |
 
@@ -205,9 +205,10 @@ Type `/` to open the command picker:
 | `/clear`, `/new`           | Start a new conversation       |
 | `/resume`                  | Resume a saved session         |
 | `/model`                   | Switch model                   |
-| `/compact`                 | Compact conversation history   |
+| `/compact [focus]`         | Compact conversation history   |
 | `/vim`                     | Toggle vim mode                |
-| `/theme`                   | Change accent color            |
+| `/theme [name]`            | Change accent color            |
+| `/color [name]`            | Set task slug color (session)  |
 | `/settings`                | Open settings menu             |
 | `/export`                  | Copy conversation to clipboard |
 | `/fork`                    | Fork current session           |
@@ -217,6 +218,22 @@ Type `/` to open the command picker:
 | `:q`, `:qa`, `:wq`, `:wqa` | Exit (vim-style)               |
 
 Prefix with `!` to run a shell command directly (e.g. `!git status`).
+
+## Compaction (`/compact`)
+
+Use `/compact` to summarize older conversation history, freeing up context
+window space. The summary appears as a dim divider in the conversation and
+replaces the older messages sent to the API.
+
+Optionally provide a focus to guide what the summary preserves:
+
+```
+/compact keep details about the auth refactor
+```
+
+When `auto_compact` is enabled in settings, compaction triggers automatically
+when context usage exceeds 80%. Press `Esc Esc` to cancel an in-flight
+compaction.
 
 ## Side Questions (`/btw`)
 

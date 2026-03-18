@@ -131,19 +131,27 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
             .to_string(),
         "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
         "glob" => str_arg(args, "pattern"),
-        "grep" => str_arg(args, "pattern"),
+        "grep" => {
+            let pattern = str_arg(args, "pattern");
+            let path = str_arg(args, "path");
+            if path.is_empty() {
+                pattern
+            } else {
+                format!("{} in {}", pattern, display_path(&path))
+            }
+        }
         "web_fetch" => str_arg(args, "url"),
         "web_search" => str_arg(args, "query"),
-        "exit_plan_mode" => "plan".to_string(),
+        "exit_plan_mode" => "plan ready".to_string(),
         "read_process_output" | "stop_process" => str_arg(args, "id"),
-        "ask_user_question" => args
-            .get("questions")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|q| q.get("question"))
-            .and_then(|q| q.as_str())
-            .unwrap_or("")
-            .to_string(),
+        "ask_user_question" => {
+            let count = args
+                .get("questions")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            format!("{} question{}", count, if count == 1 { "" } else { "s" })
+        }
         _ => String::new(),
     }
 }
@@ -161,6 +169,21 @@ pub fn display_path(path: &str) -> String {
         }
     }
     path.into()
+}
+
+/// Trim tool output to `max_lines` for LLM context. Appends a note with
+/// the total line count when truncated.
+pub fn trim_tool_output(content: &str, max_lines: usize) -> String {
+    if content == "no matches found" {
+        return content.to_string();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= max_lines {
+        return content.to_string();
+    }
+    let mut out = lines[..max_lines].join("\n");
+    out.push_str(&format!("\n... (trimmed, {} lines total)", lines.len()));
+    out
 }
 
 pub(crate) fn int_arg(args: &HashMap<String, Value>, key: &str) -> usize {
@@ -186,24 +209,40 @@ pub(crate) fn run_command_with_timeout(
     mut child: std::process::Child,
     timeout: Duration,
 ) -> ToolResult {
+    // Drain stdout/stderr in background threads to avoid pipe buffer deadlocks.
+    // If the child produces more output than the OS pipe buffer (~64KB on macOS),
+    // it will block on write and never exit unless we actively read.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        stdout.map(|mut r| {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut r, &mut buf).ok();
+            buf
+        })
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        stderr.map(|mut r| {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut r, &mut buf).ok();
+            buf
+        })
+    });
+
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = child
-                    .wait_with_output()
-                    .unwrap_or_else(|e| std::process::Output {
-                        status,
-                        stdout: Vec::new(),
-                        stderr: e.to_string().into_bytes(),
-                    });
-                let mut result = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if !stderr.is_empty() {
+                let stdout_bytes = stdout_handle.join().ok().flatten().unwrap_or_default();
+                let stderr_bytes = stderr_handle.join().ok().flatten().unwrap_or_default();
+                let mut result = String::from_utf8_lossy(&stdout_bytes).into_owned();
+                let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+                if !stderr_str.is_empty() {
                     if !result.is_empty() {
                         result.push('\n');
                     }
-                    result.push_str(&stderr);
+                    result.push_str(&stderr_str);
                 }
                 return ToolResult {
                     content: result,

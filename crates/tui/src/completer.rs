@@ -48,10 +48,32 @@ impl Completer {
     }
 
     pub fn is_command(s: &str) -> bool {
+        let base = s.split_whitespace().next().unwrap_or(s);
         Self::command_items()
             .iter()
-            .any(|(label, _)| s == format!("/{}", label))
+            .any(|(label, _)| base == format!("/{}", label))
             || crate::custom_commands::resolve(s).is_some()
+    }
+
+    /// Returns the argument hint for a command that accepts arguments.
+    /// The result is `(prefix, hint)` where prefix is the `/cmd` part
+    /// and hint is displayed dimmed after the prefix (e.g. preset names
+    /// joined with ` | ` or a `<placeholder>`).
+    pub fn command_hint(buf: &str) -> Option<(&'static str, String)> {
+        let cmd = buf.split_whitespace().next()?;
+        match cmd {
+            "/btw" => Some(("/btw", "<question>".into())),
+            "/compact" => Some(("/compact", "<focus>".into())),
+            "/theme" => {
+                let names: Vec<&str> = crate::theme::PRESETS.iter().map(|(n, _, _)| *n).collect();
+                Some(("/theme", format!("<{}>", names.join("|"))))
+            }
+            "/color" => {
+                let names: Vec<&str> = crate::theme::PRESETS.iter().map(|(n, _, _)| *n).collect();
+                Some(("/color", format!("<{}>", names.join("|"))))
+            }
+            _ => None,
+        }
     }
 
     fn command_items() -> Vec<(&'static str, &'static str)> {
@@ -67,6 +89,7 @@ impl Completer {
             ("fork", "fork current session"),
             ("stats", "show token usage statistics"),
             ("theme", "change accent color"),
+            ("color", "set task slug color"),
             ("btw", "ask a side question"),
             ("ps", "manage background processes"),
             ("exit", "exit the app"),

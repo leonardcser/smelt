@@ -4,6 +4,17 @@ use crossterm::{event, event::Event, event::KeyEvent, terminal};
 use std::collections::HashMap;
 
 impl App {
+    pub(super) fn set_history(&mut self, messages: Vec<Message>) {
+        self.history = messages;
+    }
+
+    /// Record current token count so it can be restored on rewind.
+    pub(super) fn snapshot_tokens(&mut self) {
+        if let Some(tokens) = self.screen.context_tokens() {
+            self.token_snapshots.push((self.history.len(), tokens));
+        }
+    }
+
     pub(super) fn fork_session(&mut self) {
         if self.history.is_empty() {
             self.screen.notify_error("nothing to fork".into());
@@ -21,6 +32,7 @@ impl App {
 
     pub fn reset_session(&mut self) {
         self.history.clear();
+        self.token_snapshots.clear();
         self.auto_approved.clear();
         self.queued_messages.clear();
         self.screen.clear();
@@ -63,6 +75,9 @@ impl App {
             self.screen.set_task_label(slug.clone());
         }
         self.history = self.session.messages.clone();
+        self.token_snapshots = self.session.token_snapshots.clone();
+        self.token_snapshots
+            .retain(|(len, _)| *len <= self.history.len());
         self.auto_approved.clear();
         self.queued_messages.clear();
         self.input.clear();
@@ -162,7 +177,7 @@ impl App {
                         id.clone(),
                         ToolOutput {
                             content: text,
-                            is_error: false,
+                            is_error: msg.is_error,
                         },
                     );
                 }
@@ -173,10 +188,22 @@ impl App {
             match msg.role {
                 Role::User => {
                     if let Some(ref content) = msg.content {
-                        self.screen.push(Block::User {
-                            text: content.text_content(),
-                            image_labels: vec![],
-                        });
+                        let text = content.text_content();
+                        if let Some(summary) =
+                            text.strip_prefix("Summary of prior conversation:\n\n")
+                        {
+                            let trimmed = summary.trim();
+                            if !trimmed.is_empty() {
+                                self.screen.push(Block::Compacted {
+                                    summary: trimmed.to_string(),
+                                });
+                            }
+                        } else {
+                            self.screen.push(Block::User {
+                                text,
+                                image_labels: vec![],
+                            });
+                        }
                     }
                 }
                 Role::Assistant => {
@@ -207,6 +234,8 @@ impl App {
                                     || out.content.contains("blocked this tool call")
                                 {
                                     ToolStatus::Denied
+                                } else if out.is_error {
+                                    ToolStatus::Err
                                 } else {
                                     ToolStatus::Ok
                                 }
@@ -226,21 +255,7 @@ impl App {
                     }
                 }
                 Role::Tool => {}
-                Role::System => {
-                    if let Some(ref content) = msg.content {
-                        let text = content.as_text();
-                        if let Some(summary) =
-                            text.strip_prefix("Summary of prior conversation:\n\n")
-                        {
-                            let trimmed = summary.trim();
-                            if !trimmed.is_empty() {
-                                self.screen.push(Block::Text {
-                                    content: trimmed.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
+                Role::System => {}
             }
         }
     }
@@ -251,6 +266,7 @@ impl App {
             return;
         }
         self.session.messages = self.history.clone();
+        self.session.token_snapshots = self.token_snapshots.clone();
         self.session.updated_at_ms = session::now_ms();
         self.session.mode = Some(self.mode.as_str().to_string());
         self.session.reasoning_effort = Some(self.reasoning_effort);
@@ -318,13 +334,41 @@ impl App {
         });
     }
 
-    pub fn compact_history(&mut self) {
+    pub fn compact_history(&mut self, focus: Option<String>) {
         self.pending_compact_epoch = self.compact_epoch;
         self.screen.set_throbber(render::Throbber::Compacting);
         self.engine.send(UiCommand::Compact {
-            keep_turns: 3,
+            keep_turns: 2,
             history: self.history.clone(),
+            model: self.model.clone(),
+            focus,
         });
+    }
+
+    pub(super) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
+        // The first message is the summary; the rest are kept turns already
+        // in history. Just append the summary as a regular history entry.
+        let marker = messages.into_iter().next().unwrap();
+
+        let summary = marker
+            .content
+            .as_ref()
+            .map(|c| c.as_text())
+            .and_then(|t| t.strip_prefix("Summary of prior conversation:\n\n"))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        self.snapshot_tokens();
+        self.history.push(marker);
+
+        if !summary.is_empty() {
+            self.screen.push(Block::Compacted { summary });
+        }
+
+        self.screen.clear_context_tokens();
+        self.save_session();
+        self.screen.set_throbber(render::Throbber::Done);
     }
 
     pub(super) fn maybe_auto_compact(&mut self) {
@@ -338,7 +382,7 @@ impl App {
             return;
         };
         if tokens as u64 * 100 >= ctx as u64 * 80 {
-            self.compact_history();
+            self.compact_history(None);
         }
     }
 
@@ -392,8 +436,20 @@ impl App {
             .unwrap_or_default();
 
         self.history.truncate(hist_idx);
+        // Restore the most recent token snapshot at or before the truncation point.
+        while self
+            .token_snapshots
+            .last()
+            .is_some_and(|(len, _)| *len > hist_idx)
+        {
+            self.token_snapshots.pop();
+        }
+        if let Some(&(_, tokens)) = self.token_snapshots.last() {
+            self.screen.set_context_tokens(tokens);
+        } else {
+            self.screen.clear_context_tokens();
+        }
         self.screen.truncate_to(block_idx);
-        self.screen.clear_context_tokens();
         self.auto_approved.clear();
         self.compact_epoch += 1;
 

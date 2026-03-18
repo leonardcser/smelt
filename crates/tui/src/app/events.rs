@@ -156,6 +156,10 @@ impl App {
                         state::set_accent(value);
                         self.screen.redraw(true);
                     }
+                    MenuResult::ColorSelect(_) => {
+                        // Session-only, no persistence needed
+                        self.screen.mark_dirty();
+                    }
                     MenuResult::Stats | MenuResult::Dismissed => {}
                 }
                 self.input.restore_stash();
@@ -187,11 +191,11 @@ impl App {
                             InputOutcome::CustomCommand(cmd) => {
                                 *agent = Some(self.begin_custom_command_turn(*cmd));
                             }
-                            InputOutcome::Compact => {
+                            InputOutcome::Compact { focus } => {
                                 if self.history.is_empty() {
                                     self.screen.notify_error("nothing to compact".into());
                                 } else {
-                                    self.compact_history();
+                                    self.compact_history(focus);
                                 }
                             }
                             InputOutcome::Continue => {}
@@ -331,6 +335,20 @@ impl App {
                 if double {
                     t.last_esc = None;
                     let restore_mode = t.esc_vim_mode.take();
+
+                    // Cancel in-flight compaction instead of opening rewind.
+                    if self.screen.working_throbber()
+                        == Some(render::Throbber::Compacting)
+                    {
+                        self.compact_epoch += 1;
+                        self.screen.set_throbber(render::Throbber::Done);
+                        self.screen.notify("compaction cancelled".into());
+                        if restore_mode == Some(vim::ViMode::Insert) {
+                            self.input.set_vim_mode(vim::ViMode::Insert);
+                        }
+                        return EventOutcome::Noop;
+                    }
+
                     let turns = self.screen.user_turns();
                     if turns.is_empty() {
                         return EventOutcome::Noop;
@@ -635,7 +653,7 @@ impl App {
                 self.reset_session();
                 return InputOutcome::Continue;
             }
-            CommandAction::Compact => return InputOutcome::Compact,
+            CommandAction::Compact { focus } => return InputOutcome::Compact { focus },
             CommandAction::OpenDialog(dlg) => return InputOutcome::OpenDialog(dlg),
             CommandAction::Continue => {}
         }

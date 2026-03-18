@@ -7,7 +7,13 @@ impl App {
         match input {
             "/exit" | "/quit" | ":q" | ":qa" | ":wq" | ":wqa" => CommandAction::Quit,
             "/clear" | "/new" => CommandAction::CancelAndClear,
-            "/compact" => CommandAction::Compact,
+            "/compact" => CommandAction::Compact { focus: None },
+            _ if input.starts_with("/compact ") => {
+                let focus = input[9..].trim().to_string();
+                CommandAction::Compact {
+                    focus: if focus.is_empty() { None } else { Some(focus) },
+                }
+            }
             "/resume" => {
                 let entries = self.resume_entries();
                 if entries.is_empty() {
@@ -79,11 +85,39 @@ impl App {
                 self.screen.mark_dirty();
                 CommandAction::Continue
             }
+            "/color" => {
+                self.input.open_color_picker();
+                self.screen.mark_dirty();
+                CommandAction::Continue
+            }
             "/stats" => {
                 let entries = crate::metrics::load();
                 let lines = crate::metrics::render_stats(&entries);
                 self.input.open_stats(lines);
                 self.screen.mark_dirty();
+                CommandAction::Continue
+            }
+            _ if input.starts_with("/theme ") => {
+                let name = input[7..].trim();
+                if let Some(value) = crate::theme::preset_by_name(name) {
+                    crate::theme::set_accent(value);
+                    state::set_accent(value);
+                    self.screen.redraw(true);
+                } else {
+                    self.screen
+                        .notify_error(format!("unknown theme: {}", name));
+                }
+                CommandAction::Continue
+            }
+            _ if input.starts_with("/color ") => {
+                let name = input[7..].trim();
+                if let Some(value) = crate::theme::preset_by_name(name) {
+                    crate::theme::set_slug_color(value);
+                    self.screen.mark_dirty();
+                } else {
+                    self.screen
+                        .notify_error(format!("unknown color: {}", name));
+                }
                 CommandAction::Continue
             }
             _ if input.starts_with("/btw ") => {
@@ -137,7 +171,7 @@ impl App {
             CommandAction::CancelAndClear => Some(EventOutcome::CancelAndClear),
             CommandAction::OpenDialog(dlg) => Some(EventOutcome::OpenDialog(dlg)),
             CommandAction::Continue => Some(EventOutcome::Noop),
-            CommandAction::Compact => unreachable!(), // blocked above
+            CommandAction::Compact { .. } => unreachable!(), // blocked above
         }
     }
 

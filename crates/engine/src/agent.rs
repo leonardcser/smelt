@@ -31,7 +31,6 @@ pub async fn engine_task(
 
     // Process completion channel for background processes
     let (proc_done_tx, mut proc_done_rx) = mpsc::unbounded_channel::<(String, Option<i32>)>();
-    let mut last_model = String::new();
     // Cancellation token for the in-flight prediction request.
     let mut predict_cancel = tokio_util::sync::CancellationToken::new();
 
@@ -41,7 +40,6 @@ pub async fn engine_task(
                 match cmd {
                     UiCommand::StartTurn { turn_id, input, mode, model, reasoning_effort, history, api_base, api_key, session_id, model_config_overrides, permission_overrides } => {
                         predict_cancel.cancel();
-                        last_model = model.clone();
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
                             api_base.as_deref(), api_key.as_deref(),
@@ -77,10 +75,10 @@ pub async fn engine_task(
                         };
                         turn.run(input, history).await;
                     }
-                    UiCommand::Compact { keep_turns, history } => {
+                    UiCommand::Compact { keep_turns, history, model, focus } => {
                         let provider = build_provider(&config, &client);
                         let cancel = tokio_util::sync::CancellationToken::new();
-                        match compact_history(&provider, &history, keep_turns, &last_model, &cancel).await {
+                        match compact_history(&provider, &history, keep_turns, &model, focus.as_deref(), &cancel).await {
                             Ok(messages) => {
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
                             }
@@ -195,6 +193,7 @@ fn spawn_btw_request(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         });
         messages.extend(history);
         messages.push(protocol::Message {
@@ -203,6 +202,7 @@ fn spawn_btw_request(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         });
 
         let content = match provider
@@ -237,22 +237,34 @@ fn spawn_predict_request(
                       no preamble. Keep it short (one sentence max). If you cannot predict, \
                       reply with an empty string.";
 
-        // Extract the last assistant message text to include in the user prompt.
-        let assistant_text = history
-            .last()
-            .and_then(|m| m.content.as_ref())
-            .map(|c| c.text_content())
-            .unwrap_or_default();
-
-        // Truncate to last 500 chars to keep the request small.
-        let truncated = if assistant_text.len() > 500 {
-            &assistant_text[assistant_text.len() - 500..]
-        } else {
-            &assistant_text
-        };
+        // Build context from recent user messages + last assistant response.
+        let mut context_parts = Vec::new();
+        for msg in &history {
+            let text = msg
+                .content
+                .as_ref()
+                .map(|c| c.text_content())
+                .unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+            // Truncate each message to keep the request small.
+            let truncated = if text.len() > 500 {
+                &text[text.len() - 500..]
+            } else {
+                &text
+            };
+            let label = if msg.role == protocol::Role::User {
+                "User"
+            } else {
+                "Assistant"
+            };
+            context_parts.push(format!("{label}: {truncated}"));
+        }
 
         let user_msg = format!(
-            "The coding assistant just said:\n\n{truncated}\n\nPredict the user's next message."
+            "Recent conversation:\n\n{}\n\nPredict the user's next message.",
+            context_parts.join("\n\n")
         );
 
         let messages = vec![
@@ -262,6 +274,7 @@ fn spawn_predict_request(
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
+                is_error: false,
             },
             protocol::Message {
                 role: protocol::Role::User,
@@ -269,6 +282,7 @@ fn spawn_predict_request(
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
+                is_error: false,
             },
         ];
 
@@ -408,6 +422,7 @@ impl<'a> Turn<'a> {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         });
         self.messages.extend(history);
 
@@ -418,6 +433,7 @@ impl<'a> Turn<'a> {
                 reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
+                is_error: false,
             });
         }
 
@@ -529,6 +545,7 @@ impl<'a> Turn<'a> {
                     reasoning_content: reasoning,
                     tool_calls: None,
                     tool_call_id: None,
+                    is_error: false,
                 });
                 self.send_snapshot();
                 self.messages.remove(0);
@@ -548,6 +565,7 @@ impl<'a> Turn<'a> {
                 reasoning_content: reasoning,
                 tool_calls: Some(tool_calls.clone()),
                 tool_call_id: None,
+                is_error: false,
             });
             self.send_snapshot();
 
@@ -619,19 +637,17 @@ impl<'a> Turn<'a> {
                     }),
                 );
 
-                let mut model_content = match tc.function.name.as_str() {
-                    "grep" | "glob" => trim_tool_output(&content, 200),
-                    _ => content.clone(),
-                };
+                let mut tool_content = content.clone();
                 if let Some(ref msg) = confirm_msg {
-                    model_content.push_str(&format!("\n\nUser message: {msg}"));
+                    tool_content.push_str(&format!("\n\nUser message: {msg}"));
                 }
                 self.messages.push(Message {
                     role: Role::Tool,
-                    content: Some(Content::text(model_content)),
+                    content: Some(Content::text(tool_content)),
                     reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: Some(tc.id.clone()),
+                    is_error,
                 });
                 self.emit(EngineEvent::ToolFinished {
                     call_id: tc.id.clone(),
@@ -657,6 +673,7 @@ impl<'a> Turn<'a> {
                         reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
+                        is_error: false,
                     });
                 }
                 Ok(UiCommand::Unsteer { count }) => {
@@ -895,6 +912,7 @@ impl<'a> Turn<'a> {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+            is_error,
         });
         self.emit(EngineEvent::ToolFinished {
             call_id: tool_call_id.to_string(),
@@ -918,6 +936,7 @@ async fn compact_history(
     messages: &[Message],
     keep_turns: usize,
     model: &str,
+    focus: Option<&str>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Vec<Message>, String> {
     let mut user_count = 0;
@@ -936,30 +955,19 @@ async fn compact_history(
     }
 
     let to_summarize = &messages[..cut];
-    let summary = provider.compact(to_summarize, model, cancel).await?;
+    let summary = provider.compact(to_summarize, model, focus, cancel).await?;
 
     let mut new_messages = vec![Message {
-        role: Role::System,
+        role: Role::User,
         content: Some(Content::text(format!(
             "Summary of prior conversation:\n\n{summary}"
         ))),
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
+        is_error: false,
     }];
     new_messages.extend_from_slice(&messages[cut..]);
     Ok(new_messages)
 }
 
-fn trim_tool_output(content: &str, max_lines: usize) -> String {
-    if content == "no matches found" {
-        return content.to_string();
-    }
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() <= max_lines {
-        return content.to_string();
-    }
-    let mut out = lines[..max_lines].join("\n");
-    out.push_str(&format!("\n... (trimmed, {} lines total)", lines.len()));
-    out
-}

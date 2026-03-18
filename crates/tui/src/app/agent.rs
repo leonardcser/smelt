@@ -196,15 +196,29 @@ impl App {
             // Fire async prediction for the user's next input.
             self.input_prediction = None;
             if self.show_prediction {
-                let last_assistant = self
+                // Collect last 3 user messages + last assistant message for
+                // richer prediction context.
+                let mut context: Vec<protocol::Message> = self
+                    .history
+                    .iter()
+                    .rev()
+                    .filter(|m| m.role == protocol::Role::User)
+                    .take(3)
+                    .cloned()
+                    .collect();
+                context.reverse();
+                if let Some(msg) = self
                     .history
                     .iter()
                     .rev()
                     .find(|m| m.role == protocol::Role::Assistant)
-                    .cloned();
-                if let Some(msg) = last_assistant {
+                    .cloned()
+                {
+                    context.push(msg);
+                }
+                if !context.is_empty() {
                     self.engine.send(UiCommand::PredictInput {
-                        history: vec![msg],
+                        history: context,
                         model: self.model.clone(),
                         api_base: Some(self.api_base.clone()),
                         api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
@@ -212,6 +226,7 @@ impl App {
                 }
             }
         }
+        self.snapshot_tokens();
         self.save_session();
         state::set_mode(self.mode);
         self.maybe_auto_compact();
@@ -348,10 +363,7 @@ impl App {
                     self.screen.set_throbber(render::Throbber::Done);
                     return SessionControl::Continue;
                 }
-                self.history = messages;
-                self.save_session();
-                self.screen.notify("conversation compacted".into());
-                self.screen.set_throbber(render::Throbber::Done);
+                self.apply_compaction(messages);
                 SessionControl::Continue
             }
             EngineEvent::TitleGenerated { title, slug } => {
@@ -379,7 +391,7 @@ impl App {
                 messages,
             } => {
                 if id == turn_id {
-                    self.history = messages;
+                    self.set_history(messages);
                 }
                 SessionControl::Continue
             }
@@ -391,7 +403,7 @@ impl App {
                     // Stale event from a previous (cancelled) turn — ignore.
                     return SessionControl::Continue;
                 }
-                self.history = messages;
+                self.set_history(messages);
                 SessionControl::Done
             }
             EngineEvent::TurnError { message } => {
@@ -410,16 +422,11 @@ impl App {
             EngineEvent::Messages { .. } => {}
             EngineEvent::TurnComplete { messages, .. } => {
                 // Accept final messages from a just-cancelled turn so that
-                // denial tool results are persisted before the session is saved.
+                // tool results are persisted. Don't rebuild the screen —
+                // the displayed blocks already reflect what the user saw
+                // at cancel time, and rebuilding would cause visual flicker.
                 if !self.history.is_empty() && !messages.is_empty() {
-                    // Preserve throbber state (e.g. Interrupted) across the
-                    // rebuild, since screen.clear() would wipe it.
-                    let throbber = self.screen.working_throbber();
-                    self.history = messages;
-                    self.rebuild_screen_from_history();
-                    if let Some(t) = throbber {
-                        self.screen.set_throbber(t);
-                    }
+                    self.set_history(messages);
                     self.save_session();
                 }
             }
@@ -428,10 +435,7 @@ impl App {
                     self.screen.set_throbber(render::Throbber::Done);
                     return;
                 }
-                self.history = messages;
-                self.save_session();
-                self.screen.notify("conversation compacted".into());
-                self.screen.set_throbber(render::Throbber::Done);
+                self.apply_compaction(messages);
             }
             EngineEvent::TitleGenerated { title, slug } => {
                 self.session.title = Some(title);
@@ -458,6 +462,11 @@ impl App {
                 self.screen.push(Block::Text { content: msg });
                 self.screen
                     .set_running_procs(self.engine.processes.running_count());
+            }
+            EngineEvent::TurnError { message } => {
+                self.screen.set_throbber(render::Throbber::Done);
+                self.screen
+                    .notify_error(format!("compaction failed: {message}"));
             }
             _ => {}
         }

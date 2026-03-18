@@ -1,4 +1,5 @@
 use crate::log;
+use crate::tools::trim_tool_output;
 use protocol::{Content, Message, ReasoningEffort, Role, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
@@ -133,7 +134,21 @@ impl Provider {
         body.insert("model", serde_json::json!(model));
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| serde_json::to_value(m).unwrap())
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap();
+                if let Some(obj) = v.as_object_mut() {
+                    // Strip is_error — not part of the OpenAI API spec.
+                    obj.remove("is_error");
+                    // Trim large tool outputs to keep API payloads lean.
+                    if m.role == Role::Tool {
+                        if let Some(s) = obj.get("content").and_then(|c| c.as_str()) {
+                            let trimmed = trim_tool_output(s, 200);
+                            obj.insert("content".into(), serde_json::json!(trimmed));
+                        }
+                    }
+                }
+                v
+            })
             .collect();
         body.insert("messages", serde_json::json!(api_messages));
         if !tools.is_empty() {
@@ -346,6 +361,7 @@ impl Provider {
         &self,
         messages: &[Message],
         model: &str,
+        focus: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<String, String> {
         const COMPACT_PROMPT: &str = include_str!("prompts/compact.txt");
@@ -370,12 +386,21 @@ impl Provider {
             .collect::<Vec<_>>()
             .join("\n\n");
 
+        let mut system_text = COMPACT_PROMPT.trim().to_string();
+        if let Some(focus) = focus {
+            system_text.push_str(&format!(
+                "\n\nThe user has asked you to pay special attention to the following when summarizing:\n{}",
+                focus
+            ));
+        }
+
         let system = Message {
             role: Role::System,
-            content: Some(Content::text(COMPACT_PROMPT.trim())),
+            content: Some(Content::text(system_text)),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         };
         let user = Message {
             role: Role::User,
@@ -386,6 +411,7 @@ impl Provider {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            is_error: false,
         };
         let resp = self
             .chat(

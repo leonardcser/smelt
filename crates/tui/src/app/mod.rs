@@ -71,6 +71,10 @@ pub struct App {
     compact_epoch: u64,
     /// The `compact_epoch` value when the last compaction was requested.
     pending_compact_epoch: u64,
+    /// Token count snapshots: `(history_len, tokens)` recorded after each turn
+    /// and before each compaction. On rewind, the most recent snapshot at or
+    /// before the truncation point is restored.
+    token_snapshots: Vec<(usize, u32)>,
 }
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
@@ -102,7 +106,7 @@ enum CommandAction {
     Continue,
     Quit,
     CancelAndClear,
-    Compact,
+    Compact { focus: Option<String> },
     OpenDialog(Box<dyn render::Dialog>),
 }
 
@@ -169,7 +173,9 @@ fn build_session_tree(mut flat: Vec<ResumeEntry>) -> Vec<ResumeEntry> {
 /// Returns `Err(reason)` for commands that are blocked.
 fn is_allowed_while_running(input: &str) -> Result<(), String> {
     match input {
-        "/compact" => Err("cannot compact while agent is working".into()),
+        _ if input == "/compact" || input.starts_with("/compact ") => {
+            Err("cannot compact while agent is working".into())
+        }
         "/resume" => Err("cannot resume while agent is working".into()),
         "/fork" => Err("cannot fork while agent is working".into()),
         _ => Ok(()),
@@ -194,7 +200,7 @@ fn classify_startup_command(input: &str) -> Option<&'static str> {
 enum InputOutcome {
     Continue,
     StartAgent,
-    Compact,
+    Compact { focus: Option<String> },
     Quit,
     OpenDialog(Box<dyn render::Dialog>),
     CustomCommand(Box<crate::custom_commands::CustomCommand>),
@@ -317,6 +323,7 @@ impl App {
             next_turn_id: 1,
             compact_epoch: 0,
             pending_compact_epoch: 0,
+            token_snapshots: Vec::new(),
         }
     }
 
@@ -498,11 +505,11 @@ impl App {
                                     let content = Content::text(text.clone());
                                     agent = Some(self.begin_agent_turn(&text, content));
                                 }
-                                InputOutcome::Compact => {
+                                InputOutcome::Compact { focus } => {
                                     if self.history.is_empty() {
                                         self.screen.notify_error("nothing to compact".into());
                                     } else {
-                                        self.compact_history();
+                                        self.compact_history(focus);
                                     }
                                 }
                                 InputOutcome::CustomCommand(cmd) => {
@@ -737,13 +744,13 @@ impl App {
                     });
                 }
                 EngineEvent::Messages { messages, .. } => {
-                    self.history = messages;
+                    self.set_history(messages);
                 }
                 EngineEvent::TurnError { message } => {
                     eprintln!("[error] {message}");
                 }
                 EngineEvent::TurnComplete { messages, .. } => {
-                    self.history = messages;
+                    self.set_history(messages);
                     break;
                 }
                 _ => {}

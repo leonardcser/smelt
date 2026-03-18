@@ -35,6 +35,8 @@ pub struct Session {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
+    #[serde(default)]
+    pub token_snapshots: Vec<(usize, u32)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +93,7 @@ impl Session {
             parent_id: None,
             messages: Vec::new(),
             context_tokens: None,
+            token_snapshots: Vec::new(),
         }
     }
 
@@ -128,6 +131,7 @@ impl Session {
             parent_id: Some(self.id.clone()),
             messages: self.messages.clone(),
             context_tokens: self.context_tokens,
+            token_snapshots: self.token_snapshots.clone(),
         }
     }
 }

@@ -17,6 +17,31 @@ pub fn accent_value() -> u8 {
     ACCENT_VALUE.load(Ordering::Relaxed)
 }
 
+/// Session-only slug color. 0 means "use accent".
+static SLUG_COLOR_VALUE: AtomicU8 = AtomicU8::new(0);
+
+pub fn slug_color() -> Color {
+    let v = SLUG_COLOR_VALUE.load(Ordering::Relaxed);
+    if v == 0 {
+        accent()
+    } else {
+        Color::AnsiValue(v)
+    }
+}
+
+pub fn set_slug_color(value: u8) {
+    SLUG_COLOR_VALUE.store(value, Ordering::Relaxed);
+}
+
+pub fn slug_color_value() -> u8 {
+    SLUG_COLOR_VALUE.load(Ordering::Relaxed)
+}
+
+/// Look up a preset by name. Returns the ansi value if found.
+pub fn preset_by_name(name: &str) -> Option<u8> {
+    PRESETS.iter().find(|(n, _, _)| *n == name).map(|(_, _, v)| *v)
+}
+
 pub const TOOL_PENDING: Color = Color::DarkGrey;
 pub const APPLY: Color = Color::AnsiValue(141);
 pub const USER_BG: Color = Color::AnsiValue(236);
@@ -38,6 +63,7 @@ pub const ERROR: Color = Color::Red;
 pub const PRESETS: &[(&str, &str, u8)] = &[
     ("lavender", "default", DEFAULT_ACCENT),
     ("sky", "light blue", 117),
+    ("blue", "classic blue", 69),
     ("mint", "soft green", 115),
     ("rose", "soft pink", 211),
     ("peach", "warm coral", 209),

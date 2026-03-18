@@ -269,13 +269,27 @@ impl InputState {
     }
 
     pub fn open_theme_picker(&mut self) {
+        self.open_preset_picker(crate::theme::accent_value(), |presets, original| {
+            MenuKind::Theme { presets, original }
+        });
+    }
+
+    pub fn open_color_picker(&mut self) {
+        self.open_preset_picker(crate::theme::slug_color_value(), |presets, original| {
+            MenuKind::Color { presets, original }
+        });
+    }
+
+    fn open_preset_picker(
+        &mut self,
+        current: u8,
+        make_kind: impl FnOnce(Vec<(&'static str, &'static str, u8)>, u8) -> MenuKind,
+    ) {
         let presets: Vec<_> = crate::theme::PRESETS.to_vec();
         let len = presets.len();
-        let original = crate::theme::accent_value();
-        // Pre-select current theme
         let selected = presets
             .iter()
-            .position(|(_, _, v)| *v == original)
+            .position(|(_, _, v)| *v == current)
             .unwrap_or(0);
         self.completer = None;
         self.menu = Some(MenuState {
@@ -284,7 +298,7 @@ impl InputState {
                 len,
                 select_on_enter: true,
             },
-            kind: MenuKind::Theme { presets, original },
+            kind: make_kind(presets, current),
         });
     }
 
@@ -317,6 +331,10 @@ impl InputState {
                 crate::theme::set_accent(original);
                 MenuResult::Dismissed
             }
+            MenuKind::Color { original, .. } => {
+                crate::theme::set_slug_color(original);
+                MenuResult::Dismissed
+            }
             MenuKind::Stats { .. } => MenuResult::Stats,
         })
     }
@@ -328,6 +346,7 @@ impl InputState {
                 MenuKind::Settings { .. } => 6,
                 MenuKind::Model { models } => (models.len() + 2).min(12),
                 MenuKind::Theme { presets, .. } => presets.len().min(14),
+                MenuKind::Color { presets, .. } => presets.len().min(14),
                 MenuKind::Stats { lines } => lines
                     .iter()
                     .map(|l| match l {
@@ -783,17 +802,33 @@ impl InputState {
                             Action::Redraw
                         }
                     }
+                    MenuKind::Color { ref presets, .. } => {
+                        if let Some(&(_, _, value)) = presets.get(idx) {
+                            crate::theme::set_slug_color(value);
+                            Action::MenuResult(MenuResult::ColorSelect(value))
+                        } else {
+                            Action::Redraw
+                        }
+                    }
                     _ => Action::Redraw,
                 }
             }
             MenuAction::Dismiss => Action::MenuResult(self.dismiss_menu().unwrap()),
             MenuAction::Redraw => {
-                // Live-preview theme color while scrolling
+                // Live-preview theme/color while scrolling
                 if let Some(ref ms) = self.menu {
-                    if let MenuKind::Theme { ref presets, .. } = ms.kind {
-                        if let Some(&(_, _, value)) = presets.get(ms.nav.selected) {
-                            crate::theme::set_accent(value);
+                    match ms.kind {
+                        MenuKind::Theme { ref presets, .. } => {
+                            if let Some(&(_, _, value)) = presets.get(ms.nav.selected) {
+                                crate::theme::set_accent(value);
+                            }
                         }
+                        MenuKind::Color { ref presets, .. } => {
+                            if let Some(&(_, _, value)) = presets.get(ms.nav.selected) {
+                                crate::theme::set_slug_color(value);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Action::Redraw

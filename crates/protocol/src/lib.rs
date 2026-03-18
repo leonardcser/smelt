@@ -340,6 +340,8 @@ pub enum UiCommand {
     Compact {
         keep_turns: usize,
         history: Vec<Message>,
+        model: String,
+        focus: Option<String>,
     },
 
     /// Generate a title for the session based on recent user messages.
@@ -419,6 +421,13 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Whether this tool result is an error. Only meaningful for `Role::Tool`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

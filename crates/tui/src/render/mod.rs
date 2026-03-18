@@ -274,6 +274,9 @@ pub enum Block {
         command: String,
         output: String,
     },
+    Compacted {
+        summary: String,
+    },
 }
 
 #[derive(Clone, PartialEq)]
@@ -1081,11 +1084,9 @@ impl Screen {
         let mut out = RenderOut::scroll();
 
         // ── Position cursor ─────────────────────────────────────────────
-        let draw_start_row = self
-            .prompt
-            .anchor_row
-            .take()
-            .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0));
+        let explicit_anchor = self.prompt.anchor_row.take();
+        let draw_start_row =
+            explicit_anchor.unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0));
 
         // Always issue BeginSync.  In content-only mode the dialog that
         // follows will skip its own BeginSync and close this one with
@@ -1096,7 +1097,10 @@ impl Screen {
             self.sync_started = true;
         }
         let _ = out.queue(cursor::Hide);
-        if self.prompt.drawn {
+        // Reposition when the prompt was previously drawn (incremental
+        // update) OR when an explicit anchor was set (e.g. after
+        // redraw/clear/rewind where the cursor may not match the anchor).
+        if self.prompt.drawn || explicit_anchor.is_some() {
             let _ = out.queue(cursor::MoveTo(0, draw_start_row));
         }
         if is_dialog {
@@ -1280,10 +1284,21 @@ impl Screen {
 
         if self.show_slug {
             if let Some(ref label) = self.task_label {
+                let is_compacting =
+                    self.working.throbber == Some(Throbber::Compacting);
                 let slug_text = if let Some(spinner) = self.working.spinner_char() {
-                    // Remove the first span (spinner + "working"/"compacting")
                     if !throbber_spans.is_empty() {
                         throbber_spans.remove(0);
+                    }
+                    // Keep "compacting" visible after the tag.
+                    if is_compacting {
+                        throbber_spans.insert(0, BarSpan {
+                            text: " compacting".into(),
+                            color: Color::Reset,
+                            bg: None,
+                            attr: Some(crossterm::style::Attribute::Bold),
+                            priority: 0,
+                        });
                     }
                     format!(" {} {} ", spinner, label)
                 } else {
@@ -1292,7 +1307,7 @@ impl Screen {
                 throbber_spans.insert(0, BarSpan {
                     text: slug_text,
                     color: Color::Black,
-                    bg: Some(theme::accent()),
+                    bg: Some(theme::slug_color()),
                     attr: None,
                     priority: 1,
                 });
@@ -1399,8 +1414,12 @@ impl Screen {
         let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
         let (visual_lines, cursor_line, cursor_col) =
             wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
-        let is_btw = state.buf.starts_with("/btw ");
-        let is_command = is_btw || crate::completer::Completer::is_command(state.buf.trim());
+        let cmd_hint = crate::completer::Completer::command_hint(&state.buf);
+        let has_arg_space = cmd_hint.is_some()
+            && state.buf.len() > cmd_hint.as_ref().unwrap().0.len()
+            && state.buf.as_bytes()[cmd_hint.as_ref().unwrap().0.len()] == b' ';
+        let is_command =
+            cmd_hint.is_some() || crate::completer::Completer::is_command(state.buf.trim());
         let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = state.buf == "!";
         let total_content_rows = visual_lines.len();
@@ -1494,9 +1513,9 @@ impl Screen {
         {
             let abs_idx = scroll_offset + li;
             let _ = out.queue(Print(" "));
-            if is_btw && abs_idx == 0 {
-                // "/btw" prefix in accent, argument text in normal style.
-                let prefix = "/btw";
+            if has_arg_space && abs_idx == 0 {
+                // Command prefix in accent, argument text in normal style.
+                let (prefix, hint) = cmd_hint.as_ref().unwrap();
                 let prefix_len = prefix.len();
                 let _ = out.queue(SetForegroundColor(theme::accent()));
                 if line.len() >= prefix_len {
@@ -1504,10 +1523,19 @@ impl Screen {
                     let _ = out.queue(ResetColor);
                     let rest = &line[prefix_len..];
                     if rest.trim().is_empty() && state.buf.ends_with(' ') {
-                        // Show placeholder when only "/btw " typed.
+                        // Show hint when only "/cmd " typed with no argument yet.
+                        // Truncate with ellipsis if it would overflow the line.
+                        let max = usable.saturating_sub(prefix_len + 2); // +2 for spaces
+                        let truncated: String = if hint.chars().count() > max {
+                            let mut s: String = hint.chars().take(max.saturating_sub(1)).collect();
+                            s.push('…');
+                            s
+                        } else {
+                            hint.clone()
+                        };
                         let _ = out.queue(Print(" "));
                         let _ = out.queue(SetAttribute(Attribute::Dim));
-                        let _ = out.queue(Print("<question>"));
+                        let _ = out.queue(Print(&truncated));
                         let _ = out.queue(SetAttribute(Attribute::Reset));
                     } else {
                         let _ = out.queue(Print(rest));
@@ -1516,8 +1544,8 @@ impl Screen {
                     let _ = out.queue(Print(line));
                     let _ = out.queue(ResetColor);
                 }
-            } else if is_btw {
-                // Wrapped continuation lines of a /btw command — normal style.
+            } else if has_arg_space {
+                // Wrapped continuation lines of an arg command — normal style.
                 let _ = out.queue(Print(line));
             } else if is_command {
                 let _ = out.queue(SetForegroundColor(theme::accent()));
@@ -1664,9 +1692,9 @@ fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usiz
 }
 
 fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
-    // Mirrors Block::User rendering (blocks.rs) but with a 2-char indent
+    // Mirrors Block::User rendering (blocks.rs) but with a 1-char indent
     // and no stripping of leading/trailing blank lines.
-    let indent = 2usize;
+    let indent = 1usize;
     let text_w = usable.saturating_sub(indent + 1).max(1);
     let mut rows = 0u16;
     for msg in queued {
@@ -1889,67 +1917,7 @@ pub(super) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     chunks
 }
 
-fn make_relative(path: &str) -> String {
-    if let Ok(cwd) = std::env::current_dir() {
-        let prefix = cwd.to_string_lossy();
-        if let Some(rest) = path.strip_prefix(prefix.as_ref()) {
-            let rest = rest.strip_prefix('/').unwrap_or(rest);
-            if rest.is_empty() {
-                return ".".into();
-            }
-            return rest.into();
-        }
-    }
-    path.into()
-}
-
-pub fn tool_arg_summary(name: &str, args: &HashMap<String, serde_json::Value>) -> String {
-    match name {
-        "bash" => {
-            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            cmd.lines().next().unwrap_or("").to_string()
-        }
-        "read_file" | "write_file" | "edit_file" => {
-            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            make_relative(path)
-        }
-        "glob" => args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .into(),
-        "grep" => {
-            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-            match args.get("path").and_then(|v| v.as_str()) {
-                Some(p) => format!("{} in {}", pattern, make_relative(p)),
-                None => pattern.into(),
-            }
-        }
-        "web_fetch" => args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .into(),
-        "web_search" => args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .into(),
-        "read_process_output" | "stop_process" => {
-            args.get("id").and_then(|v| v.as_str()).unwrap_or("").into()
-        }
-        "ask_user_question" => {
-            let count = args
-                .get("questions")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            format!("{} question{}", count, if count == 1 { "" } else { "s" })
-        }
-        "exit_plan_mode" => "plan ready".into(),
-        _ => String::new(),
-    }
-}
+pub use engine::tools::tool_arg_summary;
 
 pub fn tool_timeout_label(args: &HashMap<String, serde_json::Value>) -> Option<String> {
     let ms = args.get("timeout_ms").and_then(|v| v.as_u64())?;
@@ -2484,40 +2452,8 @@ fn draw_menu(
             }
             drawn
         }
-        MenuKind::Theme { presets, .. } => {
-            let col = presets
-                .iter()
-                .map(|(name, _, _)| name.len())
-                .max()
-                .unwrap_or(0)
-                + 4;
-            let mut drawn = 0;
-            for (idx, (name, detail, ansi)) in presets.iter().enumerate() {
-                if drawn >= max_rows {
-                    break;
-                }
-                if drawn > 0 {
-                    let _ = out.queue(Print("\r\n"));
-                }
-                let _ = out.queue(Print("  "));
-                if idx == selected {
-                    let _ = out.queue(SetForegroundColor(Color::AnsiValue(*ansi)));
-                    let _ = out.queue(Print(format!("● {name}")));
-                    let _ = out.queue(ResetColor);
-                } else {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
-                    let _ = out.queue(Print(format!("  {name}")));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                }
-                let label_len = name.len() + 2; // account for "● " or "  "
-                let padding = " ".repeat(col.saturating_sub(label_len - 2));
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-                let _ = out.queue(Print(format!("{padding}{detail}")));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                drawn += 1;
-            }
-            drawn
+        MenuKind::Theme { presets, .. } | MenuKind::Color { presets, .. } => {
+            draw_color_presets(out, presets, selected, max_rows)
         }
         MenuKind::Stats { lines } => draw_stats(out, lines, max_rows),
         MenuKind::Model { models } => {
@@ -2558,6 +2494,47 @@ fn draw_menu(
             drawn
         }
     }
+}
+
+fn draw_color_presets(
+    out: &mut RenderOut,
+    presets: &[(&str, &str, u8)],
+    selected: usize,
+    max_rows: usize,
+) -> usize {
+    let col = presets
+        .iter()
+        .map(|(name, _, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        + 4;
+    let mut drawn = 0;
+    for (idx, (name, detail, ansi)) in presets.iter().enumerate() {
+        if drawn >= max_rows {
+            break;
+        }
+        if drawn > 0 {
+            let _ = out.queue(Print("\r\n"));
+        }
+        let _ = out.queue(Print("  "));
+        if idx == selected {
+            let _ = out.queue(SetForegroundColor(Color::AnsiValue(*ansi)));
+            let _ = out.queue(Print(format!("● {name}")));
+            let _ = out.queue(ResetColor);
+        } else {
+            let _ = out.queue(SetAttribute(Attribute::Dim));
+            let _ = out.queue(Print(format!("  {name}")));
+            let _ = out.queue(SetAttribute(Attribute::Reset));
+        }
+        let label_len = name.len() + 2;
+        let padding = " ".repeat(col.saturating_sub(label_len - 2));
+        let _ = out.queue(SetAttribute(Attribute::Dim));
+        let _ = out.queue(Print(format!("{padding}{detail}")));
+        let _ = out.queue(SetAttribute(Attribute::Reset));
+        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        drawn += 1;
+    }
+    drawn
 }
 
 fn draw_menu_row(out: &mut RenderOut, label: &str, detail: &str, col: usize, selected: bool) {
