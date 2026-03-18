@@ -166,7 +166,9 @@ CLI flags take precedence over config file values.
 Press `Shift+Tab` to cycle through modes:
 
 - **Normal** — default; agent asks before editing files or running commands
-- **Plan** — read-only tools only; agent thinks and plans without making changes
+- **Plan** — read-only tools only; agent creates a plan file and calls
+  `exit_plan_mode` when ready for approval; plan files are stored in
+  `~/.local/state/agent/plans/<session_id>/`
 - **Apply** — agent edits files and runs pre-approved commands without asking
 - **Yolo** — all permissions default to Allow; configurable via
   `permissions.yolo` in config
@@ -183,6 +185,7 @@ Press `Shift+Tab` to cycle through modes:
 | `Ctrl+S`    | Stash/unstash current input        |
 | `Ctrl+T`    | Cycle reasoning effort             |
 | `Shift+Tab` | Cycle mode (normal → plan → apply) |
+| `Esc`       | Unqueue messages or dismiss dialog |
 | `Esc Esc`   | Cancel running agent               |
 | `↑ / ↓`     | Navigate input history             |
 | `Tab`       | Accept completion                  |
@@ -193,6 +196,7 @@ Type `/` to open the command picker:
 
 | Command                    | Description                    |
 | -------------------------- | ------------------------------ |
+| `/btw <question>`          | Ask a quick side question      |
 | `/clear`, `/new`           | Start a new conversation       |
 | `/resume`                  | Resume a saved session         |
 | `/model`                   | Switch model                   |
@@ -208,6 +212,25 @@ Type `/` to open the command picker:
 | `:q`, `:qa`, `:wq`, `:wqa` | Exit (vim-style)               |
 
 Prefix with `!` to run a shell command directly (e.g. `!git status`).
+
+## Side Questions (`/btw`)
+
+Use `/btw <question>` to ask quick side questions without interrupting your main
+conversation. The response appears in a dialog above the prompt and can be
+dismissed with `Esc` or scrolled with `↑`/`↓`. The side question and answer are
+not added to the main conversation history.
+
+**Example:**
+
+```
+/btw what does the glob crate do?
+```
+
+## Message Queuing
+
+When the agent is busy responding, you can continue typing messages. They will
+be queued and processed sequentially. Press `Esc` once to unqueue and edit your
+pending messages, or twice to cancel the agent and unqueue everything.
 
 ## File References
 
