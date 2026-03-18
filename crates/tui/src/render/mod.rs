@@ -855,36 +855,6 @@ impl Screen {
         self.render_pending_blocks();
     }
 
-    /// Render unflushed blocks and scroll all viewport content into
-    /// scrollback so the dialog gets a clean viewport.
-    pub fn flush_history_to_scrollback(&mut self) {
-        self.render_pending_blocks();
-
-        // Scroll viewport content into scrollback. Content rendered with
-        // \r\n only enters scrollback when lines are pushed off the top of
-        // the viewport. If the conversation fits on screen, it's still in
-        // the viewport — not in scrollback. ScrollUp(n) physically pushes
-        // the top n lines into scrollback.
-        let rows_to_scroll = self
-            .prompt
-            .anchor_row
-            .or(self.content_start_row)
-            .unwrap_or(0);
-        if rows_to_scroll > 0 {
-            let mut out = RenderOut::scroll();
-            let _ = out.queue(terminal::ScrollUp(rows_to_scroll));
-            let _ = out.flush();
-            self.prompt.anchor_row = Some(0);
-            self.prompt.prev_dialog_row = self
-                .prompt
-                .prev_dialog_row
-                .map(|r| r.saturating_sub(rows_to_scroll));
-            self.prompt.drawn = false;
-            self.prompt.dirty = true;
-            self.has_scrollback = true;
-        }
-    }
-
     /// Convert active tool to a history block without rendering.
     /// The block remains unflushed so that `draw_frame(None)` will render
     /// it (along with any preceding reasoning blocks) before the dialog
