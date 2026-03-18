@@ -194,10 +194,7 @@ impl App {
                         }
                         InputOutcome::Compact => {
                             if self.history.is_empty() {
-                                self.screen.push(Block::Error {
-                                    message: "nothing to compact".into(),
-                                });
-                                self.screen.flush_blocks();
+                                self.screen.notify_error("nothing to compact".into());
                             } else {
                                 self.compact_history();
                             }
@@ -225,6 +222,11 @@ impl App {
                 self.screen.redraw(true);
             }
             return EventOutcome::Noop;
+        }
+
+        // Dismiss notification on any keypress (key still passes through).
+        if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
+            self.screen.dismiss_notification();
         }
 
         // Handle btw block keys: scroll or dismiss.
@@ -435,6 +437,11 @@ impl App {
                 self.screen.redraw(true);
             }
             return EventOutcome::Noop;
+        }
+
+        // Dismiss notification on any keypress (key still passes through).
+        if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
+            self.screen.dismiss_notification();
         }
 
         // Handle btw block keys: scroll or dismiss.

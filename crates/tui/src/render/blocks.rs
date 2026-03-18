@@ -227,8 +227,8 @@ pub(super) fn render_tool(
     width: usize,
 ) -> u16 {
     let color = match status {
-        ToolStatus::Ok => theme::TOOL_OK,
-        ToolStatus::Err | ToolStatus::Denied => theme::TOOL_ERR,
+        ToolStatus::Ok => theme::SUCCESS,
+        ToolStatus::Err | ToolStatus::Denied => theme::ERROR,
         ToolStatus::Confirm => theme::accent(),
         ToolStatus::Pending => theme::TOOL_PENDING,
     };
@@ -318,7 +318,7 @@ fn render_confirm_result(
                 print_dim(out, &format!("always ({})", pat));
             }
             ConfirmChoice::No => {
-                let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+                let _ = out.queue(SetForegroundColor(theme::ERROR));
                 let _ = out.queue(Print("denied"));
                 let _ = out.queue(ResetColor);
             }
@@ -627,7 +627,7 @@ fn render_bash_output(out: &mut RenderOut, content: &str, is_error: bool, width:
         let segments = wrap_line(line, max_cols);
         for seg in &segments {
             if is_error {
-                let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+                let _ = out.queue(SetForegroundColor(theme::ERROR));
                 let _ = out.queue(Print(format!("   {}", seg)));
                 let _ = out.queue(ResetColor);
             } else {
@@ -646,7 +646,7 @@ fn render_default_output(out: &mut RenderOut, content: &str, is_error: bool, wid
     let mut rows = 0u16;
     for seg in &wrap_line(&preview, max_cols) {
         if is_error {
-            let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+            let _ = out.queue(SetForegroundColor(theme::ERROR));
             let _ = out.queue(Print(format!("   {}", seg)));
             let _ = out.queue(ResetColor);
         } else {
@@ -667,7 +667,7 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
 }
 
 fn print_error(out: &mut RenderOut, msg: &str) {
-    let _ = out.queue(SetForegroundColor(theme::TOOL_ERR));
+    let _ = out.queue(SetForegroundColor(theme::ERROR));
     let _ = out.queue(Print(format!(" error: {}", msg)));
     let _ = out.queue(ResetColor);
     crlf(out);

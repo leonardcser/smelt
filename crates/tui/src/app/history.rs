@@ -6,10 +6,7 @@ use std::collections::HashMap;
 impl App {
     pub(super) fn fork_session(&mut self) {
         if self.history.is_empty() {
-            self.screen.push(Block::Error {
-                message: "nothing to fork".into(),
-            });
-            self.screen.flush_blocks();
+            self.screen.notify_error("nothing to fork".into());
             return;
         }
         // Save current session first.
@@ -19,10 +16,7 @@ impl App {
         let forked = self.session.fork();
         self.session = forked;
         self.save_session();
-        self.screen.push(Block::Hint {
-            content: format!("forked from {original_id}"),
-        });
-        self.screen.flush_blocks();
+        self.screen.notify(format!("forked from {original_id}"));
     }
 
     pub fn reset_session(&mut self) {

@@ -17,8 +17,6 @@ pub fn accent_value() -> u8 {
     ACCENT_VALUE.load(Ordering::Relaxed)
 }
 
-pub const TOOL_OK: Color = Color::Green;
-pub const TOOL_ERR: Color = Color::Red;
 pub const TOOL_PENDING: Color = Color::DarkGrey;
 pub const APPLY: Color = Color::AnsiValue(141);
 pub const USER_BG: Color = Color::AnsiValue(236);
@@ -34,6 +32,7 @@ pub const PLAN: Color = Color::AnsiValue(79); // teal-green for plan mode
 pub const YOLO: Color = Color::AnsiValue(204); // rose for yolo mode
 pub const EXEC: Color = Color::AnsiValue(197); // red-pink for exec mode
 pub const SUCCESS: Color = Color::AnsiValue(114); // soft green for answered/success
+pub const ERROR: Color = Color::Red;
 
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[

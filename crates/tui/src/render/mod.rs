@@ -322,6 +322,14 @@ pub struct Screen {
     show_tool_in_dialog: bool,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
+    /// Ephemeral notification shown above the prompt, dismissed on any key.
+    notification: Option<Notification>,
+}
+
+/// A short ephemeral notification rendered above the prompt bar.
+pub struct Notification {
+    pub message: String,
+    pub is_error: bool,
 }
 
 /// State for an in-flight `/btw` side question.
@@ -362,6 +370,7 @@ impl Screen {
             show_speed: true,
             show_tool_in_dialog: false,
             btw: None,
+            notification: None,
         }
     }
 
@@ -421,6 +430,33 @@ impl Screen {
         } else {
             false
         }
+    }
+
+    pub fn notify(&mut self, message: String) {
+        self.notification = Some(Notification {
+            message,
+            is_error: false,
+        });
+        self.prompt.dirty = true;
+    }
+
+    pub fn notify_error(&mut self, message: String) {
+        self.notification = Some(Notification {
+            message,
+            is_error: true,
+        });
+        self.prompt.dirty = true;
+    }
+
+    pub fn dismiss_notification(&mut self) {
+        if self.notification.is_some() {
+            self.notification = None;
+            self.prompt.dirty = true;
+        }
+    }
+
+    pub fn has_notification(&self) -> bool {
+        self.notification.is_some()
     }
 
     pub fn set_show_speed(&mut self, show: bool) {
@@ -1163,7 +1199,6 @@ impl Screen {
         } else {
             0
         };
-
         let vi_normal = state.vim_mode() == Some(crate::vim::ViMode::Normal);
         let bar_color = if vi_normal {
             theme::accent()
@@ -1316,10 +1351,35 @@ impl Screen {
             .saturating_sub(scroll_offset)
             .min(content_rows.saturating_sub(1));
 
+        // If notification is active and input is empty, render it in the input area.
+        let show_notif = self.notification.is_some() && state.buf.is_empty();
+        if show_notif {
+            let notif = self.notification.as_ref().unwrap();
+            let _ = out.queue(Print(" "));
+            if notif.is_error {
+                let _ = out.queue(SetForegroundColor(theme::ERROR));
+            } else {
+                let _ = out.queue(SetAttribute(Attribute::Dim));
+            }
+            let msg: String = notif
+                .message
+                .chars()
+                .take(usable.saturating_sub(1))
+                .collect();
+            let _ = out.queue(Print(&msg));
+            if notif.is_error {
+                let _ = out.queue(ResetColor);
+            } else {
+                let _ = out.queue(SetAttribute(Attribute::Reset));
+            }
+            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            let _ = out.queue(Print("\r\n"));
+        }
+
         for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)
-            .take(content_rows)
+            .take(if show_notif { 0 } else { content_rows })
             .enumerate()
         {
             let abs_idx = scroll_offset + li;

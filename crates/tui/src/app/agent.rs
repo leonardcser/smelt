@@ -329,9 +329,7 @@ impl App {
                 }
                 self.history = messages;
                 self.save_session();
-                self.screen.push(Block::Text {
-                    content: "conversation compacted".into(),
-                });
+                self.screen.notify("conversation compacted".into());
                 self.screen.set_throbber(render::Throbber::Done);
                 SessionControl::Continue
             }
@@ -395,9 +393,7 @@ impl App {
                 }
                 self.history = messages;
                 self.save_session();
-                self.screen.push(Block::Text {
-                    content: "conversation compacted".into(),
-                });
+                self.screen.notify("conversation compacted".into());
                 self.screen.set_throbber(render::Throbber::Done);
             }
             EngineEvent::TitleGenerated { title } => {

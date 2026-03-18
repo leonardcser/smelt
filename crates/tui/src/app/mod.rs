@@ -360,10 +360,8 @@ impl App {
                 );
                 self.screen.mark_dirty();
             } else if let Some(reason) = classify_startup_command(trimmed) {
-                self.screen.push(Block::Error {
-                    message: format!("\"{}\" {}", trimmed, reason),
-                });
-                self.screen.flush_blocks();
+                self.screen
+                    .notify_error(format!("\"{}\" {}", trimmed, reason));
             } else {
                 self.screen.erase_prompt();
                 let content = Content::text(msg.clone());
@@ -494,10 +492,7 @@ impl App {
                                 }
                                 InputOutcome::Compact => {
                                     if self.history.is_empty() {
-                                        self.screen.push(Block::Error {
-                                            message: "nothing to compact".into(),
-                                        });
-                                        self.screen.flush_blocks();
+                                        self.screen.notify_error("nothing to compact".into());
                                     } else {
                                         self.compact_history();
                                     }

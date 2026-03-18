@@ -11,10 +11,7 @@ impl App {
             "/resume" => {
                 let entries = self.resume_entries();
                 if entries.is_empty() {
-                    self.screen.push(Block::Error {
-                        message: "no saved sessions".into(),
-                    });
-                    self.screen.flush_blocks();
+                    self.screen.notify_error("no saved sessions".into());
                     CommandAction::Continue
                 } else {
                     let cwd = std::env::current_dir()
@@ -40,10 +37,7 @@ impl App {
             }
             "/ps" => {
                 if self.engine.processes.list().is_empty() {
-                    self.screen.push(Block::Error {
-                        message: "no background processes".into(),
-                    });
-                    self.screen.flush_blocks();
+                    self.screen.notify_error("no background processes".into());
                     CommandAction::Continue
                 } else {
                     CommandAction::OpenDialog(Box::new(render::PsDialog::new(
@@ -93,10 +87,7 @@ impl App {
             _ if input.starts_with("/btw ") => {
                 let question = input[5..].trim().to_string();
                 if question.is_empty() {
-                    self.screen.push(Block::Error {
-                        message: "usage: /btw <question>".into(),
-                    });
-                    self.screen.flush_blocks();
+                    self.screen.notify_error("usage: /btw <question>".into());
                 } else {
                     self.start_btw(question.clone(), question, vec![]);
                 }
@@ -137,8 +128,7 @@ impl App {
 
         // Access control: some commands are blocked while running.
         if let Err(reason) = is_allowed_while_running(input) {
-            self.screen.push(Block::Error { message: reason });
-            self.screen.flush_blocks();
+            self.screen.notify_error(reason);
             return Some(EventOutcome::Noop);
         }
 
@@ -215,24 +205,16 @@ impl App {
     pub(super) fn export_to_clipboard(&mut self) {
         let text = self.format_conversation_text();
         if text.is_empty() {
-            self.screen.push(Block::Error {
-                message: "nothing to export".into(),
-            });
-            self.screen.flush_blocks();
+            self.screen.notify_error("nothing to export".into());
             return;
         }
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
             Ok(()) => {
-                self.screen.push(Block::Text {
-                    content: "conversation copied to clipboard".into(),
-                });
-                self.screen.flush_blocks();
+                self.screen
+                    .notify("conversation copied to clipboard".into());
             }
             Err(e) => {
-                self.screen.push(Block::Error {
-                    message: format!("clipboard error: {}", e),
-                });
-                self.screen.flush_blocks();
+                self.screen.notify_error(format!("clipboard error: {}", e));
             }
         }
     }

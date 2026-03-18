@@ -699,7 +699,7 @@ fn print_diff_lines(
             if let Some((ch, color)) = sign {
                 let _ = out.queue(SetBackgroundColor(bg.unwrap()));
                 if vi == 0 {
-                    let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                    let _ = out.queue(SetForegroundColor(color));
                     let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
                     let _ = out.queue(SetForegroundColor(color));
                     let _ = out.queue(Print(format!("{} ", ch)));
@@ -777,7 +777,7 @@ fn print_diff_lines_skip(
                 if let Some((ch, color)) = sign {
                     let _ = out.queue(SetBackgroundColor(bg.unwrap()));
                     if vi == 0 {
-                        let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                        let _ = out.queue(SetForegroundColor(color));
                         let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
                         let _ = out.queue(SetForegroundColor(color));
                         let _ = out.queue(Print(format!("{} ", ch)));
