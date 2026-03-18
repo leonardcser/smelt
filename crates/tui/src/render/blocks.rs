@@ -317,6 +317,9 @@ fn render_confirm_result(
             ConfirmChoice::AlwaysPattern(ref pat) => {
                 print_dim(out, &format!("always ({})", pat));
             }
+            ConfirmChoice::AlwaysDir(ref dir) => {
+                print_dim(out, &format!("always (dir: {})", dir));
+            }
             ConfirmChoice::No => {
                 let _ = out.queue(SetForegroundColor(theme::ERROR));
                 let _ = out.queue(Print("denied"));

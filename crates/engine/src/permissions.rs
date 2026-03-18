@@ -347,6 +347,37 @@ impl Permissions {
         }
         base
     }
+
+    /// Whether this tool call's base permission is Allow but was downgraded
+    /// to Ask solely because of paths outside the workspace.
+    pub fn was_downgraded(
+        &self,
+        mode: Mode,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+    ) -> bool {
+        let base = decide_base(self, mode, tool_name, args);
+        base == Decision::Allow
+            && self.restrict_to_workspace
+            && !self.workspace.as_os_str().is_empty()
+            && has_paths_outside_workspace(tool_name, args, &self.workspace)
+    }
+
+    /// Return paths from a tool call that fall outside the workspace.
+    /// Empty if `restrict_to_workspace` is off or no paths escape.
+    pub fn outside_workspace_paths(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+    ) -> Vec<String> {
+        if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
+            return vec![];
+        }
+        extract_tool_paths(tool_name, args)
+            .into_iter()
+            .filter(|p| !is_in_workspace(p, &self.workspace))
+            .collect()
+    }
 }
 
 const SHELL_OPERATORS: &[(&str, usize)] = &[

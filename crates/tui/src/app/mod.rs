@@ -21,8 +21,9 @@ use crossterm::{
     terminal, ExecutableCommand,
 };
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,10 @@ pub struct App {
     pub input: InputState,
     pub queued_messages: Vec<String>,
     pub auto_approved: HashMap<String, Vec<glob::Pattern>>,
+    /// Directories outside the workspace that have appeared in confirm dialogs.
+    pub seen_outside_dirs: HashSet<PathBuf>,
+    /// Directories the user has chosen to "always allow" — global across all tools.
+    pub auto_approved_dirs: Vec<PathBuf>,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
@@ -206,6 +211,7 @@ enum DeferredDialog {
         desc: String,
         args: HashMap<String, serde_json::Value>,
         approval_pattern: Option<String>,
+        outside_dir: Option<PathBuf>,
         summary: Option<String>,
         request_id: u64,
     },
@@ -298,6 +304,8 @@ impl App {
             input,
             queued_messages: Vec::new(),
             auto_approved: HashMap::new(),
+            seen_outside_dirs: HashSet::new(),
+            auto_approved_dirs: Vec::new(),
             session: session::Session::new(),
             shared_session,
             context_window: None,
@@ -530,6 +538,7 @@ impl App {
                             desc,
                             args,
                             approval_pattern,
+                            outside_dir,
                             summary,
                             request_id,
                         } => {
@@ -544,6 +553,10 @@ impl App {
                                 &desc,
                                 &args,
                                 approval_pattern.as_deref(),
+                                outside_dir
+                                    .as_ref()
+                                    .map(|d| d.to_string_lossy().into_owned())
+                                    .as_deref(),
                                 summary.as_deref(),
                                 request_id,
                             ));

@@ -211,6 +211,8 @@ pub enum ConfirmChoice {
     Always,
     /// Approve all future calls matching a specific pattern (e.g. domain).
     AlwaysPattern(String),
+    /// Approve all future tool calls targeting a specific directory (global).
+    AlwaysDir(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]

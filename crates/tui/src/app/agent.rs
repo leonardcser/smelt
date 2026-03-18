@@ -517,6 +517,7 @@ impl App {
             ConfirmChoice::Yes => "approved",
             ConfirmChoice::Always => "always",
             ConfirmChoice::AlwaysPattern(pat) => pat.as_str(),
+            ConfirmChoice::AlwaysDir(dir) => dir.as_str(),
             ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
@@ -557,6 +558,16 @@ impl App {
                         .or_default()
                         .push(compiled);
                 }
+                self.screen.set_active_status(ToolStatus::Pending);
+                self.engine.send(UiCommand::PermissionDecision {
+                    request_id,
+                    approved: true,
+                    message,
+                });
+                false
+            }
+            ConfirmChoice::AlwaysDir(ref dir) => {
+                self.auto_approved_dirs.push(std::path::PathBuf::from(dir));
                 self.screen.set_active_status(ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
@@ -672,6 +683,56 @@ impl App {
                     }
                 }
 
+                // Check directory-based auto-approvals (global across tools).
+                let outside_paths = self.permissions.outside_workspace_paths(&tool_name, &args);
+                if !outside_paths.is_empty()
+                    && outside_paths.iter().all(|p| {
+                        let dir = std::path::Path::new(p)
+                            .parent()
+                            .unwrap_or(std::path::Path::new(p));
+                        self.auto_approved_dirs.iter().any(|ad| dir.starts_with(ad))
+                    })
+                {
+                    self.engine.send(UiCommand::PermissionDecision {
+                        request_id,
+                        approved: true,
+                        message: None,
+                    });
+                    return LoopAction::Continue;
+                }
+
+                // For commands with paths outside the workspace, decide
+                // whether to offer command-based or directory-based "always
+                // allow".
+                //
+                // If the command was downgraded (base=Allow, demoted to Ask
+                // purely because of the path), always offer the directory
+                // option — the command itself is already trusted.
+                //
+                // If the command is genuinely Ask (e.g. rm), the first time
+                // show "always allow" (command), the second time show the
+                // directory option.
+                let downgraded = self
+                    .permissions
+                    .was_downgraded(self.mode, &tool_name, &args);
+                let outside_dir_option = if !outside_paths.is_empty() {
+                    let dir = std::path::Path::new(&outside_paths[0])
+                        .parent()
+                        .unwrap_or(std::path::Path::new(&outside_paths[0]))
+                        .to_path_buf();
+                    if downgraded || self.seen_outside_dirs.contains(&dir) {
+                        // Downgraded command or second+ encounter: directory option.
+                        self.seen_outside_dirs.insert(dir.clone());
+                        Some(dir)
+                    } else {
+                        // First time for a genuinely-Ask command: command option.
+                        self.seen_outside_dirs.insert(dir);
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 // If the user is actively typing, defer the dialog.
                 let recently_typed = last_keypress
                     .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
@@ -683,6 +744,7 @@ impl App {
                         desc,
                         args,
                         approval_pattern,
+                        outside_dir: outside_dir_option,
                         summary,
                         request_id,
                     });
@@ -704,6 +766,10 @@ impl App {
                     &desc,
                     &args,
                     approval_pattern.as_deref(),
+                    outside_dir_option
+                        .as_ref()
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .as_deref(),
                     summary.as_deref(),
                     request_id,
                 ));

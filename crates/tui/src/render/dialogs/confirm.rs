@@ -188,6 +188,7 @@ impl ConfirmDialog {
         desc: &str,
         args: &HashMap<String, serde_json::Value>,
         approval_pattern: Option<&str>,
+        outside_dir: Option<&str>,
         summary: Option<&str>,
         request_id: u64,
     ) -> Self {
@@ -197,7 +198,13 @@ impl ConfirmDialog {
             ("no".into(), ConfirmChoice::No),
         ];
         if !is_plan {
-            if let Some(pattern) = approval_pattern {
+            if let Some(dir) = outside_dir {
+                // Directory-based approval (second+ time seeing this dir).
+                options.push((
+                    format!("allow {dir}"),
+                    ConfirmChoice::AlwaysDir(dir.to_string()),
+                ));
+            } else if let Some(pattern) = approval_pattern {
                 let display = pattern.strip_suffix("/*").unwrap_or(pattern);
                 let display = display.split("://").nth(1).unwrap_or(display);
                 options.push((
