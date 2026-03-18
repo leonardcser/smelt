@@ -22,6 +22,9 @@ analysis, and assistance.
 - **4 modes** — Normal, Plan, Apply, Yolo with different permission defaults
 - **Vim mode** — full vi keybindings for the input editor
 - **Session management** — auto-save, resume, and fork conversations
+- **Task slug** — short label on the status bar showing what the agent is working
+  on, generated from the conversation
+- **Input prediction** — ghost text suggesting your next message after a turn
 - **Auto-compact** — LLM-powered conversation summarization to reduce token
   usage
 - **Reasoning effort** — configurable thinking depth (off/low/medium/high)
@@ -79,6 +82,8 @@ settings:
   vim_mode: false # vi keybindings (default: false)
   auto_compact: false # auto-summarize long conversations (default: false)
   show_speed: true # show tokens/sec (default: true)
+  input_prediction: true # ghost text next-message prediction (default: true)
+  task_slug: true # short task label on the status bar (default: true)
   restrict_to_workspace: true # downgrade Allow→Ask for out-of-workspace paths (default: true)
 
 # Visual appearance

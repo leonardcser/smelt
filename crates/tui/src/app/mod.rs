@@ -50,6 +50,8 @@ pub struct App {
     pub context_window: Option<u32>,
     pub auto_compact: bool,
     pub show_speed: bool,
+    pub show_prediction: bool,
+    pub show_slug: bool,
     pub restrict_to_workspace: bool,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
@@ -299,6 +301,8 @@ impl App {
             context_window: None,
             auto_compact,
             show_speed,
+            show_prediction: true,
+            show_slug: true,
             restrict_to_workspace,
             available_models,
             engine,
@@ -356,6 +360,8 @@ impl App {
                     self.input.vim_enabled(),
                     self.auto_compact,
                     self.show_speed,
+                    self.show_prediction,
+                    self.show_slug,
                     self.restrict_to_workspace,
                 );
                 self.screen.mark_dirty();

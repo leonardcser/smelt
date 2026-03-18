@@ -221,19 +221,23 @@ impl InputState {
         vim_enabled: bool,
         auto_compact: bool,
         show_speed: bool,
+        show_prediction: bool,
+        show_slug: bool,
         restrict_to_workspace: bool,
     ) {
         self.completer = None;
         self.menu = Some(MenuState {
             nav: Menu {
                 selected: 0,
-                len: 4,
+                len: 6,
                 select_on_enter: false,
             },
             kind: MenuKind::Settings {
                 vim_enabled,
                 auto_compact,
                 show_speed,
+                show_prediction,
+                show_slug,
                 restrict_to_workspace,
             },
         });
@@ -296,11 +300,15 @@ impl InputState {
                 vim_enabled,
                 auto_compact,
                 show_speed,
+                show_prediction,
+                show_slug,
                 restrict_to_workspace,
             } => MenuResult::Settings {
                 vim: vim_enabled,
                 auto_compact,
                 show_speed,
+                show_prediction,
+                show_slug,
                 restrict_to_workspace,
             },
             MenuKind::Model { .. } => MenuResult::Dismissed,
@@ -317,7 +325,7 @@ impl InputState {
     pub fn menu_rows(&self) -> usize {
         match &self.menu {
             Some(ms) => match &ms.kind {
-                MenuKind::Settings { .. } => 4,
+                MenuKind::Settings { .. } => 6,
                 MenuKind::Model { models } => (models.len() + 2).min(12),
                 MenuKind::Theme { presets, .. } => presets.len().min(14),
                 MenuKind::Stats { lines } => lines
@@ -733,6 +741,8 @@ impl InputState {
                     ref mut vim_enabled,
                     ref mut auto_compact,
                     ref mut show_speed,
+                    ref mut show_prediction,
+                    ref mut show_slug,
                     ref mut restrict_to_workspace,
                 } = ms.kind
                 {
@@ -740,7 +750,9 @@ impl InputState {
                         0 => *vim_enabled ^= true,
                         1 => *auto_compact ^= true,
                         2 => *show_speed ^= true,
-                        3 => *restrict_to_workspace ^= true,
+                        3 => *show_prediction ^= true,
+                        4 => *show_slug ^= true,
+                        5 => *restrict_to_workspace ^= true,
                         _ => {}
                     }
                 }

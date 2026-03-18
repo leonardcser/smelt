@@ -11,6 +11,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::{cursor, terminal, QueueableCommand};
 use std::collections::HashMap;
+use std::io::Write;
 
 /// Tool-specific scrollable preview content for the confirm dialog.
 enum ConfirmPreview {
@@ -89,17 +90,14 @@ impl ConfirmPreview {
             ConfirmPreview::FileContent { content, .. } => content.lines().count() as u16,
             ConfirmPreview::BashBody { full_command } => (full_command.lines().count() - 1) as u16,
             ConfirmPreview::PlanContent { summary } => {
-                let wrap_w = width.saturating_sub(1);
-                summary
-                    .lines()
-                    .map(|line| {
-                        if line.is_empty() {
-                            1
-                        } else {
-                            wrap_line(line, wrap_w).len() as u16
-                        }
-                    })
-                    .sum()
+                let mut buf = RenderOut::buffer();
+                crate::render::blocks::render_markdown_inner(
+                    &mut buf, summary, width, " ", true, None,
+                );
+                let _ = buf.flush();
+                let bytes = buf.into_bytes();
+                let rendered = String::from_utf8_lossy(&bytes);
+                rendered.split("\r\n").count().saturating_sub(1) as u16
             }
         }
     }
@@ -147,24 +145,26 @@ impl ConfirmPreview {
                 }
             }
             ConfirmPreview::PlanContent { summary } => {
-                let wrap_w = width.saturating_sub(1);
-                let mut wrapped: Vec<String> = Vec::new();
-                for line in summary.lines() {
-                    if line.is_empty() {
-                        wrapped.push(String::new());
-                    } else {
-                        wrapped.extend(wrap_line(line, wrap_w));
-                    }
-                }
+                let mut buf = RenderOut::buffer();
+                crate::render::blocks::render_markdown_inner(
+                    &mut buf, summary, width, " ", true, None,
+                );
+                let _ = buf.flush();
+                let bytes: Vec<u8> = buf.into_bytes();
+                let rendered = String::from_utf8_lossy(&bytes);
+                let lines: Vec<&str> = rendered.split("\r\n").collect();
                 let mut emitted = 0u16;
-                for (i, line) in wrapped.iter().enumerate() {
+                for (i, line) in lines.iter().enumerate() {
+                    if line.is_empty() && i == lines.len() - 1 {
+                        break; // skip trailing empty from split
+                    }
                     if (i as u16) < skip {
                         continue;
                     }
                     if emitted >= viewport {
                         break;
                     }
-                    let _ = out.queue(Print(format!(" {line}")));
+                    let _ = out.queue(Print(*line));
                     crlf(out);
                     emitted += 1;
                 }

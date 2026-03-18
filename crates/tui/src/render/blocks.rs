@@ -510,7 +510,7 @@ fn render_markdown_boxed(
     render_markdown_inner(out, content, width, bctx.left, dim, Some(bctx))
 }
 
-fn render_markdown_inner(
+pub(crate) fn render_markdown_inner(
     out: &mut RenderOut,
     content: &str,
     width: usize,
@@ -538,7 +538,7 @@ fn render_markdown_inner(
             if i < lines.len() {
                 i += 1;
             }
-            rows += render_code_block(out, code_lines, lang, width, dim, bctx);
+            rows += render_code_block(out, code_lines, lang, width, dim, bctx, indent);
             // Skip blank lines after code block — the border provides spacing.
             while i < lines.len() && lines[i].trim().is_empty() {
                 i += 1;
@@ -548,7 +548,7 @@ fn render_markdown_inner(
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
                 i += 1;
             }
-            rows += render_markdown_table(out, &lines[table_start..i], dim, bctx);
+            rows += render_markdown_table(out, &lines[table_start..i], dim, bctx, indent);
         } else {
             // Skip blank lines before a code fence — the border provides spacing.
             let is_blank = lines[i].trim().is_empty();

@@ -27,13 +27,14 @@ struct DiffLayout {
     max_content: usize,
 }
 
-pub(super) fn render_code_block(
+pub(crate) fn render_code_block(
     out: &mut RenderOut,
     lines: &[&str],
     lang: &str,
     width: usize,
     dim: bool,
     bctx: Option<&super::BoxContext>,
+    indent: &str,
 ) -> u16 {
     let ext = match lang {
         "" => "txt",
@@ -67,10 +68,18 @@ pub(super) fn render_code_block(
     let mut rows = 0u16;
     let mut h = HighlightLines::new(syntax, theme);
 
-    // Top border: lower one-eighth block in code block bg color
-    if let Some(b) = bctx {
-        b.print_left(out);
+    macro_rules! left {
+        ($out:expr) => {
+            if let Some(b) = bctx {
+                b.print_left($out);
+            } else if !indent.is_empty() {
+                let _ = $out.queue(Print(indent));
+            }
+        };
     }
+
+    // Top border: lower one-eighth block in code block bg color
+    left!(out);
     let _ = out.queue(SetForegroundColor(theme::USER_BG));
     let _ = out.queue(Print("▁".repeat(block_w)));
     let _ = out.queue(ResetColor);
@@ -81,9 +90,7 @@ pub(super) fn render_code_block(
     rows += 1;
 
     // Top padding
-    if let Some(b) = bctx {
-        b.print_left(out);
-    }
+    left!(out);
     let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
     let _ = out.queue(Print(" ".repeat(block_w)));
     let _ = out.queue(ResetColor);
@@ -101,9 +108,7 @@ pub(super) fn render_code_block(
             .unwrap_or_default();
         let visual_rows = split_regions_into_rows(&regions, text_w);
         for vrow in &visual_rows {
-            if let Some(b) = bctx {
-                b.print_left(out);
-            }
+            left!(out);
             let cols = print_split_regions(out, vrow, Some(theme::CODE_BLOCK_BG));
             let pad = block_w.saturating_sub(cols);
             if pad > 0 {
@@ -120,9 +125,7 @@ pub(super) fn render_code_block(
     }
 
     // Bottom padding
-    if let Some(b) = bctx {
-        b.print_left(out);
-    }
+    left!(out);
     let _ = out.queue(SetBackgroundColor(theme::CODE_BLOCK_BG));
     let _ = out.queue(Print(" ".repeat(block_w)));
     let _ = out.queue(ResetColor);
@@ -133,9 +136,7 @@ pub(super) fn render_code_block(
     rows += 1;
 
     // Bottom border: upper one-eighth block in code block bg color
-    if let Some(b) = bctx {
-        b.print_left(out);
-    }
+    left!(out);
     let _ = out.queue(SetForegroundColor(theme::USER_BG));
     let _ = out.queue(Print("▔".repeat(block_w)));
     let _ = out.queue(ResetColor);
@@ -1007,11 +1008,12 @@ fn strip_markdown_markers(text: &str) -> String {
     out
 }
 
-pub(super) fn render_markdown_table(
+pub(crate) fn render_markdown_table(
     out: &mut RenderOut,
     lines: &[&str],
     dim: bool,
     bctx: Option<&super::BoxContext>,
+    indent: &str,
 ) -> u16 {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
@@ -1135,6 +1137,8 @@ pub(super) fn render_markdown_table(
             for vline in 0..height {
                 if let Some(b) = bctx {
                     b.print_left(out);
+                } else if !indent.is_empty() {
+                    let _ = out.queue(Print(indent));
                 }
                 let _ = out.queue(Print(" "));
                 bar(out, dim);
@@ -1173,6 +1177,8 @@ pub(super) fn render_markdown_table(
         |out: &mut RenderOut, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
             if let Some(b) = bctx {
                 b.print_left(out);
+            } else if !indent.is_empty() {
+                let _ = out.queue(Print(indent));
             }
             let _ = out.queue(Print(" "));
             bar(out, dim);

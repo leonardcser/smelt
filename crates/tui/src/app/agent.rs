@@ -195,20 +195,21 @@ impl App {
             self.screen.set_throbber(render::Throbber::Done);
             // Fire async prediction for the user's next input.
             self.input_prediction = None;
-            // Only send the last assistant message, not the full history.
-            let last_assistant = self
-                .history
-                .iter()
-                .rev()
-                .find(|m| m.role == protocol::Role::Assistant)
-                .cloned();
-            if let Some(msg) = last_assistant {
-                self.engine.send(UiCommand::PredictInput {
-                    history: vec![msg],
-                    model: self.model.clone(),
-                    api_base: Some(self.api_base.clone()),
-                    api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
-                });
+            if self.show_prediction {
+                let last_assistant = self
+                    .history
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == protocol::Role::Assistant)
+                    .cloned();
+                if let Some(msg) = last_assistant {
+                    self.engine.send(UiCommand::PredictInput {
+                        history: vec![msg],
+                        model: self.model.clone(),
+                        api_base: Some(self.api_base.clone()),
+                        api_key: Some(std::env::var(&self.api_key_env).unwrap_or_default()),
+                    });
+                }
             }
         }
         self.save_session();

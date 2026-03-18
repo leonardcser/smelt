@@ -102,6 +102,8 @@ pub enum MenuKind {
         vim_enabled: bool,
         auto_compact: bool,
         show_speed: bool,
+        show_prediction: bool,
+        show_slug: bool,
         restrict_to_workspace: bool,
     },
     Model {
@@ -130,6 +132,8 @@ pub enum MenuResult {
         vim: bool,
         auto_compact: bool,
         show_speed: bool,
+        show_prediction: bool,
+        show_slug: bool,
         restrict_to_workspace: bool,
     },
     ModelSelect(String),

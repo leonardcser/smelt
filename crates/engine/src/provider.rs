@@ -441,21 +441,27 @@ impl Provider {
         model: &str,
         max_tokens: u32,
         temperature: f32,
+        multiline: bool,
     ) -> Result<String, String> {
-        let text = self
-            .complete_raw(serde_json::json!({
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "Reasoning: low"},
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stop": ["\n"],
-                "chat_template_kwargs": {"enable_thinking": false},
-            }))
-            .await?;
-        Ok(normalize_short(&text))
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "Reasoning: low"},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "chat_template_kwargs": {"enable_thinking": false},
+        });
+        if !multiline {
+            body["stop"] = serde_json::json!(["\n"]);
+        }
+        let text = self.complete_raw(body).await?;
+        if multiline {
+            Ok(text.trim().to_string())
+        } else {
+            Ok(normalize_short(&text))
+        }
     }
 
     pub async fn describe_command(&self, command: &str, model: &str) -> Result<String, String> {
@@ -463,7 +469,7 @@ impl Provider {
             "Describe what this shell command does in a short sentence (max 10 words). \
              Reply with only the description, no quotes.\n\n{command}"
         );
-        self.complete_short(&prompt, model, 128, 0.0).await
+        self.complete_short(&prompt, model, 128, 0.0, false).await
     }
 
     pub async fn extract_web_content(
@@ -506,12 +512,12 @@ impl Provider {
              Focus on the most recent topic/task, not earlier ones. \
              Reply with exactly two lines, no quotes:\n\
              title: <3-6 word title>\n\
-             slug: <2-4 lowercase words separated by dashes, like a git branch name>\n\n\
+             slug: <1-5 lowercase words separated by dashes, like a git branch name>\n\n\
              User messages (oldest to newest):\n{}",
             numbered.join("\n")
         );
 
-        let raw = self.complete_short(&prompt, model, 512, 0.2).await?;
+        let raw = self.complete_short(&prompt, model, 64, 0.2, true).await?;
         let (title, slug) = parse_title_and_slug(&raw);
 
         Ok((title, slug))
@@ -551,7 +557,7 @@ fn parse_title_and_slug(raw: &str) -> (String, String) {
     slug = slug
         .split('-')
         .filter(|w| !w.is_empty())
-        .take(4)
+        .take(5)
         .collect::<Vec<_>>()
         .join("-");
 

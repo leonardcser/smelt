@@ -122,6 +122,8 @@ impl App {
                         vim,
                         auto_compact,
                         show_speed,
+                        show_prediction,
+                        show_slug,
                         restrict_to_workspace,
                     } => {
                         self.input.set_vim_enabled(vim);
@@ -129,6 +131,9 @@ impl App {
                         self.auto_compact = auto_compact;
                         self.show_speed = show_speed;
                         self.screen.set_show_speed(show_speed);
+                        self.show_prediction = show_prediction;
+                        self.show_slug = show_slug;
+                        self.screen.set_show_slug(show_slug);
                         self.restrict_to_workspace = restrict_to_workspace;
                     }
                     MenuResult::ModelSelect(key) => {
@@ -153,6 +158,7 @@ impl App {
                     }
                     MenuResult::Stats | MenuResult::Dismissed => {}
                 }
+                self.input.restore_stash();
                 self.screen.mark_dirty();
                 false
             }
@@ -195,6 +201,10 @@ impl App {
                             }
                         }
                     }
+                }
+                // Restore stash unless a menu was opened (it will restore on menu close).
+                if self.input.menu_rows() == 0 {
+                    self.input.restore_stash();
                 }
                 false
             }
@@ -370,7 +380,6 @@ impl App {
         // Delegate to InputState::handle_event
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit { content, display } => {
-                self.input.restore_stash();
                 EventOutcome::Submit { content, display }
             }
             Action::MenuResult(result) => EventOutcome::MenuResult(result),

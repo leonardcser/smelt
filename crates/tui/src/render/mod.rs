@@ -46,6 +46,7 @@ pub struct FramePrompt<'a> {
 pub(super) struct RenderOut {
     pub out: Box<dyn Write>,
     pub row: Option<u16>,
+    capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl RenderOut {
@@ -55,16 +56,38 @@ impl RenderOut {
         Self {
             out: Box::new(BufWriter::with_capacity(1 << 16, io::stdout())),
             row: None,
+            capture: None,
         }
     }
 
     /// Create a render output that writes to an in-memory buffer.
-    #[cfg(test)]
     pub fn buffer() -> Self {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
         Self {
-            out: Box::new(Vec::<u8>::new()),
+            out: Box::new(SharedWriter(buf.clone())),
             row: None,
+            capture: Some(buf),
         }
+    }
+
+    /// Extract captured bytes (only valid after `buffer()`).
+    pub fn into_bytes(self) -> Vec<u8> {
+        drop(self.out);
+        self.capture
+            .and_then(|arc| std::sync::Arc::try_unwrap(arc).ok())
+            .and_then(|m| m.into_inner().ok())
+            .unwrap_or_default()
+    }
+}
+
+struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -368,6 +391,7 @@ pub struct Screen {
     sync_started: bool,
     running_procs: usize,
     show_speed: bool,
+    show_slug: bool,
     /// Whether to render the active tool above the dialog in content-only
     /// mode.  Set when tool + dialog fit on screen; cleared on dialog close.
     show_tool_in_dialog: bool,
@@ -421,6 +445,7 @@ impl Screen {
             sync_started: false,
             running_procs: 0,
             show_speed: true,
+            show_slug: true,
             show_tool_in_dialog: false,
             btw: None,
             notification: None,
@@ -515,6 +540,11 @@ impl Screen {
 
     pub fn set_show_speed(&mut self, show: bool) {
         self.show_speed = show;
+        self.prompt.dirty = true;
+    }
+
+    pub fn set_show_slug(&mut self, show: bool) {
+        self.show_slug = show;
         self.prompt.dirty = true;
     }
 
@@ -1278,6 +1308,7 @@ impl Screen {
         // Priorities: 0 = always, 1 = context tokens, 2 = model, 3 = tok/s
         let mut throbber_spans = self.working.throbber_spans(self.show_speed);
 
+        if self.show_slug {
         if let Some(ref label) = self.task_label {
             if !throbber_spans.is_empty() {
                 throbber_spans.push(BarSpan {
@@ -1295,6 +1326,7 @@ impl Screen {
                 attr: None,
                 priority: 1,
             });
+        }
         }
 
         let mut right_spans = Vec::new();
@@ -1747,22 +1779,29 @@ fn render_btw(
     // Body: response or spinner.
     match btw.response {
         Some(ref text) => {
-            let wrap_w = usable.saturating_sub(3);
+            let render_w = usable;
 
-            // Rebuild wrapped line cache on width change or first render.
-            if btw.wrapped.is_empty() || btw.wrap_width != wrap_w {
+            // Rebuild rendered line cache on width change or first render.
+            if btw.wrapped.is_empty() || btw.wrap_width != render_w {
                 btw.wrapped.clear();
-                for line in text.lines() {
-                    if line.is_empty() {
-                        btw.wrapped.push(String::new());
-                    } else {
-                        btw.wrapped.extend(wrap_line(line, wrap_w));
-                    }
+                let mut buf = RenderOut::buffer();
+                blocks::render_markdown_inner(
+                    &mut buf, text, render_w, "   ", true, None,
+                );
+                let _ = std::io::Write::flush(&mut buf);
+                let bytes = buf.into_bytes();
+                let rendered = String::from_utf8_lossy(&bytes);
+                for line in rendered.split("\r\n") {
+                    btw.wrapped.push(line.to_string());
+                }
+                // Remove trailing empty from split.
+                if btw.wrapped.last().is_some_and(|l| l.is_empty()) {
+                    btw.wrapped.pop();
                 }
                 if btw.wrapped.is_empty() {
                     btw.wrapped.push(String::new());
                 }
-                btw.wrap_width = wrap_w;
+                btw.wrap_width = render_w;
                 // Clamp scroll.
                 let max = btw.wrapped.len().saturating_sub(max_lines);
                 btw.scroll_offset = btw.scroll_offset.min(max);
@@ -1773,7 +1812,6 @@ fn render_btw(
             let can_scroll = total > max_lines;
 
             for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
-                let _ = out.queue(Print("   "));
                 let _ = out.queue(Print(line));
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
                 let _ = out.queue(Print("\r\n"));
@@ -2448,12 +2486,16 @@ fn draw_menu(
             vim_enabled,
             auto_compact,
             show_speed,
+            show_prediction,
+            show_slug,
             restrict_to_workspace,
         } => {
             let rows: &[(&str, bool)] = &[
                 ("vim mode", *vim_enabled),
                 ("auto compact", *auto_compact),
                 ("show speed", *show_speed),
+                ("input prediction", *show_prediction),
+                ("task slug", *show_slug),
                 ("restrict to workspace", *restrict_to_workspace),
             ];
             let col = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0) + 4;

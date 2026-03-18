@@ -67,6 +67,8 @@ impl App {
                     self.input.vim_enabled(),
                     self.auto_compact,
                     self.show_speed,
+                    self.show_prediction,
+                    self.show_slug,
                     self.restrict_to_workspace,
                 );
                 self.screen.mark_dirty();
