@@ -330,8 +330,8 @@ fn render_confirm_result(
             ConfirmChoice::Always => {
                 print_dim(out, "always");
             }
-            ConfirmChoice::AlwaysPattern(ref pat) => {
-                print_dim(out, &format!("always ({})", pat));
+            ConfirmChoice::AlwaysPatterns(ref pats) => {
+                print_dim(out, &format!("always ({})", pats.join(", ")));
             }
             ConfirmChoice::AlwaysDir(ref dir) => {
                 print_dim(out, &format!("always (dir: {})", dir));

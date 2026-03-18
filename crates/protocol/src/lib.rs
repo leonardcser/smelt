@@ -222,7 +222,7 @@ pub enum EngineEvent {
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
         confirm_message: String,
-        approval_pattern: Option<String>,
+        approval_patterns: Vec<String>,
         summary: Option<String>,
     },
 

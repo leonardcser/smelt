@@ -66,8 +66,8 @@ impl Tool for WebFetchTool {
         Some(url.to_string())
     }
 
-    fn approval_pattern(&self, args: &HashMap<String, Value>) -> Option<String> {
-        domain_pattern(&str_arg(args, "url"))
+    fn approval_patterns(&self, args: &HashMap<String, Value>) -> Vec<String> {
+        domain_pattern(&str_arg(args, "url")).into_iter().collect()
     }
 
     fn execute<'a>(

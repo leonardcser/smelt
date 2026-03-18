@@ -72,10 +72,10 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// Returns a glob pattern for session-level "always allow" approval.
-    /// For web tools this is a domain pattern like "*.github.com".
-    fn approval_pattern(&self, _args: &HashMap<String, Value>) -> Option<String> {
-        None
+    /// Returns glob patterns for session-level "always allow" approval.
+    /// Each pattern is matched independently against individual sub-commands.
+    fn approval_patterns(&self, _args: &HashMap<String, Value>) -> Vec<String> {
+        vec![]
     }
 }
 

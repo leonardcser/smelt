@@ -21,3 +21,4 @@ reqwest = { version = "0.13", features = ["json"] }
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 base64 = "0.22.1"
 unicode-width = "0.2.2"
+sha2 = "0.10.9"

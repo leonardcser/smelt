@@ -403,7 +403,7 @@ pub fn split_shell_commands_with_ops(cmd: &str) -> Vec<(String, Option<String>)>
 /// Split a command string on shell operators (&&, ||, ;, |, &, newline).
 /// Quote-aware: operators inside single or double quotes are ignored.
 /// Also extracts commands embedded in $(...), backticks, and (...) subshells.
-fn split_shell_commands(cmd: &str) -> Vec<String> {
+pub fn split_shell_commands(cmd: &str) -> Vec<String> {
     let mut result = split_impl(cmd).0;
     // Post-process: extract embedded commands from subshells and substitutions.
     let mut i = 0;

@@ -31,24 +31,20 @@ impl Tool for BashTool {
         Some(str_arg(args, "command"))
     }
 
-    fn approval_pattern(&self, args: &HashMap<String, Value>) -> Option<String> {
+    fn approval_patterns(&self, args: &HashMap<String, Value>) -> Vec<String> {
         let cmd = str_arg(args, "command");
-        let subcmds = crate::permissions::split_shell_commands_with_ops(&cmd);
-        let mut result = String::new();
-        for (subcmd, op) in &subcmds {
+        let subcmds = crate::permissions::split_shell_commands(&cmd);
+        let mut patterns = Vec::new();
+        for subcmd in &subcmds {
             let bin = subcmd.split_whitespace().next().unwrap_or("");
             if !bin.is_empty() {
-                if !result.is_empty() {
-                    result.push(' ');
+                let pat = format!("{bin} *");
+                if !patterns.contains(&pat) {
+                    patterns.push(pat);
                 }
-                result.push_str(bin);
-                result.push_str(" *");
-            }
-            if let Some(op) = op {
-                result.push_str(&format!(" {op}"));
             }
         }
-        Some(result)
+        patterns
     }
 
     fn execute<'a>(
@@ -181,68 +177,59 @@ async fn execute_streaming(
 mod tests {
     use super::*;
 
-    fn pattern(cmd: &str) -> String {
+    fn patterns(cmd: &str) -> Vec<String> {
         let tool = BashTool;
         let mut args = HashMap::new();
         args.insert("command".into(), Value::String(cmd.into()));
-        tool.approval_pattern(&args).unwrap()
+        tool.approval_patterns(&args)
     }
 
     #[test]
     fn simple_command() {
-        assert_eq!(pattern("cargo build"), "cargo *");
+        assert_eq!(patterns("cargo build"), vec!["cargo *"]);
     }
 
     #[test]
-    fn chain_and() {
-        assert_eq!(pattern("cargo fmt && cargo clippy"), "cargo * && cargo *");
+    fn chain_same_binary() {
+        // Deduplicated: both sub-commands use "cargo"
+        assert_eq!(patterns("cargo fmt && cargo clippy"), vec!["cargo *"]);
     }
 
     #[test]
-    fn chain_or() {
-        assert_eq!(pattern("make || make install"), "make * || make *");
-    }
-
-    #[test]
-    fn chain_semicolon() {
-        assert_eq!(pattern("cd /tmp; rm -rf foo"), "cd * ; rm *");
+    fn chain_different_binaries() {
+        assert_eq!(patterns("cd /tmp; rm -rf foo"), vec!["cd *", "rm *"]);
     }
 
     #[test]
     fn pipe() {
-        assert_eq!(pattern("cat file.txt | grep foo"), "cat * | grep *");
-    }
-
-    #[test]
-    fn ls_and_rm() {
-        assert_eq!(pattern("ls && rm README.md"), "ls * && rm *");
+        assert_eq!(patterns("cat file.txt | grep foo"), vec!["cat *", "grep *"]);
     }
 
     #[test]
     fn mixed() {
         assert_eq!(
-            pattern("cd /tmp && rm -rf * | grep err; echo done"),
-            "cd * && rm * | grep * ; echo *"
+            patterns("cd /tmp && rm -rf * | grep err; echo done"),
+            vec!["cd *", "rm *", "grep *", "echo *"]
         );
     }
 
     #[test]
     fn background_operator() {
-        assert_eq!(pattern("sleep 5 & echo done"), "sleep * & echo *");
+        assert_eq!(patterns("sleep 5 & echo done"), vec!["sleep *", "echo *"]);
     }
 
     #[test]
     fn quoted_operator_not_split() {
-        assert_eq!(pattern(r#"grep "&&" file.txt"#), "grep *");
+        assert_eq!(patterns(r#"grep "&&" file.txt"#), vec!["grep *"]);
     }
 
     #[test]
     fn empty_command() {
-        assert_eq!(pattern(""), "");
+        assert!(patterns("").is_empty());
     }
 
     #[test]
     fn only_whitespace() {
-        assert_eq!(pattern("   "), "");
+        assert!(patterns("   ").is_empty());
     }
 }

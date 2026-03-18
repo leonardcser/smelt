@@ -791,7 +791,7 @@ impl<'a> Turn<'a> {
                 let desc = tool
                     .needs_confirm(args)
                     .unwrap_or_else(|| tool_name.to_string());
-                let approval_pattern = tool.approval_pattern(args);
+                let approval_patterns = tool.approval_patterns(args);
 
                 let cmd_summary = if tool_name == "bash" {
                     let cmd = tools::str_arg(args, "command");
@@ -815,7 +815,7 @@ impl<'a> Turn<'a> {
                     tool_name: tool_name.to_string(),
                     args: args.clone(),
                     confirm_message: desc,
-                    approval_pattern,
+                    approval_patterns,
                     summary: cmd_summary,
                 });
 

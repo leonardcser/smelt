@@ -216,12 +216,18 @@ impl ConfirmDialog {
                     format!("allow {dir_str}"),
                     ConfirmChoice::AlwaysDir(dir_str.into_owned()),
                 ));
-            } else if let Some(ref pattern) = req.approval_pattern {
-                let display = pattern.strip_suffix("/*").unwrap_or(pattern);
-                let display = display.split("://").nth(1).unwrap_or(display);
+            } else if !req.approval_patterns.is_empty() {
+                let display: Vec<&str> = req
+                    .approval_patterns
+                    .iter()
+                    .map(|p| {
+                        let d = p.strip_suffix("/*").unwrap_or(p);
+                        d.split("://").nth(1).unwrap_or(d)
+                    })
+                    .collect();
                 options.push((
-                    format!("allow {display}"),
-                    ConfirmChoice::AlwaysPattern(pattern.to_string()),
+                    format!("allow {}", display.join(", ")),
+                    ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone()),
                 ));
             } else {
                 options.push(("always allow".into(), ConfirmChoice::Always));

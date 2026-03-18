@@ -325,14 +325,14 @@ impl App {
                 tool_name,
                 args,
                 confirm_message,
-                approval_pattern,
+                approval_patterns,
                 summary,
                 ..
             } => SessionControl::NeedsConfirm(ConfirmRequest {
                 tool_name,
                 desc: confirm_message,
                 args,
-                approval_pattern,
+                approval_patterns,
                 outside_dir: None,
                 summary,
                 request_id,
@@ -564,7 +564,7 @@ impl App {
         let label = match &choice {
             ConfirmChoice::Yes => "approved",
             ConfirmChoice::Always => "always",
-            ConfirmChoice::AlwaysPattern(pat) => pat.as_str(),
+            ConfirmChoice::AlwaysPatterns(ref pats) => pats.first().map(|s| s.as_str()).unwrap_or("pattern"),
             ConfirmChoice::AlwaysDir(dir) => dir.as_str(),
             ConfirmChoice::No => "denied",
         };
@@ -599,13 +599,15 @@ impl App {
                 });
                 false
             }
-            ConfirmChoice::AlwaysPattern(ref pattern) => {
-                if let Ok(compiled) = glob::Pattern::new(pattern) {
-                    self.auto_approved
-                        .entry(tool_name.to_string())
-                        .or_default()
-                        .push(compiled);
-                }
+            ConfirmChoice::AlwaysPatterns(ref patterns) => {
+                let compiled: Vec<glob::Pattern> = patterns
+                    .iter()
+                    .filter_map(|p| glob::Pattern::new(p).ok())
+                    .collect();
+                self.auto_approved
+                    .entry(tool_name.to_string())
+                    .or_default()
+                    .extend(compiled);
                 self.screen.set_active_status(ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
@@ -716,8 +718,17 @@ impl App {
                 }
 
                 // Check auto-approvals (doesn't need UI).
+                // Split compound commands into sub-commands and check each
+                // individually against the stored patterns.
                 if let Some(patterns) = self.auto_approved.get(&req.tool_name) {
-                    if patterns.is_empty() || patterns.iter().any(|p| p.matches(&req.desc)) {
+                    if patterns.is_empty() || {
+                        let subcmds =
+                            engine::permissions::split_shell_commands(&req.desc);
+                        !subcmds.is_empty()
+                            && subcmds
+                                .iter()
+                                .all(|sc| patterns.iter().any(|p| p.matches(sc)))
+                    } {
                         self.engine.send(UiCommand::PermissionDecision {
                             request_id: req.request_id,
                             approved: true,

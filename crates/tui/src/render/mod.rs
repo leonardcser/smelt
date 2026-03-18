@@ -178,7 +178,7 @@ pub struct ConfirmRequest {
     pub tool_name: String,
     pub desc: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub approval_pattern: Option<String>,
+    pub approval_patterns: Vec<String>,
     /// Set during dispatch when paths outside the workspace are detected.
     pub outside_dir: Option<std::path::PathBuf>,
     pub summary: Option<String>,
@@ -284,8 +284,8 @@ pub enum ConfirmChoice {
     Yes,
     No,
     Always,
-    /// Approve all future calls matching a specific pattern (e.g. domain).
-    AlwaysPattern(String),
+    /// Approve all future calls matching these patterns (e.g. "cargo *", "*.github.com").
+    AlwaysPatterns(Vec<String>),
     /// Approve all future tool calls targeting a specific directory (global).
     AlwaysDir(String),
 }
