@@ -113,10 +113,7 @@ impl App {
         {
             return None;
         }
-        if input.starts_with('/')
-            && !input.starts_with("/btw ")
-            && !crate::completer::Completer::is_command(input)
-        {
+        if input.starts_with('/') && !crate::completer::Completer::is_command(input) {
             return None;
         }
 

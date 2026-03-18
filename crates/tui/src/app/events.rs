@@ -162,47 +162,37 @@ impl App {
                 false
             }
             EventOutcome::Submit { content, display } => {
-                let text = content.text_content();
-                let has_images = content.image_count() > 0;
-                // Intercept /btw before process_input so we have the
-                // compact display string for the header.
-                if text.trim().starts_with("/btw ") {
-                    let question_full = text.trim()[5..].trim().to_string();
-                    let display_q = display
-                        .strip_prefix("/btw ")
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|| question_full.clone());
-                    if !question_full.is_empty() {
-                        let labels = content.image_labels();
-                        self.input_history.push(text.clone());
-                        self.start_btw(question_full, display_q, labels);
-                    }
-                } else if !text.is_empty() || has_images {
-                    self.screen.erase_prompt();
-                    let outcome = if has_images && text.trim().is_empty() {
-                        // Image-only submission — skip command processing.
-                        InputOutcome::StartAgent
-                    } else {
-                        self.process_input(&text)
-                    };
-                    match outcome {
-                        InputOutcome::StartAgent => {
-                            *agent = Some(self.begin_agent_turn(&display, content));
-                        }
-                        InputOutcome::CustomCommand(cmd) => {
-                            *agent = Some(self.begin_custom_command_turn(*cmd));
-                        }
-                        InputOutcome::Compact => {
-                            if self.history.is_empty() {
-                                self.screen.notify_error("nothing to compact".into());
-                            } else {
-                                self.compact_history();
+                if self.try_btw_submit(&content, &display) {
+                    // handled
+                } else {
+                    let text = content.text_content();
+                    let has_images = content.image_count() > 0;
+                    if !text.is_empty() || has_images {
+                        self.screen.erase_prompt();
+                        let outcome = if has_images && text.trim().is_empty() {
+                            InputOutcome::StartAgent
+                        } else {
+                            self.process_input(&text)
+                        };
+                        match outcome {
+                            InputOutcome::StartAgent => {
+                                *agent = Some(self.begin_agent_turn(&display, content));
                             }
-                        }
-                        InputOutcome::Continue => {}
-                        InputOutcome::Quit => return true,
-                        InputOutcome::OpenDialog(dlg) => {
-                            *active_dialog = Some(dlg);
+                            InputOutcome::CustomCommand(cmd) => {
+                                *agent = Some(self.begin_custom_command_turn(*cmd));
+                            }
+                            InputOutcome::Compact => {
+                                if self.history.is_empty() {
+                                    self.screen.notify_error("nothing to compact".into());
+                                } else {
+                                    self.compact_history();
+                                }
+                            }
+                            InputOutcome::Continue => {}
+                            InputOutcome::Quit => return true,
+                            InputOutcome::OpenDialog(dlg) => {
+                                *active_dialog = Some(dlg);
+                            }
                         }
                     }
                 }
@@ -224,39 +214,8 @@ impl App {
             return EventOutcome::Noop;
         }
 
-        // Dismiss notification on any keypress (key still passes through).
-        if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
-            self.screen.dismiss_notification();
-        }
-
-        // Handle btw block keys: scroll or dismiss.
-        if self.screen.has_btw() {
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = ev
-            {
-                match (code, modifiers) {
-                    (KeyCode::Esc, _)
-                    | (KeyCode::Char('q'), KeyModifiers::NONE)
-                    | (KeyCode::Char('c'), KeyModifiers::CONTROL)
-                    | (KeyCode::Enter, _) => {
-                        self.screen.dismiss_btw();
-                        return EventOutcome::Noop;
-                    }
-                    (KeyCode::Char('d'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
-                        self.screen.btw_scroll(10);
-                        return EventOutcome::Noop;
-                    }
-                    (KeyCode::Char('u'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
-                        self.screen.btw_scroll(-10);
-                        return EventOutcome::Noop;
-                    }
-                    _ => {
-                        // Ignore other keys while btw is open.
-                        return EventOutcome::Noop;
-                    }
-                }
-            }
+        if let Some(outcome) = self.handle_overlay_keys(&ev) {
+            return outcome;
         }
 
         // Ctrl+R: open history fuzzy search (not in vim normal mode).
@@ -439,38 +398,8 @@ impl App {
             return EventOutcome::Noop;
         }
 
-        // Dismiss notification on any keypress (key still passes through).
-        if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
-            self.screen.dismiss_notification();
-        }
-
-        // Handle btw block keys: scroll or dismiss.
-        if self.screen.has_btw() {
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = ev
-            {
-                match (code, modifiers) {
-                    (KeyCode::Esc, _)
-                    | (KeyCode::Char('q'), KeyModifiers::NONE)
-                    | (KeyCode::Char('c'), KeyModifiers::CONTROL)
-                    | (KeyCode::Enter, _) => {
-                        self.screen.dismiss_btw();
-                        return EventOutcome::Noop;
-                    }
-                    (KeyCode::Char('d'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
-                        self.screen.btw_scroll(10);
-                        return EventOutcome::Noop;
-                    }
-                    (KeyCode::Char('u'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
-                        self.screen.btw_scroll(-10);
-                        return EventOutcome::Noop;
-                    }
-                    _ => {
-                        return EventOutcome::Noop;
-                    }
-                }
-            }
+        if let Some(outcome) = self.handle_overlay_keys(&ev) {
+            return outcome;
         }
 
         // Track last keypress for deferring permission dialogs.
@@ -565,22 +494,11 @@ impl App {
         // Everything else → InputState::handle_event (type-ahead with history).
         match self.input.handle_event(ev, Some(&mut self.input_history)) {
             Action::Submit { content, display } => {
-                let text = content.text_content();
-                // Intercept /btw to use the compact display string.
-                if text.trim().starts_with("/btw ") {
-                    let question_full = text.trim()[5..].trim().to_string();
-                    let display_q = display
-                        .strip_prefix("/btw ")
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|| question_full.clone());
-                    if !question_full.is_empty() {
-                        let labels = content.image_labels();
-                        self.input_history.push(text.clone());
-                        self.start_btw(question_full, display_q, labels);
-                    }
+                if self.try_btw_submit(&content, &display) {
                     self.screen.mark_dirty();
                     return EventOutcome::Noop;
                 }
+                let text = content.text_content();
                 if let Some(outcome) = self.try_command_while_running(text.trim()) {
                     return outcome;
                 }
@@ -602,6 +520,68 @@ impl App {
             Action::MenuResult(_) | Action::Noop | Action::Resize { .. } => {}
         }
         EventOutcome::Noop
+    }
+
+    // ── Shared helpers ────────────────────────────────────────────────────
+
+    /// Handle overlay keys (notification dismiss + btw scroll/dismiss).
+    /// Returns `Some(EventOutcome)` if the event was consumed.
+    fn handle_overlay_keys(&mut self, ev: &Event) -> Option<EventOutcome> {
+        if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
+            self.screen.dismiss_notification();
+        }
+
+        if self.screen.has_btw() {
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = ev
+            {
+                match (*code, *modifiers) {
+                    (KeyCode::Esc, _)
+                    | (KeyCode::Char('q'), KeyModifiers::NONE)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                    | (KeyCode::Enter, _) => {
+                        self.screen.dismiss_btw();
+                        return Some(EventOutcome::Noop);
+                    }
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL) | (KeyCode::PageDown, _) => {
+                        self.screen.btw_scroll(10);
+                        return Some(EventOutcome::Noop);
+                    }
+                    (KeyCode::Char('u'), KeyModifiers::CONTROL) | (KeyCode::PageUp, _) => {
+                        self.screen.btw_scroll(-10);
+                        return Some(EventOutcome::Noop);
+                    }
+                    _ => {
+                        return Some(EventOutcome::Noop);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Try to handle a submitted input as a `/btw` command.
+    /// Returns `true` if it was handled.
+    fn try_btw_submit(&mut self, content: &Content, display: &str) -> bool {
+        let text = content.text_content();
+        let trimmed = text.trim();
+        if !trimmed.starts_with("/btw ") {
+            return false;
+        }
+        let question_full = trimmed[5..].trim().to_string();
+        if question_full.is_empty() {
+            return true; // handled (as no-op)
+        }
+        let display_q = display
+            .strip_prefix("/btw ")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| question_full.clone());
+        let labels = content.image_labels();
+        self.input_history.push(text);
+        self.start_btw(question_full, display_q, labels);
+        true
     }
 
     // ── Input processing (commands, settings, rewind, shell) ─────────────
@@ -628,9 +608,6 @@ impl App {
             CommandAction::Continue => {}
         }
         if trimmed.starts_with('/') {
-            if trimmed.starts_with("/btw ") {
-                return InputOutcome::Continue;
-            }
             if let Some(cmd) = crate::custom_commands::resolve(trimmed) {
                 return InputOutcome::CustomCommand(Box::new(cmd));
             }
