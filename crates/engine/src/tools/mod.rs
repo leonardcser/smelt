@@ -6,6 +6,7 @@ mod edit_file;
 mod exit_plan_mode;
 mod glob;
 mod grep;
+mod notebook;
 mod read_file;
 mod web_cache;
 mod web_fetch;
@@ -33,6 +34,7 @@ pub use edit_file::EditFileTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use notebook::NotebookEditTool;
 pub use read_file::ReadFileTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
@@ -130,6 +132,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
             .unwrap_or("")
             .to_string(),
         "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
+        "notebook_edit" => display_path(&str_arg(args, "notebook_path")),
         "glob" => str_arg(args, "pattern"),
         "grep" => {
             let pattern = str_arg(args, "pattern");
@@ -308,6 +311,9 @@ pub fn build_tools(processes: ProcessRegistry) -> ToolRegistry {
     r.register(Box::new(AskUserQuestionTool));
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(WebSearchTool));
+    r.register(Box::new(NotebookEditTool {
+        hashes: hashes.clone(),
+    }));
     r.register(Box::new(ReadProcessOutputTool {
         registry: processes.clone(),
     }));

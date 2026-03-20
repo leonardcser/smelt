@@ -1,5 +1,5 @@
 use super::{
-    hash_content, int_arg, str_arg, FileHashes, Tool, ToolContext, ToolFuture, ToolResult,
+    hash_content, int_arg, notebook, str_arg, FileHashes, Tool, ToolContext, ToolFuture, ToolResult,
 };
 use crate::image;
 use serde_json::Value;
@@ -63,6 +63,25 @@ impl ReadFileTool {
                     is_error: true,
                 },
             };
+        }
+
+        if notebook::is_notebook(&path) {
+            // Store hash for staleness detection before delegating
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(mut map) = self.hashes.lock() {
+                    map.insert(path.clone(), hash_content(&raw));
+                }
+            }
+            let offset = int_arg(args, "offset").max(1);
+            let limit = {
+                let l = int_arg(args, "limit");
+                if l > 0 {
+                    l
+                } else {
+                    2000
+                }
+            };
+            return notebook::read_notebook(&path, offset, limit);
         }
 
         let content = match std::fs::read_to_string(&path) {
