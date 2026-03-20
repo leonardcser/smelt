@@ -1738,7 +1738,16 @@ impl Screen {
         } else {
             top_row + pre_prompt_rows
         };
-        let text_row = prompt_start + 1 + extra_rows + cursor_line_visible as u16;
+        // When the prompt section overflows the viewport, some leading rows
+        // (stash/queued/btw) have scrolled off the top. Reduce extra_rows by
+        // the overflow so the cursor lands on the correct input row.
+        let overflow = if scrolled {
+            (new_rows + rows_below).saturating_sub(height)
+        } else {
+            0
+        };
+        let visible_extra = extra_rows.saturating_sub(overflow);
+        let text_row = prompt_start + 1 + visible_extra + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;
         let _ = out.queue(cursor::MoveTo(text_col, text_row));
 
