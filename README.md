@@ -55,7 +55,7 @@ providers:
     api_base: http://localhost:11434/v1
     models:
       - glm-5 # simple string form
-      - name: llama3.3:70b # object form with sampling overrides
+      - name: qwen3.5:27b # object form with sampling overrides
         temperature: 0.8
         top_p: 0.95
         top_k: 40
