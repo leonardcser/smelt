@@ -600,7 +600,8 @@ pub mod hints {
         ("ctrl+_", "undo"),
         ("ctrl+x ctrl+e", "edit in $EDITOR"),
         ("tab", "autocomplete / accept ghost text"),
-        ("esc  esc esc", "dismiss / cancel agent / rewind"),
+        ("esc", "dismiss / unqueue messages"),
+        ("esc esc", "cancel agent / compaction / rewind"),
     ];
 
     const HELP_VIM_OVERRIDES: &[(&str, &str)] = &[
