@@ -558,11 +558,13 @@ fn extract_embedded_commands(cmd: &str) -> Vec<String> {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
     let mut i = 0;
+    let mut in_dquote = false;
 
     while i < len {
         match bytes[i] {
-            // Single quotes are fully opaque — no expansions inside
-            b'\'' => {
+            // Single quotes are fully opaque — no expansions inside.
+            // Inside double quotes single quotes are literal, so skip this.
+            b'\'' if !in_dquote => {
                 i += 1;
                 while i < len && bytes[i] != b'\'' {
                     i += 1;
@@ -571,23 +573,27 @@ fn extract_embedded_commands(cmd: &str) -> Vec<String> {
                     i += 1;
                 }
             }
-            // Double quotes: bash expands $() and backticks inside them,
-            // so we scan through without skipping — fall through to default
+            // Toggle double-quote state. Bash expands $() and backticks
+            // inside double quotes, so we keep scanning — but plain (...)
+            // subshells are NOT expanded inside double quotes.
+            b'"' => {
+                in_dquote = !in_dquote;
+                i += 1;
+            }
             b'\\' if i + 1 < len => {
                 i += 2;
             }
-            // $( ... )
+            // $( ... ) — valid both inside and outside double quotes
             b'$' if i + 1 < len && bytes[i + 1] == b'(' => {
                 i += 2;
                 if let Some((inner, end)) = find_matching_paren(cmd, i) {
-                    // Recursively split the inner command
                     for sub in split_shell_commands(inner) {
                         extra.push(sub);
                     }
                     i = end + 1;
                 }
             }
-            // backtick substitution
+            // backtick substitution — valid both inside and outside double quotes
             b'`' => {
                 i += 1;
                 let start = i;
@@ -605,8 +611,8 @@ fn extract_embedded_commands(cmd: &str) -> Vec<String> {
                     i += 1;
                 }
             }
-            // ( ... ) subshell — but not preceded by $
-            b'(' => {
+            // ( ... ) subshell — only outside quotes
+            b'(' if !in_dquote => {
                 i += 1;
                 if let Some((inner, end)) = find_matching_paren(cmd, i) {
                     for sub in split_shell_commands(inner) {

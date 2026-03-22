@@ -233,4 +233,13 @@ mod tests {
     fn only_whitespace() {
         assert!(patterns("   ").is_empty());
     }
+
+    #[test]
+    fn parens_inside_double_quotes_not_extracted() {
+        // "fix(tui): ..." should NOT extract "tui" as a subshell command
+        assert_eq!(
+            patterns(r#"git commit -m "fix(tui): keep lists sized""#),
+            vec!["git *"]
+        );
+    }
 }
