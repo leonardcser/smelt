@@ -70,6 +70,9 @@ pub struct ThemeConfig {
 pub struct DefaultsConfig {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Available reasoning effort levels for the TUI cycle. Overrides
+    /// provider-type defaults. Values: off, low, medium, high, max.
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +94,8 @@ pub struct ResolvedModel {
     pub model_name: String,
     pub api_base: String,
     pub api_key_env: String,
+    /// Provider type from config: "openai", "anthropic", or "openai-compatible" (default).
+    pub provider_type: String,
     pub config: ModelConfig,
 }
 
@@ -132,6 +137,10 @@ impl Config {
                     model_name,
                     api_base: api_base.clone(),
                     api_key_env: api_key_env.clone(),
+                    provider_type: provider
+                        .provider_type
+                        .clone()
+                        .unwrap_or_else(|| "openai-compatible".to_string()),
                     config: model.clone(),
                 });
             }

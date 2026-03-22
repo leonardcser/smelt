@@ -338,6 +338,7 @@ pub enum UiCommand {
         model: String,
         api_base: String,
         api_key: String,
+        provider_type: String,
     },
 
     /// Compact conversation history.
@@ -582,16 +583,37 @@ pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    Max,
 }
 
 impl ReasoningEffort {
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Off => Self::Low,
-            Self::Low => Self::Medium,
-            Self::Medium => Self::High,
-            Self::High => Self::Off,
+    /// Parse from a string label.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "max" => Some(Self::Max),
+            _ => None,
         }
+    }
+
+    /// Cycle to the next effort level within the given allowed list.
+    pub fn cycle_within(self, allowed: &[Self]) -> Self {
+        if allowed.is_empty() {
+            return self;
+        }
+        let pos = allowed.iter().position(|&e| e == self);
+        match pos {
+            Some(i) => allowed[(i + 1) % allowed.len()],
+            None => allowed[0],
+        }
+    }
+
+    /// Parse a list of effort labels into enum values, skipping unknown ones.
+    pub fn parse_list(items: &[String]) -> Vec<Self> {
+        items.iter().filter_map(|s| Self::parse(s)).collect()
     }
 
     pub fn label(self) -> &'static str {
@@ -600,6 +622,7 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Max => "max",
         }
     }
 }

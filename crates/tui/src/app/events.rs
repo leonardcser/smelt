@@ -505,7 +505,7 @@ impl App {
                 self.screen.mark_dirty();
             }
             Action::CycleReasoning => {
-                self.set_reasoning_effort(self.reasoning_effort.cycle());
+                self.cycle_reasoning();
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
@@ -535,7 +535,7 @@ impl App {
                 EventOutcome::Redraw
             }
             Action::CycleReasoning => {
-                self.set_reasoning_effort(self.reasoning_effort.cycle());
+                self.cycle_reasoning();
                 EventOutcome::Redraw
             }
             Action::EditInEditor => {

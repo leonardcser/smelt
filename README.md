@@ -13,6 +13,26 @@ analysis, and assistance.
   <img src="assets/demo.gif" alt="demo" width="800">
 </p>
 
+## Quick Start
+
+```bash
+cargo install --git https://github.com/leonardcser/agent.git
+```
+
+**With Ollama (local):**
+
+```bash
+ollama pull qwen3.5:0.8b
+agent --model qwen3.5:0.8b --api-base http://localhost:11434/v1
+```
+
+**With OpenAI:**
+
+```bash
+read -s OPENAI_API_KEY && export OPENAI_API_KEY
+agent --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
+```
+
 ## Features
 
 - **Tool use** — file read/write/edit, glob, grep, bash execution, web fetch and
@@ -27,7 +47,7 @@ analysis, and assistance.
 - **Input prediction** — ghost text suggesting your next message after a turn
 - **Auto-compact** — LLM-powered conversation summarization to reduce token
   usage
-- **Reasoning effort** — configurable thinking depth (off/low/medium/high)
+- **Reasoning effort** — configurable thinking depth (off/low/medium/high/max)
 - **File references** — attach file contents with `@path` syntax
 - **Background processes** — async bash execution with completion tracking
 - **Custom commands** — user-defined slash commands via markdown files
@@ -48,10 +68,15 @@ cargo install --path .
 Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`)
 
 ```yaml
-# Providers: named connections to OpenAI-compatible APIs
+# Providers: named connections to LLM APIs
+#
+# Provider types:
+#   openai-compatible — /v1/chat/completions (Ollama, vLLM, SGLang, llama.cpp)
+#   openai            — /v1/responses (OpenAI, OpenRouter)
+#   anthropic         — /v1/chat/completions with thinking/adaptive (Anthropic)
 providers:
   - name: ollama
-    type: openai-compatible # only supported type
+    type: openai-compatible
     api_base: http://localhost:11434/v1
     models:
       - glm-5 # simple string form
@@ -62,12 +87,27 @@ providers:
         min_p: 0.01
         repeat_penalty: 1.0
 
-  - name: anthropic
-    type: openai-compatible
-    api_base: https://api.anthropic.com/v1
-    api_key_env: ANTHROPIC_API_KEY # env var containing the API key
+  - name: openai
+    type: openai
+    api_base: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
     models:
-      - claude-sonnet-4-20250514
+      - gpt-5.4
+
+  - name: anthropic
+    type: anthropic
+    api_base: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      - claude-sonnet-4-6
+
+  - name: openrouter
+    type: openai
+    api_base: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    models:
+      - anthropic/claude-sonnet-4-6
+      - openai/gpt-5.4
 
 # Startup defaults
 # These only apply on fresh startup when no explicit model is selected.
@@ -75,7 +115,7 @@ providers:
 # If defaults.model is NOT set, the last used model from the previous session is used.
 defaults:
   model: ollama/glm-5 # provider_name/model_name
-  reasoning_effort: "off" # "off" | "low" | "medium" | "high"
+  reasoning_effort: "off" # "off" | "low" | "medium" | "high" | "max"
 
 # Runtime settings (all toggleable via /settings)
 settings:
@@ -173,12 +213,23 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 ## CLI Flags
 
 ```
---model <MODEL>         Model to use (overrides config)
---api-base <URL>        API base URL (overrides config)
---api-key-env <VAR>     Env var for API key (overrides config)
---log-level <LEVEL>     trace | debug | info | warn | error (default: info)
---bench                 Print performance timing on exit
+--model <MODEL>                Model to use (overrides config)
+--api-base <URL>               API base URL (overrides config)
+--api-key-env <VAR>            Env var for API key (overrides config)
+--type <TYPE>                  Provider type: openai-compatible, openai, anthropic
+                               (auto-detected from --api-base when omitted)
+--reasoning-effort <EFFORT>    Reasoning effort (off/low/medium/high/max/xhigh or any
+                               provider-specific value)
+--reasoning-efforts <LEVELS>   Available reasoning levels for cycling
+                               (comma-separated: off,low,medium,high,max)
+--temperature <TEMP>           Sampling temperature
+--top-p <VALUE>                Top-p (nucleus) sampling
+--top-k <VALUE>                Top-k sampling
+--log-level <LEVEL>            trace | debug | info | warn | error (default: info)
+--bench                        Print performance timing on exit
 ```
+
+`--reasoning-effort` and `--reasoning-efforts` are mutually exclusive.
 
 CLI flags take precedence over config file values.
 
@@ -239,17 +290,17 @@ Press `Shift+Tab` to cycle through modes:
 
 When vim mode is enabled and in normal mode, these keys change behavior:
 
-| Key        | Vim normal mode  | Insert / non-vim      |
-| ---------- | ---------------- | --------------------- |
-| `Ctrl+U`   | Half-page up     | Kill to start of line |
-| `Ctrl+D`   | Half-page down   | Delete char forward   |
-| `Ctrl+J`   | History next     | Insert newline        |
-| `Ctrl+K`   | History prev     | Kill to end of line   |
-| `Ctrl+R`   | Redo             | History search        |
-| `Ctrl+A`   | No-op            | Start of line         |
-| `Ctrl+E`   | No-op            | End of line           |
-| `Ctrl+W`   | No-op            | Delete word backward  |
-| `Ctrl+Y`   | No-op            | Yank (paste)          |
+| Key      | Vim normal mode | Insert / non-vim      |
+| -------- | --------------- | --------------------- |
+| `Ctrl+U` | Half-page up    | Kill to start of line |
+| `Ctrl+D` | Half-page down  | Delete char forward   |
+| `Ctrl+J` | History next    | Insert newline        |
+| `Ctrl+K` | History prev    | Kill to end of line   |
+| `Ctrl+R` | Redo            | History search        |
+| `Ctrl+A` | No-op           | Start of line         |
+| `Ctrl+E` | No-op           | End of line           |
+| `Ctrl+W` | No-op           | Delete word backward  |
+| `Ctrl+Y` | No-op           | Yank (paste)          |
 
 All standard vim motions, operators (`d`, `c`, `y`), text objects (`iw`, `a(`…),
 find (`f`, `t`, `F`, `T`, `;`, `,`), and commands (`x`, `s`, `r`, `p`, `u`, `~`,
@@ -270,20 +321,20 @@ All dialogs share these common keys:
 
 Additional dialog-specific keys:
 
-| Dialog      | Key            | Action                       |
-| ----------- | -------------- | ---------------------------- |
-| Help        | `q` / `?`      | Close                        |
-| Confirm     | `Tab`          | Enter message editing mode   |
-| Question    | `Space`        | Toggle option (multi-select) |
-| Question    | `1`–`9`        | Select option by number      |
+| Dialog      | Key                   | Action                       |
+| ----------- | --------------------- | ---------------------------- |
+| Help        | `q` / `?`             | Close                        |
+| Confirm     | `Tab`                 | Enter message editing mode   |
+| Question    | `Space`               | Toggle option (multi-select) |
+| Question    | `1`–`9`               | Select option by number      |
 | Question    | `←` / `→` / `h` / `l` | Switch between questions     |
-| Permissions | `dd`           | Delete selected permission   |
-| Permissions | `⌫`            | Delete immediately           |
-| Permissions | `q`            | Close                        |
-| Ps          | `⌫`            | Kill selected process        |
-| Resume      | `dd` / `⌫`     | Delete session               |
-| Resume      | `Ctrl+W`       | Toggle workspace filter      |
-| Resume      | Type to search | Fuzzy filter sessions        |
+| Permissions | `dd`                  | Delete selected permission   |
+| Permissions | `⌫`                   | Delete immediately           |
+| Permissions | `q`                   | Close                        |
+| Ps          | `⌫`                   | Kill selected process        |
+| Resume      | `dd` / `⌫`            | Delete session               |
+| Resume      | `Ctrl+W`              | Toggle workspace filter      |
+| Resume      | Type to search        | Fuzzy filter sessions        |
 
 ### Completer
 

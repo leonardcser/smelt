@@ -40,6 +40,15 @@ impl ToolDefinition {
     }
 }
 
+/// Parsed fields from an API response: (content, reasoning, tool_calls, prompt_tokens, completion_tokens).
+type ParsedResponse = (
+    Option<String>,
+    Option<String>,
+    Vec<ToolCall>,
+    Option<u32>,
+    Option<u32>,
+);
+
 pub struct LLMResponse {
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
@@ -82,27 +91,194 @@ impl ProviderError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    OpenAi,
+    Anthropic,
+    Local,
+}
+
+impl ProviderKind {
+    /// Default reasoning effort levels available for cycling in the TUI.
+    pub fn default_reasoning_efforts(self) -> &'static [ReasoningEffort] {
+        match self {
+            Self::OpenAi | Self::Anthropic => &[
+                ReasoningEffort::Off,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Max,
+            ],
+            Self::Local => &[
+                ReasoningEffort::Off,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ],
+        }
+    }
+
+    /// Resolve from the config `type` string.
+    pub fn from_config(provider_type: &str) -> Self {
+        match provider_type {
+            "openai" => Self::OpenAi,
+            "anthropic" => Self::Anthropic,
+            _ => Self::Local,
+        }
+    }
+
+    /// Auto-detect from an API base URL. Used as a CLI convenience when
+    /// no explicit `--type` is provided.
+    pub fn detect_from_url(api_base: &str) -> Self {
+        if api_base.contains("api.openai.com") {
+            Self::OpenAi
+        } else if api_base.contains("api.anthropic.com") {
+            Self::Anthropic
+        } else {
+            Self::Local
+        }
+    }
+
+    /// Return the config type string for this kind.
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Local => "openai-compatible",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Provider {
     api_base: String,
     api_key: String,
     client: Client,
+    kind: ProviderKind,
     model_config: crate::config::ModelConfig,
+    /// Raw reasoning effort override. Sent directly to the API instead of
+    /// the `ReasoningEffort` enum label.
+    reasoning_effort_override: Option<String>,
 }
 
 impl Provider {
-    pub fn new(api_base: String, api_key: String, client: Client) -> Self {
+    pub fn new(api_base: String, api_key: String, provider_type: &str, client: Client) -> Self {
+        let api_base = api_base.trim_end_matches('/').to_string();
+        let kind = ProviderKind::from_config(provider_type);
         Self {
-            api_base: api_base.trim_end_matches('/').to_string(),
+            api_base,
             api_key,
             client,
+            kind,
             model_config: Default::default(),
+            reasoning_effort_override: None,
         }
+    }
+
+    pub fn with_reasoning_effort_override(mut self, raw: Option<String>) -> Self {
+        self.reasoning_effort_override = raw;
+        self
     }
 
     pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
         self
+    }
+
+    /// Cloud APIs reject unknown parameters with 400 errors. These getters
+    /// return `None` for params unsupported by the target provider.
+    fn top_k(&self) -> Option<u32> {
+        match self.kind {
+            ProviderKind::OpenAi => None,
+            _ => self.model_config.top_k,
+        }
+    }
+
+    fn min_p(&self) -> Option<f64> {
+        match self.kind {
+            ProviderKind::Local => self.model_config.min_p,
+            _ => None,
+        }
+    }
+
+    fn repeat_penalty(&self) -> Option<f64> {
+        match self.kind {
+            ProviderKind::Local => self.model_config.repeat_penalty,
+            _ => None,
+        }
+    }
+
+    /// OpenAI uses `max_completion_tokens`; other providers use `max_tokens`.
+    fn max_tokens_key(&self) -> &'static str {
+        match self.kind {
+            ProviderKind::OpenAi => "max_completion_tokens",
+            _ => "max_tokens",
+        }
+    }
+
+    /// Get the effort label to send to the API. Uses the raw override if set,
+    /// otherwise maps the enum value (`Max` → `xhigh` for OpenAI).
+    fn effort_label(&self, effort: ReasoningEffort) -> String {
+        if let Some(ref raw) = self.reasoning_effort_override {
+            return raw.clone();
+        }
+        if effort == ReasoningEffort::Max {
+            match self.kind {
+                ProviderKind::OpenAi => "xhigh".to_string(),
+                _ => "max".to_string(),
+            }
+        } else {
+            effort.label().to_string()
+        }
+    }
+
+    /// Insert provider-specific reasoning/thinking parameters into the body.
+    ///
+    /// - OpenAI: `reasoning_effort` (via Responses API)
+    /// - Anthropic (OpenAI compat): `thinking` (adaptive) + `output_config.effort`
+    /// - Local servers: `reasoning_effort` + `chat_template_kwargs`
+    fn insert_reasoning(
+        &self,
+        body: &mut HashMap<&str, serde_json::Value>,
+        effort: ReasoningEffort,
+    ) {
+        let label = self.effort_label(effort);
+        match self.kind {
+            ProviderKind::Anthropic => {
+                if effort != ReasoningEffort::Off {
+                    body.insert("thinking", serde_json::json!({"type": "adaptive"}));
+                    body.insert("output_config", serde_json::json!({"effort": label}));
+                }
+            }
+            ProviderKind::OpenAi => {
+                // Reasoning is handled via Responses API body, not here.
+            }
+            ProviderKind::Local => {
+                if effort != ReasoningEffort::Off {
+                    body.insert("reasoning_effort", serde_json::json!(label));
+                    body.insert(
+                        "chat_template_kwargs",
+                        serde_json::json!({
+                            "enable_thinking": true,
+                            "reasoning_effort": label,
+                        }),
+                    );
+                } else {
+                    body.insert(
+                        "chat_template_kwargs",
+                        serde_json::json!({"enable_thinking": false}),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Insert `chat_template_kwargs` with thinking disabled for utility
+    /// requests (title generation, web extraction, etc.).
+    fn insert_no_thinking(&self, body: &mut serde_json::Value) {
+        if self.kind == ProviderKind::Local {
+            body["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+        }
     }
 
     pub fn apply_model_overrides(&mut self, overrides: &protocol::ModelConfigOverrides) {
@@ -132,73 +308,29 @@ impl Provider {
         cancel: &CancellationToken,
         on_retry: Option<&(dyn Fn(Duration, u32) + Send + Sync)>,
     ) -> Result<LLMResponse, ProviderError> {
-        let mut body: HashMap<&str, serde_json::Value> = HashMap::new();
-        body.insert("model", serde_json::json!(model));
-        let api_messages: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|m| {
-                let mut v = serde_json::to_value(m).unwrap();
-                if let Some(obj) = v.as_object_mut() {
-                    // Strip is_error — not part of the OpenAI API spec.
-                    obj.remove("is_error");
-                    // Trim large tool outputs to keep API payloads lean.
-                    if m.role == Role::Tool {
-                        if let Some(s) = obj.get("content").and_then(|c| c.as_str()) {
-                            let trimmed = trim_tool_output(s, 200);
-                            obj.insert("content".into(), serde_json::json!(trimmed));
-                        }
-                    }
-                }
-                v
-            })
-            .collect();
-        body.insert("messages", serde_json::json!(api_messages));
-        if !tools.is_empty() {
-            body.insert("tools", serde_json::to_value(tools).unwrap());
-        }
-        if let Some(v) = self.model_config.temperature {
-            body.insert("temperature", serde_json::json!(v));
-        }
-        if let Some(v) = self.model_config.top_p {
-            body.insert("top_p", serde_json::json!(v));
-        }
-        if let Some(v) = self.model_config.top_k {
-            body.insert("top_k", serde_json::json!(v));
-        }
-        if let Some(v) = self.model_config.min_p {
-            body.insert("min_p", serde_json::json!(v));
-        }
-        if let Some(v) = self.model_config.repeat_penalty {
-            body.insert("repeat_penalty", serde_json::json!(v));
-        }
-        if reasoning_effort != ReasoningEffort::Off {
-            let effort = reasoning_effort.label();
-            body.insert("reasoning_effort", serde_json::json!(effort));
-            body.insert(
-                "chat_template_kwargs",
-                serde_json::json!({
-                    "enable_thinking": true,
-                    "reasoning_effort": effort,
-                }),
-            );
-        } else {
-            body.insert(
-                "chat_template_kwargs",
-                serde_json::json!({ "enable_thinking": false }),
-            );
-        }
+        let (url, body) = match self.kind {
+            ProviderKind::OpenAi => {
+                let url = format!("{}/responses", self.api_base);
+                let body = self.build_responses_body(messages, tools, model, reasoning_effort);
+                (url, body)
+            }
+            _ => {
+                let url = format!("{}/chat/completions", self.api_base);
+                let body = self.build_chat_body(messages, tools, model, reasoning_effort);
+                (url, serde_json::to_value(body).unwrap())
+            }
+        };
 
         log::entry(
             log::Level::Debug,
             "request",
             &serde_json::json!({
-                "model": model,
-                "messages": messages,
-                "tool_count": tools.len(),
+                "url": url,
+                "provider_kind": format!("{:?}", self.kind),
+                "body": body,
             }),
         );
 
-        let url = format!("{}/chat/completions", self.api_base);
         let max_retries = 9;
 
         for attempt in 0..=max_retries {
@@ -285,42 +417,21 @@ impl Provider {
                 .await
                 .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
-            let choice = data["choices"]
-                .get(0)
-                .ok_or_else(|| ProviderError::InvalidResponse("no choices in response".into()))?;
-            let msg = &choice["message"];
+            log::entry(
+                log::Level::Debug,
+                "raw_response",
+                &serde_json::json!({
+                    "url": url,
+                    "provider_kind": format!("{:?}", self.kind),
+                    "data": data,
+                }),
+            );
 
-            let mut content = msg["content"].as_str().map(|s| s.to_string());
-            let mut reasoning_content = msg["reasoning_content"]
-                .as_str()
-                .or_else(|| msg["reasoning"].as_str())
-                .map(|s| s.to_string());
-
-            let mut tool_calls: Vec<ToolCall> = if let Some(tcs) = msg.get("tool_calls") {
-                serde_json::from_value(tcs.clone()).unwrap_or_default()
-            } else {
-                vec![]
-            };
-
-            // Fallback: some backends (vLLM with reasoning+tool calling) may
-            // place <tool_call> markup inside `content` or `reasoning_content`
-            // instead of populating `tool_calls`. Extract them client-side.
-            if tool_calls.is_empty() {
-                let (from_content, cleaned_content) =
-                    extract_tool_calls_from_text(content.as_deref());
-                let (from_reasoning, cleaned_reasoning) =
-                    extract_tool_calls_from_text(reasoning_content.as_deref());
-                if !from_content.is_empty() || !from_reasoning.is_empty() {
-                    tool_calls = from_content.into_iter().chain(from_reasoning).collect();
-                    content = cleaned_content;
-                    reasoning_content = cleaned_reasoning;
-                }
-            }
-
-            let prompt_tokens = data["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
-            let completion_tokens = data["usage"]["completion_tokens"]
-                .as_u64()
-                .map(|n| n as u32);
+            let (content, reasoning_content, tool_calls, prompt_tokens, completion_tokens) =
+                match self.kind {
+                    ProviderKind::OpenAi => Self::parse_responses_response(&data)?,
+                    _ => Self::parse_chat_response(&data)?,
+                };
 
             let elapsed = request_start.elapsed();
             let tokens_per_sec = if let Some(completed) = completion_tokens {
@@ -338,6 +449,7 @@ impl Provider {
                 "response",
                 &serde_json::json!({
                     "content": content,
+                    "reasoning_content": reasoning_content,
                     "tool_calls": tool_calls,
                     "prompt_tokens": prompt_tokens,
                 }),
@@ -354,6 +466,283 @@ impl Provider {
         }
 
         Err(ProviderError::MaxRetries)
+    }
+
+    // ── Request body builders ───────────────────────────────────────────
+
+    /// Build a Chat Completions API request body (Anthropic compat, local servers).
+    fn build_chat_body(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model: &str,
+        reasoning_effort: ReasoningEffort,
+    ) -> HashMap<&str, serde_json::Value> {
+        let mut body: HashMap<&str, serde_json::Value> = HashMap::new();
+        body.insert("model", serde_json::json!(model));
+        let api_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.remove("is_error");
+                    if m.role == Role::Tool {
+                        if let Some(s) = obj.get("content").and_then(|c| c.as_str()) {
+                            let trimmed = trim_tool_output(s, 200);
+                            obj.insert("content".into(), serde_json::json!(trimmed));
+                        }
+                    }
+                }
+                v
+            })
+            .collect();
+        body.insert("messages", serde_json::json!(api_messages));
+        if !tools.is_empty() {
+            body.insert("tools", serde_json::to_value(tools).unwrap());
+        }
+        if let Some(v) = self.model_config.temperature {
+            body.insert("temperature", serde_json::json!(v));
+        }
+        if let Some(v) = self.model_config.top_p {
+            body.insert("top_p", serde_json::json!(v));
+        }
+        if let Some(v) = self.top_k() {
+            body.insert("top_k", serde_json::json!(v));
+        }
+        if let Some(v) = self.min_p() {
+            body.insert("min_p", serde_json::json!(v));
+        }
+        if let Some(v) = self.repeat_penalty() {
+            body.insert("repeat_penalty", serde_json::json!(v));
+        }
+        self.insert_reasoning(&mut body, reasoning_effort);
+        body
+    }
+
+    /// Build an OpenAI Responses API request body.
+    fn build_responses_body(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model: &str,
+        reasoning_effort: ReasoningEffort,
+    ) -> serde_json::Value {
+        // Convert messages to Responses API input items.
+        let mut input = Vec::new();
+        for m in messages {
+            match m.role {
+                Role::System => {
+                    // System messages become instructions; handled below via
+                    // the first system message. If there are multiple, append
+                    // them as easy_input_message items with "developer" role.
+                    input.push(serde_json::json!({
+                        "role": "developer",
+                        "content": m.content.as_ref().map(|c| c.as_text()).unwrap_or_default(),
+                    }));
+                }
+                Role::User => {
+                    let content_val = match &m.content {
+                        Some(Content::Text(t)) => serde_json::json!(t),
+                        Some(Content::Parts(parts)) => {
+                            let items: Vec<serde_json::Value> = parts
+                                .iter()
+                                .map(|p| match p {
+                                    protocol::ContentPart::Text { text } => {
+                                        serde_json::json!({"type": "input_text", "text": text})
+                                    }
+                                    protocol::ContentPart::ImageUrl { url, .. } => {
+                                        serde_json::json!({"type": "input_image", "image_url": url})
+                                    }
+                                })
+                                .collect();
+                            serde_json::json!(items)
+                        }
+                        None => serde_json::json!(""),
+                    };
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": content_val,
+                    }));
+                }
+                Role::Assistant => {
+                    // Assistant messages may contain text and/or tool calls.
+                    if let Some(content) = &m.content {
+                        input.push(serde_json::json!({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content.as_text()}],
+                        }));
+                    }
+                    if let Some(tcs) = &m.tool_calls {
+                        for tc in tcs {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": tc.id,
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }));
+                        }
+                    }
+                }
+                Role::Tool => {
+                    let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
+                    let trimmed = trim_tool_output(output, 200);
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": m.tool_call_id.as_deref().unwrap_or(""),
+                        "output": trimmed,
+                    }));
+                }
+            }
+        }
+
+        // Convert tools to Responses API format (flattened).
+        let api_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "name": t.function.name,
+                    "description": t.function.description,
+                    "parameters": t.function.parameters,
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "input": input,
+        });
+
+        if !api_tools.is_empty() {
+            body["tools"] = serde_json::json!(api_tools);
+        }
+        if let Some(v) = self.model_config.temperature {
+            body["temperature"] = serde_json::json!(v);
+        }
+        if let Some(v) = self.model_config.top_p {
+            body["top_p"] = serde_json::json!(v);
+        }
+        if reasoning_effort != ReasoningEffort::Off {
+            body["reasoning"] = serde_json::json!({
+                "effort": self.effort_label(reasoning_effort),
+                "summary": "auto",
+            });
+        }
+
+        body
+    }
+
+    // ── Response parsers ────────────────────────────────────────────────
+
+    /// Parse a Chat Completions API response.
+    fn parse_chat_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
+        let choice = data["choices"]
+            .get(0)
+            .ok_or_else(|| ProviderError::InvalidResponse("no choices in response".into()))?;
+        let msg = &choice["message"];
+
+        let mut content = msg["content"].as_str().map(|s| s.to_string());
+        let mut reasoning_content = msg["reasoning_content"]
+            .as_str()
+            .or_else(|| msg["reasoning"].as_str())
+            .map(|s| s.to_string());
+
+        let mut tool_calls: Vec<ToolCall> = if let Some(tcs) = msg.get("tool_calls") {
+            serde_json::from_value(tcs.clone()).unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        // Fallback: some backends (vLLM with reasoning+tool calling) may
+        // place <tool_call> markup inside `content` or `reasoning_content`
+        // instead of populating `tool_calls`. Extract them client-side.
+        if tool_calls.is_empty() {
+            let (from_content, cleaned_content) = extract_tool_calls_from_text(content.as_deref());
+            let (from_reasoning, cleaned_reasoning) =
+                extract_tool_calls_from_text(reasoning_content.as_deref());
+            if !from_content.is_empty() || !from_reasoning.is_empty() {
+                tool_calls = from_content.into_iter().chain(from_reasoning).collect();
+                content = cleaned_content;
+                reasoning_content = cleaned_reasoning;
+            }
+        }
+
+        let prompt_tokens = data["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
+        let completion_tokens = data["usage"]["completion_tokens"]
+            .as_u64()
+            .map(|n| n as u32);
+
+        Ok((
+            content,
+            reasoning_content,
+            tool_calls,
+            prompt_tokens,
+            completion_tokens,
+        ))
+    }
+
+    /// Parse an OpenAI Responses API response.
+    fn parse_responses_response(data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
+        let output = data["output"]
+            .as_array()
+            .ok_or_else(|| ProviderError::InvalidResponse("no output in response".into()))?;
+
+        let mut content: Option<String> = None;
+        let mut reasoning_content: Option<String> = None;
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+        for item in output {
+            match item["type"].as_str() {
+                Some("message") => {
+                    if let Some(parts) = item["content"].as_array() {
+                        for part in parts {
+                            if part["type"].as_str() == Some("output_text") {
+                                let text = part["text"].as_str().unwrap_or_default();
+                                match &mut content {
+                                    Some(c) => c.push_str(text),
+                                    None => content = Some(text.to_string()),
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let call_id = item["call_id"].as_str().unwrap_or_default().to_string();
+                    let name = item["name"].as_str().unwrap_or_default().to_string();
+                    let arguments = item["arguments"].as_str().unwrap_or("{}").to_string();
+                    tool_calls.push(ToolCall::new(call_id, FunctionCall { name, arguments }));
+                }
+                Some("reasoning") => {
+                    // Try summary first (requires reasoning.summary in request).
+                    let mut texts: Vec<&str> = Vec::new();
+                    if let Some(summaries) = item["summary"].as_array() {
+                        texts.extend(summaries.iter().filter_map(|s| s["text"].as_str()));
+                    }
+                    // Fall back to content (reasoning_text items).
+                    if texts.is_empty() {
+                        if let Some(parts) = item["content"].as_array() {
+                            texts.extend(parts.iter().filter_map(|p| p["text"].as_str()));
+                        }
+                    }
+                    if !texts.is_empty() {
+                        reasoning_content = Some(texts.join("\n"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let prompt_tokens = data["usage"]["input_tokens"].as_u64().map(|n| n as u32);
+        let completion_tokens = data["usage"]["output_tokens"].as_u64().map(|n| n as u32);
+
+        Ok((
+            content,
+            reasoning_content,
+            tool_calls,
+            prompt_tokens,
+            completion_tokens,
+        ))
     }
 
     /// Fetch the context window size for `model` from the /v1/models endpoint.
@@ -492,10 +881,10 @@ impl Provider {
                 {"role": "system", "content": "Reasoning: low"},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": max_tokens,
             "temperature": temperature,
-            "chat_template_kwargs": {"enable_thinking": false},
         });
+        body[self.max_tokens_key()] = serde_json::json!(max_tokens);
+        self.insert_no_thinking(&mut body);
         if !multiline {
             body["stop"] = serde_json::json!(["\n"]);
         }
@@ -513,7 +902,7 @@ impl Provider {
         prompt: &str,
         model: &str,
     ) -> Result<String, String> {
-        self.complete_raw(serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": [
                 {
@@ -525,11 +914,11 @@ impl Provider {
                     "content": format!("<content>\n{content}\n</content>\n\n{prompt}"),
                 },
             ],
-            "max_tokens": 4096,
             "temperature": 0.0,
-            "chat_template_kwargs": {"enable_thinking": false},
-        }))
-        .await
+        });
+        body[self.max_tokens_key()] = serde_json::json!(4096);
+        self.insert_no_thinking(&mut body);
+        self.complete_raw(body).await
     }
 
     pub async fn complete_title(

@@ -21,7 +21,7 @@ fn next_request_id() -> u64 {
 
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
 pub async fn engine_task(
-    config: EngineConfig,
+    mut config: EngineConfig,
     registry: ToolRegistry,
     processes: tools::ProcessRegistry,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
@@ -108,6 +108,9 @@ pub async fn engine_task(
                         predict_cancel.cancel();
                         predict_cancel = crate::cancel::CancellationToken::new();
                         spawn_predict_request(&config, &client, &model, history, api_base, api_key, &event_tx, predict_cancel.clone());
+                    }
+                    UiCommand::SetModel { provider_type, .. } => {
+                        config.provider_type = provider_type;
                     }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
@@ -301,12 +304,7 @@ fn spawn_predict_request(
 }
 
 fn build_provider(config: &EngineConfig, client: &reqwest::Client) -> Provider {
-    Provider::new(
-        config.api_base.clone(),
-        config.api_key.clone(),
-        client.clone(),
-    )
-    .with_model_config(config.model_config.clone())
+    build_provider_with_overrides(config, client, None, None)
 }
 
 fn build_provider_with_overrides(
@@ -318,9 +316,11 @@ fn build_provider_with_overrides(
     Provider::new(
         api_base.unwrap_or(&config.api_base).to_string(),
         api_key.unwrap_or(&config.api_key).to_string(),
+        &config.provider_type,
         client.clone(),
     )
     .with_model_config(config.model_config.clone())
+    .with_reasoning_effort_override(config.reasoning_effort_override.clone())
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -381,10 +381,17 @@ impl<'a> Turn<'a> {
         }
     }
 
-    fn apply_model_change(&mut self, model: String, api_base: String, api_key: String) {
+    fn apply_model_change(
+        &mut self,
+        model: String,
+        api_base: String,
+        api_key: String,
+        provider_type: String,
+    ) {
         self.model = model;
-        self.provider = Provider::new(api_base, api_key, self.http_client.clone())
-            .with_model_config(self.config.model_config.clone());
+        self.provider = Provider::new(api_base, api_key, &provider_type, self.http_client.clone())
+            .with_model_config(self.config.model_config.clone())
+            .with_reasoning_effort_override(self.config.reasoning_effort_override.clone());
     }
 
     /// Handle a command that arrived during a turn but isn't turn-specific.
@@ -672,8 +679,9 @@ impl<'a> Turn<'a> {
                     model,
                     api_base,
                     api_key,
+                    provider_type,
                 }) => {
-                    self.apply_model_change(model, api_base, api_key);
+                    self.apply_model_change(model, api_base, api_key, provider_type);
                 }
                 Ok(UiCommand::Cancel) => {
                     self.cancel.cancel();
@@ -693,7 +701,7 @@ impl<'a> Turn<'a> {
     ) -> Result<crate::provider::LLMResponse, ProviderError> {
         // The chat future borrows self.provider and self.model, so model
         // changes received mid-request are deferred until the future resolves.
-        let mut pending_model: Option<(String, String, String)> = None;
+        let mut pending_model: Option<(String, String, String, String)> = None;
 
         let result = {
             let on_retry = |delay: std::time::Duration, attempt: u32| {
@@ -726,8 +734,8 @@ impl<'a> Turn<'a> {
                         }
                         UiCommand::SetMode { mode } => self.mode = mode,
                         UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
-                        UiCommand::SetModel { model, api_base, api_key } => {
-                            pending_model = Some((model, api_base, api_key));
+                        UiCommand::SetModel { model, api_base, api_key, provider_type } => {
+                            pending_model = Some((model, api_base, api_key, provider_type));
                         }
                         other => { self.handle_background_cmd(other); }
                     },
@@ -735,8 +743,8 @@ impl<'a> Turn<'a> {
             }
         };
 
-        if let Some((model, api_base, api_key)) = pending_model {
-            self.apply_model_change(model, api_base, api_key);
+        if let Some((model, api_base, api_key, provider_type)) = pending_model {
+            self.apply_model_change(model, api_base, api_key, provider_type);
         }
         result
     }
@@ -834,7 +842,8 @@ impl<'a> Turn<'a> {
                     model,
                     api_base,
                     api_key,
-                }) => self.apply_model_change(model, api_base, api_key),
+                    provider_type,
+                }) => self.apply_model_change(model, api_base, api_key, provider_type),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     return (false, None);
@@ -861,7 +870,8 @@ impl<'a> Turn<'a> {
                     model,
                     api_base,
                     api_key,
-                }) => self.apply_model_change(model, api_base, api_key),
+                    provider_type,
+                }) => self.apply_model_change(model, api_base, api_key, provider_type),
                 Some(UiCommand::Cancel) => {
                     self.cancel.cancel();
                     return None;

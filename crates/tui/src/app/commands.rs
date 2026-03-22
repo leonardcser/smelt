@@ -286,12 +286,14 @@ impl App {
         self.model = resolved.model_name.clone();
         self.api_base = resolved.api_base.clone();
         self.api_key_env = resolved.api_key_env.clone();
+        self.provider_type = resolved.provider_type.clone();
         self.screen.set_model_label(self.model.clone());
         state::set_selected_model(key.to_string());
         self.engine.send(UiCommand::SetModel {
             model: self.model.clone(),
             api_base: self.api_base.clone(),
             api_key: std::env::var(&self.api_key_env).unwrap_or_default(),
+            provider_type: self.provider_type.clone(),
         });
         true
     }
@@ -318,6 +320,13 @@ impl App {
         state::set_mode(self.mode);
         self.engine.send(UiCommand::SetMode { mode: self.mode });
         self.screen.mark_dirty();
+    }
+
+    pub(super) fn cycle_reasoning(&mut self) {
+        if self.reasoning_effort_override.is_none() {
+            let next = self.reasoning_effort.cycle_within(&self.reasoning_efforts);
+            self.set_reasoning_effort(next);
+        }
     }
 
     pub(super) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {

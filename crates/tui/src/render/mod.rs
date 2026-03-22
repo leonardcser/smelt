@@ -171,6 +171,7 @@ fn reasoning_color(effort: protocol::ReasoningEffort) -> Color {
         protocol::ReasoningEffort::Low => theme::REASON_LOW,
         protocol::ReasoningEffort::Medium => theme::REASON_MED,
         protocol::ReasoningEffort::High => theme::REASON_HIGH,
+        protocol::ReasoningEffort::Max => theme::REASON_MAX,
     }
 }
 

@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 pub use config::ModelConfig;
 pub use paths::{cache_dir, config_dir, home_dir, state_dir};
 pub use permissions::Permissions;
-pub use provider::Provider;
+pub use provider::{Provider, ProviderKind};
 
 /// Assemble the system prompt from the base template, mode overlay, cwd, and
 /// optional extra instructions (e.g. from AGENTS.md files).
@@ -52,6 +52,11 @@ pub fn build_system_prompt(
 pub struct EngineConfig {
     pub api_base: String,
     pub api_key: String,
+    /// Provider type: "openai", "anthropic", or "openai-compatible".
+    pub provider_type: String,
+    /// Raw reasoning effort string override. When set, sent directly to the
+    /// API instead of using the `ReasoningEffort` enum label.
+    pub reasoning_effort_override: Option<String>,
     pub model_config: ModelConfig,
     pub instructions: Option<String>,
     pub cwd: PathBuf,

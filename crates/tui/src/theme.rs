@@ -56,6 +56,7 @@ pub const REASON_OFF: Color = Color::DarkGrey; // dim
 pub const REASON_LOW: Color = Color::AnsiValue(75); // soft blue
 pub const REASON_MED: Color = Color::AnsiValue(214); // warm amber
 pub const REASON_HIGH: Color = Color::AnsiValue(203); // hot red-orange
+pub const REASON_MAX: Color = Color::AnsiValue(196); // bright red
 pub const PLAN: Color = Color::AnsiValue(79); // teal-green for plan mode
 pub const YOLO: Color = Color::AnsiValue(204); // rose for yolo mode
 pub const EXEC: Color = Color::AnsiValue(197); // red-pink for exec mode

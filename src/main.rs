@@ -12,6 +12,12 @@ struct Args {
     api_base: Option<String>,
     #[arg(long)]
     api_key_env: Option<String>,
+    #[arg(
+        long,
+        value_name = "TYPE",
+        help = "Provider type: openai-compatible, openai, anthropic"
+    )]
+    r#type: Option<String>,
     #[arg(long)]
     model: Option<String>,
     #[arg(
@@ -20,6 +26,25 @@ struct Args {
         help = "Agent mode: normal, plan, apply, yolo"
     )]
     mode: Option<String>,
+    #[arg(
+        long,
+        value_name = "EFFORT",
+        help = "Reasoning effort (off/low/medium/high/max/xhigh or any provider-specific value)"
+    )]
+    reasoning_effort: Option<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "LEVELS",
+        help = "Available reasoning levels for cycling (comma-separated: off,low,medium,high,max)"
+    )]
+    reasoning_efforts: Option<Vec<String>>,
+    #[arg(long, value_name = "TEMP", help = "Sampling temperature")]
+    temperature: Option<f64>,
+    #[arg(long, value_name = "VALUE", help = "Top-p (nucleus) sampling")]
+    top_p: Option<f64>,
+    #[arg(long, value_name = "VALUE", help = "Top-k sampling")]
+    top_k: Option<u32>,
     #[arg(long, default_value = "info", value_name = "LEVEL")]
     log_level: String,
     #[arg(long, help = "Print performance timing summary on exit")]
@@ -45,7 +70,7 @@ async fn main() {
     let available_models = cfg.resolve_models();
 
     // Resolve the active model: CLI flags > defaults.model (if set) > last_used (if no default) > first in config
-    let (api_base, api_key, api_key_env, model, model_config) = {
+    let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
         let resolved = if let Some(ref cli_model) = args.model {
             available_models
                 .iter()
@@ -73,7 +98,14 @@ async fn main() {
                 .clone()
                 .unwrap_or_else(|| r.api_key_env.clone());
             let key = std::env::var(&key_env).unwrap_or_default();
-            (base, key, key_env, r.model_name.clone(), r.config.clone())
+            (
+                base,
+                key,
+                key_env,
+                r.provider_type.clone(),
+                r.model_name.clone(),
+                r.config.clone(),
+            )
         } else {
             let base = args
                 .api_base
@@ -86,14 +118,27 @@ async fn main() {
                 .clone()
                 .expect("model must be set via --model or config file");
             (
-                base,
+                base.clone(),
                 key,
                 key_env,
+                engine::ProviderKind::detect_from_url(&base)
+                    .as_config_str()
+                    .to_string(),
                 model,
                 tui::config::ModelConfig::default(),
             )
         }
     };
+
+    // CLI --type overrides config/auto-detected provider type.
+    // CLI --api-base re-triggers auto-detect when no --type is given.
+    if let Some(ref t) = args.r#type {
+        provider_type = t.clone();
+    } else if args.api_base.is_some() {
+        provider_type = engine::ProviderKind::detect_from_url(&api_base)
+            .as_config_str()
+            .to_string();
+    }
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
         engine::log::set_level(level);
@@ -125,18 +170,48 @@ async fn main() {
     let show_speed = cfg.settings.show_speed.unwrap_or(true);
     let restrict_to_workspace = cfg.settings.restrict_to_workspace.unwrap_or(true);
 
-    // Parse reasoning effort: defaults.reasoning_effort if set, otherwise use saved state
-    let reasoning_effort = cfg
-        .defaults
+    // Apply CLI sampling overrides to model_config
+    if let Some(v) = args.temperature {
+        model_config.temperature = Some(v);
+    }
+    if let Some(v) = args.top_p {
+        model_config.top_p = Some(v);
+    }
+    if let Some(v) = args.top_k {
+        model_config.top_k = Some(v);
+    }
+
+    // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
+    // CLI --reasoning-effort is a raw passthrough string that locks the TUI.
+    let reasoning_effort_override = args.reasoning_effort.clone();
+    let reasoning_effort = args
         .reasoning_effort
         .as_deref()
-        .map(|s| match s.to_lowercase().as_str() {
-            "low" => ReasoningEffort::Low,
-            "medium" => ReasoningEffort::Medium,
-            "high" => ReasoningEffort::High,
-            _ => ReasoningEffort::Off,
+        .and_then(ReasoningEffort::parse)
+        .or_else(|| {
+            cfg.defaults
+                .reasoning_effort
+                .as_deref()
+                .and_then(ReasoningEffort::parse)
         })
         .unwrap_or(app_state.reasoning_effort);
+
+    // Available reasoning efforts: CLI > config > provider-type defaults.
+    let provider_kind = engine::ProviderKind::from_config(&provider_type);
+    // --reasoning-effort and --reasoning-efforts are mutually exclusive.
+    if args.reasoning_effort.is_some() && args.reasoning_efforts.is_some() {
+        eprintln!("error: --reasoning-effort and --reasoning-efforts cannot be used together");
+        std::process::exit(1);
+    }
+
+    // Available reasoning efforts: CLI > config > provider-type defaults.
+    let reasoning_efforts = args
+        .reasoning_efforts
+        .as_deref()
+        .or(cfg.defaults.reasoning_efforts.as_deref())
+        .map(ReasoningEffort::parse_list)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| provider_kind.default_reasoning_efforts().to_vec());
 
     // Parse theme accent from config
     if let Some(ref accent) = cfg.theme.accent {
@@ -212,9 +287,12 @@ async fn main() {
     permissions.set_restrict_to_workspace(restrict_to_workspace);
     let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
+    let initial_provider_type = provider_type.clone();
     let engine_handle = engine::start(engine::EngineConfig {
         api_base,
         api_key,
+        provider_type,
+        reasoning_effort_override: reasoning_effort_override.clone(),
         model_config: engine::ModelConfig {
             name: model_config.name.clone(),
             temperature: model_config.temperature,
@@ -242,9 +320,15 @@ async fn main() {
             .map(|env| std::env::var(env).unwrap_or_default())
             .unwrap_or_default();
         let ctx_model = model.clone();
+        let ctx_provider_type = initial_provider_type.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let provider = engine::Provider::new(ctx_api_base, ctx_api_key, reqwest::Client::new());
+            let provider = engine::Provider::new(
+                ctx_api_base,
+                ctx_api_key,
+                &ctx_provider_type,
+                reqwest::Client::new(),
+            );
             let _ = tx.send(provider.fetch_context_window(&ctx_model).await);
         });
         Some(rx)
@@ -255,6 +339,7 @@ async fn main() {
         model,
         initial_api_base,
         api_key_env,
+        initial_provider_type,
         Arc::clone(&permissions),
         engine_handle,
         vim_enabled,
@@ -262,6 +347,8 @@ async fn main() {
         show_speed,
         restrict_to_workspace,
         reasoning_effort,
+        reasoning_effort_override,
+        reasoning_efforts,
         shared_session,
         available_models,
     );

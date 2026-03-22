@@ -35,7 +35,13 @@ pub struct App {
     pub model: String,
     pub api_base: String,
     pub api_key_env: String,
+    pub provider_type: String,
     pub reasoning_effort: ReasoningEffort,
+    /// Raw reasoning effort string sent directly to the API. When set, the
+    /// TUI cycle is locked to this single value.
+    pub reasoning_effort_override: Option<String>,
+    /// Allowed reasoning effort levels for the TUI cycle.
+    pub reasoning_efforts: Vec<ReasoningEffort>,
     pub mode: Mode,
     pub screen: Screen,
     pub history: Vec<Message>,
@@ -288,6 +294,7 @@ impl App {
         model: String,
         api_base: String,
         api_key_env: String,
+        provider_type: String,
         permissions: Arc<Permissions>,
         engine: EngineHandle,
         vim_from_config: bool,
@@ -295,6 +302,8 @@ impl App {
         show_speed: bool,
         restrict_to_workspace: bool,
         reasoning_effort: protocol::ReasoningEffort,
+        reasoning_effort_override: Option<String>,
+        reasoning_efforts: Vec<protocol::ReasoningEffort>,
         shared_session: Arc<Mutex<Option<Session>>>,
         available_models: Vec<crate::config::ResolvedModel>,
     ) -> Self {
@@ -346,7 +355,10 @@ impl App {
             model,
             api_base,
             api_key_env,
+            provider_type,
             reasoning_effort,
+            reasoning_effort_override,
+            reasoning_efforts,
             mode,
             screen,
             history: Vec::new(),
