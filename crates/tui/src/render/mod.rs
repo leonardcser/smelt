@@ -993,6 +993,18 @@ impl Screen {
     }
 
     pub fn render_pending_blocks(&mut self) {
+        self.render_pending_blocks_inner(true);
+    }
+
+    /// Render pending blocks but leave the synchronized update open so
+    /// that subsequent rendering (tool overlay + dialog) is part of the
+    /// same atomic frame.  The caller is responsible for eventually
+    /// issuing `EndSynchronizedUpdate`.
+    pub fn render_pending_blocks_for_dialog(&mut self) {
+        self.render_pending_blocks_inner(false);
+    }
+
+    fn render_pending_blocks_inner(&mut self, close_sync: bool) {
         if self.defer_pending_render {
             self.defer_pending_render = false;
             return;
@@ -1016,22 +1028,41 @@ impl Screen {
         };
         let block_rows = self.history.render(&mut out, term_width());
         self.prompt.anchor_row = Some(start_row + block_rows);
-        let _ = out.queue(terminal::EndSynchronizedUpdate);
+        if close_sync {
+            let _ = out.queue(terminal::EndSynchronizedUpdate);
+        } else {
+            self.sync_started = true;
+        }
         let _ = out.flush();
     }
 
     pub fn erase_prompt(&mut self) {
+        self.erase_prompt_inner(true);
+    }
+
+    /// Erase the prompt area without issuing its own sync frame.
+    /// Used when a sync is already open (e.g. from
+    /// `render_pending_blocks_for_dialog`).
+    pub fn erase_prompt_nosync(&mut self) {
+        self.erase_prompt_inner(false);
+    }
+
+    fn erase_prompt_inner(&mut self, own_sync: bool) {
         if self.prompt.drawn {
             if let Some(anchor) = self.prompt.anchor_row {
                 let end = anchor + self.prompt.prev_rows;
                 let mut out = RenderOut::scroll();
-                let _ = out.queue(terminal::BeginSynchronizedUpdate);
+                if own_sync {
+                    let _ = out.queue(terminal::BeginSynchronizedUpdate);
+                }
                 for r in anchor..=end {
                     let _ = out.queue(cursor::MoveTo(0, r));
                     let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
                 }
                 let _ = out.queue(cursor::MoveTo(0, anchor));
-                let _ = out.queue(terminal::EndSynchronizedUpdate);
+                if own_sync {
+                    let _ = out.queue(terminal::EndSynchronizedUpdate);
+                }
                 let _ = out.flush();
             }
             self.prompt.drawn = false;
@@ -1183,11 +1214,14 @@ impl Screen {
         let draw_start_row =
             explicit_anchor.unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0));
 
-        // Always issue BeginSync.  In content-only mode the dialog that
-        // follows will skip its own BeginSync and close this one with
-        // EndSync, so the entire frame (tool overlay + dialog) is painted
-        // as a single atomic update.
-        let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        // In content-only mode the sync frame may already be open (from
+        // render_pending_blocks_for_dialog).  Only issue BeginSync when
+        // one hasn't been started yet.  The dialog that follows will
+        // close the frame with EndSync, so blocks + tool + dialog are
+        // painted as a single atomic update.
+        if !self.sync_started {
+            let _ = out.queue(terminal::BeginSynchronizedUpdate);
+        }
         if is_dialog {
             self.sync_started = true;
         }

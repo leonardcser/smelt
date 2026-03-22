@@ -876,13 +876,16 @@ impl App {
         mut dialog: Box<dyn render::Dialog>,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) {
-        // Flush any pending blocks (e.g. Thinking) to scroll mode so they
-        // persist in the viewport after the dialog is dismissed.
-        self.screen.render_pending_blocks();
+        // Flush pending blocks (e.g. Thinking) to scroll mode so they
+        // persist in scrollback.  Leave the sync frame open so that the
+        // subsequent tool overlay + dialog draw is part of the same
+        // atomic terminal update — no flicker between block flush and
+        // dialog appearance.
+        self.screen.render_pending_blocks_for_dialog();
         let height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
         let fits = self.screen.active_tool_rows() + dialog.height() <= height;
         if !fits {
-            self.screen.erase_prompt();
+            self.screen.erase_prompt_nosync();
         }
         self.screen.set_show_tool_in_dialog(fits);
         // Share the kill ring so Ctrl+K/Y work across input ↔ dialog.
