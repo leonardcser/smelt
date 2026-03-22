@@ -323,10 +323,8 @@ impl App {
     }
 
     pub(super) fn cycle_reasoning(&mut self) {
-        if self.reasoning_effort_override.is_none() {
-            let next = self.reasoning_effort.cycle_within(&self.reasoning_efforts);
-            self.set_reasoning_effort(next);
-        }
+        let next = self.reasoning_effort.cycle_within(&self.reasoning_efforts);
+        self.set_reasoning_effort(next);
     }
 
     pub(super) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {

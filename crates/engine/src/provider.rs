@@ -156,9 +156,6 @@ pub struct Provider {
     client: Client,
     kind: ProviderKind,
     model_config: crate::config::ModelConfig,
-    /// Raw reasoning effort override. Sent directly to the API instead of
-    /// the `ReasoningEffort` enum label.
-    reasoning_effort_override: Option<String>,
 }
 
 impl Provider {
@@ -171,13 +168,7 @@ impl Provider {
             client,
             kind,
             model_config: Default::default(),
-            reasoning_effort_override: None,
         }
-    }
-
-    pub fn with_reasoning_effort_override(mut self, raw: Option<String>) -> Self {
-        self.reasoning_effort_override = raw;
-        self
     }
 
     pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
@@ -216,12 +207,9 @@ impl Provider {
         }
     }
 
-    /// Get the effort label to send to the API. Uses the raw override if set,
-    /// otherwise maps the enum value (`Max` → `xhigh` for OpenAI).
+    /// Get the effort label to send to the API.
+    /// Maps `Max` → `xhigh` for OpenAI.
     fn effort_label(&self, effort: ReasoningEffort) -> String {
-        if let Some(ref raw) = self.reasoning_effort_override {
-            return raw.clone();
-        }
         if effort == ReasoningEffort::Max {
             match self.kind {
                 ProviderKind::OpenAi => "xhigh".to_string(),

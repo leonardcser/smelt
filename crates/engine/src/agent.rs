@@ -320,7 +320,6 @@ fn build_provider_with_overrides(
         client.clone(),
     )
     .with_model_config(config.model_config.clone())
-    .with_reasoning_effort_override(config.reasoning_effort_override.clone())
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -390,8 +389,7 @@ impl<'a> Turn<'a> {
     ) {
         self.model = model;
         self.provider = Provider::new(api_base, api_key, &provider_type, self.http_client.clone())
-            .with_model_config(self.config.model_config.clone())
-            .with_reasoning_effort_override(self.config.reasoning_effort_override.clone());
+            .with_model_config(self.config.model_config.clone());
     }
 
     /// Handle a command that arrived during a turn but isn't turn-specific.

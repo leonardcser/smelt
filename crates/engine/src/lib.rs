@@ -54,9 +54,6 @@ pub struct EngineConfig {
     pub api_key: String,
     /// Provider type: "openai", "anthropic", or "openai-compatible".
     pub provider_type: String,
-    /// Raw reasoning effort string override. When set, sent directly to the
-    /// API instead of using the `ReasoningEffort` enum label.
-    pub reasoning_effort_override: Option<String>,
     pub model_config: ModelConfig,
     pub instructions: Option<String>,
     pub cwd: PathBuf,

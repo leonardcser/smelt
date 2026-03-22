@@ -116,6 +116,7 @@ providers:
 defaults:
   model: ollama/glm-5 # provider_name/model_name
   reasoning_effort: "off" # "off" | "low" | "medium" | "high" | "max"
+  reasoning_efforts: ["off", "low", "medium", "high", "max"] # available levels for cycling
 
 # Runtime settings (all toggleable via /settings)
 settings:
@@ -150,6 +151,11 @@ permissions:
     web_fetch:
       allow: ["https://docs.rs/*", "https://github.com/*"]
       deny: ["https://evil.com/*"]
+  plan:
+    tools:
+      allow: [read_file, glob, grep]
+    bash:
+      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
   apply:
     tools:
       allow: [read_file, glob, grep, edit_file, write_file]
@@ -218,8 +224,7 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 --api-key-env <VAR>            Env var for API key (overrides config)
 --type <TYPE>                  Provider type: openai-compatible, openai, anthropic
                                (auto-detected from --api-base when omitted)
---reasoning-effort <EFFORT>    Reasoning effort (off/low/medium/high/max/xhigh or any
-                               provider-specific value)
+--reasoning-effort <EFFORT>    Starting reasoning effort (off/low/medium/high/max)
 --reasoning-efforts <LEVELS>   Available reasoning levels for cycling
                                (comma-separated: off,low,medium,high,max)
 --temperature <TEMP>           Sampling temperature
@@ -228,8 +233,6 @@ Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 --log-level <LEVEL>            trace | debug | info | warn | error (default: info)
 --bench                        Print performance timing on exit
 ```
-
-`--reasoning-effort` and `--reasoning-efforts` are mutually exclusive.
 
 CLI flags take precedence over config file values.
 

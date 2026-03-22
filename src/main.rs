@@ -29,7 +29,7 @@ struct Args {
     #[arg(
         long,
         value_name = "EFFORT",
-        help = "Reasoning effort (off/low/medium/high/max/xhigh or any provider-specific value)"
+        help = "Starting reasoning effort (off/low/medium/high/max)"
     )]
     reasoning_effort: Option<String>,
     #[arg(
@@ -168,6 +168,8 @@ async fn main() {
     let vim_enabled = cfg.settings.vim_mode.unwrap_or(false);
     let auto_compact = cfg.settings.auto_compact.unwrap_or(false);
     let show_speed = cfg.settings.show_speed.unwrap_or(true);
+    let input_prediction = cfg.settings.input_prediction.unwrap_or(true);
+    let task_slug = cfg.settings.task_slug.unwrap_or(true);
     let restrict_to_workspace = cfg.settings.restrict_to_workspace.unwrap_or(true);
 
     // Apply CLI sampling overrides to model_config
@@ -182,8 +184,6 @@ async fn main() {
     }
 
     // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
-    // CLI --reasoning-effort is a raw passthrough string that locks the TUI.
-    let reasoning_effort_override = args.reasoning_effort.clone();
     let reasoning_effort = args
         .reasoning_effort
         .as_deref()
@@ -196,22 +196,19 @@ async fn main() {
         })
         .unwrap_or(app_state.reasoning_effort);
 
-    // Available reasoning efforts: CLI > config > provider-type defaults.
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
-    // --reasoning-effort and --reasoning-efforts are mutually exclusive.
-    if args.reasoning_effort.is_some() && args.reasoning_efforts.is_some() {
-        eprintln!("error: --reasoning-effort and --reasoning-efforts cannot be used together");
-        std::process::exit(1);
-    }
-
     // Available reasoning efforts: CLI > config > provider-type defaults.
-    let reasoning_efforts = args
+    let mut reasoning_efforts = args
         .reasoning_efforts
         .as_deref()
         .or(cfg.defaults.reasoning_efforts.as_deref())
         .map(ReasoningEffort::parse_list)
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| provider_kind.default_reasoning_efforts().to_vec());
+    // Ensure the starting effort is in the cycle list.
+    if !reasoning_efforts.contains(&reasoning_effort) {
+        reasoning_efforts.push(reasoning_effort);
+    }
 
     // Parse theme accent from config
     if let Some(ref accent) = cfg.theme.accent {
@@ -292,7 +289,6 @@ async fn main() {
         api_base,
         api_key,
         provider_type,
-        reasoning_effort_override: reasoning_effort_override.clone(),
         model_config: engine::ModelConfig {
             name: model_config.name.clone(),
             temperature: model_config.temperature,
@@ -345,9 +341,10 @@ async fn main() {
         vim_enabled,
         auto_compact,
         show_speed,
+        input_prediction,
+        task_slug,
         restrict_to_workspace,
         reasoning_effort,
-        reasoning_effort_override,
         reasoning_efforts,
         shared_session,
         available_models,
