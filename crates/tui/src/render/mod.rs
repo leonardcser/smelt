@@ -179,6 +179,7 @@ fn reasoning_color(effort: protocol::ReasoningEffort) -> Color {
 /// `EngineEvent::RequestPermission` through `SessionControl`, `DeferredDialog`,
 /// `ConfirmContext`, and `ConfirmDialog::new`.
 pub struct ConfirmRequest {
+    pub call_id: String,
     pub tool_name: String,
     pub desc: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
@@ -213,6 +214,7 @@ pub struct ActiveExec {
 }
 
 pub struct ActiveTool {
+    pub call_id: String,
     pub name: String,
     pub summary: String,
     pub args: HashMap<String, serde_json::Value>,
@@ -382,7 +384,7 @@ impl BlockHistory {
 
 pub struct Screen {
     history: BlockHistory,
-    active_tool: Option<ActiveTool>,
+    active_tools: Vec<ActiveTool>,
     active_exec: Option<ActiveExec>,
     prompt: PromptState,
     working: WorkingState,
@@ -452,7 +454,7 @@ impl Screen {
     pub fn new() -> Self {
         Self {
             history: BlockHistory::new(),
-            active_tool: None,
+            active_tools: Vec::new(),
             active_exec: None,
             prompt: PromptState::new(),
             working: WorkingState::new(),
@@ -671,7 +673,7 @@ impl Screen {
 
     pub fn begin_turn(&mut self) {
         self.history.last_block_rows = 0;
-        self.active_tool = None;
+        self.active_tools.clear();
     }
 
     pub fn push(&mut self, block: Block) {
@@ -681,11 +683,13 @@ impl Screen {
 
     pub fn start_tool(
         &mut self,
+        call_id: String,
         name: String,
         summary: String,
         args: HashMap<String, serde_json::Value>,
     ) {
-        self.active_tool = Some(ActiveTool {
+        self.active_tools.push(ActiveTool {
+            call_id,
             name,
             summary,
             args,
@@ -743,8 +747,12 @@ impl Screen {
         self.active_exec.is_some()
     }
 
-    pub fn append_active_output(&mut self, chunk: &str) {
-        if let Some(ref mut tool) = self.active_tool {
+    fn active_tool_mut(&mut self, call_id: &str) -> Option<&mut ActiveTool> {
+        self.active_tools.iter_mut().find(|t| t.call_id == call_id)
+    }
+
+    pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
+        if let Some(tool) = self.active_tool_mut(call_id) {
             match tool.output {
                 Some(ref mut out) => {
                     if !out.content.is_empty() {
@@ -778,8 +786,8 @@ impl Screen {
         }
     }
 
-    pub fn set_active_status(&mut self, status: ToolStatus) {
-        if let Some(ref mut tool) = self.active_tool {
+    pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
+        if let Some(tool) = self.active_tool_mut(call_id) {
             // Reset timer when transitioning from confirm → pending (user approved)
             if tool.status == ToolStatus::Confirm && status == ToolStatus::Pending {
                 tool.start_time = Instant::now();
@@ -794,8 +802,8 @@ impl Screen {
         }
     }
 
-    pub fn set_active_user_message(&mut self, msg: String) {
-        if let Some(ref mut tool) = self.active_tool {
+    pub fn set_active_user_message(&mut self, call_id: &str, msg: String) {
+        if let Some(tool) = self.active_tool_mut(call_id) {
             tool.user_message = Some(msg);
             self.prompt.dirty = true;
         } else if let Some(Block::ToolCall {
@@ -809,11 +817,13 @@ impl Screen {
 
     pub fn finish_tool(
         &mut self,
+        call_id: &str,
         status: ToolStatus,
         output: Option<ToolOutput>,
         engine_elapsed: Option<Duration>,
     ) {
-        if let Some(tool) = self.active_tool.take() {
+        if let Some(idx) = self.active_tools.iter().position(|t| t.call_id == call_id) {
+            let tool = self.active_tools.remove(idx);
             let elapsed = if status == ToolStatus::Denied {
                 None
             } else {
@@ -845,11 +855,11 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Rows the active tool would occupy if rendered (including gap above).
+    /// Rows the active tools would occupy if rendered (including gaps).
     pub fn active_tool_rows(&self) -> u16 {
-        let Some(ref tool) = self.active_tool else {
+        if self.active_tools.is_empty() {
             return 0;
-        };
+        }
         let gap = if let Some(last) = self.history.blocks.last() {
             blocks::gap_between(&blocks::Element::Block(last), &blocks::Element::ActiveTool)
         } else {
@@ -858,14 +868,18 @@ impl Screen {
         let w = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(80);
-        // At confirm time there's no output yet, so tool rows = 1 + optional web_fetch prompt
-        let mut rows = 1u16;
-        if tool.name == "web_fetch" {
-            if let Some(prompt) = tool.args.get("prompt").and_then(|v| v.as_str()) {
-                rows += wrap_line(prompt, w.saturating_sub(4)).len() as u16;
+        let mut total = gap;
+        for tool in &self.active_tools {
+            // At confirm time there's no output yet, so tool rows = 1 + optional web_fetch prompt
+            let mut rows = 1u16;
+            if tool.name == "web_fetch" {
+                if let Some(prompt) = tool.args.get("prompt").and_then(|v| v.as_str()) {
+                    rows += wrap_line(prompt, w.saturating_sub(4)).len() as u16;
+                }
             }
+            total += rows;
         }
-        gap + rows
+        total
     }
 
     pub fn clear_context_tokens(&mut self) {
@@ -938,24 +952,23 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Convert active tool to a history block and render any pending blocks.
+    /// Convert active tools to history blocks and render any pending blocks.
     pub fn flush_blocks(&mut self) {
         let _perf = crate::perf::begin("flush_blocks");
-        self.commit_active_tool();
+        self.commit_active_tools();
         self.render_pending_blocks();
     }
 
-    /// Convert active tool to a history block without rendering.
-    /// The block remains unflushed so that `draw_frame(None)` will render
-    /// it (along with any preceding reasoning blocks) before the dialog
+    /// Convert all active tools to history blocks without rendering.
+    /// The blocks remain unflushed so that `draw_frame(None)` will render
+    /// them (along with any preceding reasoning blocks) before the dialog
     /// paints on top.
-    pub fn commit_active_tool(&mut self) {
-        self.commit_active_tool_as(ToolStatus::Err);
+    pub fn commit_active_tools(&mut self) {
+        self.commit_active_tools_as(ToolStatus::Err);
     }
 
-    pub fn commit_active_tool_as(&mut self, status: ToolStatus) {
-        if let Some(tool) = self.active_tool.take() {
-            // Don't show elapsed time for denied tools - they never actually ran.
+    pub fn commit_active_tools_as(&mut self, status: ToolStatus) {
+        for tool in self.active_tools.drain(..) {
             let elapsed = if status == ToolStatus::Denied {
                 None
             } else {
@@ -989,7 +1002,7 @@ impl Screen {
     /// the prompt.  Used to decide whether to emit a 1-line gap before the
     /// prompt bar.
     fn has_content(&self) -> bool {
-        !self.history.blocks.is_empty() || self.active_tool.is_some() || self.active_exec.is_some()
+        !self.history.blocks.is_empty() || !self.active_tools.is_empty() || self.active_exec.is_some()
     }
 
     pub fn render_pending_blocks(&mut self) {
@@ -1122,7 +1135,7 @@ impl Screen {
 
     pub fn clear(&mut self) {
         self.history.clear();
-        self.active_tool = None;
+        self.active_tools.clear();
         self.active_exec = None;
         self.prompt = PromptState::new();
         self.prompt.anchor_row = Some(0);
@@ -1163,7 +1176,7 @@ impl Screen {
     /// Truncate blocks so that only blocks before `block_idx` remain.
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
-        self.active_tool = None;
+        self.active_tools.clear();
         self.redraw(true);
     }
 
@@ -1239,13 +1252,17 @@ impl Screen {
         // ── Render blocks ───────────────────────────────────────────────
         let block_rows = self.history.render(&mut out, width);
 
-        // ── Render active tool ──────────────────────────────────────────
+        // ── Render active tools ─────────────────────────────────────────
         let mut active_rows: u16 = 0;
         let show_active = !is_dialog || self.show_tool_in_dialog;
         if show_active {
-            if let Some(ref tool) = self.active_tool {
-                let tool_gap = if let Some(last) = self.history.blocks.last() {
-                    gap_between(&Element::Block(last), &Element::ActiveTool)
+            for (i, tool) in self.active_tools.iter().enumerate() {
+                let tool_gap = if i == 0 {
+                    if let Some(last) = self.history.blocks.last() {
+                        gap_between(&Element::Block(last), &Element::ActiveTool)
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 };
@@ -1263,14 +1280,14 @@ impl Screen {
                     tool.user_message.as_deref(),
                     width,
                 );
-                active_rows = tool_gap + rows;
+                active_rows += tool_gap + rows;
             }
         }
 
         // ── Render active exec ──────────────────────────────────────
         if show_active {
             if let Some(ref exec) = self.active_exec {
-                let exec_gap = if self.active_tool.is_some() {
+                let exec_gap = if !self.active_tools.is_empty() {
                     gap_between(&Element::ActiveTool, &Element::ActiveExec)
                 } else if let Some(last) = self.history.blocks.last() {
                     gap_between(&Element::Block(last), &Element::ActiveExec)

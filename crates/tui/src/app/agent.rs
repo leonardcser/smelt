@@ -34,7 +34,7 @@ impl App {
 
         TurnState {
             turn_id,
-            pending: None,
+            pending: Vec::new(),
             steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
         }
@@ -156,7 +156,7 @@ impl App {
 
         TurnState {
             turn_id,
-            pending: None,
+            pending: Vec::new(),
             steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
         }
@@ -248,7 +248,7 @@ impl App {
         &mut self,
         ev: EngineEvent,
         turn_id: u64,
-        pending: &mut Option<PendingTool>,
+        pending: &mut Vec<PendingTool>,
         steered_count: &mut usize,
     ) -> SessionControl {
         match ev {
@@ -277,8 +277,8 @@ impl App {
                 self.screen.set_throbber(render::Throbber::Working);
                 SessionControl::Continue
             }
-            EngineEvent::ToolOutput { chunk, .. } => {
-                self.screen.append_active_output(&chunk);
+            EngineEvent::ToolOutput { call_id, chunk } => {
+                self.screen.append_active_output(&call_id, &chunk);
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
@@ -303,19 +303,22 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
+                call_id,
                 tool_name,
                 args,
                 summary,
-                ..
             } => {
-                self.screen.start_tool(tool_name.clone(), summary, args);
-                *pending = Some(PendingTool { name: tool_name });
+                self.screen.start_tool(call_id.clone(), tool_name.clone(), summary, args);
+                pending.push(PendingTool { call_id, name: tool_name });
                 SessionControl::Continue
             }
             EngineEvent::ToolFinished {
-                result, elapsed_ms, ..
+                call_id,
+                result,
+                elapsed_ms,
             } => {
-                if pending.is_some() {
+                if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
+                    pending.remove(idx);
                     let status = if result.is_error {
                         ToolStatus::Err
                     } else {
@@ -326,22 +329,22 @@ impl App {
                         is_error: result.is_error,
                     });
                     let elapsed = elapsed_ms.map(Duration::from_millis);
-                    self.screen.finish_tool(status, output, elapsed);
+                    self.screen.finish_tool(&call_id, status, output, elapsed);
                 }
-                *pending = None;
                 self.screen
                     .set_running_procs(self.engine.processes.running_count());
                 SessionControl::Continue
             }
             EngineEvent::RequestPermission {
                 request_id,
+                call_id,
                 tool_name,
                 args,
                 confirm_message,
                 approval_patterns,
                 summary,
-                ..
             } => SessionControl::NeedsConfirm(ConfirmRequest {
+                call_id,
                 tool_name,
                 desc: confirm_message,
                 args,
@@ -505,9 +508,10 @@ impl App {
                 tool_name,
                 request_id,
             } => {
+                let call_id = self.confirm_context.as_ref().map(|c| c.call_id.clone()).unwrap_or_default();
                 self.confirm_context = None;
                 let should_cancel =
-                    self.resolve_confirm((choice, message), request_id, &tool_name, agent);
+                    self.resolve_confirm((choice, message), &call_id, request_id, &tool_name, agent);
                 self.screen.clear_dialog_area(anchor);
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
@@ -655,6 +659,7 @@ impl App {
     pub(super) fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
+        call_id: &str,
         request_id: u64,
         tool_name: &str,
         agent: &mut Option<TurnState>,
@@ -670,11 +675,11 @@ impl App {
         };
         if let Some(ref msg) = message {
             self.screen
-                .set_active_user_message(format!("{label}: {msg}"));
+                .set_active_user_message(call_id, format!("{label}: {msg}"));
         }
         match choice {
             ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
-                self.screen.set_active_status(ToolStatus::Pending);
+                self.screen.set_active_status(call_id, ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
                     approved: true,
@@ -698,7 +703,7 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(ToolStatus::Pending);
+                self.screen.set_active_status(call_id, ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
                     approved: true,
@@ -727,7 +732,7 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(ToolStatus::Pending);
+                self.screen.set_active_status(call_id, ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
                     approved: true,
@@ -746,7 +751,7 @@ impl App {
                         self.reload_workspace_permissions();
                     }
                 }
-                self.screen.set_active_status(ToolStatus::Pending);
+                self.screen.set_active_status(call_id, ToolStatus::Pending);
                 self.engine.send(UiCommand::PermissionDecision {
                     request_id,
                     approved: true,
@@ -761,13 +766,13 @@ impl App {
                     approved: false,
                     message,
                 });
-                self.screen.finish_tool(ToolStatus::Denied, None, None);
+                self.screen.finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
                     // Deny with feedback — let the agent continue with the message.
                     // Clear pending so the engine's ToolFinished event doesn't
                     // overwrite the Denied status.
                     if let Some(ref mut ag) = agent {
-                        ag.pending = None;
+                        ag.pending.retain(|p| p.call_id != call_id);
                     }
                     false
                 } else {
@@ -781,7 +786,7 @@ impl App {
                         }),
                     );
                     if let Some(ref mut ag) = agent {
-                        ag.pending = None;
+                        ag.pending.clear();
                     }
                     true
                 }
@@ -818,9 +823,9 @@ impl App {
                     request_id,
                     answer: None,
                 });
-                self.screen.finish_tool(ToolStatus::Denied, None, None);
+                self.screen.finish_tool("", ToolStatus::Denied, None, None);
                 if let Some(ref mut ag) = agent {
-                    ag.pending = None;
+                    ag.pending.clear();
                 }
                 true
             }
@@ -832,7 +837,7 @@ impl App {
     pub(super) fn dispatch_control(
         &mut self,
         ctrl: SessionControl,
-        pending: &mut Option<PendingTool>,
+        pending: &[PendingTool],
         deferred_dialog: &mut Option<DeferredDialog>,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
         last_keypress: Option<Instant>,
@@ -842,7 +847,7 @@ impl App {
             SessionControl::Done => LoopAction::Done,
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
-                    req.tool_name = pending.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                    req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 
                 // Check auto-approvals (doesn't need UI).
@@ -932,7 +937,7 @@ impl App {
                 let recently_typed = last_keypress
                     .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS));
                 if recently_typed && !self.input.buf.is_empty() {
-                    self.screen.set_active_status(ToolStatus::Confirm);
+                    self.screen.set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.screen.set_pending_dialog(true);
                     *deferred_dialog = Some(DeferredDialog::Confirm(req));
                     return LoopAction::Continue;
@@ -943,11 +948,12 @@ impl App {
                     self.screen.clear_dialog_area(prev.anchor_row());
                 }
                 self.confirm_context = Some(ConfirmContext {
+                    call_id: req.call_id.clone(),
                     tool_name: req.tool_name.clone(),
                     args: req.args.clone(),
                     request_id: req.request_id,
                 });
-                self.screen.set_active_status(ToolStatus::Confirm);
+                self.screen.set_active_status(&req.call_id, ToolStatus::Confirm);
                 let dialog = Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
                 self.open_blocking_dialog(dialog, active_dialog);
                 LoopAction::Continue
@@ -966,7 +972,9 @@ impl App {
                 if let Some(prev) = active_dialog.take() {
                     self.screen.clear_dialog_area(prev.anchor_row());
                 }
-                self.screen.set_active_status(ToolStatus::Confirm);
+                // ask_user_question doesn't have a call_id in the permission flow,
+                // use empty string (it targets the last active tool via fallback).
+                self.screen.set_active_status("", ToolStatus::Confirm);
                 let questions = render::parse_questions(&args);
                 let dialog = Box::new(QuestionDialog::new(questions, request_id));
                 self.open_blocking_dialog(dialog, active_dialog);

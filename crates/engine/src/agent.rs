@@ -559,6 +559,19 @@ impl<'a> Turn<'a> {
                 Some(tool_calls.clone()),
             ));
 
+            // Phase 1: Permission checks (sequential — needs &mut self for
+            // cmd_rx access) and resolve tool references.
+            struct ApprovedTool<'b> {
+                tc: &'b protocol::ToolCall,
+                args: HashMap<String, Value>,
+                tool: &'b dyn tools::Tool,
+                confirm_msg: Option<String>,
+                start: Instant,
+            }
+
+            let mut approved: Vec<ApprovedTool<'_>> = Vec::new();
+            let mut sequential: Vec<ApprovedTool<'_>> = Vec::new();
+
             for tc in &tool_calls {
                 self.drain_commands();
                 if self.cancel.is_cancelled() {
@@ -590,7 +603,6 @@ impl<'a> Turn<'a> {
                     }
                 };
 
-                // Permission check
                 let confirm_msg = match self.check_permission(tool, &tc.function.name, &args).await
                 {
                     PermissionResult::Allow(msg) => msg,
@@ -600,46 +612,84 @@ impl<'a> Turn<'a> {
                     }
                 };
 
-                // Execute tool
-                let ToolResult { content, is_error } = if tc.function.name == "ask_user_question" {
-                    self.ask_user(&args).await
-                } else {
-                    let ctx = ToolContext {
-                        event_tx: self.event_tx,
-                        call_id: &tc.id,
-                        cancel: &self.cancel,
-                        processes: self.processes,
-                        proc_done_tx: self.proc_done_tx,
-                        provider: &self.provider,
-                        model: &self.model,
-                        session_id: &self.session_id,
-                        session_dir: &self.session_dir,
-                    };
-                    tool.execute(args.clone(), &ctx).await
+                let entry = ApprovedTool {
+                    tc,
+                    args,
+                    tool,
+                    confirm_msg,
+                    start: tool_start,
                 };
 
+                // ask_user_question needs &mut self (reads cmd_rx), so it
+                // must stay sequential.
+                if tc.function.name == "ask_user_question" {
+                    sequential.push(entry);
+                } else {
+                    approved.push(entry);
+                }
+            }
+
+            // Phase 2a: Execute approved tools concurrently.
+            // Build contexts first so they outlive the futures they lend to.
+            let contexts: Vec<_> = approved
+                .iter()
+                .map(|a| ToolContext {
+                    event_tx: self.event_tx,
+                    call_id: &a.tc.id,
+                    cancel: &self.cancel,
+                    processes: self.processes,
+                    proc_done_tx: self.proc_done_tx,
+                    provider: &self.provider,
+                    model: &self.model,
+                    session_id: &self.session_id,
+                    session_dir: &self.session_dir,
+                })
+                .collect();
+
+            let futures: Vec<_> = approved
+                .iter()
+                .zip(contexts.iter())
+                .map(|(a, ctx)| a.tool.execute(a.args.clone(), ctx))
+                .collect();
+
+            let results = futures_util::future::join_all(futures).await;
+
+            // Phase 2b: Execute sequential tools (ask_user_question).
+            let mut seq_results: Vec<ToolResult> = Vec::new();
+            for entry in &sequential {
+                let result = self.ask_user(&entry.args).await;
+                seq_results.push(result);
+            }
+
+            // Phase 3: Collect results (concurrent tools first, then sequential).
+            let all_results = approved
+                .iter()
+                .zip(results)
+                .chain(sequential.iter().zip(seq_results));
+
+            for (entry, ToolResult { content, is_error }) in all_results {
                 log::entry(
                     log::Level::Debug,
                     "tool_result",
                     &serde_json::json!({
-                        "tool": tc.function.name,
-                        "id": tc.id,
+                        "tool": entry.tc.function.name,
+                        "id": entry.tc.id,
                         "is_error": is_error,
                         "content_len": content.len(),
                         "content_preview": &content[..content.floor_char_boundary(500)],
                     }),
                 );
 
-                let elapsed_ms = tool_start.elapsed().as_millis() as u64;
-                self.tool_elapsed.insert(tc.id.clone(), elapsed_ms);
+                let elapsed_ms = entry.start.elapsed().as_millis() as u64;
+                self.tool_elapsed.insert(entry.tc.id.clone(), elapsed_ms);
                 let mut tool_content = content.clone();
-                if let Some(ref msg) = confirm_msg {
+                if let Some(ref msg) = entry.confirm_msg {
                     tool_content.push_str(&format!("\n\nUser message: {msg}"));
                 }
                 self.messages
-                    .push(Message::tool(tc.id.clone(), tool_content, is_error));
+                    .push(Message::tool(entry.tc.id.clone(), tool_content, is_error));
                 self.emit(EngineEvent::ToolFinished {
-                    call_id: tc.id.clone(),
+                    call_id: entry.tc.id.clone(),
                     result: ToolOutcome { content, is_error },
                     elapsed_ms: Some(elapsed_ms),
                 });

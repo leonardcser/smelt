@@ -95,6 +95,7 @@ pub struct App {
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
 struct ConfirmContext {
+    call_id: String,
     tool_name: String,
     args: HashMap<String, serde_json::Value>,
     request_id: u64,
@@ -102,7 +103,7 @@ struct ConfirmContext {
 
 struct TurnState {
     turn_id: u64,
-    pending: Option<PendingTool>,
+    pending: Vec<PendingTool>,
     steered_count: usize,
     _perf: Option<crate::perf::Guard>,
 }
@@ -280,6 +281,7 @@ enum LoopAction {
 }
 
 pub struct PendingTool {
+    pub call_id: String,
     pub name: String,
 }
 
@@ -504,7 +506,7 @@ impl App {
                         );
                         self.dispatch_control(
                             ctrl,
-                            &mut ag.pending,
+                            &ag.pending,
                             &mut deferred_dialog,
                             &mut active_dialog,
                             t.last_keypress,
@@ -622,17 +624,18 @@ impl App {
                     match deferred {
                         DeferredDialog::Confirm(req) => {
                             self.confirm_context = Some(ConfirmContext {
+                                call_id: req.call_id.clone(),
                                 tool_name: req.tool_name.clone(),
                                 args: req.args.clone(),
                                 request_id: req.request_id,
                             });
-                            self.screen.set_active_status(ToolStatus::Confirm);
+                            self.screen.set_active_status(&req.call_id, ToolStatus::Confirm);
                             let dialog =
                                 Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
                             self.open_blocking_dialog(dialog, &mut active_dialog);
                         }
                         DeferredDialog::AskQuestion { args, request_id } => {
-                            self.screen.set_active_status(ToolStatus::Confirm);
+                            self.screen.set_active_status("", ToolStatus::Confirm);
                             let questions = render::parse_questions(&args);
                             let dialog = Box::new(QuestionDialog::new(questions, request_id));
                             self.open_blocking_dialog(dialog, &mut active_dialog);
@@ -689,7 +692,7 @@ impl App {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending, &mut ag.steered_count);
                         let action = self.dispatch_control(
                             ctrl,
-                            &mut ag.pending,
+                            &ag.pending,
                             &mut deferred_dialog,
                             &mut active_dialog,
                             t.last_keypress,

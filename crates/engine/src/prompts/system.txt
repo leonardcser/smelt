@@ -20,6 +20,7 @@ Working directory: {cwd}
 # Tool usage
 - Use dedicated tools over bash: read_file instead of cat, edit_file instead of sed, glob instead of find, grep instead of grep/rg.
 - Always read a file with read_file before editing it.
+- **Always use edit_file for modifying existing files.** Only use write_file to create new files. Never use write_file to overwrite an existing file — use edit_file instead, even for large changes. If you need to replace most of a file, make multiple edit_file calls.
 - Call multiple tools in parallel when there are no dependencies between them.
 - When exploring the codebase broadly (not a specific needle query), use the task tool to reduce context usage.
 
