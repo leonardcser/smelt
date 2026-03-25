@@ -96,10 +96,11 @@ pub async fn engine_task(
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
                             }
                             Err(e) => {
-                                let msg = if e.starts_with("quota exceeded") {
-                                    "API quota exceeded — check your plan and billing details".to_string()
-                                } else {
-                                    format!("compaction failed: {e}")
+                                let msg = match e {
+                                    ProviderError::QuotaExceeded(_) => {
+                                        "API quota exceeded — check your plan and billing details".to_string()
+                                    }
+                                    _ => format!("compaction failed: {e}"),
                                 };
                                 let _ = event_tx.send(EngineEvent::TurnError { message: msg });
                             }
@@ -167,9 +168,9 @@ fn spawn_title_generation(
                 log::entry(
                     log::Level::Warn,
                     "title_error",
-                    &serde_json::json!({"error": e}),
+                    &serde_json::json!({"error": e.to_string()}),
                 );
-                if e.starts_with("quota exceeded") {
+                if matches!(e, ProviderError::QuotaExceeded(_)) {
                     let _ = tx.send(EngineEvent::TurnError {
                         message: "API quota exceeded — check your plan and billing details"
                             .to_string(),
@@ -1005,7 +1006,7 @@ async fn compact_history(
     model: &str,
     focus: Option<&str>,
     cancel: &crate::cancel::CancellationToken,
-) -> Result<Vec<Message>, String> {
+) -> Result<Vec<Message>, ProviderError> {
     let mut user_count = 0;
     let mut cut = messages.len();
     for (i, m) in messages.iter().enumerate().rev() {
@@ -1018,7 +1019,9 @@ async fn compact_history(
         }
     }
     if cut == 0 || cut >= messages.len() {
-        return Err("not enough history to compact".into());
+        return Err(ProviderError::InvalidResponse(
+            "not enough history to compact".into(),
+        ));
     }
 
     let to_summarize = &messages[..cut];

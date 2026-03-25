@@ -89,6 +89,23 @@ impl ProviderError {
                 | ProviderError::Network(_)
         )
     }
+
+    /// Classify an HTTP error response into a `ProviderError`.
+    fn from_http(code: u16, body: String) -> Self {
+        let is_quota = body.contains("insufficient_quota")
+            || body.contains("billing_not_active")
+            || body.contains("credit balance is too low")
+            || (code == 429 && body.contains("exceeded"));
+
+        match code {
+            _ if is_quota => ProviderError::QuotaExceeded(body),
+            400 => ProviderError::InvalidResponse(body),
+            401 | 403 => ProviderError::Auth(body),
+            404 => ProviderError::NotFound(body),
+            429 => ProviderError::RateLimited { attempt: 0 },
+            _ => ProviderError::Server { status: code, body },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,28 +376,13 @@ impl Provider {
             };
 
             if !resp.status().is_success() {
-                let status = resp.status();
-                let code = status.as_u16();
+                let code = resp.status().as_u16();
                 let text = resp.text().await.unwrap_or_default();
 
-                let is_quota = text.contains("insufficient_quota")
-                    || text.contains("billing_not_active")
-                    || text.contains("credit balance is too low")
-                    || (code == 429 && text.contains("exceeded"));
-
-                let err = match code {
-                    _ if is_quota => ProviderError::QuotaExceeded(text),
-                    400 => ProviderError::InvalidResponse(text),
-                    401 | 403 => ProviderError::Auth(text),
-                    404 => ProviderError::NotFound(text),
-                    429 => ProviderError::RateLimited {
-                        attempt: attempt as u32,
-                    },
-                    _ => ProviderError::Server {
-                        status: code,
-                        body: text,
-                    },
-                };
+                let mut err = ProviderError::from_http(code, text);
+                if let ProviderError::RateLimited { attempt: ref mut a } = err {
+                    *a = attempt as u32;
+                }
 
                 log::entry(
                     log::Level::Warn,
@@ -768,7 +770,7 @@ impl Provider {
         model: &str,
         focus: Option<&str>,
         cancel: &CancellationToken,
-    ) -> Result<String, String> {
+    ) -> Result<String, ProviderError> {
         const COMPACT_PROMPT: &str = include_str!("prompts/compact.txt");
 
         let conversation = messages
@@ -813,39 +815,36 @@ impl Provider {
                 cancel,
                 None,
             )
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
         let summary = resp.content.unwrap_or_default();
         if summary.trim().is_empty() {
-            return Err("empty summary".into());
+            return Err(ProviderError::InvalidResponse("empty summary".into()));
         }
         Ok(summary)
     }
 
     /// Fire-and-forget short completion.
-    async fn complete_raw(&self, body: serde_json::Value) -> Result<String, String> {
+    async fn complete_raw(&self, body: serde_json::Value) -> Result<String, ProviderError> {
         let url = format!("{}/chat/completions", self.api_base);
         let mut req = self.client.post(&url).json(&body);
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
         }
 
-        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
         if !resp.status().is_success() {
-            let status = resp.status();
+            let code = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            let code = status.as_u16();
-            if text.contains("insufficient_quota")
-                || text.contains("billing_not_active")
-                || text.contains("credit balance is too low")
-                || (code == 429 && text.contains("exceeded"))
-            {
-                return Err(format!("quota exceeded: {text}"));
-            }
-            return Err(format!("API error {}: {}", status, text));
+            return Err(ProviderError::from_http(code, text));
         }
 
-        let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
         let text = data["choices"]
             .get(0)
             .and_then(|c| c["message"]["content"].as_str())
@@ -854,7 +853,7 @@ impl Provider {
             .to_string();
 
         if text.is_empty() {
-            Err("empty response".into())
+            Err(ProviderError::InvalidResponse("empty response".into()))
         } else {
             Ok(text)
         }
@@ -866,7 +865,7 @@ impl Provider {
         &self,
         messages: &[protocol::Message],
         model: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, ProviderError> {
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| serde_json::to_value(m).unwrap())
@@ -888,7 +887,7 @@ impl Provider {
         max_tokens: u32,
         temperature: f32,
         multiline: bool,
-    ) -> Result<String, String> {
+    ) -> Result<String, ProviderError> {
         let mut body = serde_json::json!({
             "model": model,
             "messages": [
@@ -915,7 +914,7 @@ impl Provider {
         content: &str,
         prompt: &str,
         model: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, ProviderError> {
         let mut body = serde_json::json!({
             "model": model,
             "messages": [
@@ -939,7 +938,7 @@ impl Provider {
         &self,
         user_messages: &[String],
         model: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), ProviderError> {
         let numbered: Vec<String> = user_messages
             .iter()
             .enumerate()

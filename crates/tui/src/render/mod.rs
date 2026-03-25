@@ -281,9 +281,6 @@ pub enum Block {
     Hint {
         content: String,
     },
-    Error {
-        message: String,
-    },
     Exec {
         command: String,
         output: String,

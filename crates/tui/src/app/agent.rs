@@ -421,7 +421,8 @@ impl App {
                 SessionControl::Done
             }
             EngineEvent::TurnError { message } => {
-                self.screen.push(Block::Error { message });
+                self.screen.set_throbber(render::Throbber::Done);
+                self.screen.notify_error(message);
                 SessionControl::Done
             }
             EngineEvent::Shutdown { .. } => SessionControl::Done,

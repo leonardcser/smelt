@@ -53,8 +53,6 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::ToolCall { .. }), Element::Block(Block::Text { .. })) => 1,
         (Element::Block(Block::Hint { .. }), _) => 1,
         (_, Element::Block(Block::Hint { .. })) => 1,
-        (Element::Block(Block::Error { .. }), _) => 1,
-        (_, Element::Block(Block::Error { .. })) => 1,
         (_, Element::Block(Block::Compacted { .. })) => 1,
         (Element::Block(Block::Compacted { .. }), _) => 1,
         (Element::ActiveTool, Element::ActiveTool) => 1,
@@ -179,10 +177,6 @@ pub(super) fn render_block(out: &mut RenderOut, block: &Block, width: usize) -> 
             let _ = out.queue(Print(content));
             let _ = out.queue(SetAttribute(Attribute::Reset));
             crlf(out);
-            1
-        }
-        Block::Error { message } => {
-            print_error(out, message);
             1
         }
         Block::Compacted { summary } => {
@@ -797,13 +791,6 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
     } else {
         format!("{} {}", count, plural)
     }
-}
-
-fn print_error(out: &mut RenderOut, msg: &str) {
-    let _ = out.queue(SetForegroundColor(theme::ERROR));
-    let _ = out.queue(Print(format!(" error: {}", msg)));
-    let _ = out.queue(ResetColor);
-    crlf(out);
 }
 
 fn result_preview(content: &str, max_lines: usize) -> String {
