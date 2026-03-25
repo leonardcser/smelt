@@ -363,16 +363,16 @@ impl Provider {
                 let code = status.as_u16();
                 let text = resp.text().await.unwrap_or_default();
 
+                let is_quota = text.contains("insufficient_quota")
+                    || text.contains("billing_not_active")
+                    || text.contains("credit balance is too low")
+                    || (code == 429 && text.contains("exceeded"));
+
                 let err = match code {
+                    _ if is_quota => ProviderError::QuotaExceeded(text),
                     400 => ProviderError::InvalidResponse(text),
                     401 | 403 => ProviderError::Auth(text),
                     404 => ProviderError::NotFound(text),
-                    429 if text.contains("insufficient_quota")
-                        || text.contains("billing_not_active")
-                        || text.contains("exceeded") =>
-                    {
-                        ProviderError::QuotaExceeded(text)
-                    }
                     429 => ProviderError::RateLimited {
                         attempt: attempt as u32,
                     },
@@ -835,10 +835,10 @@ impl Provider {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             let code = status.as_u16();
-            if code == 429
-                && (text.contains("insufficient_quota")
-                    || text.contains("billing_not_active")
-                    || text.contains("exceeded"))
+            if text.contains("insufficient_quota")
+                || text.contains("billing_not_active")
+                || text.contains("credit balance is too low")
+                || (code == 429 && text.contains("exceeded"))
             {
                 return Err(format!("quota exceeded: {text}"));
             }

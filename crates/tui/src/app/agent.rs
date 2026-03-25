@@ -467,8 +467,7 @@ impl App {
             }
             EngineEvent::TurnError { message } => {
                 self.screen.set_throbber(render::Throbber::Done);
-                self.screen
-                    .notify_error(format!("compaction failed: {message}"));
+                self.screen.notify_error(message);
             }
             _ => {}
         }
