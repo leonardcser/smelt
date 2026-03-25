@@ -108,12 +108,10 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             "bash_background",
             "read_process_output",
             "stop_process",
+            "exit_plan_mode",
         ] {
             tools.entry(name.to_string()).or_insert(Decision::Allow);
         }
-        tools
-            .entry("exit_plan_mode".to_string())
-            .or_insert(Decision::Deny);
     } else {
         // read_file: allow in all non-yolo modes
         tools
@@ -144,14 +142,9 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             .entry("ask_user_question".to_string())
             .or_insert(Decision::Allow);
 
-        let default_exit_plan = if mode == Mode::Plan {
-            Decision::Ask
-        } else {
-            Decision::Deny
-        };
         tools
             .entry("exit_plan_mode".to_string())
-            .or_insert(default_exit_plan);
+            .or_insert(Decision::Ask);
     }
 
     let mut bash_allow = compile_patterns(&raw.bash.allow);
