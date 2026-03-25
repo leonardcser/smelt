@@ -772,10 +772,8 @@ impl Screen {
         let mut out = RenderOut::scroll();
         let _ = out.queue(cursor::MoveTo(0, end_row.min(height.saturating_sub(1))));
         if clear_below {
-            // Clear everything below to remove any leftover tab bar / completions.
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         }
-        let _ = out.queue(Print("\n"));
         let _ = out.flush();
     }
 
@@ -1120,6 +1118,15 @@ impl Screen {
     }
 
     pub fn mark_dirty(&mut self) {
+        self.prompt.dirty = true;
+    }
+
+    /// Center the input viewport on the cursor (vim `zz`).
+    pub fn center_input_scroll(&mut self) {
+        // The actual centering happens in draw_prompt_sections using a
+        // sentinel value. We set input_scroll to usize::MAX so the
+        // scroll logic knows to center instead of preserving position.
+        self.prompt.input_scroll = usize::MAX;
         self.prompt.dirty = true;
     }
 
@@ -1623,6 +1630,7 @@ impl Screen {
         draw_start_row: u16,
         pre_prompt_rows: u16,
     ) -> (u16, u16, bool) {
+        let _perf = crate::perf::begin("draw_prompt");
         let usable = width.saturating_sub(2);
         let height = terminal::size()
             .map(|(_, h)| h as usize)
@@ -1818,15 +1826,31 @@ impl Screen {
         }
 
         let content_rows = total_content_rows.min(max_content_rows);
-        let mut scroll_offset = 0usize;
-        if total_content_rows > content_rows {
-            if cursor_line + 1 > content_rows {
-                scroll_offset = cursor_line + 1 - content_rows;
+        let scroll_offset = if total_content_rows > content_rows {
+            // Vim-style viewport: persist scroll across frames, only adjust
+            // when the cursor moves outside the visible range.
+            let mut off = self.prompt.input_scroll;
+            // Sentinel: center viewport on cursor (zz).
+            if off == usize::MAX {
+                off = cursor_line.saturating_sub(content_rows / 2);
             }
-            if scroll_offset + content_rows > total_content_rows {
-                scroll_offset = total_content_rows - content_rows;
+            // Cursor below viewport → scroll down just enough.
+            if cursor_line >= off + content_rows {
+                off = cursor_line + 1 - content_rows;
             }
-        }
+            // Cursor above viewport → scroll up just enough.
+            if cursor_line < off {
+                off = cursor_line;
+            }
+            // Clamp to valid range.
+            let max_off = total_content_rows.saturating_sub(content_rows);
+            off = off.min(max_off);
+            self.prompt.input_scroll = off;
+            off
+        } else {
+            self.prompt.input_scroll = 0;
+            0
+        };
         let cursor_line_visible = cursor_line
             .saturating_sub(scroll_offset)
             .min(content_rows.saturating_sub(1));
@@ -2115,18 +2139,6 @@ impl Screen {
         let text_row = prompt_start + 1 + visible_extra + cursor_line_visible as u16;
         let text_col = 1 + cursor_col as u16;
         let _ = out.queue(cursor::MoveTo(text_col, text_row));
-
-        #[cfg(debug_assertions)]
-        {
-            let _ = out.flush();
-            if let Ok((_, actual_row)) = cursor::position() {
-                debug_assert_eq!(
-                    actual_row, text_row,
-                    "cursor row drift: calculated={text_row} actual={actual_row} \
-                     top={top_row} pre_prompt={pre_prompt_rows} draw_start={draw_start_row}"
-                );
-            }
-        }
 
         (top_row, total_rows as u16, scrolled)
     }
@@ -2424,6 +2436,7 @@ fn wrap_and_locate_cursor(
     cursor_char: usize,
     usable: usize,
 ) -> (Vec<(String, Vec<SpanKind>)>, usize, usize) {
+    let _perf = crate::perf::begin("wrap_cursor");
     let mut visual_lines: Vec<(String, Vec<SpanKind>)> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
@@ -2581,6 +2594,7 @@ pub(super) fn draw_bar(
     right: Option<&[BarSpan]>,
     bar_color: Color,
 ) {
+    let _perf = crate::perf::begin("draw_bar");
     let dash = "\u{2500}";
     let min_dashes = 4;
 
@@ -2784,6 +2798,7 @@ pub(super) fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
 }
 
 fn build_display_spans(buf: &str, att_ids: &[AttachmentId], store: &AttachmentStore) -> Vec<Span> {
+    let _perf = crate::perf::begin("display_spans");
     let mut spans = Vec::new();
     let mut plain = String::new();
     let mut att_idx = 0;

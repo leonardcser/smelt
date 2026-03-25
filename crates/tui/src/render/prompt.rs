@@ -9,6 +9,8 @@ pub(super) struct PromptState {
     /// Computed each frame inside `draw_frame`, exposed via `dialog_row()`
     /// getter for the app loop.
     pub prev_dialog_row: Option<u16>,
+    /// Persisted scroll offset for multi-line input (vim-style viewport).
+    pub input_scroll: usize,
 }
 
 impl PromptState {
@@ -19,6 +21,7 @@ impl PromptState {
             prev_rows: 0,
             anchor_row: None,
             prev_dialog_row: None,
+            input_scroll: 0,
         }
     }
 }

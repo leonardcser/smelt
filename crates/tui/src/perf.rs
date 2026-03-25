@@ -68,12 +68,12 @@ pub fn print_summary() {
     }
     groups.sort_by_key(|(l, _)| *l);
 
-    eprintln!("\n{:─<72}", "── bench ");
-    eprintln!(
+    println!("\n{:─<72}", "── bench ");
+    println!(
         "{:<30} {:>8} {:>10} {:>10} {:>10}",
         "function", "calls", "total", "avg", "max"
     );
-    eprintln!("{:─<72}", "");
+    println!("{:─<72}", "");
 
     for (label, mut durs) in groups {
         durs.sort();
@@ -81,7 +81,7 @@ pub fn print_summary() {
         let total: Duration = durs.iter().sum();
         let avg = total / count as u32;
         let max = durs.last().copied().unwrap_or_default();
-        eprintln!(
+        println!(
             "{:<30} {:>8} {:>10} {:>10} {:>10}",
             label,
             count,
@@ -90,7 +90,7 @@ pub fn print_summary() {
             fmt_dur(max),
         );
     }
-    eprintln!("{:─<72}", "");
+    println!("{:─<72}", "");
 }
 
 fn fmt_dur(d: Duration) -> String {

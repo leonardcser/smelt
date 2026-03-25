@@ -513,6 +513,9 @@ impl App {
                 self.edit_in_editor();
                 self.screen.redraw(true);
             }
+            Action::CenterScroll => {
+                self.screen.center_input_scroll();
+            }
             Action::NotifyError(msg) => {
                 self.screen.notify_error(msg);
                 self.screen.mark_dirty();
@@ -543,6 +546,10 @@ impl App {
             Action::EditInEditor => {
                 self.edit_in_editor();
                 self.screen.redraw(true);
+                EventOutcome::Noop
+            }
+            Action::CenterScroll => {
+                self.screen.center_input_scroll();
                 EventOutcome::Noop
             }
             Action::Resize {
@@ -748,6 +755,7 @@ impl App {
     /// Returns true if a dialog overlay needs to be re-dirtied (because
     /// `draw_frame` cleared the area underneath it).
     pub(super) fn tick(&mut self, agent_running: bool, has_dialog: bool) -> bool {
+        let _perf = crate::perf::begin("tick");
         let w = render::term_width();
         let screen = &mut self.screen;
 

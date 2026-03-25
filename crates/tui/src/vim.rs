@@ -24,6 +24,8 @@ pub enum Action {
     HistoryNext,
     /// Open buffer in $EDITOR.
     EditInEditor,
+    /// Center the input viewport on the cursor (zz).
+    CenterScroll,
     /// Key not handled — caller should use its own logic.
     Passthrough,
 }
@@ -71,6 +73,7 @@ enum SubState {
     Ready,
     WaitingOp(Op),
     WaitingG,
+    WaitingZ,
     /// Operator pending + `g` pressed, waiting for `g` to complete `gg` motion.
     WaitingOpG(Op),
     WaitingR,
@@ -266,6 +269,14 @@ impl Vim {
         // Handle sub-states first.
         match self.sub {
             SubState::WaitingR => return self.handle_waiting_r(key, buf, cpos, attachments),
+            SubState::WaitingZ => {
+                self.sub = SubState::Ready;
+                return if matches!(key.code, KeyCode::Char('z')) {
+                    Action::CenterScroll
+                } else {
+                    Action::Consumed
+                };
+            }
             SubState::WaitingFind(kind) => return self.handle_waiting_find(key, kind, buf, cpos),
             SubState::WaitingOpFind(op, kind) => {
                 return self.handle_waiting_op_find(key, op, kind, buf, cpos, attachments)
@@ -673,6 +684,10 @@ impl Vim {
             // ── Wait-for-second-char ────────────────────────────────────
             'g' => {
                 self.sub = SubState::WaitingG;
+                Action::Consumed
+            }
+            'z' => {
+                self.sub = SubState::WaitingZ;
                 Action::Consumed
             }
 

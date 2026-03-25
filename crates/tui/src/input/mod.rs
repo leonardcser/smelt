@@ -148,6 +148,7 @@ pub enum Action {
     ToggleMode,
     CycleReasoning,
     EditInEditor,
+    CenterScroll,
     Resize { width: usize, height: usize },
     NotifyError(String),
     Noop,
@@ -1039,6 +1040,9 @@ impl InputState {
                     }
                     vim::Action::EditInEditor => {
                         return Action::EditInEditor;
+                    }
+                    vim::Action::CenterScroll => {
+                        return Action::CenterScroll;
                     }
                     vim::Action::Passthrough => {
                         // Fall through to keymap / char insert below.
