@@ -820,25 +820,35 @@ impl App {
             permission_overrides: None,
         });
 
-        // Drain events, printing text to stdout.
+        // Drain events, printing text to stdout and tool lifecycle to stderr.
         while let Some(ev) = self.engine.recv().await {
             match ev {
                 EngineEvent::Thinking { content } => {
-                    eprintln!("[thinking] {content}");
+                    log_thinking(&content);
                 }
                 EngineEvent::Text { content } => {
-                    print!("{content}");
+                    if !content.ends_with('\n') {
+                        println!("{content}");
+                    } else {
+                        print!("{content}");
+                    }
                     let _ = io::stdout().flush();
                 }
                 EngineEvent::ToolStarted {
                     tool_name, summary, ..
                 } => {
-                    eprintln!("[tool: {tool_name}] {summary}");
+                    log_tool_start(&tool_name, &summary);
                 }
-                EngineEvent::ToolFinished { result, .. } => {
-                    if result.is_error {
-                        eprintln!("[tool error] {}", result.content);
-                    }
+                EngineEvent::ToolOutput { chunk, .. } => {
+                    log_tool_output(&chunk);
+                }
+                EngineEvent::ToolFinished {
+                    result, elapsed_ms, ..
+                } => {
+                    log_tool_finish(result.is_error, &result.content, elapsed_ms);
+                }
+                EngineEvent::Retrying { delay_ms, attempt } => {
+                    log_retry(attempt, delay_ms);
                 }
                 EngineEvent::RequestPermission { request_id, .. } => {
                     let approved = self.mode == Mode::Yolo;
@@ -856,7 +866,7 @@ impl App {
                 }
                 EngineEvent::Messages { .. } => {}
                 EngineEvent::TurnError { message } => {
-                    eprintln!("[error] {message}");
+                    log_error(&message);
                 }
                 EngineEvent::TurnComplete { .. } => {
                     break;
@@ -975,5 +985,132 @@ mod tests {
     fn startup_unknown_slash_not_a_command() {
         // Not a recognized command — should pass through as a message
         assert!(classify_startup_command("/unknown").is_none());
+    }
+}
+
+// ── Headless logging helpers ─────────────────────────────────────────────────
+
+fn stderr_supports_color() -> bool {
+    use std::sync::OnceLock;
+    static RESULT: OnceLock<bool> = OnceLock::new();
+    *RESULT.get_or_init(|| {
+        use std::io::IsTerminal;
+        if std::env::var_os("NO_COLOR").is_some() {
+            return false;
+        }
+        if std::env::var("TERM").as_deref() == Ok("dumb") {
+            return false;
+        }
+        if std::env::var_os("FORCE_COLOR").is_some() {
+            return true;
+        }
+        std::io::stderr().is_terminal()
+    })
+}
+
+/// Map a `crossterm::style::Color` to its ANSI escape foreground string.
+fn ansi_fg(c: crossterm::style::Color) -> &'static str {
+    if !stderr_supports_color() {
+        return "";
+    }
+    use crossterm::style::Color;
+    // Leak a small string per unique color (bounded by theme constants).
+    match c {
+        Color::AnsiValue(n) => {
+            let s: String = format!("\x1b[38;5;{n}m");
+            &*Box::leak(s.into_boxed_str())
+        }
+        Color::Red => "\x1b[31m",
+        Color::DarkGrey => "\x1b[90m",
+        _ => "",
+    }
+}
+
+fn reset() -> &'static str {
+    if stderr_supports_color() { "\x1b[0m" } else { "" }
+}
+fn dim() -> &'static str {
+    if stderr_supports_color() { "\x1b[2m" } else { "" }
+}
+fn dim_italic() -> &'static str {
+    if stderr_supports_color() { "\x1b[2;3m" } else { "" }
+}
+
+fn log_thinking(content: &str) {
+    let di = dim_italic();
+    let r = reset();
+    for line in content.lines() {
+        eprintln!("{di}{line}{r}");
+    }
+}
+
+fn log_tool_start(tool_name: &str, summary: &str) {
+    let c = ansi_fg(crate::theme::TOOL_PENDING);
+    let r = reset();
+    eprintln!("{c}  > {tool_name}{r} {summary}");
+}
+
+/// Max lines of tool output to show (tail). Matches the TUI's
+/// `render_bash_output` limit.
+const MAX_OUTPUT_LINES: usize = 20;
+
+fn log_tool_output(chunk: &str) {
+    let d = dim();
+    let r = reset();
+    let lines: Vec<&str> = chunk.lines().collect();
+    let total = lines.len();
+    if total > MAX_OUTPUT_LINES {
+        let skipped = total - MAX_OUTPUT_LINES;
+        eprintln!("{d}    ... {skipped} lines above{r}");
+    }
+    let start = total.saturating_sub(MAX_OUTPUT_LINES);
+    for line in &lines[start..] {
+        eprintln!("{d}    {line}{r}");
+    }
+}
+
+fn log_tool_finish(is_error: bool, content: &str, elapsed_ms: Option<u64>) {
+    let r = reset();
+    if is_error {
+        let c = ansi_fg(crate::theme::ERROR);
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+        if total > MAX_OUTPUT_LINES {
+            let skipped = total - MAX_OUTPUT_LINES;
+            eprintln!("{c}  ! ... {skipped} lines above{r}");
+        }
+        let start = total.saturating_sub(MAX_OUTPUT_LINES);
+        for (i, line) in lines[start..].iter().enumerate() {
+            if i == 0 && start == 0 {
+                eprintln!("{c}  ! {line}{r}");
+            } else {
+                eprintln!("{c}    {line}{r}");
+            }
+        }
+    } else {
+        let c = ansi_fg(crate::theme::SUCCESS);
+        let time = format_elapsed(elapsed_ms);
+        eprintln!("{c}  < {time}{r}");
+    }
+}
+
+fn log_retry(attempt: u32, delay_ms: u64) {
+    let d = dim();
+    let r = reset();
+    let secs = delay_ms as f64 / 1000.0;
+    eprintln!("{d}  \u{27f3} retry #{attempt} ({secs:.1}s){r}");
+}
+
+fn log_error(message: &str) {
+    let c = ansi_fg(crate::theme::ERROR);
+    let r = reset();
+    eprintln!("{c}  ! {message}{r}");
+}
+
+fn format_elapsed(ms: Option<u64>) -> String {
+    match ms {
+        Some(ms) if ms >= 1000 => format!("{:.1}s", ms as f64 / 1000.0),
+        Some(ms) => format!("{ms}ms"),
+        None => String::new(),
     }
 }
