@@ -221,6 +221,14 @@ prefix of the CWD).
 Use `/permissions` to view and manage both session and workspace permissions.
 Navigate with `j`/`k`, delete with `dd` or `Backspace`, close with `Esc`.
 
+> [!CAUTION]
+>
+> **Workspace restriction is a best-effort safety measure.** It catches common
+> cases where the agent tries to access paths outside the workspace, but it
+> cannot guarantee full containment — shell commands, symlinks, and indirect
+> access patterns may bypass it. If you need strong isolation, run the agent
+> inside a container or sandbox.
+
 ## CLI Flags
 
 ```
