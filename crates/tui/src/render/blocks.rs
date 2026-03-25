@@ -738,36 +738,37 @@ fn render_plan_output(
 }
 
 fn render_bash_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
-    const MAX_LINES: usize = 20;
+    const MAX_VISUAL_ROWS: usize = 20;
     let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
+
+    // Pre-wrap all lines so we can count visual rows.
+    let wrapped: Vec<String> = content
+        .lines()
+        .flat_map(|line| {
+            let expanded = line.replace('\t', "    ");
+            wrap_line(&expanded, max_cols)
+        })
+        .collect();
+
+    let total = wrapped.len();
     let mut rows = 0u16;
-    if total > MAX_LINES {
-        let skipped = total - MAX_LINES;
+    if total > MAX_VISUAL_ROWS {
+        let skipped = total - MAX_VISUAL_ROWS;
         print_dim(out, &format!("   ... {} lines above", skipped));
         crlf(out);
         rows += 1;
     }
-    let visible = if total > MAX_LINES {
-        &lines[total - MAX_LINES..]
-    } else {
-        &lines[..]
-    };
-    for line in visible {
-        let line = &line.replace('\t', "    ");
-        let segments = wrap_line(line, max_cols);
-        for seg in &segments {
-            if is_error {
-                let _ = out.queue(SetForegroundColor(theme::ERROR));
-                let _ = out.queue(Print(format!("   {}", seg)));
-                let _ = out.queue(ResetColor);
-            } else {
-                print_dim(out, &format!("   {}", seg));
-            }
-            crlf(out);
-            rows += 1;
+    let start = total.saturating_sub(MAX_VISUAL_ROWS);
+    for seg in &wrapped[start..] {
+        if is_error {
+            let _ = out.queue(SetForegroundColor(theme::ERROR));
+            let _ = out.queue(Print(format!("   {}", seg)));
+            let _ = out.queue(ResetColor);
+        } else {
+            print_dim(out, &format!("   {}", seg));
         }
+        crlf(out);
+        rows += 1;
     }
     rows
 }
