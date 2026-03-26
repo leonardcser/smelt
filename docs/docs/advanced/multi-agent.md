@@ -1,0 +1,89 @@
+# Multi-Agent Mode
+
+!!! warning
+
+    **Experimental.** Subagents inherit the parent's model and run in Normal
+    mode with workspace restriction and auto-compact enabled. The workspace
+    boundary is best-effort — use a container for strong isolation.
+
+## Enabling
+
+```bash
+agent --multi-agent
+```
+
+Or in config:
+
+```yaml
+settings:
+  multi_agent: true
+```
+
+Disable with `--no-multi-agent` (overrides config).
+
+## How It Works
+
+When enabled, the agent gains five additional tools for spawning and
+communicating with subagents:
+
+| Tool | Description |
+| --- | --- |
+| `spawn_agent` | Launch a subagent with a task prompt |
+| `list_agents` | List owned subagents and discovered peers |
+| `message_agent` | Send a message to one or more agents |
+| `peek_agent` | Query an agent's context without interrupting it |
+| `stop_agent` | Terminate a subagent |
+
+## Subagent Behavior
+
+- Inherit the parent's **model** and **reasoning effort**
+- Run in **Normal mode** with default permissions
+- Have **auto-compact** enabled
+- Are **workspace-restricted** to the parent's CWD
+- **Persist between turns** — they listen for incoming messages
+- **Self-terminate** when their task is complete
+
+Agents get human-readable names (e.g., cedar, birch, plum).
+
+## Depth and Limits
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--max-agent-depth <N>` | 1 | How deep agents can nest (agents can't spawn at max depth) |
+| `--max-agents <N>` | 8 | Max concurrent agents per session |
+
+## Peer Discovery
+
+Other interactive agent sessions in the same repository are automatically
+discovered via the registry at `~/.local/state/agent/registry/`. You can
+communicate with peers using the same `message_agent` and `peek_agent` tools.
+
+## Tab Bar
+
+Each subagent gets its own tab with full TUI rendering. The tab bar appears at
+the bottom of the screen.
+
+### Switching Tabs
+
+| Key | Action |
+| --- | --- |
+| `Left` / `Right` | Cycle tabs (when input is empty) |
+| `Alt+[` / `Alt+]` | Cycle tabs (always) |
+| `Alt+1`..`Alt+9` | Jump to tab by number |
+| `gt` / `gT` | Next / previous tab (vim normal mode) |
+
+### Subagent Commands
+
+These slash commands work on subagent tabs:
+
+| Command | Action |
+| --- | --- |
+| `/exit` | Kill the subagent |
+| `/export` | Copy conversation to clipboard |
+| `/color` | Set slug color |
+| `/stats` | Show metrics |
+| `/agents` | Manage agents |
+| `/btw` | Side question |
+| `!cmd` | Shell escape |
+
+All other commands are parent-only.

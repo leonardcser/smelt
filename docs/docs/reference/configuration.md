@@ -1,0 +1,181 @@
+# Configuration Reference
+
+Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`).
+
+## Full Example
+
+```yaml
+providers:
+  - name: ollama
+    type: openai-compatible
+    api_base: http://localhost:11434/v1
+    models:
+      - glm-5
+      - name: qwen3.5:27b
+        temperature: 0.8
+        top_p: 0.95
+        top_k: 40
+        min_p: 0.01
+        repeat_penalty: 1.0
+      - name: llama3:8b
+        tool_calling: false
+
+  - name: openai
+    type: openai
+    api_base: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    models:
+      - gpt-5.4
+
+  - name: anthropic
+    type: anthropic
+    api_base: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      - claude-sonnet-4-6
+
+  - name: openrouter
+    type: openai
+    api_base: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    models:
+      - anthropic/claude-sonnet-4-6
+      - openai/gpt-5.4
+
+defaults:
+  model: ollama/glm-5
+  mode: normal
+  mode_cycle: [normal, plan, apply, yolo]
+  reasoning_effort: "off"
+  reasoning_cycle: ["off", "low", "medium", "high", "max"]
+
+settings:
+  vim_mode: false
+  auto_compact: false
+  show_speed: true
+  input_prediction: true
+  task_slug: true
+  restrict_to_workspace: true
+  multi_agent: false
+
+theme:
+  accent: lavender
+
+permissions:
+  normal:
+    tools:
+      allow: [read_file, glob, grep]
+      ask: [edit_file, write_file]
+      deny: []
+    bash:
+      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
+      ask: []
+      deny: []
+    web_fetch:
+      allow: ["https://docs.rs/*", "https://github.com/*"]
+      deny: ["https://evil.com/*"]
+  plan:
+    tools:
+      allow: [read_file, glob, grep]
+    bash:
+      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
+  apply:
+    tools:
+      allow: [read_file, glob, grep, edit_file, write_file]
+    bash:
+      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
+  yolo:
+    tools:
+      deny: []
+    bash:
+      deny: ["rm -rf /*"]
+```
+
+## Providers
+
+Each entry under `providers` defines a connection to an LLM API.
+
+| Field | Description |
+| --- | --- |
+| `name` | Unique identifier (used in `defaults.model` as prefix) |
+| `type` | `openai-compatible`, `openai`, or `anthropic` |
+| `api_base` | API endpoint URL |
+| `api_key_env` | Environment variable holding the API key |
+| `models` | List of available models |
+
+### Provider Types
+
+| Type | Endpoint | Works With |
+| --- | --- | --- |
+| `openai-compatible` | `/v1/chat/completions` | Ollama, vLLM, SGLang, llama.cpp |
+| `openai` | `/v1/responses` | OpenAI, OpenRouter |
+| `anthropic` | `/v1/chat/completions` + thinking | Anthropic |
+
+### Model Configuration
+
+Models can be strings or objects with per-model overrides:
+
+```yaml
+models:
+  - gpt-5.4                    # simple form
+  - name: qwen3.5:27b          # object form
+    temperature: 0.8
+    top_p: 0.95
+    top_k: 40                  # openai-compatible & anthropic only
+    min_p: 0.01                # openai-compatible only
+    repeat_penalty: 1.0        # openai-compatible only
+    tool_calling: false         # disable tools for this model
+```
+
+## Defaults
+
+```yaml
+defaults:
+  model: ollama/glm-5                              # provider_name/model_name
+  mode: normal                                      # starting mode
+  mode_cycle: [normal, plan, apply, yolo]           # Shift+Tab cycle
+  reasoning_effort: "off"                           # starting level
+  reasoning_cycle: ["off", "low", "medium", "high", "max"]  # Ctrl+T cycle
+```
+
+- If `model` is set, it overrides the cached selection from the previous session
+- If `model` is omitted, the last used model is restored
+
+## Settings
+
+All toggleable at runtime via `/settings`.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `vim_mode` | `false` | Vi keybindings |
+| `auto_compact` | `false` | Auto-summarize at 80% context usage |
+| `show_speed` | `true` | Tokens/sec in status bar |
+| `input_prediction` | `true` | Ghost text suggestions |
+| `task_slug` | `true` | Task label in status bar |
+| `restrict_to_workspace` | `true` | Downgrade Allow → Ask outside workspace |
+| `multi_agent` | `false` | Enable multi-agent mode |
+
+## Theme
+
+```yaml
+theme:
+  accent: lavender
+```
+
+Presets: `lavender`, `sky`, `mint`, `rose`, `peach`, `lilac`, `gold`, `ember`,
+`ice`, `sage`, `coral`, `silver`. Or a raw ANSI value (0–255).
+
+## Permissions
+
+See [Permissions Reference](permissions.md) for full details.
+
+## Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `XDG_CONFIG_HOME` | Config directory (default: `~/.config`) |
+| `XDG_STATE_HOME` | State directory (default: `~/.local/state`) |
+| `XDG_CACHE_HOME` | Cache directory (default: `~/.cache`) |
+| `COLORFGBG` | Terminal color hint (fallback for dark/light detection) |
+| `TERM` | Terminal type (`dumb` skips color detection) |
+| `EDITOR` | Editor for `Ctrl+X Ctrl+E` and vim `v` |
