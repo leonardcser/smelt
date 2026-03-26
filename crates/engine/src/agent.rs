@@ -820,15 +820,14 @@ impl<'a> Turn<'a> {
                 (r, deferred)
             };
 
-            for cmd in deferred_tool_cmds {
-                self.handle_turn_cmd(cmd);
-            }
-
             let results = match results {
                 Some(r) => r,
                 None => {
                     for a in &approved {
                         self.push_tool_result(&a.tc.id, "cancelled", true, Some(a.start));
+                    }
+                    for cmd in deferred_tool_cmds {
+                        self.handle_turn_cmd(cmd);
                     }
                     continue;
                 }
@@ -886,6 +885,13 @@ impl<'a> Turn<'a> {
                     },
                     elapsed_ms: Some(elapsed_ms),
                 });
+            }
+
+            // Process deferred Steer/AgentMessage commands AFTER tool results
+            // are in history, so steered user messages appear in the correct
+            // chronological position.
+            for cmd in deferred_tool_cmds {
+                self.handle_turn_cmd(cmd);
             }
         }
     }
