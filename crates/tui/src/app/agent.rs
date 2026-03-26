@@ -415,8 +415,10 @@ impl App {
                             .and_then(|s| s.split_whitespace().next())
                             .unwrap_or("")
                             .to_string();
-                        if let Some(idx) =
-                            self.agents.iter().position(|a| a.agent_id == agent_id && a.blocking)
+                        if let Some(idx) = self
+                            .agents
+                            .iter()
+                            .position(|a| a.agent_id == agent_id && a.blocking)
                         {
                             let pid = self.agents[idx].pid;
                             engine::registry::kill_agent(pid);

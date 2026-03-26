@@ -189,25 +189,21 @@ async fn handle_connection(stream: UnixStream, tx: mpsc::UnboundedSender<Incomin
                 reply_tx,
             });
 
-            let response = match tokio::time::timeout(
-                std::time::Duration::from_secs(600),
-                reply_rx,
-            )
-            .await
-            {
-                Ok(Ok(reply)) => WireMessage::PermissionVerdict {
-                    approved: reply.approved,
-                    message: reply.message,
-                },
-                Ok(Err(_)) => WireMessage::PermissionVerdict {
-                    approved: false,
-                    message: Some("permission handler dropped".into()),
-                },
-                Err(_) => WireMessage::PermissionVerdict {
-                    approved: false,
-                    message: Some("permission check timed out".into()),
-                },
-            };
+            let response =
+                match tokio::time::timeout(std::time::Duration::from_secs(600), reply_rx).await {
+                    Ok(Ok(reply)) => WireMessage::PermissionVerdict {
+                        approved: reply.approved,
+                        message: reply.message,
+                    },
+                    Ok(Err(_)) => WireMessage::PermissionVerdict {
+                        approved: false,
+                        message: Some("permission handler dropped".into()),
+                    },
+                    Err(_) => WireMessage::PermissionVerdict {
+                        approved: false,
+                        message: Some("permission check timed out".into()),
+                    },
+                };
 
             write_response(&mut writer, &response).await;
         }
@@ -276,11 +272,15 @@ pub async fn send_message(
     message: &str,
 ) -> Result<(), String> {
     let stream = connect(socket_path).await?;
-    fire_and_forget(stream, &WireMessage::Message {
-        from_id: from_id.to_string(),
-        from_slug: from_slug.to_string(),
-        message: message.to_string(),
-    }).await
+    fire_and_forget(
+        stream,
+        &WireMessage::Message {
+            from_id: from_id.to_string(),
+            from_slug: from_slug.to_string(),
+            message: message.to_string(),
+        },
+    )
+    .await
 }
 
 /// Send a query to a target agent and wait for the answer.
@@ -290,10 +290,15 @@ pub async fn send_query(
     question: &str,
 ) -> Result<String, String> {
     let stream = connect(socket_path).await?;
-    let response = send_and_recv(stream, &WireMessage::Query {
-        from_id: from_id.to_string(),
-        question: question.to_string(),
-    }, 30).await?;
+    let response = send_and_recv(
+        stream,
+        &WireMessage::Query {
+            from_id: from_id.to_string(),
+            question: question.to_string(),
+        },
+        30,
+    )
+    .await?;
 
     match response {
         WireMessage::QueryResult { answer } => Ok(answer),
@@ -309,14 +314,19 @@ pub async fn send_permission_check(
 ) -> Result<PermissionReply, String> {
     let stream = connect(socket_path).await?;
     // Client timeout shorter than server's 600s to avoid race.
-    let response = send_and_recv(stream, &WireMessage::PermissionCheck {
-        from_id: req.from_id.to_string(),
-        tool_name: req.tool_name.to_string(),
-        args: req.args.clone(),
-        confirm_message: req.confirm_message.to_string(),
-        approval_patterns: req.approval_patterns.to_vec(),
-        summary: req.summary.map(|s| s.to_string()),
-    }, 590).await?;
+    let response = send_and_recv(
+        stream,
+        &WireMessage::PermissionCheck {
+            from_id: req.from_id.to_string(),
+            tool_name: req.tool_name.to_string(),
+            args: req.args.clone(),
+            confirm_message: req.confirm_message.to_string(),
+            approval_patterns: req.approval_patterns.to_vec(),
+            summary: req.summary.map(|s| s.to_string()),
+        },
+        590,
+    )
+    .await?;
 
     match response {
         WireMessage::PermissionVerdict { approved, message } => {

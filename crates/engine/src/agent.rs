@@ -789,9 +789,11 @@ impl<'a> Turn<'a> {
                     }
                     Decision::Ask
                         if self.mode == Mode::Yolo
-                            && self
-                                .permissions
-                                .was_downgraded(self.mode, &tc.function.name, &args) =>
+                            && self.permissions.was_downgraded(
+                                self.mode,
+                                &tc.function.name,
+                                &args,
+                            ) =>
                     {
                         self.push_tool_result(
                             &tc.id,
@@ -808,7 +810,11 @@ impl<'a> Turn<'a> {
                         let approval_patterns = tool.approval_patterns(&args);
                         let cmd_summary = if tc.function.name == "bash" {
                             let d = tools::str_arg(&args, "description");
-                            if d.is_empty() { None } else { Some(d) }
+                            if d.is_empty() {
+                                None
+                            } else {
+                                Some(d)
+                            }
                         } else {
                             None
                         };
@@ -840,8 +846,7 @@ impl<'a> Turn<'a> {
             //
             // contexts/futs are scoped so they drop before we need &mut self
             // again (for handle_turn_cmd, push_tool_result, ask_user).
-            let mut completed: Vec<Option<ToolResult>> =
-                (0..slots.len()).map(|_| None).collect();
+            let mut completed: Vec<Option<ToolResult>> = (0..slots.len()).map(|_| None).collect();
 
             let (cancelled, deferred_tool_cmds) = {
                 use futures_util::stream::StreamExt;
@@ -1099,7 +1104,6 @@ impl<'a> Turn<'a> {
         ToolResult::ok(answer.unwrap_or_else(|| "no response".to_string()))
     }
 
-
     /// Wait for a QuestionAnswer matching the given request_id.
     async fn wait_for_answer(&mut self, request_id: u64) -> Option<String> {
         loop {
@@ -1148,7 +1152,6 @@ impl<'a> Turn<'a> {
         });
     }
 }
-
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

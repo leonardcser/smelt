@@ -125,7 +125,8 @@ pub struct App {
     /// Receiver for child agent permission requests (fed by socket bridge).
     child_permission_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
     /// Reply channels for pending child permission requests, keyed by synthetic request_id.
-    child_permission_replies: HashMap<u64, tokio::sync::oneshot::Sender<engine::socket::PermissionReply>>,
+    child_permission_replies:
+        HashMap<u64, tokio::sync::oneshot::Sender<engine::socket::PermissionReply>>,
     pending_title: bool,
     last_width: u16,
     last_height: u16,
@@ -732,14 +733,21 @@ impl App {
             // ── Drain child permission requests ──────────────────────────
             while let Ok(msg) = self.child_permission_rx.try_recv() {
                 let engine::socket::IncomingMessage::PermissionCheck {
-                    tool_name, args, confirm_message,
-                    approval_patterns, summary, reply_tx, ..
-                } = msg else { continue };
+                    tool_name,
+                    args,
+                    confirm_message,
+                    approval_patterns,
+                    summary,
+                    reply_tx,
+                    ..
+                } = msg
+                else {
+                    continue;
+                };
 
-                let request_id = NEXT_CHILD_REQUEST_ID
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.child_permission_replies
-                    .insert(request_id, reply_tx);
+                let request_id =
+                    NEXT_CHILD_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.child_permission_replies.insert(request_id, reply_tx);
 
                 let ctrl = SessionControl::NeedsConfirm(ConfirmRequest {
                     call_id: format!("child-perm-{request_id}"),

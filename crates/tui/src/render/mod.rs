@@ -31,6 +31,10 @@ use std::time::{Duration, Instant};
 
 use blocks::{gap_between, render_block, render_tool, Element};
 
+/// Maximum number of lines to re-render during a full redraw (e.g. purge).
+/// Older blocks beyond this limit are dropped to avoid flooding the terminal.
+const MAX_REDRAW_LINES: u16 = 2000;
+
 /// Parameters for rendering the prompt section in `draw_frame`.
 /// When `None` is passed instead, only content (blocks + active tool) is drawn.
 pub struct FramePrompt<'a> {
@@ -350,6 +354,8 @@ pub enum Throbber {
 
 struct BlockHistory {
     blocks: Vec<Block>,
+    /// Cached row count for each block (from its last render).
+    row_counts: Vec<u16>,
     flushed: usize,
     last_block_rows: u16,
 }
@@ -358,6 +364,7 @@ impl BlockHistory {
     fn new() -> Self {
         Self {
             blocks: Vec::new(),
+            row_counts: Vec::new(),
             flushed: 0,
             last_block_rows: 0,
         }
@@ -365,6 +372,7 @@ impl BlockHistory {
 
     fn push(&mut self, block: Block) {
         self.blocks.push(block);
+        self.row_counts.push(0);
     }
 
     fn has_unflushed(&self) -> bool {
@@ -373,12 +381,42 @@ impl BlockHistory {
 
     fn clear(&mut self) {
         self.blocks.clear();
+        self.row_counts.clear();
         self.flushed = 0;
         self.last_block_rows = 0;
     }
 
+    /// Gap (in rows) before the block at `i`, based on adjacency rules.
+    fn block_gap(&self, i: usize) -> u16 {
+        if i > 0 {
+            gap_between(
+                &Element::Block(&self.blocks[i - 1]),
+                &Element::Block(&self.blocks[i]),
+            )
+        } else {
+            0
+        }
+    }
+
+    /// Find the earliest block index such that rendering from that index to
+    /// the end stays within `max_lines`, using cached row counts.
+    fn redraw_start(&self, max_lines: u16) -> usize {
+        let mut budget = max_lines;
+        let mut start = self.blocks.len();
+        for i in (0..self.blocks.len()).rev() {
+            let total = self.block_gap(i) + self.row_counts[i];
+            if total > budget {
+                break;
+            }
+            budget -= total;
+            start = i;
+        }
+        start
+    }
+
     fn truncate(&mut self, idx: usize) {
         self.blocks.truncate(idx);
+        self.row_counts.truncate(idx);
         self.flushed = self.flushed.min(idx);
     }
 
@@ -390,18 +428,12 @@ impl BlockHistory {
         let mut total = 0u16;
         let last_idx = self.blocks.len().saturating_sub(1);
         for i in self.flushed..self.blocks.len() {
-            let gap = if i > 0 {
-                gap_between(
-                    &Element::Block(&self.blocks[i - 1]),
-                    &Element::Block(&self.blocks[i]),
-                )
-            } else {
-                0
-            };
+            let gap = self.block_gap(i);
             for _ in 0..gap {
                 crlf(out);
             }
             let rows = render_block(out, &self.blocks[i], width);
+            self.row_counts[i] = rows;
             total += gap + rows;
             if i == last_idx {
                 self.last_block_rows = rows + gap;
@@ -1291,9 +1323,10 @@ impl Screen {
             let _ = out.queue(cursor::MoveTo(0, row));
             row
         };
-        self.history.flushed = 0;
-        self.history.last_block_rows = 0;
         let (w, height) = terminal::size().unwrap_or((80, 24));
+        let start_idx = self.history.redraw_start(MAX_REDRAW_LINES);
+        self.history.flushed = start_idx;
+        self.history.last_block_rows = 0;
         let block_rows = self.history.render(&mut out, w as usize);
         if !purge {
             // Clear remaining rows individually — Clear(FromCursorDown) at
