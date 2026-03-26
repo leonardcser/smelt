@@ -13,6 +13,40 @@ analysis, and assistance.
   <img src="assets/demo.gif" alt="demo" width="800">
 </p>
 
+## Table of Contents
+
+<!-- mtoc-start -->
+
+* [Quick Start](#quick-start)
+* [Features](#features)
+* [Installation](#installation)
+* [Configuration](#configuration)
+  * [Workspace Permissions](#workspace-permissions)
+* [CLI Flags](#cli-flags)
+* [Modes](#modes)
+* [Keybindings](#keybindings)
+  * [Input](#input)
+  * [Vim normal mode overrides](#vim-normal-mode-overrides)
+  * [Dialogs](#dialogs)
+  * [Completer](#completer)
+  * [Menu (settings / model / theme)](#menu-settings--model--theme)
+* [Slash Commands](#slash-commands)
+* [Compaction (`/compact`)](#compaction-compact)
+* [Side Questions (`/btw`)](#side-questions-btw)
+* [Message Queuing](#message-queuing)
+* [File References](#file-references)
+* [Custom Commands](#custom-commands)
+* [Custom Instructions](#custom-instructions)
+* [Sessions](#sessions)
+* [Multi-Agent Mode](#multi-agent-mode)
+  * [Tab Bar](#tab-bar)
+* [Development](#development)
+* [Acknowledgments](#acknowledgments)
+* [Contributing](#contributing)
+* [License](#license)
+
+<!-- mtoc-end -->
+
 ## Quick Start
 
 ```bash
@@ -74,8 +108,8 @@ cargo install --path .
 
 ## Configuration
 
-Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`).
-Use `--config <path>` to load a different config file.
+Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`). Use
+`--config <path>` to load a different config file.
 
 ```yaml
 # Providers: named connections to LLM APIs
@@ -199,11 +233,11 @@ permissions:
 | `exit_plan_mode`      | —      | Ask   | —     | —     |
 | `read_process_output` | Ask    | Ask   | Ask   | Allow |
 | `stop_process`        | Ask    | Ask   | Ask   | Allow |
-| `spawn_agent`*        | Allow  | Allow | Allow | Allow |
-| `list_agents`*        | Allow  | Allow | Allow | Allow |
-| `message_agent`*      | Allow  | Allow | Allow | Allow |
-| `peek_agent`*         | Allow  | Allow | Allow | Allow |
-| `stop_agent`*         | Allow  | Allow | Allow | Allow |
+| `spawn_agent`\*       | Allow  | Allow | Allow | Allow |
+| `list_agents`\*       | Allow  | Allow | Allow | Allow |
+| `message_agent`\*     | Allow  | Allow | Allow | Allow |
+| `peek_agent`\*        | Allow  | Allow | Allow | Allow |
+| `stop_agent`\*        | Allow  | Allow | Allow | Allow |
 
 \*Multi-agent tools are only registered when `--multi-agent` is enabled.  
 `—` indicates the tool is not available in that mode.
@@ -552,10 +586,10 @@ previous session and `/fork` to branch from the current one.
 
 > [!WARNING]
 >
-> **Multi-agent is experimental.** Subagents run in **yolo mode** with workspace
-> restriction — they can read, write, and execute commands within the repository
-> without asking for permission. The workspace boundary is best-effort (see
-> warning above). Use containerization for strong isolation.
+> **Multi-agent is experimental.** Subagents inherit the parent's model and run
+> with workspace restriction — they use the default permission system (Normal
+> mode) and have auto-compact enabled. The workspace boundary is best-effort
+> (see warning above). Use containerization for strong isolation.
 
 Enable with `--multi-agent` or `multi_agent: true` in config. When enabled, the
 agent can spawn parallel subagents, discover peer agents in the same repository,
@@ -563,13 +597,13 @@ and communicate via message passing.
 
 **Tools available in multi-agent mode:**
 
-| Tool              | Description                                            |
-| ----------------- | ------------------------------------------------------ |
-| `spawn_agent`     | Spawn a subagent with a prompt (not at max depth)      |
-| `list_agents`     | List all agents in the workspace (owned + peers)       |
-| `message_agent`   | Send a message to one or more agents                   |
-| `peek_agent`      | Query another agent's context without interrupting it  |
-| `stop_agent`      | Stop a subagent when its work is done or unneeded      |
+| Tool            | Description                                           |
+| --------------- | ----------------------------------------------------- |
+| `spawn_agent`   | Spawn a subagent with a prompt (not at max depth)     |
+| `list_agents`   | List all agents in the workspace (owned + peers)      |
+| `message_agent` | Send a message to one or more agents                  |
+| `peek_agent`    | Query another agent's context without interrupting it |
+| `stop_agent`    | Stop a subagent when its work is done or unneeded     |
 
 Agents have human-readable names (e.g. cedar, birch). Subagents inherit the
 parent's model and are workspace-restricted. They persist between turns
@@ -585,12 +619,12 @@ the bottom of the screen when multi-agent mode is enabled.
 
 **Tab switching:**
 
-| Key              | Action                                |
-| ---------------- | ------------------------------------- |
-| `Left` / `Right` | Cycle tabs (when input buffer empty)  |
-| `Alt+[` / `Alt+]`| Cycle tabs (always)                   |
-| `Alt+1`..`Alt+9` | Jump to tab by number                 |
-| `gt` / `gT`      | Next / previous tab (vim normal mode) |
+| Key               | Action                                |
+| ----------------- | ------------------------------------- |
+| `Left` / `Right`  | Cycle tabs (when input buffer empty)  |
+| `Alt+[` / `Alt+]` | Cycle tabs (always)                   |
+| `Alt+1`..`Alt+9`  | Jump to tab by number                 |
+| `gt` / `gT`       | Next / previous tab (vim normal mode) |
 
 **Commands available on subagent tabs:** `/exit` (kills subagent), `/export`,
 `/color`, `/stats`, `/agents`, `/btw`, `!cmd`. Other commands are parent-only.
