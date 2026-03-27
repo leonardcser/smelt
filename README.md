@@ -87,16 +87,17 @@ settings:
   auto_compact: false
 ```
 
-See the [full documentation](docs/) for all config options, CLI flags,
-keybindings, permissions, and more.
+See the [full documentation](https://leonardcser.github.io/agent/) for all
+config options, CLI flags, keybindings, permissions, and more.
 
 ## Documentation
 
-Full docs are available at [docs/](docs/) and can be built locally with
-[Zensical](https://github.com/zensical/zensical):
+Full docs are available at
+[leonardcser.github.io/agent](https://leonardcser.github.io/agent/) and can be
+built locally with [Zensical](https://github.com/zensical/zensical):
 
 ```bash
-pip install zensical
+uv tool install zensical
 cd docs && zensical serve
 ```
 

@@ -1,5 +1,5 @@
 [project]
-site_name = "Agent"
+site_name = "agent"
 site_description = "A Rust TUI coding agent. Connects to any OpenAI-compatible API and provides an interactive terminal interface for code generation, analysis, and assistance."
 site_author = "Leonard Cseres"
 site_url = "https://leonardcser.github.io/agent/"
