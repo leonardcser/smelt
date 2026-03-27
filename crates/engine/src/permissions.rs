@@ -25,6 +25,7 @@ struct RawModePerms {
     tools: RawRuleSet,
     bash: RawRuleSet,
     web_fetch: RawRuleSet,
+    mcp: RawRuleSet,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -54,6 +55,7 @@ struct ModePerms {
     tools: HashMap<String, Decision>,
     bash: RuleSet,
     web_fetch: RuleSet,
+    mcp: RuleSet,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +194,11 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             ask: compile_patterns(&raw.web_fetch.ask),
             deny: compile_patterns(&raw.web_fetch.deny),
         },
+        mcp: RuleSet {
+            allow: compile_patterns(&raw.mcp.allow),
+            ask: compile_patterns(&raw.mcp.ask),
+            deny: compile_patterns(&raw.mcp.deny),
+        },
     }
 }
 
@@ -297,6 +304,14 @@ impl Permissions {
         check_ruleset(ruleset, pattern)
     }
 
+    /// Check permission for an MCP tool call. Matches the qualified tool name
+    /// (e.g. `filesystem_read_file`) against glob patterns in the `mcp` ruleset.
+    /// Defaults to Ask if no pattern matches.
+    pub fn check_mcp(&self, mode: Mode, qualified_name: &str) -> Decision {
+        let perms = self.mode_perms(mode);
+        check_ruleset(&perms.mcp, qualified_name)
+    }
+
     pub fn check_bash(&self, mode: Mode, command: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let command = command.trim();
@@ -331,7 +346,22 @@ impl Permissions {
     /// Full permission decision for a tool call, including workspace restriction.
     /// This is the single entry point used by both the engine and TUI.
     pub fn decide(&self, mode: Mode, tool_name: &str, args: &HashMap<String, Value>) -> Decision {
-        let base = decide_base(self, mode, tool_name, args);
+        self.decide_ext(mode, tool_name, args, false)
+    }
+
+    /// Like `decide`, but with an `is_mcp` flag to route through the MCP ruleset.
+    pub fn decide_ext(
+        &self,
+        mode: Mode,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        is_mcp: bool,
+    ) -> Decision {
+        let base = if is_mcp {
+            self.check_mcp(mode, tool_name)
+        } else {
+            decide_base(self, mode, tool_name, args)
+        };
         if base == Decision::Allow
             && self.restrict_to_workspace
             && !self.workspace.as_os_str().is_empty()
@@ -928,15 +958,20 @@ mod tests {
         }
     }
 
+    fn empty_ruleset() -> RuleSet {
+        RuleSet {
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+        }
+    }
+
     fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
         let mode = ModePerms {
             tools: HashMap::new(),
             bash: ruleset(allow, ask, deny),
-            web_fetch: RuleSet {
-                allow: vec![],
-                ask: vec![],
-                deny: vec![],
-            },
+            web_fetch: empty_ruleset(),
+            mcp: empty_ruleset(),
         };
         Permissions {
             normal: mode.clone(),
@@ -1512,11 +1547,8 @@ mod tests {
                 ask: vec![],
                 deny: vec![],
             },
-            web_fetch: RuleSet {
-                allow: vec![],
-                ask: vec![],
-                deny: vec![],
-            },
+            web_fetch: empty_ruleset(),
+            mcp: empty_ruleset(),
         };
         Permissions {
             normal: mode.clone(),

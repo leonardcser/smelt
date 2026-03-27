@@ -3,23 +3,28 @@ pub mod cancel;
 pub mod config;
 pub mod image;
 pub mod log;
+pub mod mcp;
 pub mod paths;
 pub mod permissions;
 pub mod plan;
 pub mod provider;
 pub mod registry;
+pub mod skills;
 pub mod socket;
 pub mod tools;
 
 use protocol::{EngineEvent, UiCommand};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub use config::ModelConfig;
+pub use mcp::McpServerConfig;
 pub use paths::{cache_dir, config_dir, home_dir, state_dir};
 pub use permissions::Permissions;
 pub use provider::{Provider, ProviderKind};
+pub use skills::SkillLoader;
 
 /// Assemble the system prompt from the base template, mode overlay, cwd, and
 /// optional extra instructions (e.g. from AGENTS.md files).
@@ -28,7 +33,7 @@ pub fn build_system_prompt(
     cwd: &std::path::Path,
     extra_instructions: Option<&str>,
 ) -> String {
-    build_system_prompt_full(mode, cwd, extra_instructions, None)
+    build_system_prompt_full(mode, cwd, extra_instructions, None, None)
 }
 
 pub fn build_system_prompt_full(
@@ -36,6 +41,7 @@ pub fn build_system_prompt_full(
     cwd: &std::path::Path,
     extra_instructions: Option<&str>,
     agent_config: Option<&AgentPromptConfig>,
+    skill_section: Option<&str>,
 ) -> String {
     let base = include_str!("prompts/system.txt");
     let overlay = match mode {
@@ -54,6 +60,11 @@ pub fn build_system_prompt_full(
     if let Some(instructions) = extra_instructions {
         prompt.push_str("\n\n");
         prompt.push_str(instructions);
+    }
+
+    if let Some(section) = skill_section {
+        prompt.push_str("\n\n");
+        prompt.push_str(section);
     }
 
     if let Some(cfg) = agent_config {
@@ -134,6 +145,10 @@ pub struct EngineConfig {
     pub multi_agent: Option<MultiAgentConfig>,
     /// True when a human is present (TUI mode). False for headless/subagent.
     pub interactive: bool,
+    /// MCP server configurations.
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// Pre-loaded skill loader.
+    pub skills: Option<Arc<SkillLoader>>,
 }
 
 /// Handle to a running engine. Send commands, receive events.
@@ -238,6 +253,9 @@ impl EventInjector {
 }
 
 /// Start the engine. Returns a handle for bidirectional communication.
+///
+/// MCP servers are connected asynchronously — this must be called from
+/// within a tokio runtime.
 pub fn start(config: EngineConfig) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -289,7 +307,7 @@ pub fn start(config: EngineConfig) -> EngineHandle {
         None
     };
 
-    let registry = tools::build_tools(processes.clone(), ma_config);
+    let registry = tools::build_tools(processes.clone(), ma_config, config.skills.clone());
 
     let permissions = Arc::clone(&config.permissions);
     let has_multi_agent = config.multi_agent.is_some();

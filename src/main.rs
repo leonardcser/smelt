@@ -472,6 +472,17 @@ async fn main() {
             None
         },
         interactive: !args.headless && !args.subagent,
+        mcp_servers: cfg.mcp.clone(),
+        skills: {
+            let extra_paths: Vec<std::path::PathBuf> = cfg
+                .skills
+                .paths
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+            let loader = engine::SkillLoader::load(&extra_paths);
+            Some(Arc::new(loader))
+        },
     });
     engine_injector = engine_handle.injector();
 

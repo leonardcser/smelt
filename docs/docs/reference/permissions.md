@@ -37,6 +37,7 @@ Normal/Plan/Apply or **Allow** in Yolo.
 | `list_agents`\* | Allow | Allow | Allow | Allow |
 | `message_agent`\* | Allow | Allow | Allow | Allow |
 | `peek_agent`\* | Allow | Allow | Allow | Allow |
+| `load_skill` | Ask | Ask | Ask | Allow |
 | `stop_agent`\* | Allow | Allow | Allow | Allow |
 
 \*Only registered when `--multi-agent` is enabled.

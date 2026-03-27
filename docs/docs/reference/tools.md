@@ -96,6 +96,19 @@ description. Results are cached by query.
 Asks you a question with selectable options. Supports single-select and
 multi-select modes. Available in interactive mode only.
 
+## Knowledge
+
+### `load_skill`
+
+Loads a skill by name to inject specialized instructions and knowledge into the
+conversation. Skills are discovered from `~/.config/agent/skills/*/SKILL.md`,
+`.agent/skills/*/SKILL.md`, and any paths listed in `skills.paths` config.
+
+Each skill directory contains a `SKILL.md` with YAML frontmatter (`name`,
+`description`) and a markdown body. Skill descriptions appear in the system
+prompt so the agent knows what's available. The full content is loaded on demand
+when the agent calls this tool.
+
 ## Mode-Specific
 
 ### `exit_plan_mode`

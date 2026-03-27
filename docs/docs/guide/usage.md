@@ -50,6 +50,8 @@ The agent can use these tools during a conversation:
 | `web_search` | Search the web via DuckDuckGo |
 | `notebook_edit` | Edit Jupyter notebooks |
 | `ask_user_question` | Ask you a question with selectable options |
+| `load_skill` | Load specialized knowledge on demand |
+| `exit_plan_mode` | Signal that a plan is ready (Plan mode only) |
 
 When a tool requires permission, a **confirm dialog** appears showing:
 

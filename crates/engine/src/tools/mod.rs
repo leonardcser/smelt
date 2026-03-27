@@ -7,6 +7,7 @@ mod exit_plan_mode;
 mod glob;
 mod grep;
 mod list_agents;
+mod load_skill;
 mod message_agent;
 mod notebook;
 mod peek_agent;
@@ -122,6 +123,11 @@ pub trait Tool: Send + Sync {
     fn modes(&self) -> Option<&[Mode]> {
         None
     }
+
+    /// Whether this tool is an MCP tool (uses `mcp` permission ruleset).
+    fn is_mcp(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -162,7 +168,11 @@ impl ToolRegistry {
                         return false;
                     }
                 }
-                permissions.check_tool(mode, t.name()) != Decision::Deny
+                if t.is_mcp() {
+                    permissions.check_mcp(mode, t.name()) != Decision::Deny
+                } else {
+                    permissions.check_tool(mode, t.name()) != Decision::Deny
+                }
             })
             .map(|t| {
                 ToolDefinition::new(FunctionSchema {
@@ -232,6 +242,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
             format!("{} {first_line}", targets.join(", "))
         }
         "stop_agent" => str_arg(args, "target"),
+        "load_skill" => str_arg(args, "name"),
         "list_agents" => String::new(),
         "peek_agent" => {
             let target = str_arg(args, "target");
@@ -465,7 +476,11 @@ pub struct MultiAgentToolConfig {
     pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
 }
 
-pub fn build_tools(processes: ProcessRegistry, ma: Option<MultiAgentToolConfig>) -> ToolRegistry {
+pub fn build_tools(
+    processes: ProcessRegistry,
+    ma: Option<MultiAgentToolConfig>,
+    skills: Option<std::sync::Arc<crate::skills::SkillLoader>>,
+) -> ToolRegistry {
     let hashes = new_file_hashes();
     let mut r = ToolRegistry::new();
     r.register(Box::new(ReadFileTool {
@@ -493,6 +508,11 @@ pub fn build_tools(processes: ProcessRegistry, ma: Option<MultiAgentToolConfig>)
     r.register(Box::new(StopProcessTool {
         registry: processes,
     }));
+
+    // Skill loader tool (conditionally registered).
+    if let Some(loader) = skills {
+        r.register(Box::new(load_skill::LoadSkillTool { loader }));
+    }
 
     // Multi-agent tools (conditionally registered).
     if let Some(ma) = ma {

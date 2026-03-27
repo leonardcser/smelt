@@ -89,6 +89,18 @@ permissions:
       deny: []
     bash:
       deny: ["rm -rf /*"]
+    mcp:
+      allow: ["*"]
+
+mcp:
+  filesystem:
+    type: local
+    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    timeout: 30000
+
+skills:
+  paths:
+    - ~/my-skills
 ```
 
 ## Providers
@@ -109,7 +121,7 @@ Each entry under `providers` defines a connection to an LLM API.
 | --- | --- | --- |
 | `openai-compatible` | `/v1/chat/completions` | Ollama, vLLM, SGLang, llama.cpp |
 | `openai` | `/v1/responses` | OpenAI, OpenRouter |
-| `anthropic` | `/v1/chat/completions` + thinking | Anthropic |
+| `anthropic` | `/v1/messages` + thinking | Anthropic |
 
 ### Model Configuration
 
@@ -164,6 +176,95 @@ theme:
 
 Presets: `lavender`, `sky`, `mint`, `rose`, `peach`, `lilac`, `gold`, `ember`,
 `ice`, `sage`, `coral`, `silver`. Or a raw ANSI value (0–255).
+
+## MCP (Model Context Protocol)
+
+Connect external tool servers that expose tools via the MCP protocol. Each
+server runs as a child process communicating over stdio.
+
+```yaml
+mcp:
+  filesystem:
+    type: local
+    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      DEBUG: "true"
+    timeout: 30000    # ms, default 30000
+    enabled: true     # default true
+```
+
+| Field | Description |
+| --- | --- |
+| `type` | `local` (stdio child process) |
+| `command` | Command and arguments to spawn the MCP server |
+| `env` | Environment variables for the server process |
+| `timeout` | Connection and tool call timeout in milliseconds |
+| `enabled` | Set to `false` to skip connecting on startup |
+
+MCP tools appear in the agent's tool list with names prefixed by the server
+name (e.g., `filesystem_read_file`). They default to "ask" permission.
+
+### MCP Permissions
+
+MCP tools use a separate `mcp` ruleset in the permissions config. Patterns
+are matched against the qualified tool name (`servername_toolname`):
+
+```yaml
+permissions:
+  normal:
+    mcp:
+      allow: ["filesystem_*"]        # allow all filesystem server tools
+      deny: ["dangerous_server_*"]   # block an entire server
+  yolo:
+    mcp:
+      allow: ["*"]                   # allow all MCP tools in yolo mode
+```
+
+## Skills
+
+Skills are on-demand knowledge packs the agent can load via the `load_skill`
+tool. Skill descriptions are injected into the system prompt so the agent knows
+what's available without loading the full content.
+
+```yaml
+skills:
+  paths:
+    - ~/my-skills
+    - ./project-skills
+```
+
+### Discovery Locations
+
+Skills are scanned from these directories (later entries override):
+
+1. `~/.config/agent/skills/*/SKILL.md` — global user skills
+2. `.agent/skills/*/SKILL.md` — project-local skills
+3. Paths from `skills.paths` in config
+
+### Skill Format
+
+Each skill is a directory containing a `SKILL.md` file:
+
+```
+skills/
+  frontend-design/
+    SKILL.md
+    reference/
+      examples.html
+```
+
+`SKILL.md` uses YAML frontmatter:
+
+```markdown
+---
+name: frontend-design
+description: Create production-grade frontend interfaces
+---
+
+## Instructions
+
+Detailed instructions for the agent...
+```
 
 ## Permissions
 

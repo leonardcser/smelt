@@ -22,13 +22,28 @@ fn next_request_id() -> u64 {
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
 pub async fn engine_task(
     mut config: EngineConfig,
-    registry: ToolRegistry,
+    mut registry: ToolRegistry,
     processes: tools::ProcessRegistry,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
     let client = reqwest::Client::new();
     let file_locks = tools::FileLocks::default();
+
+    // Connect MCP servers and register their tools.
+    let _mcp_manager = if !config.mcp_servers.is_empty() {
+        let mgr = crate::mcp::McpManager::start(&config.mcp_servers).await;
+        let tool_defs = mgr.tool_defs().await;
+        for def in tool_defs {
+            registry.register(Box::new(crate::mcp::McpTool::new(
+                def,
+                std::sync::Arc::clone(&mgr),
+            )));
+        }
+        Some(mgr)
+    } else {
+        None
+    };
 
     let _ = event_tx.send(EngineEvent::Ready);
 
@@ -87,12 +102,14 @@ pub async fn engine_task(
                         } else {
                             None
                         };
+                        let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
                         let system_prompt = config.system_prompt_override.clone().unwrap_or_else(|| {
                             crate::build_system_prompt_full(
                                 mode,
                                 &config.cwd,
                                 config.instructions.as_deref(),
                                 agent_config.as_ref(),
+                                skill_section,
                             )
                         });
                         let mut turn = Turn {
@@ -400,6 +417,7 @@ impl<'a> Turn<'a> {
     /// Rebuild the system prompt after a mid-turn mode change so the LLM sees
     /// the correct mode instructions on the next API call.
     fn regenerate_system_prompt(&mut self) {
+        let skill_section = self.config.skills.as_ref().and_then(|s| s.prompt_section());
         let new = self
             .config
             .system_prompt_override
@@ -410,6 +428,7 @@ impl<'a> Turn<'a> {
                     &self.config.cwd,
                     self.config.instructions.as_deref(),
                     self.agent_config.as_ref(),
+                    skill_section,
                 )
             });
         self.system_prompt = new;
@@ -816,7 +835,8 @@ impl<'a> Turn<'a> {
                 let decision = if plan_auto {
                     Decision::Allow
                 } else {
-                    self.permissions.decide(self.mode, &tc.function.name, &args)
+                    self.permissions
+                        .decide_ext(self.mode, &tc.function.name, &args, tool.is_mcp())
                 };
 
                 let idx = slots.len();

@@ -114,6 +114,14 @@ pub enum ConfigSource {
     NotFound,
 }
 
+/// Configuration for the skills system.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Extra directories to scan for skills.
+    pub paths: Vec<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -122,6 +130,12 @@ pub struct Config {
     pub defaults: DefaultsConfig,
     pub settings: SettingsConfig,
     pub theme: ThemeConfig,
+    /// MCP server configurations.
+    #[serde(default)]
+    pub mcp: std::collections::HashMap<String, engine::McpServerConfig>,
+    /// Skills configuration.
+    #[serde(default)]
+    pub skills: SkillsConfig,
     /// Path the config was loaded from (not serialized).
     #[serde(skip)]
     pub path: PathBuf,

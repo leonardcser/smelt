@@ -17,3 +17,4 @@ base64 = "0.22.1"
 thiserror = "2.0.18"
 futures-util = "0.3.32"
 libc = "0.2.183"
+rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
