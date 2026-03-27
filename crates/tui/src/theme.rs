@@ -2,11 +2,17 @@ use crossterm::style::Color;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 pub const DEFAULT_ACCENT: u8 = 147;
+pub const DEFAULT_ACCENT_LIGHT: u8 = 104;
 
 static ACCENT_VALUE: AtomicU8 = AtomicU8::new(DEFAULT_ACCENT);
+static ACCENT_LIGHT_VALUE: AtomicU8 = AtomicU8::new(DEFAULT_ACCENT_LIGHT);
 
 pub fn accent() -> Color {
-    Color::AnsiValue(ACCENT_VALUE.load(Ordering::Relaxed))
+    if is_light() {
+        Color::AnsiValue(ACCENT_LIGHT_VALUE.load(Ordering::Relaxed))
+    } else {
+        Color::AnsiValue(ACCENT_VALUE.load(Ordering::Relaxed))
+    }
 }
 
 pub fn set_accent(value: u8) {

@@ -5,6 +5,7 @@ site_author = "Leonard Cseres"
 site_url = "https://leonardcser.github.io/agent/"
 repo_url = "https://github.com/leonardcser/agent"
 edit_uri = "edit/main/docs/docs/"
+extra_css = ["stylesheets/extra.css"]
 
 nav = [
   { "Home" = "index.md" },
@@ -28,8 +29,10 @@ nav = [
 ]
 
 [project.theme]
+custom_dir = "overrides"
 language = "en"
 features = [
+    "navigation.tabs",
     "content.action.edit",
     "content.action.view",
     "content.code.annotate",
@@ -53,6 +56,7 @@ features = [
 ]
 
 [project.theme.font]
+text = "Geist"
 code = "JetBrains Mono"
 
 [project.theme.icon]
@@ -60,11 +64,15 @@ logo = "lucide/terminal"
 
 [[project.theme.palette]]
 scheme = "default"
+primary = "custom"
+accent = "custom"
 toggle.icon = "lucide/sun"
 toggle.name = "Switch to dark mode"
 
 [[project.theme.palette]]
 scheme = "slate"
+primary = "custom"
+accent = "custom"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 

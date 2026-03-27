@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+
+{% block styles %}
+  {{ super() }}
+  <style>
+    /* Hide sidebar, content, footer on home page */
+    .md-sidebar { display: none !important; }
+    .md-footer { display: none !important; }
+
+    .md-main {
+      margin: 0;
+      padding: 0;
+    }
+
+    .md-main__inner {
+      margin: 0;
+      max-width: none;
+    }
+
+    .md-content {
+      max-width: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .md-content__inner {
+      margin: 0;
+      padding: 0;
+    }
+
+    .md-typeset > h1 { display: none; }
+    .md-content__button { display: none; }
+
+    .hero {
+      position: relative;
+      width: 100%;
+      height: calc(100vh - 4rem);
+      min-height: 500px;
+      overflow: hidden;
+    }
+
+    #starfield-container {
+      position: absolute;
+      inset: 0;
+    }
+
+    #starfield-canvas {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      padding: 0;
+      font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+      font-size: 18px;
+      line-height: 1.2;
+      letter-spacing: 1px;
+      white-space: pre;
+      user-select: none;
+      overflow: hidden;
+      background: none !important;
+      border: none !important;
+    }
+
+    [data-md-color-scheme="default"] #starfield-canvas {
+      color: #7b7bdf;
+    }
+    [data-md-color-scheme="slate"] #starfield-canvas {
+      color: #afafff;
+    }
+
+    /* Vignette */
+    .hero::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .hero::after {
+      background: radial-gradient(
+        ellipse at center,
+        transparent 0%,
+        var(--md-default-bg-color) 100%
+      );
+    }
+
+    .hero-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 2;
+      text-align: center;
+      padding: 2rem;
+    }
+
+    .hero-ascii-title {
+      --char-w: clamp(5px, 0.85vw, 11px);
+      --char-h: clamp(9px, 1.5vw, 19px);
+      margin: 0 0 1.5rem 0;
+      user-select: none;
+      background: none !important;
+      border: none !important;
+      font-size: 0;
+      line-height: 0;
+    }
+    .hero-ascii-title .line {
+      display: flex;
+      height: var(--char-h);
+    }
+    .hero-ascii-title span {
+      display: block;
+      width: var(--char-w);
+      height: var(--char-h);
+      overflow: hidden;
+      font-family: var(--md-code-font-family), monospace;
+      font-size: var(--char-h);
+      line-height: 1;
+      text-align: center;
+      flex-shrink: 0;
+      transform: scaleY(1.1);
+      transform-origin: top;
+    }
+    [data-md-color-scheme="default"] .hero-ascii-title {
+      color: #000;
+    }
+    [data-md-color-scheme="slate"] .hero-ascii-title {
+      color: #fff;
+    }
+
+    .hero-subtitle {
+      font-family: var(--md-code-font-family), monospace;
+      font-size: clamp(0.85rem, 1.8vw, 1.1rem);
+      font-weight: 400;
+      line-height: 1.6;
+      max-width: 36rem;
+      margin: 1.5rem 0 2rem 0;
+    }
+    [data-md-color-scheme="default"] .hero-subtitle {
+      color: #555;
+    }
+    [data-md-color-scheme="slate"] .hero-subtitle {
+      color: #aaa;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .hero-actions a {
+      position: relative;
+      font-family: var(--md-code-font-family), monospace;
+      font-size: clamp(0.7rem, 1.2vw, 0.85rem);
+      font-weight: 400;
+      text-decoration: none;
+      white-space: pre;
+      line-height: 1.1;
+    }
+
+    .hero-actions .btn-shadow {
+      position: absolute;
+      top: 0.2em;
+      left: -0.3em;
+      color: var(--md-primary-fg-color);
+      display: block;
+      line-height: 1;
+      transform: scaleY(1.1);
+      transform-origin: top;
+      opacity: 0;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .hero-actions a:hover .btn-shadow {
+      opacity: 1;
+    }
+
+    .hero-actions a:active {
+      transform: scale(0.95);
+      transform-origin: center;
+    }
+
+    .hero-actions .btn-bg {
+      position: relative;
+      z-index: 1;
+      color: var(--md-primary-fg-color);
+      background: var(--md-default-bg-color);
+      display: block;
+      line-height: 1;
+      transform: scaleY(1.1);
+      transform-origin: top;
+    }
+
+    .hero-actions .btn-label {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      padding-top: 0.3em;
+      z-index: 2;
+    }
+
+    .hero-actions .btn-label {
+      color: #000;
+    }
+    [data-md-color-scheme="slate"] .hero-actions a:last-child .btn-label {
+      color: #fff;
+    }
+  </style>
+{% endblock %}
+
+{% block content %}
+  <section class="hero">
+    <div id="starfield-container"></div>
+    <div class="hero-overlay">
+      <pre class="hero-ascii-title">                                               ░██
+                                               ░██
+ ░██████    ░████████  ░███████  ░████████  ░████████
+      ░██  ░██    ░██ ░██    ░██ ░██    ░██    ░██
+ ░███████  ░██    ░██ ░█████████ ░██    ░██    ░██
+░██   ░██  ░██   ░███ ░██        ░██    ░██    ░██
+ ░█████░██  ░█████░██  ░███████  ░██    ░██     ░████
+                  ░██
+            ░███████</pre>
+      <p class="hero-subtitle">Just another coding agent</p>
+      <div class="hero-actions">
+        <a href="guide/getting-started/"><span class="btn-shadow">░░░░░░░░░░░░░░░░
+░░░░░░░░░░░░░░░░
+░░░░░░░░░░░░░░░░</span><span class="btn-bg">████████████████
+████████████████
+████████████████</span><span class="btn-label">Get Started</span></a>
+        <a href="https://github.com/leonardcser/agent"><span class="btn-shadow">████████████████
+████████████████
+████████████████</span><span class="btn-bg">░░░░░░░░░░░░░░░░
+░░░░░░░░░░░░░░░░
+░░░░░░░░░░░░░░░░</span><span class="btn-label">GitHub</span></a>
+      </div>
+    </div>
+  </section>
+  <script>
+    var titleEl = document.querySelector('.hero-ascii-title');
+    if (titleEl) {
+      var lines = titleEl.textContent.split('\n');
+      var html = '';
+      for (var l = 0; l < lines.length; l++) {
+        html += '<div class="line">';
+        for (var i = 0; i < lines[l].length; i++) {
+          var ch = lines[l][i];
+          if (ch === ' ') {
+            html += '<span>&nbsp;</span>';
+          } else if (ch === '&') {
+            html += '<span>&amp;</span>';
+          } else if (ch === '<') {
+            html += '<span>&lt;</span>';
+          } else {
+            html += '<span>' + ch + '</span>';
+          }
+        }
+        html += '</div>';
+      }
+      titleEl.innerHTML = html;
+    }
+  </script>
+  <script src="javascripts/starfield.js"></script>
+{% endblock %}
+
+{% block footer %}{% endblock %}
