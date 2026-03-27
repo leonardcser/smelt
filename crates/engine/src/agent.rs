@@ -481,10 +481,7 @@ impl<'a> Turn<'a> {
         }
         // Lazily fetch context window on first check.
         if self.context_window.is_none() {
-            self.context_window = self
-                .provider
-                .fetch_context_window(&self.model)
-                .await;
+            self.context_window = self.provider.fetch_context_window(&self.model).await;
         }
         let Some(ctx) = self.context_window else {
             return false;

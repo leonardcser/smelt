@@ -238,7 +238,6 @@ impl ProviderKind {
             Self::Local => "openai-compatible",
         }
     }
-
 }
 
 // ── Chat options ────────────────────────────────────────────────────────────
