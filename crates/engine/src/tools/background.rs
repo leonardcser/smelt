@@ -124,12 +124,7 @@ impl ProcessRegistry {
                         }
                     }
                     _ = kill_rx.recv() => {
-                        #[cfg(unix)]
-                        if let Some(pid) = child.id() {
-                            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
-                        }
-                        #[cfg(not(unix))]
-                        let _ = child.kill().await;
+                        super::kill_process_group(&child);
                         break;
                     }
                 }

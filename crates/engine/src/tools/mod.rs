@@ -32,6 +32,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Kill the entire process group spawned by a child.
+/// The child must have been spawned with `.process_group(0)` so it leads its
+/// own group. We send SIGKILL to the negative PID (i.e. the group).
+pub(crate) fn kill_process_group(child: &tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: pid is a valid process group ID (we set process_group(0) at spawn).
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+    }
+}
+
 pub use ask_user_question::AskUserQuestionTool;
 pub use background::{ProcessInfo, ProcessRegistry};
 pub use bash::BashTool;

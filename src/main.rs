@@ -446,19 +446,7 @@ async fn main() {
         api_base,
         api_key,
         provider_type,
-        model_config: engine::ModelConfig {
-            name: model_config.name.clone(),
-            temperature: model_config.temperature,
-            top_p: model_config.top_p,
-            top_k: model_config.top_k,
-            min_p: model_config.min_p,
-            repeat_penalty: model_config.repeat_penalty,
-            tool_calling: model_config.tool_calling,
-            input_cost: model_config.input_cost,
-            output_cost: model_config.output_cost,
-            cache_read_cost: model_config.cache_read_cost,
-            cache_write_cost: model_config.cache_write_cost,
-        },
+        model_config: (&model_config).into(),
         instructions,
         system_prompt_override,
         cwd: cwd.clone(),
@@ -541,19 +529,7 @@ async fn main() {
         shared_session,
         available_models,
     );
-    app.model_config = engine::ModelConfig {
-        name: model_config.name.clone(),
-        temperature: model_config.temperature,
-        top_p: model_config.top_p,
-        top_k: model_config.top_k,
-        min_p: model_config.min_p,
-        repeat_penalty: model_config.repeat_penalty,
-        tool_calling: model_config.tool_calling,
-        input_cost: model_config.input_cost,
-        output_cost: model_config.output_cost,
-        cache_read_cost: model_config.cache_read_cost,
-        cache_write_cost: model_config.cache_write_cost,
-    };
+    app.model_config = (&model_config).into();
     if let Some(mode) = mode_override {
         app.mode = mode;
     }

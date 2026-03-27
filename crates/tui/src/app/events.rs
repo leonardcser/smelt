@@ -36,7 +36,7 @@ impl App {
                 if let Some(ctx) = self.confirm_context.take() {
                     if self
                         .permissions
-                        .decide(self.mode, &ctx.tool_name, &ctx.args)
+                        .decide(self.mode, &ctx.tool_name, &ctx.args, false)
                         == Decision::Allow
                     {
                         let d = active_dialog.take().unwrap();

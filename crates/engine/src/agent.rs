@@ -698,17 +698,13 @@ impl<'a> Turn<'a> {
                 }
             };
 
-            if let Some(tokens) = resp.usage.prompt_tokens {
+            if resp.usage.prompt_tokens.is_some() {
                 let tokens_per_sec = resp.tokens_per_sec;
                 if let Some(tps) = tokens_per_sec {
                     self.tps_samples.push(tps);
                 }
                 self.emit(EngineEvent::TokenUsage {
-                    prompt_tokens: tokens,
-                    completion_tokens: resp.usage.completion_tokens,
-                    cache_read_tokens: resp.usage.cache_read_tokens,
-                    cache_write_tokens: resp.usage.cache_write_tokens,
-                    reasoning_tokens: resp.usage.reasoning_tokens,
+                    usage: resp.usage,
                     tokens_per_sec,
                 });
             }
@@ -839,7 +835,7 @@ impl<'a> Turn<'a> {
                     Decision::Allow
                 } else {
                     self.permissions
-                        .decide_ext(self.mode, &tc.function.name, &args, tool.is_mcp())
+                        .decide(self.mode, &tc.function.name, &args, tool.is_mcp())
                 };
 
                 let idx = slots.len();

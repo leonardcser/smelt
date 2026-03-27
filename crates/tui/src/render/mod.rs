@@ -2148,7 +2148,7 @@ impl Screen {
                 });
             }
             right_spans.push(BarSpan {
-                text: format!(" {}", engine::pricing::format_cost(self.session_cost_usd)),
+                text: format!(" {}", crate::metrics::format_cost(self.session_cost_usd)),
                 color: theme::muted(),
                 bg: None,
                 attr: None,

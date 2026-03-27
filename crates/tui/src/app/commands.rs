@@ -306,19 +306,7 @@ impl App {
         self.api_base = resolved.api_base.clone();
         self.api_key_env = resolved.api_key_env.clone();
         self.provider_type = resolved.provider_type.clone();
-        self.model_config = engine::ModelConfig {
-            name: resolved.config.name.clone(),
-            temperature: resolved.config.temperature,
-            top_p: resolved.config.top_p,
-            top_k: resolved.config.top_k,
-            min_p: resolved.config.min_p,
-            repeat_penalty: resolved.config.repeat_penalty,
-            tool_calling: resolved.config.tool_calling,
-            input_cost: resolved.config.input_cost,
-            output_cost: resolved.config.output_cost,
-            cache_read_cost: resolved.config.cache_read_cost,
-            cache_write_cost: resolved.config.cache_write_cost,
-        };
+        self.model_config = (&resolved.config).into();
         self.screen.set_model_label(self.model.clone());
         state::set_selected_model(key.to_string());
         self.engine.send(UiCommand::SetModel {

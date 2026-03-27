@@ -30,6 +30,24 @@ pub struct ModelConfig {
     pub cache_write_cost: Option<f64>,
 }
 
+impl From<&ModelConfig> for engine::ModelConfig {
+    fn from(c: &ModelConfig) -> Self {
+        Self {
+            name: c.name.clone(),
+            temperature: c.temperature,
+            top_p: c.top_p,
+            top_k: c.top_k,
+            min_p: c.min_p,
+            repeat_penalty: c.repeat_penalty,
+            tool_calling: c.tool_calling,
+            input_cost: c.input_cost,
+            output_cost: c.output_cost,
+            cache_read_cost: c.cache_read_cost,
+            cache_write_cost: c.cache_write_cost,
+        }
+    }
+}
+
 fn deserialize_models<'de, D>(deserializer: D) -> Result<Vec<ModelConfig>, D::Error>
 where
     D: Deserializer<'de>,

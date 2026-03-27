@@ -341,27 +341,18 @@ impl App {
         match ev {
             EngineEvent::Ready => SessionControl::Continue,
             EngineEvent::TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-                reasoning_tokens,
+                usage,
                 tokens_per_sec,
             } => {
-                if prompt_tokens > 0 {
-                    self.screen.set_context_tokens(prompt_tokens);
-                    self.session.context_tokens = Some(prompt_tokens);
+                if let Some(tokens) = usage.prompt_tokens {
+                    if tokens > 0 {
+                        self.screen.set_context_tokens(tokens);
+                        self.session.context_tokens = Some(tokens);
+                    }
                 }
                 if let Some(tps) = tokens_per_sec {
                     self.screen.record_tokens_per_sec(tps);
                 }
-                let usage = engine::provider::TokenUsage {
-                    prompt_tokens: Some(prompt_tokens),
-                    completion_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
-                    reasoning_tokens,
-                };
                 let pricing = engine::pricing::resolve(&self.model, &self.model_config);
                 let cost = pricing.cost(&usage);
                 self.session_cost_usd += cost;
@@ -371,13 +362,13 @@ impl App {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64,
-                    prompt_tokens,
-                    completion_tokens: completion_tokens.unwrap_or(0),
+                    prompt_tokens: usage.prompt_tokens.unwrap_or(0),
+                    completion_tokens: usage.completion_tokens.unwrap_or(0),
                     model: self.model.clone(),
                     cost_usd: if cost > 0.0 { Some(cost) } else { None },
-                    cache_read_tokens,
-                    cache_write_tokens,
-                    reasoning_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
                 });
                 self.screen.set_throbber(render::Throbber::Working);
                 SessionControl::Continue

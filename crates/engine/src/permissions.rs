@@ -344,13 +344,9 @@ impl Permissions {
     }
 
     /// Full permission decision for a tool call, including workspace restriction.
-    /// This is the single entry point used by both the engine and TUI.
-    pub fn decide(&self, mode: Mode, tool_name: &str, args: &HashMap<String, Value>) -> Decision {
-        self.decide_ext(mode, tool_name, args, false)
-    }
-
-    /// Like `decide`, but with an `is_mcp` flag to route through the MCP ruleset.
-    pub fn decide_ext(
+    /// When `is_mcp` is true, routes through the MCP ruleset instead of the
+    /// normal tool/bash/web_fetch rulesets.
+    pub fn decide(
         &self,
         mode: Mode,
         tool_name: &str,
@@ -735,7 +731,8 @@ fn check_ruleset(ruleset: &RuleSet, value: &str) -> Decision {
     }
 
     // Among allow and ask, the most specific (longest pattern) wins.
-    // On tie, ask wins (safer default).
+    // On tie, ask wins (safer default). Pattern length is a heuristic for
+    // specificity — works well for typical patterns like "git *" vs "git push *".
     let mut best_allow: Option<usize> = None;
     let mut best_ask: Option<usize> = None;
 
@@ -1693,42 +1690,57 @@ mod tests {
     fn workspace_allows_file_inside() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("file_path", "/home/user/project/src/main.rs");
-        assert_eq!(p.decide(Mode::Normal, "read_file", &args), Decision::Allow);
+        assert_eq!(
+            p.decide(Mode::Normal, "read_file", &args, false),
+            Decision::Allow
+        );
     }
 
     #[test]
     fn workspace_downgrades_file_outside() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("file_path", "/etc/passwd");
-        assert_eq!(p.decide(Mode::Normal, "read_file", &args), Decision::Ask);
+        assert_eq!(
+            p.decide(Mode::Normal, "read_file", &args, false),
+            Decision::Ask
+        );
     }
 
     #[test]
     fn workspace_allows_relative_path() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("file_path", "src/main.rs");
-        assert_eq!(p.decide(Mode::Normal, "write_file", &args), Decision::Allow);
+        assert_eq!(
+            p.decide(Mode::Normal, "write_file", &args, false),
+            Decision::Allow
+        );
     }
 
     #[test]
     fn workspace_downgrades_bash_outside() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("command", "rm -rf /tmp/foo");
-        assert_eq!(p.decide(Mode::Normal, "bash", &args), Decision::Ask);
+        assert_eq!(p.decide(Mode::Normal, "bash", &args, false), Decision::Ask);
     }
 
     #[test]
     fn workspace_allows_bash_inside() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("command", "rm -rf /home/user/project/target");
-        assert_eq!(p.decide(Mode::Normal, "bash", &args), Decision::Allow);
+        assert_eq!(
+            p.decide(Mode::Normal, "bash", &args, false),
+            Decision::Allow
+        );
     }
 
     #[test]
     fn workspace_allows_bash_relative() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("command", "cargo build");
-        assert_eq!(p.decide(Mode::Normal, "bash", &args), Decision::Allow);
+        assert_eq!(
+            p.decide(Mode::Normal, "bash", &args, false),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -1736,14 +1748,17 @@ mod tests {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("command", "rm -rf /");
         // Even in yolo, out-of-workspace should ask
-        assert_eq!(p.decide(Mode::Yolo, "bash", &args), Decision::Ask);
+        assert_eq!(p.decide(Mode::Yolo, "bash", &args, false), Decision::Ask);
     }
 
     #[test]
     fn workspace_yolo_allows_inside() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("file_path", "/home/user/project/foo.txt");
-        assert_eq!(p.decide(Mode::Yolo, "write_file", &args), Decision::Allow);
+        assert_eq!(
+            p.decide(Mode::Yolo, "write_file", &args, false),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -1751,7 +1766,10 @@ mod tests {
         let mut p = perms_with_workspace("/home/user/project");
         p.restrict_to_workspace = false;
         let args = args_with("file_path", "/etc/passwd");
-        assert_eq!(p.decide(Mode::Normal, "read_file", &args), Decision::Allow);
+        assert_eq!(
+            p.decide(Mode::Normal, "read_file", &args, false),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -1762,14 +1780,17 @@ mod tests {
         p.normal.tools.remove("write_file");
         let args = args_with("file_path", "/home/user/project/foo.txt");
         // Even inside workspace, Ask stays Ask because the tool itself is Ask
-        assert_eq!(p.decide(Mode::Normal, "write_file", &args), Decision::Ask);
+        assert_eq!(
+            p.decide(Mode::Normal, "write_file", &args, false),
+            Decision::Ask
+        );
     }
 
     #[test]
     fn workspace_glob_outside_downgrades() {
         let p = perms_with_workspace("/home/user/project");
         let args = args_with("path", "/tmp");
-        assert_eq!(p.decide(Mode::Normal, "glob", &args), Decision::Ask);
+        assert_eq!(p.decide(Mode::Normal, "glob", &args, false), Decision::Ask);
     }
 
     #[test]
@@ -1777,7 +1798,10 @@ mod tests {
         let p = perms_with_workspace("/home/user/project");
         let args = HashMap::new();
         // web_search has no paths, should not be affected
-        assert_eq!(p.decide(Mode::Yolo, "web_search", &args), Decision::Allow);
+        assert_eq!(
+            p.decide(Mode::Yolo, "web_search", &args, false),
+            Decision::Allow
+        );
     }
 
     // --- yolo mode is configurable ---

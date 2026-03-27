@@ -1,26 +1,10 @@
-use super::{bool_arg, str_arg, timeout_arg, Tool, ToolContext, ToolFuture, ToolResult};
+use super::{
+    bool_arg, kill_process_group, str_arg, timeout_arg, Tool, ToolContext, ToolFuture, ToolResult,
+};
 use protocol::EngineEvent;
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
-
-/// Kill the entire process group spawned by a child.
-/// The child must have been spawned with `.process_group(0)` so it leads its
-/// own group. We send SIGKILL to the negative PID (i.e. the group).
-fn kill_process_group(child: &tokio::process::Child) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // SAFETY: pid is a valid process group ID (we set process_group(0) at spawn).
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // On non-unix, fall back to killing just the child.
-        let _ = child;
-    }
-}
 
 fn is_default_allowed_pattern(pattern: &str) -> bool {
     crate::permissions::DEFAULT_BASH_ALLOW.contains(&pattern)

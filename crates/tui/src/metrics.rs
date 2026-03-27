@@ -4,6 +4,17 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+/// Format a USD cost for display.
+pub fn format_cost(usd: f64) -> String {
+    if usd < 0.01 {
+        format!("${:.4}", usd)
+    } else if usd < 1.0 {
+        format!("${:.3}", usd)
+    } else {
+        format!("${:.2}", usd)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsEntry {
     pub timestamp_ms: u64,
@@ -197,7 +208,7 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
     if stats.total_cost_usd > 0.0 {
         left.push(StatsLine::Kv {
             label: "total cost".into(),
-            value: engine::pricing::format_cost(stats.total_cost_usd),
+            value: format_cost(stats.total_cost_usd),
         });
     }
     left.push(StatsLine::Kv {
@@ -245,7 +256,7 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
             let calls_pad = max_calls_len.saturating_sub(calls_str.len());
             let tokens_pad = max_tokens_len.saturating_sub(tokens_str.len());
             let cost_str = if show_cost {
-                format!("    {}", engine::pricing::format_cost(m.cost_usd))
+                format!("    {}", format_cost(m.cost_usd))
             } else {
                 String::new()
             };

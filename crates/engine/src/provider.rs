@@ -2,7 +2,7 @@ use crate::cancel::CancellationToken;
 use crate::log;
 use crate::tools::trim_tool_output;
 use futures_util::StreamExt;
-use protocol::{Content, FunctionCall, Message, ReasoningEffort, Role, ToolCall};
+use protocol::{Content, FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -41,18 +41,13 @@ impl ToolDefinition {
     }
 }
 
-/// Parsed token usage from an API response.
-#[derive(Debug, Default, Clone)]
-pub struct TokenUsage {
-    pub prompt_tokens: Option<u32>,
-    pub completion_tokens: Option<u32>,
-    pub cache_read_tokens: Option<u32>,
-    pub cache_write_tokens: Option<u32>,
-    pub reasoning_tokens: Option<u32>,
-}
-
 /// Parsed fields from an API response.
-type ParsedResponse = (Option<String>, Option<String>, Vec<ToolCall>, TokenUsage);
+struct ParsedResponse {
+    content: Option<String>,
+    reasoning: Option<String>,
+    tool_calls: Vec<ToolCall>,
+    usage: TokenUsage,
+}
 
 /// A streaming delta from the LLM.
 pub enum StreamDelta<'a> {
@@ -494,10 +489,8 @@ impl Provider {
                 }
             };
 
-            let (content, reasoning_content, tool_calls, usage) = parsed;
-
             let elapsed = request_start.elapsed();
-            let tokens_per_sec = usage.completion_tokens.and_then(|c| {
+            let tokens_per_sec = parsed.usage.completion_tokens.and_then(|c| {
                 if c > 0 && elapsed.as_secs_f64() >= 0.001 {
                     Some(c as f64 / elapsed.as_secs_f64())
                 } else {
@@ -509,18 +502,18 @@ impl Provider {
                 log::Level::Debug,
                 "response",
                 &serde_json::json!({
-                    "content": content,
-                    "reasoning_content": reasoning_content,
-                    "tool_calls": tool_calls,
-                    "prompt_tokens": usage.prompt_tokens,
+                    "content": parsed.content,
+                    "reasoning_content": parsed.reasoning,
+                    "tool_calls": parsed.tool_calls,
+                    "prompt_tokens": parsed.usage.prompt_tokens,
                 }),
             );
 
             return Ok(LLMResponse {
-                content,
-                reasoning_content,
-                tool_calls,
-                usage,
+                content: parsed.content,
+                reasoning_content: parsed.reasoning,
+                tool_calls: parsed.tool_calls,
+                usage: parsed.usage,
                 tokens_per_sec,
             });
         }
@@ -668,11 +661,21 @@ impl Provider {
             if !from_content.is_empty() || !from_reasoning.is_empty() {
                 let tool_calls: Vec<ToolCall> =
                     from_content.into_iter().chain(from_reasoning).collect();
-                return Ok((cleaned_content, cleaned_reasoning, tool_calls, usage));
+                return Ok(ParsedResponse {
+                    content: cleaned_content,
+                    reasoning: cleaned_reasoning,
+                    tool_calls,
+                    usage,
+                });
             }
         }
 
-        Ok((content, reasoning, tool_calls, usage))
+        Ok(ParsedResponse {
+            content,
+            reasoning,
+            tool_calls,
+            usage,
+        })
     }
 
     /// Read an SSE stream from the OpenAI Responses API and accumulate the response.
@@ -813,7 +816,12 @@ impl Provider {
             })
             .collect();
 
-        Ok((content, reasoning, tool_calls, usage))
+        Ok(ParsedResponse {
+            content,
+            reasoning,
+            tool_calls,
+            usage,
+        })
     }
 
     /// Read an SSE stream from the Anthropic Messages API and accumulate the response.
@@ -968,7 +976,12 @@ impl Provider {
         tc_vec.sort_by_key(|(idx, _)| *idx);
         let tool_calls: Vec<ToolCall> = tc_vec.into_iter().map(|(_, tc)| tc).collect();
 
-        Ok((content, reasoning, tool_calls, usage))
+        Ok(ParsedResponse {
+            content,
+            reasoning,
+            tool_calls,
+            usage,
+        })
     }
 
     // ── Request body builders ───────────────────────────────────────────
@@ -1369,7 +1382,12 @@ impl Provider {
             reasoning_tokens: None,
         };
 
-        Ok((content, reasoning_content, tool_calls, usage))
+        Ok(ParsedResponse {
+            content,
+            reasoning: reasoning_content,
+            tool_calls,
+            usage,
+        })
     }
 
     /// Parse a Chat Completions API response.
@@ -1418,7 +1436,12 @@ impl Provider {
                 .map(|n| n as u32),
         };
 
-        Ok((content, reasoning_content, tool_calls, usage))
+        Ok(ParsedResponse {
+            content,
+            reasoning: reasoning_content,
+            tool_calls,
+            usage,
+        })
     }
 
     /// Parse an OpenAI Responses API response.
@@ -1485,7 +1508,12 @@ impl Provider {
                 .map(|n| n as u32),
         };
 
-        Ok((content, reasoning_content, tool_calls, usage))
+        Ok(ParsedResponse {
+            content,
+            reasoning: reasoning_content,
+            tool_calls,
+            usage,
+        })
     }
 
     /// Fetch the context window size for `model` from the /v1/models endpoint.

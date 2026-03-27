@@ -171,6 +171,23 @@ impl<'de> Deserialize<'de> for Content {
     }
 }
 
+// ── Token usage ─────────────────────────────────────────────────────────────
+
+/// Parsed token usage from an API response.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
+}
+
 // ── Engine → UI ─────────────────────────────────────────────────────────────
 
 /// Events emitted by the engine. The UI consumes these to update its display.
@@ -241,11 +258,7 @@ pub enum EngineEvent {
 
     /// Token usage update after an LLM call.
     TokenUsage {
-        prompt_tokens: u32,
-        completion_tokens: Option<u32>,
-        cache_read_tokens: Option<u32>,
-        cache_write_tokens: Option<u32>,
-        reasoning_tokens: Option<u32>,
+        usage: TokenUsage,
         tokens_per_sec: Option<f64>,
     },
 
