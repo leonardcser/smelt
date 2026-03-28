@@ -11,5 +11,6 @@ cargo test --workspace
 cargo fmt && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Whenever you add a new feature or change the current behavior update the docs in
-the README.md and the docs/ folder.
+Whenever you add a new user-facing feature or change user-facing behavior,
+update the README.md and the docs/ folder. Don't document internal
+implementation details — only things end users need to know.

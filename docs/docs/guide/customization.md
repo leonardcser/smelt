@@ -5,45 +5,22 @@
 The config lives at `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
 Load a different file with `--config <path>`.
 
-The [Getting Started](getting-started.md) guide covers basic provider setup.
-See the [Configuration Reference](../reference/configuration.md) for every
-option.
+The [Getting Started](getting-started.md) guide covers basic provider setup. See
+the [Configuration Reference](../reference/configuration.md) for every option.
 
 ## Runtime Settings
 
-Press `/settings` to toggle these at runtime:
-
-| Setting | Default | Description |
-| --- | --- | --- |
-| `vim_mode` | off | Vi keybindings in the input editor |
-| `auto_compact` | off | Auto-summarize at 80% context usage |
-| `show_speed` | on | Tokens/sec in the status bar |
-| `input_prediction` | on | Ghost text next-message suggestions |
-| `task_slug` | on | Short task label in the status bar |
-| `restrict_to_workspace` | on | Downgrade Allow → Ask for out-of-workspace paths |
-| `multi_agent` | off | Multi-agent mode |
-| `context_window` | auto | Override context window size (tokens) |
-
-Set defaults in config:
-
-```yaml
-settings:
-  vim_mode: true
-  auto_compact: true
-```
-
-Or override from the CLI:
-
-```bash
-smelt --set vim_mode=true --set auto_compact=true
-```
+Toggle settings at runtime with `/settings`, set defaults in config under
+`settings:`, or override from the CLI with `--set key=value`. See the
+[Configuration Reference](../reference/configuration.md#settings) for all
+available settings.
 
 ## Themes
 
 Twelve accent color presets:
 
-> `lavender` · `sky` · `mint` · `rose` · `peach` · `lilac` · `gold` · `ember`
-> · `ice` · `sage` · `coral` · `silver`
+> `lavender` · `sky` · `mint` · `rose` · `peach` · `lilac` · `gold` · `ember` ·
+> `ice` · `sage` · `coral` · `silver`
 
 Set in config:
 
@@ -57,20 +34,12 @@ Or change at runtime with `/theme`. You can also use a raw ANSI color value
 
 The task slug color is separate — change it per-session with `/color`.
 
-### Dark/Light Detection
-
-The TUI auto-detects your terminal's background color:
-
-1. **OSC 11 query** — reads the terminal's reported background color
-2. **`$COLORFGBG` fallback** — parses the environment variable
-3. **Default** — assumes dark background
-
 ## Custom Commands
 
 Create `.md` files in `~/.config/smelt/commands/` and they become slash
 commands. For example, `~/.config/smelt/commands/commit.md`:
 
-````markdown
+```markdown
 ---
 description: commit staged changes
 model: gpt-4o
@@ -89,35 +58,29 @@ Staged diff:
 Recent commits for style reference:
 
 !`git log --oneline -5`
-````
+```
 
 Type `/commit` and the agent receives the evaluated prompt with shell outputs
 inlined. Pass arguments too: `/commit fix typos` appends to the prompt body.
 
-### Frontmatter
+See [Custom Commands](../reference/commands.md#custom-commands) in the Slash
+Commands Reference for all frontmatter fields and template syntax.
 
-All fields are optional:
+## Skills
 
-| Key | Description |
-| --- | --- |
-| `description` | Shown in the `/` picker |
-| `model` | Override model for this command |
-| `provider` | Resolve API connection from this provider |
-| `temperature` | Sampling temperature |
-| `top_p` | Top-p (nucleus) sampling |
-| `top_k` | Top-k sampling |
-| `min_p` | Min-p sampling |
-| `repeat_penalty` | Repetition penalty |
-| `reasoning_effort` | Thinking depth: `off`/`low`/`medium`/`high`/`max` |
-| `tools` | `allow`/`ask`/`deny` lists for tool permissions |
-| `bash` | `allow`/`ask`/`deny` glob patterns for bash |
-| `web_fetch` | `allow`/`ask`/`deny` glob patterns for URLs |
+Skills are on-demand knowledge packs the agent can load during a conversation.
+Place a `SKILL.md` file in `~/.config/smelt/skills/<name>/` (global) or
+`.smelt/skills/<name>/` (project-local). See the
+[Configuration Reference](../reference/configuration.md#skills) for the full
+format.
 
-### Shell Execution in Templates
+## External Tools (MCP)
 
-- **Inline**: `` !`command` `` — output replaces the backtick expression
-- **Fenced**: ` ```! ` code block — output replaces the block
-- **Escape**: `` \!`command` `` — prevents execution
+Connect external tool servers via the
+[Model Context Protocol](https://modelcontextprotocol.io). Servers run as child
+processes and their tools become available to the agent. See the
+[Configuration Reference](../reference/configuration.md#mcp-model-context-protocol)
+for setup.
 
 ## Custom Instructions (AGENTS.md)
 
@@ -125,7 +88,7 @@ Place an `AGENTS.md` file in your project root (or `~/.config/smelt/AGENTS.md`
 for global instructions). Its contents are automatically appended to the system
 prompt for every conversation in that directory.
 
-Use it for project conventions, coding standards, or any persistent context
-the agent should know about.
+Use it for project conventions, coding standards, or any persistent context the
+agent should know about.
 
 Disable with `--no-system-prompt`.

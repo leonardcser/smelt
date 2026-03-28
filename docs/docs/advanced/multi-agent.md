@@ -26,13 +26,13 @@ Disable with `--no-multi-agent` (overrides config).
 When enabled, the agent gains five additional tools for spawning and
 communicating with subagents:
 
-| Tool | Description |
-| --- | --- |
-| `spawn_agent` | Launch a subagent with a task prompt |
-| `list_agents` | List owned subagents and discovered peers |
-| `message_agent` | Send a message to one or more agents |
-| `peek_agent` | Query an agent's context without interrupting it |
-| `stop_agent` | Terminate a subagent |
+| Tool            | Description                                      |
+| --------------- | ------------------------------------------------ |
+| `spawn_agent`   | Launch a subagent with a task prompt             |
+| `list_agents`   | List owned subagents and discovered peers        |
+| `message_agent` | Send a message to one or more agents             |
+| `peek_agent`    | Query an agent's context without interrupting it |
+| `stop_agent`    | Terminate a subagent                             |
 
 ## Subagent Behavior
 
@@ -47,16 +47,16 @@ Agents get human-readable names (e.g., cedar, birch, plum).
 
 ## Depth and Limits
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--max-agent-depth <N>` | 1 | How deep agents can nest (agents can't spawn at max depth) |
-| `--max-agents <N>` | 8 | Max concurrent agents per session |
+| Flag                    | Default | Description                                                |
+| ----------------------- | ------- | ---------------------------------------------------------- |
+| `--max-agent-depth <N>` | 1       | How deep agents can nest (agents can't spawn at max depth) |
+| `--max-agents <N>`      | 8       | Max concurrent agents per session                          |
 
 ## Peer Discovery
 
-Other interactive agent sessions in the same repository are automatically
-discovered via the registry at `~/.local/state/smelt/registry/`. You can
-communicate with peers using the same `message_agent` and `peek_agent` tools.
+Other interactive sessions in the same repository are automatically discovered.
+The agent can communicate with peers using the same `message_agent` and
+`peek_agent` tools.
 
 ## Managing Subagents
 

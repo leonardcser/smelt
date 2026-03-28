@@ -17,42 +17,42 @@ Normal/Plan/Apply or **Allow** in Yolo.
 
 ## Default Tool Permissions
 
-| Tool | Normal | Plan | Apply | Yolo |
-| --- | --- | --- | --- | --- |
-| `read_file` | Allow | Allow | Allow | Allow |
-| `edit_file` | Ask | Ask | Allow | Allow |
-| `write_file` | Ask | Ask | Allow | Allow |
-| `notebook_edit` | Ask | Ask | Ask | Allow |
-| `glob` | Allow | Allow | Allow | Allow |
-| `grep` | Allow | Allow | Allow | Allow |
-| `bash` | Ask | Ask | Ask | Allow |
-| `web_fetch` | Ask | Ask | Ask | Allow |
-| `web_search` | Ask | Ask | Ask | Allow |
-| `ask_user_question` | Allow | Allow | Allow | Allow |
-| `exit_plan_mode` | — | Ask | — | — |
-| `read_process_output` | Ask | Ask | Ask | Allow |
-| `stop_process` | Ask | Ask | Ask | Allow |
-| `spawn_agent`\* | Allow | Allow | Allow | Allow |
-| `list_agents`\* | Allow | Allow | Allow | Allow |
-| `message_agent`\* | Allow | Allow | Allow | Allow |
-| `peek_agent`\* | Allow | Allow | Allow | Allow |
-| `load_skill` | Ask | Ask | Ask | Allow |
-| `stop_agent`\* | Allow | Allow | Allow | Allow |
+| Tool                  | Normal | Plan  | Apply | Yolo  |
+| --------------------- | ------ | ----- | ----- | ----- |
+| `read_file`           | Allow  | Allow | Allow | Allow |
+| `edit_file`           | Ask    | Ask   | Allow | Allow |
+| `write_file`          | Ask    | Ask   | Allow | Allow |
+| `notebook_edit`       | Ask    | Ask   | Ask   | Allow |
+| `glob`                | Allow  | Allow | Allow | Allow |
+| `grep`                | Allow  | Allow | Allow | Allow |
+| `bash`                | Ask    | Ask   | Ask   | Allow |
+| `web_fetch`           | Ask    | Ask   | Ask   | Allow |
+| `web_search`          | Ask    | Ask   | Ask   | Allow |
+| `ask_user_question`   | Allow  | Allow | Allow | Allow |
+| `exit_plan_mode`      | —      | Ask   | —     | —     |
+| `read_process_output` | Ask    | Ask   | Ask   | Allow |
+| `stop_process`        | Ask    | Ask   | Ask   | Allow |
+| `spawn_agent`\*       | Allow  | Allow | Allow | Allow |
+| `list_agents`\*       | Allow  | Allow | Allow | Allow |
+| `message_agent`\*     | Allow  | Allow | Allow | Allow |
+| `peek_agent`\*        | Allow  | Allow | Allow | Allow |
+| `load_skill`          | Ask    | Ask   | Ask   | Allow |
+| `stop_agent`\*        | Allow  | Allow | Allow | Allow |
 
-\*Only registered when `--multi-agent` is enabled.
-— = not available in that mode.
+\*Only registered when `--multi-agent` is enabled. — = not available in that
+mode.
 
 ## Default Bash Patterns
 
-| Pattern | Normal | Plan | Apply | Yolo |
-| --- | --- | --- | --- | --- |
-| `ls *` | Allow | Allow | Allow | Allow |
-| `grep *` | Allow | Allow | Allow | Allow |
-| `find *` | Allow | Allow | Allow | Allow |
-| `cat *` | Allow | Allow | Allow | Allow |
-| `tail *` | Allow | Allow | Allow | Allow |
-| `head *` | Allow | Allow | Allow | Allow |
-| _other_ | Ask | Ask | Ask | Allow |
+| Pattern  | Normal | Plan  | Apply | Yolo  |
+| -------- | ------ | ----- | ----- | ----- |
+| `ls *`   | Allow  | Allow | Allow | Allow |
+| `grep *` | Allow  | Allow | Allow | Allow |
+| `find *` | Allow  | Allow | Allow | Allow |
+| `cat *`  | Allow  | Allow | Allow | Allow |
+| `tail *` | Allow  | Allow | Allow | Allow |
+| `head *` | Allow  | Allow | Allow | Allow |
+| _other_  | Ask    | Ask   | Ask   | Allow |
 
 !!! note
 
@@ -84,13 +84,11 @@ categories use their defaults.
 
 When the confirm dialog appears, you can choose how broadly to approve:
 
-| Scope | Lifetime | Storage |
-| --- | --- | --- |
-| **Once** | This call only | — |
-| **Session** | Until `/clear`, `/new`, or exit | Memory |
+| Scope         | Lifetime                        | Storage                                                   |
+| ------------- | ------------------------------- | --------------------------------------------------------- |
+| **Once**      | This call only                  | —                                                         |
+| **Session**   | Until `/clear`, `/new`, or exit | Memory                                                    |
 | **Workspace** | All future sessions in this CWD | `~/.local/state/smelt/workspaces/<hash>/permissions.json` |
-
-The workspace hash is a SHA256 prefix of the working directory path.
 
 ## Managing Permissions
 

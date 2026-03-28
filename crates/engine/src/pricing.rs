@@ -143,25 +143,6 @@ const PRICING_TABLE: &[(&[&str], ModelPricing)] = &[
             cache_write: 1.0,
         },
     ),
-    // ── Google Gemini ────────────────────────────────────────────────
-    (
-        &["gemini", "2.5-pro"],
-        ModelPricing {
-            input: 1.25,
-            output: 10.0,
-            cache_read: 0.315,
-            cache_write: 0.0,
-        },
-    ),
-    (
-        &["gemini", "2.5-flash"],
-        ModelPricing {
-            input: 0.15,
-            output: 0.60,
-            cache_read: 0.0375,
-            cache_write: 0.0,
-        },
-    ),
     // ── DeepSeek ─────────────────────────────────────────────────────
     (
         &["deepseek", "r1"],

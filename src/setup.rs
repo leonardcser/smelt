@@ -1,4 +1,4 @@
-//! Interactive setup flows: first-run wizard and `agent auth` subcommand.
+//! Interactive setup flows: first-run wizard and `smelt auth` subcommand.
 //!
 //! Config manipulation is delegated to `engine::config_file`.
 
@@ -43,15 +43,6 @@ const PROVIDERS: &[ProviderTemplate] = &[
         api_base: "https://api.anthropic.com/v1",
         api_key_env: "ANTHROPIC_API_KEY",
         default_model: "claude-sonnet-4-20250514",
-        needs_api_base: false,
-    },
-    ProviderTemplate {
-        name: "google",
-        label: "Google (Gemini)",
-        provider_type: "gemini",
-        api_base: "https://generativelanguage.googleapis.com/v1beta",
-        api_key_env: "GEMINI_API_KEY",
-        default_model: "gemini-2.5-flash",
         needs_api_base: false,
     },
     ProviderTemplate {
@@ -201,7 +192,7 @@ fn ensure_codex_provider(tmpl: &ProviderTemplate) {
 
 /// First-time setup wizard. Returns true if config was written.
 pub async fn run_initial_setup(config_path: &Path) -> bool {
-    println!("\n  Welcome to Agent! No configuration found.\n");
+    println!("\n  Welcome to smelt! No configuration found.\n");
 
     let Some(idx) = pick_provider() else {
         return false;
@@ -230,7 +221,7 @@ pub async fn run_initial_setup(config_path: &Path) -> bool {
     }
 }
 
-/// `agent auth` — provider picker, then provider-specific flow.
+/// `smelt auth` — provider picker, then provider-specific flow.
 pub async fn run_auth_command() {
     let Some(idx) = pick_provider() else {
         return;

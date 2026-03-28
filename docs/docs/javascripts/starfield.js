@@ -1,9 +1,9 @@
 (function () {
-  var container = document.getElementById('starfield-container');
+  var container = document.getElementById("starfield-container");
   if (!container) return;
 
-  var pre = document.createElement('pre');
-  pre.id = 'starfield-canvas';
+  var pre = document.createElement("pre");
+  pre.id = "starfield-canvas";
   container.appendChild(pre);
 
   var COLS, ROWS;
@@ -13,9 +13,11 @@
 
   var NUM_STARS = 2000;
   var stars = [];
-  var streakChars = '  ..-=+*#@';
+  var streakChars = "  ..-=+*#@";
 
-  function lerp(a, b, t) { return a + (b - a) * t; }
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
 
   function initStars() {
     stars.length = 0;
@@ -23,7 +25,7 @@
       stars.push({
         x: (Math.random() - 0.5) * 200,
         y: (Math.random() - 0.5) * 200,
-        z: Math.random() * 100
+        z: Math.random() * 100,
       });
     }
   }
@@ -37,8 +39,9 @@
   }
 
   function render(dt) {
-    buf.fill(' ');
-    var cx = COLS / 2, cy = ROWS / 2;
+    buf.fill(" ");
+    var cx = COLS / 2,
+      cy = ROWS / 2;
     var speed = 25;
 
     for (var s = 0; s < stars.length; s++) {
@@ -54,7 +57,8 @@
       var sy = (star.y / star.z) * 30 + cy;
       var brightness = 1 - star.z / 100;
 
-      var col = Math.round(sx), row = Math.round(sy);
+      var col = Math.round(sx),
+        row = Math.round(sy);
       if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
         var idx = row * COLS + col;
         var ci = Math.floor(brightness * (streakChars.length - 1));
@@ -64,14 +68,16 @@
       var pz = star.z + speed * dt * 2.5;
       var px = (star.x / pz) * 60 + cx;
       var py = (star.y / pz) * 30 + cy;
-      var steps = Math.floor(Math.sqrt((sx - px) * (sx - px) + (sy - py) * (sy - py)));
+      var steps = Math.floor(
+        Math.sqrt((sx - px) * (sx - px) + (sy - py) * (sy - py)),
+      );
       for (var i = 1; i < steps; i++) {
         var frac = i / steps;
         var ix = Math.round(lerp(px, sx, frac));
         var iy = Math.round(lerp(py, sy, frac));
         if (ix >= 0 && ix < COLS && iy >= 0 && iy < ROWS) {
           var tidx = iy * COLS + ix;
-          if (buf[tidx] === ' ') {
+          if (buf[tidx] === " ") {
             var b2 = brightness * frac * 0.5;
             var ci2 = Math.floor(b2 * (streakChars.length - 1));
             buf[tidx] = streakChars[Math.max(0, ci2)];
@@ -80,12 +86,12 @@
       }
     }
 
-    var out = '';
+    var out = "";
     for (var r = 0; r < ROWS; r++) {
       for (var c = 0; c < COLS; c++) {
         out += buf[r * COLS + c];
       }
-      if (r < ROWS - 1) out += '\n';
+      if (r < ROWS - 1) out += "\n";
     }
     pre.textContent = out;
   }
@@ -98,20 +104,23 @@
     animFrame = requestAnimationFrame(loop);
   }
 
-  var observer = new IntersectionObserver(function (entries) {
-    if (entries[0].isIntersecting) {
-      lastTime = 0;
-      animFrame = requestAnimationFrame(loop);
-    } else {
-      cancelAnimationFrame(animFrame);
-    }
-  }, { threshold: 0.1 });
+  var observer = new IntersectionObserver(
+    function (entries) {
+      if (entries[0].isIntersecting) {
+        lastTime = 0;
+        animFrame = requestAnimationFrame(loop);
+      } else {
+        cancelAnimationFrame(animFrame);
+      }
+    },
+    { threshold: 0.1 },
+  );
 
   resize();
   initStars();
   observer.observe(container);
 
-  window.addEventListener('resize', function () {
+  window.addEventListener("resize", function () {
     resize();
   });
 })();

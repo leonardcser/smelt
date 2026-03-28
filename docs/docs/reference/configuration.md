@@ -2,9 +2,208 @@
 
 Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
 
-If no config file exists, an interactive setup wizard runs on first launch.
-If the file exists but fails to parse, a warning is printed and defaults are
-used.
+If no config file exists, an interactive setup wizard runs on first launch. If
+the file exists but fails to parse, a warning is printed and defaults are used.
+
+## Providers
+
+Each entry under `providers` defines a connection to an LLM API.
+
+| Field         | Description                                            |
+| ------------- | ------------------------------------------------------ |
+| `name`        | Unique identifier (used in `defaults.model` as prefix) |
+| `type`        | `openai`, `codex`, `anthropic`, or `openai-compatible` |
+| `api_base`    | API endpoint URL                                       |
+| `api_key_env` | Environment variable holding the API key               |
+| `models`      | List of available models                               |
+
+### Provider Types
+
+| Type                | Endpoint                                | Compatible Services                            |
+| ------------------- | --------------------------------------- | ---------------------------------------------- |
+| `openai`            | `/v1/responses`                         | OpenAI, OpenRouter                             |
+| `codex`             | `chatgpt.com/backend-api/codex` (OAuth) | OpenAI Codex (ChatGPT subscription)            |
+| `anthropic`         | `/v1/messages` + thinking               | Anthropic                                      |
+| `openai-compatible` | `/v1/chat/completions`                  | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
+
+### Model Configuration
+
+Models can be strings or objects with per-model overrides:
+
+```yaml
+models:
+  - gpt-5.4 # simple form
+  - name: qwen3.5:27b # object form
+    temperature: 0.8
+    top_p: 0.95
+    top_k: 40 # openai-compatible & anthropic only
+    min_p: 0.01 # openai-compatible only
+    repeat_penalty: 1.0 # openai-compatible only
+    tool_calling: false # disable tools for this model
+  - name: custom-model
+    input_cost: 2.0 # $/1M input tokens
+    output_cost: 8.0 # $/1M output tokens
+    cache_read_cost: 0.5 # $/1M cache-read tokens
+    cache_write_cost: 0.0 # $/1M cache-write tokens
+```
+
+#### Pricing
+
+Cost tracking is built in for popular models (GPT, Claude, DeepSeek). Codex
+models are zero-cost (included with your ChatGPT subscription). The session cost
+is shown in the status bar and total cost appears in `/stats`.
+
+For models not in the built-in table, or to override built-in prices, set cost
+fields on the model config. All values are USD per 1 million tokens. Unknown
+models default to zero cost.
+
+## Defaults
+
+```yaml
+defaults:
+  model: ollama/glm-5 # provider_name/model_name
+  mode: normal # starting mode
+  mode_cycle: [normal, plan, apply, yolo] # Shift+Tab cycle
+  reasoning_effort: "off" # starting level
+  reasoning_cycle: ["off", "low", "medium", "high", "max"] # Ctrl+T cycle
+```
+
+Model selection follows this precedence:
+
+1. `--model` CLI flag
+2. `defaults.model` in config
+3. Last used model (cached from previous session)
+4. First model in the providers list
+
+If `defaults.model` is set, the cached selection is ignored.
+
+## Settings
+
+All toggleable at runtime via `/settings`.
+
+| Key                     | Default | Description                                                          |
+| ----------------------- | ------- | -------------------------------------------------------------------- |
+| `vim_mode`              | `false` | Vi keybindings                                                       |
+| `auto_compact`          | `false` | Auto-summarize at 80% context usage (always on in headless/subagent) |
+| `show_speed`            | `true`  | Tokens/sec in status bar                                             |
+| `input_prediction`      | `true`  | Ghost text suggestions                                               |
+| `task_slug`             | `true`  | Task label in status bar                                             |
+| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                              |
+| `multi_agent`           | `false` | Enable multi-agent mode                                              |
+| `context_window`        | auto    | Override context window size (tokens); auto-detected from API        |
+
+## Theme
+
+```yaml
+theme:
+  accent: lavender
+```
+
+Presets: `lavender`, `sky`, `mint`, `rose`, `peach`, `lilac`, `gold`, `ember`,
+`ice`, `sage`, `coral`, `silver`. Or a raw ANSI value (0–255).
+
+## MCP (Model Context Protocol)
+
+Connect external tool servers that expose tools via the MCP protocol. Each
+server runs as a child process communicating over stdio.
+
+```yaml
+mcp:
+  filesystem:
+    type: local
+    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      DEBUG: "true"
+    timeout: 30000 # ms, default 30000
+    enabled: true # default true
+```
+
+| Field     | Description                                      |
+| --------- | ------------------------------------------------ |
+| `type`    | `local` (stdio child process)                    |
+| `command` | Command and arguments to spawn the MCP server    |
+| `env`     | Environment variables for the server process     |
+| `timeout` | Connection and tool call timeout in milliseconds |
+| `enabled` | Set to `false` to skip connecting on startup     |
+
+MCP tools appear in the agent's tool list with names prefixed by the server name
+(e.g., `filesystem_read_file`). They default to "ask" permission.
+
+### MCP Permissions
+
+MCP tools use a separate `mcp` ruleset in the permissions config. Patterns are
+matched against the qualified tool name (`servername_toolname`):
+
+```yaml
+permissions:
+  normal:
+    mcp:
+      allow: ["filesystem_*"] # allow all filesystem server tools
+      deny: ["dangerous_server_*"] # block an entire server
+  yolo:
+    mcp:
+      allow: ["*"] # allow all MCP tools in yolo mode
+```
+
+## Skills
+
+Skills are on-demand knowledge packs the agent can load via the `load_skill`
+tool.
+
+```yaml
+skills:
+  paths:
+    - ~/my-skills
+    - ./project-skills
+```
+
+### Discovery Locations
+
+Skills are scanned from these directories (later entries override):
+
+1. `~/.config/smelt/skills/*/SKILL.md` — global user skills
+2. `.smelt/skills/*/SKILL.md` — project-local skills
+3. Paths from `skills.paths` in config
+
+### Skill Format
+
+Each skill is a directory containing a `SKILL.md` file:
+
+```
+skills/
+  frontend-design/
+    SKILL.md
+    reference/
+      examples.html
+```
+
+`SKILL.md` uses YAML frontmatter:
+
+```markdown
+---
+name: frontend-design
+description: Create production-grade frontend interfaces
+---
+
+## Instructions
+
+Detailed instructions for the agent...
+```
+
+## Permissions
+
+See [Permissions Reference](permissions.md) for full details.
+
+## Environment Variables
+
+| Variable          | Purpose                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `XDG_CONFIG_HOME` | Config directory (default: `~/.config`)                 |
+| `XDG_STATE_HOME`  | State directory (default: `~/.local/state`)             |
+| `XDG_CACHE_HOME`  | Cache directory (default: `~/.cache`)                   |
+| `COLORFGBG`       | Terminal color hint (fallback for dark/light detection) |
+| `TERM`            | Terminal type (`dumb` skips color detection)            |
+| `EDITOR`          | Editor for `Ctrl+X Ctrl+E` and vim `v`                  |
 
 ## Full Example
 
@@ -32,7 +231,7 @@ providers:
       - gpt-5.4
 
   - name: codex
-    type: codex  # models fetched automatically from the API
+    type: codex # models fetched automatically from the API
     api_base: https://chatgpt.com/backend-api/codex
 
   - name: anthropic
@@ -110,205 +309,3 @@ skills:
   paths:
     - ~/my-skills
 ```
-
-## Providers
-
-Each entry under `providers` defines a connection to an LLM API.
-
-| Field | Description |
-| --- | --- |
-| `name` | Unique identifier (used in `defaults.model` as prefix) |
-| `type` | `openai`, `codex`, `anthropic`, `gemini`, or `openai-compatible` |
-| `api_base` | API endpoint URL |
-| `api_key_env` | Environment variable holding the API key |
-| `models` | List of available models |
-
-### Provider Types
-
-| Type | Endpoint | Works With |
-| --- | --- | --- |
-| `openai` | `/v1/responses` | OpenAI, OpenRouter |
-| `codex` | `chatgpt.com/backend-api/codex` (OAuth) | OpenAI Codex (ChatGPT subscription) |
-| `anthropic` | `/v1/messages` + thinking | Anthropic |
-| `gemini` | `/models/{model}:generateContent` | Google Gemini |
-| `openai-compatible` | `/v1/chat/completions` | Ollama, vLLM, SGLang, llama.cpp |
-
-### Model Configuration
-
-Models can be strings or objects with per-model overrides:
-
-```yaml
-models:
-  - gpt-5.4                    # simple form
-  - name: qwen3.5:27b          # object form
-    temperature: 0.8
-    top_p: 0.95
-    top_k: 40                  # openai-compatible & anthropic only
-    min_p: 0.01                # openai-compatible only
-    repeat_penalty: 1.0        # openai-compatible only
-    tool_calling: false         # disable tools for this model
-  - name: custom-model
-    input_cost: 2.0            # $/1M input tokens
-    output_cost: 8.0           # $/1M output tokens
-    cache_read_cost: 0.5       # $/1M cache-read tokens
-    cache_write_cost: 0.0      # $/1M cache-write tokens
-```
-
-#### Pricing
-
-Cost tracking is built in for popular models (GPT, Claude, Gemini, DeepSeek).
-Codex models are zero-cost (included with your ChatGPT subscription). The
-session cost is shown in the status bar and total cost appears in `/stats`.
-
-For models not in the built-in table, or to override built-in prices, set cost
-fields on the model config. All values are USD per 1 million tokens. Unknown
-models default to zero cost.
-
-## Defaults
-
-```yaml
-defaults:
-  model: ollama/glm-5                              # provider_name/model_name
-  mode: normal                                      # starting mode
-  mode_cycle: [normal, plan, apply, yolo]           # Shift+Tab cycle
-  reasoning_effort: "off"                           # starting level
-  reasoning_cycle: ["off", "low", "medium", "high", "max"]  # Ctrl+T cycle
-```
-
-Model selection follows this precedence:
-
-1. `--model` CLI flag
-2. `defaults.model` in config
-3. Last used model (cached from previous session)
-4. First model in the providers list
-
-If `defaults.model` is set, the cached selection is ignored.
-
-## Settings
-
-All toggleable at runtime via `/settings`.
-
-| Key | Default | Description |
-| --- | --- | --- |
-| `vim_mode` | `false` | Vi keybindings |
-| `auto_compact` | `false` | Auto-summarize at 80% context usage (always on in headless/subagent) |
-| `show_speed` | `true` | Tokens/sec in status bar |
-| `input_prediction` | `true` | Ghost text suggestions |
-| `task_slug` | `true` | Task label in status bar |
-| `restrict_to_workspace` | `true` | Downgrade Allow → Ask outside workspace |
-| `multi_agent` | `false` | Enable multi-agent mode |
-| `context_window` | auto | Override context window size (tokens); auto-detected from API |
-
-## Theme
-
-```yaml
-theme:
-  accent: lavender
-```
-
-Presets: `lavender`, `sky`, `mint`, `rose`, `peach`, `lilac`, `gold`, `ember`,
-`ice`, `sage`, `coral`, `silver`. Or a raw ANSI value (0–255).
-
-## MCP (Model Context Protocol)
-
-Connect external tool servers that expose tools via the MCP protocol. Each
-server runs as a child process communicating over stdio.
-
-```yaml
-mcp:
-  filesystem:
-    type: local
-    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-    env:
-      DEBUG: "true"
-    timeout: 30000    # ms, default 30000
-    enabled: true     # default true
-```
-
-| Field | Description |
-| --- | --- |
-| `type` | `local` (stdio child process) |
-| `command` | Command and arguments to spawn the MCP server |
-| `env` | Environment variables for the server process |
-| `timeout` | Connection and tool call timeout in milliseconds |
-| `enabled` | Set to `false` to skip connecting on startup |
-
-MCP tools appear in the agent's tool list with names prefixed by the server
-name (e.g., `filesystem_read_file`). They default to "ask" permission.
-
-### MCP Permissions
-
-MCP tools use a separate `mcp` ruleset in the permissions config. Patterns
-are matched against the qualified tool name (`servername_toolname`):
-
-```yaml
-permissions:
-  normal:
-    mcp:
-      allow: ["filesystem_*"]        # allow all filesystem server tools
-      deny: ["dangerous_server_*"]   # block an entire server
-  yolo:
-    mcp:
-      allow: ["*"]                   # allow all MCP tools in yolo mode
-```
-
-## Skills
-
-Skills are on-demand knowledge packs the agent can load via the `load_skill`
-tool. Skill descriptions are injected into the system prompt so the agent knows
-what's available without loading the full content.
-
-```yaml
-skills:
-  paths:
-    - ~/my-skills
-    - ./project-skills
-```
-
-### Discovery Locations
-
-Skills are scanned from these directories (later entries override):
-
-1. `~/.config/smelt/skills/*/SKILL.md` — global user skills
-2. `.smelt/skills/*/SKILL.md` — project-local skills
-3. Paths from `skills.paths` in config
-
-### Skill Format
-
-Each skill is a directory containing a `SKILL.md` file:
-
-```
-skills/
-  frontend-design/
-    SKILL.md
-    reference/
-      examples.html
-```
-
-`SKILL.md` uses YAML frontmatter:
-
-```markdown
----
-name: frontend-design
-description: Create production-grade frontend interfaces
----
-
-## Instructions
-
-Detailed instructions for the agent...
-```
-
-## Permissions
-
-See [Permissions Reference](permissions.md) for full details.
-
-## Environment Variables
-
-| Variable | Purpose |
-| --- | --- |
-| `XDG_CONFIG_HOME` | Config directory (default: `~/.config`) |
-| `XDG_STATE_HOME` | State directory (default: `~/.local/state`) |
-| `XDG_CACHE_HOME` | Cache directory (default: `~/.cache`) |
-| `COLORFGBG` | Terminal color hint (fallback for dark/light detection) |
-| `TERM` | Terminal type (`dumb` skips color detection) |
-| `EDITOR` | Editor for `Ctrl+X Ctrl+E` and vim `v` |

@@ -86,7 +86,7 @@ Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
 ```yaml
 providers:
   - name: ollama
-    type: openai-compatible # or: openai, anthropic, codex, gemini
+    type: openai-compatible # or: openai, anthropic, codex
     api_base: http://localhost:11434/v1
     models:
       - qwen3.5:27b

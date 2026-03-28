@@ -23,14 +23,14 @@ scrollable inline diff (old vs. new).
 Edits Jupyter notebook (`.ipynb`) cells. Supports replacing, inserting, and
 deleting cells. Identify cells by `cell_id` or `cell_number` (0-indexed).
 
-| Parameter | Description |
-| --- | --- |
-| `notebook_path` | Absolute path to the notebook |
-| `cell_number` | 0-indexed cell number (used when `cell_id` is omitted) |
-| `cell_id` | Cell ID (takes precedence over `cell_number`; for insert, new cell goes after this cell) |
-| `new_source` | New source content (required for replace and insert) |
-| `cell_type` | `code` or `markdown` (required for insert, defaults to current type for replace) |
-| `edit_mode` | `replace` (default), `insert`, or `delete` |
+| Parameter       | Description                                                                              |
+| --------------- | ---------------------------------------------------------------------------------------- |
+| `notebook_path` | Absolute path to the notebook                                                            |
+| `cell_number`   | 0-indexed cell number (used when `cell_id` is omitted)                                   |
+| `cell_id`       | Cell ID (takes precedence over `cell_number`; for insert, new cell goes after this cell) |
+| `new_source`    | New source content (required for replace and insert)                                     |
+| `cell_type`     | `code` or `markdown` (required for insert, defaults to current type for replace)         |
+| `edit_mode`     | `replace` (default), `insert`, or `delete`                                               |
 
 When reading, cells are displayed as numbered blocks with their type, source
 content, and outputs. Supports offset/limit slicing.
@@ -50,13 +50,12 @@ Searches file contents with regex. Returns matching lines with context.
 
 ### `bash`
 
-Runs a shell command with streaming output. Each line of stdout/stderr is
-streamed to the conversation in real-time.
+Runs a shell command and streams output in real-time.
 
 **Behavior details:**
 
 - Default timeout: 120 seconds (max: 600 seconds)
-- Interactive commands are rejected (vim, nano, less, etc.)
+- Interactive commands are blocked (vim, nano, less, etc.)
 - Shell backgrounding (`&`) is rejected — use `run_in_background` instead
 - Output is line-buffered (stdout and stderr multiplexed)
 - Non-zero exit codes are flagged as errors
@@ -68,8 +67,8 @@ manage it. Monitor all background processes with `/ps`.
 
 ### `read_process_output`
 
-Reads buffered output from a background process. Supports blocking reads with
-an optional timeout.
+Reads buffered output from a background process. Supports blocking reads with an
+optional timeout.
 
 ### `stop_process`
 
@@ -79,16 +78,14 @@ Kills a running background process.
 
 ### `web_fetch`
 
-Fetches a URL and extracts content using an LLM. The page is fetched, converted
-to the requested format, then an isolated LLM call extracts only what the
-`prompt` asks for.
+Fetches a URL and extracts content based on your `prompt`.
 
-| Parameter | Description |
-| --- | --- |
-| `url` | URL to fetch (required) |
-| `prompt` | What to extract from the page (required) |
-| `format` | Output format: `markdown` (default), `text`, or `html` |
-| `timeout` | Timeout in seconds (default: 30, max: 120) |
+| Parameter | Description                                            |
+| --------- | ------------------------------------------------------ |
+| `url`     | URL to fetch (required)                                |
+| `prompt`  | What to extract from the page (required)               |
+| `format`  | Output format: `markdown` (default), `text`, or `html` |
+| `timeout` | Timeout in seconds (default: 30, max: 120)             |
 
 **Limits:**
 
@@ -99,7 +96,7 @@ to the requested format, then an isolated LLM call extracts only what the
 ### `web_search`
 
 Searches the web via DuckDuckGo. Returns results with title, URL, and
-description. Results are cached by query.
+description. Results are cached for 15 minutes.
 
 ## Interaction
 
@@ -113,14 +110,9 @@ only.
 
 ### `load_skill`
 
-Loads a skill by name to inject specialized instructions and knowledge into the
-conversation. Skills are discovered from `~/.config/smelt/skills/*/SKILL.md`,
-`.smelt/skills/*/SKILL.md`, and any paths listed in `skills.paths` config.
-
-Each skill directory contains a `SKILL.md` with YAML frontmatter (`name`,
-`description`) and a markdown body. Skill descriptions appear in the system
-prompt so the agent knows what's available. The full content is loaded on demand
-when the agent calls this tool.
+Loads a skill by name to give the agent specialized instructions and knowledge.
+See [Skills](configuration.md#skills) in the configuration reference for how to
+create and organize skills.
 
 ## Multi-Agent
 
@@ -128,8 +120,8 @@ These tools are only available when `--multi-agent` is enabled.
 
 ### `spawn_agent`
 
-Spawns a new subagent to work on a task. Give it a well-scoped task with all
-the context it needs. Set `wait` to `true` to block until the agent finishes.
+Spawns a new subagent to work on a task. Give it a well-scoped task with all the
+context it needs. Set `wait` to `true` to block until the agent finishes.
 Subagents persist and build context — reuse them via `message_agent`.
 
 ### `list_agents`

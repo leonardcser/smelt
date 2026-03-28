@@ -17,14 +17,14 @@ nav = [
   { "Reference" = [
     { "CLI" = "reference/cli.md" },
     { "Configuration" = "reference/configuration.md" },
+    { "Slash Commands" = "reference/commands.md" },
     { "Tools" = "reference/tools.md" },
     { "Keybindings" = "reference/keybindings.md" },
     { "Permissions" = "reference/permissions.md" },
   ]},
   { "Advanced" = [
-    { "Multi-Agent" = "advanced/multi-agent.md" },
     { "Headless" = "advanced/headless.md" },
-    { "Sessions & History" = "advanced/sessions.md" },
+    { "Multi-Agent" = "advanced/multi-agent.md" },
   ]},
 ]
 

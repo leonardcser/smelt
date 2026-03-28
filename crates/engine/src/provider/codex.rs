@@ -24,7 +24,7 @@ fn token_path() -> PathBuf {
     state_dir().join("codex_auth.json")
 }
 
-const KEYRING_SERVICE: &str = "agent-codex-auth";
+const KEYRING_SERVICE: &str = "smelt-codex-auth";
 const KEYRING_USER: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
