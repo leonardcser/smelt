@@ -322,18 +322,33 @@ async fn wait_for_callback(listener: &tokio::net::TcpListener) -> Result<(String
 }
 
 fn open_browser(url: &str) {
+    use std::process::Stdio;
+
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        let _ = std::process::Command::new("open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        let _ = std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
     }
     #[cfg(target_os = "windows")]
     {
         let _ = std::process::Command::new("cmd")
             .args(["/c", "start", url])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn();
     }
 }
