@@ -1,9 +1,9 @@
 [project]
-site_name = "agent"
+site_name = "smelt"
 site_description = "A Rust TUI coding agent. Connects to any OpenAI-compatible API and provides an interactive terminal interface for code generation, analysis, and assistance."
 site_author = "Leonard Cseres"
-site_url = "https://leonardcser.github.io/agent/"
-repo_url = "https://github.com/leonardcser/agent"
+site_url = "https://leonardcser.github.io/smelt/"
+repo_url = "https://github.com/leonardcser/smelt"
 edit_uri = "edit/main/docs/docs/"
 extra_css = ["stylesheets/extra.css"]
 
@@ -78,4 +78,4 @@ toggle.name = "Switch to light mode"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
-link = "https://github.com/leonardcser/agent"
+link = "https://github.com/leonardcser/smelt"

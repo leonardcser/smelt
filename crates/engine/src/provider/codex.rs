@@ -199,18 +199,18 @@ fn build_authorize_url(redirect_uri: &str, pkce: &PkceCodes, state: &str) -> Str
         .append_pair("id_token_add_organizations", "true")
         .append_pair("codex_cli_simplified_flow", "true")
         .append_pair("state", state)
-        .append_pair("originator", "agent")
+        .append_pair("originator", "smelt")
         .finish();
     format!("{ISSUER}/oauth/authorize?{params}")
 }
 
 const HTML_SUCCESS: &str = r#"<!doctype html>
-<html><head><title>Agent — Authorization Successful</title>
+<html><head><title>smelt — Authorization Successful</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;
 align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec}
 .c{text-align:center;padding:2rem}h1{margin-bottom:1rem}p{color:#b7b1b1}</style>
 </head><body><div class="c"><h1>Authorization Successful</h1>
-<p>You can close this window and return to Agent.</p></div>
+<p>You can close this window and return to smelt.</p></div>
 <script>setTimeout(()=>window.close(),2000)</script></body></html>"#;
 
 fn html_error(msg: &str) -> String {
@@ -569,7 +569,7 @@ async fn fetch_codex_version(client: &reqwest::Client) -> Result<String, String>
     let resp = client
         .get("https://api.github.com/repos/openai/codex/releases/latest")
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "agent")
+        .header("User-Agent", "smelt")
         .timeout(Duration::from_secs(10))
         .send()
         .await

@@ -153,7 +153,7 @@ impl WebFetchTool {
                 if cf == "challenge" {
                     client
                         .get(&fetch_url)
-                        .header("User-Agent", "agent")
+                        .header("User-Agent", "smelt")
                         .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
                         .header("Accept-Language", "en-US,en;q=0.9")
                         .send()?

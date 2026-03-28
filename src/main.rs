@@ -6,7 +6,7 @@ use protocol::{Mode, ReasoningEffort};
 use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
-#[command(name = "agent", about = "Coding agent TUI")]
+#[command(name = "smelt", about = "Coding agent TUI")]
 #[command(args_conflicts_with_subcommands = true)]
 struct Args {
     #[command(subcommand)]

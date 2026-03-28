@@ -483,7 +483,7 @@ fn format_conversation_markdown(history: &[Message], session: &crate::session::S
                 // Already inlined under their tool call — skip.
             }
             Role::Agent => {
-                let id = msg.agent_from_id.as_deref().unwrap_or("agent");
+                let id = msg.agent_from_id.as_deref().unwrap_or("smelt");
                 let slug = msg.agent_from_slug.as_deref().unwrap_or("");
                 if slug.is_empty() {
                     let _ = writeln!(out, "## Agent: {id}\n");

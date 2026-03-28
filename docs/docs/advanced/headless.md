@@ -5,7 +5,7 @@ Run the agent without the TUI for scripting and automation.
 ## Usage
 
 ```bash
-agent --headless "explain this codebase"
+smelt --headless "explain this codebase"
 ```
 
 A message argument is required.
@@ -29,7 +29,7 @@ In headless mode, permission behavior depends on the mode:
 For fully autonomous scripting, combine with `--mode yolo`:
 
 ```bash
-agent --headless --mode yolo "fix the failing tests"
+smelt --headless --mode yolo "fix the failing tests"
 ```
 
 ## Examples
@@ -37,11 +37,11 @@ agent --headless --mode yolo "fix the failing tests"
 Pipe output to a file:
 
 ```bash
-agent --headless "summarize @src/main.rs" > summary.txt
+smelt --headless "summarize @src/main.rs" > summary.txt
 ```
 
 Use in a CI pipeline:
 
 ```bash
-agent --headless --mode yolo "run cargo clippy and fix any warnings" 2>agent.log
+smelt --headless --mode yolo "run cargo clippy and fix any warnings" 2>smelt.log
 ```

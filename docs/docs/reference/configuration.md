@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`).
+Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
 
 If no config file exists, an interactive setup wizard runs on first launch.
 If the file exists but fails to parse, a warning is printed and defaults are
@@ -269,8 +269,8 @@ skills:
 
 Skills are scanned from these directories (later entries override):
 
-1. `~/.config/agent/skills/*/SKILL.md` — global user skills
-2. `.agent/skills/*/SKILL.md` — project-local skills
+1. `~/.config/smelt/skills/*/SKILL.md` — global user skills
+2. `.smelt/skills/*/SKILL.md` — project-local skills
 3. Paths from `skills.paths` in config
 
 ### Skill Format

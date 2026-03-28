@@ -2,7 +2,7 @@
 
 ## Config File
 
-The config lives at `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`).
+The config lives at `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
 Load a different file with `--config <path>`.
 
 The [Getting Started](getting-started.md) guide covers basic provider setup.
@@ -35,7 +35,7 @@ settings:
 Or override from the CLI:
 
 ```bash
-agent --set vim_mode=true --set auto_compact=true
+smelt --set vim_mode=true --set auto_compact=true
 ```
 
 ## Themes
@@ -67,8 +67,8 @@ The TUI auto-detects your terminal's background color:
 
 ## Custom Commands
 
-Create `.md` files in `~/.config/agent/commands/` and they become slash
-commands. For example, `~/.config/agent/commands/commit.md`:
+Create `.md` files in `~/.config/smelt/commands/` and they become slash
+commands. For example, `~/.config/smelt/commands/commit.md`:
 
 ````markdown
 ---
@@ -121,7 +121,7 @@ All fields are optional:
 
 ## Custom Instructions (AGENTS.md)
 
-Place an `AGENTS.md` file in your project root (or `~/.config/agent/AGENTS.md`
+Place an `AGENTS.md` file in your project root (or `~/.config/smelt/AGENTS.md`
 for global instructions). Its contents are automatically appended to the system
 prompt for every conversation in that directory.
 

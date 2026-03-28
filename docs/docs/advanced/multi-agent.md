@@ -9,7 +9,7 @@
 ## Enabling
 
 ```bash
-agent --multi-agent
+smelt --multi-agent
 ```
 
 Or in config:
@@ -55,7 +55,7 @@ Agents get human-readable names (e.g., cedar, birch, plum).
 ## Peer Discovery
 
 Other interactive agent sessions in the same repository are automatically
-discovered via the registry at `~/.local/state/agent/registry/`. You can
+discovered via the registry at `~/.local/state/smelt/registry/`. You can
 communicate with peers using the same `message_agent` and `peek_agent` tools.
 
 ## Managing Subagents

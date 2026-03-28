@@ -114,8 +114,8 @@ only.
 ### `load_skill`
 
 Loads a skill by name to inject specialized instructions and knowledge into the
-conversation. Skills are discovered from `~/.config/agent/skills/*/SKILL.md`,
-`.agent/skills/*/SKILL.md`, and any paths listed in `skills.paths` config.
+conversation. Skills are discovered from `~/.config/smelt/skills/*/SKILL.md`,
+`.smelt/skills/*/SKILL.md`, and any paths listed in `skills.paths` config.
 
 Each skill directory contains a `SKILL.md` with YAML frontmatter (`name`,
 `description`) and a markdown body. Skill descriptions appear in the system

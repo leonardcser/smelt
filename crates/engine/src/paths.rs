@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-const APP_NAME: &str = "agent";
+const APP_NAME: &str = "smelt";
 
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")

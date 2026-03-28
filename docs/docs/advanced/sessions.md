@@ -10,13 +10,13 @@ across SIGINT and SIGTERM — you can always pick up where you left off.
 Open the session picker:
 
 ```bash
-agent --resume
+smelt --resume
 ```
 
 Or resume a specific session:
 
 ```bash
-agent --resume <SESSION_ID>
+smelt --resume <SESSION_ID>
 ```
 
 From within the TUI, use `/resume`. The picker supports:
@@ -78,9 +78,9 @@ All paths respect `$XDG_STATE_HOME` (default: `~/.local/state`).
 
 | Path | Contents |
 | --- | --- |
-| `~/.local/state/agent/sessions/` | Session data (JSON) |
-| `~/.local/state/agent/plans/` | Plan mode plan files |
-| `~/.local/state/agent/workspaces/` | Workspace permissions |
-| `~/.local/state/agent/registry/` | Multi-agent registry |
-| `~/.local/state/agent/codex_auth.json` | Codex OAuth tokens |
-| `~/.local/state/agent/logs/` | Log files |
+| `~/.local/state/smelt/sessions/` | Session data (JSON) |
+| `~/.local/state/smelt/plans/` | Plan mode plan files |
+| `~/.local/state/smelt/workspaces/` | Workspace permissions |
+| `~/.local/state/smelt/registry/` | Multi-agent registry |
+| `~/.local/state/smelt/codex_auth.json` | Codex OAuth tokens |
+| `~/.local/state/smelt/logs/` | Log files |

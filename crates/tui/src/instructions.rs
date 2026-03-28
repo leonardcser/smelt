@@ -7,7 +7,7 @@ const FILENAME: &str = "AGENTS.md";
 fn paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    // Root level: ~/.config/agent/AGENTS.md
+    // Root level: ~/.config/smelt/AGENTS.md
     let root = config::config_dir().join(FILENAME);
     if root.exists() {
         paths.push(root);

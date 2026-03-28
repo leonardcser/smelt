@@ -1,8 +1,8 @@
 # CLI Reference
 
 ```
-agent [MESSAGE]
-agent auth
+smelt [MESSAGE]
+smelt auth
 ```
 
 When a message is provided, it auto-submits on startup. Running with no
@@ -12,7 +12,7 @@ arguments and no config file launches the interactive setup wizard.
 
 | Subcommand | Description |
 | --- | --- |
-| `agent auth` | Manage provider authentication (add providers, Codex login/logout) |
+| `smelt auth` | Manage provider authentication (add providers, Codex login/logout) |
 
 ## Connection
 

@@ -88,7 +88,7 @@ When the confirm dialog appears, you can choose how broadly to approve:
 | --- | --- | --- |
 | **Once** | This call only | — |
 | **Session** | Until `/clear`, `/new`, or exit | Memory |
-| **Workspace** | All future sessions in this CWD | `~/.local/state/agent/workspaces/<hash>/permissions.json` |
+| **Workspace** | All future sessions in this CWD | `~/.local/state/smelt/workspaces/<hash>/permissions.json` |
 
 The workspace hash is a SHA256 prefix of the working directory path.
 

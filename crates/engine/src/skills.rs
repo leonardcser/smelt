@@ -29,8 +29,8 @@ pub struct SkillLoader {
 impl SkillLoader {
     /// Scan all skill directories and load SKILL.md files.
     /// Directories searched (later entries override earlier ones):
-    ///   1. ~/.config/agent/skills/*/SKILL.md
-    ///   2. .agent/skills/*/SKILL.md (project-local)
+    ///   1. ~/.config/smelt/skills/*/SKILL.md
+    ///   2. .smelt/skills/*/SKILL.md (project-local)
     ///   3. Any extra paths from config
     pub fn load(extra_paths: &[PathBuf]) -> Self {
         let mut skills = HashMap::new();
@@ -39,7 +39,7 @@ impl SkillLoader {
         scan_dir(&global, &mut skills);
 
         if let Ok(cwd) = std::env::current_dir() {
-            scan_dir(&cwd.join(".agent/skills"), &mut skills);
+            scan_dir(&cwd.join(".smelt/skills"), &mut skills);
         }
 
         for path in extra_paths {

@@ -1,4 +1,4 @@
-# agent
+# smelt
 
 A Rust TUI coding agent. Connects to any OpenAI-compatible API (Ollama, OpenAI,
 Anthropic, Google Gemini, OpenRouter, etc.) or your ChatGPT subscription via
@@ -17,38 +17,38 @@ analysis, and assistance.
 ## Quick Start
 
 ```bash
-cargo install --git https://github.com/leonardcser/agent.git
+cargo install --git https://github.com/leonardcser/smelt.git
 ```
 
-Running `agent` with no config file will launch an **interactive setup wizard**
+Running `smelt` with no config file will launch an **interactive setup wizard**
 that walks you through selecting a provider and model.
 
 **With Ollama (local):**
 
 ```bash
 ollama pull qwen3.5:0.8b
-agent --model qwen3.5:0.8b --api-base http://localhost:11434/v1
+smelt --model qwen3.5:0.8b --api-base http://localhost:11434/v1
 ```
 
 **With OpenAI:**
 
 ```bash
 read -s OPENAI_API_KEY && export OPENAI_API_KEY
-agent --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
+smelt --model gpt-5.4 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
 ```
 
 **With OpenAI Codex (ChatGPT Pro/Plus subscription):**
 
 ```bash
-agent auth          # log in with your ChatGPT account
-agent --model gpt-5.4    # use any Codex-supported model
+smelt auth          # log in with your ChatGPT account
+smelt --model gpt-5.4    # use any Codex-supported model
 ```
 
 **With Anthropic:**
 
 ```bash
 read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
-agent --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-env ANTHROPIC_API_KEY
+smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-env ANTHROPIC_API_KEY
 ```
 
 ## Features
@@ -70,12 +70,12 @@ agent --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-
 - **Input prediction** — ghost text suggesting your next message
 - **Image support** — paste from clipboard or reference image files
 - **Headless mode** — scriptable, no TUI
-- **Interactive setup** — guided first-run wizard and `agent auth` for managing
+- **Interactive setup** — guided first-run wizard and `smelt auth` for managing
   providers
 
 ## Configuration
 
-Config file: `~/.config/agent/config.yaml` (respects `$XDG_CONFIG_HOME`).
+Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
 
 ```yaml
 providers:
@@ -104,13 +104,13 @@ settings:
   auto_compact: false
 ```
 
-See the [full documentation](https://leonardcser.github.io/agent/) for all
+See the [full documentation](https://leonardcser.github.io/smelt/) for all
 config options, CLI flags, keybindings, permissions, and more.
 
 ## Documentation
 
 Full docs are available at
-[leonardcser.github.io/agent](https://leonardcser.github.io/agent/) and can be
+[leonardcser.github.io/smelt](https://leonardcser.github.io/smelt/) and can be
 built locally with [Zensical](https://github.com/zensical/zensical):
 
 ```bash

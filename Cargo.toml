@@ -2,12 +2,15 @@
 members = ["crates/protocol", "crates/engine", "crates/tui"]
 
 [package]
-name = "agent"
+name = "smelt-agent"
 version = "0.2.8"
 edition = "2021"
+description = "A Rust TUI coding agent"
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
 
 [[bin]]
-name = "agent"
+name = "smelt"
 path = "src/main.rs"
 
 [dependencies]

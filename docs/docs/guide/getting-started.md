@@ -3,24 +3,24 @@
 ## Installation
 
 ```bash
-cargo install --git https://github.com/leonardcser/agent.git
+cargo install --git https://github.com/leonardcser/smelt.git
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/leonardcser/agent.git
-cd agent
+git clone https://github.com/leonardcser/smelt.git
+cd smelt
 cargo install --path .
 ```
 
 ## First-Time Setup
 
-If you run `agent` without a config file, an **interactive setup wizard** walks
+If you run `smelt` without a config file, an **interactive setup wizard** walks
 you through selecting a provider and model. It writes your config and you're
 ready to go.
 
-You can also manage providers later with `agent auth` (see
+You can also manage providers later with `smelt auth` (see
 [Authentication](#authentication) below).
 
 ## Connecting to a Provider
@@ -31,7 +31,7 @@ The quickest way to start is with CLI flags — no config file needed.
 
 ```bash
 ollama pull qwen3.5:0.8b
-agent --model qwen3.5:0.8b --api-base http://localhost:11434/v1
+smelt --model qwen3.5:0.8b --api-base http://localhost:11434/v1
 ```
 
 Any server that speaks the OpenAI chat completions API works: Ollama, vLLM,
@@ -43,7 +43,7 @@ SGLang, llama.cpp.
 
     ```bash
     read -s OPENAI_API_KEY && export OPENAI_API_KEY
-    agent --model gpt-5.4 \
+    smelt --model gpt-5.4 \
           --api-base https://api.openai.com/v1 \
           --api-key-env OPENAI_API_KEY
     ```
@@ -53,8 +53,8 @@ SGLang, llama.cpp.
     No API key needed — authenticate with your ChatGPT Pro/Plus subscription:
 
     ```bash
-    agent auth   # log in via browser OAuth
-    agent --model gpt-5.4
+    smelt auth   # log in via browser OAuth
+    smelt --model gpt-5.4
     ```
 
     The Codex provider uses OAuth to connect to your ChatGPT subscription.
@@ -64,7 +64,7 @@ SGLang, llama.cpp.
 
     ```bash
     read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
-    agent --model claude-opus-4-5 \
+    smelt --model claude-opus-4-5 \
           --api-base https://api.anthropic.com/v1 \
           --api-key-env ANTHROPIC_API_KEY
     ```
@@ -73,7 +73,7 @@ SGLang, llama.cpp.
 
     ```bash
     read -s OPENROUTER_API_KEY && export OPENROUTER_API_KEY
-    agent --model anthropic/claude-sonnet-4-6 \
+    smelt --model anthropic/claude-sonnet-4-6 \
           --api-base https://openrouter.ai/api/v1 \
           --api-key-env OPENROUTER_API_KEY
     ```
@@ -93,7 +93,7 @@ or `--type openai-compatible` if auto-detection gets it wrong.
 ## Writing a Config File
 
 Once you have a setup you like, save it to
-`~/.config/agent/config.yaml` so you don't need CLI flags every time:
+`~/.config/smelt/config.yaml` so you don't need CLI flags every time:
 
 ```yaml
 providers:
@@ -118,14 +118,14 @@ defaults:
   model: ollama/qwen3.5:27b   # provider_name/model_name
 ```
 
-Now just run `agent` — it connects to your default model automatically. Switch
+Now just run `smelt` — it connects to your default model automatically. Switch
 models at runtime with `/model`.
 
 ## Authentication
 
-### `agent auth`
+### `smelt auth`
 
-The `agent auth` subcommand lets you manage provider connections:
+The `smelt auth` subcommand lets you manage provider connections:
 
 - **Add a new provider** — guided prompts for API base, key, and model
 - **Log in to OpenAI Codex** — browser OAuth (default) or device-code flow for headless environments (SSH, containers)

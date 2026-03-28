@@ -418,7 +418,7 @@ impl Provider {
                     if let Some(id) = &tokens.account_id {
                         req = req.header("ChatGPT-Account-Id", id);
                     }
-                    req = req.header("originator", "agent");
+                    req = req.header("originator", "smelt");
                     if let Some(ref ts) = *self.turn_state.lock().unwrap() {
                         req = req.header("x-codex-turn-state", ts.as_str());
                     }
