@@ -4,7 +4,9 @@
   {{ super() }}
   <style>
     /* Hide sidebar, content, footer on home page */
-    .md-sidebar { display: none !important; }
+    @media screen and (min-width: 76.25em) {
+      .md-sidebar { display: none !important; }
+    }
     .md-footer { display: none !important; }
 
     .md-main {
