@@ -975,9 +975,23 @@ impl App {
     // ── Headless mode ─────────────────────────────────────────────────────
 
     /// Run a single message through the agent without any TUI.
-    /// Prints the agent's text output to stdout.
-    pub async fn run_headless(&mut self, message: String) {
+    ///
+    /// **Text mode** (default): final assistant message → stdout,
+    /// everything else (tools, thinking, progress) → stderr. Matches
+    /// the Codex convention: stdout is sacred, only the answer.
+    ///
+    /// **JSON mode**: every `EngineEvent` is emitted as a JSONL line to
+    /// stdout for programmatic consumers.
+    pub async fn run_headless(
+        &mut self,
+        message: String,
+        format: OutputFormat,
+        color_mode: ColorMode,
+        verbose: bool,
+    ) {
         use std::io::Write;
+
+        init_color_mode(color_mode);
 
         let trimmed = message.trim();
 
@@ -1021,70 +1035,151 @@ impl App {
             permission_overrides: None,
         });
 
-        // Drain events, printing text to stdout and tool lifecycle to stderr.
+        // In text mode, buffer assistant text and only print to stdout at the end.
+        let mut final_message = String::new();
+        let mut total_usage = protocol::TokenUsage::default();
+        let mut last_tps: Option<f64> = None;
+        let mut total_cost = 0.0_f64;
+        let mut pending_tools: HashMap<String, (String, String, String)> = HashMap::new();
+
+        // Drain events.
         while let Some(ev) = self.engine.recv().await {
-            match ev {
-                EngineEvent::ThinkingDelta { .. } => {
-                    // Thinking deltas not shown in pipe mode.
-                }
-                EngineEvent::Thinking { content } => {
-                    log_thinking(&content);
-                }
-                EngineEvent::TextDelta { delta } => {
-                    print!("{delta}");
-                    let _ = io::stdout().flush();
-                }
-                EngineEvent::Text { content } => {
-                    if !content.ends_with('\n') {
-                        println!("{content}");
-                    } else {
-                        print!("{content}");
+            match format {
+                OutputFormat::Json => {
+                    // Forward every event as JSONL.
+                    emit_json(&ev);
+
+                    // Still need to handle side-effect events.
+                    match ev {
+                        EngineEvent::RequestPermission { request_id, .. } => {
+                            let approved = self.mode == Mode::Yolo;
+                            self.engine.send(UiCommand::PermissionDecision {
+                                request_id,
+                                approved,
+                                message: None,
+                            });
+                        }
+                        EngineEvent::RequestAnswer { request_id, .. } => {
+                            self.engine.send(UiCommand::QuestionAnswer {
+                                request_id,
+                                answer: Some("User is not available (headless mode).".into()),
+                            });
+                        }
+                        EngineEvent::TurnError { .. } | EngineEvent::TurnComplete { .. } => {
+                            break;
+                        }
+                        _ => {}
                     }
-                    let _ = io::stdout().flush();
                 }
-                EngineEvent::ToolStarted {
-                    tool_name, summary, ..
-                } => {
-                    log_tool_start(&tool_name, &summary);
-                }
-                EngineEvent::ToolOutput { chunk, .. } => {
-                    log_tool_output(&chunk);
-                }
-                EngineEvent::ToolFinished {
-                    result, elapsed_ms, ..
-                } => {
-                    log_tool_finish(result.is_error, &result.content, elapsed_ms);
-                }
-                EngineEvent::Retrying { delay_ms, attempt } => {
-                    log_retry(attempt, delay_ms);
-                }
-                EngineEvent::RequestPermission { request_id, .. } => {
-                    let approved = self.mode == Mode::Yolo;
-                    self.engine.send(UiCommand::PermissionDecision {
-                        request_id,
-                        approved,
-                        message: None,
-                    });
-                }
-                EngineEvent::RequestAnswer { request_id, .. } => {
-                    self.engine.send(UiCommand::QuestionAnswer {
-                        request_id,
-                        answer: Some("User is not available (headless mode).".into()),
-                    });
-                }
-                EngineEvent::Messages { .. } => {}
-                EngineEvent::TurnError { message } => {
-                    log_error(&message);
-                }
-                EngineEvent::TurnComplete { .. } => {
-                    break;
-                }
-                _ => {}
+                OutputFormat::Text => match ev {
+                    EngineEvent::ThinkingDelta { .. } => {}
+                    EngineEvent::Thinking { content } => {
+                        log_thinking(&content);
+                    }
+                    EngineEvent::TextDelta { delta } => {
+                        final_message.push_str(&delta);
+                    }
+                    EngineEvent::Text { content } => {
+                        // Full text block replaces any accumulated deltas.
+                        final_message = content;
+                    }
+                    EngineEvent::ToolStarted {
+                        call_id,
+                        tool_name,
+                        summary,
+                        ..
+                    } => {
+                        pending_tools.insert(call_id, (tool_name, summary, String::new()));
+                    }
+                    EngineEvent::ToolOutput { call_id, chunk } => {
+                        if verbose {
+                            if let Some((_, _, output)) = pending_tools.get_mut(&call_id) {
+                                output.push_str(&chunk);
+                            }
+                        }
+                    }
+                    EngineEvent::ToolFinished {
+                        call_id,
+                        result,
+                        elapsed_ms,
+                    } => {
+                        let (name, summary, output) =
+                            pending_tools.remove(&call_id).unwrap_or_default();
+                        let display_output = if !verbose {
+                            ""
+                        } else if result.is_error {
+                            &result.content
+                        } else {
+                            &output
+                        };
+                        log_tool(&name, &summary, display_output, result.is_error, elapsed_ms);
+                    }
+                    EngineEvent::TokenUsage {
+                        usage,
+                        tokens_per_sec,
+                        cost_usd,
+                    } => {
+                        total_cost += cost_usd.unwrap_or(0.0);
+                        total_usage.accumulate(&usage);
+                        last_tps = tokens_per_sec.or(last_tps);
+                    }
+                    EngineEvent::Retrying { delay_ms, attempt } => {
+                        log_retry(attempt, delay_ms);
+                    }
+                    EngineEvent::RequestPermission { request_id, .. } => {
+                        let approved = self.mode == Mode::Yolo;
+                        self.engine.send(UiCommand::PermissionDecision {
+                            request_id,
+                            approved,
+                            message: None,
+                        });
+                    }
+                    EngineEvent::RequestAnswer { request_id, .. } => {
+                        self.engine.send(UiCommand::QuestionAnswer {
+                            request_id,
+                            answer: Some("User is not available (headless mode).".into()),
+                        });
+                    }
+                    EngineEvent::Messages { .. } => {}
+                    EngineEvent::TurnError { message } => {
+                        log_error(&message);
+                        break;
+                    }
+                    EngineEvent::TurnComplete { .. } => {
+                        break;
+                    }
+                    _ => {}
+                },
             }
         }
 
-        // Ensure output ends with a newline.
-        println!();
+        // Print accumulated token/cost summary.
+        if format == OutputFormat::Text {
+            log_token_usage(&total_usage, last_tps, total_cost);
+        }
+
+        // Text mode: write the final message to stdout (only when piped).
+        if format == OutputFormat::Text && !final_message.is_empty() {
+            let stdout_is_tty = std::io::stdout().is_terminal();
+            let stderr_is_tty = std::io::stderr().is_terminal();
+
+            if stdout_is_tty && stderr_is_tty {
+                // Interactive: print to stderr so the answer appears in
+                // chronological order after tool output, not on a separate stream.
+                eprintln!();
+                eprint!("{final_message}");
+                if !final_message.ends_with('\n') {
+                    eprintln!();
+                }
+            } else {
+                // At least one stream is piped — stdout gets the clean answer.
+                print!("{final_message}");
+                if !final_message.ends_with('\n') {
+                    println!();
+                }
+                let _ = io::stdout().flush();
+            }
+        }
     }
 
     // ── Subagent mode ────────────────────────────────────────────────────
@@ -1379,10 +1474,23 @@ where
 
 // ── Streaming subagent helper ────────────────────────────────────────────────
 
+// ── Headless output types ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
 /// Write a single `EngineEvent` as a JSON line to stdout.
 fn emit_json(ev: &EngineEvent) {
-    // unwrap is safe: EngineEvent derives Serialize and all variants are
-    // representable as JSON.
     println!("{}", serde_json::to_string(ev).unwrap());
 }
 
@@ -1390,14 +1498,29 @@ fn emit_json(ev: &EngineEvent) {
 //
 // Bare-minimum style. Assistant text flows undecorated; only tool lifecycle
 // gets markers. Thinking is dim+italic. Colors match the TUI theme.
-// Respects NO_COLOR, TERM=dumb, and non-TTY stderr.
+// Respects NO_COLOR, TERM=dumb, non-TTY stderr, and --color flag.
 
+use std::io::IsTerminal;
 use std::sync::OnceLock;
+
+/// Explicit color mode set via --color flag. `None` means auto-detect.
+static COLOR_OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
+
+fn init_color_mode(mode: ColorMode) {
+    let _ = COLOR_OVERRIDE.set(match mode {
+        ColorMode::Auto => None,
+        ColorMode::Always => Some(true),
+        ColorMode::Never => Some(false),
+    });
+}
 
 fn stderr_supports_color() -> bool {
     static RESULT: OnceLock<bool> = OnceLock::new();
     *RESULT.get_or_init(|| {
-        use std::io::IsTerminal;
+        // Explicit --color flag takes precedence.
+        if let Some(Some(forced)) = COLOR_OVERRIDE.get() {
+            return *forced;
+        }
         if std::env::var_os("NO_COLOR").is_some() {
             return false;
         }
@@ -1461,54 +1584,23 @@ fn log_thinking(content: &str) {
     }
 }
 
-fn log_tool_start(tool_name: &str, summary: &str) {
-    let c = ansi_fg(crate::theme::tool_pending());
+fn log_tool(tool_name: &str, summary: &str, output: &str, is_error: bool, elapsed_ms: Option<u64>) {
     let r = reset();
-    eprintln!("{c}  > {tool_name}{r} {summary}");
-}
-
-/// Max lines of tool output to show (tail). Matches the TUI's
-/// `render_wrapped_output` limit.
-const MAX_OUTPUT_LINES: usize = 20;
-
-fn log_tool_output(chunk: &str) {
+    let time = format_elapsed(elapsed_ms);
     let d = dim();
-    let r = reset();
-    let lines: Vec<&str> = chunk.lines().collect();
-    let total = lines.len();
-    if total > MAX_OUTPUT_LINES {
-        let skipped = total - MAX_OUTPUT_LINES;
-        eprintln!("{d}    ... {skipped} lines above{r}");
-    }
-    let start = total.saturating_sub(MAX_OUTPUT_LINES);
-    for line in &lines[start..] {
-        eprintln!("{d}    {line}{r}");
-    }
-}
-
-fn log_tool_finish(is_error: bool, content: &str, elapsed_ms: Option<u64>) {
-    let r = reset();
-    if is_error {
+    let mark = if is_error {
         let c = ansi_fg(crate::theme::ERROR);
-        // Trim long error output the same way.
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-        if total > MAX_OUTPUT_LINES {
-            let skipped = total - MAX_OUTPUT_LINES;
-            eprintln!("{c}  ! ... {skipped} lines above{r}");
-        }
-        let start = total.saturating_sub(MAX_OUTPUT_LINES);
-        for (i, line) in lines[start..].iter().enumerate() {
-            if i == 0 && start == 0 {
-                eprintln!("{c}  ! {line}{r}");
-            } else {
-                eprintln!("{c}    {line}{r}");
-            }
-        }
+        format!("{c}✗{r}")
     } else {
         let c = ansi_fg(crate::theme::SUCCESS);
-        let time = format_elapsed(elapsed_ms);
-        eprintln!("{c}  < {time}{r}");
+        format!("{c}✓{r}")
+    };
+    eprintln!("{mark} {d}{tool_name}{r} {summary} {d}({time}){r}");
+
+    if !output.is_empty() {
+        for line in output.lines() {
+            eprintln!("{d}  {line}{r}");
+        }
     }
 }
 
@@ -1516,13 +1608,46 @@ fn log_retry(attempt: u32, delay_ms: u64) {
     let d = dim();
     let r = reset();
     let secs = delay_ms as f64 / 1000.0;
-    eprintln!("{d}  \u{27f3} retry #{attempt} ({secs:.1}s){r}");
+    eprintln!("{d}\u{27f3} retry #{attempt} ({secs:.1}s){r}");
 }
 
 fn log_error(message: &str) {
     let c = ansi_fg(crate::theme::ERROR);
     let r = reset();
-    eprintln!("{c}  ! {message}{r}");
+    eprintln!("{c}! {message}{r}");
+}
+
+fn log_token_usage(usage: &protocol::TokenUsage, tokens_per_sec: Option<f64>, cost_usd: f64) {
+    let d = dim();
+    let r = reset();
+    let mut parts = Vec::new();
+    if let Some(p) = usage.prompt_tokens {
+        parts.push(format!("{p} prompt"));
+    }
+    if let Some(c) = usage.completion_tokens {
+        parts.push(format!("{c} completion"));
+    }
+    if let Some(cached) = usage.cache_read_tokens {
+        if cached > 0 {
+            parts.push(format!("{cached} cached"));
+        }
+    }
+    if parts.is_empty() {
+        return;
+    }
+    let mut line = format!("{d}tokens: {}", parts.join(", "));
+    if let Some(tps) = tokens_per_sec {
+        line.push_str(&format!(" ({tps:.0} tok/s)"));
+    }
+    if cost_usd > 0.0 {
+        if cost_usd < 0.01 {
+            line.push_str(&format!(" | cost: ${cost_usd:.4}"));
+        } else {
+            line.push_str(&format!(" | cost: ${cost_usd:.2}"));
+        }
+    }
+    line.push_str(r);
+    eprintln!("{line}");
 }
 
 fn format_elapsed(ms: Option<u64>) -> String {

@@ -79,6 +79,9 @@ Models that don't support thinking ignore this setting.
 | Flag                  | Description                                                                    |
 | --------------------- | ------------------------------------------------------------------------------ |
 | `--headless`          | No TUI — requires a message argument. See [Headless](../advanced/headless.md). |
+| `--format <FORMAT>`   | Headless output format: `text` (default) or `json` (JSONL events)              |
+| `-v, --verbose`       | Show tool output in headless mode                                              |
+| `--color <WHEN>`      | Color output: `auto` (default), `always`, `never`                              |
 | `--log-level <LEVEL>` | `trace`, `debug`, `info`, `warn`, `error` (default: `info`)                    |
 | `--bench`             | Print timing summary on exit                                                   |
 

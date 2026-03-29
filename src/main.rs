@@ -1,6 +1,6 @@
 mod setup;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::ExecutableCommand;
 use protocol::{Mode, ReasoningEffort};
 use std::sync::{Arc, Mutex};
@@ -79,6 +79,12 @@ struct Args {
     bench: bool,
     #[arg(long, help = "Run headless (no TUI), requires a message argument")]
     headless: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Headless output format")]
+    format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto, help = "Color output")]
+    color: ColorMode,
+    #[arg(short, long, help = "Show tool output in headless mode")]
+    verbose: bool,
     #[arg(long, help = "Run as a subagent (persistent headless with IPC)")]
     subagent: bool,
     #[arg(long, help = "Enable multi-agent mode (registry, socket, agent tools)")]
@@ -111,6 +117,19 @@ struct Args {
         help = "Override a config setting (e.g. --set vim_mode=true)"
     )]
     set: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ColorMode {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Subcommand)]
@@ -675,7 +694,22 @@ async fn main() {
 
         engine::registry::cleanup_self(my_pid);
     } else if args.headless {
-        app.run_headless(args.message.unwrap()).await;
+        let output_format = match args.format {
+            OutputFormat::Text => tui::app::OutputFormat::Text,
+            OutputFormat::Json => tui::app::OutputFormat::Json,
+        };
+        let color_mode = match args.color {
+            ColorMode::Auto => tui::app::ColorMode::Auto,
+            ColorMode::Always => tui::app::ColorMode::Always,
+            ColorMode::Never => tui::app::ColorMode::Never,
+        };
+        app.run_headless(
+            args.message.unwrap(),
+            output_format,
+            color_mode,
+            args.verbose,
+        )
+        .await;
     } else {
         // Redirect stderr to a log file so stray output from system processes
         // (e.g. polkit, PAM) or libraries doesn't corrupt the TUI display.

@@ -343,6 +343,7 @@ impl App {
             EngineEvent::TokenUsage {
                 usage,
                 tokens_per_sec,
+                cost_usd,
             } => {
                 if let Some(tokens) = usage.prompt_tokens {
                     if tokens > 0 {
@@ -353,8 +354,7 @@ impl App {
                 if let Some(tps) = tokens_per_sec {
                     self.screen.record_tokens_per_sec(tps);
                 }
-                let pricing = engine::pricing::resolve(&self.model, &self.model_config);
-                let cost = pricing.cost(&usage);
+                let cost = cost_usd.unwrap_or(0.0);
                 self.session_cost_usd += cost;
                 self.screen.set_session_cost(self.session_cost_usd);
                 crate::metrics::append(&crate::metrics::MetricsEntry {
@@ -365,7 +365,7 @@ impl App {
                     prompt_tokens: usage.prompt_tokens.unwrap_or(0),
                     completion_tokens: usage.completion_tokens.unwrap_or(0),
                     model: self.model.clone(),
-                    cost_usd: if cost > 0.0 { Some(cost) } else { None },
+                    cost_usd,
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_write_tokens: usage.cache_write_tokens,
                     reasoning_tokens: usage.reasoning_tokens,

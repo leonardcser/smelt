@@ -188,6 +188,22 @@ pub struct TokenUsage {
     pub reasoning_tokens: Option<u32>,
 }
 
+impl TokenUsage {
+    /// Add another usage report into this accumulator.
+    pub fn accumulate(&mut self, other: &TokenUsage) {
+        fn add(a: &mut Option<u32>, b: Option<u32>) {
+            if let Some(v) = b {
+                *a = Some(a.unwrap_or(0) + v);
+            }
+        }
+        add(&mut self.prompt_tokens, other.prompt_tokens);
+        add(&mut self.completion_tokens, other.completion_tokens);
+        add(&mut self.cache_read_tokens, other.cache_read_tokens);
+        add(&mut self.cache_write_tokens, other.cache_write_tokens);
+        add(&mut self.reasoning_tokens, other.reasoning_tokens);
+    }
+}
+
 // ── Engine → UI ─────────────────────────────────────────────────────────────
 
 /// Events emitted by the engine. The UI consumes these to update its display.
@@ -260,6 +276,7 @@ pub enum EngineEvent {
     TokenUsage {
         usage: TokenUsage,
         tokens_per_sec: Option<f64>,
+        cost_usd: Option<f64>,
     },
 
     /// LLM call failed, engine is retrying.
