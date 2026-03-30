@@ -76,7 +76,13 @@ pub(crate) fn render_code_block(
         let visual_rows = split_regions_into_rows(&regions, text_w);
         for vrow in &visual_rows {
             if let Some(b) = bctx {
+                if dim {
+                    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+                }
                 b.print_left(out);
+                if dim {
+                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                }
             }
             let cols = print_split_regions(out, vrow, Some(theme::code_block_bg()));
             let pad = content_width.saturating_sub(cols);
@@ -85,6 +91,9 @@ pub(crate) fn render_code_block(
                 let _ = out.queue(Print(" ".repeat(pad)));
             }
             if let Some(b) = bctx {
+                if dim {
+                    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+                }
                 let _ = out.queue(SetForegroundColor(b.color));
                 let _ = out.queue(Print(b.right));
             }
