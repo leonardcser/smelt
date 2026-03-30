@@ -463,9 +463,7 @@ impl App {
                                         .map(|tc| protocol::AgentToolData {
                                             tool_name: tc.tool_name.clone(),
                                             summary: tc.summary.clone(),
-                                            elapsed_ms: tc
-                                                .elapsed
-                                                .map(|d| d.as_millis() as u64),
+                                            elapsed_ms: tc.elapsed.map(|d| d.as_millis() as u64),
                                             is_error: matches!(tc.status, ToolStatus::Err),
                                         })
                                         .collect(),

@@ -222,7 +222,11 @@ impl App {
         }
         for (_, meta) in &self.turn_metas {
             tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
-            agent_blocks.extend(meta.agent_blocks.iter().map(|(k, v)| (k.clone(), v.clone())));
+            agent_blocks.extend(
+                meta.agent_blocks
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
         }
         // Track blocking agent IDs so we can suppress their AgentMessage blocks.
         let mut blocking_agent_ids: std::collections::HashSet<String> =

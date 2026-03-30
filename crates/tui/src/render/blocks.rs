@@ -32,8 +32,16 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::CodeLine { .. }), Element::Block(Block::CodeLine { .. })) => {
             return 0
         }
-        // Transitions into/out of code lines need a blank line.
+        // Transitions into/out of code lines need a blank line,
+        // except after headings (headings have no trailing gap).
         (Element::Block(Block::CodeLine { .. }), _) => return 1,
+        (Element::Block(Block::Text { content }), Element::Block(Block::CodeLine { .. })) => {
+            let last_line = content.lines().last().unwrap_or("");
+            if last_line.trim_start().starts_with('#') {
+                return 0;
+            }
+            return 1;
+        }
         (_, Element::Block(Block::CodeLine { .. })) => return 1,
         _ => {}
     }
@@ -728,10 +736,12 @@ pub(crate) fn render_markdown_inner(
     let mut rows = 0u16;
     while i < lines.len() {
         if lines[i].trim_start().starts_with("```") {
-            // Blank line before code block when preceded by text content,
-            // matching the gap that gap_between(Text, CodeLine) produces
-            // during streaming.
-            if rows > 0 {
+            // Blank line before code blocks — skip when preceded by a
+            // blank line (already provides the gap) or a heading (headings
+            // don't get a trailing gap).
+            let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
+            let prev_heading = i > 0 && lines[i - 1].trim_start().starts_with('#');
+            if rows > 0 && !prev_blank && !prev_heading {
                 crlf(out);
                 rows += 1;
             }

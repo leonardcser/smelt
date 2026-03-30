@@ -266,6 +266,45 @@ fn code_block_gap_streaming_vs_resume() {
     }
 }
 
+/// Heading followed by code block — no gap between them.
+#[test]
+fn code_block_after_heading_no_gap() {
+    let content = "## Quick Start\n```bash\nnpm install\nnpm run build\n```";
+
+    let mut h_streamed = TestHarness::new(80, 24, "code_block_after_heading_streamed");
+    h_streamed.push_and_render(Block::User {
+        text: "How do I start?".into(),
+        image_labels: vec![],
+    });
+    h_streamed.stream_and_flush(content);
+    let streamed_text = h_streamed.full_text();
+
+    let mut h_resume = TestHarness::new(80, 24, "code_block_after_heading_resume");
+    h_resume.push_and_render(Block::User {
+        text: "How do I start?".into(),
+        image_labels: vec![],
+    });
+    h_resume.push_and_render(Block::Text {
+        content: content.into(),
+    });
+    let resume_text = h_resume.full_text();
+
+    // Normalize whitespace-only lines.
+    let norm = |s: &str| -> String {
+        s.lines()
+            .map(|l| if l.trim().is_empty() { "" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let streamed_text = norm(&streamed_text);
+    let resume_text = norm(&resume_text);
+
+    assert_eq!(
+        streamed_text, resume_text,
+        "Heading + code block renders differently between streaming and resume"
+    );
+}
+
 /// Multiple code blocks in one message.
 #[test]
 fn streamed_multiple_code_blocks() {
@@ -278,4 +317,56 @@ fn streamed_multiple_code_blocks() {
         "First file:\n```rust\nfn a() {}\n```\nSecond file:\n```rust\nfn b() {}\n```",
     );
     h.assert_scrollback_integrity();
+}
+
+/// Code block with blank line before fence (typical LLM output).
+/// Must not produce a double gap.
+#[test]
+fn code_block_gap_with_existing_blank_line() {
+    let content = "Here's the code:\n\n```rust\nfn main() {}\n```";
+
+    let mut h_streamed = TestHarness::new(80, 24, "code_block_gap_existing_blank_streamed");
+    h_streamed.push_and_render(Block::User {
+        text: "Show code".into(),
+        image_labels: vec![],
+    });
+    h_streamed.stream_and_flush(content);
+    let streamed_text = h_streamed.full_text();
+
+    let mut h_resume = TestHarness::new(80, 24, "code_block_gap_existing_blank_resume");
+    h_resume.push_and_render(Block::User {
+        text: "Show code".into(),
+        image_labels: vec![],
+    });
+    h_resume.push_and_render(Block::Text {
+        content: content.into(),
+    });
+    let resume_text = h_resume.full_text();
+
+    // Normalize: blank lines may differ in whitespace (indent vs none)
+    // but both are visually identical vertical gaps.
+    let norm = |s: &str| -> String {
+        s.lines()
+            .map(|l| if l.trim().is_empty() { "" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let streamed_text = norm(&streamed_text);
+    let resume_text = norm(&resume_text);
+
+    if streamed_text != resume_text {
+        let dump_dir = "target/test-frames/code_block_gap_with_existing_blank_line";
+        let _ = std::fs::create_dir_all(dump_dir);
+        let _ = std::fs::write(format!("{dump_dir}/streamed.txt"), &streamed_text);
+        let _ = std::fs::write(format!("{dump_dir}/resume.txt"), &resume_text);
+
+        use similar::TextDiff;
+        let diff = TextDiff::from_lines(&streamed_text, &resume_text);
+        let mut diff_str = String::new();
+        diff_str.push_str("--- streamed\n+++ resume\n");
+        for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+            diff_str.push_str(&format!("{hunk}"));
+        }
+        panic!("Double gap detected!\nSaved to: {dump_dir}/\n\n{diff_str}");
+    }
 }
