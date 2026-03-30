@@ -3,10 +3,10 @@ use crate::render::{crlf, draw_bar};
 use crate::{theme, utils::format_duration};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
-use crossterm::QueueableCommand;
+use crossterm::{terminal, QueueableCommand};
 use engine::tools::ProcessInfo;
 
-use super::{end_dialog_draw, truncate_str, DialogResult, ListState};
+use super::{end_dialog_draw, truncate_str, DialogResult, ListState, TerminalBackend};
 
 pub struct PsDialog {
     registry: engine::tools::ProcessRegistry,
@@ -53,7 +53,8 @@ impl super::Dialog for PsDialog {
     }
 
     fn handle_resize(&mut self) {
-        self.list.handle_resize();
+        self.list
+            .handle_resize(terminal::size().ok().map(|(_, h)| h));
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
@@ -90,7 +91,7 @@ impl super::Dialog for PsDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16, sync_started: bool) {
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
         let fresh = Self::fetch_procs(&self.registry, &self.killed);
         if fresh.len() != self.procs.len() {
             self.list.set_items(fresh.len().max(1));
@@ -99,7 +100,7 @@ impl super::Dialog for PsDialog {
 
         let Some((mut out, w, _)) =
             self.list
-                .begin_draw(start_row, self.procs.len().max(1), sync_started)
+                .begin_draw(start_row, self.procs.len().max(1), sync_started, backend)
         else {
             return;
         };

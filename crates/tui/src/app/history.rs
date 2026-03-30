@@ -140,7 +140,7 @@ impl App {
         );
         terminal::enable_raw_mode().ok();
         loop {
-            dialog.draw(0, false);
+            dialog.draw(0, false, &render::StdioBackend);
             match event::read() {
                 Ok(Event::Key(KeyEvent {
                     code, modifiers, ..

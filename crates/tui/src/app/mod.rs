@@ -850,7 +850,7 @@ impl App {
                 }
                 let scr = &mut self.screen;
                 let sync = scr.take_sync_started();
-                d.draw(scr.dialog_row(), sync);
+                d.draw(scr.dialog_row(), sync, scr.backend());
                 self.screen.sync_dialog_anchor(d.anchor_row());
             }
 
@@ -882,7 +882,7 @@ impl App {
                         if redirtied { d.mark_dirty(); }
                         let scr = &mut self.screen;
                         let sync = scr.take_sync_started();
-                        d.draw(scr.dialog_row(), sync);
+                        d.draw(scr.dialog_row(), sync, scr.backend());
                         self.screen.sync_dialog_anchor(d.anchor_row());
                     }
                 }
@@ -913,7 +913,7 @@ impl App {
                         if redirtied { d.mark_dirty(); }
                         let scr = &mut self.screen;
                         let sync = scr.take_sync_started();
-                        d.draw(scr.dialog_row(), sync);
+                        d.draw(scr.dialog_row(), sync, scr.backend());
                     }
                 }
 

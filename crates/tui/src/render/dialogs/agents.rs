@@ -9,7 +9,7 @@ use crossterm::QueueableCommand;
 use engine::registry::{AgentStatus, RegistryEntry};
 use std::sync::{Arc, Mutex};
 
-use super::{end_dialog_draw, truncate_str, DialogResult, ListState};
+use super::{end_dialog_draw, truncate_str, DialogResult, ListState, TerminalBackend};
 
 /// Snapshot of a tracked agent's state, passed to the dialog for rendering.
 #[derive(Clone)]
@@ -39,6 +39,8 @@ pub struct AgentsDialog {
     view: View,
     list_selected: usize,
     vim: bool,
+    /// Cached terminal size, updated each draw().
+    term_size: (u16, u16),
 }
 
 impl AgentsDialog {
@@ -58,6 +60,7 @@ impl AgentsDialog {
             view: View::List,
             list_selected: 0,
             vim,
+            term_size: terminal::size().unwrap_or((80, 24)),
         }
     }
 
@@ -70,14 +73,8 @@ impl AgentsDialog {
         snaps.iter().find(|s| s.agent_id == agent_id).cloned()
     }
 
-    fn term_size() -> (usize, usize) {
-        terminal::size()
-            .map(|(w, h)| (w as usize, h as usize))
-            .unwrap_or((80, 24))
-    }
-
-    fn max_detail_lines() -> usize {
-        let (_, h) = Self::term_size();
+    fn max_detail_lines(&self) -> usize {
+        let h = self.term_size.1 as usize;
         // Half the terminal minus overhead (header, blanks, hints).
         (h / 2).saturating_sub(5).max(3)
     }
@@ -121,18 +118,18 @@ impl super::Dialog for AgentsDialog {
         match &self.view {
             View::List => self.list.height(self.agents.len().max(1)),
             View::Detail { agent_id, .. } => {
-                let (w, h) = Self::term_size();
+                let w = self.term_size.0 as usize;
                 let n = if let Some(ref snap) = self.find_snapshot(agent_id) {
                     Self::detail_lines(snap, w).len()
                 } else {
                     1
                 };
                 let overhead = 5u16; // header(2) + blank + blank + hints
-                let max_content = Self::max_detail_lines();
+                let max_content = self.max_detail_lines();
                 let content = n.min(max_content) as u16;
                 let wanted = content + overhead;
                 // Expand to half the terminal when content is scrollable.
-                let half = (h as u16) / 2;
+                let half = self.term_size.1 / 2;
                 if n > max_content {
                     wanted.max(half)
                 } else {
@@ -151,7 +148,8 @@ impl super::Dialog for AgentsDialog {
     }
 
     fn handle_resize(&mut self) {
-        self.list.handle_resize();
+        self.list
+            .handle_resize(terminal::size().ok().map(|(_, h)| h));
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
@@ -162,7 +160,8 @@ impl super::Dialog for AgentsDialog {
                 agent_id,
                 ..
             } => {
-                let (w, h) = Self::term_size();
+                let (w, h) = (self.term_size.0 as usize, self.term_size.1 as usize);
+                let base_max = (h / 2).saturating_sub(5).max(3);
                 let n = {
                     let snaps = self.snapshots.lock().unwrap();
                     if let Some(snap) = snaps.iter().find(|s| s.agent_id == *agent_id) {
@@ -171,7 +170,6 @@ impl super::Dialog for AgentsDialog {
                         0
                     }
                 };
-                let base_max = Self::max_detail_lines();
                 let max_vis = if n > base_max {
                     (h / 2).saturating_sub(5).max(base_max)
                 } else {
@@ -267,7 +265,8 @@ impl super::Dialog for AgentsDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16, sync_started: bool) {
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
+        self.term_size = backend.size();
         match &self.view {
             View::Detail {
                 agent_id,
@@ -277,7 +276,7 @@ impl super::Dialog for AgentsDialog {
                 let agent_id = agent_id.clone();
                 let mut scroll = *scroll;
                 let follow = *follow;
-                let (w, _) = Self::term_size();
+                let (w, h) = (self.term_size.0 as usize, self.term_size.1 as usize);
 
                 let lines = if let Some(ref snap) = self.find_snapshot(&agent_id) {
                     Self::detail_lines(snap, w)
@@ -285,10 +284,9 @@ impl super::Dialog for AgentsDialog {
                     vec![DetailLine::Text("(agent not tracked)".into())]
                 };
 
-                let base_max = Self::max_detail_lines();
+                let base_max = self.max_detail_lines();
                 let total = lines.len();
                 // Expand to half the terminal when content overflows.
-                let (_, h) = Self::term_size();
                 let max_vis = if total > base_max {
                     (h / 2).saturating_sub(5).max(base_max)
                 } else {
@@ -304,7 +302,8 @@ impl super::Dialog for AgentsDialog {
                 let visible = total.min(max_vis);
 
                 let Some((mut out, w, _)) =
-                    self.list.begin_draw(start_row, visible + 2, sync_started)
+                    self.list
+                        .begin_draw(start_row, visible + 2, sync_started, backend)
                 else {
                     return;
                 };
@@ -413,10 +412,12 @@ impl super::Dialog for AgentsDialog {
                 }
                 self.agents = fresh;
 
-                let Some((mut out, w, _)) =
-                    self.list
-                        .begin_draw(start_row, self.agents.len().max(1), sync_started)
-                else {
+                let Some((mut out, w, _)) = self.list.begin_draw(
+                    start_row,
+                    self.agents.len().max(1),
+                    sync_started,
+                    backend,
+                ) else {
                     return;
                 };
 

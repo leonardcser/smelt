@@ -3,10 +3,10 @@ use crate::render::{crlf, draw_bar, ResumeEntry};
 use crate::{session, theme};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
-use crossterm::QueueableCommand;
+use crossterm::{terminal, QueueableCommand};
 use std::time::Instant;
 
-use super::{end_dialog_draw, truncate_str, DialogResult, ListState};
+use super::{end_dialog_draw, truncate_str, DialogResult, ListState, TerminalBackend};
 
 pub struct ResumeDialog {
     entries: Vec<ResumeEntry>,
@@ -76,7 +76,8 @@ impl super::Dialog for ResumeDialog {
     }
 
     fn handle_resize(&mut self) {
-        self.list.handle_resize();
+        self.list
+            .handle_resize(terminal::size().ok().map(|(_, h)| h));
         self.refilter();
     }
 
@@ -173,7 +174,7 @@ impl super::Dialog for ResumeDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16, sync_started: bool) {
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
         if !self.list.dirty {
             let freshest = self.filtered.iter().map(resume_ts).max().unwrap_or(0);
             let age_s = session::now_ms().saturating_sub(freshest) / 1000;
@@ -195,7 +196,7 @@ impl super::Dialog for ResumeDialog {
 
         let Some((mut out, w, _)) =
             self.list
-                .begin_draw(start_row, self.filtered.len().max(1), sync_started)
+                .begin_draw(start_row, self.filtered.len().max(1), sync_started, backend)
         else {
             return;
         };

@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, SetAttribute, SetForegroundColor};
 use crossterm::{terminal, QueueableCommand};
 
-use super::{end_dialog_draw, DialogResult, ListState};
+use super::{end_dialog_draw, DialogResult, ListState, TerminalBackend};
 
 pub struct HelpDialog {
     list: ListState,
@@ -45,7 +45,8 @@ impl super::Dialog for HelpDialog {
     }
 
     fn handle_resize(&mut self) {
-        self.list.handle_resize();
+        self.list
+            .handle_resize(terminal::size().ok().map(|(_, h)| h));
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
@@ -89,7 +90,7 @@ impl super::Dialog for HelpDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16, sync_started: bool) {
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
         let label_col = self
             .sections
             .iter()
@@ -110,7 +111,9 @@ impl super::Dialog for HelpDialog {
         }
         let total_content = content_lines.len();
 
-        let Some((mut out, w, _)) = self.list.begin_draw(start_row, total_content, sync_started)
+        let Some((mut out, w, _)) =
+            self.list
+                .begin_draw(start_row, total_content, sync_started, backend)
         else {
             return;
         };

@@ -6,7 +6,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::highlight::{
     count_inline_diff_rows, print_inline_diff, print_syntax_file, BashHighlighter,
 };
-use crate::render::{crlf, draw_bar, ConfirmChoice, RenderOut};
+use crate::render::{crlf, draw_bar, ConfirmChoice, RenderOut, TerminalBackend};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
@@ -203,6 +203,8 @@ pub struct ConfirmDialog {
     /// Row where the options section begins (used for partial redraws).
     options_row: u16,
     vim_enabled: bool,
+    /// Cached terminal size, updated each draw().
+    term_size: (u16, u16),
 }
 
 impl ConfirmDialog {
@@ -292,14 +294,14 @@ impl ConfirmDialog {
             dirty: true,
             request_id: req.request_id,
             vim_enabled,
+            term_size: terminal::size().unwrap_or((80, 24)),
         }
     }
 }
 
 impl ConfirmDialog {
     fn preview_total_rows(&self) -> usize {
-        let w = terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
-        self.preview.total_rows(w) as usize
+        self.preview.total_rows(self.term_size.0 as usize) as usize
     }
 
     fn layout(&self, width: u16, height: u16) -> ConfirmLayout {
@@ -374,7 +376,7 @@ impl super::Dialog for ConfirmDialog {
     }
 
     fn height(&self) -> u16 {
-        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let (width, height) = self.term_size;
         self.layout(width, height).total_rows
     }
 
@@ -443,10 +445,8 @@ impl super::Dialog for ConfirmDialog {
         }
 
         // ── Selection mode ──────────────────────────────────────────────
-        let (_, height) = terminal::size().unwrap_or((80, 24));
-        let viewport = self
-            .layout(terminal::size().unwrap_or((80, 24)).0, height)
-            .viewport_rows as usize;
+        let (width, height) = self.term_size;
+        let viewport = self.layout(width, height).viewport_rows as usize;
         let scroll_step = (viewport / 2).max(1);
         match nav_lookup(code, modifiers) {
             Some(NavAction::Confirm) => {
@@ -499,14 +499,15 @@ impl super::Dialog for ConfirmDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16, sync_started: bool) {
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
         if !self.dirty {
             return;
         }
         self.dirty = false;
 
-        let mut out = RenderOut::scroll();
-        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let mut out = backend.make_output();
+        let (width, height) = backend.size();
+        self.term_size = (width, height);
         let w = width as usize;
 
         let ly = self.layout(width, height);

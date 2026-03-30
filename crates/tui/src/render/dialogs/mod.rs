@@ -20,7 +20,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor, style::Print, terminal, QueueableCommand};
 use std::io::Write;
 
-use super::{crlf, wrap_line, ConfirmChoice, RenderOut};
+use super::{crlf, wrap_line, ConfirmChoice, RenderOut, TerminalBackend};
 
 pub enum DialogResult {
     Dismissed,
@@ -56,7 +56,7 @@ pub trait Dialog {
     }
     fn height(&self) -> u16;
     fn mark_dirty(&mut self);
-    fn draw(&mut self, start_row: u16, sync_started: bool);
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend);
     fn handle_resize(&mut self);
     fn anchor_row(&self) -> Option<u16>;
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult>;
@@ -123,8 +123,8 @@ impl ListState {
         self.dirty = true;
     }
 
-    pub fn handle_resize(&mut self) {
-        self.max_height = terminal::size().map(|(_, h)| h / 2).ok();
+    pub fn handle_resize(&mut self, term_height: Option<u16>) {
+        self.max_height = term_height.map(|h| h / 2);
         self.anchor_row = None;
         self.dirty = true;
     }
@@ -190,14 +190,15 @@ impl ListState {
         start_row: u16,
         item_count: usize,
         sync_started: bool,
+        backend: &dyn TerminalBackend,
     ) -> Option<(RenderOut, usize, u16)> {
         if !self.dirty {
             return None;
         }
         self.dirty = false;
 
-        let mut out = RenderOut::scroll();
-        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let mut out = backend.make_output();
+        let (width, height) = backend.size();
 
         let wanted_rows = (item_count as u16).saturating_add(self.overhead);
         let (bar_row, granted) = begin_dialog_draw(

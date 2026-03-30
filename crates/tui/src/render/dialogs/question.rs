@@ -3,7 +3,7 @@ use super::{
     TextArea,
 };
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar, RenderOut};
+use crate::render::{crlf, draw_bar, TerminalBackend};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
@@ -80,6 +80,8 @@ pub struct QuestionDialog {
     request_id: u64,
     /// The anchor row where this dialog is positioned. None on first draw.
     pub anchor_row: Option<u16>,
+    /// Cached terminal size, updated each draw().
+    term_size: (u16, u16),
 }
 
 impl QuestionDialog {
@@ -103,6 +105,7 @@ impl QuestionDialog {
             dirty: true,
             anchor_row: None,
             request_id,
+            term_size: terminal::size().unwrap_or((80, 24)),
         }
     }
 
@@ -186,8 +189,7 @@ impl super::Dialog for QuestionDialog {
     }
 
     fn height(&self) -> u16 {
-        let (width, _) = terminal::size().unwrap_or((80, 24));
-        self.content_rows(width)
+        self.content_rows(self.term_size.0)
     }
 
     fn mark_dirty(&mut self) {
@@ -350,14 +352,15 @@ impl super::Dialog for QuestionDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16, sync_started: bool) {
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
         if !self.dirty {
             return;
         }
         self.dirty = false;
 
-        let mut out = RenderOut::scroll();
-        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let mut out = backend.make_output();
+        let (width, height) = backend.size();
+        self.term_size = (width, height);
         let w = width as usize;
 
         let content_rows = self.content_rows(width);

@@ -3,9 +3,9 @@ use crate::render::{crlf, draw_bar};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
-use crossterm::QueueableCommand;
+use crossterm::{terminal, QueueableCommand};
 
-use super::{end_dialog_draw, truncate_str, DialogResult, ListState};
+use super::{end_dialog_draw, truncate_str, DialogResult, ListState, TerminalBackend};
 
 pub struct RewindDialog {
     turns: Vec<(usize, String)>,
@@ -44,7 +44,8 @@ impl super::Dialog for RewindDialog {
     }
 
     fn handle_resize(&mut self) {
-        self.list.handle_resize();
+        self.list
+            .handle_resize(terminal::size().ok().map(|(_, h)| h));
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
@@ -78,10 +79,10 @@ impl super::Dialog for RewindDialog {
         }
     }
 
-    fn draw(&mut self, start_row: u16, sync_started: bool) {
-        let Some((mut out, w, _)) = self
-            .list
-            .begin_draw(start_row, self.turns.len(), sync_started)
+    fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
+        let Some((mut out, w, _)) =
+            self.list
+                .begin_draw(start_row, self.turns.len(), sync_started, backend)
         else {
             return;
         };

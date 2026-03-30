@@ -44,13 +44,39 @@ pub struct FramePrompt<'a> {
     pub prediction: Option<&'a str>,
 }
 
+/// Abstracts terminal I/O so rendering can target either a real
+/// terminal (stdout + crossterm queries) or an in-memory buffer.
+pub trait TerminalBackend {
+    /// Terminal dimensions `(cols, rows)`.
+    fn size(&self) -> (u16, u16);
+    /// Current cursor row. Used as fallback when `anchor_row` is unset.
+    fn cursor_y(&self) -> u16;
+    /// Build a `RenderOut` that writes to this backend's output.
+    fn make_output(&self) -> RenderOut;
+}
+
+/// Production backend writing to stdout and querying the real terminal.
+pub struct StdioBackend;
+
+impl TerminalBackend for StdioBackend {
+    fn size(&self) -> (u16, u16) {
+        terminal::size().unwrap_or((80, 24))
+    }
+    fn cursor_y(&self) -> u16 {
+        cursor::position().map(|(_, y)| y).unwrap_or(0)
+    }
+    fn make_output(&self) -> RenderOut {
+        RenderOut::scroll()
+    }
+}
+
 /// Output wrapper that selects the line-advance strategy.
 ///
 /// * `row: None` — **scroll mode** (blocks / prompt): `\r\n` pushes content
 ///   into terminal scrollback, which is the normal way conversation renders.
 /// * `row: Some(r)` — **overlay mode** (dialogs): `MoveTo(0, r+1)` repositions
 ///   the cursor without scrolling, so dialogs never pollute scrollback.
-pub(super) struct RenderOut {
+pub struct RenderOut {
     pub out: Box<dyn Write>,
     pub row: Option<u16>,
     capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
@@ -62,6 +88,15 @@ impl RenderOut {
     pub fn scroll() -> Self {
         Self {
             out: Box::new(BufWriter::with_capacity(1 << 16, io::stdout())),
+            row: None,
+            capture: None,
+        }
+    }
+
+    /// Create a scroll-mode output writing to a shared buffer (for testing).
+    pub fn shared_sink(sink: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> Self {
+        Self {
+            out: Box::new(SharedWriter(sink)),
             row: None,
             capture: None,
         }
@@ -527,6 +562,9 @@ pub struct Screen {
     notification: Option<Notification>,
     /// Short task label (slug) shown on the status bar after the throbber.
     task_label: Option<String>,
+
+    /// Terminal I/O backend (real terminal or test buffer).
+    backend: Box<dyn TerminalBackend>,
 }
 
 /// A short ephemeral notification rendered above the prompt bar.
@@ -555,6 +593,10 @@ impl Default for Screen {
 
 impl Screen {
     pub fn new() -> Self {
+        Self::with_backend(Box::new(StdioBackend))
+    }
+
+    pub fn with_backend(backend: Box<dyn TerminalBackend>) -> Self {
         Self {
             history: BlockHistory::new(),
             active_thinking: None,
@@ -584,7 +626,47 @@ impl Screen {
             btw: None,
             notification: None,
             task_label: None,
+            backend,
         }
+    }
+
+    fn size(&self) -> (u16, u16) {
+        self.backend.size()
+    }
+
+    fn scroll_output(&self) -> RenderOut {
+        self.backend.make_output()
+    }
+
+    fn cursor_y(&self) -> u16 {
+        self.prompt
+            .anchor_row
+            .unwrap_or_else(|| self.backend.cursor_y())
+    }
+
+    /// Build a `RenderOut` from this screen's backend.
+    pub fn backend_make_output(&self) -> RenderOut {
+        self.backend.make_output()
+    }
+
+    /// Expose the backend for dialogs that need output + size.
+    pub fn backend(&self) -> &dyn TerminalBackend {
+        &*self.backend
+    }
+
+    /// Set the prompt anchor row explicitly (used by test harness).
+    pub fn set_anchor_row(&mut self, row: u16) {
+        self.prompt.anchor_row = Some(row);
+    }
+
+    /// Number of committed blocks in history.
+    pub fn block_count(&self) -> usize {
+        self.history.blocks.len()
+    }
+
+    /// Cloned snapshot of all blocks in history.
+    pub fn blocks(&self) -> Vec<Block> {
+        self.history.blocks.clone()
     }
 
     pub fn set_btw(&mut self, question: String, image_labels: Vec<String>) {
@@ -622,13 +704,13 @@ impl Screen {
 
     /// Scroll the btw block. Returns true if state changed.
     pub fn btw_scroll(&mut self, delta: isize) -> bool {
+        let term_h = self.size().1 as usize;
         let Some(ref mut btw) = self.btw else {
             return false;
         };
         if btw.wrapped.is_empty() {
             return false;
         }
-        let term_h = terminal::size().map(|(_, h)| h).unwrap_or(24) as usize;
         let max_lines = (term_h / 2).saturating_sub(4).max(1);
         let max = btw.wrapped.len().saturating_sub(max_lines);
         let old = btw.scroll_offset;
@@ -821,11 +903,8 @@ impl Screen {
 
         let clear_from = anchor.min(adjusted_anchor);
 
-        // Clear each row individually instead of using Clear(FromCursorDown).
-        // Some terminals (e.g. Ghostty) push the viewport into scrollback
-        // when Clear(FromCursorDown) is issued at row 0.
-        let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
-        let mut out = RenderOut::scroll();
+        let height = self.size().1;
+        let mut out = self.scroll_output();
         for row in clear_from..height {
             let _ = out.queue(cursor::MoveTo(0, row));
             let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
@@ -854,8 +933,8 @@ impl Screen {
         }
         let anchor = self.prompt.anchor_row.unwrap_or(0);
         let end_row = anchor + self.prompt.prev_rows;
-        let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
-        let mut out = RenderOut::scroll();
+        let height = self.size().1;
+        let mut out = self.scroll_output();
         let _ = out.queue(cursor::MoveTo(0, end_row.min(height.saturating_sub(1))));
         let _ = out.queue(Print("\r\n\r\n"));
         if clear_below {
@@ -1308,9 +1387,7 @@ impl Screen {
         } else {
             0
         };
-        let w = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80);
+        let w = self.size().0 as usize;
         let inter_tool_gap =
             blocks::gap_between(&blocks::Element::ActiveTool, &blocks::Element::ActiveTool);
         let mut total = gap;
@@ -1493,7 +1570,7 @@ impl Screen {
         if !self.history.has_unflushed() {
             return;
         }
-        let mut out = RenderOut::scroll();
+        let mut out = self.scroll_output();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::Hide);
         let start_row = if self.prompt.drawn {
@@ -1507,9 +1584,9 @@ impl Screen {
             self.prompt
                 .anchor_row
                 .take()
-                .unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0))
+                .unwrap_or_else(|| self.cursor_y())
         };
-        let (w, h) = terminal::size().unwrap_or((80, 24));
+        let (w, h) = self.size();
         let block_rows = self.history.render(&mut out, w as usize);
         // Cap anchor at the last terminal row — scroll-mode rendering may
         // have pushed past the bottom, making start_row + block_rows overshoot.
@@ -1541,9 +1618,9 @@ impl Screen {
     pub fn erase_prompt_nosync(&mut self) {
         if self.prompt.drawn {
             if let Some(anchor) = self.prompt.anchor_row {
-                let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+                let height = self.size().1;
                 let end = (anchor + self.prompt.prev_rows).min(height);
-                let mut out = RenderOut::scroll();
+                let mut out = self.scroll_output();
                 let _ = out.queue(cursor::Hide);
                 for r in anchor..end {
                     let _ = out.queue(cursor::MoveTo(0, r));
@@ -1567,7 +1644,7 @@ impl Screen {
         } else {
             purge
         };
-        let mut out = RenderOut::scroll();
+        let mut out = self.scroll_output();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::Hide);
         let start = if purge {
@@ -1580,7 +1657,7 @@ impl Screen {
             let _ = out.queue(cursor::MoveTo(0, row));
             row
         };
-        let (w, height) = terminal::size().unwrap_or((80, 24));
+        let (w, height) = self.size();
         let start_idx = self.history.redraw_start(MAX_REDRAW_LINES);
         self.history.flushed = start_idx;
         self.history.last_block_rows = 0;
@@ -1624,7 +1701,7 @@ impl Screen {
         self.task_label = None;
         self.has_scrollback = false;
         self.content_start_row = None;
-        let mut out = RenderOut::scroll();
+        let mut out = self.scroll_output();
         let _ = out.queue(terminal::BeginSynchronizedUpdate);
         let _ = out.queue(cursor::Hide);
         let _ = out.queue(cursor::MoveTo(0, 0));
@@ -1702,12 +1779,11 @@ impl Screen {
             return false;
         }
 
-        let mut out = RenderOut::scroll();
+        let mut out = self.scroll_output();
 
         // ── Position cursor ─────────────────────────────────────────────
         let explicit_anchor = self.prompt.anchor_row.take();
-        let draw_start_row =
-            explicit_anchor.unwrap_or_else(|| cursor::position().map(|(_, y)| y).unwrap_or(0));
+        let draw_start_row = explicit_anchor.unwrap_or_else(|| self.cursor_y());
 
         // In content-only mode the sync frame may already be open (from
         // render_pending_blocks_for_dialog).  Only issue BeginSync when
@@ -1952,7 +2028,7 @@ impl Screen {
             // fresh by draw_frame, never baked into anchor_row.
             let prompt_section_rows = streaming_rows + active_rows + gap + new_rows;
             if scrolled {
-                let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+                let height = self.size().1;
                 self.prompt.anchor_row = Some(height.saturating_sub(prompt_section_rows));
             } else {
                 self.prompt.anchor_row = Some(top_row + block_rows);
@@ -1989,7 +2065,7 @@ impl Screen {
             };
 
             let content_rows = block_rows + streaming_rows + active_rows + gap;
-            let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+            let height = self.size().1;
             let scrolled = draw_start_row + content_rows > height;
 
             let anchor = if scrolled {
@@ -2027,18 +2103,15 @@ impl Screen {
     ) -> (u16, u16, bool) {
         let _perf = crate::perf::begin("draw_prompt");
         let usable = width.saturating_sub(2);
-        let height = terminal::size()
-            .map(|(_, h)| h as usize)
-            .unwrap_or(24)
-            .saturating_sub(pre_prompt_rows as usize);
+        let height = (self.size().1 as usize).saturating_sub(pre_prompt_rows as usize);
         let stash_rows = if state.stash.is_some() { 1 } else { 0 };
 
         let mut extra_rows = render_stash(out, &state.stash, usable, &state.store);
         let queued_visual = render_queued(out, queued, usable);
         extra_rows += queued_visual;
         let queued_rows = queued_visual as usize;
+        let term_h = self.size().1 as usize;
         let btw_visual = if let Some(ref mut btw) = self.btw {
-            let term_h = terminal::size().map(|(_, h)| h).unwrap_or(24) as usize;
             // Cap btw to half the terminal height, minus overhead for bar+input.
             let max_btw = (term_h / 2).saturating_sub(4);
             let rows = render_btw(out, btw, usable, max_btw, state.vim_enabled());
@@ -2526,7 +2599,7 @@ impl Screen {
 
         let rows_below: u16 = prev_rows.saturating_sub(new_rows);
         let total_drawn = pre_prompt_rows + new_rows + rows_below;
-        let height = terminal::size().map(|(_, h)| h).unwrap_or(24);
+        let height = self.size().1;
         // If content would extend past terminal bottom, the terminal scrolls up
         let scrolled = draw_start_row + total_drawn > height;
         let top_row = if scrolled {
