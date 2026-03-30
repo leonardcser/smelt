@@ -282,7 +282,7 @@ pub const REASON_MAX: Color = Color::AnsiValue(196);
 pub const PLAN: Color = Color::AnsiValue(79);
 pub const YOLO: Color = Color::AnsiValue(204);
 pub const EXEC: Color = Color::AnsiValue(197);
-pub const SUCCESS: Color = Color::AnsiValue(114);
+pub const SUCCESS: Color = Color::AnsiValue(77);
 pub const ERROR: Color = Color::Red;
 pub const AGENT: Color = Color::AnsiValue(75);
 
