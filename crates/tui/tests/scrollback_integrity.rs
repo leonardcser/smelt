@@ -266,6 +266,44 @@ fn code_block_gap_streaming_vs_resume() {
     }
 }
 
+/// Heading followed by paragraph — no extra blank line after the heading.
+#[test]
+fn paragraph_after_heading_no_gap() {
+    let content = "## Quick Start\nRun `agent` from your project root.";
+
+    let mut h_streamed = TestHarness::new(80, 24, "paragraph_after_heading_streamed");
+    h_streamed.push_and_render(Block::User {
+        text: "How do I start?".into(),
+        image_labels: vec![],
+    });
+    h_streamed.stream_and_flush(content);
+    let streamed_text = h_streamed.full_text();
+
+    let mut h_resume = TestHarness::new(80, 24, "paragraph_after_heading_resume");
+    h_resume.push_and_render(Block::User {
+        text: "How do I start?".into(),
+        image_labels: vec![],
+    });
+    h_resume.push_and_render(Block::Text {
+        content: content.into(),
+    });
+    let resume_text = h_resume.full_text();
+
+    let norm = |s: &str| -> String {
+        s.lines()
+            .map(|l| if l.trim().is_empty() { "" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let streamed_text = norm(&streamed_text);
+    let resume_text = norm(&resume_text);
+
+    assert_eq!(
+        streamed_text, resume_text,
+        "Heading + paragraph renders differently between streaming and resume"
+    );
+}
+
 /// Heading followed by code block — no gap between them.
 #[test]
 fn code_block_after_heading_no_gap() {

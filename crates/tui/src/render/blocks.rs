@@ -66,9 +66,17 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::AgentMessage { .. }), _) => 1,
         (_, Element::Block(Block::Agent { .. })) => 1,
         (Element::Block(Block::Agent { .. }), _) => 1,
-        // Text→Text: 1 gap (paragraph spacing). During streaming, each
-        // paragraph is committed as its own Block::Text.
-        (Element::Block(Block::Text { .. }), Element::Block(Block::Text { .. })) => 1,
+        // Text→Text: 1 gap (paragraph spacing), except when the previous
+        // text block ends with a markdown heading — headings do not get a
+        // trailing blank line.
+        (Element::Block(Block::Text { content }), Element::Block(Block::Text { .. })) => {
+            let last_line = content.lines().last().unwrap_or("");
+            if last_line.trim_start().starts_with('#') {
+                0
+            } else {
+                1
+            }
+        }
         (Element::ActiveTool, Element::ActiveTool) => 1,
         (_, Element::ActiveExec) => 1,
         (Element::ActiveExec, _) => 1,
