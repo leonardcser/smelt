@@ -181,6 +181,11 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
         web_allow = vec![glob::Pattern::new("*").unwrap()];
     }
 
+    let mut mcp_allow = compile_patterns(&raw.mcp.allow);
+    if mode == Mode::Yolo && mcp_allow.is_empty() {
+        mcp_allow = vec![glob::Pattern::new("*").unwrap()];
+    }
+
     ModePerms {
         tools,
         bash: RuleSet {
@@ -194,7 +199,7 @@ fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             deny: compile_patterns(&raw.web_fetch.deny),
         },
         mcp: RuleSet {
-            allow: compile_patterns(&raw.mcp.allow),
+            allow: mcp_allow,
             ask: compile_patterns(&raw.mcp.ask),
             deny: compile_patterns(&raw.mcp.deny),
         },
@@ -305,10 +310,15 @@ impl Permissions {
 
     /// Check permission for an MCP tool call. Matches the qualified tool name
     /// (e.g. `filesystem_read_file`) against glob patterns in the `mcp` ruleset.
-    /// Defaults to Ask if no pattern matches.
+    /// Defaults to Allow in yolo mode, Ask otherwise, if no pattern matches.
     pub fn check_mcp(&self, mode: Mode, qualified_name: &str) -> Decision {
         let perms = self.mode_perms(mode);
-        check_ruleset(&perms.mcp, qualified_name)
+        let decision = check_ruleset(&perms.mcp, qualified_name);
+        if decision == Decision::Ask && mode == Mode::Yolo {
+            Decision::Allow
+        } else {
+            decision
+        }
     }
 
     pub fn check_bash(&self, mode: Mode, command: &str) -> Decision {
@@ -1002,6 +1012,24 @@ mod tests {
             restrict_to_workspace: false,
             workspace: PathBuf::new(),
         }
+    }
+
+    #[test]
+    fn yolo_allows_mcp_by_default() {
+        let p = perms_with_bash(&[], &[], &[]);
+        assert_eq!(
+            p.check_mcp(Mode::Yolo, "filesystem_read_file"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn normal_mode_asks_for_mcp_by_default() {
+        let p = perms_with_bash(&[], &[], &[]);
+        assert_eq!(
+            p.check_mcp(Mode::Normal, "filesystem_read_file"),
+            Decision::Ask
+        );
     }
 
     // --- simple commands ---
