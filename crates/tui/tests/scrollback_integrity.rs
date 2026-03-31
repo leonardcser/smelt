@@ -129,6 +129,38 @@ fn tool_call_block() {
 }
 
 #[test]
+fn tool_call_empty_result_has_no_extra_line() {
+    let mut h = TestHarness::new(80, 24, "tool_call_empty_result_has_no_extra_line");
+    h.push_and_render(Block::User {
+        text: "Run it".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::ToolCall {
+        name: "message_agent".into(),
+        summary: "cedar".into(),
+        args: std::collections::HashMap::new(),
+        status: tui::render::ToolStatus::Ok,
+        output: Some(tui::render::ToolOutput {
+            content: String::new(),
+            is_error: false,
+            metadata: None,
+        }),
+        user_message: None,
+        elapsed: Some(std::time::Duration::from_millis(150)),
+    });
+    h.push_and_render(Block::Text {
+        content: "Done.".into(),
+    });
+
+    let text = h.full_text();
+    assert!(
+        !text.contains("cedar\n\nDone."),
+        "tool call with empty result added a blank line before following text:\n{text}"
+    );
+    h.assert_scrollback_integrity();
+}
+
+#[test]
 fn narrow_terminal() {
     let mut h = TestHarness::new(40, 24, "narrow_terminal");
     h.push_and_render(Block::User {

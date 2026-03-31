@@ -436,7 +436,10 @@ pub(super) fn render_tool(
     }
     if status != ToolStatus::Denied {
         if let Some(out_data) = output {
-            rows += print_tool_output(out, name, &out_data.content, out_data.is_error, args, width);
+            if !out_data.content.is_empty() {
+                rows +=
+                    print_tool_output(out, name, &out_data.content, out_data.is_error, args, width);
+            }
         }
     }
     rows
