@@ -439,7 +439,6 @@ impl App {
                 if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
                     let removed = pending.remove(idx);
                     if removed.name == "spawn_agent" {
-                        self.screen.finish_active_agent();
                         // Extract agent_id from result and kill if blocking.
                         let agent_id = result
                             .content
@@ -447,6 +446,7 @@ impl App {
                             .and_then(|s| s.split_whitespace().next())
                             .unwrap_or("")
                             .to_string();
+                        self.screen.finish_active_agent(&agent_id);
                         if let Some(idx) = self
                             .agents
                             .iter()
@@ -739,7 +739,7 @@ impl App {
                 agent.status = super::AgentTrackStatus::Error;
             }
         }
-        self.screen.cancel_active_agent();
+        self.screen.cancel_active_agents();
     }
 
     pub(super) fn refresh_agent_counts(&mut self) {
@@ -858,7 +858,7 @@ impl App {
             return;
         }
 
-        // Update the active blocking agent overlay on screen.
+        // Update active blocking agent overlays on screen.
         for agent in &self.agents {
             if agent.blocking {
                 let status = match agent.status {
@@ -866,8 +866,12 @@ impl App {
                     super::AgentTrackStatus::Idle => render::AgentBlockStatus::Done,
                     super::AgentTrackStatus::Error => render::AgentBlockStatus::Error,
                 };
-                self.screen
-                    .update_active_agent(agent.slug.as_deref(), &agent.tool_calls, status);
+                self.screen.update_active_agent(
+                    &agent.agent_id,
+                    agent.slug.as_deref(),
+                    &agent.tool_calls,
+                    status,
+                );
             }
         }
 

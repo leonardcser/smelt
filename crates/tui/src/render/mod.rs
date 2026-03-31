@@ -518,7 +518,7 @@ pub struct Screen {
     active_thinking: Option<ActiveThinking>,
     active_text: Option<ActiveText>,
     active_tools: Vec<ActiveTool>,
-    active_agent: Option<ActiveAgent>,
+    active_agents: Vec<ActiveAgent>,
     active_exec: Option<ActiveExec>,
     prompt: PromptState,
     working: WorkingState,
@@ -602,7 +602,7 @@ impl Screen {
             active_thinking: None,
             active_text: None,
             active_tools: Vec::new(),
-            active_agent: None,
+            active_agents: Vec::new(),
             active_exec: None,
             prompt: PromptState::new(),
             working: WorkingState::new(),
@@ -790,7 +790,7 @@ impl Screen {
 
     /// Start tracking a blocking agent in the dynamic section.
     pub fn start_active_agent(&mut self, agent_id: String) {
-        self.active_agent = Some(ActiveAgent {
+        self.active_agents.push(ActiveAgent {
             agent_id,
             slug: None,
             tool_calls: Vec::new(),
@@ -801,14 +801,15 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Update the active blocking agent's state.
+    /// Update a specific active blocking agent's state.
     pub fn update_active_agent(
         &mut self,
+        agent_id: &str,
         slug: Option<&str>,
         tool_calls: &[crate::app::AgentToolEntry],
         status: AgentBlockStatus,
     ) {
-        if let Some(ref mut agent) = self.active_agent {
+        if let Some(agent) = self.active_agents.iter_mut().find(|a| a.agent_id == agent_id) {
             agent.slug = slug.map(str::to_string);
             agent.tool_calls = tool_calls.to_vec();
             if status != AgentBlockStatus::Running && agent.status == AgentBlockStatus::Running {
@@ -820,17 +821,18 @@ impl Screen {
         }
     }
 
-    /// Mark the active agent as cancelled/error (before flush commits it).
-    pub fn cancel_active_agent(&mut self) {
-        if let Some(ref mut agent) = self.active_agent {
+    /// Mark all active agents as cancelled/error (before flush commits them).
+    pub fn cancel_active_agents(&mut self) {
+        for agent in &mut self.active_agents {
             agent.status = AgentBlockStatus::Error;
             agent.final_elapsed = Some(agent.start_time.elapsed());
         }
     }
 
-    /// Commit the active agent to history and clear the dynamic slot.
-    pub fn finish_active_agent(&mut self) {
-        if let Some(mut agent) = self.active_agent.take() {
+    /// Commit a specific active agent to history and remove it from the live set.
+    pub fn finish_active_agent(&mut self, agent_id: &str) {
+        if let Some(idx) = self.active_agents.iter().position(|a| a.agent_id == agent_id) {
+            let mut agent = self.active_agents.remove(idx);
             // If still marked Running, the tool returned successfully —
             // the subagent's TurnComplete may not have been drained yet.
             if agent.status == AgentBlockStatus::Running {
@@ -850,6 +852,29 @@ impl Screen {
             });
             self.prompt.dirty = true;
         }
+    }
+
+    /// Commit all active agents to history and clear the live set.
+    pub fn finish_all_active_agents(&mut self) {
+        let agents: Vec<ActiveAgent> = self.active_agents.drain(..).collect();
+        for mut agent in agents {
+            if agent.status == AgentBlockStatus::Running {
+                agent.status = AgentBlockStatus::Done;
+                agent.final_elapsed = Some(agent.start_time.elapsed());
+            }
+            let elapsed = agent
+                .final_elapsed
+                .unwrap_or_else(|| agent.start_time.elapsed());
+            self.history.push(Block::Agent {
+                agent_id: agent.agent_id,
+                slug: agent.slug,
+                blocking: true,
+                tool_calls: agent.tool_calls,
+                status: agent.status,
+                elapsed: Some(elapsed),
+            });
+        }
+        self.prompt.dirty = true;
     }
 
     /// Whether to show the active tool above a dialog overlay.
@@ -1502,7 +1527,7 @@ impl Screen {
     }
 
     pub fn commit_active_tools_as(&mut self, status: ToolStatus) {
-        self.finish_active_agent();
+        self.finish_all_active_agents();
         for tool in self.active_tools.drain(..) {
             let elapsed = if status == ToolStatus::Denied {
                 None
@@ -1541,7 +1566,7 @@ impl Screen {
             || self.active_thinking.is_some()
             || self.active_text.is_some()
             || !self.active_tools.is_empty()
-            || self.active_agent.is_some()
+            || !self.active_agents.is_empty()
             || self.active_exec.is_some()
     }
 
@@ -1686,7 +1711,7 @@ impl Screen {
         self.active_thinking = None;
         self.active_text = None;
         self.active_tools.clear();
-        self.active_agent = None;
+        self.active_agents.clear();
         self.active_exec = None;
         self.prompt = PromptState::new();
         self.prompt.anchor_row = Some(0);
@@ -1730,7 +1755,7 @@ impl Screen {
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
         self.active_tools.clear();
-        self.active_agent = None;
+        self.active_agents.clear();
         self.redraw(true);
     }
 
@@ -1938,10 +1963,10 @@ impl Screen {
             }
         }
 
-        // ── Render active blocking agent ───────────────────────────
+        // ── Render active blocking agents ──────────────────────────
         if show_active {
-            if let Some(ref agent) = self.active_agent {
-                let agent_gap = if !self.active_tools.is_empty() {
+            for (i, agent) in self.active_agents.iter().enumerate() {
+                let agent_gap = if i > 0 || !self.active_tools.is_empty() {
                     1
                 } else if let Some(last) = self.history.blocks.last() {
                     gap_between(&Element::Block(last), &Element::ActiveTool)
@@ -1973,7 +1998,7 @@ impl Screen {
         // ── Render active exec ──────────────────────────────────────
         if show_active {
             if let Some(ref exec) = self.active_exec {
-                let exec_gap = if self.active_agent.is_some() || !self.active_tools.is_empty() {
+                let exec_gap = if !self.active_agents.is_empty() || !self.active_tools.is_empty() {
                     1
                 } else if let Some(last) = self.history.blocks.last() {
                     gap_between(&Element::Block(last), &Element::ActiveExec)
