@@ -2459,6 +2459,20 @@ impl Screen {
         // display buffer contributes 1 additional char between logical lines.
         let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
 
+        let has_scrollbar = total_content_rows > content_rows;
+        let (thumb_start, thumb_end) = if has_scrollbar {
+            let thumb_size = (content_rows * content_rows / total_content_rows).max(1);
+            let max_scroll = total_content_rows - content_rows;
+            let thumb_pos = if max_scroll > 0 {
+                scroll_offset * (content_rows - thumb_size) / max_scroll
+            } else {
+                0
+            };
+            (thumb_pos, thumb_pos + thumb_size)
+        } else {
+            (0, 0)
+        };
+
         for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)
@@ -2550,6 +2564,17 @@ impl Screen {
                 render_styled_chars(out, line, kinds, line_sel);
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            if has_scrollbar {
+                let bg = if li >= thumb_start && li < thumb_end {
+                    theme::scrollbar_thumb()
+                } else {
+                    theme::scrollbar_track()
+                };
+                let _ = out.queue(cursor::MoveToColumn(width as u16 - 1));
+                let _ = out.queue(SetBackgroundColor(bg));
+                let _ = out.queue(Print(" "));
+                let _ = out.queue(ResetColor);
+            }
             let _ = out.queue(Print("\r\n"));
         }
 

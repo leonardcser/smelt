@@ -261,6 +261,22 @@ pub fn selection_bg() -> Color {
     }
 }
 
+pub fn scrollbar_track() -> Color {
+    if is_light() {
+        Color::AnsiValue(254)
+    } else {
+        Color::AnsiValue(235)
+    }
+}
+
+pub fn scrollbar_thumb() -> Color {
+    if is_light() {
+        Color::AnsiValue(247)
+    } else {
+        Color::AnsiValue(243)
+    }
+}
+
 pub const HEADING: Color = Color::AnsiValue(214);
 
 pub fn muted() -> Color {
