@@ -1296,7 +1296,12 @@ impl Vim {
         attachments: &mut [AttachmentId],
     ) -> Action {
         self.sub = SubState::Ready;
-        if let KeyCode::Char(c) = key.code {
+        let replacement_char = match key.code {
+            KeyCode::Char(c) => Some(c),
+            KeyCode::Enter => Some('\n'),
+            _ => None,
+        };
+        if let Some(c) = replacement_char {
             if !buf.is_empty() && *cpos < buf.len() {
                 let n = self.take_count();
                 self.save_undo(buf, *cpos, attachments);
@@ -1307,11 +1312,7 @@ impl Vim {
                     }
                     let old = buf[pos..].chars().next().unwrap();
                     let end = pos + old.len_utf8();
-                    let replacement = if c == '\n' {
-                        "\n".to_string()
-                    } else {
-                        c.to_string()
-                    };
+                    let replacement = c.to_string();
                     buf.replace_range(pos..end, &replacement);
                     pos += replacement.len();
                 }
@@ -2634,6 +2635,20 @@ mod tests {
         vim.handle_key(key('r'), &mut buf, &mut cpos, &mut attachments);
         vim.handle_key(key('X'), &mut buf, &mut cpos, &mut attachments);
         assert_eq!(buf, "Xello");
+    }
+
+    #[test]
+    fn test_replace_with_enter() {
+        let (mut vim, mut buf, mut cpos, mut attachments) = setup("hello");
+        let enter = KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        vim.handle_key(key('r'), &mut buf, &mut cpos, &mut attachments);
+        vim.handle_key(enter, &mut buf, &mut cpos, &mut attachments);
+        assert_eq!(buf, "\nello");
     }
 
     #[test]
