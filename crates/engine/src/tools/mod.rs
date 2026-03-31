@@ -211,11 +211,7 @@ pub fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
 
 pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> String {
     match tool_name {
-        "bash" => str_arg(args, "command")
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string(),
+        "bash" => str_arg(args, "command"),
         "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
         "notebook_edit" => display_path(&str_arg(args, "notebook_path")),
         "glob" => str_arg(args, "pattern"),

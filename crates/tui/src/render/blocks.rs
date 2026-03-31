@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::highlight::{
-    print_highlighted_bash_line, print_inline_diff, print_syntax_file, render_code_block,
-    render_markdown_table, strip_markdown_markers,
+    print_inline_diff, print_syntax_file, render_code_block, render_markdown_table,
+    strip_markdown_markers, BashHighlighter,
 };
 use super::{
     crlf, truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, RenderOut,
@@ -418,8 +418,7 @@ pub(super) fn render_tool(
     } else {
         None
     };
-    print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
-    let mut rows = 1u16;
+    let mut rows = print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
     if name == "web_fetch" {
         if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
             for seg in &wrap_line(prompt, width.saturating_sub(4)) {
@@ -524,7 +523,7 @@ fn print_tool_line(
     elapsed: Option<Duration>,
     timeout_label: Option<&str>,
     width: usize,
-) {
+) -> u16 {
     let _ = out.queue(Print(" "));
     let _ = out.queue(SetForegroundColor(pill_color));
     let _ = out.queue(Print("\u{23fa}"));
@@ -537,14 +536,39 @@ fn print_tool_line(
         .map(|l| format!(" ({})", l))
         .unwrap_or_default();
     let suffix_len = time_str.len() + timeout_str.len();
+    let prefix = format!(" {} ", name);
     let prefix_len = 3 + name.len() + 1;
     let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
-    let truncated = truncate_str(summary, max_summary);
-    print_dim(out, &format!(" {}", name));
-    let _ = out.queue(Print(" "));
+
+    print_dim(out, &prefix);
+
     if name == "bash" {
-        print_highlighted_bash_line(out, &truncated);
-    } else if matches!(name, "message_agent" | "stop_agent" | "peek_agent") {
+        let mut bh = BashHighlighter::new();
+        let mut line_num = 0;
+        for line in summary.lines() {
+            let segments = wrap_line(line, max_summary.max(1));
+            for (i, seg) in segments.iter().enumerate() {
+                if line_num > 0 || i > 0 {
+                    let _ = out.queue(Print(" ".repeat(prefix_len)));
+                }
+                bh.print_line(out, seg);
+                if line_num == 0 && i == 0 {
+                    if !time_str.is_empty() {
+                        print_dim(out, &time_str);
+                    }
+                    if !timeout_str.is_empty() {
+                        print_dim(out, &timeout_str);
+                    }
+                }
+                crlf(out);
+                line_num += 1;
+            }
+        }
+        return line_num as u16;
+    }
+
+    let truncated = truncate_str(summary, max_summary);
+    if matches!(name, "message_agent" | "stop_agent" | "peek_agent") {
         // Agent tool summaries start with agent name(s), followed by
         // optional text. Color only the leading agent name tokens.
         print_agent_summary(out, &truncated);
@@ -558,6 +582,7 @@ fn print_tool_line(
         print_dim(out, &timeout_str);
     }
     crlf(out);
+    1
 }
 
 /// Print an agent tool summary: color leading agent name tokens, print the

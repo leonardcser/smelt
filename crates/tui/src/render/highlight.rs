@@ -887,12 +887,6 @@ impl<'a> BashHighlighter<'a> {
     }
 }
 
-/// Print a single line of bash/shell code with syntax highlighting.
-/// Does not emit `crlf` — the caller controls line breaks.
-pub(crate) fn print_highlighted_bash_line(out: &mut RenderOut, line: &str) {
-    BashHighlighter::new().print_line(out, line);
-}
-
 /// Print pre-split owned regions. Returns columns printed.
 fn print_split_regions(
     out: &mut RenderOut,
