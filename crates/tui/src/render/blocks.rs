@@ -734,14 +734,16 @@ pub(crate) fn render_markdown_inner(
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
     let mut rows = 0u16;
+    // Track the last non-blank source line for heading gap suppression.
+    let mut last_content_line: Option<&str> = None;
     while i < lines.len() {
         if lines[i].trim_start().starts_with("```") {
             // Blank line before code blocks — skip when preceded by a
             // blank line (already provides the gap) or a heading (headings
-            // don't get a trailing gap).
+            // never get a trailing gap).
             let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
-            let prev_heading = i > 0 && lines[i - 1].trim_start().starts_with('#');
-            if rows > 0 && !prev_blank && !prev_heading {
+            let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+            if rows > 0 && !prev_blank && !after_heading {
                 crlf(out);
                 rows += 1;
             }
@@ -756,6 +758,7 @@ pub(crate) fn render_markdown_inner(
                 i += 1;
             }
             rows += render_code_block(out, code_lines, lang, width, dim, bctx);
+            last_content_line = None;
         } else if lines[i].trim_start().starts_with('|') {
             let table_start = i;
             while i < lines.len() && lines[i].trim_start().starts_with('|') {
@@ -763,20 +766,28 @@ pub(crate) fn render_markdown_inner(
             }
             rows +=
                 render_markdown_table_from_lines(out, &lines[table_start..i], dim, bctx, indent);
+            last_content_line = None;
         } else {
-            // Skip blank lines that immediately precede a list item.
-            // This prevents unwanted gaps between text and list start.
             if lines[i].trim().is_empty() {
-                // Look ahead to find the next non-blank line.
+                // Skip blank lines after headings — headings never have
+                // a trailing gap.
+                let after_heading =
+                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+                if after_heading {
+                    i += 1;
+                    continue;
+                }
+                // Skip blank lines before list items.
                 let mut next_i = i + 1;
                 while next_i < lines.len() && lines[next_i].trim().is_empty() {
                     next_i += 1;
                 }
-                // If the next non-blank line is a list item, skip this blank line.
                 if next_i < lines.len() && is_list_item(lines[next_i]) {
                     i += 1;
                     continue;
                 }
+            } else {
+                last_content_line = Some(lines[i]);
             }
             let segments = wrap_line(lines[i], max_cols);
             for seg in &segments {
