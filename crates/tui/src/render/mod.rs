@@ -2178,12 +2178,14 @@ impl Screen {
         let _perf = crate::perf::begin("draw_prompt");
         let usable = width.saturating_sub(2);
         let height = (self.size().1 as usize).saturating_sub(pre_prompt_rows as usize);
-        let stash_rows = if state.stash.is_some() { 1 } else { 0 };
-
-        let mut extra_rows = render_stash(out, &state.stash, usable, &state.store);
+        let mut extra_rows = 0u16;
+        let notification_rows = render_notification(out, self.notification.as_ref(), usable);
+        extra_rows += notification_rows;
         let queued_visual = render_queued(out, queued, usable);
         extra_rows += queued_visual;
         let queued_rows = queued_visual as usize;
+        let stash_rows = render_stash(out, &state.stash, usable);
+        extra_rows += stash_rows;
         let term_h = self.size().1 as usize;
         let btw_visual = if let Some(ref mut btw) = self.btw {
             // Cap btw to half the terminal height, minus overhead for bar+input.
@@ -2370,7 +2372,11 @@ impl Screen {
         // Reserve space for the status line (always shown when no completions/menus).
         let status_line_reserve: usize = if comp_total == 0 { 1 } else { 0 };
 
-        let fixed_base = stash_rows + queued_rows + 2 + status_line_reserve;
+        let fixed_base = notification_rows as usize
+            + stash_rows as usize
+            + queued_rows
+            + 2
+            + status_line_reserve;
         let mut fixed = fixed_base + comp_rows;
         let mut max_content_rows = height.saturating_sub(fixed);
         if max_content_rows == 0 {
@@ -2417,31 +2423,8 @@ impl Screen {
             .saturating_sub(scroll_offset)
             .min(content_rows.saturating_sub(1));
 
-        // If notification is active and input is empty, render it in the input area.
-        let show_notif = self.notification.is_some() && state.buf.is_empty();
-        let show_prediction = !show_notif && prediction.is_some() && state.buf.is_empty();
-        if show_notif {
-            let notif = self.notification.as_ref().unwrap();
-            let _ = out.queue(Print(" "));
-            if notif.is_error {
-                let _ = out.queue(SetForegroundColor(theme::ERROR));
-            } else {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-            }
-            let msg: String = notif
-                .message
-                .chars()
-                .take(usable.saturating_sub(1))
-                .collect();
-            let _ = out.queue(Print(&msg));
-            if notif.is_error {
-                let _ = out.queue(ResetColor);
-            } else {
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-            }
-            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-            let _ = out.queue(Print("\r\n"));
-        } else if show_prediction {
+        let show_prediction = prediction.is_some() && state.buf.is_empty();
+        if show_prediction {
             let pred = prediction.unwrap();
             let first_line = pred.lines().next().unwrap_or(pred);
             let _ = out.queue(Print(" "));
@@ -2476,11 +2459,7 @@ impl Screen {
         for (li, (line, kinds)) in visual_lines
             .iter()
             .skip(scroll_offset)
-            .take(if show_notif || show_prediction {
-                0
-            } else {
-                content_rows
-            })
+            .take(if show_prediction { 0 } else { content_rows })
             .enumerate()
         {
             let abs_idx = scroll_offset + li;
@@ -2671,7 +2650,8 @@ impl Screen {
             draw_completions(out, state.completer.as_ref(), comp_rows)
         };
 
-        let total_rows = stash_rows
+        let total_rows = notification_rows as usize
+            + stash_rows as usize
             + queued_rows
             + btw_visual
             + 1
@@ -2740,30 +2720,51 @@ fn vim_mode_label(mode: Option<crate::vim::ViMode>) -> Option<&'static str> {
     }
 }
 
-fn render_stash(
+fn render_notification(
     out: &mut RenderOut,
-    stash: &Option<InputSnapshot>,
+    notification: Option<&Notification>,
     usable: usize,
-    store: &AttachmentStore,
 ) -> u16 {
-    let Some(ref snap) = stash else {
+    let Some(notification) = notification else {
         return 0;
     };
-    let full_display =
-        spans_to_string(&build_display_spans(&snap.buf, &snap.attachment_ids, store));
-    let first_line = full_display.lines().next().unwrap_or("");
-    let line_count = full_display.lines().count();
-    let max_chars = usable.saturating_sub(2);
-    let display: String = first_line.chars().take(max_chars).collect();
-    let suffix = if display.chars().count() < first_line.chars().count() || line_count > 1 {
-        "\u{2026}"
+
+    let label = if notification.is_error {
+        "error"
     } else {
-        ""
+        "info"
     };
+    let max_msg = usable.saturating_sub(label.len() + 3);
+
+    let _ = out.queue(Print(" "));
+    if notification.is_error {
+        let _ = out.queue(SetForegroundColor(theme::ERROR));
+    }
+    let _ = out.queue(SetAttribute(Attribute::Bold));
+    let _ = out.queue(Print(label));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(ResetColor);
+    let _ = out.queue(Print("  "));
+
+    let msg: String = notification.message.chars().take(max_msg).collect();
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(&msg));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+    let _ = out.queue(Print("\r\n"));
+    1
+}
+
+fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usize) -> u16 {
+    let Some(_) = stash else {
+        return 0;
+    };
+    let text = "› Stashed (ctrl+s to unstash)";
+    let display: String = text.chars().take(usable).collect();
     let _ = out.queue(Print("  "));
     let _ = out.queue(SetAttribute(Attribute::Dim));
     let _ = out.queue(SetForegroundColor(theme::muted()));
-    let _ = out.queue(Print(format!("{}{}", display, suffix)));
+    let _ = out.queue(Print(display));
     let _ = out.queue(SetAttribute(Attribute::Reset));
     let _ = out.queue(ResetColor);
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));

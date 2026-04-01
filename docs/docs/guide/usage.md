@@ -112,8 +112,7 @@ normal, and visual modes. See the
 ## Input Stashing
 
 Press `Ctrl+S` to stash your current input and get a blank buffer. Press
-`Ctrl+S` again to restore it. Useful for firing off a quick message without
-losing what you were composing.
+`Ctrl+S` again to restore it.
 
 ## Input Prediction
 
