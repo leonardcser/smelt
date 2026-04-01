@@ -62,7 +62,7 @@ struct RawConfig {
 }
 
 #[derive(Debug, Clone)]
-struct RuleSet {
+pub struct RuleSet {
     allow: Vec<glob::Pattern>,
     ask: Vec<glob::Pattern>,
     deny: Vec<glob::Pattern>,
@@ -413,6 +413,12 @@ impl Permissions {
 
     /// Return paths from a tool call that fall outside the workspace.
     /// Empty if `restrict_to_workspace` is off or no paths escape.
+    /// Get the bash ruleset for the given mode (used by RuntimeApprovals
+    /// to check per-subcommand config decisions).
+    pub fn bash_ruleset(&self, mode: Mode) -> &RuleSet {
+        &self.mode_perms(mode).bash
+    }
+
     pub fn outside_workspace_paths(
         &self,
         tool_name: &str,
@@ -425,6 +431,176 @@ impl Permissions {
             .into_iter()
             .filter(|p| !is_in_workspace(p, &self.workspace))
             .collect()
+    }
+}
+
+/// Runtime permission approvals that augment the static config-based rules.
+/// Shared between the engine and TUI via `Arc<RwLock<RuntimeApprovals>>` so
+/// the engine can check them during `decide()` and the TUI can update them
+/// when the user approves a tool call.
+#[derive(Debug, Default)]
+pub struct RuntimeApprovals {
+    session_tools: HashMap<String, Vec<glob::Pattern>>,
+    session_dirs: Vec<PathBuf>,
+    workspace_tools: HashMap<String, Vec<glob::Pattern>>,
+    workspace_dirs: Vec<PathBuf>,
+}
+
+impl RuntimeApprovals {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add session-scoped tool approval patterns. Empty `patterns` = blanket approval.
+    pub fn add_session_tool(&mut self, tool: &str, patterns: Vec<glob::Pattern>) {
+        let entry = self.session_tools.entry(tool.to_string()).or_default();
+        if patterns.is_empty() || entry.is_empty() {
+            // Blanket approval: clear existing patterns.
+            entry.clear();
+        } else {
+            entry.extend(patterns);
+        }
+    }
+
+    /// Add workspace-scoped tool approval patterns. Empty `patterns` = blanket approval.
+    pub fn add_workspace_tool(&mut self, tool: &str, patterns: Vec<glob::Pattern>) {
+        let entry = self.workspace_tools.entry(tool.to_string()).or_default();
+        if patterns.is_empty() || entry.is_empty() {
+            entry.clear();
+        } else {
+            entry.extend(patterns);
+        }
+    }
+
+    pub fn add_session_dir(&mut self, dir: PathBuf) {
+        if !self.session_dirs.contains(&dir) {
+            self.session_dirs.push(dir);
+        }
+    }
+
+    pub fn add_workspace_dir(&mut self, dir: PathBuf) {
+        if !self.workspace_dirs.contains(&dir) {
+            self.workspace_dirs.push(dir);
+        }
+    }
+
+    pub fn clear_session(&mut self) {
+        self.session_tools.clear();
+        self.session_dirs.clear();
+    }
+
+    /// Load workspace approvals from pre-compiled patterns (called at startup
+    /// and after persisting new workspace rules).
+    pub fn load_workspace(
+        &mut self,
+        tools: HashMap<String, Vec<glob::Pattern>>,
+        dirs: Vec<PathBuf>,
+    ) {
+        self.workspace_tools = tools;
+        self.workspace_dirs = dirs;
+    }
+
+    /// Check whether a tool call that the config-based rules said "Ask" for
+    /// should be auto-approved based on runtime patterns.
+    ///
+    /// For bash: splits the command into subcommands and checks each against
+    /// runtime patterns AND the config's allow list (so that default-allowed
+    /// commands like `head`, `cat`, etc. don't block auto-approval).
+    ///
+    /// For other tools with patterns (e.g. web_fetch URLs): checks the
+    /// description against patterns.
+    ///
+    /// Returns `true` if the tool call should be auto-approved.
+    pub fn is_approved(&self, tool_name: &str, desc: &str, config_bash: Option<&RuleSet>) -> bool {
+        let session = self.session_tools.get(tool_name);
+        let workspace = self.workspace_tools.get(tool_name);
+
+        if session.is_none() && workspace.is_none() {
+            return false;
+        }
+
+        // Blanket approval (empty pattern list).
+        let blanket =
+            session.is_some_and(|p| p.is_empty()) || workspace.is_some_and(|p| p.is_empty());
+        if blanket {
+            return true;
+        }
+
+        let subcmds = split_shell_commands(desc);
+        if subcmds.is_empty() {
+            return false;
+        }
+
+        let all_pats: Vec<&glob::Pattern> =
+            session.into_iter().chain(workspace).flatten().collect();
+
+        subcmds.iter().all(|sc| {
+            // Check runtime approval patterns.
+            all_pats.iter().any(|p| p.matches(sc))
+            // For bash: also check if the config already allows this subcommand
+            // (e.g. DEFAULT_BASH_ALLOW patterns like "head *", "cat *").
+            // The full compound command was Ask because of OTHER subcommands,
+            // not this one.
+                || config_bash.is_some_and(|rs| check_ruleset(rs, sc) == Decision::Allow)
+        })
+    }
+
+    /// Check whether a specific pattern string is already present in the
+    /// runtime approvals for a tool (used to filter already-approved patterns
+    /// from the confirm dialog options).
+    pub fn has_pattern(&self, tool_name: &str, pattern: &str) -> bool {
+        let check = |pats: Option<&Vec<glob::Pattern>>| -> bool {
+            pats.is_some_and(|ps| ps.iter().any(|p| p.as_str() == pattern))
+        };
+        check(self.session_tools.get(tool_name)) || check(self.workspace_tools.get(tool_name))
+    }
+
+    /// Iterate session tool approvals (for display in status UI).
+    pub fn session_tool_entries(&self) -> Vec<(String, Vec<String>)> {
+        let mut tools: Vec<_> = self.session_tools.keys().cloned().collect();
+        tools.sort();
+        tools
+            .into_iter()
+            .map(|t| {
+                let pats: Vec<String> = self.session_tools[&t]
+                    .iter()
+                    .map(|p| p.as_str().to_string())
+                    .collect();
+                (t, pats)
+            })
+            .collect()
+    }
+
+    /// Session directory approvals (for display in status UI).
+    pub fn session_dirs(&self) -> &[PathBuf] {
+        &self.session_dirs
+    }
+
+    /// Rebuild session state from flattened entries (used by permissions sync UI).
+    pub fn set_session(&mut self, tools: HashMap<String, Vec<glob::Pattern>>, dirs: Vec<PathBuf>) {
+        self.session_tools = tools;
+        self.session_dirs = dirs;
+    }
+
+    /// Check whether all given outside-workspace paths are covered by
+    /// approved directories.
+    pub fn dirs_approved(&self, paths: &[String]) -> bool {
+        if paths.is_empty() {
+            return true;
+        }
+        let all_dirs: Vec<&PathBuf> = self
+            .session_dirs
+            .iter()
+            .chain(self.workspace_dirs.iter())
+            .collect();
+        if all_dirs.is_empty() {
+            return false;
+        }
+        paths.iter().all(|p| {
+            let path = Path::new(p);
+            let dir = path.parent().unwrap_or(path);
+            all_dirs.iter().any(|ad| dir.starts_with(ad))
+        })
     }
 }
 
@@ -505,66 +681,8 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
                 // Handle heredoc: << or <<- followed by a delimiter word.
                 // Skip everything until the delimiter appears on its own line.
                 if rest.starts_with("<<") {
-                    let mut hi = 2;
-                    if hi < rest.len() && rest.as_bytes()[hi] == b'-' {
-                        hi += 1;
-                    }
-                    // Skip whitespace before delimiter
-                    while hi < rest.len() && rest.as_bytes()[hi] == b' ' {
-                        hi += 1;
-                    }
-                    // Read the delimiter (strip quotes)
-                    let mut delim_start = hi;
-                    let mut strip_quotes = false;
-                    if hi < rest.len()
-                        && (rest.as_bytes()[hi] == b'\'' || rest.as_bytes()[hi] == b'"')
-                    {
-                        let q = rest.as_bytes()[hi];
-                        strip_quotes = true;
-                        hi += 1;
-                        delim_start = hi;
-                        while hi < rest.len() && rest.as_bytes()[hi] != q {
-                            hi += 1;
-                        }
-                    } else {
-                        while hi < rest.len()
-                            && !rest.as_bytes()[hi].is_ascii_whitespace()
-                            && rest.as_bytes()[hi] != b';'
-                            && rest.as_bytes()[hi] != b'&'
-                            && rest.as_bytes()[hi] != b'|'
-                        {
-                            hi += 1;
-                        }
-                    }
-                    let delim = &rest[delim_start..hi];
-                    if strip_quotes && hi < rest.len() {
-                        hi += 1; // skip closing quote
-                    }
-                    if !delim.is_empty() {
-                        // Skip past the heredoc body: find \n<delim>\n or \n<delim>EOF
-                        let search_from = i + hi;
-                        let mut found = false;
-                        let mut si = search_from;
-                        while si < len {
-                            if bytes[si] == b'\n' {
-                                let line_start = si + 1;
-                                let line_end = cmd[line_start..]
-                                    .find('\n')
-                                    .map(|p| line_start + p)
-                                    .unwrap_or(len);
-                                let line = cmd[line_start..line_end].trim();
-                                if line == delim {
-                                    i = line_end;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            si += 1;
-                        }
-                        if !found {
-                            // No closing delimiter — consume rest
-                            i = len;
-                        }
+                    if let Some((_header_end, body_end)) = parse_heredoc(cmd, i) {
+                        i = body_end;
                         continue;
                     }
                 }
@@ -610,6 +728,77 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
     (commands, operators)
 }
 
+/// Parse a heredoc starting at `cmd[i..]` (which must begin with `<<`).
+/// Returns `Some((header_end, body_end))` where:
+///   - `header_end` is the byte offset (relative to `cmd`) just past the
+///     delimiter word (e.g. after `'EOF'` in `<< 'EOF'`).
+///   - `body_end` is the byte offset past the closing delimiter line
+///     (the `\n` after `EOF`), or `cmd.len()` if no closing delimiter.
+///
+/// Returns `None` if no valid delimiter is found.
+fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
+    let rest = &cmd[i..];
+    let bytes = cmd.as_bytes();
+    let len = cmd.len();
+
+    let mut hi = 2; // skip "<<"
+    if hi < rest.len() && rest.as_bytes()[hi] == b'-' {
+        hi += 1;
+    }
+    // Skip whitespace before delimiter.
+    while hi < rest.len() && rest.as_bytes()[hi] == b' ' {
+        hi += 1;
+    }
+    // Read the delimiter (strip quotes).
+    let mut delim_start = hi;
+    let mut strip_quotes = false;
+    if hi < rest.len() && (rest.as_bytes()[hi] == b'\'' || rest.as_bytes()[hi] == b'"') {
+        let q = rest.as_bytes()[hi];
+        strip_quotes = true;
+        hi += 1;
+        delim_start = hi;
+        while hi < rest.len() && rest.as_bytes()[hi] != q {
+            hi += 1;
+        }
+    } else {
+        while hi < rest.len()
+            && !rest.as_bytes()[hi].is_ascii_whitespace()
+            && rest.as_bytes()[hi] != b';'
+            && rest.as_bytes()[hi] != b'&'
+            && rest.as_bytes()[hi] != b'|'
+        {
+            hi += 1;
+        }
+    }
+    let delim = &rest[delim_start..hi];
+    if delim.is_empty() {
+        return None;
+    }
+    if strip_quotes && hi < rest.len() {
+        hi += 1; // skip closing quote
+    }
+    let header_end = i + hi;
+
+    // Scan for the closing delimiter on its own line.
+    let mut si = header_end;
+    while si < len {
+        if bytes[si] == b'\n' {
+            let line_start = si + 1;
+            let line_end = cmd[line_start..]
+                .find('\n')
+                .map(|p| line_start + p)
+                .unwrap_or(len);
+            let line = cmd[line_start..line_end].trim();
+            if line == delim {
+                return Some((header_end, line_end));
+            }
+        }
+        si += 1;
+    }
+    // No closing delimiter — consume rest.
+    Some((header_end, len))
+}
+
 /// Strip heredoc bodies from a command string so that downstream parsing
 /// (e.g. `extract_embedded_commands`) does not misinterpret content inside
 /// heredocs as shell constructs like `(...)` subshells.
@@ -653,64 +842,19 @@ fn strip_heredoc_bodies(cmd: &str) -> String {
             _ => {
                 let rest = &cmd[i..];
                 if rest.starts_with("<<") {
-                    let mut hi = 2;
-                    if hi < rest.len() && rest.as_bytes()[hi] == b'-' {
-                        hi += 1;
-                    }
-                    while hi < rest.len() && rest.as_bytes()[hi] == b' ' {
-                        hi += 1;
-                    }
-                    let mut delim_start = hi;
-                    let mut strip_quotes = false;
-                    if hi < rest.len()
-                        && (rest.as_bytes()[hi] == b'\'' || rest.as_bytes()[hi] == b'"')
-                    {
-                        let q = rest.as_bytes()[hi];
-                        strip_quotes = true;
-                        hi += 1;
-                        delim_start = hi;
-                        while hi < rest.len() && rest.as_bytes()[hi] != q {
-                            hi += 1;
-                        }
-                    } else {
-                        while hi < rest.len()
-                            && !rest.as_bytes()[hi].is_ascii_whitespace()
-                            && rest.as_bytes()[hi] != b';'
-                            && rest.as_bytes()[hi] != b'&'
-                            && rest.as_bytes()[hi] != b'|'
-                        {
-                            hi += 1;
-                        }
-                    }
-                    let delim = &rest[delim_start..hi];
-                    if strip_quotes && hi < rest.len() {
-                        hi += 1;
-                    }
-                    if !delim.is_empty() {
-                        // Keep the << DELIM part, skip the body until closing delimiter.
-                        out.push_str(&cmd[i..i + hi]);
-                        let search_from = i + hi;
-                        let mut si = search_from;
-                        while si < len {
-                            if bytes[si] == b'\n' {
-                                let line_start = si + 1;
-                                let line_end = cmd[line_start..]
-                                    .find('\n')
-                                    .map(|p| line_start + p)
-                                    .unwrap_or(len);
-                                let line = cmd[line_start..line_end].trim();
-                                if line == delim {
-                                    // Keep the closing delimiter line.
-                                    out.push_str(&cmd[si..line_end]);
-                                    i = line_end;
-                                    break;
-                                }
+                    if let Some((header_end, body_end)) = parse_heredoc(cmd, i) {
+                        // Keep the header (e.g. "<< 'EOF'") and the closing
+                        // delimiter line, but drop the body in between.
+                        out.push_str(&cmd[i..header_end]);
+                        // Find the closing delimiter line start (\n before it).
+                        if body_end < len || cmd[header_end..body_end].contains('\n') {
+                            // The last \nDELIM portion: find where the closing
+                            // delimiter line begins.
+                            if let Some(last_nl) = cmd[header_end..body_end].rfind('\n') {
+                                out.push_str(&cmd[header_end + last_nl..body_end]);
                             }
-                            si += 1;
                         }
-                        if si >= len {
-                            i = len;
-                        }
+                        i = body_end;
                         continue;
                     }
                 }

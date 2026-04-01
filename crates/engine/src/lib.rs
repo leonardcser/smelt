@@ -165,6 +165,8 @@ pub struct EngineConfig {
     pub system_prompt_override: Option<String>,
     pub cwd: PathBuf,
     pub permissions: Arc<Permissions>,
+    /// Runtime approvals shared between engine and TUI.
+    pub runtime_approvals: Arc<std::sync::RwLock<permissions::RuntimeApprovals>>,
     /// Multi-agent settings. `None` when multi-agent is disabled.
     pub multi_agent: Option<MultiAgentConfig>,
     /// True when a human is present (TUI mode). False for headless/subagent.
@@ -188,6 +190,7 @@ pub struct EngineHandle {
     event_rx: mpsc::UnboundedReceiver<EngineEvent>,
     pub processes: tools::ProcessRegistry,
     pub permissions: Arc<Permissions>,
+    runtime_approvals: Arc<std::sync::RwLock<permissions::RuntimeApprovals>>,
     agent_msg_tx: Option<tokio::sync::broadcast::Sender<tools::AgentMessageNotification>>,
     spawned_rx: Option<mpsc::UnboundedReceiver<tools::SpawnedChild>>,
 }
@@ -203,6 +206,10 @@ impl EngineHandle {
 
     pub fn try_recv(&mut self) -> Result<EngineEvent, mpsc::error::TryRecvError> {
         self.event_rx.try_recv()
+    }
+
+    pub fn runtime_approvals(&self) -> Arc<std::sync::RwLock<permissions::RuntimeApprovals>> {
+        Arc::clone(&self.runtime_approvals)
     }
 
     /// Inject an inter-agent message event into the engine's event stream.
@@ -340,6 +347,7 @@ pub fn start(config: EngineConfig) -> EngineHandle {
     let registry = tools::build_tools(processes.clone(), ma_config, config.skills.clone());
 
     let permissions = Arc::clone(&config.permissions);
+    let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();
     let processes_clone = processes.clone();
     let event_tx_clone = event_tx.clone();
@@ -357,6 +365,7 @@ pub fn start(config: EngineConfig) -> EngineHandle {
         event_rx,
         processes,
         permissions,
+        runtime_approvals,
         agent_msg_tx,
         spawned_rx: if has_multi_agent {
             Some(spawned_rx)

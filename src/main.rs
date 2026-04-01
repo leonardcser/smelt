@@ -535,6 +535,16 @@ async fn main() {
         None
     };
 
+    // Create shared runtime approvals and load workspace rules.
+    let runtime_approvals = {
+        let cwd_str = cwd.to_string_lossy();
+        let rules = tui::workspace_permissions::load(&cwd_str);
+        let (ws_tools, ws_dirs) = tui::workspace_permissions::into_approvals(&rules);
+        let mut rt = engine::permissions::RuntimeApprovals::new();
+        rt.load_workspace(ws_tools, ws_dirs);
+        Arc::new(std::sync::RwLock::new(rt))
+    };
+
     let engine_handle = engine::start(engine::EngineConfig {
         api: engine::ApiConfig {
             base: api_base,
@@ -547,6 +557,7 @@ async fn main() {
         system_prompt_override,
         cwd: cwd.clone(),
         permissions: permissions.clone(),
+        runtime_approvals: runtime_approvals.clone(),
         multi_agent: if multi_agent {
             Some(engine::MultiAgentConfig {
                 depth: args.depth.unwrap_or(0),

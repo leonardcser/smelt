@@ -84,14 +84,10 @@ pub struct App {
     pub queued_messages: Vec<String>,
     /// Agent messages waiting to trigger a turn.
     pending_agent_messages: Vec<protocol::Message>,
-    /// Session-scoped auto-approvals (cleared on /clear, /new, rewind).
-    pub session_approved: HashMap<String, Vec<glob::Pattern>>,
-    pub session_approved_dirs: Vec<PathBuf>,
-    /// Workspace-persisted approvals (survive across sessions).
-    pub workspace_approved: HashMap<String, Vec<glob::Pattern>>,
-    pub workspace_approved_dirs: Vec<PathBuf>,
-    /// Workspace rules as loaded from disk (source of truth for persistence).
-    pub workspace_rules: Vec<crate::workspace_permissions::Rule>,
+    /// Runtime approvals shared with the engine. The engine checks these
+    /// during `decide()` to auto-approve tools without sending
+    /// `RequestPermission`. The TUI writes to them when the user approves.
+    pub runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
     cwd: String,
     /// Directories outside the workspace that have appeared in confirm dialogs.
@@ -457,9 +453,9 @@ impl App {
             .ok()
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_default();
-        let workspace_rules = crate::workspace_permissions::load(&cwd);
-        let (workspace_approved, workspace_approved_dirs) =
-            crate::workspace_permissions::into_approvals(&workspace_rules);
+        // Runtime approvals are shared with the engine via Arc<RwLock>.
+        // Load workspace rules from disk into them at startup.
+        let runtime_approvals = engine.runtime_approvals();
 
         Self {
             model,
@@ -478,11 +474,7 @@ impl App {
             exec_kill: None,
             queued_messages: Vec::new(),
             pending_agent_messages: Vec::new(),
-            session_approved: HashMap::new(),
-            session_approved_dirs: Vec::new(),
-            workspace_approved,
-            workspace_approved_dirs,
-            workspace_rules,
+            runtime_approvals,
             cwd,
             seen_outside_dirs: HashSet::new(),
             session: session::Session::new(),

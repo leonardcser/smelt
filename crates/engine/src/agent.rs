@@ -1,5 +1,5 @@
 use crate::log;
-use crate::permissions::{Decision, Permissions};
+use crate::permissions::{Decision, Permissions, RuntimeApprovals};
 use crate::provider::{self, ChatOptions, Provider, ProviderError, ToolDefinition};
 use crate::tools::{self, ToolContext, ToolRegistry, ToolResult};
 use crate::EngineConfig;
@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -124,6 +125,7 @@ pub async fn engine_task(
                             provider,
                             registry: &registry,
                             permissions: perm_ref,
+                            runtime_approvals: &config.runtime_approvals,
                             processes: &processes,
                             proc_done_tx: &proc_done_tx,
                             cmd_rx: &mut cmd_rx,
@@ -397,6 +399,7 @@ struct Turn<'a> {
     provider: Provider,
     registry: &'a ToolRegistry,
     permissions: &'a Permissions,
+    runtime_approvals: &'a Arc<RwLock<RuntimeApprovals>>,
     processes: &'a tools::ProcessRegistry,
     proc_done_tx: &'a mpsc::UnboundedSender<(String, Option<i32>)>,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
@@ -929,12 +932,36 @@ impl<'a> Turn<'a> {
                         .and_then(|v| v.as_str())
                         .is_some_and(|p| crate::plan::is_plan_file(&self.session_dir, p));
 
-                let decision = if plan_auto {
+                let mut decision = if plan_auto {
                     Decision::Allow
                 } else {
                     self.permissions
                         .decide(self.mode, &tc.function.name, &args, tool.is_mcp())
                 };
+
+                // Check runtime approvals (session + workspace) for Ask decisions.
+                if decision == Decision::Ask {
+                    let rt = self.runtime_approvals.read().unwrap();
+                    let desc = tool
+                        .needs_confirm(&args)
+                        .unwrap_or_else(|| tc.function.name.clone());
+                    let config_bash = if tc.function.name == "bash" {
+                        Some(self.permissions.bash_ruleset(self.mode))
+                    } else {
+                        None
+                    };
+                    if rt.is_approved(&tc.function.name, &desc, config_bash) {
+                        decision = Decision::Allow;
+                    } else {
+                        // Check directory-based approvals.
+                        let outside = self
+                            .permissions
+                            .outside_workspace_paths(&tc.function.name, &args);
+                        if !outside.is_empty() && rt.dirs_approved(&outside) {
+                            decision = Decision::Allow;
+                        }
+                    }
+                }
 
                 let idx = slots.len();
                 match decision {
