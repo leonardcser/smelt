@@ -57,6 +57,7 @@ impl App {
                 let enabled = !self.input.vim_enabled();
                 self.input.set_vim_enabled(enabled);
                 state::set_vim_enabled(enabled);
+                self.screen.mark_dirty();
                 CommandAction::Continue
             }
             "/export" => {

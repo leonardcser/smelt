@@ -2561,18 +2561,20 @@ impl Screen {
             // ── Dark bg for the middle section ──
             let _ = out.queue(SetBackgroundColor(status_bg));
 
-            // ── Vim mode (nvim colors, darker bg) ──
-            let vim_label = vim_mode_label(state.vim_mode()).unwrap_or("NORMAL");
-            let vim_fg = match state.vim_mode() {
-                Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
-                Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
-                    Color::AnsiValue(176)
-                }
-                _ => Color::AnsiValue(74),
-            };
-            let _ = out.queue(SetBackgroundColor(Color::AnsiValue(236)));
-            let _ = out.queue(SetForegroundColor(vim_fg));
-            let _ = out.queue(Print(format!(" {vim_label} ")));
+            // ── Vim mode (nvim colors, darker bg) — only when vim is enabled ──
+            if state.vim_enabled() {
+                let vim_label = vim_mode_label(state.vim_mode()).unwrap_or("NORMAL");
+                let vim_fg = match state.vim_mode() {
+                    Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
+                    Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
+                        Color::AnsiValue(176)
+                    }
+                    _ => Color::AnsiValue(74),
+                };
+                let _ = out.queue(SetBackgroundColor(Color::AnsiValue(236)));
+                let _ = out.queue(SetForegroundColor(vim_fg));
+                let _ = out.queue(Print(format!(" {vim_label} ")));
+            }
 
             // ── Mode indicator (mode color, lighter bg) ──
             let (mode_icon, mode_name, mode_fg) = match mode {
