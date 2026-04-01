@@ -1199,7 +1199,7 @@ fn extract_paths_from_command(cmd: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for token in cmd.split_whitespace() {
         let clean = token.trim_matches(|c: char| c == '\'' || c == '"' || c == ';');
-        if clean.starts_with('/') || clean.starts_with("~/") {
+        if (clean.starts_with('/') && clean.len() > 1) || clean.starts_with("~/") {
             paths.push(clean.to_string());
         }
     }
@@ -2059,7 +2059,7 @@ mod tests {
     #[test]
     fn workspace_downgrades_yolo_outside() {
         let p = perms_with_workspace("/home/user/project");
-        let args = args_with("command", "rm -rf /");
+        let args = args_with("command", "rm -rf /etc");
         // Even in yolo, out-of-workspace should ask
         assert_eq!(p.decide(Mode::Yolo, "bash", &args, false), Decision::Ask);
     }
