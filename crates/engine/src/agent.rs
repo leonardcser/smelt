@@ -1403,7 +1403,14 @@ pub fn emit_usage(
     model: &str,
     usage: protocol::TokenUsage,
 ) {
-    send_usage(tx, &config.api.provider_type, &config.api.model_config, model, usage, None);
+    send_usage(
+        tx,
+        &config.api.provider_type,
+        &config.api.model_config,
+        model,
+        usage,
+        None,
+    );
 }
 
 /// Lightweight pricing context for spawned background tasks.
@@ -1421,8 +1428,20 @@ impl PricingContext {
         }
     }
 
-    fn emit(&self, tx: &mpsc::UnboundedSender<EngineEvent>, model: &str, usage: protocol::TokenUsage) {
-        send_usage(tx, &self.provider_type, &self.model_config, model, usage, None);
+    fn emit(
+        &self,
+        tx: &mpsc::UnboundedSender<EngineEvent>,
+        model: &str,
+        usage: protocol::TokenUsage,
+    ) {
+        send_usage(
+            tx,
+            &self.provider_type,
+            &self.model_config,
+            model,
+            usage,
+            None,
+        );
     }
 }
 

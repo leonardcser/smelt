@@ -624,11 +624,9 @@ where
     match v {
         serde_json::Value::Null => Ok(None),
         serde_json::Value::Number(n) => Ok(n.as_u64()),
-        serde_json::Value::String(s) => s
-            .trim()
-            .parse::<u64>()
-            .map(Some)
-            .map_err(de::Error::custom),
+        serde_json::Value::String(s) => {
+            s.trim().parse::<u64>().map(Some).map_err(de::Error::custom)
+        }
         _ => Err(de::Error::custom("expected number or string for interval")),
     }
 }
@@ -717,9 +715,7 @@ pub async fn device_code_login(client: &reqwest::Client) -> Result<CodexTokens, 
         // 403/404 = authorization pending, keep polling. Other errors = bail.
         if poll_status.as_u16() != 403 && poll_status.as_u16() != 404 {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "device auth failed (HTTP {poll_status}): {body}"
-            ));
+            return Err(format!("device auth failed (HTTP {poll_status}): {body}"));
         }
     }
 }
