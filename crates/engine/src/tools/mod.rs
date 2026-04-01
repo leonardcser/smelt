@@ -57,7 +57,7 @@ pub use edit_file::EditFileTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use notebook::NotebookEditTool;
+pub use notebook::{NotebookEditTool, NotebookRenderData};
 pub use read_file::ReadFileTool;
 pub use spawn_agent::AgentMessageNotification;
 pub use web_fetch::WebFetchTool;

@@ -6,6 +6,7 @@ use crossterm::{
     },
     QueueableCommand,
 };
+use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -436,8 +437,7 @@ pub(super) fn render_tool(
     if status != ToolStatus::Denied {
         if let Some(out_data) = output {
             if !out_data.content.is_empty() {
-                rows +=
-                    print_tool_output(out, name, &out_data.content, out_data.is_error, args, width);
+                rows += print_tool_output(out, name, out_data, args, width);
             }
         }
     }
@@ -683,11 +683,12 @@ fn print_agent_summary(out: &mut RenderOut, summary: &str) {
 fn print_tool_output(
     out: &mut RenderOut,
     name: &str,
-    content: &str,
-    is_error: bool,
+    output: &ToolOutput,
     args: &HashMap<String, serde_json::Value>,
     width: usize,
 ) -> u16 {
+    let content = &output.content;
+    let is_error = output.is_error;
     match name {
         "web_search" if !is_error => {
             let mut count = 0u16;
@@ -720,6 +721,7 @@ fn print_tool_output(
         "web_fetch" if !is_error => print_dim_count(out, content.lines().count(), "line", "lines"),
         "edit_file" if !is_error => render_edit_output(out, args),
         "write_file" if !is_error => render_write_output(out, args),
+        "notebook_edit" if !is_error => render_notebook_output(out, output, width),
         "ask_user_question" if !is_error => render_question_output(out, content, width),
         "exit_plan_mode" if !is_error => render_plan_output(out, args, width),
         "bash" | "read_process_output" | "stop_process" => {
@@ -772,6 +774,35 @@ fn render_write_output(out: &mut RenderOut, args: &HashMap<String, serde_json::V
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     print_syntax_file(out, content, path, 0, 0)
+}
+
+fn render_notebook_output(out: &mut RenderOut, output: &ToolOutput, width: usize) -> u16 {
+    let Some(meta) = output.metadata.as_ref() else {
+        return render_default_output(out, &output.content, output.is_error, width);
+    };
+    let Ok(data) = serde_json::from_value::<NotebookRenderData>(meta.clone()) else {
+        return render_default_output(out, &output.content, output.is_error, width);
+    };
+
+    let mut rows = 0u16;
+    print_dim(out, &format!("   {}", data.title()));
+    crlf(out);
+    rows += 1;
+
+    if data.edit_mode == "insert" {
+        rows += print_syntax_file(out, &data.new_source, &data.path, 0, 0);
+    } else {
+        rows += print_inline_diff(
+            out,
+            &data.old_source,
+            &data.new_source,
+            &data.path,
+            &data.old_source,
+            0,
+            0,
+        );
+    }
+    rows
 }
 
 fn render_question_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {

@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,9 +13,41 @@ pub fn is_notebook(path: &str) -> bool {
     path.to_lowercase().ends_with(".ipynb")
 }
 
-// ---------------------------------------------------------------------------
-// Reading
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+struct NotebookCellSnapshot {
+    index: usize,
+    cell_type: String,
+    cell_id: Option<String>,
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotebookRenderData {
+    pub edit_mode: String,
+    pub path: String,
+    pub index: usize,
+    pub old_type: Option<String>,
+    pub new_type: Option<String>,
+    pub cell_id: Option<String>,
+    pub old_source: String,
+    pub new_source: String,
+}
+
+impl NotebookRenderData {
+    pub fn title(&self) -> String {
+        let kind = match (self.old_type.as_deref(), self.new_type.as_deref()) {
+            (Some(old), Some(new)) if old != new => format!("{old} → {new}"),
+            (_, Some(new)) => new.to_string(),
+            (Some(old), None) => old.to_string(),
+            _ => "cell".into(),
+        };
+        let mut title = format!("{} cell {} [{}]", self.edit_mode, self.index, kind);
+        if let Some(id) = self.cell_id.as_deref() {
+            title.push_str(&format!(" id={id}"));
+        }
+        title
+    }
+}
 
 /// Render a notebook's cells as human-readable text with line numbers.
 pub fn read_notebook(path: &str, offset: usize, limit: usize) -> ToolResult {
@@ -177,7 +209,6 @@ fn strip_ansi(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             match chars.peek() {
-                // CSI sequence: ESC [ ... <letter>
                 Some('[') => {
                     while let Some(&next) = chars.peek() {
                         chars.next();
@@ -186,7 +217,6 @@ fn strip_ansi(s: &str) -> String {
                         }
                     }
                 }
-                // OSC sequence: ESC ] ... (BEL | ST)
                 Some(']') => {
                     chars.next();
                     while let Some(&next) = chars.peek() {
@@ -196,7 +226,6 @@ fn strip_ansi(s: &str) -> String {
                         }
                         if next == '\x1b' {
                             chars.next();
-                            // Consume the backslash of ST (ESC \)
                             if chars.peek() == Some(&'\\') {
                                 chars.next();
                             }
@@ -205,7 +234,6 @@ fn strip_ansi(s: &str) -> String {
                         chars.next();
                     }
                 }
-                // Other escape sequences: skip until letter
                 _ => {
                     while let Some(&next) = chars.peek() {
                         chars.next();
@@ -220,6 +248,57 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+fn render_data_metadata(data: &NotebookRenderData) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "notebook_cell_edit",
+        "edit_mode": data.edit_mode,
+        "path": data.path,
+        "index": data.index,
+        "old_type": data.old_type,
+        "new_type": data.new_type,
+        "cell_id": data.cell_id,
+        "old_source": data.old_source,
+        "new_source": data.new_source,
+    })
+}
+
+fn cell_snapshot(cell: &Value, index: usize) -> NotebookCellSnapshot {
+    NotebookCellSnapshot {
+        index,
+        cell_type: cell
+            .get("cell_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        cell_id: cell.get("id").and_then(|v| v.as_str()).map(str::to_string),
+        source: join_string_or_array(cell.get("source")),
+    }
+}
+
+fn render_data_from_snapshots(
+    edit_mode: &str,
+    path: &str,
+    old: Option<&NotebookCellSnapshot>,
+    new: Option<&NotebookCellSnapshot>,
+) -> NotebookRenderData {
+    let index = new
+        .map(|c| c.index)
+        .or_else(|| old.map(|c| c.index))
+        .unwrap_or(0);
+    NotebookRenderData {
+        edit_mode: edit_mode.to_string(),
+        path: path.to_string(),
+        index,
+        old_type: old.map(|c| c.cell_type.clone()),
+        new_type: new.map(|c| c.cell_type.clone()),
+        cell_id: new
+            .and_then(|c| c.cell_id.clone())
+            .or_else(|| old.and_then(|c| c.cell_id.clone())),
+        old_source: old.map(|c| c.source.clone()).unwrap_or_default(),
+        new_source: new.map(|c| c.source.clone()).unwrap_or_default(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +467,8 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
                 ));
             }
 
+            let old_cell = cell_snapshot(&cells[idx], idx);
+
             // Convert source to array of lines (notebook convention)
             let source_value = source_to_json(&new_source);
             cells[idx]["source"] = source_value;
@@ -415,7 +496,16 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
                 cells[idx]["execution_count"] = Value::Null;
             }
 
-            write_notebook(&path, &nb, &format!("replaced cell {idx}"), hashes)
+            let new_cell = cell_snapshot(&cells[idx], idx);
+            let render =
+                render_data_from_snapshots("replace", &path, Some(&old_cell), Some(&new_cell));
+            write_notebook(
+                &path,
+                &nb,
+                &format!("replaced cell {idx}"),
+                hashes,
+                Some(render),
+            )
         }
         "insert" => {
             // Insert after target_idx, or at beginning if no target specified
@@ -444,12 +534,15 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
 
             let new_cell = make_cell(&cell_type, &new_source);
             cells.insert(insert_at, new_cell);
+            let inserted = cell_snapshot(&cells[insert_at], insert_at);
+            let render = render_data_from_snapshots("insert", &path, None, Some(&inserted));
 
             write_notebook(
                 &path,
                 &nb,
                 &format!("inserted {cell_type} cell at position {insert_at}"),
                 hashes,
+                Some(render),
             )
         }
         "delete" => {
@@ -466,9 +559,17 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
                 ));
             }
 
+            let deleted = cell_snapshot(&cells[idx], idx);
             cells.remove(idx);
+            let render = render_data_from_snapshots("delete", &path, Some(&deleted), None);
 
-            write_notebook(&path, &nb, &format!("deleted cell {idx}"), hashes)
+            write_notebook(
+                &path,
+                &nb,
+                &format!("deleted cell {idx}"),
+                hashes,
+                Some(render),
+            )
         }
         _ => unreachable!(),
     }
@@ -540,7 +641,13 @@ fn generate_cell_id() -> String {
     format!("{:016x}", id)
 }
 
-fn write_notebook(path: &str, nb: &Value, action: &str, hashes: &FileHashes) -> ToolResult {
+fn write_notebook(
+    path: &str,
+    nb: &Value,
+    action: &str,
+    hashes: &FileHashes,
+    render: Option<NotebookRenderData>,
+) -> ToolResult {
     // 1-space indent matches Jupyter/JupyterLab convention
     let mut buf = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
@@ -563,7 +670,12 @@ fn write_notebook(path: &str, nb: &Value, action: &str, hashes: &FileHashes) -> 
             if let Ok(mut map) = hashes.lock() {
                 map.insert(path.to_string(), hash_content(&json));
             }
-            ToolResult::ok(format!("{action} in {}", display_path(path)))
+            if let Some(render) = render {
+                ToolResult::ok(format!("{action} in {}", display_path(path)))
+                    .with_metadata(render_data_metadata(&render))
+            } else {
+                ToolResult::ok(format!("{action} in {}", display_path(path)))
+            }
         }
         Err(e) => ToolResult::err(e.to_string()),
     }

@@ -33,7 +33,8 @@ deleting cells. Identify cells by `cell_id` or `cell_number` (0-indexed).
 | `edit_mode`     | `replace` (default), `insert`, or `delete`                                               |
 
 When reading, cells are displayed as numbered blocks with their type, source
-content, and outputs. Supports offset/limit slicing.
+content, and outputs. Notebook edits preview the affected cell: inserts show the
+new cell content, while replace/delete show a scrollable diff.
 
 ## Search
 
