@@ -1150,6 +1150,7 @@ impl App {
                         usage,
                         tokens_per_sec,
                         cost_usd,
+                        ..
                     } => {
                         total_cost += cost_usd.unwrap_or(0.0);
                         total_usage.accumulate(&usage);

@@ -277,6 +277,10 @@ pub enum EngineEvent {
         usage: TokenUsage,
         tokens_per_sec: Option<f64>,
         cost_usd: Option<f64>,
+        /// True for background requests (title, compaction, btw, predict)
+        /// whose prompt_tokens should not update the displayed context usage.
+        #[serde(default)]
+        background: bool,
     },
 
     /// LLM call failed, engine is retrying.

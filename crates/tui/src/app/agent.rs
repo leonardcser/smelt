@@ -348,15 +348,19 @@ impl App {
                 usage,
                 tokens_per_sec,
                 cost_usd,
+                background,
             } => {
-                if let Some(tokens) = usage.prompt_tokens {
-                    if tokens > 0 {
-                        self.screen.set_context_tokens(tokens);
-                        self.session.context_tokens = Some(tokens);
+                if !background {
+                    if let Some(tokens) = usage.prompt_tokens {
+                        if tokens > 0 {
+                            self.screen.set_context_tokens(tokens);
+                            self.session.context_tokens = Some(tokens);
+                        }
                     }
-                }
-                if let Some(tps) = tokens_per_sec {
-                    self.screen.record_tokens_per_sec(tps);
+                    if let Some(tps) = tokens_per_sec {
+                        self.screen.record_tokens_per_sec(tps);
+                    }
+                    self.screen.set_throbber(render::Throbber::Working);
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 self.session_cost_usd += cost;
@@ -374,7 +378,6 @@ impl App {
                     cache_write_tokens: usage.cache_write_tokens,
                     reasoning_tokens: usage.reasoning_tokens,
                 });
-                self.screen.set_throbber(render::Throbber::Working);
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {

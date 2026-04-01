@@ -2550,26 +2550,28 @@ impl Screen {
             let spinner = self.working.spinner_char();
             let has_slug = self.show_slug && self.task_label.is_some();
 
-            let pill_label: Option<String> = if has_slug {
+            let pill_label: Option<String> = if is_compacting {
+                // Compacting overrides the task slug pill.
+                let sp = spinner.unwrap_or(SPINNER_FRAMES[0]);
+                Some(format!(" {} compacting ", sp))
+            } else if has_slug {
                 let label = self.task_label.as_ref().unwrap();
                 Some(if let Some(sp) = spinner {
                     format!(" {} {} ", sp, label)
                 } else {
                     format!(" {} ", label)
                 })
-            } else if let Some(sp) = spinner {
-                let state_name = if is_compacting {
-                    "compacting"
-                } else {
-                    "working"
-                };
-                Some(format!(" {} {} ", sp, state_name))
             } else {
-                None
+                spinner.map(|sp| format!(" {} working ", sp))
             };
 
             if let Some(ref pill_text) = pill_label {
-                let _ = out.queue(SetBackgroundColor(theme::slug_color()));
+                let pill_bg = if is_compacting {
+                    Color::White
+                } else {
+                    theme::slug_color()
+                };
+                let _ = out.queue(SetBackgroundColor(pill_bg));
                 let _ = out.queue(SetForegroundColor(Color::Black));
                 let _ = out.queue(Print(pill_text));
                 let _ = out.queue(ResetColor);

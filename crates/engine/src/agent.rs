@@ -158,7 +158,7 @@ pub async fn engine_task(
                         let cancel = crate::cancel::CancellationToken::new();
                         match compact_history(&provider, &history, keep_turns, &model, instructions.as_deref(), &cancel).await {
                             Ok((messages, usage)) => {
-                                emit_usage(&event_tx, &config, &model, usage);
+                                emit_usage_background(&event_tx, &config, &model, usage);
                                 let _ = event_tx.send(EngineEvent::CompactionComplete { messages });
                             }
                             Err(e) => {
@@ -519,7 +519,7 @@ impl<'a> Turn<'a> {
         .await
         {
             Ok((compacted, usage)) => {
-                emit_usage(self.event_tx, self.config, &self.model, usage);
+                emit_usage_background(self.event_tx, self.config, &self.model, usage);
                 let system = self.messages[0].clone();
                 self.messages = vec![system];
                 self.messages.extend(compacted);
@@ -801,6 +801,7 @@ impl<'a> Turn<'a> {
                     &self.model,
                     resp.usage,
                     tokens_per_sec,
+                    false,
                 );
             }
 
@@ -1386,6 +1387,7 @@ fn send_usage(
     model: &str,
     usage: protocol::TokenUsage,
     tokens_per_sec: Option<f64>,
+    background: bool,
 ) {
     let resolved = crate::pricing::resolve(model, provider_type, model_config);
     let cost = resolved.pricing.cost(&usage);
@@ -1393,6 +1395,7 @@ fn send_usage(
         usage,
         tokens_per_sec,
         cost_usd: if cost > 0.0 { Some(cost) } else { None },
+        background,
     });
 }
 
@@ -1410,6 +1413,26 @@ pub fn emit_usage(
         model,
         usage,
         None,
+        false,
+    );
+}
+
+/// Emit a background `TokenUsage` event (compaction, title, btw, predict).
+/// Cost is tracked but prompt_tokens won't update displayed context usage.
+fn emit_usage_background(
+    tx: &mpsc::UnboundedSender<EngineEvent>,
+    config: &EngineConfig,
+    model: &str,
+    usage: protocol::TokenUsage,
+) {
+    send_usage(
+        tx,
+        &config.api.provider_type,
+        &config.api.model_config,
+        model,
+        usage,
+        None,
+        true,
     );
 }
 
@@ -1441,6 +1464,7 @@ impl PricingContext {
             model,
             usage,
             None,
+            true,
         );
     }
 }
