@@ -19,20 +19,30 @@ impl RewindDialog {
         restore_vim_insert: bool,
         max_height: Option<u16>,
     ) -> Self {
-        let mut list = ListState::new(turns.len(), max_height, 4);
-        list.selected = turns.len().saturating_sub(1);
-        list.scroll_offset = turns.len().saturating_sub(list.max_visible);
+        // +1 for the "(current)" sentinel entry at the end.
+        let total = turns.len() + 1;
+        let mut list = ListState::new(total, max_height, 4);
+        list.selected = total.saturating_sub(1);
+        list.scroll_offset = total.saturating_sub(list.max_visible);
         Self {
             turns,
             list,
             restore_vim_insert,
         }
     }
+
+    fn total_items(&self) -> usize {
+        self.turns.len() + 1
+    }
+
+    fn is_current_selected(&self) -> bool {
+        self.list.selected == self.turns.len()
+    }
 }
 
 impl super::Dialog for RewindDialog {
     fn height(&self) -> u16 {
-        self.list.height(self.turns.len())
+        self.list.height(self.total_items())
     }
 
     fn mark_dirty(&mut self) {
@@ -49,12 +59,22 @@ impl super::Dialog for RewindDialog {
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
-        let n = self.turns.len();
+        let n = self.total_items();
         match nav_lookup(code, mods) {
-            Some(NavAction::Confirm) => Some(DialogResult::Rewind {
-                block_idx: Some(self.turns[self.list.selected].0),
-                restore_vim_insert: self.restore_vim_insert,
-            }),
+            Some(NavAction::Confirm) => {
+                if self.is_current_selected() {
+                    // "(current)" — just dismiss, no rewind.
+                    Some(DialogResult::Rewind {
+                        block_idx: None,
+                        restore_vim_insert: self.restore_vim_insert,
+                    })
+                } else {
+                    Some(DialogResult::Rewind {
+                        block_idx: Some(self.turns[self.list.selected].0),
+                        restore_vim_insert: self.restore_vim_insert,
+                    })
+                }
+            }
             Some(NavAction::Dismiss) => Some(DialogResult::Rewind {
                 block_idx: None,
                 restore_vim_insert: self.restore_vim_insert,
@@ -80,9 +100,8 @@ impl super::Dialog for RewindDialog {
     }
 
     fn draw(&mut self, start_row: u16, sync_started: bool, backend: &dyn TerminalBackend) {
-        let Some((mut out, w, _)) =
-            self.list
-                .begin_draw(start_row, self.turns.len(), sync_started, backend)
+        let n = self.total_items();
+        let Some((mut out, w, _)) = self.list.begin_draw(start_row, n, sync_started, backend)
         else {
             return;
         };
@@ -95,17 +114,17 @@ impl super::Dialog for RewindDialog {
         let _ = out.queue(SetAttribute(Attribute::Reset));
         crlf(&mut out);
 
-        let num_width = self.turns.len().to_string().len();
-        for (i, (_, ref full_text)) in self
-            .turns
-            .iter()
-            .enumerate()
-            .take(self.list.visible_range(self.turns.len()).end)
-            .skip(self.list.visible_range(self.turns.len()).start)
-        {
-            let label = full_text.lines().next().unwrap_or("");
+        let num_width = n.to_string().len();
+        let range = self.list.visible_range(n);
+        for i in range.start..range.end {
+            let is_current = i == self.turns.len();
+            let label = if is_current {
+                "(current)"
+            } else {
+                self.turns[i].1.lines().next().unwrap_or("")
+            };
             let num = i + 1;
-            let pad = num_width + 4; // "  " + num_width + ". "
+            let pad = num_width + 4;
             let max_label = w.saturating_sub(pad);
             let truncated = truncate_str(label, max_label);
             let _ = out.queue(SetAttribute(Attribute::Dim));
