@@ -380,6 +380,11 @@ impl Provider {
                 let mut body =
                     openai::build_body(messages, tools, model, effort, &self.model_config);
                 body["store"] = serde_json::json!(false);
+                // Codex API doesn't support temperature/top_p; remove them.
+                if let Some(obj) = body.as_object_mut() {
+                    obj.remove("temperature");
+                    obj.remove("top_p");
+                }
                 (url, body)
             }
             ProviderKind::Anthropic => {
