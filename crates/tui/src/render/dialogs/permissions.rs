@@ -2,7 +2,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::{theme, workspace_permissions};
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::style::{Color, Print};
 use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, TerminalBackend};
@@ -166,9 +166,9 @@ impl super::Dialog for PermissionsDialog {
         crlf(&mut out);
 
         if self.items.is_empty() {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print(" No permissions"));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             crlf(&mut out);
         } else {
             let mut printed_workspace = false;
@@ -199,22 +199,22 @@ impl super::Dialog for PermissionsDialog {
         }
 
         crlf(&mut out);
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let hint = if self.pending_d {
             hints::join(&[hints::DD_PENDING, hints::CLOSE])
         } else {
             hints::join(&[hints::dd_delete(self.vim_enabled), hints::CLOSE])
         };
         let _ = out.queue(Print(&hint));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         end_dialog_draw(&mut out);
     }
 }
 
 fn print_header(out: &mut crate::render::RenderOut, label: &str) {
-    let _ = out.queue(SetAttribute(Attribute::Dim));
+    out.push_dim();
     let _ = out.queue(Print(label));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    out.pop_style();
     crlf(out);
 }
 
@@ -228,9 +228,9 @@ fn render_entry_row(
     let label = truncate_str(label, width.saturating_sub(4));
     if selected {
         let _ = out.queue(Print("  "));
-        let _ = out.queue(SetForegroundColor(accent));
+        out.push_fg(accent);
         let _ = out.queue(Print(&label));
-        let _ = out.queue(ResetColor);
+        out.pop_style();
     } else {
         let _ = out.queue(Print("  "));
         let _ = out.queue(Print(&label));

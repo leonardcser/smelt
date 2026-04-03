@@ -6,7 +6,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar, TerminalBackend};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::style::Print;
 use crossterm::terminal;
 use crossterm::QueueableCommand;
 use std::collections::HashMap;
@@ -402,22 +402,20 @@ impl super::Dialog for QuestionDialog {
                     "\u{25a1}"
                 };
                 if i == self.active_tab {
-                    let _ = out.queue(SetForegroundColor(theme::accent()));
-                    let _ = out.queue(SetAttribute(Attribute::Bold));
+                    out.push_style(crate::render::StyleState { fg: Some(theme::accent()), bold: true, ..Default::default() });
                     let _ = out.queue(Print(format!(" {} {} ", bullet, q.header)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                    let _ = out.queue(ResetColor);
+                    out.pop_style();
                 } else if self.answered[i] {
-                    let _ = out.queue(SetForegroundColor(theme::SUCCESS));
+                    out.push_fg(theme::SUCCESS);
                     let _ = out.queue(Print(format!(" {}", bullet)));
-                    let _ = out.queue(ResetColor);
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.pop_style();
+                    out.push_dim();
                     let _ = out.queue(Print(format!(" {} ", q.header)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    out.pop_style();
                 } else {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.push_dim();
                     let _ = out.queue(Print(format!(" {} {} ", bullet, q.header)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    out.pop_style();
                 }
             }
             crlf(&mut out);
@@ -433,13 +431,13 @@ impl super::Dialog for QuestionDialog {
         let segments = wrap_line(&q.question, q_max);
         for (i, seg) in segments.iter().enumerate() {
             let _ = out.queue(Print(" "));
-            let _ = out.queue(SetAttribute(Attribute::Bold));
+            out.push_bold();
             let _ = out.queue(Print(seg));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             if i == 0 && !suffix.is_empty() {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(suffix));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
             }
             crlf(&mut out);
             row += 1;
@@ -456,25 +454,25 @@ impl super::Dialog for QuestionDialog {
             if is_multi {
                 let check = if is_toggled { "\u{25c9}" } else { "\u{25cb}" };
                 if is_current {
-                    let _ = out.queue(SetForegroundColor(theme::accent()));
+                    out.push_fg(theme::accent());
                     let _ = out.queue(Print(format!("{} ", check)));
                     let _ = out.queue(Print(&opt.label));
-                    let _ = out.queue(ResetColor);
+                    out.pop_style();
                 } else {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.push_dim();
                     let _ = out.queue(Print(format!("{} ", check)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    out.pop_style();
                     let _ = out.queue(Print(&opt.label));
                 }
             } else {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(format!("{}.", i + 1)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 let _ = out.queue(Print(" "));
                 if is_current {
-                    let _ = out.queue(SetForegroundColor(theme::accent()));
+                    out.push_fg(theme::accent());
                     let _ = out.queue(Print(&opt.label));
-                    let _ = out.queue(ResetColor);
+                    out.pop_style();
                 } else {
                     let _ = out.queue(Print(&opt.label));
                 }
@@ -490,9 +488,9 @@ impl super::Dialog for QuestionDialog {
                 let remaining = w.saturating_sub(used);
                 if remaining > 3 {
                     let desc: String = opt.description.chars().take(remaining).collect();
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.push_dim();
                     let _ = out.queue(Print(format!("  {desc}")));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    out.pop_style();
                 }
             }
             crlf(&mut out);
@@ -511,24 +509,24 @@ impl super::Dialog for QuestionDialog {
                 "\u{25cb}"
             };
             if is_other_current {
-                let _ = out.queue(SetForegroundColor(theme::accent()));
+                out.push_fg(theme::accent());
                 let _ = out.queue(Print(format!("{} Other", check)));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
             } else {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(format!("{} ", check)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 let _ = out.queue(Print("Other"));
             }
         } else {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print(format!("{}.", other_idx + 1)));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             let _ = out.queue(Print(" "));
             if is_other_current {
-                let _ = out.queue(SetForegroundColor(theme::accent()));
+                out.push_fg(theme::accent());
                 let _ = out.queue(Print("Other"));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
             } else {
                 let _ = out.queue(Print("Other"));
             }
@@ -548,7 +546,7 @@ impl super::Dialog for QuestionDialog {
 
         // Footer
         crlf(&mut out);
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let hint = if editing {
             hints::join(&[hints::CANCEL, hints::CONFIRM])
         } else if self.has_tabs {
@@ -557,7 +555,7 @@ impl super::Dialog for QuestionDialog {
             hints::join(&[hints::CONFIRM, hints::CANCEL])
         };
         let _ = out.queue(Print(&hint));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         // Only clear below the dialog if there's viewport space left.
         // When the dialog fills the full terminal, clearing here wipes
         // the last visible line.

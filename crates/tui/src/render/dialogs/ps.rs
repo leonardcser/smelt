@@ -2,7 +2,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::{theme, utils::format_duration};
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::style::Print;
 use crossterm::{terminal, QueueableCommand};
 use engine::tools::ProcessInfo;
 
@@ -109,15 +109,15 @@ impl super::Dialog for PsDialog {
         draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
 
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(" Background Processes"));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         crlf(&mut out);
 
         if self.procs.is_empty() {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print("  No processes"));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             crlf(&mut out);
         } else {
             let range = self.list.visible_range(self.procs.len());
@@ -135,25 +135,25 @@ impl super::Dialog for PsDialog {
                 let cmd_display = truncate_str(&proc.command, max_cmd);
                 if i == self.list.selected {
                     let _ = out.queue(Print("  "));
-                    let _ = out.queue(SetForegroundColor(theme::accent()));
+                    out.push_fg(theme::accent());
                     let _ = out.queue(Print(&cmd_display));
-                    let _ = out.queue(ResetColor);
+                    out.pop_style();
                 } else {
                     let _ = out.queue(Print("  "));
                     let _ = out.queue(Print(&cmd_display));
                 }
                 let _ = out.queue(Print(" "));
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(format!("{time} {}", proc.id)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 crlf(&mut out);
             }
         }
 
         crlf(&mut out);
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(&hints::join(&[hints::CLOSE, hints::KILL_PROC])));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         end_dialog_draw(&mut out);
     }
 }

@@ -2,7 +2,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::style::Print;
 use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, TerminalBackend};
@@ -109,9 +109,9 @@ impl super::Dialog for RewindDialog {
         draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
 
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(" Rewind to:"));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         crlf(&mut out);
 
         let num_width = n.to_string().len();
@@ -127,16 +127,15 @@ impl super::Dialog for RewindDialog {
             let pad = num_width + 4;
             let max_label = w.saturating_sub(pad);
             let truncated = truncate_str(label, max_label);
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print(format!("  {:>width$}.", num, width = num_width)));
+            out.pop_style();
             if i == self.list.selected {
-                let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(Print(" "));
-                let _ = out.queue(SetForegroundColor(theme::accent()));
+                out.push_fg(theme::accent());
                 let _ = out.queue(Print(&truncated));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
             } else {
-                let _ = out.queue(SetAttribute(Attribute::Reset));
                 let _ = out.queue(Print(" "));
                 let _ = out.queue(Print(&truncated));
             }
@@ -144,9 +143,9 @@ impl super::Dialog for RewindDialog {
         }
 
         crlf(&mut out);
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(&hints::join(&[hints::SELECT, hints::CANCEL])));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         end_dialog_draw(&mut out);
     }
 }

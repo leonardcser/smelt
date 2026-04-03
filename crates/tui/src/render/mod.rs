@@ -80,71 +80,61 @@ impl TerminalBackend for StdioBackend {
     }
 }
 
-/// Output wrapper that selects the line-advance strategy.
-///
-/// * `row: None` — **scroll mode** (blocks / prompt): `\r\n` pushes content
-///   into terminal scrollback, which is the normal way conversation renders.
-/// * `row: Some(r)` — **overlay mode** (dialogs): `MoveTo(0, r+1)` repositions
-///   the cursor without scrolling, so dialogs never pollute scrollback.
+/// Tracked terminal style state for diff-based SGR emission.
+#[derive(Clone, Default, PartialEq)]
+pub struct StyleState {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub crossedout: bool,
+    pub underline: bool,
+}
+
+/// Output wrapper that selects the line-advance strategy (scroll vs overlay).
 pub struct RenderOut {
     pub out: Box<dyn Write>,
     pub row: Option<u16>,
     capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
-    /// Tracked foreground color (for skipping redundant style commands).
-    cur_fg: Option<Color>,
-    /// Tracked background color.
-    cur_bg: Option<Color>,
-    /// Tracked bold attribute.
-    cur_bold: bool,
-    /// Tracked dim attribute.
-    cur_dim: bool,
-    /// Tracked italic attribute.
-    cur_italic: bool,
+    /// Current terminal style (what the terminal is actually showing).
+    current: StyleState,
+    /// Stack of saved styles for push/pop scoping.
+    stack: Vec<StyleState>,
 }
 
 impl RenderOut {
+    fn new(
+        out: Box<dyn Write>,
+        capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    ) -> Self {
+        Self {
+            out,
+            row: None,
+            capture,
+            current: StyleState::default(),
+            stack: Vec::new(),
+        }
+    }
+
     /// Create a scroll-mode output (for blocks + prompt).
     /// Dialogs switch to overlay mode by setting `out.row = Some(r)`.
     pub fn scroll() -> Self {
-        Self {
-            out: Box::new(BufWriter::with_capacity(1 << 20, io::stdout())),
-            row: None,
-            capture: None,
-            cur_fg: None,
-            cur_bg: None,
-            cur_bold: false,
-            cur_dim: false,
-            cur_italic: false,
-        }
+        Self::new(
+            Box::new(BufWriter::with_capacity(1 << 20, io::stdout())),
+            None,
+        )
     }
 
     /// Create a scroll-mode output writing to a shared buffer (for testing).
     pub fn shared_sink(sink: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> Self {
-        Self {
-            out: Box::new(SharedWriter(sink)),
-            row: None,
-            capture: None,
-            cur_fg: None,
-            cur_bg: None,
-            cur_bold: false,
-            cur_dim: false,
-            cur_italic: false,
-        }
+        Self::new(Box::new(SharedWriter(sink)), None)
     }
 
     /// Create a render output that writes to an in-memory buffer.
     pub fn buffer() -> Self {
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        Self {
-            out: Box::new(SharedWriter(buf.clone())),
-            row: None,
-            capture: Some(buf),
-            cur_fg: None,
-            cur_bg: None,
-            cur_bold: false,
-            cur_dim: false,
-            cur_italic: false,
-        }
+        Self::new(Box::new(SharedWriter(buf.clone())), Some(buf))
     }
 
     /// Extract captured bytes (only valid after `buffer()`).
@@ -156,79 +146,250 @@ impl RenderOut {
             .unwrap_or_default()
     }
 
+    // ── Style stack ──────────────────────────────────────────────────
+
+    /// Push the current style onto the stack and apply a new style on top.
+    /// `None` fields in the target inherit from the current style.
+    /// Only emits SGR sequences for fields that actually change.
+    pub fn push_style(&mut self, target: StyleState) {
+        self.stack.push(self.current.clone());
+        self.emit_diff(&target);
+        self.current = target;
+    }
+
+    /// Pop back to the previous style. Only emits SGR for what differs.
+    pub fn pop_style(&mut self) {
+        if let Some(prev) = self.stack.pop() {
+            self.emit_diff(&prev);
+            self.current = prev;
+        }
+    }
+
+    /// Push a scope that only changes foreground color.
+    pub fn push_fg(&mut self, color: Color) {
+        let mut target = self.current.clone();
+        target.fg = Some(color);
+        self.push_style(target);
+    }
+
+    /// Push a scope that only changes background color.
+    pub fn push_bg(&mut self, color: Color) {
+        let mut target = self.current.clone();
+        target.bg = Some(color);
+        self.push_style(target);
+    }
+
+    /// Push a scope that adds bold.
+    pub fn push_bold(&mut self) {
+        let mut target = self.current.clone();
+        target.bold = true;
+        self.push_style(target);
+    }
+
+    /// Push a scope that adds dim.
+    pub fn push_dim(&mut self) {
+        let mut target = self.current.clone();
+        target.dim = true;
+        self.push_style(target);
+    }
+
+    /// Push a scope that adds italic.
+    pub fn push_italic(&mut self) {
+        let mut target = self.current.clone();
+        target.italic = true;
+        self.push_style(target);
+    }
+
+    /// Push a scope that adds crossedout.
+    pub fn push_crossedout(&mut self) {
+        let mut target = self.current.clone();
+        target.crossedout = true;
+        self.push_style(target);
+    }
+
+    /// Push a scope that adds dim + italic.
+    pub fn push_dim_italic(&mut self) {
+        let mut target = self.current.clone();
+        target.dim = true;
+        target.italic = true;
+        self.push_style(target);
+    }
+
+    // ── Direct style setters (no stack, for incremental updates) ─────
+
     pub fn set_fg(&mut self, color: Color) {
-        if self.cur_fg != Some(color) {
-            self.cur_fg = Some(color);
+        if self.current.fg != Some(color) {
+            self.current.fg = Some(color);
             let _ = self.queue(SetForegroundColor(color));
         }
     }
 
     pub fn set_bg(&mut self, color: Color) {
-        if self.cur_bg != Some(color) {
-            self.cur_bg = Some(color);
+        if self.current.bg != Some(color) {
+            self.current.bg = Some(color);
             let _ = self.queue(SetBackgroundColor(color));
         }
     }
 
     pub fn set_bold(&mut self) {
-        if !self.cur_bold {
-            self.cur_bold = true;
+        if !self.current.bold {
+            self.current.bold = true;
             let _ = self.queue(SetAttribute(Attribute::Bold));
         }
     }
 
     pub fn set_dim(&mut self) {
-        if !self.cur_dim {
-            self.cur_dim = true;
+        if !self.current.dim {
+            self.current.dim = true;
             let _ = self.queue(SetAttribute(Attribute::Dim));
         }
     }
 
     pub fn set_italic(&mut self) {
-        if !self.cur_italic {
-            self.cur_italic = true;
+        if !self.current.italic {
+            self.current.italic = true;
             let _ = self.queue(SetAttribute(Attribute::Italic));
         }
     }
 
-    /// Set dim+italic, skipping if both are already active.
     pub fn set_dim_italic(&mut self) {
-        if self.cur_dim && self.cur_italic {
-            return;
-        }
-        if !self.cur_dim {
-            self.cur_dim = true;
-            let _ = self.queue(SetAttribute(Attribute::Dim));
-        }
-        if !self.cur_italic {
-            self.cur_italic = true;
-            let _ = self.queue(SetAttribute(Attribute::Italic));
-        }
+        self.set_dim();
+        self.set_italic();
     }
 
+    /// Reset all style to terminal defaults.
     pub fn reset_style(&mut self) {
-        if self.cur_fg.is_some()
-            || self.cur_bg.is_some()
-            || self.cur_bold
-            || self.cur_dim
-            || self.cur_italic
-        {
+        let clean = StyleState::default();
+        if self.current != clean {
             let _ = self.queue(SetAttribute(Attribute::Reset));
             let _ = self.queue(ResetColor);
-            self.cur_fg = None;
-            self.cur_bg = None;
-            self.cur_bold = false;
-            self.cur_dim = false;
-            self.cur_italic = false;
+            self.current = clean;
         }
     }
 
+    /// Mark style state as unknown (after replaying cached bytes).
+    /// Forces the next style call to emit unconditionally.
     pub fn invalidate_style(&mut self) {
-        self.cur_fg = None;
-        self.cur_bg = None;
-        self.cur_bold = false;
-        self.cur_dim = false;
-        self.cur_italic = false;
+        // Setting everything to default without emitting — next set_* call
+        // will see a mismatch and emit. Stack is cleared since cached blocks
+        // are self-contained.
+        self.current = StyleState::default();
+        self.stack.clear();
+    }
+
+    // ── Internal diff engine ─────────────────────────────────────────
+
+    /// Emit the minimal SGR sequences to transition from `self.current` to `target`.
+    fn emit_diff(&mut self, target: &StyleState) {
+        // Attributes being turned OFF require special handling.
+        // Bold/dim share NormalIntensity (SGR 22) — turning off either
+        // turns off both, so we may need to re-enable the other.
+        let need_unbold = self.current.bold && !target.bold;
+        let need_undim = self.current.dim && !target.dim;
+        let need_unitalic = self.current.italic && !target.italic;
+        let need_uncrossed = self.current.crossedout && !target.crossedout;
+        let need_ununderline = self.current.underline && !target.underline;
+
+        // Check if a full reset is cheaper than individual unsets.
+        // A reset is 1 sequence vs potentially many unsets + re-sets.
+        let unsets = need_unbold as u8
+            + need_undim as u8
+            + need_unitalic as u8
+            + need_uncrossed as u8
+            + need_ununderline as u8;
+        let fg_change = self.current.fg != target.fg;
+        let bg_change = self.current.bg != target.bg;
+
+        // NormalIntensity (SGR 22) kills both bold AND dim. If we need to
+        // turn off bold but keep dim (or vice versa), we'd need to re-emit
+        // the one we want to keep. Count that cost.
+        let intensity_conflict = (need_unbold && target.dim) || (need_undim && target.bold);
+
+        if unsets >= 2 || intensity_conflict {
+            // Full reset is simpler.
+            let _ = self.queue(SetAttribute(Attribute::Reset));
+            let _ = self.queue(ResetColor);
+
+            // Re-apply everything the target wants.
+            if let Some(fg) = target.fg {
+                let _ = self.queue(SetForegroundColor(fg));
+            }
+            if let Some(bg) = target.bg {
+                let _ = self.queue(SetBackgroundColor(bg));
+            }
+            if target.bold {
+                let _ = self.queue(SetAttribute(Attribute::Bold));
+            }
+            if target.dim {
+                let _ = self.queue(SetAttribute(Attribute::Dim));
+            }
+            if target.italic {
+                let _ = self.queue(SetAttribute(Attribute::Italic));
+            }
+            if target.crossedout {
+                let _ = self.queue(SetAttribute(Attribute::CrossedOut));
+            }
+            if target.underline {
+                let _ = self.queue(SetAttribute(Attribute::Underlined));
+            }
+            return;
+        }
+
+        // Individual transitions — only emit what changed.
+
+        // Bold/dim: NormalIntensity unsets both.
+        if need_unbold || need_undim {
+            let _ = self.queue(SetAttribute(Attribute::NormalIntensity));
+            // Re-enable the one we want to keep (if any).
+            if need_unbold && target.dim {
+                let _ = self.queue(SetAttribute(Attribute::Dim));
+            }
+            if need_undim && target.bold {
+                let _ = self.queue(SetAttribute(Attribute::Bold));
+            }
+        }
+        if need_unitalic {
+            let _ = self.queue(SetAttribute(Attribute::NoItalic));
+        }
+        if need_uncrossed {
+            let _ = self.queue(SetAttribute(Attribute::NotCrossedOut));
+        }
+        if need_ununderline {
+            let _ = self.queue(SetAttribute(Attribute::NoUnderline));
+        }
+
+        // Attributes being turned ON.
+        if !self.current.bold && target.bold {
+            let _ = self.queue(SetAttribute(Attribute::Bold));
+        }
+        if !self.current.dim && target.dim {
+            let _ = self.queue(SetAttribute(Attribute::Dim));
+        }
+        if !self.current.italic && target.italic {
+            let _ = self.queue(SetAttribute(Attribute::Italic));
+        }
+        if !self.current.crossedout && target.crossedout {
+            let _ = self.queue(SetAttribute(Attribute::CrossedOut));
+        }
+        if !self.current.underline && target.underline {
+            let _ = self.queue(SetAttribute(Attribute::Underlined));
+        }
+
+        // Colors.
+        if fg_change {
+            if let Some(fg) = target.fg {
+                let _ = self.queue(SetForegroundColor(fg));
+            } else {
+                let _ = self.queue(SetForegroundColor(Color::Reset));
+            }
+        }
+        if bg_change {
+            if let Some(bg) = target.bg {
+                let _ = self.queue(SetBackgroundColor(bg));
+            } else {
+                let _ = self.queue(SetBackgroundColor(Color::Reset));
+            }
+        }
     }
 }
 
@@ -305,9 +466,9 @@ pub(super) struct BoxContext {
 impl BoxContext {
     /// Print the left border with color.
     pub fn print_left(&self, out: &mut RenderOut) {
-        let _ = out.queue(SetForegroundColor(self.color));
+        out.push_fg(self.color);
         let _ = out.queue(Print(self.left));
-        let _ = out.queue(ResetColor);
+        out.pop_style();
     }
 
     /// Print right-side padding and border for a line that used `cols` content columns.
@@ -316,9 +477,9 @@ impl BoxContext {
         if pad > 0 {
             let _ = out.queue(Print(" ".repeat(pad)));
         }
-        let _ = out.queue(SetForegroundColor(self.color));
+        out.push_fg(self.color);
         let _ = out.queue(Print(self.right));
-        let _ = out.queue(ResetColor);
+        out.pop_style();
     }
 }
 
@@ -1184,14 +1345,17 @@ impl Screen {
             } else {
                 theme::slug_color()
             };
-            let _ = out.queue(SetBackgroundColor(pill_bg));
-            let _ = out.queue(SetForegroundColor(Color::Black));
+            out.push_style(StyleState {
+                fg: Some(Color::Black),
+                bg: Some(pill_bg),
+                ..StyleState::default()
+            });
             let _ = out.queue(Print(pill_text));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
         }
 
         // ── Dark bg for the middle section ──
-        let _ = out.queue(SetBackgroundColor(status_bg));
+        out.set_bg(status_bg);
 
         // ── Vim mode ──
         if self.last_vim_enabled {
@@ -1203,9 +1367,13 @@ impl Screen {
                 }
                 _ => Color::AnsiValue(74),
             };
-            let _ = out.queue(SetBackgroundColor(Color::AnsiValue(236)));
-            let _ = out.queue(SetForegroundColor(vim_fg));
+            out.push_style(StyleState {
+                fg: Some(vim_fg),
+                bg: Some(Color::AnsiValue(236)),
+                ..StyleState::default()
+            });
             let _ = out.queue(Print(format!(" {vim_label} ")));
+            out.pop_style();
         }
 
         // ── Mode indicator ──
@@ -1215,10 +1383,14 @@ impl Screen {
             protocol::Mode::Yolo => ("⚡", "yolo", theme::YOLO),
             protocol::Mode::Normal => ("○ ", "normal", theme::muted()),
         };
-        let _ = out.queue(SetBackgroundColor(Color::AnsiValue(234)));
-        let _ = out.queue(SetForegroundColor(mode_fg));
+        out.push_style(StyleState {
+            fg: Some(mode_fg),
+            bg: Some(Color::AnsiValue(234)),
+            ..StyleState::default()
+        });
         let _ = out.queue(Print(format!(" {mode_icon}{mode_name} ")));
-        let _ = out.queue(SetBackgroundColor(status_bg));
+        out.pop_style();
+        out.set_bg(status_bg);
         let mut has_prev = true;
 
         // ── Throbber status ──
@@ -1236,14 +1408,16 @@ impl Screen {
         };
         if !status_spans.is_empty() {
             for span in status_spans {
-                if let Some(attr) = span.attr {
-                    let _ = out.queue(SetAttribute(attr));
-                }
-                let _ = out.queue(SetForegroundColor(span.color));
+                out.push_style(StyleState {
+                    fg: Some(span.color),
+                    bold: span.bold,
+                    dim: span.dim,
+                    ..StyleState::default()
+                });
                 let _ = out.queue(Print(&span.text));
-                if span.attr.is_some() {
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
-                    let _ = out.queue(SetBackgroundColor(status_bg));
+                out.pop_style();
+                if span.bold || span.dim {
+                    out.set_bg(status_bg);
                 }
             }
             has_prev = true;
@@ -1252,24 +1426,27 @@ impl Screen {
         // ── Permission pending (only when no dialog is open) ──
         if self.pending_dialog && !self.dialog_open {
             if has_prev {
-                let _ = out.queue(SetForegroundColor(theme::muted()));
+                out.set_fg(theme::muted());
                 let _ = out.queue(Print(" · "));
             }
-            let _ = out.queue(SetForegroundColor(theme::accent()));
-            let _ = out.queue(SetAttribute(Attribute::Bold));
+            out.push_style(StyleState {
+                fg: Some(theme::accent()),
+                bold: true,
+                ..StyleState::default()
+            });
             let _ = out.queue(Print("permission pending"));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(SetBackgroundColor(status_bg));
+            out.pop_style();
+            out.set_bg(status_bg);
             has_prev = true;
         }
 
         // ── Running procs ──
         if self.running_procs > 0 {
             if has_prev {
-                let _ = out.queue(SetForegroundColor(theme::muted()));
+                out.set_fg(theme::muted());
                 let _ = out.queue(Print(" · "));
             }
-            let _ = out.queue(SetForegroundColor(theme::accent()));
+            out.set_fg(theme::accent());
             let label = if self.running_procs == 1 {
                 "1 proc".to_string()
             } else {
@@ -1282,10 +1459,10 @@ impl Screen {
         // ── Running agents ──
         if self.running_agents > 0 {
             if has_prev {
-                let _ = out.queue(SetForegroundColor(theme::muted()));
+                out.set_fg(theme::muted());
                 let _ = out.queue(Print(" · "));
             }
-            let _ = out.queue(SetForegroundColor(theme::AGENT));
+            out.set_fg(theme::AGENT);
             let label = if self.running_agents == 1 {
                 "1 agent".to_string()
             } else {
@@ -1296,7 +1473,7 @@ impl Screen {
 
         // Fill the rest of the line with the dark bg
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-        let _ = out.queue(ResetColor);
+        out.reset_style();
     }
 
     /// Dismiss a dialog overlay.
@@ -2666,7 +2843,7 @@ impl Screen {
                 text: format!(" {}", model),
                 color: theme::muted(),
                 bg: None,
-                attr: None,
+                bold: false, dim: false,
                 priority: 2,
             });
             if self.reasoning_effort != protocol::ReasoningEffort::Off {
@@ -2675,7 +2852,7 @@ impl Screen {
                     text: format!(" {}", effort.label()),
                     color: reasoning_color(effort),
                     bg: None,
-                    attr: None,
+                    bold: false, dim: false,
                     priority: 2,
                 });
             }
@@ -2687,7 +2864,7 @@ impl Screen {
                         text: " ·".into(),
                         color: bar_color,
                         bg: None,
-                        attr: None,
+                        bold: false, dim: false,
                         priority: 2,
                     });
                 }
@@ -2705,7 +2882,7 @@ impl Screen {
                     text: token_text,
                     color: theme::muted(),
                     bg: None,
-                    attr: None,
+                    bold: false, dim: false,
                     priority: 1,
                 });
             }
@@ -2716,7 +2893,7 @@ impl Screen {
                     text: " ·".into(),
                     color: bar_color,
                     bg: None,
-                    attr: None,
+                    bold: false, dim: false,
                     priority: 2,
                 });
             }
@@ -2724,7 +2901,7 @@ impl Screen {
                 text: format!(" {}", crate::metrics::format_cost(self.session_cost_usd)),
                 color: theme::muted(),
                 bg: None,
-                attr: None,
+                bold: false, dim: false,
                 priority: 1,
             });
         }
@@ -2832,10 +3009,10 @@ impl Screen {
             let pred = prediction.unwrap();
             let first_line = pred.lines().next().unwrap_or(pred);
             let _ = out.queue(Print(" "));
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let msg: String = first_line.chars().take(usable.saturating_sub(1)).collect();
             let _ = out.queue(Print(&msg));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = out.queue(Print("\r\n"));
         }
@@ -2888,10 +3065,10 @@ impl Screen {
                 // Command prefix in accent, argument text in normal style.
                 let (prefix, hint) = cmd_hint.as_ref().unwrap();
                 let prefix_len = prefix.len();
-                let _ = out.queue(SetForegroundColor(theme::accent()));
+                out.set_fg(theme::accent());
                 if line.len() >= prefix_len {
                     let _ = out.queue(Print(&line[..prefix_len]));
-                    let _ = out.queue(ResetColor);
+                    out.reset_style();
                     let rest = &line[prefix_len..];
                     if rest.trim().is_empty() && state.buf.ends_with(' ') {
                         // Show hint when only "/cmd " typed with no argument yet.
@@ -2905,15 +3082,15 @@ impl Screen {
                             hint.clone()
                         };
                         let _ = out.queue(Print(" "));
-                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                        out.push_dim();
                         let _ = out.queue(Print(&truncated));
-                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                        out.pop_style();
                     } else {
                         let _ = out.queue(Print(rest));
                     }
                 } else {
                     let _ = out.queue(Print(line));
-                    let _ = out.queue(ResetColor);
+                    out.reset_style();
                 }
             } else if has_arg_space {
                 render_styled_chars(out, line, kinds, line_sel);
@@ -2924,14 +3101,18 @@ impl Screen {
             } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
                 // Render the `!` prefix with its own style (possibly selected).
                 let bang_selected = line_sel.is_some_and(|(s, _)| s == 0);
-                if bang_selected {
-                    let _ = out.queue(SetBackgroundColor(theme::selection_bg()));
-                }
-                let _ = out.queue(SetForegroundColor(Color::Red));
-                let _ = out.queue(SetAttribute(Attribute::Bold));
+                out.push_style(StyleState {
+                    fg: Some(Color::Red),
+                    bg: if bang_selected {
+                        Some(theme::selection_bg())
+                    } else {
+                        None
+                    },
+                    bold: true,
+                    ..StyleState::default()
+                });
                 let _ = out.queue(Print("!"));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
                 // Shift selection range by 1 for the remaining text.
                 let rest_sel = line_sel.and_then(|(s, e)| {
                     let s2 = if s == 0 { 0 } else { s - 1 };
@@ -2954,9 +3135,9 @@ impl Screen {
                     theme::scrollbar_track()
                 };
                 let _ = out.queue(cursor::MoveToColumn(width as u16 - 1));
-                let _ = out.queue(SetBackgroundColor(bg));
+                out.push_bg(bg);
                 let _ = out.queue(Print(" "));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
             }
             let _ = out.queue(Print("\r\n"));
         }
@@ -3074,19 +3255,23 @@ fn render_notification(
     let max_msg = usable.saturating_sub(label.len() + 3);
 
     let _ = out.queue(Print(" "));
-    if notification.is_error {
-        let _ = out.queue(SetForegroundColor(theme::ERROR));
-    }
-    let _ = out.queue(SetAttribute(Attribute::Bold));
+    out.push_style(StyleState {
+        fg: if notification.is_error {
+            Some(theme::ERROR)
+        } else {
+            None
+        },
+        bold: true,
+        ..StyleState::default()
+    });
     let _ = out.queue(Print(label));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     let _ = out.queue(Print("  "));
 
     let msg: String = notification.message.chars().take(max_msg).collect();
-    let _ = out.queue(SetAttribute(Attribute::Dim));
+    out.push_dim();
     let _ = out.queue(Print(&msg));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    out.pop_style();
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
     let _ = out.queue(Print("\r\n"));
     1
@@ -3099,11 +3284,13 @@ fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usiz
     let text = "› Stashed (ctrl+s to unstash)";
     let display: String = text.chars().take(usable).collect();
     let _ = out.queue(Print("  "));
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-    let _ = out.queue(SetForegroundColor(theme::muted()));
+    out.push_style(StyleState {
+        fg: Some(theme::muted()),
+        dim: true,
+        ..StyleState::default()
+    });
     let _ = out.queue(Print(display));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
     let _ = out.queue(Print("\r\n"));
     1
@@ -3138,10 +3325,9 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
             if line.is_empty() {
                 let fill = if block_w > 0 { block_w + 1 } else { 2 };
                 let _ = out.queue(Print(" ".repeat(indent)));
-                let _ = out.queue(SetBackgroundColor(theme::user_bg()));
+                out.push_bg(theme::user_bg());
                 let _ = out.queue(Print(" ".repeat(fill)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
                 crlf(out);
                 rows += 1;
                 continue;
@@ -3155,13 +3341,15 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
                     1
                 };
                 let _ = out.queue(Print(" ".repeat(indent)));
-                let _ = out.queue(SetBackgroundColor(theme::user_bg()));
-                let _ = out.queue(SetAttribute(Attribute::Bold));
+                out.push_style(StyleState {
+                    bg: Some(theme::user_bg()),
+                    bold: true,
+                    ..StyleState::default()
+                });
                 let _ = out.queue(Print(" "));
                 blocks::print_user_highlights(out, chunk, &[], is_command);
                 let _ = out.queue(Print(" ".repeat(trailing)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
                 crlf(out);
                 rows += 1;
             }
@@ -3182,9 +3370,9 @@ fn render_btw(
 
     // Header: "/btw" in accent, question with @path and image highlighting.
     let _ = out.queue(Print(" "));
-    let _ = out.queue(SetForegroundColor(theme::accent()));
+    out.push_fg(theme::accent());
     let _ = out.queue(Print("/btw"));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     let _ = out.queue(Print(" "));
     let max_q = usable.saturating_sub(6); // " /btw " = 6 chars
     let q: String = btw.question.chars().take(max_q).collect();
@@ -3239,7 +3427,7 @@ fn render_btw(
             rows += 1;
 
             // Scroll hint or dismiss hint.
-            let _ = out.queue(SetForegroundColor(theme::muted()));
+            out.push_fg(theme::muted());
             if can_scroll {
                 let end = (btw.scroll_offset + visible).min(total);
                 let _ = out.queue(Print(format!(
@@ -3250,7 +3438,7 @@ fn render_btw(
             } else {
                 let _ = out.queue(Print("   esc: close"));
             }
-            let _ = out.queue(ResetColor);
+            out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = out.queue(Print("\r\n"));
             rows += 1;
@@ -3262,9 +3450,9 @@ fn render_btw(
                 .as_millis()
                 / 150) as usize
                 % SPINNER_FRAMES.len();
-            let _ = out.queue(SetForegroundColor(theme::muted()));
+            out.push_fg(theme::muted());
             let _ = out.queue(Print(format!("   {} thinking", SPINNER_FRAMES[frame])));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             let _ = out.queue(Print("\r\n"));
             rows += 1;
@@ -3568,7 +3756,8 @@ pub(super) struct BarSpan {
     text: String,
     color: Color,
     bg: Option<Color>,
-    attr: Option<Attribute>,
+    bold: bool,
+    dim: bool,
     /// Priority for responsive dropping. 0 = always show, higher = drop first.
     priority: u8,
 }
@@ -3660,39 +3849,39 @@ pub(super) fn draw_bar(
 
     if !left_filtered.is_empty() {
         for span in &left_filtered {
-            if let Some(attr) = span.attr {
-                let _ = out.queue(SetAttribute(attr));
-            }
-            if let Some(bg) = span.bg {
-                let _ = out.queue(SetBackgroundColor(bg));
-            }
-            let _ = out.queue(SetForegroundColor(span.color));
+            out.push_style(StyleState {
+                fg: Some(span.color),
+                bg: span.bg,
+                bold: span.bold,
+                dim: span.dim,
+                ..StyleState::default()
+            });
             let _ = out.queue(Print(&span.text));
-            let _ = out.queue(ResetColor);
-            if span.attr.is_some() {
-                let _ = out.queue(SetAttribute(Attribute::Reset));
-            }
+            out.pop_style();
         }
         let _ = out.queue(Print(" "));
     }
 
-    let _ = out.queue(SetForegroundColor(bar_color));
+    out.push_fg(bar_color);
     let _ = out.queue(Print(dash.repeat(bar_len)));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
 
     if !right_filtered.is_empty() {
         for span in &right_filtered {
-            if let Some(bg) = span.bg {
-                let _ = out.queue(SetBackgroundColor(bg));
-            }
-            let _ = out.queue(SetForegroundColor(span.color));
+            out.push_style(StyleState {
+                fg: Some(span.color),
+                bg: span.bg,
+                bold: span.bold,
+                dim: span.dim,
+                ..StyleState::default()
+            });
             let _ = out.queue(Print(&span.text));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
         }
         let _ = out.queue(Print(" "));
-        let _ = out.queue(SetForegroundColor(bar_color));
+        out.push_fg(bar_color);
         let _ = out.queue(Print(dash));
-        let _ = out.queue(ResetColor);
+        out.pop_style();
     }
 }
 
@@ -3885,13 +4074,13 @@ fn render_styled_chars(
         if kind != current || want_sel != in_sel {
             // Reset previous styling before applying new.
             if in_sel || current != SpanKind::Plain {
-                let _ = out.queue(ResetColor);
+                out.reset_style();
             }
             if want_sel {
-                let _ = out.queue(SetBackgroundColor(theme::selection_bg()));
+                out.set_bg(theme::selection_bg());
             }
             if kind == SpanKind::AtRef || kind == SpanKind::Attachment {
-                let _ = out.queue(SetForegroundColor(theme::accent()));
+                out.set_fg(theme::accent());
             }
             current = kind;
             in_sel = want_sel;
@@ -3902,15 +4091,15 @@ fn render_styled_chars(
     if let Some((s, e)) = selection {
         if e > char_count && s <= char_count {
             if !in_sel {
-                let _ = out.queue(SetBackgroundColor(theme::selection_bg()));
+                out.set_bg(theme::selection_bg());
             }
             let _ = out.queue(Print(' '));
-            let _ = out.queue(ResetColor);
+            out.reset_style();
             return;
         }
     }
     if in_sel || current != SpanKind::Plain {
-        let _ = out.queue(ResetColor);
+        out.reset_style();
     }
 }
 
@@ -3954,9 +4143,9 @@ fn draw_completions(
 
     if comp.results.is_empty() {
         if comp.is_picker() {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print("  no results"));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             if show_hints && max_rows > hint_rows + empty_gap {
                 let _ = out.queue(Print("\r\n"));
@@ -4009,41 +4198,42 @@ fn draw_completions(
             let _ = out.queue(Print("  "));
             if selected {
                 let ansi = item.ansi_color.unwrap_or(theme::accent_value());
-                let _ = out.queue(SetForegroundColor(Color::AnsiValue(ansi)));
+                out.push_fg(Color::AnsiValue(ansi));
                 let _ = out.queue(Print(format!("● {}", label)));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
             } else {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(format!("  {}", label)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
             }
             if let Some(ref desc) = item.description {
                 let pad = (max_label + 2).saturating_sub(label.len());
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
             }
         } else {
             let _ = out.queue(Print("  "));
             if selected {
-                let _ = out.queue(SetForegroundColor(theme::accent()));
+                out.push_fg(theme::accent());
                 let _ = out.queue(Print(&label));
                 if let Some(ref desc) = item.description {
                     let pad = max_label - label.len() + 2;
-                    let _ = out.queue(ResetColor);
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.pop_style();
+                    out.push_dim();
                     let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    out.pop_style();
+                } else {
+                    out.pop_style();
                 }
-                let _ = out.queue(ResetColor);
             } else {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(&label));
                 if let Some(ref desc) = item.description {
                     let pad = max_label - label.len() + 2;
                     let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
                 }
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
             }
         }
 
@@ -4065,13 +4255,13 @@ fn draw_completions(
 fn draw_settings_hints(out: &mut RenderOut, vim_enabled: bool) {
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
     let _ = out.queue(Print("\r\n"));
-    let _ = out.queue(SetAttribute(Attribute::Dim));
+    out.push_dim();
     let _ = out.queue(Print(crate::keymap::hints::join(&[
         crate::keymap::hints::picker_nav(vim_enabled),
         "enter/space: toggle",
         crate::keymap::hints::CANCEL,
     ])));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    out.pop_style();
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
 }
 
@@ -4104,40 +4294,40 @@ fn draw_stats_line(out: &mut RenderOut, line: &crate::metrics::StatsLine, label_
     use crate::metrics::StatsLine;
     match line {
         StatsLine::Kv { label, value } => {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print(label));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             let col = label_col.max(label.len() + 2);
             let padding = " ".repeat(col.saturating_sub(label.len()));
             let _ = out.queue(Print(padding));
             let _ = out.queue(Print(value));
         }
         StatsLine::Heading(text) | StatsLine::SparklineLegend(text) => {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print(text));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
         }
         StatsLine::SparklineBars(bars) => {
-            let _ = out.queue(SetForegroundColor(theme::accent()));
+            out.push_fg(theme::accent());
             let _ = out.queue(Print(bars));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
         }
         StatsLine::HeatRow { label, cells } => {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print(format!("{label} ")));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             for cell in cells {
                 match cell {
                     crate::metrics::HeatCell::Empty => {
-                        let _ = out.queue(SetForegroundColor(Color::AnsiValue(238)));
+                        out.push_fg(Color::AnsiValue(238));
                         let _ = out.queue(Print(format!("{HEAT_EMPTY} ")));
-                        let _ = out.queue(ResetColor);
+                        out.pop_style();
                     }
                     crate::metrics::HeatCell::Level(lvl) => {
                         let color = HEAT_COLORS[(*lvl as usize).min(3)];
-                        let _ = out.queue(SetForegroundColor(color));
+                        out.push_fg(color);
                         let _ = out.queue(Print(format!("{HEAT_CHAR} ")));
-                        let _ = out.queue(ResetColor);
+                        out.pop_style();
                     }
                 }
             }

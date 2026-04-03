@@ -2,7 +2,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar, ResumeEntry};
 use crate::{session, theme};
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::style::Print;
 use crossterm::{terminal, QueueableCommand};
 use std::time::Instant;
 
@@ -206,21 +206,21 @@ impl super::Dialog for ResumeDialog {
         draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
 
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         if self.workspace_only {
             let _ = out.queue(Print(" Resume (workspace):"));
         } else {
             let _ = out.queue(Print(" Resume (all):"));
         }
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         let _ = out.queue(Print(" "));
         let _ = out.queue(Print(&self.query));
         crlf(&mut out);
 
         if self.filtered.is_empty() {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print("  No matches"));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             crlf(&mut out);
         } else {
             let range = self.list.visible_range(self.filtered.len());
@@ -240,23 +240,23 @@ impl super::Dialog for ResumeDialog {
                 let truncated = truncate_str(&title, max_label);
                 if i == self.list.selected {
                     let _ = out.queue(Print(&indent_str));
-                    let _ = out.queue(SetForegroundColor(theme::accent()));
+                    out.push_fg(theme::accent());
                     let _ = out.queue(Print(&truncated));
-                    let _ = out.queue(ResetColor);
+                    out.pop_style();
                 } else {
                     let _ = out.queue(Print(&indent_str));
                     let _ = out.queue(Print(&truncated));
                 }
                 let _ = out.queue(Print(" "));
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(&time_ago));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 crlf(&mut out);
             }
         }
 
         crlf(&mut out);
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let toggle = if self.workspace_only {
             "ctrl+w: all sessions"
         } else {
@@ -268,7 +268,7 @@ impl super::Dialog for ResumeDialog {
             hints::CANCEL,
             toggle,
         ])));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         end_dialog_draw(&mut out);
     }
 }

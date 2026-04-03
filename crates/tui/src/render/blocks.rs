@@ -1,9 +1,7 @@
 use crate::theme;
 use crate::utils::format_duration;
 use crossterm::{
-    style::{
-        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-    },
+    style::{Color, Print},
     QueueableCommand,
 };
 use engine::tools::NotebookRenderData;
@@ -298,10 +296,9 @@ pub(super) fn render_block(
             render_confirm_result(out, tool, desc, choice.clone(), width)
         }
         Block::Hint { content } => {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(SetAttribute(Attribute::Italic));
+            out.push_dim_italic();
             let _ = out.queue(Print(content));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             crlf(out);
             1
         }
@@ -311,11 +308,11 @@ pub(super) fn render_block(
             let remaining = width.saturating_sub(label_len);
             let left = remaining / 2;
             let right = remaining - left;
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print("─".repeat(left)));
             let _ = out.queue(Print(label));
             let _ = out.queue(Print("─".repeat(right)));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
+            out.pop_style();
             crlf(out);
             1 + render_markdown_inner(out, summary, width, " ", true, None)
         }
@@ -323,14 +320,16 @@ pub(super) fn render_block(
             let char_len = command.chars().count() + 1;
             let pad_width = (char_len + 2).min(width);
             let trailing = pad_width.saturating_sub(char_len + 1);
-            let _ = out.queue(SetBackgroundColor(theme::user_bg()));
-            let _ = out.queue(SetForegroundColor(theme::EXEC));
-            let _ = out.queue(SetAttribute(Attribute::Bold));
+            out.push_style(super::StyleState {
+                bg: Some(theme::user_bg()),
+                fg: Some(theme::EXEC),
+                bold: true,
+                ..Default::default()
+            });
             let _ = out.queue(Print(" !"));
-            let _ = out.queue(SetForegroundColor(Color::Reset));
+            out.set_fg(Color::Reset);
             let _ = out.queue(Print(format!("{}{}", command, " ".repeat(trailing))));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
             crlf(out);
             let mut rows = 1u16;
             if !output.is_empty() {
@@ -344,11 +343,13 @@ pub(super) fn render_block(
             content,
         } => {
             let header = format!(" ➜ {from_id}");
-            let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
-            let _ = out.queue(SetAttribute(Attribute::Bold));
+            out.push_style(super::StyleState {
+                fg: Some(crate::theme::AGENT),
+                bold: true,
+                ..Default::default()
+            });
             let _ = out.queue(Print(&header));
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
             crlf(out);
             let bctx = super::BoxContext {
                 left: " \u{2502} ",
@@ -392,63 +393,69 @@ fn render_agent_block(
     use super::AgentBlockStatus;
     let mut rows = 0u16;
 
-    // Header: " ➜ agent_id · slug [✓/✗] [elapsed]"
-    let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
-    let _ = out.queue(SetAttribute(Attribute::Bold));
+    // Header: " + agent_id · slug [✓/✗] [elapsed]"
+    out.push_style(super::StyleState {
+        fg: Some(crate::theme::AGENT),
+        bold: true,
+        ..Default::default()
+    });
     let _ = out.queue(Print(format!(" + {agent_id}")));
-    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
 
     if !blocking {
-        let _ = out.queue(SetForegroundColor(crate::theme::muted()));
+        out.push_fg(crate::theme::muted());
         let _ = out.queue(Print(" started"));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        let _ = out.queue(ResetColor);
+        out.pop_style(); // muted fg
+        out.pop_style(); // bold+agent fg
         crlf(out);
         return rows + 1;
     }
 
     if let Some(slug) = slug {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(format!(" \u{00b7} {slug}")));
-        let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+        out.pop_style();
     }
 
     match status {
         AgentBlockStatus::Done => {
-            let _ = out.queue(SetForegroundColor(crate::theme::SUCCESS));
+            out.push_fg(crate::theme::SUCCESS);
             let _ = out.queue(Print(" \u{2713}")); // ✓
+            out.pop_style();
         }
         AgentBlockStatus::Error => {
-            let _ = out.queue(SetForegroundColor(crate::theme::ERROR));
+            out.push_fg(crate::theme::ERROR);
             let _ = out.queue(Print(" \u{2717}")); // ✗
+            out.pop_style();
         }
         AgentBlockStatus::Running => {}
     }
 
     if let Some(d) = elapsed {
         if d.as_secs_f64() >= 0.1 {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
-            let _ = out.queue(SetForegroundColor(crate::theme::muted()));
+            out.push_style(super::StyleState {
+                fg: Some(crate::theme::muted()),
+                dim: true,
+                ..Default::default()
+            });
             let _ = out.queue(Print(format!("  {}", format_duration(d.as_secs()))));
-            let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+            out.pop_style();
         }
     }
 
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    let _ = out.queue(ResetColor);
+    out.pop_style(); // bold+agent fg
     crlf(out);
     rows += 1;
 
     // Blocking: show last 3 tool calls with left border.
     let visible = tool_calls.iter().rev().take(3).collect::<Vec<_>>();
     for entry in visible.iter().rev() {
-        let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
+        out.push_fg(crate::theme::AGENT);
         let _ = out.queue(Print(" \u{2502} ")); // │
-        let _ = out.queue(ResetColor);
+        out.pop_style();
 
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(&entry.tool_name));
-        let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+        out.pop_style();
 
         // Reserve space for elapsed time so the summary doesn't push it off-screen.
         let time_str = entry
@@ -462,9 +469,9 @@ fn render_agent_block(
         let _ = out.queue(Print(format!(" {summary}")));
 
         if let Some(ref ts) = time_str {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.push_dim();
             let _ = out.queue(Print(ts));
-            let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+            out.pop_style();
         }
 
         crlf(out);
@@ -473,9 +480,9 @@ fn render_agent_block(
 
     // Bottom border
     let border_w = width.saturating_sub(2);
-    let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
+    out.push_fg(crate::theme::AGENT);
     let _ = out.queue(Print(format!(" \u{2570}{}", "\u{2500}".repeat(border_w))));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     crlf(out);
     rows += 1;
 
@@ -554,9 +561,9 @@ fn render_confirm_result(
 ) -> u16 {
     let mut rows = 2u16;
 
-    let _ = out.queue(SetForegroundColor(theme::APPLY));
+    out.push_fg(theme::APPLY);
     let _ = out.queue(Print("   allow? "));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     print_dim(out, tool);
     crlf(out);
 
@@ -606,9 +613,9 @@ fn render_confirm_result(
                 print_dim(out, &format!("always{suffix} (dir: {dir})"));
             }
             ConfirmChoice::No => {
-                let _ = out.queue(SetForegroundColor(theme::ERROR));
+                out.push_fg(theme::ERROR);
                 let _ = out.queue(Print("denied"));
-                let _ = out.queue(ResetColor);
+                out.pop_style();
             }
         }
         crlf(out);
@@ -665,9 +672,9 @@ fn print_tool_line(
     width: usize,
 ) -> u16 {
     let _ = out.queue(Print(" "));
-    let _ = out.queue(SetForegroundColor(pill_color));
+    out.push_fg(pill_color);
     let _ = out.queue(Print("\u{23fa}"));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     let time_str = elapsed
         .filter(|d| d.as_secs_f64() >= 0.1)
         .map(|d| format!("  {}", format_duration(d.as_secs())))
@@ -773,9 +780,9 @@ fn print_agent_summary(out: &mut RenderOut, summary: &str) {
             if i > 0 {
                 let _ = out.queue(Print(", "));
             }
-            let _ = out.queue(SetForegroundColor(theme::AGENT));
+            out.push_fg(theme::AGENT);
             let _ = out.queue(Print(name.trim()));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
         }
     }
     let tail = &summary[end..];
@@ -846,9 +853,9 @@ fn print_tool_output(
 }
 
 fn print_dim(out: &mut RenderOut, text: &str) {
-    let _ = out.queue(SetAttribute(Attribute::Dim));
+    out.push_dim();
     let _ = out.queue(Print(text));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    out.pop_style();
 }
 
 fn print_dim_count(out: &mut RenderOut, count: usize, singular: &str, plural: &str) -> u16 {
@@ -1068,31 +1075,28 @@ fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) -> usize {
     use super::highlight::print_inline_styled;
     use unicode_width::UnicodeWidthStr;
 
-    macro_rules! reset {
-        () => {
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(ResetColor);
-            if dim {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
-            }
-        };
-    }
-
     let trimmed = text.trim_start();
     if trimmed.starts_with('#') {
-        let _ = out.queue(SetForegroundColor(theme::HEADING));
-        let _ = out.queue(SetAttribute(Attribute::Bold));
+        out.push_style(super::StyleState {
+            fg: Some(theme::HEADING),
+            bold: true,
+            dim,
+            ..Default::default()
+        });
         let _ = out.queue(Print(trimmed));
-        reset!();
+        out.pop_style();
         return trimmed.chars().count();
     }
 
     if trimmed.starts_with('>') {
         let content = trimmed.strip_prefix('>').unwrap().trim_start();
-        let _ = out.queue(SetAttribute(Attribute::Dim));
-        let _ = out.queue(SetAttribute(Attribute::Italic));
+        out.push_style(super::StyleState {
+            dim: true,
+            italic: true,
+            ..Default::default()
+        });
         let _ = out.queue(Print(content));
-        reset!();
+        out.pop_style();
         return content.chars().count();
     }
 
@@ -1103,10 +1107,9 @@ fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) -> usize {
         let _ = out.queue(Print(leading_ws));
     }
     if !prefix.is_empty() {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(prefix));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        let _ = out.queue(ResetColor);
+        out.pop_style();
     }
 
     print_inline_styled(out, body, dim);
@@ -1207,14 +1210,9 @@ fn render_horizontal_rule(
     }
 
     // Always apply dim attribute (same as list markers)
-    let _ = out.queue(SetAttribute(Attribute::Dim));
-
-    // Print the horizontal rule
+    out.push_dim();
     let _ = out.queue(Print(&hr));
-
-    // Reset
-    let _ = out.queue(ResetColor);
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    out.pop_style();
 
     if let Some(b) = bctx {
         b.print_right(out, 3);
@@ -1266,12 +1264,12 @@ fn render_plan_output(
     // 3 + 1(┌) + 1(─) + 6(label) + fill + 1(┐) = 5 + inner_w + 2
     let label = " Plan ";
     let fill = inner_w.saturating_sub(label.len()).saturating_add(1);
-    let _ = out.queue(SetForegroundColor(theme::PLAN));
+    out.push_fg(theme::PLAN);
     let _ = out.queue(Print(format!(
         "  \u{250c}\u{2500}{label}{}\u{2510}",
         "\u{2500}".repeat(fill)
     )));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     crlf(out);
     rows += 1;
 
@@ -1286,12 +1284,12 @@ fn render_plan_output(
 
     // Bottom border: "   └──...──┘"
     // 3 + 1(└) + dashes + 1(┘) = 5 + inner_w + 2 → dashes = inner_w + 2
-    let _ = out.queue(SetForegroundColor(theme::PLAN));
+    out.push_fg(theme::PLAN);
     let _ = out.queue(Print(format!(
         "  \u{2514}{}\u{2518}",
         "\u{2500}".repeat(inner_w + 2)
     )));
-    let _ = out.queue(ResetColor);
+    out.pop_style();
     crlf(out);
     rows += 1;
 
@@ -1326,9 +1324,9 @@ fn render_wrapped_output(out: &mut RenderOut, content: &str, is_error: bool, wid
     let start = total.saturating_sub(MAX_VISUAL_ROWS);
     for seg in &wrapped[start..] {
         if is_error {
-            let _ = out.queue(SetForegroundColor(theme::ERROR));
+            out.push_fg(theme::ERROR);
             let _ = out.queue(Print(format!("   {}", seg)));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
         } else {
             print_dim(out, &format!("   {}", seg));
         }
@@ -1344,9 +1342,9 @@ fn render_default_output(out: &mut RenderOut, content: &str, is_error: bool, wid
     let mut rows = 0u16;
     for seg in &wrap_line(&preview, max_cols) {
         if is_error {
-            let _ = out.queue(SetForegroundColor(theme::ERROR));
+            out.push_fg(theme::ERROR);
             let _ = out.queue(Print(format!("   {}", seg)));
-            let _ = out.queue(ResetColor);
+            out.pop_style();
         } else {
             print_dim(out, &format!("   {}", seg));
         }
@@ -1387,9 +1385,9 @@ pub(super) fn print_user_highlights(
 ) {
     // Slash commands: accent the entire text, same as the prompt.
     if is_command {
-        let _ = out.queue(SetForegroundColor(theme::accent()));
+        out.push_fg(theme::accent());
         let _ = out.queue(Print(text));
-        let _ = out.queue(SetForegroundColor(Color::Reset));
+        out.pop_style();
         return;
     }
 
@@ -1405,9 +1403,9 @@ pub(super) fn print_user_highlights(
     };
 
     let accent = |out: &mut RenderOut, token: String| {
-        let _ = out.queue(SetForegroundColor(theme::accent()));
+        out.push_fg(theme::accent());
         let _ = out.queue(Print(token));
-        let _ = out.queue(SetForegroundColor(Color::Reset));
+        out.pop_style();
     };
 
     while i < len {
@@ -1448,17 +1446,19 @@ pub(super) fn render_active_exec(out: &mut RenderOut, exec: &ActiveExec, width: 
     let elapsed = exec.start_time.elapsed();
     let time_str = format!(" {}", format_duration(elapsed.as_secs()));
 
-    let _ = out.queue(SetBackgroundColor(theme::user_bg()));
-    let _ = out.queue(SetForegroundColor(theme::EXEC));
-    let _ = out.queue(SetAttribute(Attribute::Bold));
+    out.push_style(super::StyleState {
+        bg: Some(theme::user_bg()),
+        fg: Some(theme::EXEC),
+        bold: true,
+        ..Default::default()
+    });
     let _ = out.queue(Print(" !"));
-    let _ = out.queue(SetForegroundColor(Color::Reset));
+    out.set_fg(Color::Reset);
     let _ = out.queue(Print(format!("{}{}", exec.command, " ".repeat(trailing))));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
-    let _ = out.queue(ResetColor);
-    let _ = out.queue(SetAttribute(Attribute::Dim));
+    out.pop_style();
+    out.push_dim();
     let _ = out.queue(Print(&time_str));
-    let _ = out.queue(SetAttribute(Attribute::Reset));
+    out.pop_style();
     crlf(out);
     let mut rows = 1u16;
 

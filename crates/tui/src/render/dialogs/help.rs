@@ -2,7 +2,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Attribute, Print, SetAttribute, SetForegroundColor};
+use crossterm::style::Print;
 use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, DialogResult, ListState, TerminalBackend};
@@ -126,9 +126,9 @@ impl super::Dialog for HelpDialog {
         draw_bar(&mut out, w, None, None, theme::accent());
         crlf(&mut out);
 
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(" help"));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         crlf(&mut out);
         crlf(&mut out);
 
@@ -141,26 +141,26 @@ impl super::Dialog for HelpDialog {
                 crlf(&mut out);
             } else {
                 let _ = out.queue(Print("  "));
-                let _ = out.queue(SetForegroundColor(theme::muted()));
+                out.push_fg(theme::muted());
                 let _ = out.queue(Print(label));
-                let _ = out.queue(crossterm::style::ResetColor);
+                out.pop_style();
                 let padding = " ".repeat(label_col.saturating_sub(label.len()));
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(format!("{padding}{detail}")));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
                 crlf(&mut out);
             }
         }
 
         crlf(&mut out);
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.push_dim();
         let _ = out.queue(Print(&hints::join(&[
             hints::CLOSE,
             hints::nav(self.vim_enabled),
             hints::scroll(self.vim_enabled),
         ])));
-        let _ = out.queue(SetAttribute(Attribute::Reset));
+        out.pop_style();
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
 
         end_dialog_draw(&mut out);

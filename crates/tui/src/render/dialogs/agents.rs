@@ -3,7 +3,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{crlf, draw_bar, wrap_line};
 use crate::utils::format_duration;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::style::Print;
 use crossterm::terminal;
 use crossterm::QueueableCommand;
 use engine::registry::{AgentStatus, RegistryEntry};
@@ -313,25 +313,24 @@ impl super::Dialog for AgentsDialog {
 
                 // Header: agent name + slug
                 let _ = out.queue(Print(" "));
-                let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
-                let _ = out.queue(SetAttribute(Attribute::Bold));
+                out.push_style(crate::render::StyleState { fg: Some(crate::theme::AGENT), bold: true, ..Default::default() });
                 let _ = out.queue(Print(&agent_id));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
 
                 // Find status from registry entries
                 if let Some(entry) = self.agents.iter().find(|a| a.agent_id == agent_id) {
                     match entry.status {
                         AgentStatus::Working => {}
                         AgentStatus::Idle => {
-                            let _ = out.queue(SetForegroundColor(crate::theme::SUCCESS));
+                            out.push_fg(crate::theme::SUCCESS);
                             let _ = out.queue(Print(" \u{2713}"));
-                            let _ = out.queue(ResetColor);
+                            out.pop_style();
                         }
                     }
                     if let Some(ref slug) = entry.task_slug {
-                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                        out.push_dim();
                         let _ = out.queue(Print(format!(" \u{00b7} {slug}")));
-                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                        out.pop_style();
                     }
                 }
                 crlf(&mut out);
@@ -341,9 +340,9 @@ impl super::Dialog for AgentsDialog {
                 for line in lines.iter().skip(scroll).take(visible) {
                     match line {
                         DetailLine::Label(text) => {
-                            let _ = out.queue(SetAttribute(Attribute::Dim));
+                            out.push_dim();
                             let _ = out.queue(Print(format!("  {text}")));
-                            let _ = out.queue(SetAttribute(Attribute::Reset));
+                            out.pop_style();
                             crlf(&mut out);
                         }
                         DetailLine::Text(text) => {
@@ -358,9 +357,9 @@ impl super::Dialog for AgentsDialog {
                         }
                         DetailLine::ToolCall(entry) => {
                             let _ = out.queue(Print("  "));
-                            let _ = out.queue(SetAttribute(Attribute::Dim));
+                            out.push_dim();
                             let _ = out.queue(Print(&entry.tool_name));
-                            let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+                            out.pop_style();
                             let max_summary = w.saturating_sub(5 + entry.tool_name.len());
                             let _ = out.queue(Print(format!(
                                 " {}",
@@ -368,12 +367,12 @@ impl super::Dialog for AgentsDialog {
                             )));
                             if let Some(d) = entry.elapsed {
                                 if d.as_secs_f64() >= 0.1 {
-                                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                                    out.push_dim();
                                     let _ = out.queue(Print(format!(
                                         "  {}",
                                         format_duration(d.as_secs())
                                     )));
-                                    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+                                    out.pop_style();
                                 }
                             }
                             crlf(&mut out);
@@ -383,7 +382,7 @@ impl super::Dialog for AgentsDialog {
 
                 // Hints
                 crlf(&mut out);
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let can_scroll = total > max_vis;
                 if can_scroll {
                     let end = (scroll + visible).min(total);
@@ -396,7 +395,7 @@ impl super::Dialog for AgentsDialog {
                 } else {
                     let _ = out.queue(Print(&hints::join(&[hints::BACK])));
                 }
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 end_dialog_draw(&mut out);
 
                 self.view = View::Detail {
@@ -424,15 +423,15 @@ impl super::Dialog for AgentsDialog {
                 draw_bar(&mut out, w, None, None, crate::theme::AGENT);
                 crlf(&mut out);
 
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(" Agents"));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 crlf(&mut out);
 
                 if self.agents.is_empty() {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.push_dim();
                     let _ = out.queue(Print("  No subagents running"));
-                    let _ = out.queue(SetAttribute(Attribute::Reset));
+                    out.pop_style();
                     crlf(&mut out);
                 } else {
                     let name_w = self
@@ -457,16 +456,15 @@ impl super::Dialog for AgentsDialog {
                         let _ = out.queue(Print("  "));
                         let padded_name = format!("{:<name_w$}", agent.agent_id);
                         if i == self.list.selected {
-                            let _ = out.queue(SetForegroundColor(crate::theme::AGENT));
-                            let _ = out.queue(SetAttribute(Attribute::Bold));
+                            out.push_style(crate::render::StyleState { fg: Some(crate::theme::AGENT), bold: true, ..Default::default() });
                             let _ = out.queue(Print(&padded_name));
-                            let _ = out.queue(SetAttribute(Attribute::Reset));
+                            out.pop_style();
                         } else {
                             let _ = out.queue(Print(&padded_name));
                         }
-                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                        out.push_dim();
                         let _ = out.queue(Print(format!("  {status_str}")));
-                        let _ = out.queue(SetAttribute(Attribute::Reset));
+                        out.pop_style();
                         if let Some(slug) = &agent.task_slug {
                             let max = w.saturating_sub(name_w + 12);
                             let _ = out.queue(Print(format!("  {}", truncate_str(slug, max))));
@@ -476,13 +474,13 @@ impl super::Dialog for AgentsDialog {
                 }
 
                 crlf(&mut out);
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.push_dim();
                 let _ = out.queue(Print(&hints::join(&[
                     "enter: view",
                     hints::KILL_PROC,
                     hints::CLOSE,
                 ])));
-                let _ = out.queue(SetAttribute(Attribute::Reset));
+                out.pop_style();
                 end_dialog_draw(&mut out);
             }
         }

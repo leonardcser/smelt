@@ -1,8 +1,6 @@
 use crate::theme;
 use crossterm::{
-    style::{
-        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-    },
+    style::{Color, Print},
     QueueableCommand,
 };
 use serde::{Deserialize, Serialize};
@@ -61,7 +59,7 @@ pub(crate) fn render_code_block(
     let mut h = HighlightLines::new(syntax, theme);
 
     if dim {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.set_dim();
     }
 
     for line in &expanded {
@@ -73,34 +71,34 @@ pub(crate) fn render_code_block(
         for vrow in &visual_rows {
             if let Some(b) = bctx {
                 if dim {
-                    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+                    out.reset_style();
                 }
                 b.print_left(out);
                 if dim {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.set_dim();
                 }
             }
             let cols = print_split_regions(out, vrow, Some(theme::code_block_bg()));
             let pad = content_width.saturating_sub(cols);
             if pad > 0 {
-                let _ = out.queue(SetBackgroundColor(theme::code_block_bg()));
+                out.set_bg(theme::code_block_bg());
                 let _ = out.queue(Print(" ".repeat(pad)));
             }
             if let Some(b) = bctx {
                 if dim {
-                    let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+                    out.reset_style();
                 }
-                let _ = out.queue(SetForegroundColor(b.color));
+                out.set_fg(b.color);
                 let _ = out.queue(Print(b.right));
             }
-            let _ = out.queue(ResetColor);
+            out.reset_style();
             crlf(out);
         }
         rows += visual_rows.len() as u16;
     }
 
     if dim {
-        let _ = out.queue(SetAttribute(Attribute::NormalIntensity));
+        out.reset_style();
     }
     rows
 }
@@ -138,9 +136,9 @@ pub(super) fn render_highlighted(
             if total_rows >= skip && emitted < emit_limit {
                 let _ = out.queue(Print(indent));
                 if vi == 0 {
-                    let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                    out.set_fg(Color::DarkGrey);
                     let _ = out.queue(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
-                    let _ = out.queue(ResetColor);
+                    out.reset_style();
                     let _ = out.queue(Print("   "));
                 } else {
                     let _ = out.queue(Print(&blank_gutter));
@@ -500,17 +498,17 @@ fn print_cached_spans(out: &mut RenderOut, spans: &[CachedSpan], bg: Option<Colo
             continue;
         }
         if let Some(bg_color) = bg {
-            let _ = out.queue(SetBackgroundColor(bg_color));
+            out.set_bg(bg_color);
         }
-        let _ = out.queue(SetForegroundColor(Color::Rgb {
+        out.set_fg(Color::Rgb {
             r: span.fg.0,
             g: span.fg.1,
             b: span.fg.2,
-        }));
+        });
         let _ = out.queue(Print(&span.text));
         col += span.text.chars().count();
     }
-    let _ = out.queue(ResetColor);
+    out.reset_style();
     col
 }
 
@@ -585,9 +583,9 @@ pub(super) fn print_cached_inline_diff(
         match line {
             CachedDiffLine::Ellipsis => {
                 let _ = out.queue(Print(indent));
-                let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                out.set_fg(Color::DarkGrey);
                 let _ = out.queue(Print(format!("{:>w$}", "...", w = 1 + gutter_width)));
-                let _ = out.queue(ResetColor);
+                out.reset_style();
                 crlf(out);
             }
             CachedDiffLine::Context { lineno, spans, .. }
@@ -603,11 +601,11 @@ pub(super) fn print_cached_inline_diff(
                 for (vi, vrow) in visual_rows.iter().enumerate() {
                     let _ = out.queue(Print(indent));
                     if let Some((ch, color)) = sign {
-                        let _ = out.queue(SetBackgroundColor(bg.unwrap()));
+                        out.set_bg(bg.unwrap());
                         if vi == 0 {
-                            let _ = out.queue(SetForegroundColor(color));
+                            out.set_fg(color);
                             let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
-                            let _ = out.queue(SetForegroundColor(color));
+                            out.set_fg(color);
                             let _ = out.queue(Print(format!("{} ", ch)));
                         } else {
                             let _ = out.queue(Print(&blank_gutter));
@@ -617,16 +615,16 @@ pub(super) fn print_cached_inline_diff(
                             term_width().saturating_sub(prefix_len + content_cols + right_margin);
                         if pad > 0 {
                             if let Some(bg_color) = bg {
-                                let _ = out.queue(SetBackgroundColor(bg_color));
+                                out.set_bg(bg_color);
                             }
                             let _ = out.queue(Print(" ".repeat(pad)));
                         }
-                        let _ = out.queue(ResetColor);
+                        out.reset_style();
                     } else {
                         if vi == 0 {
-                            let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                            out.set_fg(Color::DarkGrey);
                             let _ = out.queue(Print(format!(" {:>w$}", lineno, w = gutter_width)));
-                            let _ = out.queue(ResetColor);
+                            out.reset_style();
                             let _ = out.queue(Print("   "));
                         } else {
                             let _ = out.queue(Print(&blank_gutter));
@@ -753,10 +751,10 @@ impl<'a> BashHighlighter<'a> {
                 g: style.foreground.g,
                 b: style.foreground.b,
             };
-            let _ = out.queue(SetForegroundColor(fg));
+            out.set_fg(fg);
             let _ = out.queue(Print(text));
         }
-        let _ = out.queue(ResetColor);
+        out.reset_style();
     }
 }
 
@@ -772,18 +770,18 @@ fn print_split_regions(
             continue;
         }
         if let Some(bg_color) = bg {
-            let _ = out.queue(SetBackgroundColor(bg_color));
+            out.set_bg(bg_color);
         }
         let fg = Color::Rgb {
             r: style.foreground.r,
             g: style.foreground.g,
             b: style.foreground.b,
         };
-        let _ = out.queue(SetForegroundColor(fg));
+        out.set_fg(fg);
         let _ = out.queue(Print(text));
         col += text.chars().count();
     }
-    let _ = out.queue(ResetColor);
+    out.reset_style();
     col
 }
 
@@ -981,16 +979,13 @@ pub(crate) fn render_markdown_table(
     let mut total_rows = 0u16;
 
     let bar = |out: &mut RenderOut, dim: bool| {
-        let _ = out.queue(SetForegroundColor(theme::bar()));
+        out.set_fg(theme::bar());
         if dim {
-            let _ = out.queue(SetAttribute(Attribute::Dim));
+            out.set_dim();
         }
     };
-    let reset = |out: &mut RenderOut, dim: bool| {
-        let _ = out.queue(ResetColor);
-        if dim {
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-        }
+    let reset = |out: &mut RenderOut, _dim: bool| {
+        out.reset_style();
     };
 
     let render_table_row =
@@ -1125,18 +1120,15 @@ fn render_table_stacked(out: &mut RenderOut, rows: &[Vec<String>], dim: bool) ->
             for (li, line) in wrapped.iter().enumerate() {
                 if li == 0 {
                     let _ = out.queue(Print("  "));
-                    let _ = out.queue(SetForegroundColor(Color::DarkGrey));
+                    out.set_fg(Color::DarkGrey);
                     if dim {
-                        let _ = out.queue(SetAttribute(Attribute::Dim));
+                        out.set_dim();
                     }
                     print_inline_styled(out, label, dim);
                     if pad > 0 {
                         let _ = out.queue(Print(" ".repeat(pad)));
                     }
-                    let _ = out.queue(ResetColor);
-                    if dim {
-                        let _ = out.queue(SetAttribute(Attribute::Reset));
-                    }
+                    out.reset_style();
                     let _ = out.queue(Print("  "));
                 } else {
                     let _ = out.queue(Print(" ".repeat(value_indent)));
@@ -1221,16 +1213,15 @@ fn min_visual_width(text: &str) -> usize {
 pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: bool) {
     macro_rules! reset {
         () => {
-            let _ = out.queue(SetAttribute(Attribute::Reset));
-            let _ = out.queue(ResetColor);
+            out.reset_style();
             if dim {
-                let _ = out.queue(SetAttribute(Attribute::Dim));
+                out.set_dim();
             }
         };
     }
 
     if dim {
-        let _ = out.queue(SetAttribute(Attribute::Dim));
+        out.set_dim();
     }
 
     let chars: Vec<char> = text.chars().collect();
@@ -1253,9 +1244,9 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
             if let Some(end) = find_closing_pair(&chars, i + 2, '~', '~') {
                 flush_plain!();
                 let word: String = chars[i + 2..end].iter().collect();
-                let _ = out.queue(SetAttribute(Attribute::CrossedOut));
+                out.push_crossedout();
                 let _ = out.queue(Print(&word));
-                reset!();
+                out.pop_style();
                 i = end + 2;
                 continue;
             }
@@ -1271,8 +1262,8 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
             if let Some(end) = find_closing_triple(&chars, i + 3, marker) {
                 flush_plain!();
                 let word: String = chars[i + 3..end].iter().collect();
-                let _ = out.queue(SetAttribute(Attribute::Bold));
-                let _ = out.queue(SetAttribute(Attribute::Italic));
+                out.set_bold();
+                out.set_italic();
                 let _ = out.queue(Print(&word));
                 reset!();
                 i = end + 3;
@@ -1292,7 +1283,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
                 if !chars[end - 1].is_whitespace() {
                     flush_plain!();
                     let word: String = chars[i + 2..end].iter().collect();
-                    let _ = out.queue(SetAttribute(Attribute::Bold));
+                    out.set_bold();
                     let _ = out.queue(Print(&word));
                     reset!();
                     i = end + 2;
@@ -1312,7 +1303,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
                 if !chars[end - 1].is_whitespace() {
                     flush_plain!();
                     let word: String = chars[i + 1..end].iter().collect();
-                    let _ = out.queue(SetAttribute(Attribute::Italic));
+                    out.set_italic();
                     let _ = out.queue(Print(&word));
                     reset!();
                     i = end + 1;
@@ -1326,9 +1317,9 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
             if let Some(end) = find_closing_single(&chars, i + 1, '`') {
                 flush_plain!();
                 let word: String = chars[i + 1..end].iter().collect();
-                let _ = out.queue(SetForegroundColor(theme::accent()));
+                out.set_fg(theme::accent());
                 if dim {
-                    let _ = out.queue(SetAttribute(Attribute::Dim));
+                    out.set_dim();
                 }
                 let _ = out.queue(Print(&word));
                 reset!();
@@ -1343,8 +1334,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
     flush_plain!();
 
     if dim {
-        let _ = out.queue(SetAttribute(Attribute::Reset));
-        let _ = out.queue(ResetColor);
+        out.reset_style();
     }
 }
 
