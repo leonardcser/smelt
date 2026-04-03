@@ -122,8 +122,8 @@ pub struct LLMResponse {
 pub enum ProviderError {
     #[error("cancelled")]
     Cancelled,
-    #[error("rate limited (attempt {attempt})")]
-    RateLimited { attempt: u32 },
+    #[error("{}", format_rate_limit(resets_at))]
+    RateLimited { resets_at: Option<u64> },
     #[error("quota exceeded: {0}")]
     QuotaExceeded(String),
     #[error("authentication failed: {0}")]
@@ -140,6 +140,36 @@ pub enum ProviderError {
     MaxRetries,
 }
 
+fn format_rate_limit(resets_at: &Option<u64>) -> String {
+    let Some(epoch) = resets_at else {
+        return "rate limited".to_string();
+    };
+    let time_str = format_epoch_local(*epoch);
+    format!("rate limited — try again at {time_str}")
+}
+
+fn format_epoch_local(epoch_secs: u64) -> String {
+    #[cfg(unix)]
+    {
+        let t = epoch_secs as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&t, &mut tm) };
+        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = epoch_secs;
+        "later".to_string()
+    }
+}
+
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 impl ProviderError {
     fn is_retryable(&self) -> bool {
         matches!(
@@ -148,7 +178,7 @@ impl ProviderError {
         )
     }
 
-    fn from_http(code: u16, body: String) -> Self {
+    fn from_http(code: u16, body: String, retry_after: Option<Duration>) -> Self {
         let is_quota = body.contains("insufficient_quota")
             || body.contains("billing_not_active")
             || body.contains("credit balance is too low")
@@ -159,9 +189,42 @@ impl ProviderError {
             400 => ProviderError::InvalidResponse(body),
             401 | 403 => ProviderError::Auth(body),
             404 => ProviderError::NotFound(body),
-            429 => ProviderError::RateLimited { attempt: 0 },
+            429 => ProviderError::RateLimited {
+                resets_at: parse_resets_at(&body)
+                    .or_else(|| retry_after.map(|d| unix_now() + d.as_secs())),
+            },
             _ => ProviderError::Server { status: code, body },
         }
+    }
+}
+
+fn parse_resets_at(body: &str) -> Option<u64> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    json.get("error")
+        .and_then(|e| e.get("resets_at"))
+        .and_then(json_as_u64)
+}
+
+pub(crate) fn json_as_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64().or_else(|| v.as_i64().map(|i| i as u64))
+}
+
+pub(crate) fn parse_retry_from_body(body: &str) -> Option<Duration> {
+    let lower = body.to_ascii_lowercase();
+    let idx = lower.find("try again in")?;
+    let after = &lower[idx + "try again in".len()..];
+    let trimmed = after.trim_start();
+
+    let end = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(trimmed.len());
+    let value: f64 = trimmed[..end].parse().ok()?;
+
+    let unit = trimmed[end..].trim_start();
+    if unit.starts_with("ms") {
+        Some(Duration::from_millis(value as u64))
+    } else {
+        Some(Duration::from_secs_f64(value))
     }
 }
 
@@ -484,10 +547,7 @@ impl Provider {
                 let retry_after = parse_retry_after(&resp);
                 let text = resp.text().await.unwrap_or_default();
 
-                let mut err = ProviderError::from_http(code, text);
-                if let ProviderError::RateLimited { attempt: ref mut a } = err {
-                    *a = attempt as u32;
-                }
+                let err = ProviderError::from_http(code, text, retry_after);
 
                 log::entry(
                     log::Level::Warn,

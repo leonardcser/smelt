@@ -11,12 +11,9 @@ pub const CODEX_API_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/resp
 const OAUTH_PORT: u16 = 1455;
 const REFRESH_INTERVAL_SECS: u64 = 8 * 3600; // 8 hours
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+pub const CODEX_TOKENS_ENV: &str = "SMELT_CODEX_TOKENS";
+
+use super::unix_now;
 
 // ── Persisted tokens ───────────────────────────────────────────────────────
 
@@ -50,18 +47,21 @@ impl CodexTokens {
     pub fn save(&self) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
 
+        file_save(&json)?;
         if keyring_save(&json).is_ok() {
             println!("  Credentials saved to keyring ({KEYRING_SERVICE})");
-            let _ = file_save(&json);
-            return Ok(());
+        } else {
+            println!("  Credentials saved to {}", token_path().display());
         }
-
-        file_save(&json)?;
-        println!("  Credentials saved to {}", token_path().display());
         Ok(())
     }
 
     pub fn load() -> Option<Self> {
+        if let Ok(json) = std::env::var(CODEX_TOKENS_ENV) {
+            if let Ok(tokens) = serde_json::from_str(&json) {
+                return Some(tokens);
+            }
+        }
         if let Some(json) = keyring_load() {
             if let Ok(tokens) = serde_json::from_str(&json) {
                 return Some(tokens);
@@ -74,6 +74,10 @@ impl CodexTokens {
     pub fn delete() {
         let _ = keyring_delete();
         let _ = std::fs::remove_file(token_path());
+    }
+
+    pub fn to_env_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
     }
 }
 

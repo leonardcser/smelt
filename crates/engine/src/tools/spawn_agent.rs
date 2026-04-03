@@ -106,6 +106,15 @@ impl Tool for SpawnAgentTool {
             cmd.stdin(std::process::Stdio::null());
             cmd.env("FORCE_COLOR", "1");
 
+            if self.provider_type == crate::ProviderKind::Codex.as_config_str() {
+                if let Some(tokens) = crate::provider::codex::CodexTokens::load() {
+                    cmd.env(
+                        crate::provider::codex::CODEX_TOKENS_ENV,
+                        tokens.to_env_json(),
+                    );
+                }
+            }
+
             let agent_id = crate::registry::next_agent_id();
 
             cmd.stdout(std::process::Stdio::piped());

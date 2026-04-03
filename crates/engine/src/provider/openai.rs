@@ -241,6 +241,7 @@ pub(super) async fn read_stream(
     // Map from item_id to (call_id, name, args)
     let mut tool_calls: HashMap<String, (String, String, String)> = HashMap::new();
     let mut usage = TokenUsage::default();
+    let mut stream_error: Option<ProviderError> = None;
 
     sse::read_events(resp, cancel, |ev| {
         let ev_type = ev["type"].as_str().unwrap_or("");
@@ -294,10 +295,38 @@ pub(super) async fn read_stream(
                     usage = parse_usage(u);
                 }
             }
+            "response.failed" => {
+                if let Some(error) = ev.get("response").and_then(|r| r.get("error")) {
+                    let code = error["code"].as_str().unwrap_or("");
+                    let err_type = error["type"].as_str().unwrap_or("");
+                    let message = error["message"].as_str().unwrap_or("");
+                    let resets_at = super::json_as_u64(&error["resets_at"]);
+                    if code == "rate_limit_exceeded" || err_type == "usage_limit_reached" {
+                        let fallback = super::parse_retry_from_body(message)
+                            .map(|d| super::unix_now() + d.as_secs());
+                        stream_error = Some(ProviderError::RateLimited {
+                            resets_at: resets_at.or(fallback),
+                        });
+                    } else if code == "insufficient_quota" || code == "billing_not_active" {
+                        stream_error = Some(ProviderError::QuotaExceeded(message.to_string()));
+                    } else if code == "context_length_exceeded" {
+                        stream_error = Some(ProviderError::InvalidResponse(message.to_string()));
+                    } else {
+                        stream_error = Some(ProviderError::Server {
+                            status: 0,
+                            body: message.to_string(),
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     })
     .await?;
+
+    if let Some(err) = stream_error {
+        return Err(err);
+    }
 
     let tool_calls: Vec<ToolCall> = tool_calls
         .into_values()
