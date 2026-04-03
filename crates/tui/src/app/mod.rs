@@ -159,7 +159,6 @@ struct ConfirmContext {
 struct TurnState {
     turn_id: u64,
     pending: Vec<PendingTool>,
-    steered_count: usize,
     _perf: Option<crate::perf::Guard>,
 }
 
@@ -611,12 +610,7 @@ impl App {
                         }
                     };
                     let action = if let Some(ref mut ag) = agent {
-                        let ctrl = self.handle_engine_event(
-                            ev,
-                            ag.turn_id,
-                            &mut ag.pending,
-                            &mut ag.steered_count,
-                        );
+                        let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         self.dispatch_control(
                             ctrl,
                             &ag.pending,
@@ -640,86 +634,45 @@ impl App {
                 }
             }
 
-            // ── Sync steering ────────────────────────────────────────────
-            if let Some(ref mut ag) = agent {
-                if self.queued_messages.len() > ag.steered_count {
-                    for msg in &self.queued_messages[ag.steered_count..] {
-                        // Custom commands need their own turn — don't steer them
-                        // into the current one.
-                        if crate::custom_commands::resolve(msg.trim()).is_none() {
-                            self.engine.send(UiCommand::Steer { text: msg.clone() });
-                        }
-                    }
-                    ag.steered_count = self.queued_messages.len();
-                }
-            }
-
-            // ── Auto-start from leftover queued messages ─────────────────
+            // ── Auto-start from leftover queued messages (one per turn) ──
             if agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
-                let items = std::mem::take(&mut self.queued_messages);
-
-                // Find the first custom command in the queue.
-                let cmd_idx = items
-                    .iter()
-                    .position(|m| crate::custom_commands::resolve(m.trim()).is_some());
-
-                match cmd_idx {
-                    // First item is a custom command — start it, keep the rest.
-                    Some(0) => {
-                        let cmd = crate::custom_commands::resolve(items[0].trim()).unwrap();
-                        self.screen.erase_prompt();
-                        agent = Some(self.begin_custom_command_turn(cmd));
-                        self.queued_messages = items[1..].to_vec();
-                    }
-                    // Regular messages before a custom command — process them,
-                    // keep the command (and everything after) for next round.
-                    Some(idx) => {
-                        let text = items[..idx].join("\n");
-                        self.queued_messages = items[idx..].to_vec();
-                        if !text.is_empty() {
+                let text = self.queued_messages.remove(0);
+                if let Some(cmd) = crate::custom_commands::resolve(text.trim()) {
+                    self.screen.erase_prompt();
+                    agent = Some(self.begin_custom_command_turn(cmd));
+                } else if !text.is_empty() {
+                    match self.process_input(&text) {
+                        InputOutcome::StartAgent => {
                             self.screen.erase_prompt();
                             let content = Content::text(text.clone());
                             agent = Some(self.begin_agent_turn(&text, content));
                         }
-                    }
-                    // No custom commands — original behavior.
-                    None => {
-                        let text = items.join("\n");
-                        if !text.is_empty() {
-                            match self.process_input(&text) {
-                                InputOutcome::StartAgent => {
-                                    self.screen.erase_prompt();
-                                    let content = Content::text(text.clone());
-                                    agent = Some(self.begin_agent_turn(&text, content));
-                                }
-                                InputOutcome::Compact { instructions } => {
-                                    self.screen.erase_prompt();
-                                    if self.history.is_empty() {
-                                        self.screen.notify_error("nothing to compact".into());
-                                    } else {
-                                        self.compact_history(instructions);
-                                    }
-                                }
-                                InputOutcome::CustomCommand(cmd) => {
-                                    self.screen.erase_prompt();
-                                    agent = Some(self.begin_custom_command_turn(*cmd));
-                                }
-                                InputOutcome::Exec(rx, kill) => {
-                                    self.screen.erase_prompt();
-                                    self.exec_rx = Some(rx);
-                                    self.exec_kill = Some(kill);
-                                }
-                                InputOutcome::CancelAndClear => {
-                                    self.screen.erase_prompt();
-                                    self.reset_session();
-                                    agent = None;
-                                }
-                                InputOutcome::Continue | InputOutcome::Quit => {}
-                                InputOutcome::OpenDialog(dlg) => {
-                                    self.screen.erase_prompt();
-                                    active_dialog = Some(dlg);
-                                }
+                        InputOutcome::Compact { instructions } => {
+                            self.screen.erase_prompt();
+                            if self.history.is_empty() {
+                                self.screen.notify_error("nothing to compact".into());
+                            } else {
+                                self.compact_history(instructions);
                             }
+                        }
+                        InputOutcome::CustomCommand(cmd) => {
+                            self.screen.erase_prompt();
+                            agent = Some(self.begin_custom_command_turn(*cmd));
+                        }
+                        InputOutcome::Exec(rx, kill) => {
+                            self.screen.erase_prompt();
+                            self.exec_rx = Some(rx);
+                            self.exec_kill = Some(kill);
+                        }
+                        InputOutcome::CancelAndClear => {
+                            self.screen.erase_prompt();
+                            self.reset_session();
+                            agent = None;
+                        }
+                        InputOutcome::Continue | InputOutcome::Quit => {}
+                        InputOutcome::OpenDialog(dlg) => {
+                            self.screen.erase_prompt();
+                            active_dialog = Some(dlg);
                         }
                     }
                 }
@@ -883,7 +836,7 @@ impl App {
 
                 Some(ev) = self.engine.recv(), if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) => {
                     if let Some(ref mut ag) = agent {
-                        let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending, &mut ag.steered_count);
+                        let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,

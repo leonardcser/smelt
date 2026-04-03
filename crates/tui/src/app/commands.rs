@@ -397,15 +397,6 @@ impl App {
         }
     }
 
-    /// Count queued messages that were actually steered into the engine
-    /// (excludes custom commands, which need their own turn).
-    pub(super) fn steered_message_count(&self) -> usize {
-        self.queued_messages
-            .iter()
-            .filter(|m| crate::custom_commands::resolve(m.trim()).is_none())
-            .count()
-    }
-
     pub(super) fn format_conversation_text(&self) -> String {
         format_conversation_markdown(&self.history, &self.session)
     }

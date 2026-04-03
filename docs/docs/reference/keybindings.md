@@ -14,6 +14,7 @@
 | `Ctrl+L`                        | Redraw screen                      |
 | `Ctrl+T`                        | Cycle reasoning effort             |
 | `Shift+Tab`                     | Cycle mode                         |
+| `Enter` (empty prompt)          | Pop and send next queued message   |
 | `Esc`                           | Unqueue messages or dismiss dialog |
 | `Esc Esc`                       | Cancel agent / compaction / rewind |
 | `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Navigate input history             |

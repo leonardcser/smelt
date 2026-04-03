@@ -62,7 +62,6 @@ impl App {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
         }
     }
@@ -99,7 +98,6 @@ impl App {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
         }
     }
@@ -229,7 +227,6 @@ impl App {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            steered_count: 0,
             _perf: crate::perf::begin("agent_turn"),
         }
     }
@@ -340,7 +337,6 @@ impl App {
         ev: EngineEvent,
         turn_id: u64,
         pending: &mut Vec<PendingTool>,
-        steered_count: &mut usize,
     ) -> SessionControl {
         match ev {
             EngineEvent::Ready => SessionControl::Continue,
@@ -385,12 +381,10 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::Steered { text, count } => {
-                // Flush streaming content before showing the queued message.
                 self.screen.flush_streaming_thinking();
                 self.screen.flush_streaming_text();
                 let drain_n = count.min(self.queued_messages.len());
                 self.queued_messages.drain(..drain_n);
-                *steered_count = steered_count.saturating_sub(drain_n);
                 if drain_n > 0 {
                     self.screen.push(Block::User {
                         text,

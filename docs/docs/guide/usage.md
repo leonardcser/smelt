@@ -69,9 +69,10 @@ text is collapsed into a single attachment.
 
 ## Message Queuing
 
-While the agent is responding, keep typing. Messages queue up and are sent
-sequentially when the agent finishes.
+While the agent is responding, keep typing. Messages queue up and are sent one
+at a time — each queued message becomes its own turn, in order.
 
+- `Enter` on an empty prompt — pop and send the next queued message immediately
 - `Esc` — unqueue pending messages so you can edit them
 - `Esc Esc` — cancel the agent _and_ unqueue everything
 

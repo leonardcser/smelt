@@ -240,6 +240,50 @@ impl App {
                                 *active_dialog = Some(dlg);
                             }
                         }
+                    } else if !self.queued_messages.is_empty() {
+                        // Empty submit with queued messages: pop and send the
+                        // oldest one immediately.
+                        let queued = self.queued_messages.remove(0);
+                        if let Some(cmd) = crate::custom_commands::resolve(queued.trim()) {
+                            self.screen.erase_prompt();
+                            *agent = Some(self.begin_custom_command_turn(cmd));
+                        } else {
+                            match self.process_input(&queued) {
+                                InputOutcome::StartAgent => {
+                                    self.screen.erase_prompt();
+                                    let content = Content::text(queued.clone());
+                                    *agent = Some(self.begin_agent_turn(&queued, content));
+                                }
+                                InputOutcome::CustomCommand(cmd) => {
+                                    self.screen.erase_prompt();
+                                    *agent = Some(self.begin_custom_command_turn(*cmd));
+                                }
+                                InputOutcome::Compact { instructions } => {
+                                    self.screen.erase_prompt();
+                                    if self.history.is_empty() {
+                                        self.screen.notify_error("nothing to compact".into());
+                                    } else {
+                                        self.compact_history(instructions);
+                                    }
+                                }
+                                InputOutcome::Exec(rx, kill) => {
+                                    self.screen.erase_prompt();
+                                    self.exec_rx = Some(rx);
+                                    self.exec_kill = Some(kill);
+                                }
+                                InputOutcome::CancelAndClear => {
+                                    self.screen.erase_prompt();
+                                    self.reset_session();
+                                    *agent = None;
+                                }
+                                InputOutcome::Continue => {}
+                                InputOutcome::Quit => return true,
+                                InputOutcome::OpenDialog(dlg) => {
+                                    self.screen.erase_prompt();
+                                    *active_dialog = Some(dlg);
+                                }
+                            }
+                        }
                     }
                 }
                 // Restore stash unless a modal/dialog was opened (it will restore on close).
@@ -449,10 +493,6 @@ impl App {
                         }
                         t.last_ctrlc = Some(Instant::now());
                         self.input.clear();
-                        let count = self.steered_message_count();
-                        if count > 0 {
-                            self.engine.send(UiCommand::Unsteer { count });
-                        }
                         self.queued_messages.clear();
                         self.screen.mark_dirty();
                         return EventOutcome::Noop;
@@ -488,10 +528,6 @@ impl App {
                     self.screen.mark_dirty();
                 }
                 EscAction::Unqueue => {
-                    let count = self.steered_message_count();
-                    if count > 0 {
-                        self.engine.send(UiCommand::Unsteer { count });
-                    }
                     let mut combined = self.queued_messages.join("\n");
                     if !self.input.buf.is_empty() {
                         combined.push('\n');
