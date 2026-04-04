@@ -544,8 +544,15 @@ fn dialog_overlay_replaced_by_live_tool() {
     dialog.set_term_size(h.width, h.height);
     h.screen.render_pending_blocks();
     h.screen.erase_prompt();
-    let fits = h.screen.tool_overlay_fits_with_dialog(dialog.height());
-    h.screen.set_show_tool_in_dialog(fits);
+    let overlay_id = if h
+        .screen
+        .tool_overlay_fits_with_dialog("c1", dialog.height())
+    {
+        Some("c1".to_string())
+    } else {
+        None
+    };
+    h.screen.set_dialog_tool_call_id(overlay_id);
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
         h.screen.draw_frame(&mut frame, h.width as usize, None);
@@ -561,7 +568,7 @@ fn dialog_overlay_replaced_by_live_tool() {
     h.screen.clear_dialog_area(da);
     h.drain_sink();
     h.screen.set_active_status("c1", ToolStatus::Pending);
-    h.screen.set_show_tool_in_dialog(false);
+    h.screen.set_dialog_tool_call_id(None);
     h.draw_prompt(); // tool now live-updating
 
     // The summary should appear exactly once (the live overlay).

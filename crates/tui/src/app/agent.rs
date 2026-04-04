@@ -973,7 +973,7 @@ impl App {
                     // drain stale engine events and save the truncated state.
                     while self.engine.try_recv().is_ok() {}
                     self.save_session();
-                    self.screen.set_show_tool_in_dialog(false);
+                    self.screen.set_dialog_tool_call_id(None);
                 } else {
                     // Dialog was cancelled — clean up the dialog overlay.
                     if restore_vim_insert {
@@ -1297,6 +1297,16 @@ impl App {
                     return LoopAction::Continue;
                 }
 
+                // Check mode-based permissions (e.g. Apply mode auto-allows writes).
+                if self
+                    .permissions
+                    .decide(self.mode, &req.tool_name, &req.args, false)
+                    == Decision::Allow
+                {
+                    self.send_permission_decision(req.request_id, true, None);
+                    return LoopAction::Continue;
+                }
+
                 let outside_paths = self
                     .permissions
                     .outside_workspace_paths(&req.tool_name, &req.args);
@@ -1350,8 +1360,9 @@ impl App {
                 });
                 self.screen
                     .set_active_status(&req.call_id, ToolStatus::Confirm);
+                let call_id = req.call_id.clone();
                 let dialog = Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
-                self.open_blocking_dialog(dialog, active_dialog);
+                self.open_blocking_dialog(dialog, active_dialog, Some(&call_id));
                 LoopAction::Continue
             }
             SessionControl::NeedsAskQuestion { args, request_id } => {
@@ -1370,7 +1381,7 @@ impl App {
                 self.screen.set_active_status("", ToolStatus::Confirm);
                 let questions = render::parse_questions(&args);
                 let dialog = Box::new(QuestionDialog::new(questions, request_id));
-                self.open_blocking_dialog(dialog, active_dialog);
+                self.open_blocking_dialog(dialog, active_dialog, None);
                 LoopAction::Continue
             }
         }

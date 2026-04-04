@@ -1440,13 +1440,20 @@ impl App {
         &mut self,
         mut dialog: Box<dyn render::Dialog>,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
+        tool_call_id: Option<&str>,
     ) {
         // Flush pending blocks to scroll mode so they persist in scrollback.
         let scr = &mut self.screen;
         scr.render_pending_blocks();
-        let fits = scr.tool_overlay_fits_with_dialog(dialog.height());
+        let overlay_id = tool_call_id.and_then(|cid| {
+            if scr.tool_overlay_fits_with_dialog(cid, dialog.height()) {
+                Some(cid.to_string())
+            } else {
+                None
+            }
+        });
         scr.erase_prompt();
-        scr.set_show_tool_in_dialog(fits);
+        scr.set_dialog_tool_call_id(overlay_id);
         // Share the kill ring so Ctrl+K/Y work across input ↔ dialog.
         dialog.set_kill_ring(self.input.take_kill_ring());
         *active_dialog = Some(dialog);

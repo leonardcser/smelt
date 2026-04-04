@@ -436,8 +436,15 @@ fn no_double_gap_when_overlay_hidden() {
 
     h.screen.render_pending_blocks();
     h.screen.erase_prompt();
-    let fits = h.screen.tool_overlay_fits_with_dialog(dialog.height());
-    h.screen.set_show_tool_in_dialog(fits);
+    let overlay_id = if h
+        .screen
+        .tool_overlay_fits_with_dialog("c1", dialog.height())
+    {
+        Some("c1".to_string())
+    } else {
+        None
+    };
+    h.screen.set_dialog_tool_call_id(overlay_id.clone());
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
         h.screen.draw_frame(&mut frame, 80, None);
@@ -495,7 +502,7 @@ fn no_double_gap_when_overlay_hidden() {
         blanks,
         1,
         "Expected 1 blank line above tool when overlay was hidden, found {blanks}.\n\
-         fits={fits}, dialog_height={}, scrollback={sb}\n\
+         overlay={overlay_id:?}, dialog_height={}, scrollback={sb}\n\
          Full output:\n{text}\n\nVisible rows:\n{vrows}",
         dialog.height()
     );
@@ -518,4 +525,103 @@ fn no_double_gap_nearly_full_terminal() {
 
     let text = h.full_text();
     assert_no_double_gaps(&text, "no_double_gap_nearly_full_terminal");
+}
+
+/// With parallel tool calls, the confirm dialog overlay should only show
+/// the tool that owns the dialog — not the other parallel tools.
+#[test]
+fn parallel_tools_only_dialog_owner_shown() {
+    let height = 24;
+    let mut h = TestHarness::new(80, height, "parallel_tools_only_dialog_owner");
+
+    h.push_and_render(Block::Text {
+        content: "I'll run three commands.".into(),
+    });
+    h.draw_prompt();
+
+    // Start 3 parallel tools.
+    for (id, summary) in [
+        ("c1", "MARKER_AAA"),
+        ("c2", "MARKER_BBB"),
+        ("c3", "MARKER_CCC"),
+    ] {
+        h.screen.start_tool(
+            id.into(),
+            "bash".into(),
+            summary.into(),
+            std::collections::HashMap::new(),
+        );
+    }
+    // c2 needs confirmation — the other two are still pending.
+    h.screen
+        .set_active_status("c2", tui::render::ToolStatus::Confirm);
+    h.screen.render_pending_blocks();
+    h.drain_sink();
+
+    // Open confirm dialog for c2.
+    let req = tui::render::ConfirmRequest {
+        call_id: "c2".into(),
+        tool_name: "bash".into(),
+        desc: "MARKER_BBB".into(),
+        args: std::collections::HashMap::new(),
+        approval_patterns: vec![],
+        outside_dir: None,
+        summary: Some("MARKER_BBB".into()),
+        request_id: 2,
+    };
+    let mut dialog = tui::render::ConfirmDialog::new(&req, false);
+    dialog.set_term_size(80, height);
+
+    h.screen.render_pending_blocks();
+    h.screen.erase_prompt();
+    let overlay_id = if h
+        .screen
+        .tool_overlay_fits_with_dialog("c2", dialog.height())
+    {
+        Some("c2".to_string())
+    } else {
+        None
+    };
+    h.screen.set_dialog_tool_call_id(overlay_id);
+    {
+        let mut frame = tui::render::Frame::begin(h.screen.backend());
+        h.screen.draw_frame(&mut frame, 80, None);
+        let dr = h.screen.dialog_row();
+        dialog.draw(&mut frame, dr, 80, height);
+    }
+    h.drain_sink();
+    let da = dialog.anchor_row();
+    h.screen.sync_dialog_anchor(da);
+    h.drain_sink();
+
+    let text = h.full_text();
+
+    // The dialog-owning tool (c2 / MARKER_BBB) should be visible.
+    assert!(
+        text.contains("MARKER_BBB"),
+        "Dialog's own tool overlay should be visible.\n{text}"
+    );
+    // The other parallel tools should NOT be in the output.
+    assert!(
+        !text.contains("MARKER_AAA"),
+        "Parallel tool c1 should be hidden during dialog.\n{text}"
+    );
+    assert!(
+        !text.contains("MARKER_CCC"),
+        "Parallel tool c3 should be hidden during dialog.\n{text}"
+    );
+
+    // After dialog dismiss, all tools reappear.
+    h.screen.clear_dialog_area(da);
+    h.drain_sink();
+    h.screen.set_dialog_tool_call_id(None);
+    h.draw_prompt();
+
+    let text_after = h.full_text();
+    for marker in ["MARKER_AAA", "MARKER_BBB", "MARKER_CCC"] {
+        assert!(
+            text_after.contains(marker),
+            "All tools should reappear after dialog dismiss. Missing: {marker}\n{text_after}"
+        );
+    }
 }

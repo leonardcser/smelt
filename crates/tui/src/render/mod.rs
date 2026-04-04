@@ -979,9 +979,10 @@ pub struct Screen {
     last_vim_enabled: bool,
     last_vim_mode: Option<crate::vim::ViMode>,
     last_mode: protocol::Mode,
-    /// Whether to render the active tool above the dialog in content-only
-    /// mode.  Set when tool + dialog fit on screen; cleared on dialog close.
-    show_tool_in_dialog: bool,
+    /// When a confirm dialog is open, the call ID of the tool to overlay
+    /// above it.  Only the matching tool is shown (not all parallel tools)
+    /// so the overlay + dialog fit on screen.  `None` = hide all tools.
+    dialog_tool_call_id: Option<String>,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -1053,7 +1054,7 @@ impl Screen {
             last_vim_enabled: false,
             last_vim_mode: None,
             last_mode: protocol::Mode::Normal,
-            show_tool_in_dialog: false,
+            dialog_tool_call_id: None,
             btw: None,
             notification: None,
             task_label: None,
@@ -1297,9 +1298,10 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Whether to show the active tool above a dialog overlay.
-    pub fn set_show_tool_in_dialog(&mut self, show: bool) {
-        self.show_tool_in_dialog = show;
+    /// Set the call ID of the single active tool to show above a dialog overlay.
+    /// Pass `None` to hide all tools.
+    pub fn set_dialog_tool_call_id(&mut self, call_id: Option<String>) {
+        self.dialog_tool_call_id = call_id;
         self.prompt.dirty = true;
     }
 
@@ -1545,7 +1547,7 @@ impl Screen {
         // begin_dialog_draw used ScrollUp, the overlay was shifted upward
         // and now sits between the screen anchor and the dialog bar.
         // Extend the clear range to wipe the ghost.
-        let clear_from = if self.show_tool_in_dialog {
+        let clear_from = if self.dialog_tool_call_id.is_some() {
             let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
             screen_anchor.min(dialog_row)
         } else {
@@ -1570,7 +1572,7 @@ impl Screen {
         }
         self.defer_pending_render = true;
         self.defer_redraw = true;
-        self.show_tool_in_dialog = false;
+        self.dialog_tool_call_id = None;
         // Only reset anchor/prev_rows when the dialog caused ScrollUp
         // (prompt was physically moved). For non-scrolled dialogs the
         // prompt is still in its original position — just mark dirty so
@@ -2072,51 +2074,34 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Rows the active tools would occupy if rendered (including gaps).
-    pub fn active_tool_rows(&self) -> u16 {
-        if self.active_tools.is_empty() {
-            return 0;
+    /// Returns whether a single tool overlay fits on screen above a
+    /// dialog of the given height.
+    pub fn tool_overlay_fits_with_dialog(&self, call_id: &str, dialog_height: u16) -> bool {
+        let (width, height) = self.size();
+        let w = width as usize;
+        let tool_rows = self
+            .active_tools
+            .iter()
+            .find(|t| t.call_id == call_id)
+            .map(|t| {
+                let mut rows = blocks::tool_line_rows(&t.name, &t.summary, w);
+                if t.name == "web_fetch" {
+                    if let Some(prompt) = t.args.get("prompt").and_then(|v| v.as_str()) {
+                        rows += wrap_line(prompt, w.saturating_sub(4)).len() as u16;
+                    }
+                }
+                rows
+            })
+            .unwrap_or(0);
+        if tool_rows == 0 {
+            return true;
         }
-        let gap = if let Some(last) = self.history.blocks.last() {
+        let gap_above = if let Some(last) = self.history.blocks.last() {
             blocks::gap_between(&blocks::Element::Block(last), &blocks::Element::ActiveTool)
         } else {
             0
         };
-        let w = self.size().0 as usize;
-        let inter_tool_gap =
-            blocks::gap_between(&blocks::Element::ActiveTool, &blocks::Element::ActiveTool);
-        let mut total = gap;
-        for (i, tool) in self.active_tools.iter().enumerate() {
-            if i > 0 {
-                total += inter_tool_gap;
-            }
-            let mut rows = blocks::tool_line_rows(&tool.name, &tool.summary, w);
-            if tool.name == "web_fetch" {
-                if let Some(prompt) = tool.args.get("prompt").and_then(|v| v.as_str()) {
-                    rows += wrap_line(prompt, w.saturating_sub(4)).len() as u16;
-                }
-            }
-            total += rows;
-        }
-        total
-    }
-
-    /// Returns whether the active tool overlay fits on screen above a
-    /// dialog of the given height.
-    ///
-    /// The check is purely about physical space: can the tool overlay and
-    /// dialog both fit within the terminal height? If yes, the content-only
-    /// frame shows the tool and lets the dialog's `ScrollUp` handle
-    /// positioning. If no (dialog is nearly full-screen), the tool is
-    /// hidden to avoid it being pushed into scrollback as a ghost.
-    pub fn tool_overlay_fits_with_dialog(&self, dialog_height: u16) -> bool {
-        let (_width, height) = self.size();
-        let active_rows = self.active_tool_rows();
-        if active_rows == 0 {
-            return true;
-        }
-        let gap: u16 = 1;
-        active_rows + gap + dialog_height <= height
+        gap_above + tool_rows + 1 + dialog_height <= height
     }
 
     pub fn clear_context_tokens(&mut self) {
@@ -2458,7 +2443,7 @@ impl Screen {
     pub fn needs_draw(&self, is_dialog: bool) -> bool {
         let has_new_blocks = self.history.has_unflushed();
         if is_dialog {
-            has_new_blocks || (self.show_tool_in_dialog && self.prompt.dirty)
+            has_new_blocks || (self.dialog_tool_call_id.is_some() && self.prompt.dirty)
         } else {
             has_new_blocks || self.prompt.dirty
         }
@@ -2487,7 +2472,10 @@ impl Screen {
 
         // Content-only (dialog overlay): only render when new blocks arrived
         // or when the active tool should be shown and has changes.
-        if is_dialog && !has_new_blocks && !(self.show_tool_in_dialog && self.prompt.dirty) {
+        if is_dialog
+            && !has_new_blocks
+            && !(self.dialog_tool_call_id.is_some() && self.prompt.dirty)
+        {
             return false;
         }
         // Full mode: skip if nothing changed.
@@ -2628,42 +2616,53 @@ impl Screen {
 
         // ── Render active tools ─────────────────────────────────────────
         let mut active_rows: u16 = 0;
-        let show_active = !is_dialog || self.show_tool_in_dialog;
-        if show_active {
-            for (i, tool) in self.active_tools.iter().enumerate() {
-                let tool_gap = if i == 0 {
-                    if streaming_rows > 0 {
-                        // Streaming text is above — always 1 gap.
-                        1
-                    } else if let Some(last) = self.history.blocks.last() {
-                        gap_between(&Element::Block(last), &Element::ActiveTool)
-                    } else {
-                        0
-                    }
+        // During a dialog, only show the single tool that owns the dialog.
+        let dialog_filter = if is_dialog {
+            self.dialog_tool_call_id.as_deref()
+        } else {
+            None
+        };
+        let tools_to_show: Vec<_> = if let Some(cid) = dialog_filter {
+            self.active_tools
+                .iter()
+                .filter(|t| t.call_id == cid)
+                .collect()
+        } else {
+            self.active_tools.iter().collect()
+        };
+        for (i, tool) in tools_to_show.iter().enumerate() {
+            let tool_gap = if i == 0 {
+                if streaming_rows > 0 {
+                    1
+                } else if let Some(last) = self.history.blocks.last() {
+                    gap_between(&Element::Block(last), &Element::ActiveTool)
                 } else {
-                    gap_between(&Element::ActiveTool, &Element::ActiveTool)
-                };
-                for _ in 0..tool_gap {
-                    crlf(out);
+                    0
                 }
-                let rows = render_tool(
-                    out,
-                    &tool.call_id,
-                    &tool.name,
-                    &tool.summary,
-                    &tool.args,
-                    tool.status,
-                    Some(tool.start_time.elapsed()),
-                    tool.output.as_deref(),
-                    tool.user_message.as_deref(),
-                    width,
-                );
-                active_rows += tool_gap + rows;
+            } else {
+                gap_between(&Element::ActiveTool, &Element::ActiveTool)
+            };
+            for _ in 0..tool_gap {
+                crlf(out);
             }
+            let rows = render_tool(
+                out,
+                &tool.call_id,
+                &tool.name,
+                &tool.summary,
+                &tool.args,
+                tool.status,
+                Some(tool.start_time.elapsed()),
+                tool.output.as_deref(),
+                tool.user_message.as_deref(),
+                width,
+            );
+            active_rows += tool_gap + rows;
         }
 
         // ── Render active blocking agents ──────────────────────────
-        if show_active {
+        let show_agents = dialog_filter.is_none();
+        if show_agents {
             for (i, agent) in self.active_agents.iter().enumerate() {
                 let agent_gap = if i > 0 || !self.active_tools.is_empty() {
                     1
@@ -2696,7 +2695,7 @@ impl Screen {
         }
 
         // ── Render active exec ──────────────────────────────────────
-        if show_active {
+        if show_agents {
             if let Some(ref exec) = self.active_exec {
                 let exec_gap = if !self.active_agents.is_empty() || !self.active_tools.is_empty() {
                     1

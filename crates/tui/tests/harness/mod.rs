@@ -277,8 +277,15 @@ impl TestHarness {
         // Open dialog.
         self.screen.render_pending_blocks();
         self.screen.erase_prompt();
-        let fits = self.screen.tool_overlay_fits_with_dialog(dialog.height());
-        self.screen.set_show_tool_in_dialog(fits);
+        let overlay_id = if self
+            .screen
+            .tool_overlay_fits_with_dialog(call_id, dialog.height())
+        {
+            Some(call_id.to_string())
+        } else {
+            None
+        };
+        self.screen.set_dialog_tool_call_id(overlay_id);
 
         // Draw content + dialog in a single frame.
         {
