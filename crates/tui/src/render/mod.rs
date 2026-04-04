@@ -1383,7 +1383,7 @@ impl Screen {
             spans.push(StatusSpan {
                 text: label,
                 style: pill_style,
-                priority: 3,
+                priority: 5,
                 group: false,
                 truncatable: true,
             });
@@ -1392,7 +1392,7 @@ impl Screen {
                 spans.push(StatusSpan {
                     text: format!(" {label} "),
                     style: pill_style,
-                    priority: 3,
+                    priority: 5,
                     group: false,
                     truncatable: true,
                 });
@@ -1416,7 +1416,7 @@ impl Screen {
                     bg: Some(Color::AnsiValue(236)),
                     ..StyleState::default()
                 },
-                priority: 5,
+                priority: 3,
                 group: false,
                 truncatable: false,
             });
