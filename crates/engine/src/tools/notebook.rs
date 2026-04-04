@@ -34,6 +34,15 @@ pub struct NotebookRenderData {
 }
 
 impl NotebookRenderData {
+    /// Return the file extension for syntax highlighting based on the cell type.
+    pub fn syntax_ext(&self) -> &str {
+        let cell_type = self.new_type.as_deref().or(self.old_type.as_deref());
+        match cell_type {
+            Some("markdown") => "md",
+            _ => "py",
+        }
+    }
+
     pub fn title(&self) -> String {
         let kind = match (self.old_type.as_deref(), self.new_type.as_deref()) {
             (Some(old), Some(new)) if old != new => format!("{old} → {new}"),
