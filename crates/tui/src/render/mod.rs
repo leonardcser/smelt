@@ -1453,7 +1453,6 @@ impl Screen {
         } else {
             &throbber_spans
         };
-        let first_throbber = spans.len();
         for bar_span in status_bar_spans {
             // Map BarSpan priorities: timer (0) → 4, tok/s (3) → 6.
             let priority = match bar_span.priority {
@@ -1471,7 +1470,7 @@ impl Screen {
                     ..StyleState::default()
                 },
                 priority,
-                group: spans.len() == first_throbber,
+                group: false,
                 truncatable: false,
             });
         }
