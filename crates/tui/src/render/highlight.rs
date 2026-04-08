@@ -1,8 +1,4 @@
 use crate::theme;
-use crossterm::{
-    style::{Color, Print},
-    QueueableCommand,
-};
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
@@ -12,12 +8,22 @@ use syntect::highlighting::Style;
 use syntect::parsing::SyntaxSet;
 use unicode_width::UnicodeWidthStr;
 
-use super::{crlf, term_width, RenderOut};
+use super::display::{ColorRole, ColorValue, NamedColor};
+use super::layout_out::LayoutSink;
+use super::term_width;
 
 pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
     LazyLock::new(SyntaxSet::load_defaults_newlines);
 pub(super) static THEME_SET: LazyLock<two_face::theme::EmbeddedLazyThemeSet> =
     LazyLock::new(two_face::theme::extra);
+
+/// Force eager initialization of the syntect syntax and theme sets. Call
+/// once at startup from a background thread so the first tool render
+/// doesn't pay the ~30ms deserialization cost mid-frame.
+pub fn warm_up_syntect() {
+    LazyLock::force(&SYNTAX_SET);
+    LazyLock::force(&THEME_SET);
+}
 
 fn syntax_theme() -> &'static syntect::highlighting::Theme {
     if theme::is_light() {
@@ -27,15 +33,15 @@ fn syntax_theme() -> &'static syntect::highlighting::Theme {
     }
 }
 
-pub(crate) fn render_code_block(
-    out: &mut RenderOut,
+pub(crate) fn render_code_block<S: LayoutSink>(
+    out: &mut S,
     lines: &[&str],
     lang: &str,
     width: usize,
     dim: bool,
     bctx: Option<&super::BoxContext>,
 ) -> u16 {
-    let _perf = crate::perf::begin("render_code_block");
+    let _perf = crate::perf::begin("render:code_block");
     let ext = match lang {
         "" => "txt",
         "js" | "javascript" => "js",
@@ -62,12 +68,13 @@ pub(crate) fn render_code_block(
         out.set_dim();
     }
 
+    let bg = ColorValue::Role(ColorRole::CodeBlockBg);
     for line in &expanded {
         let line_with_nl = format!("{}\n", line);
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
-        let visual_rows = split_regions_into_rows(&regions, text_w);
+        let visual_rows = split_regions_into_rows(out, &regions, text_w);
         for vrow in &visual_rows {
             if let Some(b) = bctx {
                 if dim {
@@ -78,21 +85,21 @@ pub(crate) fn render_code_block(
                     out.set_dim();
                 }
             }
-            let cols = print_split_regions(out, vrow, Some(theme::code_block_bg()));
+            let cols = print_split_regions(out, vrow, Some(bg));
             let pad = content_width.saturating_sub(cols);
             if pad > 0 {
-                out.set_bg(theme::code_block_bg());
-                let _ = out.queue(Print(" ".repeat(pad)));
+                out.set_bg(bg);
+                out.print_string(" ".repeat(pad));
             }
             if let Some(b) = bctx {
                 if dim {
                     out.reset_style();
                 }
                 out.set_fg(b.color);
-                let _ = out.queue(Print(b.right));
+                out.print(b.right);
             }
             out.reset_style();
-            crlf(out);
+            out.newline();
         }
         rows += visual_rows.len() as u16;
     }
@@ -103,14 +110,14 @@ pub(crate) fn render_code_block(
     rows
 }
 
-pub(super) fn render_highlighted(
-    out: &mut RenderOut,
+pub(super) fn render_highlighted<S: LayoutSink>(
+    out: &mut S,
     lines: &[&str],
     syntax: &syntect::parsing::SyntaxReference,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    let _perf = crate::perf::begin("render_highlighted");
+    let _perf = crate::perf::begin("render:highlighted");
     let indent = "   ";
     let theme = syntax_theme();
     let gutter_width = format!("{}", lines.len()).len();
@@ -131,20 +138,20 @@ pub(super) fn render_highlighted(
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
             .unwrap_or_default();
-        let visual_rows = split_regions_into_rows(&regions, max_content);
+        let visual_rows = split_regions_into_rows(out, &regions, max_content);
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if total_rows >= skip && emitted < emit_limit {
-                let _ = out.queue(Print(indent));
+                out.print(indent);
                 if vi == 0 {
-                    out.set_fg(Color::DarkGrey);
-                    let _ = out.queue(Print(format!(" {:>w$}", i + 1, w = gutter_width)));
+                    out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
+                    out.print_string(format!(" {:>w$}", i + 1, w = gutter_width));
                     out.reset_style();
-                    let _ = out.queue(Print("   "));
+                    out.print("   ");
                 } else {
-                    let _ = out.queue(Print(&blank_gutter));
+                    out.print(&blank_gutter);
                 }
                 print_split_regions(out, vrow, None);
-                crlf(out);
+                out.newline();
                 emitted += 1;
             }
             total_rows += 1;
@@ -153,8 +160,8 @@ pub(super) fn render_highlighted(
     emitted
 }
 
-pub(super) fn print_syntax_file(
-    out: &mut RenderOut,
+pub(super) fn print_syntax_file<S: LayoutSink>(
+    out: &mut S,
     content: &str,
     path: &str,
     skip: u16,
@@ -163,15 +170,15 @@ pub(super) fn print_syntax_file(
     print_syntax_file_ext(out, content, path, None, skip, max_rows)
 }
 
-pub(super) fn print_syntax_file_ext(
-    out: &mut RenderOut,
+pub(super) fn print_syntax_file_ext<S: LayoutSink>(
+    out: &mut S,
     content: &str,
     path: &str,
     syntax_ext: Option<&str>,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    let _perf = crate::perf::begin("print_syntax_file");
+    let _perf = crate::perf::begin("render:syntax_file");
     let ext = syntax_ext.unwrap_or_else(|| {
         Path::new(path)
             .extension()
@@ -267,6 +274,7 @@ pub(super) fn build_inline_diff_cache_ext(
     anchor: &str,
     syntax_ext: Option<&str>,
 ) -> CachedInlineDiff {
+    let _perf = crate::perf::begin("render:build_diff_cache");
     let dv = compute_diff_view(old, new, path, anchor);
     let expanded_lines: Vec<String> = dv
         .file_content
@@ -503,8 +511,8 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
 /// Render a syntax-highlighted inline diff.
 /// `skip` rows are computed but not emitted; up to `max_rows` visible rows
 /// are written to `out`.
-pub(super) fn print_inline_diff(
-    out: &mut RenderOut,
+pub(super) fn print_inline_diff<S: LayoutSink>(
+    out: &mut S,
     old: &str,
     new: &str,
     path: &str,
@@ -512,11 +520,16 @@ pub(super) fn print_inline_diff(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
+    let _perf = crate::perf::begin("render:inline_diff_cold");
     let cache = build_inline_diff_cache(old, new, path, anchor);
     print_cached_inline_diff(out, &cache, skip, max_rows)
 }
 
-fn print_cached_spans(out: &mut RenderOut, spans: &[CachedSpan], bg: Option<Color>) -> usize {
+fn print_cached_spans<S: LayoutSink>(
+    out: &mut S,
+    spans: &[CachedSpan],
+    bg: Option<ColorValue>,
+) -> usize {
     let mut col = 0;
     for span in spans {
         if span.text.is_empty() {
@@ -525,19 +538,20 @@ fn print_cached_spans(out: &mut RenderOut, spans: &[CachedSpan], bg: Option<Colo
         if let Some(bg_color) = bg {
             out.set_bg(bg_color);
         }
-        out.set_fg(Color::Rgb {
-            r: span.fg.0,
-            g: span.fg.1,
-            b: span.fg.2,
-        });
-        let _ = out.queue(Print(&span.text));
+        out.set_fg(ColorValue::Rgb(span.fg.0, span.fg.1, span.fg.2));
+        out.print(&span.text);
         col += span.text.chars().count();
     }
     out.reset_style();
     col
 }
 
-fn split_cached_spans_into_rows(spans: &[CachedSpan], max_width: usize) -> Vec<Vec<CachedSpan>> {
+fn split_cached_spans_into_rows<S: LayoutSink>(
+    out: &mut S,
+    spans: &[CachedSpan],
+    max_width: usize,
+) -> Vec<Vec<CachedSpan>> {
+    let _ = out; // wrap-marking is owned by the diff caller
     let max_width = max_width.max(1);
     let mut rows: Vec<Vec<CachedSpan>> = Vec::new();
     let mut current_row: Vec<CachedSpan> = Vec::new();
@@ -572,32 +586,26 @@ fn split_cached_spans_into_rows(spans: &[CachedSpan], max_width: usize) -> Vec<V
     rows
 }
 
-pub(super) fn print_cached_inline_diff(
-    out: &mut RenderOut,
+pub(super) fn print_cached_inline_diff<S: LayoutSink>(
+    out: &mut S,
     cache: &CachedInlineDiff,
     skip: u16,
     max_rows: u16,
 ) -> u16 {
-    let _perf = crate::perf::begin("print_inline_diff");
+    let _perf = crate::perf::begin("render:inline_diff_cached");
 
     let indent = "   ";
     let gutter_width = format!("{}", cache.max_display_lineno).len();
     let prefix_len = indent.len() + 1 + gutter_width + 3;
     let right_margin = indent.len();
-    let max_content = term_width()
-        .saturating_sub(prefix_len + right_margin)
-        .max(1);
+    let tw = term_width();
+    let max_content = tw.saturating_sub(prefix_len + right_margin).max(1);
+    // Diff lines re-wrap content per row using `term_width()`-derived
+    // bounds, so the layout cannot be replayed at a different width.
+    out.mark_wrapped();
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
-    let bg_del = Color::Rgb {
-        r: 60,
-        g: 20,
-        b: 20,
-    };
-    let bg_add = Color::Rgb {
-        r: 20,
-        g: 50,
-        b: 20,
-    };
+    let bg_del = ColorValue::Rgb(60, 20, 20);
+    let bg_add = ColorValue::Rgb(20, 50, 20);
     let blank_gutter = " ".repeat(1 + gutter_width + 3);
 
     let mut emitted = 0u16;
@@ -610,56 +618,56 @@ pub(super) fn print_cached_inline_diff(
         }
         match line {
             CachedDiffLine::Ellipsis => {
-                let _ = out.queue(Print(indent));
-                out.set_fg(Color::DarkGrey);
-                let _ = out.queue(Print(format!("{:>w$}", "...", w = 1 + gutter_width)));
+                out.print(indent);
+                out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
+                out.print_string(format!("{:>w$}", "...", w = 1 + gutter_width));
                 out.reset_style();
-                crlf(out);
+                out.newline();
             }
             CachedDiffLine::Context { lineno, spans, .. }
             | CachedDiffLine::Delete { lineno, spans, .. }
             | CachedDiffLine::Insert { lineno, spans, .. } => {
-                let visual_rows = split_cached_spans_into_rows(spans, max_content);
+                let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
                 let (sign, bg) = match line {
                     CachedDiffLine::Context { .. } => (None, None),
-                    CachedDiffLine::Delete { .. } => (Some(('-', Color::Red)), Some(bg_del)),
-                    CachedDiffLine::Insert { .. } => (Some(('+', Color::Green)), Some(bg_add)),
+                    CachedDiffLine::Delete { .. } => (
+                        Some(('-', ColorValue::Named(NamedColor::Red))),
+                        Some(bg_del),
+                    ),
+                    CachedDiffLine::Insert { .. } => (
+                        Some(('+', ColorValue::Named(NamedColor::Green))),
+                        Some(bg_add),
+                    ),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
                 for (vi, vrow) in visual_rows.iter().enumerate() {
-                    let _ = out.queue(Print(indent));
+                    out.print(indent);
                     if let Some((ch, color)) = sign {
-                        out.set_bg(bg.unwrap());
+                        let bgv = bg.unwrap();
+                        out.set_bg(bgv);
                         if vi == 0 {
                             out.set_fg(color);
-                            let _ = out.queue(Print(format!(" {:>w$} ", lineno, w = gutter_width)));
+                            out.print_string(format!(" {:>w$} ", lineno, w = gutter_width));
                             out.set_fg(color);
-                            let _ = out.queue(Print(format!("{} ", ch)));
+                            out.print_string(format!("{} ", ch));
                         } else {
-                            let _ = out.queue(Print(&blank_gutter));
+                            out.print(&blank_gutter);
                         }
-                        let content_cols = print_cached_spans(out, vrow, bg);
-                        let pad =
-                            term_width().saturating_sub(prefix_len + content_cols + right_margin);
-                        if pad > 0 {
-                            if let Some(bg_color) = bg {
-                                out.set_bg(bg_color);
-                            }
-                            let _ = out.queue(Print(" ".repeat(pad)));
-                        }
+                        let _content_cols = print_cached_spans(out, vrow, bg);
+                        out.fill_line_bg(bgv, right_margin as u16);
                         out.reset_style();
                     } else {
                         if vi == 0 {
-                            out.set_fg(Color::DarkGrey);
-                            let _ = out.queue(Print(format!(" {:>w$}", lineno, w = gutter_width)));
+                            out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
+                            out.print_string(format!(" {:>w$}", lineno, w = gutter_width));
                             out.reset_style();
-                            let _ = out.queue(Print("   "));
+                            out.print("   ");
                         } else {
-                            let _ = out.queue(Print(&blank_gutter));
+                            out.print(&blank_gutter);
                         }
                         print_cached_spans(out, vrow, None);
                     }
-                    crlf(out);
+                    out.newline();
                 }
             }
         }
@@ -704,7 +712,8 @@ pub(super) fn count_cached_inline_diff_rows(cache: &CachedInlineDiff) -> u16 {
 }
 
 /// Split syntax regions into visual rows that each fit within `max_width` columns.
-fn split_regions_into_rows(
+fn split_regions_into_rows<S: LayoutSink>(
+    out: &mut S,
     regions: &[(Style, &str)],
     max_width: usize,
 ) -> Vec<Vec<(Style, String)>> {
@@ -737,6 +746,9 @@ fn split_regions_into_rows(
     if rows.is_empty() {
         rows.push(Vec::new());
     }
+    if rows.len() > 1 {
+        out.mark_wrapped();
+    }
     rows
 }
 
@@ -763,8 +775,8 @@ impl<'a> BashHighlighter<'a> {
     }
 
     /// Print a single line with syntax highlighting.
-    /// Does not emit `crlf` — the caller controls line breaks.
-    pub fn print_line(&mut self, out: &mut RenderOut, line: &str) {
+    /// Does not emit a newline — the caller controls line breaks.
+    pub fn print_line<S: LayoutSink>(&mut self, out: &mut S, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let regions = self
             .h
@@ -775,23 +787,19 @@ impl<'a> BashHighlighter<'a> {
             if text.is_empty() {
                 continue;
             }
-            let fg = Color::Rgb {
-                r: style.foreground.r,
-                g: style.foreground.g,
-                b: style.foreground.b,
-            };
+            let fg = ColorValue::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
             out.set_fg(fg);
-            let _ = out.queue(Print(text));
+            out.print(text);
         }
         out.reset_style();
     }
 }
 
 /// Print pre-split owned regions. Returns columns printed.
-fn print_split_regions(
-    out: &mut RenderOut,
+fn print_split_regions<S: LayoutSink>(
+    out: &mut S,
     regions: &[(Style, String)],
-    bg: Option<Color>,
+    bg: Option<ColorValue>,
 ) -> usize {
     let mut col = 0;
     for (style, text) in regions {
@@ -801,13 +809,9 @@ fn print_split_regions(
         if let Some(bg_color) = bg {
             out.set_bg(bg_color);
         }
-        let fg = Color::Rgb {
-            r: style.foreground.r,
-            g: style.foreground.g,
-            b: style.foreground.b,
-        };
+        let fg = ColorValue::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
         out.set_fg(fg);
-        let _ = out.queue(Print(text));
+        out.print(text);
         col += text.chars().count();
     }
     out.reset_style();
@@ -919,8 +923,8 @@ fn skip_inline_span(chars: &[char], i: usize) -> Option<(usize, usize, usize)> {
     None
 }
 
-pub(crate) fn render_markdown_table(
-    out: &mut RenderOut,
+pub(crate) fn render_markdown_table<S: LayoutSink>(
+    out: &mut S,
     rows: &[Vec<String>],
     dim: bool,
     bctx: Option<&super::BoxContext>,
@@ -1007,92 +1011,91 @@ pub(crate) fn render_markdown_table(
 
     let mut total_rows = 0u16;
 
-    let bar = |out: &mut RenderOut, dim: bool| {
-        out.set_fg(theme::bar());
+    let bar = |out: &mut S, dim: bool| {
+        out.set_fg(ColorValue::Role(ColorRole::Bar));
         if dim {
             out.set_dim();
         }
     };
-    let reset = |out: &mut RenderOut, _dim: bool| {
+    let reset = |out: &mut S, _dim: bool| {
         out.reset_style();
     };
 
-    let render_table_row =
-        |out: &mut RenderOut, row: &[String], widths: &[usize], dim: bool| -> u16 {
-            let wrapped: Vec<Vec<String>> = row
-                .iter()
-                .enumerate()
-                .map(|(c, cell)| {
-                    let w = widths.get(c).copied().unwrap_or(0);
-                    wrap_cell_words(cell, w)
-                })
-                .collect();
-            let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
+    let render_table_row = |out: &mut S, row: &[String], widths: &[usize], dim: bool| -> u16 {
+        let wrapped: Vec<Vec<String>> = row
+            .iter()
+            .enumerate()
+            .map(|(c, cell)| {
+                let w = widths.get(c).copied().unwrap_or(0);
+                wrap_cell_words(out, cell, w)
+            })
+            .collect();
+        let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
 
-            for vline in 0..height {
-                if let Some(b) = bctx {
-                    b.print_left(out);
-                } else if !indent.is_empty() {
-                    let _ = out.queue(Print(indent));
-                }
-                bar(out, dim);
-                let _ = out.queue(Print("┃"));
-                reset(out, dim);
-                let mut line_cols = 1; // "┃"
-                for (c, width) in widths.iter().enumerate() {
-                    let text = wrapped
-                        .get(c)
-                        .and_then(|w| w.get(vline))
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    let visual_len = strip_markdown_markers(text).width();
-                    let _ = out.queue(Print(" "));
-                    print_inline_styled(out, text, dim);
-                    let pad = width.saturating_sub(visual_len);
-                    if pad > 0 {
-                        let _ = out.queue(Print(" ".repeat(pad)));
-                    }
-                    let _ = out.queue(Print(" "));
-                    bar(out, dim);
-                    let _ = out.queue(Print("┃"));
-                    reset(out, dim);
-                    line_cols += width + 3; // " content pad ┃"
-                }
-                if let Some(b) = bctx {
-                    b.print_right(out, line_cols);
-                }
-                crlf(out);
-            }
-            height as u16
-        };
-
-    // left, horizontal, junction, right
-    let render_border =
-        |out: &mut RenderOut, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
+        for vline in 0..height {
             if let Some(b) = bctx {
                 b.print_left(out);
             } else if !indent.is_empty() {
-                let _ = out.queue(Print(indent));
+                out.print(indent);
             }
             bar(out, dim);
-            let _ = out.queue(Print(l));
+            out.print("┃");
+            reset(out, dim);
+            let mut line_cols = 1; // "┃"
+            for (c, width) in widths.iter().enumerate() {
+                let text = wrapped
+                    .get(c)
+                    .and_then(|w| w.get(vline))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let visual_len = strip_markdown_markers(text).width();
+                out.print(" ");
+                print_inline_styled(out, text, dim);
+                let pad = width.saturating_sub(visual_len);
+                if pad > 0 {
+                    out.print_string(" ".repeat(pad));
+                }
+                out.print(" ");
+                bar(out, dim);
+                out.print("┃");
+                reset(out, dim);
+                line_cols += width + 3; // " content pad ┃"
+            }
+            if let Some(b) = bctx {
+                b.print_right(out, line_cols);
+            }
+            out.newline();
+        }
+        height as u16
+    };
+
+    // left, horizontal, junction, right
+    let render_border =
+        |out: &mut S, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
+            if let Some(b) = bctx {
+                b.print_left(out);
+            } else if !indent.is_empty() {
+                out.print(indent);
+            }
+            bar(out, dim);
+            out.print(l);
             let mut line_cols = 1; // "l"
             for (c, width) in widths.iter().enumerate() {
                 let seg = width + 2;
-                let _ = out.queue(Print("━".repeat(seg)));
+                out.print_string("━".repeat(seg));
                 line_cols += seg;
                 if c + 1 < widths.len() {
-                    let _ = out.queue(Print(j));
+                    out.print(j);
                     line_cols += 1;
                 }
             }
-            let _ = out.queue(Print(r));
+            out.print(r);
             line_cols += 1;
             reset(out, dim);
             if let Some(b) = bctx {
                 b.print_right(out, line_cols);
             }
-            crlf(out);
+            out.newline();
             1
         };
 
@@ -1118,7 +1121,7 @@ pub(crate) fn render_markdown_table(
 
 /// Stacked layout for tables too wide for the terminal.
 /// Each data row becomes a block of "Header: value" lines, separated by blank lines.
-fn render_table_stacked(out: &mut RenderOut, rows: &[Vec<String>], dim: bool) -> u16 {
+fn render_table_stacked<S: LayoutSink>(out: &mut S, rows: &[Vec<String>], dim: bool) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
         None => return 0,
@@ -1137,7 +1140,7 @@ fn render_table_stacked(out: &mut RenderOut, rows: &[Vec<String>], dim: bool) ->
     let mut total_rows = 0u16;
     for (ri, row) in rows.iter().skip(1).enumerate() {
         if ri > 0 {
-            crlf(out);
+            out.newline();
             total_rows += 1;
         }
         for (c, cell) in row.iter().enumerate() {
@@ -1145,25 +1148,25 @@ fn render_table_stacked(out: &mut RenderOut, rows: &[Vec<String>], dim: bool) ->
             let label_visual = strip_markdown_markers(label).width();
             let pad = label_width.saturating_sub(label_visual);
 
-            let wrapped = wrap_cell_words(cell, value_width);
+            let wrapped = wrap_cell_words(out, cell, value_width);
             for (li, line) in wrapped.iter().enumerate() {
                 if li == 0 {
-                    let _ = out.queue(Print("  "));
-                    out.set_fg(Color::DarkGrey);
+                    out.print("  ");
+                    out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
                     if dim {
                         out.set_dim();
                     }
                     print_inline_styled(out, label, dim);
                     if pad > 0 {
-                        let _ = out.queue(Print(" ".repeat(pad)));
+                        out.print_string(" ".repeat(pad));
                     }
                     out.reset_style();
-                    let _ = out.queue(Print("  "));
+                    out.print("  ");
                 } else {
-                    let _ = out.queue(Print(" ".repeat(value_indent)));
+                    out.print_string(" ".repeat(value_indent));
                 }
                 print_inline_styled(out, line, dim);
-                crlf(out);
+                out.newline();
                 total_rows += 1;
             }
         }
@@ -1173,7 +1176,7 @@ fn render_table_stacked(out: &mut RenderOut, rows: &[Vec<String>], dim: bool) ->
 
 /// Word-wrap cell text so each line's visual width (after stripping markers) fits within `max_width`.
 /// Only breaks at spaces that are outside inline markdown spans.
-fn wrap_cell_words(text: &str, max_width: usize) -> Vec<String> {
+fn wrap_cell_words<S: LayoutSink>(out: &mut S, text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
@@ -1208,6 +1211,9 @@ fn wrap_cell_words(text: &str, max_width: usize) -> Vec<String> {
     if lines.is_empty() {
         lines.push(String::new());
     }
+    if lines.len() > 1 {
+        out.mark_wrapped();
+    }
     lines
 }
 
@@ -1239,7 +1245,7 @@ fn min_visual_width(text: &str) -> usize {
 /// Render inline markdown spans: `**bold**`, `__bold__`, `*italic*`, `_italic_`,
 /// `***bold+italic***`, `` `code` ``, `~~strikethrough~~`.
 /// Everything else passes through literally.
-pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: bool) {
+pub(crate) fn print_inline_styled<S: LayoutSink>(out: &mut S, text: &str, dim: bool) {
     macro_rules! reset {
         () => {
             out.reset_style();
@@ -1261,7 +1267,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
     macro_rules! flush_plain {
         () => {
             if !plain.is_empty() {
-                let _ = out.queue(Print(&plain));
+                out.print(&plain);
                 plain.clear();
             }
         };
@@ -1274,7 +1280,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
                 flush_plain!();
                 let word: String = chars[i + 2..end].iter().collect();
                 out.push_crossedout();
-                let _ = out.queue(Print(&word));
+                out.print(&word);
                 out.pop_style();
                 i = end + 2;
                 continue;
@@ -1293,7 +1299,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
                 let word: String = chars[i + 3..end].iter().collect();
                 out.set_bold();
                 out.set_italic();
-                let _ = out.queue(Print(&word));
+                out.print(&word);
                 reset!();
                 i = end + 3;
                 continue;
@@ -1313,7 +1319,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
                     flush_plain!();
                     let word: String = chars[i + 2..end].iter().collect();
                     out.set_bold();
-                    let _ = out.queue(Print(&word));
+                    out.print(&word);
                     reset!();
                     i = end + 2;
                     continue;
@@ -1333,7 +1339,7 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
                     flush_plain!();
                     let word: String = chars[i + 1..end].iter().collect();
                     out.set_italic();
-                    let _ = out.queue(Print(&word));
+                    out.print(&word);
                     reset!();
                     i = end + 1;
                     continue;
@@ -1346,11 +1352,11 @@ pub(crate) fn print_inline_styled(out: &mut super::RenderOut, text: &str, dim: b
             if let Some(end) = find_closing_single(&chars, i + 1, '`') {
                 flush_plain!();
                 let word: String = chars[i + 1..end].iter().collect();
-                out.set_fg(theme::accent());
+                out.set_fg(ColorValue::Role(ColorRole::Accent));
                 if dim {
                     out.set_dim();
                 }
-                let _ = out.queue(Print(&word));
+                out.print(&word);
                 reset!();
                 i = end + 1;
                 continue;

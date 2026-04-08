@@ -186,7 +186,7 @@ pub fn dir_for(session: &Session) -> PathBuf {
 }
 
 pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
-    let _perf = crate::perf::begin("session_save");
+    let _perf = crate::perf::begin("session:write");
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
     let ts = now_ms();
@@ -231,16 +231,51 @@ pub fn save_render_cache(session: &Session, cache: &crate::render::RenderCache) 
     let _ = fs::write(path, cache.serialize());
 }
 
-/// Load the render cache for a session.
+/// Load the render cache for a session. Returns `None` if the file is
+/// missing, corrupt, or built by an incompatible version.
 pub fn load_render_cache(session: &Session) -> Option<crate::render::RenderCache> {
     let session_dir = dir_for(session);
     let path = render_cache_path(&session_dir);
     let data = fs::read(path).ok()?;
-    crate::render::RenderCache::deserialize(&data)
+    let cache = crate::render::RenderCache::deserialize(&data)?;
+    if cache.version != crate::render::RENDER_CACHE_VERSION {
+        return None;
+    }
+    Some(cache)
+}
+
+/// Save the persisted layout cache (per-block laid-out output) alongside
+/// the session.
+pub fn save_layout_cache(session: &Session, cache: &crate::render::PersistedLayoutCache) {
+    let _perf = crate::perf::begin("session:write_layout");
+    let session_dir = dir_for(session);
+    let _ = fs::create_dir_all(&session_dir);
+    let path = layout_cache_path(&session_dir);
+    let bytes = cache.serialize();
+    crate::perf::record_value("layout_cache:bytes", bytes.len() as u64);
+    let _ = fs::write(path, bytes);
+}
+
+/// Load the persisted layout cache for a session. Returns `None` if the
+/// file is missing, corrupt, or built by an incompatible version.
+pub fn load_layout_cache(session: &Session) -> Option<crate::render::PersistedLayoutCache> {
+    let _perf = crate::perf::begin("session:read_layout");
+    let session_dir = dir_for(session);
+    let path = layout_cache_path(&session_dir);
+    let data = fs::read(path).ok()?;
+    let cache = crate::render::PersistedLayoutCache::deserialize(&data)?;
+    if cache.version != crate::render::LAYOUT_CACHE_VERSION {
+        return None;
+    }
+    Some(cache)
 }
 
 fn render_cache_path(session_dir: &std::path::Path) -> PathBuf {
     session_dir.join("render_cache.ir.bin")
+}
+
+fn layout_cache_path(session_dir: &std::path::Path) -> PathBuf {
+    session_dir.join("render_cache.layout.bin")
 }
 
 /// Load a session by exact ID or unique prefix (git-style).
@@ -306,7 +341,7 @@ pub fn delete(id: &str) {
 }
 
 pub fn list_sessions() -> Vec<SessionMeta> {
-    let _perf = crate::perf::begin("session_list");
+    let _perf = crate::perf::begin("session:list");
     let dir = sessions_dir();
     let Ok(entries) = fs::read_dir(&dir) else {
         return Vec::new();

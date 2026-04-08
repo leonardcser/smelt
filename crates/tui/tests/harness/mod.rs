@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tui::render::{
     Block, ConfirmDialog, ConfirmRequest, Dialog, RenderOut, Screen, TerminalBackend, ToolOutput,
-    ToolStatus,
+    ToolState, ToolStatus,
 };
 
 // ── TestBackend ──────────────────────────────────────────────────────
@@ -69,13 +69,24 @@ pub fn extract_full_content(parser: &mut vt100::Parser) -> String {
     all_lines.join("\n")
 }
 
-fn fresh_render(blocks: &[Block], width: u16, height: u16) -> String {
+fn fresh_render(
+    blocks: &[Block],
+    tool_states: &HashMap<String, ToolState>,
+    width: u16,
+    height: u16,
+) -> String {
     let sink = Arc::new(Mutex::new(Vec::new()));
     let backend = TestBackend::new(width, height, sink.clone());
     let mut screen = Screen::with_backend(Box::new(backend));
     screen.set_anchor_row(0);
 
     for block in blocks {
+        if let Block::ToolCall { call_id, .. } = block {
+            if let Some(state) = tool_states.get(call_id) {
+                screen.push_tool_call(block.clone(), state.clone());
+                continue;
+            }
+        }
         screen.push(block.clone());
     }
     screen.render_pending_blocks();
@@ -188,6 +199,17 @@ impl TestHarness {
         self.render_pending();
     }
 
+    pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
+        self.actions
+            .push(format!("push: {}", block_summary(&block)));
+        self.screen.push_tool_call(block, state);
+    }
+
+    pub fn push_tool_call_and_render(&mut self, block: Block, state: ToolState) {
+        self.push_tool_call(block, state);
+        self.render_pending();
+    }
+
     /// Assert incremental rendering matches a fresh re-render.
     pub fn assert_scrollback_integrity(&mut self) {
         self.assert_count += 1;
@@ -211,7 +233,8 @@ impl TestHarness {
 
         let incremental = extract_full_content(&mut self.parser);
         let blocks = self.screen.blocks();
-        let fresh = fresh_render(&blocks, self.width, self.height);
+        let tool_states = self.screen.tool_states_snapshot();
+        let fresh = fresh_render(&blocks, &tool_states, self.width, self.height);
 
         if incremental == fresh {
             return;

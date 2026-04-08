@@ -464,7 +464,7 @@ impl Completer {
     }
 
     fn filter_inner(&mut self, preserve_selection: bool) {
-        let _perf = crate::perf::begin("completer_filter");
+        let _perf = crate::perf::begin("completer:filter");
         if preserve_selection {
             self.remember_selected_key();
         }

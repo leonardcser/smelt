@@ -1,7 +1,11 @@
 mod blocks;
 mod cache;
+mod context;
 mod dialogs;
+mod display;
 mod highlight;
+mod layout_out;
+mod paint;
 mod prompt;
 mod working;
 
@@ -26,19 +30,24 @@ use crossterm::{
     },
     terminal, QueueableCommand,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 use blocks::{
-    animated_dots, collect_trailing_thinking, gap_between, render_block, render_thinking_summary,
+    animated_dots, collect_trailing_thinking, gap_between, layout_block, render_thinking_summary,
     render_tool, thinking_summary, Element,
 };
 
+pub use context::{LayoutContext, PaintContext};
+pub use display::DisplayBlock;
+pub use highlight::warm_up_syntect;
+use paint::paint_block;
+
 pub use cache::{
-    build_tool_output_render_cache, session_render_hash, CachedNotebookEdit, RenderCache,
-    ToolOutputRenderCache,
+    build_tool_output_render_cache, session_render_hash, CachedNotebookEdit, PersistedLayoutCache,
+    RenderCache, ToolOutputRenderCache, LAYOUT_CACHE_VERSION, RENDER_CACHE_VERSION,
 };
 
 /// Maximum number of lines to re-render during a full redraw (e.g. purge).
@@ -115,8 +124,17 @@ impl Frame {
 
 impl Drop for Frame {
     fn drop(&mut self) {
+        let _perf = crate::perf::begin("frame:flush");
         let _ = self.out.queue(terminal::EndSynchronizedUpdate);
-        let _ = self.out.flush();
+        let bytes = self.out.bytes_queued;
+        {
+            let _p = crate::perf::begin("frame:write_all");
+            let _ = self.out.flush();
+        }
+        self.out.bytes_queued = 0;
+        // Record the payload size so the perf summary can show a
+        // distribution of how many bytes each frame pushed to the TTY.
+        crate::perf::record_value("frame:bytes", bytes as u64);
     }
 }
 
@@ -142,6 +160,14 @@ pub struct RenderOut {
     current: StyleState,
     /// Stack of saved styles for push/pop scoping.
     stack: Vec<StyleState>,
+    /// Visible columns printed on the current row since the last
+    /// newline. Tracked by the `LayoutSink` impl so dialog code that
+    /// shares helpers with block renderers can fill rows to the
+    /// terminal edge.
+    pub(super) line_cols: u16,
+    /// Running count of bytes queued since the last `flush()`. Read by
+    /// `Frame::drop` for bench instrumentation, then reset on flush.
+    pub(super) bytes_queued: usize,
 }
 
 impl RenderOut {
@@ -155,14 +181,20 @@ impl RenderOut {
             capture,
             current: StyleState::default(),
             stack: Vec::new(),
+            line_cols: 0,
+            bytes_queued: 0,
         }
     }
 
     /// Create a scroll-mode output (for blocks + prompt).
     /// Dialogs switch to overlay mode by setting `out.row = Some(r)`.
     pub fn scroll() -> Self {
+        // 1 MiB is enough for any realistic full redraw payload (~640 KB
+        // for a 360-block session at 120 cols). `bin/term_bench` confirms
+        // there's no measurable gain from a larger buffer (scenarios 6, 7).
+        const STDOUT_BUF_CAPACITY: usize = 1 << 20;
         Self::new(
-            Box::new(BufWriter::with_capacity(1 << 20, io::stdout())),
+            Box::new(BufWriter::with_capacity(STDOUT_BUF_CAPACITY, io::stdout())),
             None,
         )
     }
@@ -272,6 +304,21 @@ impl RenderOut {
         }
     }
 
+    /// Update only the background slot — keeping fg and all attributes
+    /// untouched — and emit a single SGR command for the change. Used by
+    /// the paint stage to set / clear bg around end-of-line padding
+    /// without cloning the full `StyleState`.
+    pub fn set_bg_only(&mut self, color: Option<Color>) {
+        if self.current.bg == color {
+            return;
+        }
+        self.current.bg = color;
+        let _ = match color {
+            Some(c) => self.queue(SetBackgroundColor(c)),
+            None => self.queue(SetBackgroundColor(Color::Reset)),
+        };
+    }
+
     pub fn set_bold(&mut self) {
         if !self.current.bold {
             self.current.bold = true;
@@ -306,6 +353,17 @@ impl RenderOut {
             let _ = self.queue(ResetColor);
             self.current = clean;
         }
+    }
+
+    /// Diff to `target` and replace `current` without growing the
+    /// push/pop stack. Used by the paint stage which emits flat
+    /// sequences rather than nested style scopes.
+    pub fn set_state(&mut self, target: StyleState) {
+        if self.current == target {
+            return;
+        }
+        self.emit_diff(&target);
+        self.current = target;
     }
 
     /// Mark style state as unknown (after replaying cached bytes).
@@ -447,7 +505,11 @@ impl Write for SharedWriter {
 
 impl io::Write for RenderOut {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.out.write(buf)
+        let n = self.out.write(buf)?;
+        if crate::perf::enabled() {
+            self.bytes_queued = self.bytes_queued.saturating_add(n);
+        }
+        Ok(n)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.out.flush()
@@ -457,17 +519,28 @@ impl io::Write for RenderOut {
 /// Clear remaining characters on the current line and advance to the next.
 ///
 /// In scroll mode (`row: None`) this emits `\r\n`, pushing content into
-/// terminal scrollback.  In overlay mode (`row: Some`) it uses `MoveTo` to
+/// terminal scrollback. In overlay mode (`row: Some`) it uses `MoveTo` to
 /// reposition without scrolling — dialogs use this to avoid polluting
 /// scrollback.
 ///
 /// In overlay mode, Clear is issued on the *current* row (after the
 /// content just printed) and then the cursor advances to the next row
-/// *without* clearing it.  The next row's stale content is overwritten
-/// by the subsequent `Print`.  This avoids a visible blank→content
+/// *without* clearing it. The next row's stale content is overwritten
+/// by the subsequent `Print`. This avoids a visible blank→content
 /// flash on terminals that don't fully support synchronized updates.
+///
+/// **Scroll-mode invariant**: every code path that writes via scroll-mode
+/// `crlf` must first clear the destination region. The two callers are
+/// `Screen::redraw` (which emits `Clear::All` + `Clear::Purge` before
+/// painting) and `render_pending_blocks` (which emits
+/// `Clear::FromCursorDown`). New scroll-mode call sites must preserve
+/// this invariant or they'll inherit stale row content from whatever was
+/// previously on screen — `crlf` no longer emits `Clear::UntilNewLine`
+/// per row because the per-op cost dominated large redraws.
 pub(super) fn crlf(out: &mut RenderOut) {
     if out.row.is_some() {
+        // Overlay mode: must clear because we're painting over a live
+        // screen area that may have stale content to the right.
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         if let Some(r) = &mut out.row {
             *r += 1;
@@ -475,8 +548,31 @@ pub(super) fn crlf(out: &mut RenderOut) {
             let _ = out.queue(cursor::MoveTo(0, next));
         }
     } else {
-        let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        // Scroll mode: paths that enter scroll-mode `crlf` always do so
+        // after a full clear (`redraw(true)` → Clear::Purge, or
+        // `render_pending_blocks` → Clear::FromCursorDown), so the row
+        // below the cursor is already blank and `Clear::UntilNewLine`
+        // would be a no-op. Skipping ~2000 clear ops saves terminal
+        // parse work on large redraws.
         let _ = out.queue(Print("\r\n"));
+    }
+    out.line_cols = 0;
+}
+
+/// Resolve a `display::ColorRole` against the live theme atomics.
+/// Used by `RenderOut`'s `LayoutSink` impl (dialogs and overlay paints
+/// that don't go through a `Theme` snapshot).
+pub(super) fn resolve_role_live(role: display::ColorRole) -> Color {
+    use display::ColorRole as R;
+    match role {
+        R::Accent => theme::accent(),
+        R::Slug => theme::slug_color(),
+        R::UserBg => theme::user_bg(),
+        R::CodeBlockBg => theme::code_block_bg(),
+        R::Bar => theme::bar(),
+        R::ToolPending => theme::tool_pending(),
+        R::ReasonOff => theme::reason_off(),
+        R::Muted => theme::muted(),
     }
 }
 
@@ -499,27 +595,27 @@ pub(super) struct BoxContext {
     /// Right border string printed after padding (e.g. " │").
     pub right: &'static str,
     /// Color for the border characters.
-    pub color: Color,
+    pub color: display::ColorValue,
     /// Inner content width (between left and right borders).
     pub inner_w: usize,
 }
 
 impl BoxContext {
     /// Print the left border with color.
-    pub fn print_left(&self, out: &mut RenderOut) {
+    pub fn print_left<S: layout_out::LayoutSink>(&self, out: &mut S) {
         out.push_fg(self.color);
-        let _ = out.queue(Print(self.left));
+        out.print(self.left);
         out.pop_style();
     }
 
     /// Print right-side padding and border for a line that used `cols` content columns.
-    pub fn print_right(&self, out: &mut RenderOut, cols: usize) {
+    pub fn print_right<S: layout_out::LayoutSink>(&self, out: &mut S, cols: usize) {
         let pad = self.inner_w.saturating_sub(cols);
         if pad > 0 {
-            let _ = out.queue(Print(" ".repeat(pad)));
+            out.print_string(" ".repeat(pad));
         }
         out.push_fg(self.color);
-        let _ = out.queue(Print(self.right));
+        out.print(self.right);
         out.pop_style();
     }
 }
@@ -567,6 +663,28 @@ pub struct ToolOutput {
 }
 
 pub type ToolOutputRef = Box<ToolOutput>;
+
+/// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id` on
+/// `BlockHistory::tool_states`. Holds every field of a tool block that can
+/// change after the block has been pushed (status flip, streamed output,
+/// finalized elapsed, etc.). Splitting this out keeps `Block::ToolCall`
+/// immutable so its layout can be cached permanently once terminal.
+#[derive(Clone)]
+pub struct ToolState {
+    pub status: ToolStatus,
+    pub elapsed: Option<Duration>,
+    pub output: Option<ToolOutputRef>,
+    pub user_message: Option<String>,
+}
+
+impl ToolState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
+        )
+    }
+}
 
 pub struct ActiveExec {
     pub command: String,
@@ -624,7 +742,7 @@ pub struct ResumeEntry {
     pub depth: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub enum Block {
     User {
         text: String,
@@ -643,15 +761,14 @@ pub enum Block {
         content: String,
         lang: String,
     },
+    /// Immutable handle to a committed tool call. The mutable result
+    /// (status, elapsed, output, user_message) lives in `BlockHistory::tool_states`
+    /// keyed by `call_id`; look it up with `Screen::tool_state`.
     ToolCall {
         call_id: String,
         name: String,
         summary: String,
         args: HashMap<String, serde_json::Value>,
-        status: ToolStatus,
-        elapsed: Option<Duration>,
-        output: Option<ToolOutputRef>,
-        user_message: Option<String>,
     },
     Confirm {
         tool: String,
@@ -684,20 +801,40 @@ pub enum Block {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl Block {
+    /// Stable content hash of this block. Two blocks with the same id
+    /// produce identical `DisplayBlock`s for the same `LayoutKey` and
+    /// `ToolState`. For `ToolCall`, `ToolState` (status / output / elapsed)
+    /// is deliberately *not* hashed — mutable tool state lives separately
+    /// and is invalidated via `BlockHistory::invalidate_block_layout`.
+    ///
+    /// Implementation: serialize through `serde_json::Value` first (whose
+    /// `Map` is a `BTreeMap` without the `preserve_order` feature) so the
+    /// `HashMap<String, Value>` arg fields are emitted in sorted-key
+    /// order, then hash the resulting bytes. Without the intermediate
+    /// `to_value` step, two blocks with identical content but different
+    /// HashMap insertion orders would produce different ids.
+    pub fn id(&self) -> BlockId {
+        let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        let bytes = serde_json::to_vec(&value).unwrap_or_default();
+        BlockId(seahash::hash(&bytes))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum AgentBlockStatus {
     Running,
     Done,
     Error,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize)]
 pub enum ApprovalScope {
     Session,
     Workspace,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize)]
 pub enum ConfirmChoice {
     Yes,
     YesAutoApply,
@@ -716,20 +853,78 @@ pub enum Throbber {
     Interrupted,
 }
 
+/// Stable content hash of a `Block`. Computed once at construction; two
+/// blocks with the same id are guaranteed to lay out identically given the
+/// same `LayoutKey` and (for tool blocks) `ToolState`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct BlockId(pub u64);
+
+/// Cache key for a single `DisplayBlock` layout — the inputs to
+/// `layout_block` that affect the laid-out output for a given block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct LayoutKey {
+    pub width: u16,
+    pub show_thinking: bool,
+}
+
+/// Per-block cached artifacts. Keeps a bounded LRU of the most recent
+/// `LayoutKey → DisplayBlock` pairs so that resize cycles (e.g. 100→80→100)
+/// can hit the cache on every step.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct BlockArtifact {
+    /// `(LayoutKey, DisplayBlock)` entries ordered most-recently-used first.
+    pub layouts: Vec<(LayoutKey, DisplayBlock)>,
+}
+
+impl BlockArtifact {
+    const MAX_LAYOUTS: usize = 4;
+
+    pub fn get(&self, key: LayoutKey) -> Option<&DisplayBlock> {
+        self.layouts.iter().find(|(k, _)| *k == key).map(|(_, b)| b)
+    }
+
+    pub fn insert(&mut self, key: LayoutKey, block: DisplayBlock) {
+        self.layouts.retain(|(k, _)| *k != key);
+        self.layouts.insert(0, (key, block));
+        self.layouts.truncate(Self::MAX_LAYOUTS);
+    }
+
+    pub fn clear(&mut self) {
+        self.layouts.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layouts.is_empty()
+    }
+
+    /// Drop cached layouts whose replay would be stale at `new_width`.
+    /// Layouts whose `layout_width` equals `new_width` or whose source
+    /// didn't wrap and still fits are preserved.
+    pub fn invalidate_for_width(&mut self, new_width: u16) {
+        self.layouts
+            .retain(|(k, b)| k.width == new_width || b.is_valid_at(new_width));
+    }
+}
+
 struct BlockHistory {
-    blocks: Vec<Block>,
-    /// Cached row count for each block in thinking-visible mode.
-    row_counts_visible: Vec<u16>,
-    /// Cached row count for each block in thinking-hidden mode.
-    row_counts_hidden: Vec<u16>,
-    /// Cached rendered bytes for each block (scroll-mode ANSI output) in
-    /// thinking-visible mode.
-    cached_bytes_visible: Vec<Option<Vec<u8>>>,
-    /// Cached rendered bytes for each block (scroll-mode ANSI output) in
-    /// thinking-hidden mode.
-    cached_bytes_hidden: Vec<Option<Vec<u8>>>,
-    /// Terminal width when caches were built. Mismatch invalidates all caches.
+    /// Append-only sequence of `BlockId`s. The "ith block" is
+    /// `blocks[&order[i]]`. Duplicate ids are allowed: two identical blocks
+    /// at different positions resolve to the same entry in `blocks` /
+    /// `artifacts`.
+    order: Vec<BlockId>,
+    /// Content-addressed block store.
+    blocks: HashMap<BlockId, Block>,
+    /// Content-addressed per-block layout cache.
+    artifacts: HashMap<BlockId, BlockArtifact>,
+    /// Mutable sidecar state for `Block::ToolCall` entries, keyed by `call_id`.
+    tool_states: HashMap<String, ToolState>,
+    /// Terminal width when artifacts were last width-pruned.
     cache_width: usize,
+    /// True iff the layout cache has changed since the last persisted save.
+    /// When false, `save_session` skips writing the layout cache file.
+    cache_dirty: bool,
     flushed: usize,
     last_block_rows: u16,
     /// When true, the leading gap of the next unflushed block is suppressed.
@@ -740,90 +935,104 @@ struct BlockHistory {
 impl BlockHistory {
     fn new() -> Self {
         Self {
-            blocks: Vec::new(),
-            row_counts_visible: Vec::new(),
-            row_counts_hidden: Vec::new(),
-            cached_bytes_visible: Vec::new(),
-            cached_bytes_hidden: Vec::new(),
+            order: Vec::new(),
+            blocks: HashMap::new(),
+            artifacts: HashMap::new(),
+            tool_states: HashMap::new(),
             cache_width: 0,
+            cache_dirty: false,
             flushed: 0,
             last_block_rows: 0,
             suppress_leading_gap: false,
         }
     }
 
-    fn push(&mut self, block: Block) {
-        self.blocks.push(block);
-        self.row_counts_visible.push(0);
-        self.row_counts_hidden.push(0);
-        self.cached_bytes_visible.push(None);
-        self.cached_bytes_hidden.push(None);
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    fn block_at(&self, i: usize) -> &Block {
+        &self.blocks[&self.order[i]]
+    }
+
+    fn last_block(&self) -> Option<&Block> {
+        self.order.last().and_then(|id| self.blocks.get(id))
+    }
+
+    /// Append `block` and return its `BlockId`. Duplicate content merges
+    /// into the existing entry in `blocks`/`artifacts`, so two identical
+    /// blocks share their cached layouts.
+    fn push(&mut self, block: Block) -> BlockId {
+        let id = block.id();
+        self.order.push(id);
+        self.blocks.entry(id).or_insert(block);
+        self.artifacts.entry(id).or_default();
+        self.cache_dirty = true;
+        id
+    }
+
+    /// Push a `Block::ToolCall` alongside its initial `ToolState`.
+    fn push_with_state(&mut self, block: Block, call_id: String, state: ToolState) -> BlockId {
+        self.tool_states.insert(call_id, state);
+        self.push(block)
+    }
+
+    /// `BlockId` of the most recent `Block::ToolCall` whose `call_id` matches.
+    fn tool_block_id(&self, call_id: &str) -> Option<BlockId> {
+        self.order.iter().rev().copied().find(|id| {
+            matches!(
+                self.blocks.get(id),
+                Some(Block::ToolCall { call_id: c, .. }) if c == call_id
+            )
+        })
+    }
+
+    /// Drop every cached layout for a single block id.
+    fn invalidate_block_layout(&mut self, id: BlockId) {
+        if let Some(artifact) = self.artifacts.get_mut(&id) {
+            if !artifact.is_empty() {
+                artifact.clear();
+                self.cache_dirty = true;
+            }
+        }
     }
 
     fn has_unflushed(&self) -> bool {
-        self.flushed < self.blocks.len()
+        self.flushed < self.order.len()
     }
 
     fn clear(&mut self) {
+        self.order.clear();
         self.blocks.clear();
-        self.row_counts_visible.clear();
-        self.row_counts_hidden.clear();
-        self.cached_bytes_visible.clear();
-        self.cached_bytes_hidden.clear();
+        self.artifacts.clear();
+        self.tool_states.clear();
         self.flushed = 0;
         self.last_block_rows = 0;
+        self.cache_dirty = true;
     }
 
-    fn invalidate_caches(&mut self) {
-        for c in &mut self.cached_bytes_visible {
-            *c = None;
+    /// Width-aware invalidation: prune cached layouts that are no longer
+    /// replayable at `new_width`. The bounded LRU in each artifact means
+    /// layouts from previous widths survive and can be reused after a
+    /// resize cycle.
+    fn invalidate_for_width(&mut self, new_width: usize) {
+        let _perf = crate::perf::begin("history:invalidate_for_width");
+        let nw = new_width as u16;
+        let mut dirty = false;
+        for artifact in self.artifacts.values_mut() {
+            let before = artifact.layouts.len();
+            artifact.invalidate_for_width(nw);
+            if artifact.layouts.len() != before {
+                dirty = true;
+            }
         }
-        for c in &mut self.cached_bytes_hidden {
-            *c = None;
-        }
-    }
-
-    /// Invalidate render caches **and** reset row counts so that
-    /// `redraw_start` does not use stale heights from a different width.
-    fn invalidate_all(&mut self) {
-        self.invalidate_caches();
-        for r in &mut self.row_counts_visible {
-            *r = 0;
-        }
-        for r in &mut self.row_counts_hidden {
-            *r = 0;
-        }
-    }
-
-    fn row_counts(&self, show_thinking: bool) -> &[u16] {
-        if show_thinking {
-            &self.row_counts_visible
-        } else {
-            &self.row_counts_hidden
-        }
-    }
-
-    fn row_counts_mut(&mut self, show_thinking: bool) -> &mut Vec<u16> {
-        if show_thinking {
-            &mut self.row_counts_visible
-        } else {
-            &mut self.row_counts_hidden
-        }
-    }
-
-    fn cached_bytes_mut(&mut self, show_thinking: bool) -> &mut Vec<Option<Vec<u8>>> {
-        if show_thinking {
-            &mut self.cached_bytes_visible
-        } else {
-            &mut self.cached_bytes_hidden
-        }
-    }
-
-    fn cached_bytes(&self, show_thinking: bool) -> &[Option<Vec<u8>>] {
-        if show_thinking {
-            &self.cached_bytes_visible
-        } else {
-            &self.cached_bytes_hidden
+        self.cache_width = new_width;
+        if dirty {
+            self.cache_dirty = true;
         }
     }
 
@@ -831,22 +1040,55 @@ impl BlockHistory {
     fn block_gap(&self, i: usize) -> u16 {
         if i > 0 {
             gap_between(
-                &Element::Block(&self.blocks[i - 1]),
-                &Element::Block(&self.blocks[i]),
+                &Element::Block(self.block_at(i - 1)),
+                &Element::Block(self.block_at(i)),
             )
         } else {
             0
         }
     }
 
+    /// Rows the block at `i` would occupy under `key`. Lays the block out
+    /// if no cached layout exists, so that the caller's subsequent render
+    /// pass gets a cache hit.
+    fn ensure_rows(&mut self, i: usize, key: LayoutKey) -> u16 {
+        let id = self.order[i];
+        if let Some(rows) = self
+            .artifacts
+            .get(&id)
+            .and_then(|a| a.get(key))
+            .map(|d| d.rows())
+        {
+            return rows;
+        }
+        let block = &self.blocks[&id];
+        let tool_state = if let Block::ToolCall { call_id, .. } = block {
+            self.tool_states.get(call_id)
+        } else {
+            None
+        };
+        let lctx = LayoutContext {
+            width: key.width,
+            show_thinking: key.show_thinking,
+        };
+        let display = layout_block(block, tool_state, &lctx);
+        let rows = display.rows();
+        let artifact = self.artifacts.get_mut(&id).unwrap();
+        artifact.insert(key, display);
+        self.cache_dirty = true;
+        rows
+    }
+
     /// Find the earliest block index such that rendering from that index to
-    /// the end stays within `max_lines`, using cached row counts.
-    fn redraw_start(&self, max_lines: u16, show_thinking: bool) -> usize {
-        let row_counts = self.row_counts(show_thinking);
+    /// the end stays within `max_lines`. Lays out blocks that have no
+    /// cached layout yet so the render that follows can cache-hit.
+    fn redraw_start(&mut self, max_lines: u16, key: LayoutKey) -> usize {
+        let _perf = crate::perf::begin("history:redraw_start");
         let mut budget = max_lines;
-        let mut start = self.blocks.len();
-        for i in (0..self.blocks.len()).rev() {
-            let total = self.block_gap(i) + row_counts[i];
+        let mut start = self.order.len();
+        for i in (0..self.order.len()).rev() {
+            let rows = self.ensure_rows(i, key);
+            let total = self.block_gap(i) + rows;
             if total > budget {
                 break;
             }
@@ -857,34 +1099,66 @@ impl BlockHistory {
     }
 
     fn truncate(&mut self, idx: usize) {
-        self.blocks.truncate(idx);
-        self.row_counts_visible.truncate(idx);
-        self.row_counts_hidden.truncate(idx);
-        self.cached_bytes_visible.truncate(idx);
-        self.cached_bytes_hidden.truncate(idx);
-        self.flushed = self.flushed.min(idx);
+        if idx >= self.order.len() {
+            return;
+        }
+        let removed: Vec<BlockId> = self.order.drain(idx..).collect();
+        let live: HashSet<BlockId> = self.order.iter().copied().collect();
+        for id in removed {
+            if !live.contains(&id) {
+                self.blocks.remove(&id);
+                self.artifacts.remove(&id);
+            }
+        }
+        self.flushed = self.flushed.min(self.order.len());
+        self.cache_dirty = true;
+        self.gc_tool_states();
+    }
+
+    /// Drop tool states whose owning `Block::ToolCall` no longer appears in
+    /// `order`.
+    fn gc_tool_states(&mut self) {
+        let live: HashSet<String> = self
+            .order
+            .iter()
+            .filter_map(|id| self.blocks.get(id))
+            .filter_map(|b| {
+                if let Block::ToolCall { call_id, .. } = b {
+                    Some(call_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.tool_states.retain(|cid, _| live.contains(cid));
     }
 
     /// Render unflushed blocks. Returns total rows printed.
-    ///
-    /// In scroll mode (`out.row` is `None`), rendered bytes are cached per
-    /// block and replayed on subsequent redraws instead of re-rendering.
     fn render(&mut self, out: &mut RenderOut, width: usize, show_thinking: bool) -> u16 {
         if !self.has_unflushed() {
             return 0;
         }
+        let _perf = crate::perf::begin("history:render");
         let use_cache = out.row.is_none();
 
-        // Invalidate caches when terminal width changes.
         if use_cache && width != self.cache_width {
-            self.invalidate_caches();
-            self.cache_width = width;
+            self.invalidate_for_width(width);
         }
 
+        let theme = crate::theme::snapshot();
+        let pctx = PaintContext {
+            theme: &theme,
+            term_width: width as u16,
+        };
+        let key = LayoutKey {
+            width: width as u16,
+            show_thinking,
+        };
+
         let mut total = 0u16;
-        let last_idx = self.blocks.len().saturating_sub(1);
+        let last_idx = self.order.len().saturating_sub(1);
         let mut first = true;
-        for i in self.flushed..self.blocks.len() {
+        for i in self.flushed..self.order.len() {
             let gap = if first && self.suppress_leading_gap {
                 0
             } else {
@@ -895,33 +1169,51 @@ impl BlockHistory {
                 crlf(out);
             }
 
-            if use_cache {
-                let cached = self.cached_bytes(show_thinking)[i].clone();
-                if let Some(cached) = cached {
-                    let _ = out.write_all(&cached);
-                    out.invalidate_style();
+            let id = self.order[i];
+            let block = &self.blocks[&id];
+            let tool_state = if let Block::ToolCall { call_id, .. } = block {
+                self.tool_states.get(call_id)
+            } else {
+                None
+            };
+
+            let rows = if use_cache {
+                if let Some(cached) = self.artifacts.get(&id).and_then(|a| a.get(key)) {
+                    let _p = crate::perf::begin("history:cache_hit");
+                    paint_block(out, cached, &pctx);
+                    cached.rows()
                 } else {
-                    let mut buf = RenderOut::buffer();
-                    let rows = render_block(&mut buf, &self.blocks[i], width, show_thinking);
-                    let bytes = buf.into_bytes();
-                    let _ = out.write_all(&bytes);
-                    out.invalidate_style();
-                    self.cached_bytes_mut(show_thinking)[i] = Some(bytes);
-                    self.row_counts_mut(show_thinking)[i] = rows;
+                    let _p = crate::perf::begin("history:cache_miss");
+                    let lctx = LayoutContext {
+                        width: width as u16,
+                        show_thinking,
+                    };
+                    let display = layout_block(block, tool_state, &lctx);
+                    paint_block(out, &display, &pctx);
+                    let rows = display.rows();
+                    let artifact = self.artifacts.get_mut(&id).unwrap();
+                    artifact.insert(key, display);
+                    self.cache_dirty = true;
+                    rows
                 }
             } else {
-                let rows = render_block(out, &self.blocks[i], width, show_thinking);
-                self.row_counts_mut(show_thinking)[i] = rows;
-            }
+                let _p = crate::perf::begin("history:overlay_render");
+                let lctx = LayoutContext {
+                    width: width as u16,
+                    show_thinking,
+                };
+                let display = layout_block(block, tool_state, &lctx);
+                paint_block(out, &display, &pctx);
+                display.rows()
+            };
 
-            let rows = self.row_counts(show_thinking)[i];
             total += gap + rows;
             if i == last_idx {
                 self.last_block_rows = rows + gap;
             }
         }
         self.suppress_leading_gap = false;
-        self.flushed = self.blocks.len();
+        self.flushed = self.order.len();
         total
     }
 }
@@ -1096,12 +1388,22 @@ impl Screen {
 
     /// Number of committed blocks in history.
     pub fn block_count(&self) -> usize {
-        self.history.blocks.len()
+        self.history.len()
     }
 
-    /// Cloned snapshot of all blocks in history.
+    /// Cloned snapshot of all blocks in history, in order.
     pub fn blocks(&self) -> Vec<Block> {
-        self.history.blocks.clone()
+        self.history
+            .order
+            .iter()
+            .map(|id| self.history.blocks[id].clone())
+            .collect()
+    }
+
+    /// Cloned snapshot of every committed tool's `ToolState`. Pairs with
+    /// `blocks()` to fully reconstruct history (used by the test harness).
+    pub fn tool_states_snapshot(&self) -> HashMap<String, ToolState> {
+        self.history.tool_states.clone()
     }
 
     pub fn set_btw(&mut self, question: String, image_labels: Vec<String>) {
@@ -1624,6 +1926,19 @@ impl Screen {
         self.active_tools.clear();
     }
 
+    /// Push a `Block::ToolCall` along with its `ToolState`. Use this on
+    /// the resume path where the protocol message already carries a
+    /// finished tool result.
+    pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
+        debug_assert!(matches!(block, Block::ToolCall { .. }));
+        let call_id = match &block {
+            Block::ToolCall { call_id, .. } => call_id.clone(),
+            _ => return,
+        };
+        self.history.push_with_state(block, call_id, state);
+        self.prompt.dirty = true;
+    }
+
     pub fn push(&mut self, block: Block) {
         let block = match block {
             Block::Text { content } => {
@@ -1731,9 +2046,10 @@ impl Screen {
     fn thinking_summary_gap(&self) -> u16 {
         if let Some(last) = self
             .history
-            .blocks
+            .order
             .iter()
             .rev()
+            .filter_map(|id| self.history.blocks.get(id))
             .find(|b| !matches!(b, Block::Thinking { .. }))
         {
             gap_between(
@@ -1742,7 +2058,7 @@ impl Screen {
                     content: String::new(),
                 }),
             )
-        } else if self.history.blocks.is_empty() {
+        } else if self.history.is_empty() {
             0
         } else {
             1
@@ -1993,8 +2309,8 @@ impl Screen {
                 }
             }
             self.prompt.dirty = true;
-        } else if let Some(Block::ToolCall { ref mut output, .. }) = self.last_tool_block_mut() {
-            match output {
+        } else if let Some(cid) = self.last_tool_call_id() {
+            self.update_tool_state(&cid, |state| match state.output {
                 Some(ref mut out) => {
                     if !out.content.is_empty() {
                         out.content.push('\n');
@@ -2002,14 +2318,14 @@ impl Screen {
                     out.content.push_str(chunk);
                 }
                 None => {
-                    *output = Some(Box::new(ToolOutput {
+                    state.output = Some(Box::new(ToolOutput {
                         content: chunk.to_string(),
                         is_error: false,
                         metadata: None,
                         render_cache: None,
                     }));
                 }
-            }
+            });
         }
     }
 
@@ -2021,11 +2337,8 @@ impl Screen {
             }
             tool.status = status;
             self.prompt.dirty = true;
-        } else if let Some(Block::ToolCall {
-            status: ref mut s, ..
-        }) = self.last_tool_block_mut()
-        {
-            *s = status;
+        } else if let Some(cid) = self.last_tool_call_id() {
+            self.update_tool_state(&cid, |state| state.status = status);
         }
     }
 
@@ -2033,12 +2346,8 @@ impl Screen {
         if let Some(tool) = self.active_tool_mut(call_id) {
             tool.user_message = Some(msg);
             self.prompt.dirty = true;
-        } else if let Some(Block::ToolCall {
-            ref mut user_message,
-            ..
-        }) = self.last_tool_block_mut()
-        {
-            *user_message = Some(msg);
+        } else if let Some(cid) = self.last_tool_call_id() {
+            self.update_tool_state(&cid, |state| state.user_message = Some(msg));
         }
     }
 
@@ -2056,25 +2365,33 @@ impl Screen {
             } else {
                 engine_elapsed.or_else(|| tool.elapsed())
             };
-            self.history.push(Block::ToolCall {
-                call_id: call_id.to_string(),
-                name: tool.name,
-                summary: tool.summary,
-                args: tool.args,
+            let cid = if call_id.is_empty() {
+                tool.call_id.clone()
+            } else {
+                call_id.to_string()
+            };
+            let state = ToolState {
                 status,
                 elapsed,
                 output,
                 user_message: tool.user_message,
-            });
+            };
+            self.history.push_with_state(
+                Block::ToolCall {
+                    call_id: cid.clone(),
+                    name: tool.name,
+                    summary: tool.summary,
+                    args: tool.args,
+                },
+                cid,
+                state,
+            );
             self.prompt.dirty = true;
-        } else if let Some(Block::ToolCall {
-            status: ref mut s,
-            output: ref mut o,
-            ..
-        }) = self.last_tool_block_mut()
-        {
-            *s = status;
-            *o = output;
+        } else if let Some(cid) = self.last_tool_call_id() {
+            self.update_tool_state(&cid, |state| {
+                state.status = status;
+                state.output = output;
+            });
         }
     }
 
@@ -2110,7 +2427,7 @@ impl Screen {
         if tool_rows == 0 {
             return true;
         }
-        let gap_above = if let Some(last) = self.history.blocks.last() {
+        let gap_above = if let Some(last) = self.history.last_block() {
             blocks::gap_between(&blocks::Element::Block(last), &blocks::Element::ActiveTool)
         } else {
             0
@@ -2221,7 +2538,7 @@ impl Screen {
 
     /// Convert active tools to history blocks and render any pending blocks.
     pub fn flush_blocks(&mut self) {
-        let _perf = crate::perf::begin("flush_blocks");
+        let _perf = crate::perf::begin("render:flush_blocks");
         self.commit_active_tools();
         self.render_pending_blocks();
     }
@@ -2242,36 +2559,72 @@ impl Screen {
             } else {
                 tool.elapsed()
             };
-            self.history.push(Block::ToolCall {
-                call_id: tool.call_id,
-                name: tool.name,
-                summary: tool.summary,
-                args: tool.args,
+            let state = ToolState {
                 status,
                 elapsed,
                 output: tool.output,
                 user_message: tool.user_message,
-            });
+            };
+            self.history.push_with_state(
+                Block::ToolCall {
+                    call_id: tool.call_id.clone(),
+                    name: tool.name,
+                    summary: tool.summary,
+                    args: tool.args,
+                },
+                tool.call_id,
+                state,
+            );
         }
     }
 
-    /// Get a mutable reference to the last history block if it's a ToolCall.
-    /// Updates data only — does NOT change flushed/anchor_row so there is no
-    /// risk of duplicate scroll-mode renders.
-    fn last_tool_block_mut(&mut self) -> Option<&mut Block> {
-        let idx = self.history.blocks.len().checked_sub(1)?;
-        if matches!(self.history.blocks[idx], Block::ToolCall { .. }) {
-            Some(&mut self.history.blocks[idx])
-        } else {
-            None
+    /// `call_id` of the most recent committed `Block::ToolCall`, if any.
+    fn last_tool_call_id(&self) -> Option<String> {
+        self.history
+            .order
+            .iter()
+            .rev()
+            .find_map(|id| match self.history.blocks.get(id) {
+                Some(Block::ToolCall { call_id, .. }) => Some(call_id.clone()),
+                _ => None,
+            })
+    }
+
+    /// Read-only view of a committed tool's mutable state.
+    pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
+        self.history.tool_states.get(call_id)
+    }
+
+    /// Mutate a committed tool's state and invalidate its layout cache so
+    /// the next paint reflects the change. Returns true if `call_id` was
+    /// found in history.
+    pub fn update_tool_state(
+        &mut self,
+        call_id: &str,
+        mutator: impl FnOnce(&mut ToolState),
+    ) -> bool {
+        let Some(state) = self.history.tool_states.get_mut(call_id) else {
+            return false;
+        };
+        mutator(state);
+        if let Some(id) = self.history.tool_block_id(call_id) {
+            self.history.invalidate_block_layout(id);
         }
+        self.prompt.dirty = true;
+        true
+    }
+
+    /// Insert or replace tool state for a call_id without touching blocks.
+    /// Used by resume to attach state to freshly reconstructed blocks.
+    pub fn set_tool_state(&mut self, call_id: String, state: ToolState) {
+        self.history.tool_states.insert(call_id, state);
     }
 
     /// Whether any content (blocks, active tool, active exec) exists above
     /// the prompt.  Used to decide whether to emit a 1-line gap before the
     /// prompt bar.
     fn has_content(&self) -> bool {
-        !self.history.blocks.is_empty()
+        !self.history.is_empty()
             || self.active_thinking.is_some()
             || self.active_text.is_some()
             || !self.active_tools.is_empty()
@@ -2333,6 +2686,11 @@ impl Screen {
         } else {
             purge
         };
+        let _perf = if purge {
+            crate::perf::begin("redraw:purge")
+        } else {
+            crate::perf::begin("redraw:soft")
+        };
         let mut frame = Frame::begin(&*self.backend);
         let _ = frame.queue(cursor::Hide);
         let start = if purge {
@@ -2346,21 +2704,31 @@ impl Screen {
             row
         };
         let (w, height) = self.size();
-        // Invalidate caches before computing redraw_start so that stale
-        // row counts from a previous terminal width don't cause blocks to
-        // be skipped.
+        // Width-aware invalidation before computing redraw_start so that
+        // stale row counts from a previous terminal width don't cause
+        // blocks to be skipped. Blocks whose cached bytes are still valid
+        // at the new width are preserved.
         if w as usize != self.history.cache_width {
-            self.history.invalidate_all();
-            self.history.cache_width = w as usize;
+            let _p = crate::perf::begin("redraw:invalidate");
+            self.history.invalidate_for_width(w as usize);
         }
-        let start_idx = self
-            .history
-            .redraw_start(MAX_REDRAW_LINES, self.show_thinking);
+        let start_idx = {
+            let _p = crate::perf::begin("redraw:start_idx");
+            self.history.redraw_start(
+                MAX_REDRAW_LINES,
+                LayoutKey {
+                    width: w,
+                    show_thinking: self.show_thinking,
+                },
+            )
+        };
         self.history.flushed = start_idx;
         self.history.last_block_rows = 0;
-        let block_rows = self
-            .history
-            .render(&mut frame, w as usize, self.show_thinking);
+        let block_rows = {
+            let _p = crate::perf::begin("redraw:render_blocks");
+            self.history
+                .render(&mut frame, w as usize, self.show_thinking)
+        };
         if !purge {
             let cur_row = start + block_rows;
             for row in cur_row..height {
@@ -2402,27 +2770,149 @@ impl Screen {
     }
 
     pub fn has_history(&self) -> bool {
-        !self.history.blocks.is_empty()
+        !self.history.is_empty()
     }
 
+    /// Snapshot the per-tool intermediate representations stored on
+    /// committed `Block::ToolCall` blocks. The IR is width-independent and
+    /// expensive to rebuild (it contains the LCS diff and syntect tokens),
+    /// so we persist it alongside the session and reattach on resume.
+    /// Returns `None` if no IR has been built yet.
     pub fn export_render_cache(&self) -> Option<RenderCache> {
-        None
+        let mut cache = RenderCache::new(String::new());
+        for id in &self.history.order {
+            if let Some(Block::ToolCall { call_id, .. }) = self.history.blocks.get(id) {
+                if let Some(state) = self.history.tool_states.get(call_id) {
+                    if let Some(out) = state.output.as_deref() {
+                        if let Some(ir) = &out.render_cache {
+                            cache.insert_tool_output(call_id.clone(), ir.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if cache.tool_outputs.is_empty() {
+            None
+        } else {
+            Some(cache)
+        }
     }
 
-    pub fn import_render_cache(&mut self, _cache: RenderCache) {}
+    /// Whether the layout cache has changed since the last
+    /// `export_layout_cache`. Used by `save_session` to skip writing the
+    /// cache file when nothing would change on disk.
+    pub fn layout_cache_dirty(&self) -> bool {
+        self.history.cache_dirty
+    }
 
-    /// Returns (block_index, full_text) for each User block.
+    /// Export a content-addressed snapshot of every cached block artifact
+    /// that is safe to persist. Tool blocks whose `ToolState` is not yet
+    /// terminal are skipped — their layout captures transient state.
+    pub fn export_layout_cache(&mut self) -> Option<PersistedLayoutCache> {
+        if self.history.is_empty() {
+            return None;
+        }
+        let mut cache = PersistedLayoutCache::new(crate::theme::is_light());
+        // Walk `order` so we only export artifacts for blocks currently in
+        // history (and so we can inspect the `ToolState` of each tool block
+        // exactly once — duplicates in `order` resolve to the same entry).
+        for id in &self.history.order {
+            if cache.blocks.contains_key(id) {
+                continue;
+            }
+            let Some(block) = self.history.blocks.get(id) else {
+                continue;
+            };
+            let persist = match block {
+                Block::ToolCall { call_id, .. } => self
+                    .history
+                    .tool_states
+                    .get(call_id)
+                    .map(|s| s.is_terminal())
+                    .unwrap_or(false),
+                _ => true,
+            };
+            if !persist {
+                continue;
+            }
+            if let Some(artifact) = self.history.artifacts.get(id) {
+                if !artifact.is_empty() {
+                    cache.blocks.insert(*id, artifact.clone());
+                }
+            }
+        }
+        self.history.cache_dirty = false;
+        if cache.blocks.is_empty() {
+            return None;
+        }
+        crate::perf::record_value("layout_cache:artifacts", cache.blocks.len() as u64);
+        let total_layouts: usize = cache.blocks.values().map(|a| a.layouts.len()).sum();
+        crate::perf::record_value("layout_cache:layouts", total_layouts as u64);
+        Some(cache)
+    }
+
+    /// Install a previously persisted layout cache. Entries for block ids
+    /// not currently in history are ignored; missing ids just become cache
+    /// misses on the next render. Tool blocks in a non-terminal state
+    /// still skip cache adoption so the next render rebuilds their layout.
+    pub fn import_layout_cache(&mut self, cache: PersistedLayoutCache) {
+        if !cache.is_compatible(crate::theme::is_light()) {
+            return;
+        }
+        let nw = self.size().0;
+        let live: HashSet<BlockId> = self.history.order.iter().copied().collect();
+        for (id, mut artifact) in cache.blocks {
+            if !live.contains(&id) {
+                continue;
+            }
+            let Some(block) = self.history.blocks.get(&id) else {
+                continue;
+            };
+            let allow = match block {
+                Block::ToolCall { call_id, .. } => self
+                    .history
+                    .tool_states
+                    .get(call_id)
+                    .map(|s| s.is_terminal())
+                    .unwrap_or(false),
+                _ => true,
+            };
+            if !allow {
+                continue;
+            }
+            // Drop any layouts that would not paint correctly at the
+            // current terminal width.
+            artifact
+                .layouts
+                .retain(|(k, b)| k.width == nw || b.is_valid_at(nw));
+            if artifact.is_empty() {
+                continue;
+            }
+            self.history
+                .artifacts
+                .entry(id)
+                .and_modify(|a| {
+                    for (k, b) in &artifact.layouts {
+                        a.insert(*k, b.clone());
+                    }
+                })
+                .or_insert(artifact);
+        }
+        self.history.cache_width = nw as usize;
+        self.history.cache_dirty = false;
+    }
+
+    /// Returns (block_index, full_text) for each User block. The index is
+    /// the position in the ordered history and is the value expected by
+    /// `truncate_to`.
     pub fn user_turns(&self) -> Vec<(usize, String)> {
         self.history
-            .blocks
+            .order
             .iter()
             .enumerate()
-            .filter_map(|(i, b)| {
-                if let Block::User { text, .. } = b {
-                    Some((i, text.clone()))
-                } else {
-                    None
-                }
+            .filter_map(|(i, id)| match self.history.blocks.get(id) {
+                Some(Block::User { text, .. }) => Some((i, text.clone())),
+                _ => None,
             })
             .collect()
     }
@@ -2484,7 +2974,7 @@ impl Screen {
         width: usize,
         prompt: Option<FramePrompt>,
     ) -> bool {
-        let _perf = crate::perf::begin("draw_frame");
+        let _perf = crate::perf::begin("render:frame");
 
         self.update_spinner();
 
@@ -2519,22 +3009,21 @@ impl Screen {
             out.row = Some(draw_start_row);
         }
 
-        // ── Render blocks ───────────────────────────────────────────────
-        let block_rows = self.history.render(out, width, self.show_thinking);
-
-        // ── Clear stale volatile area ────────────────────────────────────
-        // When new blocks are committed (block_rows > 0), the overlay
-        // shrinks and previous frame's streaming/prompt content lingers.
-        // Clear everything below the new block content so the overlay and
-        // prompt render into clean space.  With synchronized updates this
-        // is invisible.
-        if block_rows > 0 && self.prompt.prev_rows > 0 {
+        // ── Clear stale volatile area before painting ───────────────────
+        // Scroll-mode `crlf` no longer issues a per-line clear, so any new
+        // block / overlay / active-tool / prompt content shorter than the
+        // previous frame's row would leave trailing characters behind from
+        // the old prompt bar, status line, or active tool.  Wipe the area
+        // below the cursor up front so painting starts on clean rows.
+        // Skipped in dialog (overlay) mode where `crlf` clears each row
+        // itself and the dialog draws over its own area.
+        if !is_dialog && self.prompt.prev_rows > 0 {
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            // Area below is now clean — reset prev_rows so draw_prompt_sections
-            // doesn't try to clear already-cleared rows (which would add extra
-            // blank lines).
             self.prompt.prev_rows = 0;
         }
+
+        // ── Render blocks ───────────────────────────────────────────────
+        let block_rows = self.history.render(out, width, self.show_thinking);
 
         // ── Render streaming overlay ─────────────────────────────────────
         // Only the current incomplete line lives here (tables and completed
@@ -2559,7 +3048,9 @@ impl Screen {
                 // Animated summary while streaming. Always render from
                 // committed blocks even when active text is momentarily
                 // empty (right after a paragraph commit) to avoid flicker.
-                let mut combined = collect_trailing_thinking(&self.history.blocks);
+                let mut combined = collect_trailing_thinking(
+                    self.history.order.iter().map(|id| &self.history.blocks[id]),
+                );
                 if !text.trim().is_empty() {
                     if !combined.is_empty() {
                         combined.push('\n');
@@ -2617,7 +3108,7 @@ impl Screen {
         // Render overlay blocks with correct gaps.
         for (i, block) in overlay_blocks.iter().enumerate() {
             let gap = if i == 0 {
-                if let Some(last) = self.history.blocks.last() {
+                if let Some(last) = self.history.last_block() {
                     gap_between(&Element::Block(last), &Element::Block(block))
                 } else {
                     0
@@ -2631,8 +3122,18 @@ impl Screen {
             for _ in 0..gap {
                 crlf(out);
             }
-            let rows = blocks::render_block(out, block, width, self.show_thinking);
-            streaming_rows += gap + rows;
+            let lctx = LayoutContext {
+                width: width as u16,
+                show_thinking: self.show_thinking,
+            };
+            let theme = crate::theme::snapshot();
+            let pctx = PaintContext {
+                theme: &theme,
+                term_width: width as u16,
+            };
+            let display = layout_block(block, None, &lctx);
+            paint_block(out, &display, &pctx);
+            streaming_rows += gap + display.rows();
         }
 
         // ── Render active tools ─────────────────────────────────────────
@@ -2655,7 +3156,7 @@ impl Screen {
             let tool_gap = if i == 0 {
                 if streaming_rows > 0 {
                     1
-                } else if let Some(last) = self.history.blocks.last() {
+                } else if let Some(last) = self.history.last_block() {
                     gap_between(&Element::Block(last), &Element::ActiveTool)
                 } else {
                     0
@@ -2687,7 +3188,7 @@ impl Screen {
             for (i, agent) in self.active_agents.iter().enumerate() {
                 let agent_gap = if i > 0 || !self.active_tools.is_empty() {
                     1
-                } else if let Some(last) = self.history.blocks.last() {
+                } else if let Some(last) = self.history.last_block() {
                     gap_between(&Element::Block(last), &Element::ActiveTool)
                 } else {
                     0
@@ -2698,20 +3199,26 @@ impl Screen {
                 let elapsed = agent
                     .final_elapsed
                     .unwrap_or_else(|| agent.start_time.elapsed());
-                let rows = blocks::render_block(
-                    out,
-                    &Block::Agent {
-                        agent_id: agent.agent_id.clone(),
-                        slug: agent.slug.clone(),
-                        blocking: true,
-                        tool_calls: agent.tool_calls.clone(),
-                        status: agent.status,
-                        elapsed: Some(elapsed),
-                    },
-                    width,
-                    self.show_thinking,
-                );
-                active_rows += agent_gap + rows;
+                let agent_block = Block::Agent {
+                    agent_id: agent.agent_id.clone(),
+                    slug: agent.slug.clone(),
+                    blocking: true,
+                    tool_calls: agent.tool_calls.clone(),
+                    status: agent.status,
+                    elapsed: Some(elapsed),
+                };
+                let lctx = LayoutContext {
+                    width: width as u16,
+                    show_thinking: self.show_thinking,
+                };
+                let theme = crate::theme::snapshot();
+                let pctx = PaintContext {
+                    theme: &theme,
+                    term_width: width as u16,
+                };
+                let display = layout_block(&agent_block, None, &lctx);
+                paint_block(out, &display, &pctx);
+                active_rows += agent_gap + display.rows();
             }
         }
 
@@ -2720,7 +3227,7 @@ impl Screen {
             if let Some(ref exec) = self.active_exec {
                 let exec_gap = if !self.active_agents.is_empty() || !self.active_tools.is_empty() {
                     1
-                } else if let Some(last) = self.history.blocks.last() {
+                } else if let Some(last) = self.history.last_block() {
                     gap_between(&Element::Block(last), &Element::ActiveExec)
                 } else {
                     0
@@ -2836,13 +3343,18 @@ impl Screen {
         draw_start_row: u16,
         pre_prompt_rows: u16,
     ) -> (u16, u16, bool) {
-        let _perf = crate::perf::begin("draw_prompt");
+        let _perf = crate::perf::begin("render:prompt");
         // Cache state for dialog-mode status line rendering.
         self.last_vim_enabled = state.vim_enabled();
         self.last_vim_mode = state.vim_mode();
         self.last_mode = mode;
         let usable = width.saturating_sub(2);
         let height = (self.size().1 as usize).saturating_sub(pre_prompt_rows as usize);
+        // Reset SGR state before painting any prompt section: a prior
+        // overlay (thinking, code line, active tool) may have left a
+        // colour or attribute (e.g. dim+italic from a thinking block)
+        // that would otherwise bleed into the prompt bar and input row.
+        out.reset_style();
         let mut extra_rows = 0u16;
         let notification_rows = render_notification(out, self.notification.as_ref(), usable);
         extra_rows += notification_rows;
@@ -3584,7 +4096,7 @@ fn wrap_and_locate_cursor(
     cursor_char: usize,
     usable: usize,
 ) -> (Vec<(String, Vec<SpanKind>)>, usize, usize) {
-    let _perf = crate::perf::begin("wrap_cursor");
+    let _perf = crate::perf::begin("render:wrap_cursor");
     let mut visual_lines: Vec<(String, Vec<SpanKind>)> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
@@ -3900,7 +4412,7 @@ pub(super) fn draw_bar(
     right: Option<&[BarSpan]>,
     bar_color: Color,
 ) {
-    let _perf = crate::perf::begin("draw_bar");
+    let _perf = crate::perf::begin("render:bar");
     let dash = "\u{2500}";
     let min_dashes = 4;
 
@@ -4101,7 +4613,7 @@ pub(super) fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
 }
 
 fn build_display_spans(buf: &str, att_ids: &[AttachmentId], store: &AttachmentStore) -> Vec<Span> {
-    let _perf = crate::perf::begin("display_spans");
+    let _perf = crate::perf::begin("render:display_spans");
     let mut spans = Vec::new();
     let mut plain = String::new();
     let mut att_idx = 0;
@@ -4719,19 +5231,79 @@ mod selection_tests {
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("thinking (2 lines)"));
+        // Gap row is either "\r\n\r\n" (new form, since scroll-mode
+        // `crlf` drops the redundant Clear::UntilNewLine) or
+        // "\r\n\x1b[K\r\n" (old form), depending on history path.
         assert!(
-            rendered.contains("\r\n\u{1b}[K\r\n") || rendered.contains("\n\n"),
+            rendered.contains("\r\n\r\n") || rendered.contains("\r\n\u{1b}[K\r\n"),
             "rendered: {rendered:?}"
         );
     }
 
     #[test]
-    fn export_render_cache_is_empty() {
+    fn block_artifact_bounded_lru_roundtrip() {
+        // Resize cycle 100 → 80 → 100 → 80 must hit cache on every repeat
+        // step, because the bounded LRU keeps both widths resident.
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Text {
+            content: "the quick brown fox jumps over the lazy dog".into(),
+        });
+
+        let mut sink = RenderOut::buffer();
+        history.render(&mut sink, 100, true);
+        history.flushed = 0;
+        history.render(&mut sink, 80, true);
+        history.flushed = 0;
+        history.render(&mut sink, 100, true);
+        history.flushed = 0;
+        history.render(&mut sink, 80, true);
+
+        let keys: Vec<LayoutKey> = history
+            .artifacts
+            .get(&id)
+            .unwrap()
+            .layouts
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        let k100 = LayoutKey {
+            width: 100,
+            show_thinking: true,
+        };
+        let k80 = LayoutKey {
+            width: 80,
+            show_thinking: true,
+        };
+        assert!(keys.contains(&k100), "expected width=100 cached: {keys:?}");
+        assert!(keys.contains(&k80), "expected width=80 cached: {keys:?}");
+        assert!(keys.len() <= BlockArtifact::MAX_LAYOUTS);
+    }
+
+    #[test]
+    fn duplicate_block_ids_share_artifact() {
+        // Two identical blocks at different positions should resolve to the
+        // same `BlockId` and share a single entry in `blocks` / `artifacts`.
+        let mut history = BlockHistory::new();
+        let a = history.push(Block::Text {
+            content: "same".into(),
+        });
+        let b = history.push(Block::Text {
+            content: "same".into(),
+        });
+        assert_eq!(a, b);
+        assert_eq!(history.order.len(), 2);
+        assert_eq!(history.blocks.len(), 1);
+        assert_eq!(history.artifacts.len(), 1);
+    }
+
+    #[test]
+    fn export_render_cache_skips_blocks_without_ir() {
         let mut screen = Screen::new();
         screen.push(Block::Thinking {
             content: "alpha\nbeta".into(),
         });
         screen.history.render(&mut RenderOut::buffer(), 80, true);
+        // Thinking blocks don't carry tool-output IR, so the cache is empty.
         assert!(screen.export_render_cache().is_none());
     }
 }

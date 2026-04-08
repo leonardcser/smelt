@@ -1,25 +1,45 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static SAMPLES: Mutex<Vec<Sample>> = Mutex::new(Vec::new());
 
-struct Sample {
-    label: &'static str,
-    dur: Duration,
+/// Global per-label samples (self-time durations).
+fn samples() -> &'static Mutex<HashMap<&'static str, Vec<Duration>>> {
+    static S: OnceLock<Mutex<HashMap<&'static str, Vec<Duration>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn enable() {
-    ENABLED.store(true, Ordering::Relaxed);
+/// Global per-label value samples (arbitrary u64, e.g. byte counts).
+fn value_samples() -> &'static Mutex<HashMap<&'static str, Vec<u64>>> {
+    static V: OnceLock<Mutex<HashMap<&'static str, Vec<u64>>>> = OnceLock::new();
+    V.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a raw numeric sample under `label`. Used for things that
+/// aren't durations — byte counts, cache sizes, etc. Printed in the
+/// summary alongside the duration table.
+pub fn record_value(label: &'static str, value: u64) {
+    if !enabled() {
+        return;
+    }
+    if let Ok(mut m) = value_samples().lock() {
+        m.entry(label).or_default().push(value);
+    }
 }
 
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-/// Returns a guard that records the elapsed time when dropped.
-/// If bench mode is disabled, returns None (zero overhead).
+/// Enable bench-mode collection. Idempotent.
+pub fn enable() {
+    ENABLED.store(true, Ordering::Relaxed);
+}
+
+/// Returns an RAII guard that records a self-time sample for `label` when
+/// dropped. Cheap no-op if bench mode is off.
 pub fn begin(label: &'static str) -> Option<Guard> {
     if !enabled() {
         return None;
@@ -38,59 +58,141 @@ pub struct Guard {
 impl Drop for Guard {
     fn drop(&mut self) {
         let dur = self.start.elapsed();
-        if let Ok(mut samples) = SAMPLES.lock() {
-            samples.push(Sample {
-                label: self.label,
-                dur,
-            });
+        if let Ok(mut s) = samples().lock() {
+            s.entry(self.label).or_default().push(dur);
         }
     }
 }
 
-/// Print a summary table of all recorded timings to stderr.
+// ── summary printing ─────────────────────────────────────────────────────
+
+// Total visual width of the table:
+// 30 (label) + 1 + 8 (calls) + 6 * (1 + 10) = 30 + 1 + 8 + 66 = 105
+const TABLE_WIDTH: usize = 105;
+
+/// Print a summary table of all recorded timings to stdout.
 pub fn print_summary() {
     if !enabled() {
         return;
     }
-    let samples = SAMPLES.lock().unwrap();
-    if samples.is_empty() {
+    let map = samples().lock().unwrap();
+    if map.is_empty() {
         return;
     }
+    let mut groups: Vec<(&'static str, Vec<Duration>)> =
+        map.iter().map(|(k, v)| (*k, v.clone())).collect();
+    drop(map);
+    // Sort by total time descending so worst offenders are at the top.
+    groups.sort_by(|a, b| {
+        let ta: Duration = a.1.iter().sum();
+        let tb: Duration = b.1.iter().sum();
+        tb.cmp(&ta)
+    });
+    let max_total: Duration = groups
+        .iter()
+        .map(|(_, ds)| ds.iter().sum::<Duration>())
+        .max()
+        .unwrap_or_default();
 
-    // Group by label
-    let mut groups: Vec<(&'static str, Vec<Duration>)> = Vec::new();
-    for s in samples.iter() {
-        if let Some(g) = groups.iter_mut().find(|(l, _)| *l == s.label) {
-            g.1.push(s.dur);
-        } else {
-            groups.push((s.label, vec![s.dur]));
-        }
-    }
-    groups.sort_by_key(|(l, _)| *l);
-
-    println!("\n{:─<72}", "── bench ");
-    println!(
-        "{:<30} {:>8} {:>10} {:>10} {:>10}",
-        "function", "calls", "total", "avg", "max"
+    let bar = "─".repeat(TABLE_WIDTH);
+    let title = "── bench ";
+    let title_bar = format!(
+        "{}{}",
+        title,
+        "─".repeat(TABLE_WIDTH - title.chars().count())
     );
-    println!("{:─<72}", "");
-
+    println!("\n{}", title_bar);
+    print_header("function", &bar);
     for (label, mut durs) in groups {
         durs.sort();
-        let count = durs.len();
         let total: Duration = durs.iter().sum();
-        let avg = total / count as u32;
-        let max = durs.last().copied().unwrap_or_default();
-        println!(
-            "{:<30} {:>8} {:>10} {:>10} {:>10}",
-            label,
-            count,
-            fmt_dur(total),
-            fmt_dur(avg),
-            fmt_dur(max),
-        );
+        let avg = total / durs.len() as u32;
+        let row = format_row(label, &durs, total, avg, fmt_dur);
+        println!("{}", colorize_row(&row, total, max_total));
     }
-    println!("{:─<72}", "");
+    println!("{}", bar);
+
+    // Value samples (byte counts etc.) in a smaller table below.
+    let value_map = value_samples().lock().unwrap();
+    if !value_map.is_empty() {
+        let mut vgroups: Vec<(&'static str, Vec<u64>)> =
+            value_map.iter().map(|(k, v)| (*k, v.clone())).collect();
+        drop(value_map);
+        vgroups.sort_by_key(|(k, _)| *k);
+        print_header("value", &bar);
+        for (label, mut vs) in vgroups {
+            vs.sort();
+            let total: u64 = vs.iter().sum();
+            let avg = total / vs.len() as u64;
+            println!("{}", format_row(label, &vs, total, avg, fmt_bytes));
+        }
+        println!("{}", bar);
+    }
+}
+
+fn print_header(first: &str, bar: &str) {
+    println!(
+        "{:<30} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        first, "count", "total", "avg", "p50", "p95", "p99", "max"
+    );
+    println!("{}", bar);
+}
+
+/// Format one row of a samples table. `samples` must already be sorted
+/// ascending. Generic over the sample value type so both the duration
+/// and byte-count tables share the same column layout and percentile
+/// math.
+fn format_row<T, F>(label: &str, samples: &[T], total: T, avg: T, fmt: F) -> String
+where
+    T: Copy,
+    F: Fn(T) -> String,
+{
+    let count = samples.len();
+    let pct = |p: usize| -> T {
+        let idx = ((count * p) / 100).min(count - 1);
+        samples[idx]
+    };
+    let max = *samples.last().unwrap();
+    format!(
+        "{:<30} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        label,
+        count,
+        fmt(total),
+        fmt(avg),
+        fmt(pct(50)),
+        fmt(pct(95)),
+        fmt(pct(99)),
+        fmt(max),
+    )
+}
+
+/// Colorize a formatted row based on the row's `total` time relative to
+/// the worst row's total. Uses a log-scaled gradient from dim → red.
+fn colorize_row(row: &str, total: Duration, max_total: Duration) -> String {
+    let code = severity_color(total, max_total);
+    format!("\x1b[{}m{}\x1b[0m", code, row)
+}
+
+/// Map a (total, max_total) pair to an ANSI SGR color code.
+/// Log-scaled so that the totals (which span ~5 orders of magnitude in
+/// practice) get spread across the gradient instead of all clumping at
+/// the bottom.
+fn severity_color(total: Duration, max_total: Duration) -> &'static str {
+    let t = total.as_secs_f64();
+    let m = max_total.as_secs_f64().max(1e-9);
+    // Normalize on a log scale: ratio = log(t)/log(m), clamped to [0, 1].
+    // Using log(1 + x * 1000) to avoid -inf at zero and to compress.
+    let ratio = (1.0 + t * 1000.0).ln() / (1.0 + m * 1000.0).ln();
+    let ratio = ratio.clamp(0.0, 1.0);
+
+    match ratio {
+        r if r >= 0.85 => "1;91", // bold bright red
+        r if r >= 0.65 => "91",   // bright red
+        r if r >= 0.45 => "33",   // yellow
+        r if r >= 0.25 => "36",   // cyan
+        r if r >= 0.10 => "37",   // white
+        _ => "2;37",              // dim
+    }
 }
 
 fn fmt_dur(d: Duration) -> String {
@@ -101,5 +203,15 @@ fn fmt_dur(d: Duration) -> String {
         format!("{:.1}ms", us as f64 / 1_000.0)
     } else {
         format!("{:.2}s", d.as_secs_f64())
+    }
+}
+
+fn fmt_bytes(n: u64) -> String {
+    if n < 1024 {
+        format!("{}B", n)
+    } else if n < 1024 * 1024 {
+        format!("{:.1}KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.2}MB", n as f64 / (1024.0 * 1024.0))
     }
 }

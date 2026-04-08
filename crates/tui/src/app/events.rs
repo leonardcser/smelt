@@ -2,8 +2,29 @@ use super::*;
 
 use crate::keymap::{self, KeyAction};
 use crossterm::{event::Event, terminal};
+use std::time::{Duration, Instant};
+
+/// Coalesce-window for repeated `Action::PurgeRedraw` (Ctrl+L) presses.
+/// A second press inside this window is dropped — the first press has
+/// already done a full purge+repaint and the screen state hasn't had
+/// time to drift.
+const PURGE_REDRAW_DEBOUNCE: Duration = Duration::from_millis(10);
 
 impl App {
+    /// Run a Ctrl+L purge+redraw, suppressing repeats inside the
+    /// debounce window so a held key or rapid double-press only fires
+    /// the expensive full-screen repaint once.
+    pub(super) fn purge_redraw_debounced(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.last_purge_redraw {
+            if now.duration_since(last) < PURGE_REDRAW_DEBOUNCE {
+                return;
+            }
+        }
+        self.last_purge_redraw = Some(now);
+        self.screen.redraw(true);
+    }
+
     fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
         let needs_rebuild = self.settings.show_thinking != s.show_thinking;
         self.input.set_vim_enabled(s.vim);
@@ -157,12 +178,16 @@ impl App {
                         self.screen.erase_prompt();
                     }
                     MenuResult::ThemeSelect(value) => {
+                        // Live preview already set the in-memory accent;
+                        // mirror it explicitly so settings.json and the
+                        // atomic stay in lockstep regardless of preview
+                        // state.
+                        crate::theme::set_accent(value);
                         state::set_accent(value);
                         self.screen.redraw(true);
                     }
                     MenuResult::ColorSelect(_) => {
-                        // Session-only, no persistence needed
-                        self.screen.mark_dirty();
+                        self.screen.redraw(true);
                     }
                     MenuResult::Stats | MenuResult::Cost | MenuResult::Dismissed => {}
                 }
@@ -587,7 +612,7 @@ impl App {
                 self.screen.mark_dirty();
             }
             Action::PurgeRedraw => {
-                self.screen.redraw(true);
+                self.purge_redraw_debounced();
             }
             Action::MenuResult(result) => return EventOutcome::MenuResult(result),
             Action::Noop | Action::Resize { .. } => {}
@@ -631,7 +656,7 @@ impl App {
                 EventOutcome::Redraw
             }
             Action::PurgeRedraw => {
-                self.screen.redraw(true);
+                self.purge_redraw_debounced();
                 EventOutcome::Noop
             }
             Action::NotifyError(msg) => {
@@ -687,10 +712,18 @@ impl App {
     }
 
     fn handle_resize(&mut self, w: u16, h: u16) {
-        if w != self.last_width || h != self.last_height {
-            self.last_width = w;
-            self.last_height = h;
+        if w == self.last_width && h == self.last_height {
+            return;
+        }
+        let width_changed = w != self.last_width;
+        self.last_width = w;
+        self.last_height = h;
+        if width_changed {
             self.screen.redraw(true);
+        } else {
+            // Height-only: block layouts are still valid at this width.
+            // Soft redraw skips Clear::Purge and reuses cached layouts.
+            self.screen.redraw(false);
         }
     }
 
@@ -810,7 +843,7 @@ impl App {
     /// Render a dialog-mode frame into the provided output buffer.
     /// Returns true if content was drawn (caller should re-dirty the dialog).
     pub(super) fn tick_dialog(&mut self, out: &mut render::RenderOut) -> bool {
-        let _perf = crate::perf::begin("tick");
+        let _perf = crate::perf::begin("app:tick");
         let w = render::term_width();
         self.screen.set_dialog_open(true);
         self.screen.draw_frame(out, w, None)
@@ -818,34 +851,35 @@ impl App {
 
     /// Render a full-mode frame (content + prompt) in its own sync frame.
     pub(super) fn tick_prompt(&mut self, agent_running: bool) {
-        let _perf = crate::perf::begin("tick");
+        let _perf = crate::perf::begin("app:tick");
+        // Advance the spinner before the dirty check — otherwise the
+        // status bar spinner stops animating during idle ticks where
+        // nothing else marks the screen dirty.
+        self.screen.update_spinner();
+        // Skip the entire frame/flush cycle when nothing changed. Avoids
+        // issuing BeginSync + EndSync + flush on every idle tick.
+        if !self.screen.needs_draw(false) {
+            return;
+        }
         let w = render::term_width();
         let show_queued = agent_running || self.is_compacting();
         self.screen.set_dialog_open(false);
 
-        let mut frame = render::Frame::begin(self.screen.backend());
-        if show_queued {
-            self.screen.draw_frame(
-                &mut frame,
-                w,
-                Some(FramePrompt {
-                    state: &self.input,
-                    mode: self.mode,
-                    queued: &self.queued_messages,
-                    prediction: None,
-                }),
-            );
+        let (queued, prediction): (&[String], Option<&str>) = if show_queued {
+            (&self.queued_messages, None)
         } else {
-            self.screen.draw_frame(
-                &mut frame,
-                w,
-                Some(FramePrompt {
-                    state: &self.input,
-                    mode: self.mode,
-                    queued: &[],
-                    prediction: self.input_prediction.as_deref(),
-                }),
-            );
-        }
+            (&[], self.input_prediction.as_deref())
+        };
+        let mut frame = render::Frame::begin(self.screen.backend());
+        self.screen.draw_frame(
+            &mut frame,
+            w,
+            Some(FramePrompt {
+                state: &self.input,
+                mode: self.mode,
+                queued,
+                prediction,
+            }),
+        );
     }
 }

@@ -23,6 +23,7 @@ sha2 = "0.10.9"
 tempfile = "3.27.0"
 libc = "0.2.183"
 flate2 = "1.1.9"
+seahash = "4.1.0"
 
 [dev-dependencies]
 vt100 = "0.16.2"

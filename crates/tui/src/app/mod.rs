@@ -120,6 +120,10 @@ pub struct App {
     pending_title: bool,
     last_width: u16,
     last_height: u16,
+    /// Last time `Action::PurgeRedraw` (Ctrl+L) actually fired a redraw.
+    /// Used to coalesce rapid double-presses within `PURGE_REDRAW_DEBOUNCE`
+    /// into a single full repaint.
+    last_purge_redraw: Option<Instant>,
     next_turn_id: u64,
     /// Incremented on rewind/clear/load to invalidate in-flight compactions.
     compact_epoch: u64,
@@ -481,6 +485,7 @@ impl App {
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
+            last_purge_redraw: None,
             next_turn_id: 1,
             compact_epoch: 0,
             pending_compact_epoch: 0,

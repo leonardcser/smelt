@@ -1,4 +1,21 @@
+//! Two persisted caches per session, one layered above the other:
+//!
+//! - `RenderCache` (`render_cache.ir.bin`) — tool-output intermediate
+//!   representations: pre-computed `CachedInlineDiff`s for `edit_file` /
+//!   `notebook_edit`. The IR is width-independent and survives layout
+//!   invalidation, so a terminal resize can re-lay out diff blocks
+//!   without re-running the LCS / syntect passes.
+//!
+//! - `PersistedLayoutCache` (`render_cache.layout.bin`) — fully laid-out
+//!   `DisplayBlock` span trees per `BlockId`. A cache hit here skips
+//!   layout entirely; the paint stage just walks the span tree.
+//!
+//! Layered fall-through: layout cache → IR cache → cold rebuild. The
+//! layout cache survives paint (theme changes resolve `ColorRole::*`
+//! freshly each frame). The IR cache survives layout invalidation
+//! (resize prunes layouts but not the underlying diff IR).
 use super::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
+use super::{BlockArtifact, BlockId};
 use engine::tools::NotebookRenderData;
 use protocol::{Message, TurnMeta};
 use serde::{Deserialize, Serialize};
@@ -6,6 +23,72 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub const RENDER_CACHE_VERSION: u32 = 1;
+pub const LAYOUT_CACHE_VERSION: u32 = 5;
+
+/// Content-addressed on-disk snapshot of `BlockHistory::artifacts` for one
+/// session. Keyed by `BlockId`, so forked sessions with identical blocks
+/// can share cached layouts. Per-layout width validity is enforced lazily
+/// by `DisplayBlock::is_valid_at` during the next paint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedLayoutCache {
+    pub version: u32,
+    /// Light/dark mode at the time of capture. Syntect picks a different
+    /// syntax theme based on `theme::is_light()`, and those colors get
+    /// baked into `DisplayBlock` spans at layout time. Resuming a session
+    /// in a terminal with a different background detection produces
+    /// stale syntax-highlight colors, so we drop the cache on mismatch.
+    #[serde(default)]
+    pub is_light: bool,
+    pub blocks: HashMap<BlockId, BlockArtifact>,
+}
+
+impl PersistedLayoutCache {
+    pub fn new(is_light: bool) -> Self {
+        Self {
+            version: LAYOUT_CACHE_VERSION,
+            is_light,
+            blocks: HashMap::new(),
+        }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+
+        let payload = serde_json::to_vec(self).unwrap_or_default();
+        let mut out = Vec::with_capacity(4 + payload.len() / 4);
+        out.extend_from_slice(b"LCi5");
+        let mut enc = DeflateEncoder::new(out, Compression::fast());
+        std::io::Write::write_all(&mut enc, &payload).ok();
+        enc.finish().unwrap_or_default()
+    }
+
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        use flate2::read::DeflateDecoder;
+        use std::io::Read;
+
+        if data.len() < 4 || &data[..4] != b"LCi5" {
+            return None;
+        }
+        let mut dec = DeflateDecoder::new(&data[4..]);
+        let mut payload = Vec::new();
+        dec.read_to_end(&mut payload).ok()?;
+        serde_json::from_slice(&payload).ok()
+    }
+
+    /// Compatible iff version matches AND the persisted light/dark mode
+    /// matches current detection. Mismatched modes mean stale syntect
+    /// colors throughout the cache.
+    pub fn is_compatible(&self, current_is_light: bool) -> bool {
+        self.version == LAYOUT_CACHE_VERSION && self.is_light == current_is_light
+    }
+}
+
+impl Default for PersistedLayoutCache {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RenderCache {

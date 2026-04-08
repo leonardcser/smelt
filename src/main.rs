@@ -320,6 +320,11 @@ async fn main() {
         tui::perf::enable();
     }
 
+    // Eager-load syntect's syntax and theme sets in the background so the
+    // first tool render doesn't pay the ~30ms lazy-init cost mid-frame.
+    // Runs in parallel with session loading and is done well before first paint.
+    std::thread::spawn(tui::render::warm_up_syntect);
+
     if args.headless && args.message.is_none() {
         eprintln!("error: --headless requires a message argument");
         std::process::exit(1);

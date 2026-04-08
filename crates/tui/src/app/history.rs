@@ -396,16 +396,20 @@ impl App {
                             let elapsed = tool_elapsed
                                 .get(&tc.id)
                                 .map(|ms| Duration::from_millis(*ms));
-                            self.screen.push(Block::ToolCall {
-                                call_id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                summary,
-                                args,
-                                status,
-                                elapsed,
-                                output: output.map(Box::new),
-                                user_message: None,
-                            });
+                            self.screen.push_tool_call(
+                                Block::ToolCall {
+                                    call_id: tc.id.clone(),
+                                    name: tc.function.name.clone(),
+                                    summary,
+                                    args,
+                                },
+                                crate::render::ToolState {
+                                    status,
+                                    elapsed,
+                                    output: output.map(Box::new),
+                                    user_message: None,
+                                },
+                            );
                         }
                     }
                 }
@@ -431,10 +435,17 @@ impl App {
         if let Some((_, meta)) = self.turn_metas.last() {
             self.screen.restore_from_turn_meta(meta);
         }
+
+        // Reattach the persisted layout cache, if any. Must happen *after*
+        // every block has been pushed so the cache vector lengths match.
+        // Per-block width validity is enforced inside `import_layout_cache`.
+        if let Some(layout_cache) = session::load_layout_cache(&self.session) {
+            self.screen.import_layout_cache(layout_cache);
+        }
     }
 
     pub fn save_session(&mut self) {
-        let _perf = crate::perf::begin("save_session");
+        let _perf = crate::perf::begin("session:save");
         if self.history.is_empty() {
             return;
         }
@@ -443,6 +454,14 @@ impl App {
         self.session.turn_metas = self.turn_metas.clone();
         self.sync_session_snapshot();
         session::save(&self.session, &self.input.store);
+        if let Some(cache) = self.screen.export_render_cache() {
+            session::save_render_cache(&self.session, &cache);
+        }
+        if self.screen.layout_cache_dirty() {
+            if let Some(cache) = self.screen.export_layout_cache() {
+                session::save_layout_cache(&self.session, &cache);
+            }
+        }
     }
 
     pub(super) fn maybe_generate_title(&mut self, current_message: Option<&str>) {

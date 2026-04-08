@@ -104,28 +104,32 @@ fn tool_call_block() {
         text: "Read the file".into(),
         image_labels: vec![],
     });
-    h.push_and_render(Block::ToolCall {
-        call_id: "call-1".into(),
-        name: "read".into(),
-        summary: "Reading file.rs".into(),
-        args: {
-            let mut m = std::collections::HashMap::new();
-            m.insert(
-                "path".into(),
-                serde_json::Value::String("/src/main.rs".into()),
-            );
-            m
+    h.push_tool_call_and_render(
+        Block::ToolCall {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            summary: "Reading file.rs".into(),
+            args: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "path".into(),
+                    serde_json::Value::String("/src/main.rs".into()),
+                );
+                m
+            },
         },
-        status: tui::render::ToolStatus::Ok,
-        output: Some(Box::new(tui::render::ToolOutput {
-            content: "fn main() {}".into(),
-            is_error: false,
-            metadata: None,
-            render_cache: None,
-        })),
-        user_message: None,
-        elapsed: Some(std::time::Duration::from_millis(150)),
-    });
+        tui::render::ToolState {
+            status: tui::render::ToolStatus::Ok,
+            output: Some(Box::new(tui::render::ToolOutput {
+                content: "fn main() {}".into(),
+                is_error: false,
+                metadata: None,
+                render_cache: None,
+            })),
+            user_message: None,
+            elapsed: Some(std::time::Duration::from_millis(150)),
+        },
+    );
     h.push_and_render(Block::Text {
         content: "I read the file.".into(),
     });
@@ -139,21 +143,25 @@ fn tool_call_empty_result_has_no_extra_line() {
         text: "Run it".into(),
         image_labels: vec![],
     });
-    h.push_and_render(Block::ToolCall {
-        call_id: "call-2".into(),
-        name: "message_agent".into(),
-        summary: "cedar".into(),
-        args: std::collections::HashMap::new(),
-        status: tui::render::ToolStatus::Ok,
-        output: Some(Box::new(tui::render::ToolOutput {
-            content: String::new(),
-            is_error: false,
-            metadata: None,
-            render_cache: None,
-        })),
-        user_message: None,
-        elapsed: Some(std::time::Duration::from_millis(150)),
-    });
+    h.push_tool_call_and_render(
+        Block::ToolCall {
+            call_id: "call-2".into(),
+            name: "message_agent".into(),
+            summary: "cedar".into(),
+            args: std::collections::HashMap::new(),
+        },
+        tui::render::ToolState {
+            status: tui::render::ToolStatus::Ok,
+            output: Some(Box::new(tui::render::ToolOutput {
+                content: String::new(),
+                is_error: false,
+                metadata: None,
+                render_cache: None,
+            })),
+            user_message: None,
+            elapsed: Some(std::time::Duration::from_millis(150)),
+        },
+    );
     h.push_and_render(Block::Text {
         content: "Done.".into(),
     });

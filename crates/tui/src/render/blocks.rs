@@ -1,21 +1,37 @@
 use crate::theme;
 use crate::utils::format_duration;
-use crossterm::{
-    style::{Color, Print},
-    QueueableCommand,
-};
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use super::display::{ColorRole, ColorValue, DisplayBlock, NamedColor, SpanStyle};
 use super::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, strip_markdown_markers, BashHighlighter,
 };
+use super::layout_out::{LayoutSink, SpanCollector};
 use super::{
-    crlf, truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, RenderOut,
-    ToolOutput, ToolStatus,
+    truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, LayoutContext,
+    RenderOut, ToolOutput, ToolState, ToolStatus,
 };
+
+/// Layout entry point: produce a `DisplayBlock` for `block` at the given
+/// width. Drives the per-variant renderers against a `SpanCollector` and
+/// hands the resulting span tree off to the cache / paint stage.
+///
+/// `state` must be `Some(_)` for `Block::ToolCall` and is unused for every
+/// other variant.
+pub(super) fn layout_block(
+    block: &Block,
+    state: Option<&ToolState>,
+    ctx: &LayoutContext,
+) -> DisplayBlock {
+    let width = ctx.width as usize;
+    let show_thinking = ctx.show_thinking;
+    let mut col = SpanCollector::new(ctx.width);
+    render_block(&mut col, block, state, width, show_thinking);
+    col.finish()
+}
 
 /// Animated trailing dots for streaming indicators.
 pub(super) fn animated_dots() -> &'static str {
@@ -29,10 +45,15 @@ pub(super) fn animated_dots() -> &'static str {
     &"..."[..n]
 }
 
-/// Concatenate trailing `Block::Thinking` content from the end of a block list.
-pub(super) fn collect_trailing_thinking(blocks: &[super::Block]) -> String {
+/// Concatenate trailing `Block::Thinking` content from the end of a block
+/// iterator. The iterator must yield blocks in forward order.
+pub(super) fn collect_trailing_thinking<'a, I>(blocks: I) -> String
+where
+    I: IntoIterator<Item = &'a super::Block>,
+    I::IntoIter: DoubleEndedIterator,
+{
     let parts: Vec<&str> = blocks
-        .iter()
+        .into_iter()
         .rev()
         .map_while(|b| match b {
             super::Block::Thinking { content } => Some(content.as_str()),
@@ -73,8 +94,8 @@ pub(super) fn thinking_summary(content: &str) -> (String, usize) {
 }
 
 /// Render a single hidden-thinking summary row with optional animated dots.
-pub(super) fn render_thinking_summary(
-    out: &mut RenderOut,
+pub(super) fn render_thinking_summary<S: LayoutSink>(
+    out: &mut S,
     width: usize,
     label: &str,
     line_count: usize,
@@ -83,12 +104,16 @@ pub(super) fn render_thinking_summary(
     let dots = if animated { animated_dots() } else { "" };
     let summary = format!("{label} ({}){dots}", pluralize(line_count, "line", "lines"));
     let max_cols = width.saturating_sub(4).max(1);
+    let segs = wrap_line(&summary, max_cols);
+    if segs.len() > 1 {
+        out.mark_wrapped();
+    }
     let mut rows = 0u16;
-    for seg in &wrap_line(&summary, max_cols) {
+    for seg in &segs {
         out.set_dim_italic();
-        let _ = out.queue(Print(format!(" \u{2502} {}", seg)));
+        out.print_string(format!(" \u{2502} {}", seg));
         out.reset_style();
-        crlf(out);
+        out.newline();
         rows += 1;
     }
     rows
@@ -160,26 +185,26 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
     }
 }
 
-pub(super) fn render_block(
-    out: &mut RenderOut,
+pub(super) fn render_block<S: LayoutSink>(
+    out: &mut S,
     block: &Block,
+    state: Option<&ToolState>,
     width: usize,
     show_thinking: bool,
 ) -> u16 {
-    let label = match block {
-        Block::User { .. } => "render:user",
-        Block::Thinking { .. } => "render:thinking",
-        Block::Text { .. } => "render:text",
-        Block::CodeLine { .. } => "render:code_line",
-        Block::ToolCall { .. } => "render:tool_call",
-        Block::Confirm { .. } => "render:confirm",
-        Block::Hint { .. } => "render:hint",
-        Block::Compacted { .. } => "render:compacted",
-        Block::Exec { .. } => "render:exec",
-        Block::AgentMessage { .. } => "render:agent_msg",
-        Block::Agent { .. } => "render:agent",
+    let _perf = match block {
+        Block::User { .. } => crate::perf::begin("render:user"),
+        Block::Thinking { .. } => crate::perf::begin("render:thinking"),
+        Block::Text { .. } => crate::perf::begin("render:text"),
+        Block::CodeLine { .. } => crate::perf::begin("render:code_line"),
+        Block::ToolCall { .. } => crate::perf::begin("render:tool_call"),
+        Block::Confirm { .. } => crate::perf::begin("render:confirm"),
+        Block::Hint { .. } => crate::perf::begin("render:hint"),
+        Block::Compacted { .. } => crate::perf::begin("render:compacted"),
+        Block::Exec { .. } => crate::perf::begin("render:exec"),
+        Block::AgentMessage { .. } => crate::perf::begin("render:agent_msg"),
+        Block::Agent { .. } => crate::perf::begin("render:agent"),
     };
-    let _perf = crate::perf::begin(label);
     match block {
         Block::User { text, image_labels } => {
             let is_command = crate::completer::Completer::is_command(text.trim());
@@ -216,19 +241,22 @@ pub(super) fn render_block(
             } else {
                 0
             };
-            let user_bg = theme::user_bg();
+            let user_bg = ColorValue::Role(ColorRole::UserBg);
             let mut rows = 0u16;
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
                     let fill = if block_w > 0 { block_w + 1 } else { 2 };
                     out.set_bg(user_bg);
-                    let _ = out.queue(Print(" ".repeat(fill)));
+                    out.print_string(" ".repeat(fill));
                     out.reset_style();
-                    crlf(out);
+                    out.newline();
                     rows += 1;
                     continue;
                 }
                 let chunks = wrap_line(logical_line, text_w);
+                if chunks.len() > 1 {
+                    out.mark_wrapped();
+                }
                 for chunk in &chunks {
                     let chunk_len = chunk.chars().count();
                     let trailing = if block_w > 0 {
@@ -238,11 +266,11 @@ pub(super) fn render_block(
                     };
                     out.set_bg(user_bg);
                     out.set_bold();
-                    let _ = out.queue(Print(" "));
+                    out.print(" ");
                     print_user_highlights(out, chunk, image_labels, is_command);
-                    let _ = out.queue(Print(" ".repeat(trailing)));
+                    out.print_string(" ".repeat(trailing));
                     out.reset_style();
-                    crlf(out);
+                    out.newline();
                     rows += 1;
                 }
             }
@@ -257,11 +285,14 @@ pub(super) fn render_block(
             let mut rows = 0u16;
             for line in content.lines() {
                 let segments = wrap_line(line, max_cols);
+                if segments.len() > 1 {
+                    out.mark_wrapped();
+                }
                 for seg in &segments {
                     out.set_dim_italic();
-                    let _ = out.queue(Print(format!(" │ {}", seg)));
+                    out.print_string(format!(" │ {}", seg));
                     out.reset_style();
-                    crlf(out);
+                    out.newline();
                     rows += 1;
                 }
             }
@@ -275,31 +306,30 @@ pub(super) fn render_block(
             call_id,
             name,
             summary,
-            status,
-            elapsed,
-            output,
             args,
-            user_message,
-        } => render_tool(
-            out,
-            call_id,
-            name,
-            summary,
-            args,
-            *status,
-            *elapsed,
-            output.as_deref(),
-            user_message.as_deref(),
-            width,
-        ),
+        } => {
+            let state = state.expect("ToolCall layout requires ToolState");
+            render_tool(
+                out,
+                call_id,
+                name,
+                summary,
+                args,
+                state.status,
+                state.elapsed,
+                state.output.as_deref(),
+                state.user_message.as_deref(),
+                width,
+            )
+        }
         Block::Confirm { tool, desc, choice } => {
             render_confirm_result(out, tool, desc, choice.clone(), width)
         }
         Block::Hint { content } => {
             out.push_dim_italic();
-            let _ = out.queue(Print(content));
+            out.print(content);
             out.pop_style();
-            crlf(out);
+            out.newline();
             1
         }
         Block::Compacted { summary } => {
@@ -309,28 +339,28 @@ pub(super) fn render_block(
             let left = remaining / 2;
             let right = remaining - left;
             out.push_dim();
-            let _ = out.queue(Print("─".repeat(left)));
-            let _ = out.queue(Print(label));
-            let _ = out.queue(Print("─".repeat(right)));
+            out.print_string("─".repeat(left));
+            out.print(label);
+            out.print_string("─".repeat(right));
             out.pop_style();
-            crlf(out);
+            out.newline();
             1 + render_markdown_inner(out, summary, width, " ", true, None)
         }
         Block::Exec { command, output } => {
             let char_len = command.chars().count() + 1;
             let pad_width = (char_len + 2).min(width);
             let trailing = pad_width.saturating_sub(char_len + 1);
-            out.push_style(super::StyleState {
-                bg: Some(theme::user_bg()),
-                fg: Some(theme::EXEC),
+            out.push_style(SpanStyle {
+                bg: Some(ColorValue::Role(ColorRole::UserBg)),
+                fg: Some(theme::EXEC.into()),
                 bold: true,
                 ..Default::default()
             });
-            let _ = out.queue(Print(" !"));
-            out.set_fg(Color::Reset);
-            let _ = out.queue(Print(format!("{}{}", command, " ".repeat(trailing))));
+            out.print(" !");
+            out.set_fg(ColorValue::Named(NamedColor::Reset));
+            out.print_string(format!("{}{}", command, " ".repeat(trailing)));
             out.pop_style();
-            crlf(out);
+            out.newline();
             let mut rows = 1u16;
             if !output.is_empty() {
                 rows += render_wrapped_output(out, output, false, width);
@@ -343,18 +373,18 @@ pub(super) fn render_block(
             content,
         } => {
             let header = format!(" ➜ {from_id}");
-            out.push_style(super::StyleState {
-                fg: Some(crate::theme::AGENT),
+            out.push_style(SpanStyle {
+                fg: Some(crate::theme::AGENT.into()),
                 bold: true,
                 ..Default::default()
             });
-            let _ = out.queue(Print(&header));
+            out.print(&header);
             out.pop_style();
-            crlf(out);
+            out.newline();
             let bctx = super::BoxContext {
                 left: " \u{2502} ",
                 right: "",
-                color: crate::theme::AGENT,
+                color: crate::theme::AGENT.into(),
                 inner_w: width.saturating_sub(4),
             };
             1 + render_markdown_inner(out, content, width, bctx.left, true, Some(&bctx))
@@ -380,8 +410,8 @@ pub(super) fn render_block(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_agent_block(
-    out: &mut RenderOut,
+fn render_agent_block<S: LayoutSink>(
+    out: &mut S,
     agent_id: &str,
     slug: Option<&str>,
     blocking: bool,
@@ -394,37 +424,37 @@ fn render_agent_block(
     let mut rows = 0u16;
 
     // Header: " + agent_id · slug [✓/✗] [elapsed]"
-    out.push_style(super::StyleState {
-        fg: Some(crate::theme::AGENT),
+    out.push_style(SpanStyle {
+        fg: Some(crate::theme::AGENT.into()),
         bold: true,
         ..Default::default()
     });
-    let _ = out.queue(Print(format!(" + {agent_id}")));
+    out.print_string(format!(" + {agent_id}"));
 
     if !blocking {
-        out.push_fg(crate::theme::muted());
-        let _ = out.queue(Print(" started"));
+        out.push_fg(ColorValue::Role(ColorRole::Muted));
+        out.print(" started");
         out.pop_style(); // muted fg
         out.pop_style(); // bold+agent fg
-        crlf(out);
+        out.newline();
         return rows + 1;
     }
 
     if let Some(slug) = slug {
         out.push_dim();
-        let _ = out.queue(Print(format!(" \u{00b7} {slug}")));
+        out.print_string(format!(" \u{00b7} {slug}"));
         out.pop_style();
     }
 
     match status {
         AgentBlockStatus::Done => {
-            out.push_fg(crate::theme::SUCCESS);
-            let _ = out.queue(Print(" \u{2713}")); // ✓
+            out.push_fg(crate::theme::SUCCESS.into());
+            out.print(" \u{2713}"); // ✓
             out.pop_style();
         }
         AgentBlockStatus::Error => {
-            out.push_fg(crate::theme::ERROR);
-            let _ = out.queue(Print(" \u{2717}")); // ✗
+            out.push_fg(crate::theme::ERROR.into());
+            out.print(" \u{2717}"); // ✗
             out.pop_style();
         }
         AgentBlockStatus::Running => {}
@@ -432,29 +462,29 @@ fn render_agent_block(
 
     if let Some(d) = elapsed {
         if d.as_secs_f64() >= 0.1 {
-            out.push_style(super::StyleState {
-                fg: Some(crate::theme::muted()),
+            out.push_style(SpanStyle {
+                fg: Some(ColorValue::Role(ColorRole::Muted)),
                 dim: true,
                 ..Default::default()
             });
-            let _ = out.queue(Print(format!("  {}", format_duration(d.as_secs()))));
+            out.print_string(format!("  {}", format_duration(d.as_secs())));
             out.pop_style();
         }
     }
 
     out.pop_style(); // bold+agent fg
-    crlf(out);
+    out.newline();
     rows += 1;
 
     // Blocking: show last 3 tool calls with left border.
     let visible = tool_calls.iter().rev().take(3).collect::<Vec<_>>();
     for entry in visible.iter().rev() {
-        out.push_fg(crate::theme::AGENT);
-        let _ = out.queue(Print(" \u{2502} ")); // │
+        out.push_fg(crate::theme::AGENT.into());
+        out.print(" \u{2502} "); // │
         out.pop_style();
 
         out.push_dim();
-        let _ = out.queue(Print(&entry.tool_name));
+        out.print(&entry.tool_name);
         out.pop_style();
 
         // Reserve space for elapsed time so the summary doesn't push it off-screen.
@@ -466,32 +496,32 @@ fn render_agent_block(
         // 6 = " │ " (3) + space before summary (1) + padding (2)
         let max_summary = width.saturating_sub(6 + entry.tool_name.len() + time_w);
         let summary = truncate_str(&entry.summary, max_summary);
-        let _ = out.queue(Print(format!(" {summary}")));
+        out.print_string(format!(" {summary}"));
 
         if let Some(ref ts) = time_str {
             out.push_dim();
-            let _ = out.queue(Print(ts));
+            out.print(ts);
             out.pop_style();
         }
 
-        crlf(out);
+        out.newline();
         rows += 1;
     }
 
     // Bottom border
     let border_w = width.saturating_sub(2);
-    out.push_fg(crate::theme::AGENT);
-    let _ = out.queue(Print(format!(" \u{2570}{}", "\u{2500}".repeat(border_w))));
+    out.push_fg(crate::theme::AGENT.into());
+    out.print_string(format!(" \u{2570}{}", "\u{2500}".repeat(border_w)));
     out.pop_style();
-    crlf(out);
+    out.newline();
     rows += 1;
 
     rows
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_tool(
-    out: &mut RenderOut,
+pub(super) fn render_tool<S: LayoutSink>(
+    out: &mut S,
     _call_id: &str,
     name: &str,
     summary: &str,
@@ -502,11 +532,11 @@ pub(super) fn render_tool(
     user_message: Option<&str>,
     width: usize,
 ) -> u16 {
-    let color = match status {
-        ToolStatus::Ok => theme::SUCCESS,
-        ToolStatus::Err | ToolStatus::Denied => theme::ERROR,
-        ToolStatus::Confirm => theme::accent(),
-        ToolStatus::Pending => theme::tool_pending(),
+    let color: ColorValue = match status {
+        ToolStatus::Ok => theme::SUCCESS.into(),
+        ToolStatus::Err | ToolStatus::Denied => theme::ERROR.into(),
+        ToolStatus::Confirm => ColorValue::Role(ColorRole::Accent),
+        ToolStatus::Pending => ColorValue::Role(ColorRole::ToolPending),
     };
     let time = if matches!(
         name,
@@ -530,16 +560,20 @@ pub(super) fn render_tool(
     let mut rows = print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
     if name == "web_fetch" {
         if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
-            for seg in &wrap_line(prompt, width.saturating_sub(4)) {
+            let segs = wrap_line(prompt, width.saturating_sub(4));
+            if segs.len() > 1 {
+                out.mark_wrapped();
+            }
+            for seg in &segs {
                 print_dim(out, &format!("   {}", seg));
-                crlf(out);
+                out.newline();
                 rows += 1;
             }
         }
     }
     if let Some(msg) = user_message {
         print_dim(out, &format!("   {msg}"));
-        crlf(out);
+        out.newline();
         rows += 1;
     }
     if status != ToolStatus::Denied {
@@ -552,8 +586,8 @@ pub(super) fn render_tool(
     rows
 }
 
-fn render_confirm_result(
-    out: &mut RenderOut,
+fn render_confirm_result<S: LayoutSink>(
+    out: &mut S,
     tool: &str,
     desc: &str,
     choice: Option<ConfirmChoice>,
@@ -561,29 +595,32 @@ fn render_confirm_result(
 ) -> u16 {
     let mut rows = 2u16;
 
-    out.push_fg(theme::APPLY);
-    let _ = out.queue(Print("   allow? "));
+    out.push_fg(theme::APPLY.into());
+    out.print("   allow? ");
     out.pop_style();
     print_dim(out, tool);
-    crlf(out);
+    out.newline();
 
     let prefix = "   \u{2502} ";
     let prefix_len = prefix.chars().count();
     let segments = wrap_line(desc, width.saturating_sub(prefix_len));
+    if segments.len() > 1 {
+        out.mark_wrapped();
+    }
     for (i, seg) in segments.iter().enumerate() {
         if i == 0 {
             print_dim(out, prefix);
         } else {
-            let _ = out.queue(Print(" ".repeat(prefix_len)));
+            out.print_string(" ".repeat(prefix_len));
         }
-        let _ = out.queue(Print(seg));
-        crlf(out);
+        out.print(seg);
+        out.newline();
     }
     rows += segments.len().saturating_sub(1) as u16;
 
     if let Some(c) = choice {
         rows += 1;
-        let _ = out.queue(Print("   "));
+        out.print("   ");
         match c {
             ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
                 print_dim(out, "approved");
@@ -613,12 +650,12 @@ fn render_confirm_result(
                 print_dim(out, &format!("always{suffix} (dir: {dir})"));
             }
             ConfirmChoice::No => {
-                out.push_fg(theme::ERROR);
-                let _ = out.queue(Print("denied"));
+                out.push_fg(theme::ERROR.into());
+                out.print("denied");
                 out.pop_style();
             }
         }
-        crlf(out);
+        out.newline();
     }
     rows
 }
@@ -662,18 +699,18 @@ pub(super) fn tool_line_rows(name: &str, summary: &str, width: usize) -> u16 {
     }
 }
 
-fn print_tool_line(
-    out: &mut RenderOut,
+fn print_tool_line<S: LayoutSink>(
+    out: &mut S,
     name: &str,
     summary: &str,
-    pill_color: Color,
+    pill_color: ColorValue,
     elapsed: Option<Duration>,
     timeout_label: Option<&str>,
     width: usize,
 ) -> u16 {
-    let _ = out.queue(Print(" "));
+    out.print(" ");
     out.push_fg(pill_color);
-    let _ = out.queue(Print("\u{23fa}"));
+    out.print("\u{23fa}");
     out.pop_style();
     let time_str = elapsed
         .filter(|d| d.as_secs_f64() >= 0.1)
@@ -688,10 +725,15 @@ fn print_tool_line(
     print_dim(out, &format!(" {} ", name));
 
     if name == "bash" {
-        let wrapped: Vec<String> = summary
-            .lines()
-            .flat_map(|line| wrap_line(line, ly.max_summary.max(1)))
-            .collect();
+        let raw_lines: Vec<&str> = summary.lines().collect();
+        let mut wrapped: Vec<String> = Vec::new();
+        for line in &raw_lines {
+            let segs = wrap_line(line, ly.max_summary.max(1));
+            if segs.len() > 1 {
+                out.mark_wrapped();
+            }
+            wrapped.extend(segs);
+        }
         let total = wrapped.len();
         let show = total.min(MAX_TOOL_SUMMARY_ROWS);
         let mut line_num = 0;
@@ -699,7 +741,7 @@ fn print_tool_line(
 
         for (idx, seg) in wrapped[..show].iter().enumerate() {
             if idx > 0 {
-                let _ = out.queue(Print(" ".repeat(ly.prefix_len)));
+                out.print_string(" ".repeat(ly.prefix_len));
             }
             bh.print_line(out, seg);
             if idx == 0 {
@@ -710,18 +752,18 @@ fn print_tool_line(
                     print_dim(out, &timeout_str);
                 }
             }
-            crlf(out);
+            out.newline();
             line_num += 1;
         }
 
         if total > MAX_TOOL_SUMMARY_ROWS {
             let skipped = total - MAX_TOOL_SUMMARY_ROWS;
-            let _ = out.queue(Print(" ".repeat(ly.prefix_len)));
+            out.print_string(" ".repeat(ly.prefix_len));
             print_dim(
                 out,
                 &format!("... {} below", pluralize(skipped, "line", "lines")),
             );
-            crlf(out);
+            out.newline();
             line_num += 1;
         }
 
@@ -732,7 +774,7 @@ fn print_tool_line(
     if matches!(name, "message_agent" | "stop_agent" | "peek_agent") {
         print_agent_summary(out, &truncated);
     } else {
-        let _ = out.queue(Print(&truncated));
+        out.print(&truncated);
     }
     if !time_str.is_empty() {
         print_dim(out, &time_str);
@@ -740,7 +782,7 @@ fn print_tool_line(
     if !timeout_str.is_empty() {
         print_dim(out, &timeout_str);
     }
-    crlf(out);
+    out.newline();
     1
 }
 
@@ -748,7 +790,7 @@ fn print_tool_line(
 /// rest as plain text. Agent names are single words (no spaces) optionally
 /// separated by ", ". The first token that contains a space or follows a
 /// non-comma separator marks the start of the plain-text portion.
-fn print_agent_summary(out: &mut RenderOut, summary: &str) {
+fn print_agent_summary<S: LayoutSink>(out: &mut S, summary: &str) {
     // Find where agent names end: consume "word(, word)*" prefix.
     let mut end = 0;
     let mut rest = summary;
@@ -775,21 +817,21 @@ fn print_agent_summary(out: &mut RenderOut, summary: &str) {
         let names = &summary[..end];
         for (i, name) in names.split(", ").enumerate() {
             if i > 0 {
-                let _ = out.queue(Print(", "));
+                out.print(", ");
             }
-            out.push_fg(theme::AGENT);
-            let _ = out.queue(Print(name.trim()));
+            out.push_fg(theme::AGENT.into());
+            out.print(name.trim());
             out.pop_style();
         }
     }
     let tail = &summary[end..];
     if !tail.is_empty() {
-        let _ = out.queue(Print(tail));
+        out.print(tail);
     }
 }
 
-fn print_tool_output(
-    out: &mut RenderOut,
+fn print_tool_output<S: LayoutSink>(
+    out: &mut S,
     name: &str,
     output: &ToolOutput,
     args: &HashMap<String, serde_json::Value>,
@@ -806,14 +848,14 @@ fn print_tool_output(
                     if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
                         let title = &line[pos + 2..];
                         print_dim(out, &format!("   {title}"));
-                        crlf(out);
+                        out.newline();
                         count += 1;
                     }
                 }
             }
             if count == 0 {
                 print_dim(out, "   No results found");
-                crlf(out);
+                out.newline();
                 return 1;
             }
             count
@@ -840,7 +882,7 @@ fn print_tool_output(
             let mut rows = 0u16;
             for line in content.lines() {
                 print_dim(out, &format!("   {line}"));
-                crlf(out);
+                out.newline();
                 rows += 1;
             }
             rows.max(1)
@@ -849,20 +891,20 @@ fn print_tool_output(
     }
 }
 
-fn print_dim(out: &mut RenderOut, text: &str) {
+fn print_dim<S: LayoutSink>(out: &mut S, text: &str) {
     out.push_dim();
-    let _ = out.queue(Print(text));
+    out.print(text);
     out.pop_style();
 }
 
-fn print_dim_count(out: &mut RenderOut, count: usize, singular: &str, plural: &str) -> u16 {
+fn print_dim_count<S: LayoutSink>(out: &mut S, count: usize, singular: &str, plural: &str) -> u16 {
     print_dim(out, &format!("   {}", pluralize(count, singular, plural)));
-    crlf(out);
+    out.newline();
     1
 }
 
-fn render_edit_output(
-    out: &mut RenderOut,
+fn render_edit_output<S: LayoutSink>(
+    out: &mut S,
     output: &ToolOutput,
     args: &HashMap<String, serde_json::Value>,
 ) -> u16 {
@@ -886,13 +928,16 @@ fn render_edit_output(
     }
 }
 
-fn render_write_output(out: &mut RenderOut, args: &HashMap<String, serde_json::Value>) -> u16 {
+fn render_write_output<S: LayoutSink>(
+    out: &mut S,
+    args: &HashMap<String, serde_json::Value>,
+) -> u16 {
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     print_syntax_file(out, content, path, 0, 0)
 }
 
-fn render_notebook_output(out: &mut RenderOut, output: &ToolOutput, width: usize) -> u16 {
+fn render_notebook_output<S: LayoutSink>(out: &mut S, output: &ToolOutput, width: usize) -> u16 {
     let Some(meta) = output.metadata.as_ref() else {
         return render_default_output(out, &output.content, output.is_error, width);
     };
@@ -902,7 +947,7 @@ fn render_notebook_output(out: &mut RenderOut, output: &ToolOutput, width: usize
 
     let mut rows = 0u16;
     print_dim(out, &format!("   {}", data.title()));
-    crlf(out);
+    out.newline();
     rows += 1;
 
     if data.edit_mode == "insert" {
@@ -944,7 +989,7 @@ fn render_notebook_output(out: &mut RenderOut, output: &ToolOutput, width: usize
     rows
 }
 
-fn render_question_output(out: &mut RenderOut, content: &str, width: usize) -> u16 {
+fn render_question_output<S: LayoutSink>(out: &mut S, content: &str, width: usize) -> u16 {
     let max_cols = width.saturating_sub(4);
     let mut rows = 0u16;
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
@@ -959,31 +1004,39 @@ fn render_question_output(out: &mut RenderOut, content: &str, width: usize) -> u
                 other => other.to_string(),
             };
             let combined = format!("{} {}", question, answer_str);
-            for seg in &wrap_line(&combined, max_cols) {
+            let segs = wrap_line(&combined, max_cols);
+            if segs.len() > 1 {
+                out.mark_wrapped();
+            }
+            for seg in &segs {
                 print_dim(out, &format!("   {}", seg));
-                crlf(out);
+                out.newline();
                 rows += 1;
             }
         }
     } else {
-        for seg in &wrap_line(content, max_cols) {
+        let segs = wrap_line(content, max_cols);
+        if segs.len() > 1 {
+            out.mark_wrapped();
+        }
+        for seg in &segs {
             print_dim(out, &format!("   {}", seg));
-            crlf(out);
+            out.newline();
             rows += 1;
         }
     }
     rows
 }
 
-pub(crate) fn render_markdown_inner(
-    out: &mut RenderOut,
+pub(crate) fn render_markdown_inner<S: LayoutSink>(
+    out: &mut S,
     content: &str,
     width: usize,
     indent: &str,
     dim: bool,
     bctx: Option<&super::BoxContext>,
 ) -> u16 {
-    let _perf = crate::perf::begin("render_markdown");
+    let _perf = crate::perf::begin("render:markdown");
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
@@ -1002,7 +1055,7 @@ pub(crate) fn render_markdown_inner(
             let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
             let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
             if rows > 0 && !prev_blank && !after_heading {
-                crlf(out);
+                out.newline();
                 rows += 1;
             }
             let lang = lines[i].trim_start().trim_start_matches('`').trim();
@@ -1030,7 +1083,7 @@ pub(crate) fn render_markdown_inner(
             let prev_blank = i > 0 && lines[i - 1].trim().is_empty();
             let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
             if rows > 0 && !prev_blank && !after_heading {
-                crlf(out);
+                out.newline();
                 rows += 1;
             }
             rows += render_horizontal_rule(out, bctx, indent);
@@ -1042,7 +1095,7 @@ pub(crate) fn render_markdown_inner(
             let next_is_heading =
                 next_i < lines.len() && lines[next_i].trim_start().starts_with('#');
             if next_i < lines.len() && !next_is_heading && !lines[next_i].trim().is_empty() {
-                crlf(out);
+                out.newline();
                 rows += 1;
             }
             last_content_line = None;
@@ -1070,16 +1123,19 @@ pub(crate) fn render_markdown_inner(
                 last_content_line = Some(lines[i]);
             }
             let segments = wrap_line(lines[i], max_cols);
+            if segments.len() > 1 {
+                out.mark_wrapped();
+            }
             for seg in &segments {
                 if let Some(b) = bctx {
                     b.print_left(out);
                     let cols = print_styled_line(out, seg, dim);
                     b.print_right(out, cols);
                 } else {
-                    let _ = out.queue(Print(indent));
+                    out.print(indent);
                     print_styled_line(out, seg, dim);
                 }
-                crlf(out);
+                out.newline();
             }
             i += 1;
             rows += segments.len() as u16;
@@ -1091,31 +1147,31 @@ pub(crate) fn render_markdown_inner(
 /// Render a single line with block-level detection (headings, blockquotes,
 /// list markers) then inline styling via the shared `print_inline_styled`.
 /// Returns the number of visible columns printed.
-fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) -> usize {
+fn print_styled_line<S: LayoutSink>(out: &mut S, text: &str, dim: bool) -> usize {
     use super::highlight::print_inline_styled;
     use unicode_width::UnicodeWidthStr;
 
     let trimmed = text.trim_start();
     if trimmed.starts_with('#') {
-        out.push_style(super::StyleState {
-            fg: Some(theme::HEADING),
+        out.push_style(SpanStyle {
+            fg: Some(theme::HEADING.into()),
             bold: true,
             dim,
             ..Default::default()
         });
-        let _ = out.queue(Print(trimmed));
+        out.print(trimmed);
         out.pop_style();
         return trimmed.chars().count();
     }
 
     if trimmed.starts_with('>') {
         let content = trimmed.strip_prefix('>').unwrap().trim_start();
-        out.push_style(super::StyleState {
+        out.push_style(SpanStyle {
             dim: true,
             italic: true,
             ..Default::default()
         });
-        let _ = out.queue(Print(content));
+        out.print(content);
         out.pop_style();
         return content.chars().count();
     }
@@ -1124,11 +1180,11 @@ fn print_styled_line(out: &mut RenderOut, text: &str, dim: bool) -> usize {
     let (prefix, body) = split_list_prefix(trimmed);
     let leading_ws = &text[..text.len() - trimmed.len()];
     if !leading_ws.is_empty() {
-        let _ = out.queue(Print(leading_ws));
+        out.print(leading_ws);
     }
     if !prefix.is_empty() {
         out.push_dim();
-        let _ = out.queue(Print(prefix));
+        out.print(prefix);
         out.pop_style();
     }
 
@@ -1215,8 +1271,8 @@ fn is_horizontal_rule(line: &str) -> bool {
 /// Render a horizontal rule line with dim styling (matching list markers).
 /// Replaces the HR characters (---, ***, ___) with box-drawing chars (─) but
 /// only renders 3 of them to match the visual weight of list markers.
-fn render_horizontal_rule(
-    out: &mut RenderOut,
+fn render_horizontal_rule<S: LayoutSink>(
+    out: &mut S,
     bctx: Option<&super::BoxContext>,
     indent: &str,
 ) -> u16 {
@@ -1226,25 +1282,25 @@ fn render_horizontal_rule(
     if let Some(b) = bctx {
         b.print_left(out);
     } else if !indent.is_empty() {
-        let _ = out.queue(Print(indent));
+        out.print(indent);
     }
 
     // Always apply dim attribute (same as list markers)
     out.push_dim();
-    let _ = out.queue(Print(&hr));
+    out.print(&hr);
     out.pop_style();
 
     if let Some(b) = bctx {
         b.print_right(out, 3);
     }
 
-    crlf(out);
+    out.newline();
     1
 }
 
 /// Parse pipe-delimited table lines into rows, then render.
-fn render_markdown_table_from_lines(
-    out: &mut RenderOut,
+fn render_markdown_table_from_lines<S: LayoutSink>(
+    out: &mut S,
     lines: &[&str],
     dim: bool,
     bctx: Option<&super::BoxContext>,
@@ -1262,8 +1318,8 @@ fn render_markdown_table_from_lines(
     render_markdown_table(out, &table_rows, dim, bctx, indent)
 }
 
-fn render_plan_output(
-    out: &mut RenderOut,
+fn render_plan_output<S: LayoutSink>(
+    out: &mut S,
     args: &HashMap<String, serde_json::Value>,
     width: usize,
 ) -> u16 {
@@ -1284,40 +1340,45 @@ fn render_plan_output(
     // 3 + 1(┌) + 1(─) + 6(label) + fill + 1(┐) = 5 + inner_w + 2
     let label = " Plan ";
     let fill = inner_w.saturating_sub(label.len()).saturating_add(1);
-    out.push_fg(theme::PLAN);
-    let _ = out.queue(Print(format!(
+    out.push_fg(theme::PLAN.into());
+    out.print_string(format!(
         "  \u{250c}\u{2500}{label}{}\u{2510}",
         "\u{2500}".repeat(fill)
-    )));
+    ));
     out.pop_style();
-    crlf(out);
+    out.newline();
     rows += 1;
 
     // Body: markdown rendering inside the plan box.
     let bctx = super::BoxContext {
         left: "  \u{2502} ",
         right: " \u{2502}",
-        color: theme::PLAN,
+        color: theme::PLAN.into(),
         inner_w,
     };
     rows += render_markdown_inner(out, body, width, bctx.left, false, Some(&bctx));
 
     // Bottom border: "   └──...──┘"
     // 3 + 1(└) + dashes + 1(┘) = 5 + inner_w + 2 → dashes = inner_w + 2
-    out.push_fg(theme::PLAN);
-    let _ = out.queue(Print(format!(
+    out.push_fg(theme::PLAN.into());
+    out.print_string(format!(
         "  \u{2514}{}\u{2518}",
         "\u{2500}".repeat(inner_w + 2)
-    )));
+    ));
     out.pop_style();
-    crlf(out);
+    out.newline();
     rows += 1;
 
     rows
 }
 
-fn render_wrapped_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
-    let _perf = crate::perf::begin("render_wrapped_output");
+fn render_wrapped_output<S: LayoutSink>(
+    out: &mut S,
+    content: &str,
+    is_error: bool,
+    width: usize,
+) -> u16 {
+    let _perf = crate::perf::begin("render:wrapped_output");
     const MAX_VISUAL_ROWS: usize = 20;
     let max_cols = width.saturating_sub(4); // "   " prefix + 1 margin
 
@@ -1326,7 +1387,11 @@ fn render_wrapped_output(out: &mut RenderOut, content: &str, is_error: bool, wid
         .lines()
         .flat_map(|line| {
             let expanded = line.replace('\t', "    ");
-            wrap_line(&expanded, max_cols)
+            let segs = wrap_line(&expanded, max_cols);
+            if segs.len() > 1 {
+                out.mark_wrapped();
+            }
+            segs
         })
         .collect();
 
@@ -1338,37 +1403,46 @@ fn render_wrapped_output(out: &mut RenderOut, content: &str, is_error: bool, wid
             out,
             &format!("   ... {} above", pluralize(skipped, "line", "lines")),
         );
-        crlf(out);
+        out.newline();
         rows += 1;
     }
     let start = total.saturating_sub(MAX_VISUAL_ROWS);
     for seg in &wrapped[start..] {
         if is_error {
-            out.push_fg(theme::ERROR);
-            let _ = out.queue(Print(format!("   {}", seg)));
+            out.push_fg(theme::ERROR.into());
+            out.print_string(format!("   {}", seg));
             out.pop_style();
         } else {
             print_dim(out, &format!("   {}", seg));
         }
-        crlf(out);
+        out.newline();
         rows += 1;
     }
     rows
 }
 
-fn render_default_output(out: &mut RenderOut, content: &str, is_error: bool, width: usize) -> u16 {
+fn render_default_output<S: LayoutSink>(
+    out: &mut S,
+    content: &str,
+    is_error: bool,
+    width: usize,
+) -> u16 {
     let preview = result_preview(content, 3);
     let max_cols = width.saturating_sub(4);
+    let segs = wrap_line(&preview, max_cols);
+    if segs.len() > 1 {
+        out.mark_wrapped();
+    }
     let mut rows = 0u16;
-    for seg in &wrap_line(&preview, max_cols) {
+    for seg in &segs {
         if is_error {
-            out.push_fg(theme::ERROR);
-            let _ = out.queue(Print(format!("   {}", seg)));
+            out.push_fg(theme::ERROR.into());
+            out.print_string(format!("   {}", seg));
             out.pop_style();
         } else {
             print_dim(out, &format!("   {}", seg));
         }
-        crlf(out);
+        out.newline();
         rows += 1;
     }
     rows
@@ -1397,16 +1471,18 @@ fn result_preview(content: &str, max_lines: usize) -> String {
 
 /// Print user message text with accent highlighting for valid `@path` refs,
 /// `/command` lines, and `[image]` attachment labels.
-pub(super) fn print_user_highlights(
-    out: &mut RenderOut,
+pub(super) fn print_user_highlights<S: LayoutSink>(
+    out: &mut S,
     text: &str,
     image_labels: &[String],
     is_command: bool,
 ) {
+    let accent_role = ColorValue::Role(ColorRole::Accent);
+
     // Slash commands: accent the entire text, same as the prompt.
     if is_command {
-        out.push_fg(theme::accent());
-        let _ = out.queue(Print(text));
+        out.push_fg(accent_role);
+        out.print(text);
         out.pop_style();
         return;
     }
@@ -1416,15 +1492,16 @@ pub(super) fn print_user_highlights(
     let mut i = 0;
     let mut plain = String::new();
 
-    let flush = |out: &mut RenderOut, plain: &mut String| {
+    let flush = |out: &mut S, plain: &mut String| {
         if !plain.is_empty() {
-            let _ = out.queue(Print(std::mem::take(plain)));
+            let s = std::mem::take(plain);
+            out.print(&s);
         }
     };
 
-    let accent = |out: &mut RenderOut, token: String| {
-        out.push_fg(theme::accent());
-        let _ = out.queue(Print(token));
+    let accent = |out: &mut S, token: String| {
+        out.push_fg(accent_role);
+        out.print(&token);
         out.pop_style();
     };
 
@@ -1466,20 +1543,23 @@ pub(super) fn render_active_exec(out: &mut RenderOut, exec: &ActiveExec, width: 
     let elapsed = exec.start_time.elapsed();
     let time_str = format!(" {}", format_duration(elapsed.as_secs()));
 
-    out.push_style(super::StyleState {
-        bg: Some(theme::user_bg()),
-        fg: Some(theme::EXEC),
-        bold: true,
-        ..Default::default()
-    });
-    let _ = out.queue(Print(" !"));
-    out.set_fg(Color::Reset);
-    let _ = out.queue(Print(format!("{}{}", exec.command, " ".repeat(trailing))));
-    out.pop_style();
-    out.push_dim();
-    let _ = out.queue(Print(&time_str));
-    out.pop_style();
-    crlf(out);
+    LayoutSink::push_style(
+        out,
+        SpanStyle {
+            bg: Some(ColorValue::Role(ColorRole::UserBg)),
+            fg: Some(theme::EXEC.into()),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    LayoutSink::print(out, " !");
+    LayoutSink::set_fg(out, ColorValue::Named(NamedColor::Reset));
+    LayoutSink::print_string(out, format!("{}{}", exec.command, " ".repeat(trailing)));
+    LayoutSink::pop_style(out);
+    LayoutSink::push_dim(out);
+    LayoutSink::print(out, &time_str);
+    LayoutSink::pop_style(out);
+    LayoutSink::newline(out);
     let mut rows = 1u16;
 
     if !exec.output.is_empty() {
@@ -1519,6 +1599,11 @@ mod tests {
             name: "bash".into(),
             summary: "ls".into(),
             args: HashMap::new(),
+        }
+    }
+
+    fn pending_tool_state() -> ToolState {
+        ToolState {
             status: ToolStatus::Pending,
             elapsed: None,
             output: None,
@@ -1526,9 +1611,14 @@ mod tests {
         }
     }
 
+    fn state_for(block: &Block) -> Option<ToolState> {
+        matches!(block, Block::ToolCall { .. }).then(pending_tool_state)
+    }
+
     fn block_rows(block: &Block) -> u16 {
-        let mut out = RenderOut::buffer();
-        render_block(&mut out, block, W, true)
+        let mut out = SpanCollector::new(W as u16);
+        let st = state_for(block);
+        render_block(&mut out, block, st.as_ref(), W, true)
     }
 
     /// Compute total gap rows between the last history block and an active tool.
@@ -1543,7 +1633,7 @@ mod tests {
     /// rendered in one pass, then active tool is appended.
     /// Returns (block_rows, tool_gap, total_before_tool).
     fn render_all_at_once(blocks: &[Block]) -> (u16, u16, u16) {
-        let mut out = RenderOut::buffer();
+        let mut out = SpanCollector::new(W as u16);
         let mut total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -1551,7 +1641,10 @@ mod tests {
             } else {
                 0
             };
-            let rows = render_block(&mut out, &blocks[i], W, true);
+            let rows = {
+                let st = state_for(&blocks[i]);
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+            };
             total += gap + rows;
         }
         let tg = tool_gap_for(blocks);
@@ -1565,7 +1658,7 @@ mod tests {
     /// computed from last block. Returns (block_rows, tool_gap, total_before_tool).
     fn render_split(blocks: &[Block]) -> (u16, u16, u16) {
         // Phase 1: render_pending_blocks
-        let mut out = RenderOut::buffer();
+        let mut out = SpanCollector::new(W as u16);
         let mut block_rows_total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -1573,7 +1666,10 @@ mod tests {
             } else {
                 0
             };
-            let rows = render_block(&mut out, &blocks[i], W, true);
+            let rows = {
+                let st = state_for(&blocks[i]);
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+            };
             block_rows_total += gap + rows;
         }
         // anchor_row = start_row + block_rows_total
@@ -1601,7 +1697,7 @@ mod tests {
         //
         // Net effect: final anchor = sum of all block rows + gaps.
         // This is the same as render_split.
-        let mut out = RenderOut::buffer();
+        let mut out = SpanCollector::new(W as u16);
         let mut cumulative = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -1609,7 +1705,10 @@ mod tests {
             } else {
                 0
             };
-            let rows = render_block(&mut out, &blocks[i], W, true);
+            let rows = {
+                let st = state_for(&blocks[i]);
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+            };
             cumulative += gap + rows;
         }
         let tg = tool_gap_for(blocks);
@@ -1779,14 +1878,17 @@ mod tests {
         for &end in flushed_at {
             // This frame renders blocks[flushed..end]
             let mut frame_block_rows = 0u16;
-            let mut out = RenderOut::buffer();
+            let mut out = SpanCollector::new(W as u16);
             for i in flushed..end {
                 let gap = if i > 0 {
                     gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))
                 } else {
                     0
                 };
-                let rows = render_block(&mut out, &blocks[i], W, true);
+                let rows = {
+                    let st = state_for(&blocks[i]);
+                    render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                };
                 frame_block_rows += gap + rows;
             }
             // In non-dialog draw_frame: anchor_row = top_row + block_rows

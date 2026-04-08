@@ -62,7 +62,7 @@ impl App {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            _perf: crate::perf::begin("agent_turn"),
+            _perf: crate::perf::begin("agent:turn"),
         }
     }
 
@@ -98,7 +98,7 @@ impl App {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            _perf: crate::perf::begin("agent_turn"),
+            _perf: crate::perf::begin("agent:turn"),
         }
     }
 
@@ -227,7 +227,7 @@ impl App {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            _perf: crate::perf::begin("agent_turn"),
+            _perf: crate::perf::begin("agent:turn"),
         }
     }
 
