@@ -298,7 +298,10 @@ impl Config {
                 api_base: api_base.clone(),
                 api_key_env: String::new(),
                 provider_type: "codex".to_string(),
-                config: ModelConfig::default(),
+                config: ModelConfig {
+                    name: Some(slug.clone()),
+                    ..ModelConfig::default()
+                },
             });
         }
     }
