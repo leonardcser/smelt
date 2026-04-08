@@ -22,10 +22,26 @@ impl App {
         self.session.updated_at_ms = session::now_ms();
         self.session.mode = Some(self.mode.as_str().to_string());
         self.session.reasoning_effort = Some(self.reasoning_effort);
-        self.session.model = Some(self.model.clone());
+        self.session.model = Some(self.current_model_key());
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(self.session.clone());
         }
+    }
+
+    /// Resolve the active model to its full `provider/model` key so that
+    /// resuming a session restores the same provider (auth method), even
+    /// when the same model name is configured under multiple providers.
+    fn current_model_key(&self) -> String {
+        self.available_models
+            .iter()
+            .find(|m| {
+                m.model_name == self.model
+                    && m.api_base == self.api_base
+                    && m.api_key_env == self.api_key_env
+                    && m.provider_type == self.provider_type
+            })
+            .map(|m| m.key.clone())
+            .unwrap_or_else(|| self.model.clone())
     }
 
     /// Record current token count and cost so they can be restored on rewind.
@@ -99,15 +115,21 @@ impl App {
         if !self.cli_model_override && !self.cli_api_base_override && !self.cli_api_key_env_override
         {
             if let Some(ref model_key) = loaded.model {
-                if let Some(resolved) = self
+                // Prefer an exact key match (provider/model) so the original
+                // provider/auth method is restored. Fall back to model_name
+                // for sessions saved before the key was persisted.
+                let resolved_key = self
                     .available_models
                     .iter()
-                    .find(|m| m.key == *model_key || m.model_name == *model_key)
-                {
-                    self.model = resolved.model_name.clone();
-                    self.api_base = resolved.api_base.clone();
-                    self.api_key_env = resolved.api_key_env.clone();
-                    self.screen.set_model_label(resolved.model_name.clone());
+                    .find(|m| m.key == *model_key)
+                    .or_else(|| {
+                        self.available_models
+                            .iter()
+                            .find(|m| m.model_name == *model_key)
+                    })
+                    .map(|m| m.key.clone());
+                if let Some(key) = resolved_key {
+                    self.apply_model(&key);
                 }
             }
         }
