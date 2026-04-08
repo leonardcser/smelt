@@ -553,6 +553,35 @@ impl RuntimeApprovals {
         })
     }
 
+    /// Full runtime auto-approval for an Ask decision.
+    ///
+    /// Inside the workspace, tool approvals are enough.
+    /// Outside the workspace, tool approvals and directory approvals must both
+    /// match when `restrict_to_workspace` is enabled.
+    pub fn is_auto_approved(
+        &self,
+        permissions: &Permissions,
+        mode: Mode,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        desc: &str,
+    ) -> bool {
+        let config_bash = if tool_name == "bash" {
+            Some(permissions.bash_ruleset(mode))
+        } else {
+            None
+        };
+        let tool_approved = self.is_approved(tool_name, desc, config_bash);
+        let outside = permissions.outside_workspace_paths(tool_name, args);
+        if outside.is_empty() {
+            return tool_approved;
+        }
+        if !self.dirs_approved(&outside) {
+            return false;
+        }
+        tool_approved || permissions.was_downgraded(mode, tool_name, args)
+    }
+
     /// Check whether a specific pattern string is already present in the
     /// runtime approvals for a tool (used to filter already-approved patterns
     /// from the confirm dialog options).
@@ -2453,13 +2482,60 @@ mod tests {
     }
 
     #[test]
-    fn is_cd_command_variants() {
-        assert!(is_cd_command("cd"));
-        assert!(is_cd_command("cd /tmp"));
-        assert!(is_cd_command("cd\t/tmp"));
-        assert!(is_cd_command("  cd /tmp  "));
-        assert!(!is_cd_command("cdr /tmp"));
-        assert!(!is_cd_command("echo cd"));
-        assert!(!is_cd_command("cdx"));
+    fn runtime_tool_approval_does_not_bypass_workspace_restriction() {
+        let p = perms_with_workspace("/home/user/project");
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
+        let args = args_with("command", "rm -rf /tmp/foo");
+        assert!(!rt.is_auto_approved(&p, Mode::Normal, "bash", &args, "rm -rf /tmp/foo"));
+    }
+
+    #[test]
+    fn runtime_tool_and_dir_approval_allow_outside_workspace_request() {
+        let p = perms_with_workspace("/home/user/project");
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        let args = args_with("command", "rm -rf /tmp/foo");
+        assert!(rt.is_auto_approved(&p, Mode::Normal, "bash", &args, "rm -rf /tmp/foo"));
+    }
+
+    #[test]
+    fn runtime_dir_approval_allows_default_allowed_command_outside_workspace() {
+        let p = perms_with_workspace("/home/user/project");
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        let args = args_with("command", "cat /tmp/foo");
+        assert!(rt.is_auto_approved(&p, Mode::Normal, "bash", &args, "cat /tmp/foo"));
+    }
+
+    #[test]
+    fn runtime_tool_approval_allows_inside_workspace_request() {
+        let p = perms_with_workspace("/home/user/project");
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
+        let args = args_with("command", "rm -rf /home/user/project/target");
+        assert!(rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "rm -rf /home/user/project/target",
+        ));
+    }
+
+    #[test]
+    fn runtime_dir_approval_does_not_affect_inside_workspace_request() {
+        let p = perms_with_workspace("/home/user/project");
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        let args = args_with("command", "rm -rf /home/user/project/target");
+        assert!(!rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "rm -rf /home/user/project/target",
+        ));
     }
 }

@@ -104,6 +104,10 @@ When `restrict_to_workspace` is enabled (default), any tool call targeting a
 path outside the current workspace has its permission downgraded from Allow to
 Ask.
 
+Workspace approvals stay narrow: approving a command pattern only approves that
+pattern, and approving an outside directory only approves access to that
+directory.
+
 !!! warning
 
     **Best-effort safety measure.** Shell commands, symlinks, and indirect

@@ -1278,19 +1278,13 @@ impl App {
                 // decision flow, so we check here too.
                 let auto_approved = {
                     let rt = self.runtime_approvals.read().unwrap();
-                    let config_bash = if req.tool_name == "bash" {
-                        Some(self.permissions.bash_ruleset(self.mode))
-                    } else {
-                        None
-                    };
-                    if rt.is_approved(&req.tool_name, &req.desc, config_bash) {
-                        true
-                    } else {
-                        let outside_paths = self
-                            .permissions
-                            .outside_workspace_paths(&req.tool_name, &req.args);
-                        !outside_paths.is_empty() && rt.dirs_approved(&outside_paths)
-                    }
+                    rt.is_auto_approved(
+                        &self.permissions,
+                        self.mode,
+                        &req.tool_name,
+                        &req.args,
+                        &req.desc,
+                    )
                 };
                 if auto_approved {
                     self.send_permission_decision(req.request_id, true, None);

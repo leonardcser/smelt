@@ -61,7 +61,8 @@ smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-
 
 - **Tool use** — file read/write/edit, glob, grep, bash, notebooks, web
   fetch/search
-- **Permission system** — granular allow/ask/deny per tool, bash pattern, URL
+- **Permission system** — granular allow/ask/deny per tool, bash pattern, URL,
+  and workspace-scoped approvals
 - **4 modes** — Normal, Plan, Apply, Yolo (`Shift+Tab` to cycle)
 - **Vim mode** — full vi keybindings for the input editor
 - **Sessions** — auto-save, resume, fork, rewind conversations

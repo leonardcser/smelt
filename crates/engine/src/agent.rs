@@ -953,21 +953,14 @@ impl<'a> Turn<'a> {
                     let desc = tool
                         .needs_confirm(&args)
                         .unwrap_or_else(|| tc.function.name.clone());
-                    let config_bash = if tc.function.name == "bash" {
-                        Some(self.permissions.bash_ruleset(self.mode))
-                    } else {
-                        None
-                    };
-                    if rt.is_approved(&tc.function.name, &desc, config_bash) {
+                    if rt.is_auto_approved(
+                        self.permissions,
+                        self.mode,
+                        &tc.function.name,
+                        &args,
+                        &desc,
+                    ) {
                         decision = Decision::Allow;
-                    } else {
-                        // Check directory-based approvals.
-                        let outside = self
-                            .permissions
-                            .outside_workspace_paths(&tc.function.name, &args);
-                        if !outside.is_empty() && rt.dirs_approved(&outside) {
-                            decision = Decision::Allow;
-                        }
                     }
                 }
 
