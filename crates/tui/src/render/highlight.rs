@@ -820,17 +820,38 @@ fn print_split_regions<S: LayoutSink>(
 
 /// Strip inline markdown markers (`**`, `*`, `__`, `_`, `` ` ``, `~~`) and
 /// return the visible text content. Used for measuring visual width.
+/// Recurses into nested spans so nested emphasis/code is also stripped,
+/// keeping this consistent with `print_inline_styled`'s actual output.
 pub(crate) fn strip_markdown_markers(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut out = String::with_capacity(len);
-    let mut i = 0;
-    while i < len {
-        if let Some(skip) = skip_inline_span(&chars, i) {
-            // Append the content between the opening and closing delimiters.
-            let (content_start, content_end, after) = skip;
-            out.extend(&chars[content_start..content_end]);
+    strip_range(&chars, 0, chars.len())
+}
+
+fn strip_range(chars: &[char], start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut i = start;
+    while i < end {
+        if let Some((content_start, content_end, after)) = skip_inline_span_range(chars, i, end) {
+            // Code spans are literal; emphasis/strike recurse for nesting.
+            if chars[i] == '`' {
+                out.extend(chars[content_start..content_end].iter());
+            } else {
+                out.push_str(&strip_range(chars, content_start, content_end));
+            }
             i = after;
+            continue;
+        }
+        // When an emphasis delimiter run didn't open a span, consume
+        // the whole run at once. Otherwise a stray `*` inside e.g.
+        // `**text*` could be re-interpreted by the next iteration as
+        // an italic opener, producing a stripped string that doesn't
+        // match what `print_inline_styled` actually emits.
+        if chars[i] == '*' || chars[i] == '_' {
+            let run = run_length(chars, i, end, chars[i]);
+            for _ in 0..run {
+                out.push(chars[i]);
+            }
+            i += run;
             continue;
         }
         out.push(chars[i]);
@@ -848,9 +869,9 @@ fn breakable_positions(text: &str) -> Vec<bool> {
     let mut breakable = vec![false; len];
     let mut i = 0;
     while i < len {
-        if let Some(skip) = skip_inline_span(&chars, i) {
+        if let Some((_, _, after)) = skip_inline_span_range(&chars, i, len) {
             // Jump past the entire span (delimiters + content) — no breaks inside.
-            i = skip.2;
+            i = after;
             continue;
         }
         if chars[i] == ' ' {
@@ -861,62 +882,37 @@ fn breakable_positions(text: &str) -> Vec<bool> {
     breakable
 }
 
-/// Try to match an inline markdown span starting at position `i`.
-/// Returns `Some((content_start, content_end, after))` if a complete span is
-/// found, where `content_start..content_end` is the inner text and `after` is
-/// the index past the closing delimiter. Returns `None` if no span matches.
-fn skip_inline_span(chars: &[char], i: usize) -> Option<(usize, usize, usize)> {
-    let len = chars.len();
+/// Try to match an inline markdown span at position `i` within the open
+/// range `[0..end)`. Returns `Some((content_start, content_end, after))`
+/// if a complete span is found. Uses strict delimiter-run matching so
+/// that e.g. `**text*` does not collapse to `*` + italic("text").
+fn skip_inline_span_range(chars: &[char], i: usize, end: usize) -> Option<(usize, usize, usize)> {
+    if i >= end {
+        return None;
+    }
+
+    // `code`: highest precedence.
+    if chars[i] == '`' {
+        if let Some(close) = find_code_close(chars, i + 1, end) {
+            return Some((i + 1, close, close + 1));
+        }
+    }
 
     // ~~strikethrough~~
-    if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
-        if let Some(end) = find_closing_pair(chars, i + 2, '~', '~') {
-            return Some((i + 2, end, end + 2));
+    if i + 1 < end && chars[i] == '~' && chars[i + 1] == '~' {
+        if let Some(close) = find_strike_close(chars, i + 2, end) {
+            return Some((i + 2, close, close + 2));
         }
     }
 
-    // ***bold+italic*** or ___bold+italic___
-    if i + 2 < len
-        && chars[i] == chars[i + 1]
-        && chars[i] == chars[i + 2]
-        && (chars[i] == '*' || chars[i] == '_')
-    {
-        if let Some(end) = find_closing_triple(chars, i + 3, chars[i]) {
-            return Some((i + 3, end, end + 3));
-        }
-    }
-
-    // **bold** or __bold__
-    if i + 1 < len
-        && chars[i] == chars[i + 1]
-        && (chars[i] == '*' || chars[i] == '_')
-        && i + 2 < len
-        && !chars[i + 2].is_whitespace()
-    {
-        if let Some(end) = find_closing_pair(chars, i + 2, chars[i], chars[i]) {
-            if !chars[end - 1].is_whitespace() {
-                return Some((i + 2, end, end + 2));
+    // Emphasis: *italic*, **bold**, ***both*** (and `_` variants).
+    if chars[i] == '*' || chars[i] == '_' {
+        let marker = chars[i];
+        let run = run_length(chars, i, end, marker);
+        if (1..=3).contains(&run) && can_open_emphasis(chars, i, run, end, marker) {
+            if let Some(close) = find_closing_run(chars, i + run, end, marker, run) {
+                return Some((i + run, close, close + run));
             }
-        }
-    }
-
-    // *italic* or _italic_
-    if (chars[i] == '*' || chars[i] == '_')
-        && i + 1 < len
-        && chars[i + 1] != chars[i]
-        && !chars[i + 1].is_whitespace()
-    {
-        if let Some(end) = find_closing_single(chars, i + 1, chars[i]) {
-            if !chars[end - 1].is_whitespace() {
-                return Some((i + 1, end, end + 1));
-            }
-        }
-    }
-
-    // `code`
-    if chars[i] == '`' {
-        if let Some(end) = find_closing_single(chars, i + 1, '`') {
-            return Some((i + 1, end, end + 1));
         }
     }
 
@@ -1246,165 +1242,630 @@ fn min_visual_width(text: &str) -> usize {
 /// `***bold+italic***`, `` `code` ``, `~~strikethrough~~`.
 /// Everything else passes through literally.
 pub(crate) fn print_inline_styled<S: LayoutSink>(out: &mut S, text: &str, dim: bool) {
-    macro_rules! reset {
-        () => {
-            out.reset_style();
-            if dim {
-                out.set_dim();
-            }
-        };
-    }
-
     if dim {
-        out.set_dim();
+        out.push_dim();
     }
-
     let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+    let nodes = parse_inline(&chars, 0, chars.len());
+    emit_inline_nodes(out, &nodes);
+    if dim {
+        out.pop_style();
+    }
+}
+
+// ── Inline markdown AST + parser ─────────────────────────────────────────
+//
+// `print_inline_styled` parses its input into a small `InlineNode` tree
+// and then walks the tree to emit spans. The tree approach is what lets
+// nested spans (bold containing italic, code inside italic, …) render
+// correctly: each inner node pushes a style on top of the outer one
+// instead of flatly resetting between spans.
+//
+// Delimiter matching is **strict** on count: an opener of length N can
+// only match a closer of length N. That prevents the "inverted" case
+// where e.g. `**text*` used to flip an unclosed bold into an italic by
+// letting a single `*` close a double `**`. Runs that don't match
+// anything are emitted as literal text *as a whole run*, so the trailing
+// `*` of `**text*` never gets re-scanned as a new italic opener.
+
+enum InlineNode {
+    Text(String),
+    Code(String),
+    Strike(Vec<InlineNode>),
+    Bold(Vec<InlineNode>),
+    Italic(Vec<InlineNode>),
+    BoldItalic(Vec<InlineNode>),
+}
+
+/// Length of the run of consecutive `marker` chars starting at `i`.
+fn run_length(chars: &[char], i: usize, end: usize, marker: char) -> usize {
+    let mut j = i;
+    while j < end && chars[j] == marker {
+        j += 1;
+    }
+    j - i
+}
+
+/// Can a delimiter run of `count` `marker` chars at position `i` open
+/// emphasis? Rules (simplified CommonMark left-flanking):
+/// - The character after the run must exist and not be whitespace.
+/// - For `_`: the character before the run must not be alphanumeric.
+///   Prevents intraword emphasis like `snake_case` or URLs containing
+///   underscores.
+fn can_open_emphasis(chars: &[char], i: usize, count: usize, end: usize, marker: char) -> bool {
+    let after = i + count;
+    if after >= end || chars[after].is_whitespace() {
+        return false;
+    }
+    if marker == '_' && i > 0 && chars[i - 1].is_alphanumeric() {
+        return false;
+    }
+    true
+}
+
+/// Find a closing delimiter run of **exactly** `count` consecutive
+/// `marker` chars in `[start..end)`. Rules:
+/// - The character before the run must not be whitespace
+///   (right-flanking).
+/// - For `_`: the character after the run must not be alphanumeric.
+/// - Run length must equal `count` exactly — a run of 1 cannot close an
+///   opener of 2, and vice versa.
+fn find_closing_run(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    marker: char,
+    count: usize,
+) -> Option<usize> {
+    let mut j = start;
+    while j < end {
+        if chars[j] == marker {
+            let run = run_length(chars, j, end, marker);
+            if run == count && j > 0 && !chars[j - 1].is_whitespace() {
+                let after = j + run;
+                if marker == '*' || after >= end || !chars[after].is_alphanumeric() {
+                    return Some(j);
+                }
+            }
+            j += run;
+        } else {
+            j += 1;
+        }
+    }
+    None
+}
+
+/// Find the closing backtick of a code span starting at `start`.
+fn find_code_close(chars: &[char], start: usize, end: usize) -> Option<usize> {
+    let mut j = start;
+    while j < end {
+        if chars[j] == '`' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Find the closing `~~` of a strikethrough span.
+fn find_strike_close(chars: &[char], start: usize, end: usize) -> Option<usize> {
+    let mut j = start;
+    while j + 1 < end {
+        if chars[j] == '~' && chars[j + 1] == '~' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Parse the slice `chars[start..end]` into a flat list of `InlineNode`s.
+/// Recurses into emphasis/strikethrough content so nesting works, but
+/// treats code-span content as literal.
+fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
+    let mut nodes: Vec<InlineNode> = Vec::new();
     let mut plain = String::new();
+    let mut i = start;
 
     macro_rules! flush_plain {
         () => {
             if !plain.is_empty() {
-                out.print(&plain);
-                plain.clear();
+                nodes.push(InlineNode::Text(std::mem::take(&mut plain)));
             }
         };
     }
 
-    while i < len {
-        // ~~strikethrough~~
-        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
-            if let Some(end) = find_closing_pair(&chars, i + 2, '~', '~') {
-                flush_plain!();
-                let word: String = chars[i + 2..end].iter().collect();
-                out.push_crossedout();
-                out.print(&word);
-                out.pop_style();
-                i = end + 2;
-                continue;
-            }
-        }
-
-        // ***bold+italic*** or ___bold+italic___
-        if i + 2 < len
-            && chars[i] == chars[i + 1]
-            && chars[i] == chars[i + 2]
-            && (chars[i] == '*' || chars[i] == '_')
-        {
-            let marker = chars[i];
-            if let Some(end) = find_closing_triple(&chars, i + 3, marker) {
-                flush_plain!();
-                let word: String = chars[i + 3..end].iter().collect();
-                out.set_bold();
-                out.set_italic();
-                out.print(&word);
-                reset!();
-                i = end + 3;
-                continue;
-            }
-        }
-
-        // **bold** or __bold__
-        if i + 1 < len
-            && chars[i] == chars[i + 1]
-            && (chars[i] == '*' || chars[i] == '_')
-            && i + 2 < len
-            && !chars[i + 2].is_whitespace()
-        {
-            let marker = chars[i];
-            if let Some(end) = find_closing_pair(&chars, i + 2, marker, marker) {
-                if !chars[end - 1].is_whitespace() {
-                    flush_plain!();
-                    let word: String = chars[i + 2..end].iter().collect();
-                    out.set_bold();
-                    out.print(&word);
-                    reset!();
-                    i = end + 2;
-                    continue;
-                }
-            }
-        }
-
-        // *italic* or _italic_
-        if (chars[i] == '*' || chars[i] == '_')
-            && i + 1 < len
-            && chars[i + 1] != chars[i]
-            && !chars[i + 1].is_whitespace()
-        {
-            let marker = chars[i];
-            if let Some(end) = find_closing_single(&chars, i + 1, marker) {
-                if !chars[end - 1].is_whitespace() {
-                    flush_plain!();
-                    let word: String = chars[i + 1..end].iter().collect();
-                    out.set_italic();
-                    out.print(&word);
-                    reset!();
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-
-        // `code`
+    while i < end {
+        // Code span (precedence over emphasis: CommonMark §6.1).
         if chars[i] == '`' {
-            if let Some(end) = find_closing_single(&chars, i + 1, '`') {
+            if let Some(close) = find_code_close(chars, i + 1, end) {
                 flush_plain!();
-                let word: String = chars[i + 1..end].iter().collect();
-                out.set_fg(ColorValue::Role(ColorRole::Accent));
-                if dim {
-                    out.set_dim();
-                }
-                out.print(&word);
-                reset!();
-                i = end + 1;
+                let content: String = chars[i + 1..close].iter().collect();
+                nodes.push(InlineNode::Code(content));
+                i = close + 1;
                 continue;
             }
+        }
+
+        // Strikethrough `~~text~~`.
+        if i + 1 < end && chars[i] == '~' && chars[i + 1] == '~' {
+            if let Some(close) = find_strike_close(chars, i + 2, end) {
+                flush_plain!();
+                let inner = parse_inline(chars, i + 2, close);
+                nodes.push(InlineNode::Strike(inner));
+                i = close + 2;
+                continue;
+            }
+        }
+
+        // Emphasis: `*italic*`, `**bold**`, `***both***`.
+        if chars[i] == '*' || chars[i] == '_' {
+            let marker = chars[i];
+            let open_run = run_length(chars, i, end, marker);
+
+            if (1..=3).contains(&open_run) && can_open_emphasis(chars, i, open_run, end, marker) {
+                if let Some(close) = find_closing_run(chars, i + open_run, end, marker, open_run) {
+                    flush_plain!();
+                    let inner = parse_inline(chars, i + open_run, close);
+                    let node = match open_run {
+                        1 => InlineNode::Italic(inner),
+                        2 => InlineNode::Bold(inner),
+                        3 => InlineNode::BoldItalic(inner),
+                        _ => unreachable!("run length checked by contains()"),
+                    };
+                    nodes.push(node);
+                    i = close + open_run;
+                    continue;
+                }
+            }
+
+            // No match — emit the ENTIRE run as literal and skip past it.
+            // Emitting char-by-char would let the tail of the run re-enter
+            // the parser as a new opener (the "inverted emphasis" bug).
+            for _ in 0..open_run {
+                plain.push(marker);
+            }
+            i += open_run;
+            continue;
         }
 
         plain.push(chars[i]);
         i += 1;
     }
+
     flush_plain!();
+    nodes
+}
 
-    if dim {
-        out.reset_style();
+/// Walk an `InlineNode` tree and emit its spans to the sink. Uses
+/// `push_style`/`pop_style` so inner nodes inherit the outer style —
+/// e.g. italic inside bold becomes a single span with both attributes.
+fn emit_inline_nodes<S: LayoutSink>(out: &mut S, nodes: &[InlineNode]) {
+    for node in nodes {
+        match node {
+            InlineNode::Text(s) => out.print(s),
+            InlineNode::Code(s) => {
+                out.push_fg(ColorValue::Role(ColorRole::Accent));
+                out.print(s);
+                out.pop_style();
+            }
+            InlineNode::Strike(children) => {
+                out.push_crossedout();
+                emit_inline_nodes(out, children);
+                out.pop_style();
+            }
+            InlineNode::Bold(children) => {
+                out.push_bold();
+                emit_inline_nodes(out, children);
+                out.pop_style();
+            }
+            InlineNode::Italic(children) => {
+                out.push_italic();
+                emit_inline_nodes(out, children);
+                out.pop_style();
+            }
+            InlineNode::BoldItalic(children) => {
+                let mut style = out.snapshot_style();
+                style.bold = true;
+                style.italic = true;
+                out.push_style(style);
+                emit_inline_nodes(out, children);
+                out.pop_style();
+            }
+        }
     }
 }
 
-/// Find position of a single closing `marker` starting from `start`.
-fn find_closing_single(chars: &[char], start: usize, marker: char) -> Option<usize> {
-    let mut j = start;
-    while j < chars.len() {
-        if chars[j] == marker {
-            return Some(j);
-        }
-        j += 1;
-    }
-    None
-}
+#[cfg(test)]
+mod tests {
+    use super::super::display::{ColorRole, ColorValue, SpanStyle};
+    use super::super::layout_out::SpanCollector;
+    use super::*;
 
-/// Find position of a closing double-marker (`m1 m2`) starting from `start`.
-fn find_closing_pair(chars: &[char], start: usize, m1: char, m2: char) -> Option<usize> {
-    let mut j = start;
-    while j + 1 < chars.len() {
-        if chars[j] == m1 && chars[j + 1] == m2 {
-            return Some(j);
-        }
-        j += 1;
+    /// Render `text` through `print_inline_styled` (dim=false) and return
+    /// a compact `Vec<(tag, text)>` representation of the span tree.
+    /// Tags: "plain", "bold", "italic", "bi" (bold+italic), "code",
+    /// "strike". Adjacent spans with the same style are merged by the
+    /// sink, so you get one entry per visible style run.
+    fn parse(text: &str) -> Vec<(&'static str, String)> {
+        let mut sink = SpanCollector::new(200);
+        print_inline_styled(&mut sink, text, false);
+        let block = sink.finish();
+        let line = match block.lines.into_iter().next() {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+        line.spans
+            .into_iter()
+            .filter(|s| !s.text.is_empty())
+            .map(|s| (tag_for(&s.style), s.text))
+            .collect()
     }
-    None
-}
 
-/// Find position of a closing triple-marker starting from `start`.
-fn find_closing_triple(chars: &[char], start: usize, marker: char) -> Option<usize> {
-    let mut j = start;
-    while j + 2 < chars.len() {
-        if chars[j] == marker && chars[j + 1] == marker && chars[j + 2] == marker {
-            return Some(j);
+    fn tag_for(style: &SpanStyle) -> &'static str {
+        // Code spans carry an accent foreground; they can also inherit
+        // bold/italic when nested inside emphasis, in which case the
+        // rendered span shows both attributes at once.
+        let is_code = matches!(style.fg, Some(ColorValue::Role(ColorRole::Accent)));
+        match (style.bold, style.italic, style.crossedout, is_code) {
+            (false, false, false, false) => "plain",
+            (true, false, false, false) => "bold",
+            (false, true, false, false) => "italic",
+            (true, true, false, false) => "bi",
+            (false, false, true, false) => "strike",
+            (false, false, false, true) => "code",
+            (true, false, false, true) => "bold+code",
+            (false, true, false, true) => "italic+code",
+            (true, true, false, true) => "bi+code",
+            _ => "mixed",
         }
-        j += 1;
     }
-    None
+
+    // Tag shorthands.
+    fn p(s: &str) -> (&'static str, String) {
+        ("plain", s.into())
+    }
+    fn b(s: &str) -> (&'static str, String) {
+        ("bold", s.into())
+    }
+    fn i(s: &str) -> (&'static str, String) {
+        ("italic", s.into())
+    }
+    fn bi(s: &str) -> (&'static str, String) {
+        ("bi", s.into())
+    }
+    fn c(s: &str) -> (&'static str, String) {
+        ("code", s.into())
+    }
+    fn s(s: &str) -> (&'static str, String) {
+        ("strike", s.into())
+    }
+
+    // ── Plain ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn plain_text() {
+        assert_eq!(parse("hello world"), vec![p("hello world")]);
+    }
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(parse(""), vec![]);
+    }
+
+    // ── Bold ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn bold_star() {
+        assert_eq!(parse("**hello**"), vec![b("hello")]);
+    }
+
+    #[test]
+    fn bold_underscore() {
+        assert_eq!(parse("__hello__"), vec![b("hello")]);
+    }
+
+    #[test]
+    fn bold_within_text() {
+        assert_eq!(parse("a **bold** c"), vec![p("a "), b("bold"), p(" c")]);
+    }
+
+    // ── Italic ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn italic_star() {
+        assert_eq!(parse("*hello*"), vec![i("hello")]);
+    }
+
+    #[test]
+    fn italic_underscore() {
+        assert_eq!(parse("_hello_"), vec![i("hello")]);
+    }
+
+    #[test]
+    fn italic_within_text() {
+        assert_eq!(parse("a *word* b"), vec![p("a "), i("word"), p(" b")]);
+    }
+
+    // ── Bold + italic (triple delimiters) ──────────────────────────────
+
+    #[test]
+    fn bold_italic_star() {
+        assert_eq!(parse("***both***"), vec![bi("both")]);
+    }
+
+    #[test]
+    fn bold_italic_underscore() {
+        assert_eq!(parse("___both___"), vec![bi("both")]);
+    }
+
+    // ── Inline code ────────────────────────────────────────────────────
+
+    #[test]
+    fn inline_code() {
+        assert_eq!(parse("`foo`"), vec![c("foo")]);
+    }
+
+    #[test]
+    fn inline_code_with_stars_inside() {
+        // Stars inside backticks are literal.
+        assert_eq!(parse("`*not bold*`"), vec![c("*not bold*")]);
+    }
+
+    #[test]
+    fn inline_code_with_underscores_inside() {
+        assert_eq!(parse("`_not italic_`"), vec![c("_not italic_")]);
+    }
+
+    #[test]
+    fn inline_code_around_text() {
+        assert_eq!(
+            parse("call `foo()` please"),
+            vec![p("call "), c("foo()"), p(" please")]
+        );
+    }
+
+    // ── Strikethrough ──────────────────────────────────────────────────
+
+    #[test]
+    fn strikethrough_basic() {
+        assert_eq!(parse("~~gone~~"), vec![s("gone")]);
+    }
+
+    // ── Intraword underscores (CommonMark: NOT emphasis) ──────────────
+
+    #[test]
+    fn intraword_underscore_identifier() {
+        // `snake_case_variable` — underscores are part of the identifier.
+        assert_eq!(parse("snake_case_variable"), vec![p("snake_case_variable")]);
+    }
+
+    #[test]
+    fn intraword_underscore_in_url() {
+        assert_eq!(
+            parse("https://example.com/foo_bar_baz"),
+            vec![p("https://example.com/foo_bar_baz")]
+        );
+    }
+
+    #[test]
+    fn intraword_underscore_between_letters() {
+        assert_eq!(parse("foo_bar"), vec![p("foo_bar")]);
+    }
+
+    // ── Unclosed delimiters (should stay literal) ─────────────────────
+
+    #[test]
+    fn unclosed_bold_stays_literal() {
+        assert_eq!(parse("**text"), vec![p("**text")]);
+    }
+
+    #[test]
+    fn unclosed_italic_stays_literal() {
+        assert_eq!(parse("*text"), vec![p("*text")]);
+    }
+
+    #[test]
+    fn unclosed_code_stays_literal() {
+        assert_eq!(parse("`unclosed"), vec![p("`unclosed")]);
+    }
+
+    /// Regression: `**text*` (3 stars) is an unclosed bold, NOT an
+    /// opened bold that collapses to italic. Previously the parser
+    /// dropped the leading `*` and produced an italic, giving the user
+    /// an "inverted" result (italic instead of bold).
+    #[test]
+    fn odd_star_count_does_not_invert_emphasis() {
+        assert_eq!(parse("**text*"), vec![p("**text*")]);
+    }
+
+    #[test]
+    fn odd_star_count_trailing_double() {
+        assert_eq!(parse("*text**"), vec![p("*text**")]);
+    }
+
+    // ── Nested emphasis (CommonMark supports this) ────────────────────
+
+    #[test]
+    fn bold_containing_italic() {
+        // `**bold *italic* bold**` — inner italic must render inside bold.
+        assert_eq!(
+            parse("**bold *it* bold**"),
+            vec![b("bold "), bi("it"), b(" bold")]
+        );
+    }
+
+    #[test]
+    fn italic_containing_bold() {
+        assert_eq!(
+            parse("*it **bold** it*"),
+            vec![i("it "), bi("bold"), i(" it")]
+        );
+    }
+
+    #[test]
+    fn bold_containing_code() {
+        // Code span nested inside bold inherits the outer bold, so the
+        // inner span carries both attributes at once.
+        assert_eq!(
+            parse("**call `foo()` now**"),
+            vec![b("call "), ("bold+code", "foo()".into()), b(" now")]
+        );
+    }
+
+    // ── Precedence: code > emphasis ───────────────────────────────────
+
+    #[test]
+    fn code_inside_italic() {
+        // `*a `code` b*` — italic wrapping, code inside. The inner code
+        // span inherits italic, so it's italic+code.
+        assert_eq!(
+            parse("*a `code` b*"),
+            vec![i("a "), ("italic+code", "code".into()), i(" b")]
+        );
+    }
+
+    #[test]
+    fn code_containing_italic_stars() {
+        // The `*` inside a code span is literal.
+        assert_eq!(
+            parse("before `*x*` after"),
+            vec![p("before "), c("*x*"), p(" after")]
+        );
+    }
+
+    // ── Multiple runs on one line ─────────────────────────────────────
+
+    #[test]
+    fn bold_then_italic() {
+        assert_eq!(parse("**a** and *b*"), vec![b("a"), p(" and "), i("b")]);
+    }
+
+    #[test]
+    fn adjacent_bolds() {
+        assert_eq!(parse("**a** **b**"), vec![b("a"), p(" "), b("b")]);
+    }
+
+    // ── Asterisk as literal ───────────────────────────────────────────
+
+    #[test]
+    fn asterisk_as_multiplication() {
+        // `a * b` — stars with whitespace on both sides, not emphasis.
+        assert_eq!(parse("a * b = c"), vec![p("a * b = c")]);
+    }
+
+    #[test]
+    fn trailing_lone_star() {
+        assert_eq!(parse("note*"), vec![p("note*")]);
+    }
+
+    #[test]
+    fn star_right_after_word() {
+        assert_eq!(parse("footnote*"), vec![p("footnote*")]);
+    }
+
+    // ── Stress: edge cases the spec cares about ──────────────────────
+
+    #[test]
+    fn space_before_closing_delim_rejects_emphasis() {
+        // `**text **` — close preceded by space is NOT right-flanking.
+        assert_eq!(parse("**text **"), vec![p("**text **")]);
+    }
+
+    #[test]
+    fn space_after_opening_delim_rejects_emphasis() {
+        // `** text**` — open followed by space is NOT left-flanking.
+        assert_eq!(parse("** text**"), vec![p("** text**")]);
+    }
+
+    #[test]
+    fn four_star_run_is_literal() {
+        // Runs of 4+ delimiters have no standard meaning; keep them literal.
+        assert_eq!(parse("****text****"), vec![p("****text****")]);
+    }
+
+    #[test]
+    fn deeply_nested_bold_italic_code() {
+        // `**outer *inner `code` inner* outer**`
+        assert_eq!(
+            parse("**a *b `c` d* e**"),
+            vec![
+                b("a "),
+                bi("b "),
+                ("bi+code", "c".into()),
+                bi(" d"),
+                b(" e"),
+            ]
+        );
+    }
+
+    #[test]
+    fn bold_italic_containing_plain_text() {
+        assert_eq!(parse("***a b c***"), vec![bi("a b c")]);
+    }
+
+    #[test]
+    fn two_italic_runs_separated_by_text() {
+        assert_eq!(
+            parse("start *a* mid *b* end"),
+            vec![p("start "), i("a"), p(" mid "), i("b"), p(" end"),]
+        );
+    }
+
+    #[test]
+    fn mixed_underscore_and_star_dont_match() {
+        // `*foo_` — `*` opener, `_` is just a literal char, not a closer.
+        assert_eq!(parse("*foo_"), vec![p("*foo_")]);
+    }
+
+    #[test]
+    fn underscore_surrounded_by_non_alnum_can_italic() {
+        // `(_foo_)` — `_` is not intraword here because `(` and `)` are
+        // not alphanumeric. CommonMark permits this as italic.
+        assert_eq!(parse("(_foo_)"), vec![p("("), i("foo"), p(")")]);
+    }
+
+    #[test]
+    fn star_can_italic_intraword() {
+        // Unlike `_`, `*` does not have the intraword restriction.
+        assert_eq!(parse("foo*bar*baz"), vec![p("foo"), i("bar"), p("baz")]);
+    }
+
+    #[test]
+    fn code_with_backtick_literal() {
+        // A backtick inside a code span closes it — our single-backtick
+        // parser can't represent literal backticks inside a code span.
+        // `` `a`b` `` → code("a") + plain("b`").
+        assert_eq!(parse("`a`b`"), vec![c("a"), p("b`")]);
+    }
+
+    #[test]
+    fn strip_markers_matches_parse_for_nested() {
+        // The visible width used by wrapping code must match the text
+        // that the parser actually emits.
+        let text = "**bold *it* bold**";
+        let stripped = strip_markdown_markers(text);
+        assert_eq!(stripped, "bold it bold");
+        // And matches what print_inline_styled would emit:
+        let emitted: String = parse(text).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(emitted, stripped);
+    }
+
+    #[test]
+    fn strip_markers_handles_intraword_underscore() {
+        // Must not strip `_` that are intraword — they're part of the
+        // identifier, not emphasis markers.
+        assert_eq!(
+            strip_markdown_markers("call foo_bar_baz() now"),
+            "call foo_bar_baz() now"
+        );
+    }
+
+    #[test]
+    fn strip_markers_matches_parse_for_unclosed_bold() {
+        // The old parser produced `*` + italic("text") for `**text*`,
+        // giving width=4 after stripping. The new parser keeps the run
+        // literal, so stripping should return the whole thing.
+        assert_eq!(strip_markdown_markers("**text*"), "**text*");
+    }
 }
