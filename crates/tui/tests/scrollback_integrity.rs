@@ -808,6 +808,359 @@ fn streaming_overlay_visible_after_viewport_full() {
     );
 }
 
+/// Growing the prompt line-by-line must NEVER push prompt content
+/// into terminal scrollback. Each frame, the visible viewport should
+/// contain exactly the prompt section — no stale snapshots above.
+#[test]
+fn typing_multiline_prompt_does_not_pollute_scrollback() {
+    let mut h = TestHarness::new(73, 20, "typing_multiline_no_scrollback_pollution");
+    h.screen.set_anchor_row(8); // prompt at bottom, parent shell above
+
+    h.draw_prompt();
+
+    for i in 1..=22 {
+        let mut lines: Vec<String> = Vec::new();
+        for j in 1..=i {
+            lines.push(format!("line_{j:02}"));
+        }
+        let input = lines.join("\n");
+        h.draw_prompt_with_input(&input);
+
+        // Count prompt bars in full text — should be exactly 2 (live).
+        let full = harness::extract_full_content(&mut h.parser);
+        let bar_rows = full
+            .lines()
+            .filter(|l| l.chars().filter(|c| *c == '\u{2500}').count() > 10)
+            .count();
+        if bar_rows != 2 {
+            let dump = "target/test-frames/typing_multiline_no_scrollback_pollution";
+            let _ = std::fs::create_dir_all(dump);
+            let _ = std::fs::write(format!("{dump}/full_at_{i}.txt"), &full);
+            panic!(
+                "After typing {i} lines: {bar_rows} bar rows found (expected 2).\n\
+                 Full:\n{full}"
+            );
+        }
+    }
+}
+
+/// Multi-line prompt that grows line-by-line (like real typing with
+/// Enter between lines), eventually filling most of the terminal.
+/// After sending the message, the committed Block::User should appear
+/// exactly once — no stale prompt chrome or duplicated input lines.
+///
+/// This is the highest-fidelity reproduction of the bug: the prompt
+/// section grows across many frames, each updating `prev_prompt_ui_rows`,
+/// and the final send transitions from a large prompt to a committed
+/// block + small empty prompt.
+#[test]
+fn multiline_prompt_fullscreen_no_duplicate_on_send() {
+    let mut h = TestHarness::new(80, 15, "multiline_prompt_fullscreen_no_dup");
+    h.screen.set_anchor_row(0);
+
+    // Grow the prompt line-by-line, redrawing each time (like typing).
+    let mut lines: Vec<String> = Vec::new();
+    for i in 0..10 {
+        lines.push(format!("line_{i:02}"));
+        let input = lines.join("\n");
+        h.draw_prompt_with_input(&input);
+    }
+
+    let big_input = lines.join("\n");
+
+    // User presses Enter — commit as Block::User, then redraw with empty prompt.
+    h.push(Block::User {
+        text: big_input.clone(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    let visible = harness::visible_content(&h.parser);
+    let full = h.full_text();
+    let dump_dir = "target/test-frames/multiline_prompt_fullscreen_no_dup";
+    let _ = std::fs::create_dir_all(dump_dir);
+    let _ = std::fs::write(format!("{dump_dir}/visible.txt"), &visible);
+    let _ = std::fs::write(format!("{dump_dir}/full.txt"), &full);
+
+    // "line_00" should appear exactly once (as the committed block,
+    // not duplicated from a stale prompt echo).
+    let count = full.matches("line_00").count();
+    assert_eq!(
+        count, 1,
+        "line_00 duplicated ({count}x) after sending multi-line prompt:\n{full}"
+    );
+    // Prompt bars should be exactly 2 (live top + bottom).
+    let bar_rows = full
+        .lines()
+        .filter(|l| l.chars().filter(|c| *c == '\u{2500}').count() > 10)
+        .count();
+    assert_eq!(
+        bar_rows, 2,
+        "stale prompt bars leaked after sending multi-line input ({bar_rows} bars):\n{full}"
+    );
+}
+
+/// Multi-line prompt at 3 lines — smaller than fullscreen but still
+/// taller than the minimal 1-line prompt. Catches off-by-one in the
+/// prompt reserve calculation.
+#[test]
+fn multiline_prompt_3_lines_no_duplicate() {
+    let mut h = TestHarness::new(80, 15, "multiline_prompt_3_lines");
+    h.screen.set_anchor_row(11);
+    let input = "first line\nsecond line\nthird line";
+    h.draw_prompt_with_input(input);
+
+    h.push(Block::User {
+        text: input.into(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    let full = h.full_text();
+    let count = full.matches("first line").count();
+    assert_eq!(count, 1, "multi-line input duplicated after send:\n{full}");
+    let bar_rows = full
+        .lines()
+        .filter(|l| l.chars().filter(|c| *c == '\u{2500}').count() > 10)
+        .count();
+    assert_eq!(bar_rows, 2, "stale bars leaked ({bar_rows}):\n{full}");
+}
+
+/// Prompt anchored near the bottom (real-world startup), then grown
+/// line-by-line until it overflows the viewport (scrollable input).
+/// After sending, the committed block should appear once, no stale
+/// chrome. This is the exact scenario the user reported.
+#[test]
+fn multiline_prompt_at_bottom_overflow_no_duplicate() {
+    let mut h = TestHarness::new(80, 15, "multiline_prompt_at_bottom_overflow");
+
+    // Anchor at row 11 = parent shell output fills rows 0-10.
+    h.screen.set_anchor_row(11);
+
+    // Grow the prompt line-by-line. The prompt section
+    // (2 bars + N input lines + status = N+3) eventually exceeds
+    // the 4 available rows (15 - 11). The prompt section scrolls
+    // the terminal to fit, pushing stale content into scrollback.
+    let mut lines: Vec<String> = Vec::new();
+    for i in 0..12 {
+        lines.push(format!("typed_{i:02}"));
+        let input = lines.join("\n");
+        h.draw_prompt_with_input(&input);
+    }
+
+    let big_input = lines.join("\n");
+
+    // User sends.
+    h.push(Block::User {
+        text: big_input.clone(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    let full = h.full_text();
+    let dump_dir = "target/test-frames/multiline_prompt_at_bottom_overflow";
+    let _ = std::fs::create_dir_all(dump_dir);
+    let _ = std::fs::write(format!("{dump_dir}/full.txt"), &full);
+
+    // Each unique line should appear exactly once.
+    for i in 0..12 {
+        let marker = format!("typed_{i:02}");
+        let count = full.matches(&marker).count();
+        assert_eq!(
+            count, 1,
+            "{marker} duplicated ({count}x) after sending overflowed prompt:\n{full}"
+        );
+    }
+    let bar_rows = full
+        .lines()
+        .filter(|l| l.chars().filter(|c| *c == '\u{2500}').count() > 10)
+        .count();
+    assert_eq!(bar_rows, 2, "stale bars leaked ({bar_rows}):\n{full}");
+}
+
+/// Prompt at the bottom with a single-line message, then a streamed
+/// assistant reply. Regression test for the stale-bar bug.
+/// Exercises anchor_row tracking through the commit + stream + commit
+/// transition.
+#[test]
+fn multiline_prompt_then_stream_reply_no_duplicate() {
+    let mut h = TestHarness::new(80, 15, "multiline_prompt_stream_reply");
+    h.screen.set_anchor_row(11);
+
+    let input = "line_A\nline_B\nline_C\nline_D\nline_E";
+    h.draw_prompt_with_input(input);
+
+    // Send the multi-line message.
+    h.push(Block::User {
+        text: input.into(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    // Stream a response.
+    h.screen.append_streaming_text("Reply paragraph one.\n");
+    h.draw_prompt();
+    h.screen.flush_streaming_text();
+    h.draw_prompt();
+
+    let full = h.full_text();
+    let count = full.matches("line_A").count();
+    assert_eq!(count, 1, "user input duplicated after stream:\n{full}");
+    let bar_rows = full
+        .lines()
+        .filter(|l| l.chars().filter(|c| *c == '\u{2500}').count() > 10)
+        .count();
+    assert_eq!(bar_rows, 2, "stale bars leaked ({bar_rows}):\n{full}");
+}
+
+/// Sending a user message when the prompt is anchored at the bottom
+/// of the terminal (typical real-world startup where parent shell
+/// content fills the rows above smelt) must NOT leave stale prompt
+/// rows visible between the new committed blocks. Reproduces a
+/// regression where, after the user message and assistant response
+/// commit, a leftover top bar from the prompt section appeared
+/// between them in the viewport.
+#[test]
+fn send_user_message_at_bottom_does_not_duplicate_prompt() {
+    let mut h = TestHarness::new(
+        76,
+        15,
+        "send_user_message_at_bottom_does_not_duplicate_prompt",
+    );
+
+    // Real smelt starts with the cursor near the bottom of the
+    // terminal because the parent shell already filled the rows above
+    // (e.g. `cargo run` output). Simulate that by clearing anchor_row
+    // and setting the backend cursor row to a deep value before the
+    // first draw.
+    h.screen.set_anchor_row(11);
+    h.draw_prompt();
+
+    // User types "hi" and presses Enter — push the block to history
+    // and tick a prompt frame (mirroring how the real event loop
+    // commits a user message via tick_prompt → draw_frame).
+    h.push(Block::User {
+        text: "hi".into(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    // The assistant streams its response (like the real engine).
+    h.screen
+        .append_streaming_text("Hi. What do you want to work on?\n");
+    h.draw_prompt();
+    h.screen.flush_streaming_text();
+    h.draw_prompt();
+
+    let visible = harness::visible_content(&h.parser);
+    let full = h.full_text();
+    let dump_dir = "target/test-frames/send_user_message_at_bottom_does_not_duplicate_prompt";
+    let _ = std::fs::create_dir_all(dump_dir);
+    let _ = std::fs::write(format!("{dump_dir}/visible.txt"), &visible);
+    let _ = std::fs::write(format!("{dump_dir}/full.txt"), &full);
+
+    // Between " hi" and " Hi. What..." there should be exactly ONE
+    // blank line (the gap), not multiple. Multiple blanks indicate
+    // stale rows from a prior frame's prompt position.
+    let lines: Vec<&str> = visible.lines().collect();
+    let hi_idx = lines.iter().position(|l| l.contains(" hi")).unwrap();
+    let reply_idx = lines
+        .iter()
+        .position(|l| l.contains("Hi. What do you want"))
+        .unwrap();
+    let blanks_between = (hi_idx + 1..reply_idx)
+        .filter(|i| lines[*i].trim().is_empty())
+        .count();
+    let nonblanks_between = (hi_idx + 1..reply_idx)
+        .filter(|i| !lines[*i].trim().is_empty())
+        .count();
+    assert_eq!(
+        blanks_between, 1,
+        "expected 1 blank gap between user msg and reply, got {blanks_between}:\n{visible}"
+    );
+    assert_eq!(
+        nonblanks_between, 0,
+        "expected no stale rows between user msg and reply, got {nonblanks_between}:\n{visible}"
+    );
+
+    // Bar rows (long horizontal-line runs) should equal exactly 2 —
+    // the live prompt's top bar and bottom bar. More than that means a
+    // stale prompt bar leaked from a previous frame.
+    let bar_rows = visible
+        .lines()
+        .filter(|l| l.chars().filter(|c| *c == '\u{2500}').count() > 10)
+        .count();
+    assert_eq!(
+        bar_rows, 2,
+        "expected 2 bar rows (live prompt top + bottom), got {bar_rows}.\n\
+         Likely a stale prompt bar leaked between committed blocks.\n{visible}"
+    );
+}
+
+/// Streaming an overlay tall enough to push committed history off the
+/// screen, then ticking the prompt repeatedly. The status bar must
+/// stay in the viewport — never end up in scrollback.
+///
+/// Regression: the overlay reservation (`prev_prompt_ui_rows.max(1)`)
+/// excluded the 1-row gap between content and prompt. The overlay
+/// painted into the gap row, then the prompt's `crlf` for the gap
+/// triggered a terminal scroll, leaking 1+ rows of overlay into
+/// scrollback per frame. After enough frames, the prompt's own status
+/// bar climbed to the top of the viewport and itself got pushed.
+#[test]
+fn long_streaming_session_no_prompt_in_scrollback() {
+    let mut h = TestHarness::new(80, 16, "long_streaming_session_no_prompt_in_scrollback");
+
+    h.push_and_render(Block::User {
+        text: "stream a big tool".into(),
+        image_labels: vec![],
+    });
+    h.draw_prompt();
+
+    // Start a streaming bash tool whose output will fill the overlay
+    // (more rows than the viewport leaves for it). Each appended line
+    // is followed by a draw_prompt tick — mirroring the engine's
+    // per-token frame rate.
+    h.start_bash_tool("c1", "stream lots of lines");
+    for i in 0..50 {
+        h.screen
+            .append_active_output("c1", &format!("STREAM_LINE_{i:03}"));
+        h.draw_prompt();
+    }
+
+    // The visible viewport (what the user sees right now, no scrollback)
+    // should contain at most ~20 rows of stream output (the active
+    // tool's cap). The overlay should NOT have leaked older lines into
+    // scrollback that show up in extracted full text.
+    let visible_only = harness::visible_content(&h.parser);
+    let dump_dir = "target/test-frames/long_streaming_session_no_prompt_in_scrollback";
+    let _ = std::fs::create_dir_all(dump_dir);
+    let _ = std::fs::write(format!("{dump_dir}/visible.txt"), &visible_only);
+
+    // Count STREAM_LINE rows in scrollback (full minus visible).
+    let full = h.full_text();
+    let _ = std::fs::write(format!("{dump_dir}/full.txt"), &full);
+
+    let stream_in_full = full.matches("STREAM_LINE_").count();
+    let stream_in_visible = visible_only.matches("STREAM_LINE_").count();
+    let stream_in_scrollback = stream_in_full - stream_in_visible;
+    assert_eq!(
+        stream_in_scrollback, 0,
+        "streaming overlay leaked into scrollback: {stream_in_scrollback} stream rows in scrollback.\n\
+         visible rows in viewport: {stream_in_visible}\n\
+         total stream rows seen: {stream_in_full}\n\n\
+         Visible viewport:\n{visible_only}\n\n\
+         Full (viewport+scrollback):\n{full}"
+    );
+
+    // Status bar's "normal" mode label should appear exactly once.
+    let normal_count = full.matches("normal").count();
+    assert_eq!(
+        normal_count, 1,
+        "status bar leaked into scrollback ({normal_count} occurrences of 'normal'):\n{full}"
+    );
+}
+
 /// Multi-block history where the LAST block alone is bigger than the
 /// redraw budget. Earlier blocks should be excluded entirely; the last
 /// block has its head cropped so its tail is visible.

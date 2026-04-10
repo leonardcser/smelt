@@ -491,6 +491,30 @@ impl TestHarness {
         self.draw_prompt();
     }
 
+    /// Draw a prompt frame with a specific input buffer.
+    pub fn draw_prompt_with_input(&mut self, text: &str) {
+        self.actions
+            .push(format!("draw_prompt_with_input({:?})", truncate(text, 40)));
+        let mut input = tui::input::InputState::default();
+        input.buf = text.to_string();
+        input.cpos = text.len();
+        {
+            let mut frame = tui::render::Frame::begin(self.screen.backend());
+            self.screen.draw_frame(
+                &mut frame,
+                self.width as usize,
+                Some(tui::render::FramePrompt {
+                    state: &input,
+                    mode: self.mode,
+                    queued: &[],
+                    prediction: None,
+                }),
+                None,
+            );
+        }
+        self.drain_sink();
+    }
+
     /// Draw a prompt frame (simulates the prompt being visible).
     pub fn draw_prompt(&mut self) {
         self.actions.push("draw_prompt".into());

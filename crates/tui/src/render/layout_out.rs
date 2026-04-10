@@ -298,7 +298,6 @@ impl LayoutSink for RenderOut {
 
     fn newline(&mut self) {
         super::crlf(self);
-        self.line_cols = 0;
     }
 
     fn mark_wrapped(&mut self) {
