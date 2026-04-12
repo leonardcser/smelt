@@ -221,23 +221,9 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
         "bash" => str_arg(args, "command"),
         "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
         "notebook_edit" => display_path(&str_arg(args, "notebook_path")),
-        "glob" => {
-            let pattern = str_arg(args, "pattern");
-            let path = str_arg(args, "path");
-            if path.is_empty() {
-                pattern
-            } else {
-                format!("{} in {}", pattern, display_path(&path))
-            }
-        }
-        "grep" => {
-            let pattern = str_arg(args, "pattern");
-            let path = str_arg(args, "path");
-            if path.is_empty() {
-                pattern
-            } else {
-                format!("{} in {}", pattern, display_path(&path))
-            }
+        "glob" | "grep" => {
+            confirm_with_optional_path(str_arg(args, "pattern"), &str_arg(args, "path"))
+                .unwrap_or_default()
         }
         "web_fetch" => str_arg(args, "url"),
         "web_search" => str_arg(args, "query"),
@@ -294,6 +280,16 @@ pub fn display_path(path: &str) -> String {
         }
     }
     path.into()
+}
+
+/// Build a confirm label like `"pattern"` or `"pattern in dir"`, omitting the
+/// path when it is the cwd.
+pub fn confirm_with_optional_path(label: String, path: &str) -> Option<String> {
+    if path.is_empty() || path == "." {
+        Some(label)
+    } else {
+        Some(format!("{} in {}", label, display_path(path)))
+    }
 }
 
 /// Maximum lines of tool output sent to the LLM. Individual tools may

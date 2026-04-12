@@ -88,13 +88,7 @@ impl Tool for GrepTool {
     }
 
     fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        let pattern = str_arg(args, "pattern");
-        let path = str_arg(args, "path");
-        if path.is_empty() {
-            Some(pattern)
-        } else {
-            Some(format!("{} in {}", pattern, super::display_path(&path)))
-        }
+        super::confirm_with_optional_path(str_arg(args, "pattern"), &str_arg(args, "path"))
     }
 
     fn execute<'a>(

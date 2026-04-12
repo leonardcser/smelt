@@ -1,4 +1,4 @@
-use super::{display_path, str_arg, Tool, ToolContext, ToolFuture, ToolResult};
+use super::{confirm_with_optional_path, str_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use globset::Glob;
 use ignore::WalkBuilder;
 use serde_json::Value;
@@ -33,13 +33,7 @@ impl Tool for GlobTool {
     }
 
     fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        let pattern = str_arg(args, "pattern");
-        let path = str_arg(args, "path");
-        if path.is_empty() {
-            Some(pattern)
-        } else {
-            Some(format!("{} in {}", pattern, display_path(&path)))
-        }
+        confirm_with_optional_path(str_arg(args, "pattern"), &str_arg(args, "path"))
     }
 
     fn execute<'a>(
