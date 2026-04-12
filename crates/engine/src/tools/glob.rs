@@ -1,4 +1,6 @@
 use super::{display_path, str_arg, Tool, ToolContext, ToolFuture, ToolResult};
+use globset::Glob;
+use ignore::WalkBuilder;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -49,35 +51,55 @@ impl Tool for GlobTool {
             tokio::task::block_in_place(|| {
                 let pattern = str_arg(&args, "pattern");
                 let root = str_arg(&args, "path");
+                let search_dir = if root.is_empty() { "." } else { root.as_str() };
 
-                let full_pattern = if root.is_empty() {
-                    pattern
-                } else {
-                    format!("{}/{}", root.trim_end_matches('/'), pattern)
+                let matcher = match Glob::new(&pattern) {
+                    Ok(g) => g.compile_matcher(),
+                    Err(e) => return ToolResult::err(format!("invalid glob pattern: {}", e)),
                 };
 
-                match glob::glob(&full_pattern) {
-                    Ok(paths) => {
-                        let mut entries: Vec<(std::time::SystemTime, String)> = paths
-                            .filter_map(|p| p.ok())
-                            .take(200)
-                            .filter_map(|p| {
-                                let mtime = p.metadata().ok()?.modified().ok()?;
-                                Some((mtime, p.display().to_string()))
-                            })
-                            .collect();
+                let walker = WalkBuilder::new(search_dir)
+                    .hidden(false)
+                    .git_ignore(true)
+                    .build();
 
-                        entries.sort_by(|a, b| b.0.cmp(&a.0));
-                        let matches: Vec<String> =
-                            entries.into_iter().map(|(_, path)| path).collect();
+                let mut entries: Vec<(std::time::SystemTime, String)> = Vec::new();
 
-                        if matches.is_empty() {
-                            ToolResult::ok("no matches found")
-                        } else {
-                            ToolResult::ok(matches.join("\n"))
+                for entry in walker {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+
+                    if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                        continue;
+                    }
+
+                    let path = entry.path();
+                    let relative = path.strip_prefix(search_dir).unwrap_or(path);
+
+                    if !matcher.is_match(relative) {
+                        continue;
+                    }
+
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            entries.push((mtime, path.display().to_string()));
                         }
                     }
-                    Err(e) => ToolResult::err(e.to_string()),
+
+                    if entries.len() >= 200 {
+                        break;
+                    }
+                }
+
+                entries.sort_by(|a, b| b.0.cmp(&a.0));
+                let matches: Vec<String> = entries.into_iter().map(|(_, p)| p).collect();
+
+                if matches.is_empty() {
+                    ToolResult::ok("no matches found")
+                } else {
+                    ToolResult::ok(matches.join("\n"))
                 }
             })
         })
