@@ -221,7 +221,15 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
         "bash" => str_arg(args, "command"),
         "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
         "notebook_edit" => display_path(&str_arg(args, "notebook_path")),
-        "glob" => str_arg(args, "pattern"),
+        "glob" => {
+            let pattern = str_arg(args, "pattern");
+            let path = str_arg(args, "path");
+            if path.is_empty() {
+                pattern
+            } else {
+                format!("{} in {}", pattern, display_path(&path))
+            }
+        }
         "grep" => {
             let pattern = str_arg(args, "pattern");
             let path = str_arg(args, "path");
