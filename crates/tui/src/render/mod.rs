@@ -598,6 +598,26 @@ pub(super) fn crlf(out: &mut RenderOut) {
     out.line_cols = 0;
 }
 
+/// Colors for the software block cursor, adapted to light/dark theme.
+fn cursor_colors() -> (Color, Color) {
+    if theme::is_light() {
+        (Color::White, Color::Black)
+    } else {
+        (Color::Black, Color::White)
+    }
+}
+
+/// Draw a software cursor (block) at the given position.
+/// The native terminal cursor stays hidden to avoid flickering.
+pub(super) fn draw_soft_cursor(out: &mut RenderOut, col: u16, row: u16) {
+    let (fg, bg) = cursor_colors();
+    let _ = out.queue(cursor::MoveTo(col, row));
+    out.set_fg(fg);
+    out.set_bg(bg);
+    let _ = out.queue(Print(" "));
+    out.reset_style();
+}
+
 /// Resolve a `display::ColorRole` against the live theme atomics.
 /// Used by `RenderOut`'s `LayoutSink` impl (dialogs and overlay paints
 /// that don't go through a `Theme` snapshot).
@@ -2652,7 +2672,6 @@ impl Screen {
             return;
         }
         let mut frame = Frame::begin(&*self.backend);
-        let _ = frame.queue(cursor::Hide);
         let start_row = if self.prompt.drawn {
             let row = self.prompt.anchor_row.unwrap_or(0);
             let _ = frame.queue(cursor::MoveTo(0, row));
@@ -2670,7 +2689,6 @@ impl Screen {
         let block_rows = self
             .history
             .render(&mut frame, w as usize, self.show_thinking);
-        let _ = frame.queue(cursor::Show);
         // Cap anchor at the last terminal row — scroll-mode rendering may
         // have pushed past the bottom, making start_row + block_rows overshoot.
         self.prompt.anchor_row = Some((start_row + block_rows).min(h.saturating_sub(1)));
@@ -2698,7 +2716,6 @@ impl Screen {
         let _perf = crate::perf::begin("redraw");
         let (w, height) = self.size();
         let mut frame = Frame::begin(&*self.backend);
-        let _ = frame.queue(cursor::Hide);
         let _ = frame.queue(cursor::MoveTo(0, 0));
         let _ = frame.queue(terminal::Clear(terminal::ClearType::All));
         let _ = frame.queue(terminal::Clear(terminal::ClearType::Purge));
@@ -2724,7 +2741,6 @@ impl Screen {
             self.history
                 .render(&mut frame, w as usize, self.show_thinking)
         };
-        let _ = frame.queue(cursor::Show);
         self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
@@ -3188,7 +3204,6 @@ impl Screen {
         }
 
         // ── Position cursor ─────────────────────────────────────────────
-        let _ = out.queue(cursor::Hide);
         let (_term_w, term_h) = self.size();
         let explicit_anchor = self.prompt.anchor_row.take();
         let draw_start_row = explicit_anchor.unwrap_or_else(|| self.cursor_y());
@@ -3329,7 +3344,6 @@ impl Screen {
                 }
             }
 
-            let _ = out.queue(cursor::Show);
             false
         } else {
             // ── Dialog mode ─────────────────────────────────────────
@@ -3402,7 +3416,7 @@ impl Screen {
         let input_rows: u16 = if show_prediction {
             1
         } else {
-            let (visual_lines, _, _) = wrap_and_locate_cursor(&state.buf, &[], 0, usable);
+            let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.buf, &[], 0, usable);
             visual_lines.len() as u16
         };
 
@@ -3452,20 +3466,14 @@ impl Screen {
         // get a fresh `RenderOut`, so we must force a terminal reset here
         // instead of relying on the diff engine's cached state.
         out.force_reset_style();
-        let mut extra_rows = 0u16;
         let notification_rows = render_notification(out, self.notification.as_ref(), usable);
-        extra_rows += notification_rows;
         let queued_visual = render_queued(out, queued, usable);
-        extra_rows += queued_visual;
         let queued_rows = queued_visual as usize;
         let stash_rows = render_stash(out, &state.stash, usable);
-        extra_rows += stash_rows;
         let term_h = self.size().1 as usize;
         let btw_visual = if let Some(ref mut btw) = self.btw {
             let max_btw = btw_max_body_rows(term_h);
-            let rows = render_btw(out, btw, usable, max_btw, state.vim_enabled());
-            extra_rows += rows;
-            rows as usize
+            render_btw(out, btw, usable, max_btw, state.vim_enabled()) as usize
         } else {
             0
         };
@@ -3573,7 +3581,7 @@ impl Screen {
             let de = map_cursor(raw_end_char, &state.buf, &spans);
             (ds, de)
         });
-        let (visual_lines, cursor_line, cursor_col) =
+        let (visual_lines, cursor_line, _, cursor_char_in_line) =
             wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
         let cmd_hint =
             crate::completer::Completer::command_hint(&state.buf, &state.command_arg_sources);
@@ -3646,10 +3654,6 @@ impl Screen {
             self.prompt.input_scroll = 0;
             0
         };
-        let cursor_line_visible = cursor_line
-            .saturating_sub(scroll_offset)
-            .min(content_rows.saturating_sub(1));
-
         let show_prediction = prediction.is_some() && state.buf.is_empty();
         if show_prediction {
             let pred = prediction.unwrap();
@@ -3706,20 +3710,26 @@ impl Screen {
                     Some((s, e))
                 }
             });
+            let line_cursor = if abs_idx == cursor_line {
+                Some(cursor_char_in_line)
+            } else {
+                None
+            };
             let _ = out.queue(Print(" "));
             if has_arg_space && abs_idx == 0 {
                 // Command prefix in accent, argument text in normal style.
                 let (prefix, hint) = cmd_hint.as_ref().unwrap();
-                let prefix_len = prefix.len();
-                out.set_fg(theme::accent());
-                if line.len() >= prefix_len {
-                    let _ = out.queue(Print(&line[..prefix_len]));
-                    out.reset_style();
-                    let rest = &line[prefix_len..];
+                let prefix_len = prefix.chars().count();
+                let line_chars = line.chars().count();
+                // Build kinds: accent for the prefix chars, plain for the rest.
+                let mut cmd_kinds = vec![SpanKind::AtRef; prefix_len.min(line_chars)];
+                cmd_kinds.resize(line_chars, SpanKind::Plain);
+                render_styled_chars(out, line, &cmd_kinds, line_sel, line_cursor);
+                // Show hint when only "/cmd " typed with no argument yet.
+                if line_chars >= prefix_len {
+                    let rest = &line[prefix.len()..];
                     if rest.trim().is_empty() && state.buf.ends_with(' ') {
-                        // Show hint when only "/cmd " typed with no argument yet.
-                        // Truncate with ellipsis if it would overflow the line.
-                        let max = usable.saturating_sub(prefix_len + 2); // +2 for spaces
+                        let max = usable.saturating_sub(prefix_len + 2);
                         let truncated: String = if hint.chars().count() > max {
                             let mut s: String = hint.chars().take(max.saturating_sub(1)).collect();
                             s.push('…');
@@ -3731,34 +3741,38 @@ impl Screen {
                         out.push_dim();
                         let _ = out.queue(Print(&truncated));
                         out.pop_style();
-                    } else {
-                        let _ = out.queue(Print(rest));
                     }
-                } else {
-                    let _ = out.queue(Print(line));
-                    out.reset_style();
                 }
             } else if has_arg_space {
-                render_styled_chars(out, line, kinds, line_sel);
+                render_styled_chars(out, line, kinds, line_sel, line_cursor);
             } else if is_command {
                 // All chars are accent-colored; reuse AtRef kind for accent rendering.
                 let accent_kinds = vec![SpanKind::AtRef; line.chars().count()];
-                render_styled_chars(out, line, &accent_kinds, line_sel);
+                render_styled_chars(out, line, &accent_kinds, line_sel, line_cursor);
             } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
                 // Render the `!` prefix with its own style (possibly selected).
+                let bang_cursor = line_cursor == Some(0);
                 let bang_selected = line_sel.is_some_and(|(s, _)| s == 0);
-                out.push_style(StyleState {
-                    fg: Some(Color::Red),
-                    bg: if bang_selected {
-                        Some(theme::selection_bg())
-                    } else {
-                        None
-                    },
-                    bold: true,
-                    ..StyleState::default()
-                });
-                let _ = out.queue(Print("!"));
-                out.pop_style();
+                if bang_cursor {
+                    let (fg, bg) = cursor_colors();
+                    out.set_fg(fg);
+                    out.set_bg(bg);
+                    let _ = out.queue(Print("!"));
+                    out.reset_style();
+                } else {
+                    out.push_style(StyleState {
+                        fg: Some(Color::Red),
+                        bg: if bang_selected {
+                            Some(theme::selection_bg())
+                        } else {
+                            None
+                        },
+                        bold: true,
+                        ..StyleState::default()
+                    });
+                    let _ = out.queue(Print("!"));
+                    out.pop_style();
+                }
                 // Shift selection range by 1 for the remaining text.
                 let rest_sel = line_sel.and_then(|(s, e)| {
                     let s2 = if s == 0 { 0 } else { s - 1 };
@@ -3769,9 +3783,10 @@ impl Screen {
                         None
                     }
                 });
-                render_styled_chars(out, &line[1..], &kinds[1..], rest_sel);
+                let rest_cursor = line_cursor.and_then(|c| c.checked_sub(1));
+                render_styled_chars(out, &line[1..], &kinds[1..], rest_sel, rest_cursor);
             } else {
-                render_styled_chars(out, line, kinds, line_sel);
+                render_styled_chars(out, line, kinds, line_sel, line_cursor);
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             if has_scrollbar {
@@ -3816,7 +3831,7 @@ impl Screen {
 
         // Mirror of `fixed_base`'s structure: extras, top bar, input
         // content, bottom bar, status line / completions.
-        let total_rows = notification_rows as usize
+        (notification_rows as usize
             + stash_rows as usize
             + queued_rows
             + btw_visual
@@ -3824,20 +3839,7 @@ impl Screen {
             + content_rows
             + 1 // bottom bar (below input)
             + status_line_rows
-            + comp_rows;
-        let new_rows = total_rows as u16;
-
-        // Cursor positioning: `out.row` has been tracking the exact
-        // row via MoveTo after each crlf. The prompt started at
-        // `prompt_start_row` (captured before drawing). The cursor
-        // sits at: prompt_start + 1 (top bar) + extra_rows +
-        // cursor_line_visible.
-        let prompt_start_row = out.row.unwrap().saturating_sub(new_rows.saturating_sub(1));
-        let text_row = prompt_start_row + 1 + extra_rows + cursor_line_visible as u16;
-        let text_col = 1 + cursor_col as u16;
-        let _ = out.queue(cursor::MoveTo(text_col, text_row));
-
-        new_rows
+            + comp_rows) as u16
     }
 }
 
@@ -4163,11 +4165,12 @@ fn wrap_and_locate_cursor(
     char_kinds: &[SpanKind],
     cursor_char: usize,
     usable: usize,
-) -> (Vec<(String, Vec<SpanKind>)>, usize, usize) {
+) -> (Vec<(String, Vec<SpanKind>)>, usize, usize, usize) {
     let _perf = crate::perf::begin("render:wrap_cursor");
     let mut visual_lines: Vec<(String, Vec<SpanKind>)> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
+    let mut cursor_char_in_line = 0usize;
     let mut chars_seen = 0usize;
     let mut cursor_set = false;
     let max_col = usable.max(1);
@@ -4180,6 +4183,7 @@ fn wrap_and_locate_cursor(
                 &mut visual_lines,
                 &mut cursor_line,
                 &mut cursor_col,
+                &mut cursor_char_in_line,
                 &mut cursor_set,
                 chars_seen,
                 &[],
@@ -4215,6 +4219,7 @@ fn wrap_and_locate_cursor(
                         &mut visual_lines,
                         &mut cursor_line,
                         &mut cursor_col,
+                        &mut cursor_char_in_line,
                         &mut cursor_set,
                         line_start,
                         &line_chars,
@@ -4236,6 +4241,7 @@ fn wrap_and_locate_cursor(
                         &mut visual_lines,
                         &mut cursor_line,
                         &mut cursor_col,
+                        &mut cursor_char_in_line,
                         &mut cursor_set,
                         line_start,
                         &line_chars,
@@ -4266,6 +4272,7 @@ fn wrap_and_locate_cursor(
             &mut visual_lines,
             &mut cursor_line,
             &mut cursor_col,
+            &mut cursor_char_in_line,
             &mut cursor_set,
             line_start,
             &line_chars,
@@ -4279,7 +4286,7 @@ fn wrap_and_locate_cursor(
     if visual_lines.is_empty() {
         visual_lines.push((String::new(), Vec::new()));
     }
-    (visual_lines, cursor_line, cursor_col)
+    (visual_lines, cursor_line, cursor_col, cursor_char_in_line)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4287,6 +4294,7 @@ fn push_visual_line(
     visual_lines: &mut Vec<(String, Vec<SpanKind>)>,
     cursor_line: &mut usize,
     cursor_col: &mut usize,
+    cursor_char_in_line: &mut usize,
     cursor_set: &mut bool,
     start_char: usize,
     line_chars: &[char],
@@ -4301,6 +4309,7 @@ fn push_visual_line(
         && (cursor_char < end_char || (is_last_chunk && cursor_char == end_char))
     {
         *cursor_line = visual_lines.len();
+        *cursor_char_in_line = cursor_char - start_char;
         *cursor_col = display_width(&line_chars[..cursor_char - start_char], prompt_col);
         *cursor_set = true;
     }
@@ -4770,34 +4779,58 @@ fn map_cursor(raw_cursor: usize, raw_buf: &str, spans: &[Span]) -> usize {
 
 /// Render a line using pre-computed per-character span kinds.
 /// `selection` is an optional (start_char, end_char) range within this line.
+/// `cursor_pos` is an optional char index within this line to render as a
+/// software block cursor (white bg, black fg).
 fn render_styled_chars(
     out: &mut RenderOut,
     line: &str,
     kinds: &[SpanKind],
     selection: Option<(usize, usize)>,
+    cursor_pos: Option<usize>,
 ) {
     let mut current = SpanKind::Plain;
     let mut in_sel = false;
+    let mut in_cursor = false;
     let char_count = line.chars().count();
     for (i, ch) in line.chars().enumerate() {
         let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
         let want_sel = selection.is_some_and(|(s, e)| i >= s && i < e);
+        let want_cursor = cursor_pos == Some(i);
 
-        if kind != current || want_sel != in_sel {
+        if kind != current || want_sel != in_sel || want_cursor != in_cursor {
             // Reset previous styling before applying new.
-            if in_sel || current != SpanKind::Plain {
+            if in_sel || in_cursor || current != SpanKind::Plain {
                 out.reset_style();
             }
-            if want_sel {
-                out.set_bg(theme::selection_bg());
-            }
-            if kind == SpanKind::AtRef || kind == SpanKind::Attachment {
-                out.set_fg(theme::accent());
+            if want_cursor {
+                let (fg, bg) = cursor_colors();
+                out.set_fg(fg);
+                out.set_bg(bg);
+            } else {
+                if want_sel {
+                    out.set_bg(theme::selection_bg());
+                }
+                if kind == SpanKind::AtRef || kind == SpanKind::Attachment {
+                    out.set_fg(theme::accent());
+                }
             }
             current = kind;
             in_sel = want_sel;
+            in_cursor = want_cursor;
         }
         let _ = out.queue(Print(ch));
+    }
+    // Render a cursor block past the end of the line.
+    if cursor_pos == Some(char_count) {
+        if in_sel || in_cursor || current != SpanKind::Plain {
+            out.reset_style();
+        }
+        let (fg, bg) = cursor_colors();
+        out.set_fg(fg);
+        out.set_bg(bg);
+        let _ = out.queue(Print(' '));
+        out.reset_style();
+        return;
     }
     // Render a highlighted space for empty lines within a selection.
     if let Some((s, e)) = selection {
@@ -4810,7 +4843,7 @@ fn render_styled_chars(
             return;
         }
     }
-    if in_sel || current != SpanKind::Plain {
+    if in_sel || in_cursor || current != SpanKind::Plain {
         out.reset_style();
     }
 }
@@ -5144,82 +5177,6 @@ fn draw_stats(
 mod selection_tests {
     use super::*;
 
-    struct TestBackend {
-        size: (u16, u16),
-        cursor_y: u16,
-    }
-
-    impl TerminalBackend for TestBackend {
-        fn size(&self) -> (u16, u16) {
-            self.size
-        }
-
-        fn cursor_y(&self) -> u16 {
-            self.cursor_y
-        }
-
-        fn make_output(&self) -> RenderOut {
-            RenderOut::buffer()
-        }
-    }
-
-    fn final_cursor_pos(rendered: &str) -> Option<(u16, u16)> {
-        let bytes = rendered.as_bytes();
-        let mut i = 0;
-        let mut cursor = None;
-        let mut saved = None;
-        while i < bytes.len() {
-            if bytes[i] == 0x1b {
-                match bytes.get(i + 1) {
-                    Some(b'7') => {
-                        saved = cursor;
-                        i += 2;
-                        continue;
-                    }
-                    Some(b'8') => {
-                        cursor = saved;
-                        i += 2;
-                        continue;
-                    }
-                    Some(b'[') => {
-                        let mut j = i + 2;
-                        let row_start = j;
-                        while j < bytes.len() && bytes[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                        if j == row_start || j >= bytes.len() || bytes[j] != b';' {
-                            i += 1;
-                            continue;
-                        }
-                        let row = std::str::from_utf8(&bytes[row_start..j])
-                            .ok()?
-                            .parse::<u16>()
-                            .ok()?;
-                        j += 1;
-                        let col_start = j;
-                        while j < bytes.len() && bytes[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                        if j == col_start || j >= bytes.len() || bytes[j] != b'H' {
-                            i += 1;
-                            continue;
-                        }
-                        let col = std::str::from_utf8(&bytes[col_start..j])
-                            .ok()?
-                            .parse::<u16>()
-                            .ok()?;
-                        cursor = Some((col.saturating_sub(1), row.saturating_sub(1)));
-                        i = j + 1;
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            i += 1;
-        }
-        cursor
-    }
-
     fn vlines(strs: &[&str]) -> Vec<(String, Vec<SpanKind>)> {
         strs.iter()
             .map(|s| (s.to_string(), vec![SpanKind::Plain; s.chars().count()]))
@@ -5278,7 +5235,7 @@ mod selection_tests {
     #[test]
     fn prompt_cursor_uses_tab_display_width() {
         let kinds = vec![SpanKind::Plain; "a\tb".chars().count()];
-        let (_, cursor_line, cursor_col) = wrap_and_locate_cursor("a\tb", &kinds, 3, 80);
+        let (_, cursor_line, cursor_col, _) = wrap_and_locate_cursor("a\tb", &kinds, 3, 80);
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 8);
     }
@@ -5286,7 +5243,7 @@ mod selection_tests {
     #[test]
     fn prompt_cursor_tracks_multiple_tabs_from_prompt_column() {
         let kinds = vec![SpanKind::Plain; "\t\tb".chars().count()];
-        let (_, cursor_line, cursor_col) = wrap_and_locate_cursor("\t\tb", &kinds, 3, 80);
+        let (_, cursor_line, cursor_col, _) = wrap_and_locate_cursor("\t\tb", &kinds, 3, 80);
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 16);
     }
@@ -5294,7 +5251,7 @@ mod selection_tests {
     #[test]
     fn prompt_cursor_uses_wide_char_display_width() {
         let kinds = vec![SpanKind::Plain; "a界b".chars().count()];
-        let (_, cursor_line, cursor_col) = wrap_and_locate_cursor("a界b", &kinds, 3, 80);
+        let (_, cursor_line, cursor_col, _) = wrap_and_locate_cursor("a界b", &kinds, 3, 80);
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 4);
     }
@@ -5302,7 +5259,7 @@ mod selection_tests {
     #[test]
     fn prompt_tabs_respect_prompt_column_without_forced_wrap() {
         let kinds = vec![SpanKind::Plain; "a\tb".chars().count()];
-        let (lines, cursor_line, cursor_col) = wrap_and_locate_cursor("a\tb", &kinds, 3, 8);
+        let (lines, cursor_line, cursor_col, _) = wrap_and_locate_cursor("a\tb", &kinds, 3, 8);
         assert_eq!(
             lines.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(),
             vec!["a\tb"]
@@ -5326,7 +5283,7 @@ mod selection_tests {
         dialog.draw(&mut out, 0, 40, 12);
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(
-            rendered.starts_with("\u{1b}[?25l\u{1b}[0m\u{1b}[0m"),
+            rendered.starts_with("\u{1b}[0m\u{1b}[0m"),
             "rendered: {rendered:?}"
         );
     }
@@ -5376,43 +5333,6 @@ mod selection_tests {
         assert!(comp.results.is_empty());
         assert!(!comp.is_picker());
         assert_eq!(completion_reserved_rows(Some(&comp)), 0);
-    }
-
-    #[test]
-    fn file_completer_with_no_results_keeps_cursor_on_input_row() {
-        let backend = Box::new(TestBackend {
-            size: (40, 12),
-            cursor_y: 0,
-        });
-        let mut screen = Screen::with_backend(backend);
-        screen.set_anchor_row(0);
-
-        let mut input = crate::input::InputState::default();
-        input.buf = "@zzzzzz".into();
-        input.cpos = input.buf.len();
-        let mut comp = crate::completer::Completer::files(0);
-        comp.update_query("zzzzzz".into());
-        input.completer = Some(comp);
-
-        let mut out = RenderOut::buffer();
-        screen.draw_frame(
-            &mut out,
-            40,
-            Some(FramePrompt {
-                state: &input,
-                mode: protocol::Mode::Normal,
-                queued: &[],
-                prediction: None,
-            }),
-            None,
-        );
-
-        let rendered = String::from_utf8(out.into_bytes()).unwrap();
-        assert_eq!(
-            final_cursor_pos(&rendered),
-            Some((8, 1)),
-            "rendered: {rendered:?}"
-        );
     }
 
     #[test]

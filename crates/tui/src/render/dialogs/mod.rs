@@ -19,7 +19,7 @@ pub use rewind::RewindDialog;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor, style::Print, terminal, QueueableCommand};
 
-use super::{crlf, wrap_line, ConfirmChoice, RenderOut};
+use super::{crlf, draw_soft_cursor, wrap_line, ConfirmChoice, RenderOut};
 
 pub enum DialogResult {
     Dismissed,
@@ -586,7 +586,6 @@ pub(crate) fn begin_dialog_draw(
     max_rows: Option<u16>,
     anchor_row: &mut Option<u16>,
 ) -> (u16, u16) {
-    let _ = out.queue(cursor::Hide);
     // Dialogs paint after conversation content that may have left SGR
     // attributes active in the terminal. Frames use a fresh `RenderOut`, so
     // reset the terminal unconditionally before drawing the overlay.
@@ -632,9 +631,8 @@ pub(crate) fn finish_dialog_frame(
 ) {
     if editing {
         if let Some((col, r)) = cursor_pos {
-            let _ = out.queue(cursor::MoveTo(col, r));
+            draw_soft_cursor(out, col, r);
         }
-        let _ = out.queue(cursor::Show);
     }
 }
 

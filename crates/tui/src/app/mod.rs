@@ -15,6 +15,7 @@ use engine::{permissions::Decision, EngineHandle, Permissions};
 use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
+    cursor,
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, EventStream, KeyCode, KeyEvent,
         KeyModifiers,
@@ -528,6 +529,7 @@ impl App {
     ) {
         crate::theme::detect_background();
         terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(cursor::Hide);
         let _ = io::stdout().execute(EnableBracketedPaste);
 
         if !self.history.is_empty() {
@@ -910,6 +912,7 @@ impl App {
         // When there is session history, clear below for a clean resume hint area.
         let clear_below = !self.session.messages.is_empty();
         self.screen.move_cursor_past_prompt(clear_below);
+        let _ = io::stdout().execute(cursor::Show);
         let _ = io::stdout().execute(DisableBracketedPaste);
         terminal::disable_raw_mode().ok();
     }
