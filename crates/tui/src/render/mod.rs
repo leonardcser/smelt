@@ -4826,6 +4826,9 @@ fn completion_reserved_rows(completer: Option<&crate::completer::Completer>) -> 
     let Some(comp) = completer else {
         return 0;
     };
+    if comp.results.is_empty() && !comp.is_picker() {
+        return 0;
+    }
     let (list_rows, hint_rows, empty_gap) = completion_layout(comp);
     if list_rows == 0 {
         return 0;
@@ -5140,6 +5143,82 @@ fn draw_stats(
 mod selection_tests {
     use super::*;
 
+    struct TestBackend {
+        size: (u16, u16),
+        cursor_y: u16,
+    }
+
+    impl TerminalBackend for TestBackend {
+        fn size(&self) -> (u16, u16) {
+            self.size
+        }
+
+        fn cursor_y(&self) -> u16 {
+            self.cursor_y
+        }
+
+        fn make_output(&self) -> RenderOut {
+            RenderOut::buffer()
+        }
+    }
+
+    fn final_cursor_pos(rendered: &str) -> Option<(u16, u16)> {
+        let bytes = rendered.as_bytes();
+        let mut i = 0;
+        let mut cursor = None;
+        let mut saved = None;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b {
+                match bytes.get(i + 1) {
+                    Some(b'7') => {
+                        saved = cursor;
+                        i += 2;
+                        continue;
+                    }
+                    Some(b'8') => {
+                        cursor = saved;
+                        i += 2;
+                        continue;
+                    }
+                    Some(b'[') => {
+                        let mut j = i + 2;
+                        let row_start = j;
+                        while j < bytes.len() && bytes[j].is_ascii_digit() {
+                            j += 1;
+                        }
+                        if j == row_start || j >= bytes.len() || bytes[j] != b';' {
+                            i += 1;
+                            continue;
+                        }
+                        let row = std::str::from_utf8(&bytes[row_start..j])
+                            .ok()?
+                            .parse::<u16>()
+                            .ok()?;
+                        j += 1;
+                        let col_start = j;
+                        while j < bytes.len() && bytes[j].is_ascii_digit() {
+                            j += 1;
+                        }
+                        if j == col_start || j >= bytes.len() || bytes[j] != b'H' {
+                            i += 1;
+                            continue;
+                        }
+                        let col = std::str::from_utf8(&bytes[col_start..j])
+                            .ok()?
+                            .parse::<u16>()
+                            .ok()?;
+                        cursor = Some((col.saturating_sub(1), row.saturating_sub(1)));
+                        i = j + 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        cursor
+    }
+
     fn vlines(strs: &[&str]) -> Vec<(String, Vec<SpanKind>)> {
         strs.iter()
             .map(|s| (s.to_string(), vec![SpanKind::Plain; s.chars().count()]))
@@ -5284,6 +5363,53 @@ mod selection_tests {
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(
             rendered.contains("\u{1b}[0m\u{1b}[0m"),
+            "rendered: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn file_completer_with_no_results_reserves_no_rows() {
+        let mut comp = crate::completer::Completer::files(0);
+        comp.update_query("zzzzzz".into());
+
+        assert!(comp.results.is_empty());
+        assert!(!comp.is_picker());
+        assert_eq!(completion_reserved_rows(Some(&comp)), 0);
+    }
+
+    #[test]
+    fn file_completer_with_no_results_keeps_cursor_on_input_row() {
+        let backend = Box::new(TestBackend {
+            size: (40, 12),
+            cursor_y: 0,
+        });
+        let mut screen = Screen::with_backend(backend);
+        screen.set_anchor_row(0);
+
+        let mut input = crate::input::InputState::default();
+        input.buf = "@zzzzzz".into();
+        input.cpos = input.buf.len();
+        let mut comp = crate::completer::Completer::files(0);
+        comp.update_query("zzzzzz".into());
+        input.completer = Some(comp);
+
+        let mut out = RenderOut::buffer();
+        screen.draw_frame(
+            &mut out,
+            40,
+            Some(FramePrompt {
+                state: &input,
+                mode: protocol::Mode::Normal,
+                queued: &[],
+                prediction: None,
+            }),
+            None,
+        );
+
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        assert_eq!(
+            final_cursor_pos(&rendered),
+            Some((8, 1)),
             "rendered: {rendered:?}"
         );
     }
