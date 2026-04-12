@@ -80,26 +80,10 @@ fn apply_style(out: &mut RenderOut, style: &SpanStyle, theme: &Theme) {
 }
 
 /// Resolve a `ColorValue` against the current theme.
-///
-/// `is_bg = false` (foreground): RGB values are mapped to the nearest
-/// xterm-256 cube entry so the terminal emits 10-byte `\x1b[38;5;Nm`
-/// escapes instead of 17-byte `\x1b[38;2;R;G;Bm`. Minor accuracy loss,
-/// invisible for syntax highlighting in practice.
-///
-/// `is_bg = true` (background): RGB stays 24-bit. Dark, low-saturation
-/// diff bgs (e.g. `rgb(60,20,20)`) lose their hue when snapped to the
-/// 6×6×6 cube — the nearest cube entry is usually a much brighter pure-
-/// channel color, which reads wrong on the diff background.
 #[inline]
-pub(super) fn resolve(c: ColorValue, theme: &Theme, is_bg: bool) -> Color {
+pub(super) fn resolve(c: ColorValue, theme: &Theme, _is_bg: bool) -> Color {
     match c {
-        ColorValue::Rgb(r, g, b) => {
-            if is_bg {
-                Color::Rgb { r, g, b }
-            } else {
-                Color::AnsiValue(rgb_to_cube(r, g, b))
-            }
-        }
+        ColorValue::Rgb(r, g, b) => Color::Rgb { r, g, b },
         ColorValue::Ansi(v) => Color::AnsiValue(v),
         ColorValue::Named(n) => Color::from(n),
         ColorValue::Role(role) => match role {
@@ -113,33 +97,4 @@ pub(super) fn resolve(c: ColorValue, theme: &Theme, is_bg: bool) -> Color {
             ColorRole::Muted => theme.muted,
         },
     }
-}
-
-/// Map an RGB triple to the closest xterm-256 6×6×6 cube entry
-/// (palette indices 16–231). The cube uses level values
-/// `[0, 95, 135, 175, 215, 255]` per channel.
-///
-/// Deliberately ignores the grayscale ramp (indices 232–255): for dark
-/// colors with one dominant channel (e.g. `rgb(60,20,20)`), the gray ramp
-/// is closer in Euclidean distance but loses the hue, which reads as a
-/// regression for syntax highlighting. The cube alone is "good enough"
-/// and never surprises.
-#[inline]
-fn rgb_to_cube(r: u8, g: u8, b: u8) -> u8 {
-    16 + 36 * nearest_level(r) + 6 * nearest_level(g) + nearest_level(b)
-}
-
-#[inline]
-fn nearest_level(v: u8) -> u8 {
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    let mut best = 0u8;
-    let mut best_d = u32::MAX;
-    for (i, &lv) in LEVELS.iter().enumerate() {
-        let d = (v as i32 - lv as i32).unsigned_abs();
-        if d < best_d {
-            best_d = d;
-            best = i as u8;
-        }
-    }
-    best
 }
