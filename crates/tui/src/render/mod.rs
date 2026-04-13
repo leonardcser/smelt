@@ -1997,6 +1997,12 @@ impl Screen {
         let last_row = anchor + self.prompt.prev_rows.saturating_sub(1);
         let height = self.size().1;
         let mut out = self.backend.make_output();
+        // Erase the software block cursor so it doesn't linger on exit.
+        if let Some((col, row)) = self.prompt.soft_cursor {
+            let _ = out.queue(cursor::MoveTo(col, row));
+            let _ = out.queue(ResetColor);
+            let _ = out.queue(Print(' '));
+        }
         let _ = out.queue(cursor::MoveTo(0, last_row.min(height.saturating_sub(1))));
         let _ = out.queue(Print("\r\n\r\n"));
         if clear_below {
@@ -3529,6 +3535,7 @@ impl Screen {
         self.last_vim_enabled = state.vim_enabled();
         self.last_vim_mode = state.vim_mode();
         self.last_mode = mode;
+        self.prompt.soft_cursor = None;
         let usable = width.saturating_sub(2);
         // Reset SGR state before painting any prompt section. The previous
         // frame may have ended with styled content (for example a dim/italic
@@ -3863,6 +3870,9 @@ impl Screen {
                 render_styled_chars(out, line, kinds, line_sel, line_cursor);
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+            if line_cursor.is_some() {
+                self.prompt.soft_cursor = Some((1 + cursor_char_in_line as u16, out.cursor_row));
+            }
             if has_scrollbar {
                 let bg = if li >= thumb_start && li < thumb_end {
                     theme::scrollbar_thumb()

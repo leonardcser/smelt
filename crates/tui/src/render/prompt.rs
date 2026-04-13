@@ -21,6 +21,9 @@ pub(super) struct PromptState {
     pub prev_dialog_height: u16,
     /// Persisted scroll offset for multi-line input (vim-style viewport).
     pub input_scroll: usize,
+    /// Screen position `(col, row)` of the software block cursor from
+    /// the last prompt frame. Used to erase it on exit.
+    pub soft_cursor: Option<(u16, u16)>,
 }
 
 impl PromptState {
@@ -34,6 +37,7 @@ impl PromptState {
             prev_dialog_row: None,
             prev_dialog_height: 0,
             input_scroll: 0,
+            soft_cursor: None,
         }
     }
 }
