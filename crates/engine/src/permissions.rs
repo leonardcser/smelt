@@ -1150,6 +1150,23 @@ fn is_cd_command(subcmd: &str) -> bool {
 
 /// Check whether a command contains an output redirection (`>`, `>>`, `&>`, `&>>`).
 /// Quote-aware: ignores redirection operators inside single or double quotes.
+/// Check whether a redirect operator at byte position `gt_pos` targets `/dev/null`.
+/// Skips past the `>` / `>>` operator and optional whitespace to read the target.
+fn redirect_targets_dev_null(cmd: &str, gt_pos: usize) -> bool {
+    let rest = &cmd[gt_pos..];
+    let rest = rest
+        .strip_prefix(">>")
+        .unwrap_or_else(|| rest.strip_prefix('>').unwrap_or(rest));
+    let target = rest.trim_start();
+    target == "/dev/null"
+        || target.starts_with("/dev/null ")
+        || target.starts_with("/dev/null;")
+        || target.starts_with("/dev/null&")
+        || target.starts_with("/dev/null|")
+        || target.starts_with("/dev/null\t")
+        || target.starts_with("/dev/null\n")
+}
+
 fn has_output_redirection(cmd: &str) -> bool {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
@@ -1193,8 +1210,12 @@ fn has_output_redirection(cmd: &str) -> bool {
                 }
             }
             b'&' => {
-                // &> or &>> is output redirection
+                // &> or &>> is output redirection (unless targeting /dev/null)
                 if i + 1 < len && bytes[i + 1] == b'>' {
+                    if redirect_targets_dev_null(cmd, i + 1) {
+                        i += 2;
+                        continue;
+                    }
                     return true;
                 }
                 i += 1;
@@ -1212,6 +1233,11 @@ fn has_output_redirection(cmd: &str) -> bool {
                     }
                     // >& without a following digit, or >&N where N isn't a digit
                     // could still be problematic, but let's be conservative.
+                }
+                // Redirecting to /dev/null is harmless — just discards output.
+                if redirect_targets_dev_null(cmd, i) {
+                    i += 1;
+                    continue;
                 }
                 return true;
             }
@@ -2263,12 +2289,12 @@ mod tests {
 
     #[test]
     fn has_output_redirection_ampersand_greater() {
-        assert!(has_output_redirection("cargo build &> /dev/null"));
+        assert!(has_output_redirection("cargo build &> output.log"));
     }
 
     #[test]
     fn has_output_redirection_double_ampersand_greater() {
-        assert!(has_output_redirection("cargo build &>> /dev/null"));
+        assert!(has_output_redirection("cargo build &>> output.log"));
     }
 
     #[test]
@@ -2308,6 +2334,54 @@ mod tests {
     fn has_output_redirection_stderr_redirect() {
         // 2>&1 is fd duplication, not file output redirection
         assert!(!has_output_redirection("cargo build 2>&1"));
+    }
+
+    #[test]
+    fn dev_null_redirect_not_escalated() {
+        assert!(!has_output_redirection("find /tmp 2>/dev/null"));
+    }
+
+    #[test]
+    fn dev_null_redirect_with_space() {
+        assert!(!has_output_redirection("find /tmp 2> /dev/null"));
+    }
+
+    #[test]
+    fn dev_null_stdout_redirect() {
+        assert!(!has_output_redirection("echo hello > /dev/null"));
+    }
+
+    #[test]
+    fn dev_null_append_redirect() {
+        assert!(!has_output_redirection("echo hello >> /dev/null"));
+    }
+
+    #[test]
+    fn dev_null_ampersand_redirect() {
+        assert!(!has_output_redirection("cargo build &> /dev/null"));
+    }
+
+    #[test]
+    fn dev_null_in_chain_not_escalated() {
+        // 2>/dev/null is harmless, the whole command should stay allowed
+        assert!(!has_output_redirection(
+            "tree -L 3 /tmp 2>/dev/null || find /tmp -type d"
+        ));
+    }
+
+    #[test]
+    fn dev_null_mixed_with_real_redirect() {
+        // One redirect to /dev/null, but another to a real file — should escalate
+        assert!(has_output_redirection("cmd 2>/dev/null > out.txt"));
+    }
+
+    #[test]
+    fn auto_allowed_with_dev_null_stays_allow() {
+        let p = perms_with_bash(&["find *"], &[], &[]);
+        assert_eq!(
+            p.check_bash(Mode::Normal, "find /tmp 2>/dev/null"),
+            Decision::Allow
+        );
     }
 
     #[test]
