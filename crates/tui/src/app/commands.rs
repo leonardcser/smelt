@@ -393,7 +393,8 @@ impl App {
     }
 
     pub(super) fn format_conversation_text(&self) -> String {
-        format_conversation_markdown(&self.history, &self.session)
+        let text = format_conversation_markdown(&self.history, &self.session);
+        self.maybe_redact(text)
     }
 }
 

@@ -5481,6 +5481,7 @@ mod selection_tests {
             show_slug: true,
             show_thinking: true,
             restrict_to_workspace: false,
+            redact_secrets: true,
         };
         let mut comp = crate::completer::Completer::settings(&state);
         comp.update_query("zzzzzz".into());
@@ -5513,6 +5514,7 @@ mod selection_tests {
             show_slug: true,
             show_thinking: true,
             restrict_to_workspace: false,
+            redact_secrets: true,
         };
         let mut comp = crate::completer::Completer::settings(&state);
         let rows_before = completion_reserved_rows(Some(&comp));

@@ -213,7 +213,12 @@ fn spawn_title_generation(
     let model = model.to_string();
     let tx = event_tx.clone();
     let pricing = PricingContext::from_config(config);
+    let redact = config.redact_secrets;
     tokio::spawn(async move {
+        let user_messages: Vec<String> = user_messages
+            .into_iter()
+            .map(|m| crate::redact::maybe_redact(m, redact))
+            .collect();
         log::entry(
             log::Level::Info,
             "title_request",
@@ -278,9 +283,14 @@ fn spawn_btw_request(
     let model = model.to_string();
     let tx = event_tx.clone();
     let pricing = PricingContext::from_config(config);
+    let redact = config.redact_secrets;
     tokio::spawn(async move {
         let cancel = crate::cancel::CancellationToken::new();
 
+        let mut history = history;
+        if redact {
+            crate::redact::redact_messages(&mut history);
+        }
         let mut messages = Vec::with_capacity(history.len() + 2);
         messages.push(protocol::Message::system(
             "You are a helpful assistant. The user is asking a quick side question \
@@ -326,6 +336,7 @@ fn spawn_predict_request(
     let model = model.to_string();
     let tx = event_tx.clone();
     let pricing = PricingContext::from_config(config);
+    let redact = config.redact_secrets;
     tokio::spawn(async move {
         let system = "You predict what a user will type next in a coding assistant conversation. \
                       Reply with ONLY the predicted message — no quotes, no explanation, \
@@ -343,6 +354,7 @@ fn spawn_predict_request(
             if text.is_empty() {
                 continue;
             }
+            let text = crate::redact::maybe_redact(text, redact);
             // Truncate each message to keep the request small.
             let truncated = if text.len() > 500 {
                 &text[text.floor_char_boundary(text.len() - 500)..]
@@ -399,6 +411,7 @@ fn build_provider_with_overrides(
         client.clone(),
     )
     .with_model_config(config.api.model_config.clone())
+    .with_redact_secrets(config.redact_secrets)
 }
 
 // ── Turn ────────────────────────────────────────────────────────────────────
@@ -1168,17 +1181,24 @@ impl<'a> Turn<'a> {
                     metadata,
                 } = result;
 
-                log::entry(
-                    log::Level::Debug,
-                    "tool_result",
-                    &serde_json::json!({
-                        "tool": slot.tc.function.name,
-                        "id": slot.tc.id,
-                        "is_error": is_error,
-                        "content_len": content.len(),
-                        "content_preview": &content[..content.floor_char_boundary(500)],
-                    }),
-                );
+                if log::Level::Debug.enabled() {
+                    let preview = &content[..content.floor_char_boundary(500)];
+                    let preview = crate::redact::maybe_redact(
+                        preview.to_string(),
+                        self.config.redact_secrets,
+                    );
+                    log::entry(
+                        log::Level::Debug,
+                        "tool_result",
+                        &serde_json::json!({
+                            "tool": slot.tc.function.name,
+                            "id": slot.tc.id,
+                            "is_error": is_error,
+                            "content_len": content.len(),
+                            "content_preview": preview,
+                        }),
+                    );
+                }
 
                 let elapsed_ms = slot.start.elapsed().as_millis() as u64;
                 self.tool_elapsed.insert(slot.tc.id.clone(), elapsed_ms);
@@ -1263,8 +1283,19 @@ impl<'a> Turn<'a> {
                 on_retry: Some(&on_retry),
                 on_delta: Some(&on_delta),
             };
+            let redacted_messages;
+            let chat_messages: &[Message] = if self.config.redact_secrets {
+                redacted_messages = {
+                    let mut msgs = self.messages.clone();
+                    crate::redact::redact_messages(&mut msgs);
+                    msgs
+                };
+                &redacted_messages
+            } else {
+                &self.messages
+            };
             let chat_future = self.provider.chat(
-                &self.messages,
+                chat_messages,
                 tool_defs,
                 &self.model,
                 self.reasoning_effort,

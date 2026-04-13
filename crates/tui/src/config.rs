@@ -89,6 +89,7 @@ pub struct SettingsConfig {
     pub task_slug: Option<bool>,
     pub show_thinking: Option<bool>,
     pub restrict_to_workspace: Option<bool>,
+    pub redact_secrets: Option<bool>,
     pub multi_agent: Option<bool>,
     /// Override the context window size (tokens). When unset, the engine
     /// fetches it from the provider API at startup.
@@ -113,6 +114,7 @@ impl SettingsConfig {
             "task_slug" => self.task_slug = b()?,
             "show_thinking" => self.show_thinking = b()?,
             "restrict_to_workspace" => self.restrict_to_workspace = b()?,
+            "redact_secrets" => self.redact_secrets = b()?,
             "multi_agent" => self.multi_agent = b()?,
             _ => return Err(format!("unknown setting '{key}'")),
         }

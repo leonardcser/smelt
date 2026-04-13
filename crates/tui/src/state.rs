@@ -25,6 +25,8 @@ pub struct PersistedSettings {
     pub show_thinking: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restrict_to_workspace: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact_secrets: Option<bool>,
 }
 
 impl PersistedSettings {
@@ -46,6 +48,7 @@ impl PersistedSettings {
                 .restrict_to_workspace
                 .or(cfg.restrict_to_workspace)
                 .unwrap_or(true),
+            redact_secrets: self.redact_secrets.or(cfg.redact_secrets).unwrap_or(true),
         }
     }
 }
@@ -62,6 +65,7 @@ pub struct ResolvedSettings {
     pub show_slug: bool,
     pub show_thinking: bool,
     pub restrict_to_workspace: bool,
+    pub redact_secrets: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -238,6 +242,7 @@ pub fn save_settings(resolved: &ResolvedSettings) {
             task_slug: Some(resolved.show_slug),
             show_thinking: Some(resolved.show_thinking),
             restrict_to_workspace: Some(resolved.restrict_to_workspace),
+            redact_secrets: Some(resolved.redact_secrets),
         };
     });
 }
@@ -278,6 +283,7 @@ mod tests {
             show_slug: true,
             show_thinking: true,
             restrict_to_workspace: true,
+            redact_secrets: true,
         }
     }
 

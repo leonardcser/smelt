@@ -3,6 +3,10 @@ use super::*;
 use std::collections::HashMap;
 
 impl App {
+    pub(super) fn maybe_redact(&self, s: String) -> String {
+        engine::redact::maybe_redact(s, self.settings.redact_secrets)
+    }
+
     fn reset_subagents_for_new_session(&mut self) {
         let my_pid = std::process::id();
         engine::registry::kill_descendants(my_pid);
@@ -204,11 +208,12 @@ impl App {
         for msg in &self.history {
             if matches!(msg.role, Role::Tool) {
                 if let Some(ref id) = msg.tool_call_id {
-                    let text = msg
-                        .content
-                        .as_ref()
-                        .map(|c| c.text_content())
-                        .unwrap_or_default();
+                    let text = self.maybe_redact(
+                        msg.content
+                            .as_ref()
+                            .map(|c| c.text_content())
+                            .unwrap_or_default(),
+                    );
                     tool_outputs.insert(
                         id.clone(),
                         ToolOutput {
@@ -243,7 +248,7 @@ impl App {
             match msg.role {
                 Role::User => {
                     if let Some(ref content) = msg.content {
-                        let text = content.text_content();
+                        let text = self.maybe_redact(content.text_content());
                         if let Some(summary) =
                             text.strip_prefix("Summary of prior conversation:\n\n")
                         {
@@ -273,13 +278,13 @@ impl App {
                     if let Some(ref reasoning) = msg.reasoning_content {
                         if !reasoning.is_empty() {
                             self.screen.push(Block::Thinking {
-                                content: reasoning.clone(),
+                                content: self.maybe_redact(reasoning.clone()),
                             });
                         }
                     }
                     if let Some(ref content) = msg.content {
                         self.screen.push(Block::Text {
-                            content: content.text_content(),
+                            content: self.maybe_redact(content.text_content()),
                         });
                     }
                     if let Some(ref calls) = msg.tool_calls {
@@ -398,7 +403,7 @@ impl App {
                             self.screen.push(Block::AgentMessage {
                                 from_id,
                                 from_slug: msg.agent_from_slug.clone().unwrap_or_default(),
-                                content: content.text_content(),
+                                content: self.maybe_redact(content.text_content()),
                             });
                         }
                     }
@@ -427,13 +432,21 @@ impl App {
         self.session.cost_snapshots = self.cost_snapshots.clone();
         self.session.turn_metas = self.turn_metas.clone();
         self.sync_session_snapshot();
-        session::save(&self.session, &self.input.store);
-        if let Some(cache) = self.screen.export_render_cache() {
-            session::save_render_cache(&self.session, &cache);
-        }
-        if self.screen.layout_cache_dirty() {
-            if let Some(cache) = self.screen.export_layout_cache() {
-                session::save_layout_cache(&self.session, &cache);
+        session::save(
+            &self.session,
+            &self.input.store,
+            self.settings.redact_secrets,
+        );
+        // Skip persisting render/layout caches when redaction is enabled —
+        // they contain raw source text from tool output that would leak secrets.
+        if !self.settings.redact_secrets {
+            if let Some(cache) = self.screen.export_render_cache() {
+                session::save_render_cache(&self.session, &cache);
+            }
+            if self.screen.layout_cache_dirty() {
+                if let Some(cache) = self.screen.export_layout_cache() {
+                    session::save_layout_cache(&self.session, &cache);
+                }
             }
         }
     }

@@ -86,19 +86,20 @@ If `defaults.model` is set, the cached selection is ignored.
 
 All toggleable at runtime via `/settings`.
 
-| Key                     | Default | Description                                                          |
-| ----------------------- | ------- | -------------------------------------------------------------------- |
-| `vim_mode`              | `false` | Vi keybindings                                                       |
-| `auto_compact`          | `false` | Auto-summarize at 80% context usage (always on in headless/subagent) |
-| `show_tps`              | `true`  | Tokens/sec in status bar                                             |
-| `show_tokens`           | `true`  | Context token count in status bar                                    |
-| `show_cost`             | `true`  | Session cost in status bar                                           |
-| `input_prediction`      | `true`  | Ghost text suggestions                                               |
-| `task_slug`             | `true`  | Task label in status bar                                             |
-| `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)   |
-| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                              |
-| `multi_agent`           | `false` | Enable multi-agent mode                                              |
-| `context_window`        | auto    | Override context window size (tokens); auto-detected from API        |
+| Key                     | Default | Description                                                               |
+| ----------------------- | ------- | ------------------------------------------------------------------------- |
+| `vim_mode`              | `false` | Vi keybindings                                                            |
+| `auto_compact`          | `false` | Auto-summarize at 80% context usage (always on in headless/subagent)      |
+| `show_tps`              | `true`  | Tokens/sec in status bar                                                  |
+| `show_tokens`           | `true`  | Context token count in status bar                                         |
+| `show_cost`             | `true`  | Session cost in status bar                                                |
+| `input_prediction`      | `true`  | Ghost text suggestions                                                    |
+| `task_slug`             | `true`  | Task label in status bar                                                  |
+| `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)        |
+| `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                                   |
+| `redact_secrets`        | `true`  | Redact detected secrets everywhere: display, sessions, LLM requests, logs |
+| `multi_agent`           | `false` | Enable multi-agent mode                                                   |
+| `context_window`        | auto    | Override context window size (tokens); auto-detected from API             |
 
 ## Theme
 
@@ -293,6 +294,7 @@ settings:
   task_slug: true
   show_thinking: true
   restrict_to_workspace: true
+  redact_secrets: true
   multi_agent: false
 
 theme:

@@ -377,6 +377,7 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {
+                let chunk = self.maybe_redact(chunk);
                 self.screen.append_active_output(&call_id, &chunk);
                 SessionControl::Continue
             }
@@ -387,7 +388,7 @@ impl App {
                 self.queued_messages.drain(..drain_n);
                 if drain_n > 0 {
                     self.screen.push(Block::User {
-                        text,
+                        text: self.maybe_redact(text),
                         image_labels: vec![],
                     });
                 }
@@ -398,7 +399,9 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::Thinking { content } => {
-                self.screen.push(Block::Thinking { content });
+                self.screen.push(Block::Thinking {
+                    content: self.maybe_redact(content),
+                });
                 SessionControl::Continue
             }
             EngineEvent::TextDelta { delta } => {
@@ -407,7 +410,9 @@ impl App {
             }
             EngineEvent::Text { content } => {
                 self.screen.flush_streaming_text();
-                self.screen.push(Block::Text { content });
+                self.screen.push(Block::Text {
+                    content: self.maybe_redact(content),
+                });
                 SessionControl::Continue
             }
             EngineEvent::ToolStarted {
@@ -609,7 +614,7 @@ impl App {
                     self.screen.push(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
-                        content: message.clone(),
+                        content: self.maybe_redact(message.clone()),
                     });
                 }
                 // Forward to engine so it enters the conversation history
@@ -684,7 +689,7 @@ impl App {
                     self.screen.push(Block::AgentMessage {
                         from_id: from_id.clone(),
                         from_slug: from_slug.clone(),
-                        content: message.clone(),
+                        content: self.maybe_redact(message.clone()),
                     });
                     // Queue as an Agent role message to trigger a turn without
                     // rendering a duplicate User block.

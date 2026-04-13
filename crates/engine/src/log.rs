@@ -18,7 +18,7 @@ pub enum Level {
 }
 
 impl Level {
-    fn enabled(self) -> bool {
+    pub fn enabled(self) -> bool {
         self as u8 >= LOG_LEVEL.load(Ordering::Relaxed)
     }
 }

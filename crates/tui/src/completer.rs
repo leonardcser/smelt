@@ -359,6 +359,13 @@ impl Completer {
                 extra: Some("restrict_to_workspace".into()),
                 ..Default::default()
             },
+            CompletionItem {
+                label: "redact secrets".into(),
+                description: Some(on_off(state.redact_secrets).into()),
+                search_terms: Some("redact secrets mask hide credentials tokens keys".into()),
+                extra: Some("redact_secrets".into()),
+                ..Default::default()
+            },
         ]
     }
 
@@ -878,6 +885,7 @@ mod settings_tests {
             show_slug: true,
             show_thinking: true,
             restrict_to_workspace: false,
+            redact_secrets: true,
         }
     }
 

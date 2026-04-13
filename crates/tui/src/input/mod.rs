@@ -1171,6 +1171,7 @@ impl InputState {
             show_slug: s("show_slug"),
             show_thinking: s("show_thinking"),
             restrict_to_workspace: s("restrict_to_workspace"),
+            redact_secrets: s("redact_secrets"),
         };
         match key {
             "vim" => state.vim ^= true,
@@ -1182,6 +1183,7 @@ impl InputState {
             "show_slug" => state.show_slug ^= true,
             "show_thinking" => state.show_thinking ^= true,
             "restrict_to_workspace" => state.restrict_to_workspace ^= true,
+            "redact_secrets" => state.redact_secrets ^= true,
             _ => return Action::Redraw,
         }
         Action::MenuResult(MenuResult::Settings(state))

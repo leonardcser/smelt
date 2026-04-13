@@ -462,7 +462,11 @@ async fn main() {
             }
             let session_id = if let Ok(guard) = shared.lock() {
                 if let Some(ref s) = *guard {
-                    tui::session::save(s, &tui::attachment::AttachmentStore::new());
+                    let redact = tui::state::State::load()
+                        .settings
+                        .redact_secrets
+                        .unwrap_or(true);
+                    tui::session::save(s, &tui::attachment::AttachmentStore::new(), redact);
                     if !s.messages.is_empty() {
                         Some(s.id.clone())
                     } else {
@@ -578,6 +582,7 @@ async fn main() {
         },
         auto_compact: settings.auto_compact,
         context_window: cfg.settings.context_window,
+        redact_secrets: settings.redact_secrets,
     });
     engine_injector = engine_handle.injector();
 

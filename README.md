@@ -115,6 +115,7 @@ defaults:
 settings:
   vim_mode: false
   auto_compact: false
+  redact_secrets: true # on by default — redacts secrets everywhere
 ```
 
 See the [full documentation](https://leonardcser.github.io/smelt/) for all

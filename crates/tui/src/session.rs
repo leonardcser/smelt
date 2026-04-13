@@ -185,7 +185,7 @@ pub fn dir_for(session: &Session) -> PathBuf {
     sessions_dir().join(&session.id)
 }
 
-pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
+pub fn save(session: &Session, store: &crate::attachment::AttachmentStore, redact_secrets: bool) {
     let _perf = crate::perf::begin("session:write");
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
@@ -195,13 +195,23 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     let blob_dir = session_dir.join("blobs");
     let url_to_blob = store.save_blobs(&blob_dir);
 
-    // Clone session and replace inline data URLs with blob refs.
-    let session_out = if url_to_blob.is_empty() {
-        std::borrow::Cow::Borrowed(session)
-    } else {
+    // Clone session and replace inline data URLs with blob refs,
+    // and optionally redact secrets from persisted content.
+    let needs_clone = !url_to_blob.is_empty() || redact_secrets;
+    let session_out = if needs_clone {
         let mut s = session.clone();
-        externalize_blobs(&mut s.messages, &url_to_blob);
+        if !url_to_blob.is_empty() {
+            externalize_blobs(&mut s.messages, &url_to_blob);
+        }
+        if redact_secrets {
+            engine::redact::redact_messages(&mut s.messages);
+            if let Some(ref first_msg) = s.first_user_message {
+                s.first_user_message = Some(engine::redact::redact(first_msg));
+            }
+        }
         std::borrow::Cow::Owned(s)
+    } else {
+        std::borrow::Cow::Borrowed(session)
     };
 
     // Write main session file
@@ -213,10 +223,11 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
         }
     }
 
-    // Write sidecar metadata file
+    // Write sidecar metadata file from the (possibly redacted) session.
     let meta_path = session_dir.join("meta.json");
     let meta_tmp = session_dir.join(format!("meta.{ts}.tmp"));
-    if let Ok(json) = serde_json::to_string(&session.meta()) {
+    let meta = session_out.meta();
+    if let Ok(json) = serde_json::to_string(&meta) {
         if fs::write(&meta_tmp, json).is_ok() {
             let _ = fs::rename(&meta_tmp, &meta_path);
         }

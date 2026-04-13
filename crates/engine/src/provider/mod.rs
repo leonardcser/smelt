@@ -354,6 +354,7 @@ pub struct Provider {
     /// Sticky routing token for Codex — set from the first response in a turn,
     /// echoed back on subsequent requests within the same turn.
     turn_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    redact_secrets: bool,
 }
 
 /// Ensure that `arguments` in any `tool_calls[].function` is valid JSON.
@@ -394,6 +395,7 @@ impl Provider {
             kind,
             model_config: Default::default(),
             turn_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            redact_secrets: false,
         }
     }
 
@@ -404,6 +406,11 @@ impl Provider {
 
     pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
+        self
+    }
+
+    pub fn with_redact_secrets(mut self, enabled: bool) -> Self {
+        self.redact_secrets = enabled;
         self
     }
 
@@ -501,15 +508,18 @@ impl Provider {
             }
         }
 
-        log::entry(
-            log::Level::Debug,
-            "request",
-            &serde_json::json!({
-                "url": url,
-                "provider_kind": format!("{:?}", self.kind),
-                "body": body,
-            }),
-        );
+        if log::Level::Debug.enabled() {
+            let log_body = crate::redact::maybe_redact_json(&body, self.redact_secrets);
+            log::entry(
+                log::Level::Debug,
+                "request",
+                &serde_json::json!({
+                    "url": url,
+                    "provider_kind": format!("{:?}", self.kind),
+                    "body": log_body,
+                }),
+            );
+        }
 
         let max_retries = 9;
 
@@ -643,15 +653,18 @@ impl Provider {
                     .await
                     .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
-                log::entry(
-                    log::Level::Debug,
-                    "raw_response",
-                    &serde_json::json!({
-                        "url": url,
-                        "provider_kind": format!("{:?}", self.kind),
-                        "data": data,
-                    }),
-                );
+                if log::Level::Debug.enabled() {
+                    let log_data = crate::redact::maybe_redact_json(&data, self.redact_secrets);
+                    log::entry(
+                        log::Level::Debug,
+                        "raw_response",
+                        &serde_json::json!({
+                            "url": url,
+                            "provider_kind": format!("{:?}", self.kind),
+                            "data": log_data,
+                        }),
+                    );
+                }
 
                 match self.kind {
                     ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data)?,
@@ -669,16 +682,17 @@ impl Provider {
                 }
             });
 
-            log::entry(
-                log::Level::Debug,
-                "response",
-                &serde_json::json!({
+            if log::Level::Debug.enabled() {
+                let log_payload = serde_json::json!({
                     "content": parsed.content,
                     "reasoning_content": parsed.reasoning,
                     "tool_calls": parsed.tool_calls,
                     "prompt_tokens": parsed.usage.prompt_tokens,
-                }),
-            );
+                });
+                let log_payload =
+                    crate::redact::maybe_redact_json(&log_payload, self.redact_secrets);
+                log::entry(log::Level::Debug, "response", &log_payload);
+            }
 
             return Ok(parsed.into_response(tokens_per_sec));
         }
@@ -800,6 +814,7 @@ impl Provider {
             ));
         }
 
+        let conversation = crate::redact::maybe_redact(conversation, self.redact_secrets);
         let system = Message::system(system_text);
         let user = Message::user(Content::text(format!(
             "Conversation to summarize:\n\n{}",

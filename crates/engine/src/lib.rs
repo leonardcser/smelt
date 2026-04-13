@@ -10,6 +10,7 @@ pub mod permissions;
 pub mod plan;
 pub mod pricing;
 pub mod provider;
+pub mod redact;
 pub mod registry;
 pub mod skills;
 pub mod socket;
@@ -181,6 +182,9 @@ pub struct EngineConfig {
     /// the provider API at startup. User config can override via
     /// `context_window`.
     pub context_window: Option<u32>,
+    /// When true, redact detected secrets from messages sent to the LLM,
+    /// debug logs, and inter-agent socket communication.
+    pub redact_secrets: bool,
 }
 
 /// Handle to a running engine. Send commands, receive events.
