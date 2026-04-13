@@ -44,15 +44,45 @@ mode.
 
 ## Default Bash Patterns
 
-| Pattern  | Normal | Plan  | Apply | Yolo  |
-| -------- | ------ | ----- | ----- | ----- |
-| `ls *`   | Allow  | Allow | Allow | Allow |
-| `grep *` | Allow  | Allow | Allow | Allow |
-| `find *` | Allow  | Allow | Allow | Allow |
-| `cat *`  | Allow  | Allow | Allow | Allow |
-| `tail *` | Allow  | Allow | Allow | Allow |
-| `head *` | Allow  | Allow | Allow | Allow |
-| _other_  | Ask    | Ask   | Ask   | Allow |
+Read-only commands with no side effects are allowed by default. Commands that
+can modify files, install packages, or affect system state require approval.
+
+| Pattern       | Normal | Plan  | Apply | Yolo  |
+| ------------- | ------ | ----- | ----- | ----- |
+| `ls *`        | Allow  | Allow | Allow | Allow |
+| `find *`      | Allow  | Allow | Allow | Allow |
+| `tree *`      | Allow  | Allow | Allow | Allow |
+| `cat *`       | Allow  | Allow | Allow | Allow |
+| `head *`      | Allow  | Allow | Allow | Allow |
+| `tail *`      | Allow  | Allow | Allow | Allow |
+| `less *`      | Allow  | Allow | Allow | Allow |
+| `grep *`      | Allow  | Allow | Allow | Allow |
+| `sort *`      | Allow  | Allow | Allow | Allow |
+| `uniq *`      | Allow  | Allow | Allow | Allow |
+| `wc *`        | Allow  | Allow | Allow | Allow |
+| `diff *`      | Allow  | Allow | Allow | Allow |
+| `tr *`        | Allow  | Allow | Allow | Allow |
+| `cut *`       | Allow  | Allow | Allow | Allow |
+| `jq *`        | Allow  | Allow | Allow | Allow |
+| `echo *`      | Allow  | Allow | Allow | Allow |
+| `pwd *`       | Allow  | Allow | Allow | Allow |
+| `which *`     | Allow  | Allow | Allow | Allow |
+| `dirname *`   | Allow  | Allow | Allow | Allow |
+| `basename *`  | Allow  | Allow | Allow | Allow |
+| `realpath *`  | Allow  | Allow | Allow | Allow |
+| `stat *`      | Allow  | Allow | Allow | Allow |
+| `file *`      | Allow  | Allow | Allow | Allow |
+| `test *`      | Allow  | Allow | Allow | Allow |
+| `du *`        | Allow  | Allow | Allow | Allow |
+| `df *`        | Allow  | Allow | Allow | Allow |
+| `date *`      | Allow  | Allow | Allow | Allow |
+| `whoami *`    | Allow  | Allow | Allow | Allow |
+| `sha256sum *` | Allow  | Allow | Allow | Allow |
+| `md5sum *`    | Allow  | Allow | Allow | Allow |
+| `xxd *`       | Allow  | Allow | Allow | Allow |
+| `hexdump *`   | Allow  | Allow | Allow | Allow |
+| `strings *`   | Allow  | Allow | Allow | Allow |
+| _other_       | Ask    | Ask   | Ask   | Allow |
 
 !!! note
 

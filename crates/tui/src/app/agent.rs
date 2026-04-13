@@ -1332,12 +1332,14 @@ impl App {
                     self.permissions
                         .was_downgraded(self.mode, &req.tool_name, &req.args);
                 req.outside_dir = if !outside_paths.is_empty() {
-                    let path = std::path::Path::new(&outside_paths[0]);
-                    let dir = if path.is_dir() {
-                        path.to_path_buf()
+                    let raw = std::path::Path::new(&outside_paths[0]);
+                    let expanded = engine::paths::expand_tilde(raw);
+                    let abs_dir = if expanded.is_dir() {
+                        expanded
                     } else {
-                        path.parent().unwrap_or(path).to_path_buf()
+                        expanded.parent().unwrap_or(&expanded).to_path_buf()
                     };
+                    let dir = engine::paths::collapse_tilde(&abs_dir);
                     if downgraded || self.seen_outside_dirs.contains(&dir) {
                         self.seen_outside_dirs.insert(dir.clone());
                         Some(dir)

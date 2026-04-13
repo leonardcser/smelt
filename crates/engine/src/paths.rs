@@ -1,6 +1,27 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const APP_NAME: &str = "smelt";
+
+/// Expand a leading `~` or `~/` to the user's home directory.
+/// Non-tilde paths are returned as-is.
+pub fn expand_tilde(p: &Path) -> PathBuf {
+    if let Ok(rest) = p.strip_prefix("~") {
+        home_dir().join(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// Replace a leading home directory prefix with `~`.
+/// Paths outside the home directory are returned as-is.
+pub fn collapse_tilde(p: &Path) -> PathBuf {
+    let home = home_dir();
+    if let Ok(rest) = p.strip_prefix(&home) {
+        PathBuf::from("~").join(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
 
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -68,4 +89,63 @@ pub fn git_branch(cwd: &std::path::Path) -> Option<String> {
         return None;
     }
     Some(branch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_tilde_home_prefix() {
+        let home = home_dir();
+        assert_eq!(expand_tilde(Path::new("~/foo/bar")), home.join("foo/bar"));
+    }
+
+    #[test]
+    fn expand_tilde_bare() {
+        let home = home_dir();
+        assert_eq!(expand_tilde(Path::new("~")), home);
+    }
+
+    #[test]
+    fn expand_tilde_absolute_unchanged() {
+        assert_eq!(
+            expand_tilde(Path::new("/usr/local/bin")),
+            PathBuf::from("/usr/local/bin")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_relative_unchanged() {
+        assert_eq!(expand_tilde(Path::new("foo/bar")), PathBuf::from("foo/bar"));
+    }
+
+    #[test]
+    fn collapse_tilde_under_home() {
+        let home = home_dir();
+        let p = home.join("projects/rust");
+        assert_eq!(collapse_tilde(&p), PathBuf::from("~/projects/rust"));
+    }
+
+    #[test]
+    fn collapse_tilde_home_itself() {
+        let home = home_dir();
+        assert_eq!(collapse_tilde(&home), PathBuf::from("~"));
+    }
+
+    #[test]
+    fn collapse_tilde_outside_home() {
+        assert_eq!(
+            collapse_tilde(Path::new("/tmp/foo")),
+            PathBuf::from("/tmp/foo")
+        );
+    }
+
+    #[test]
+    fn roundtrip_expand_collapse() {
+        let original = Path::new("~/syncthing/vault");
+        let expanded = expand_tilde(original);
+        let collapsed = collapse_tilde(&expanded);
+        assert_eq!(collapsed, original);
+    }
 }

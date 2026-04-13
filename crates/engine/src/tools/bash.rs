@@ -273,17 +273,17 @@ mod tests {
 
     #[test]
     fn mixed() {
-        // grep is in default allowed patterns, so it's filtered out
+        // grep and echo are in default allowed patterns, so they're filtered out
         // cd is treated as a path permission, not a command permission
         assert_eq!(
             patterns("cd /tmp && rm -rf * | grep err; echo done"),
-            vec!["rm *", "echo *"]
+            vec!["rm *"]
         );
     }
 
     #[test]
     fn background_operator() {
-        assert_eq!(patterns("sleep 5 & echo done"), vec!["sleep *", "echo *"]);
+        assert_eq!(patterns("sleep 5 & echo done"), vec!["sleep *"]);
     }
 
     #[test]

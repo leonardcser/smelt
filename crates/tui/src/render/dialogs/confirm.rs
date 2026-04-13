@@ -438,6 +438,9 @@ impl ConfirmDialog {
                 })
                 .unwrap_or_default();
 
+            let has_dir = req.outside_dir.is_some();
+            let has_patterns = !req.approval_patterns.is_empty();
+
             if let Some(ref dir) = req.outside_dir {
                 let dir_str = dir.to_string_lossy().into_owned();
                 options.push((
@@ -448,7 +451,8 @@ impl ConfirmDialog {
                     format!("allow {dir_str} in {cwd_label}"),
                     ConfirmChoice::AlwaysDir(dir_str, Workspace),
                 ));
-            } else if !req.approval_patterns.is_empty() {
+            }
+            if has_patterns {
                 let display: Vec<&str> = req
                     .approval_patterns
                     .iter()
@@ -466,7 +470,8 @@ impl ConfirmDialog {
                     format!("allow {display_str} in {cwd_label}"),
                     ConfirmChoice::AlwaysPatterns(req.approval_patterns.clone(), Workspace),
                 ));
-            } else {
+            }
+            if !has_dir && !has_patterns {
                 options.push(("always allow".into(), ConfirmChoice::Always(Session)));
                 options.push((
                     format!("always allow in {cwd_label}"),

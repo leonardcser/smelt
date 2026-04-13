@@ -109,7 +109,47 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
 
 /// Default bash patterns that are allowed without explicit approval.
 /// Used by both permissions checking and approval pattern suggestions.
-pub const DEFAULT_BASH_ALLOW: &[&str] = &["ls *", "grep *", "find *", "cat *", "tail *", "head *"];
+pub const DEFAULT_BASH_ALLOW: &[&str] = &[
+    // Directory listing & file search
+    "ls *",
+    "find *",
+    "tree *",
+    // Text viewing
+    "cat *",
+    "head *",
+    "tail *",
+    "less *",
+    // Text search & processing (read-only)
+    "grep *",
+    "sort *",
+    "uniq *",
+    "wc *",
+    "diff *",
+    "tr *",
+    "cut *",
+    "jq *",
+    // Path & file info
+    "echo *",
+    "pwd *",
+    "which *",
+    "dirname *",
+    "basename *",
+    "realpath *",
+    "stat *",
+    "file *",
+    "test *",
+    // Disk & system info
+    "du *",
+    "df *",
+    "date *",
+    "whoami *",
+    // Binary inspection
+    "sha256sum *",
+    "md5sum *",
+    "xxd *",
+    "hexdump *",
+    "strings *",
+];
 
 fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
@@ -576,10 +616,16 @@ impl RuntimeApprovals {
         if outside.is_empty() {
             return tool_approved;
         }
-        if !self.dirs_approved(&outside) {
-            return false;
+        let dirs_ok = self.dirs_approved(&outside);
+        if dirs_ok && tool_approved {
+            return true;
         }
-        tool_approved || permissions.was_downgraded(mode, tool_name, args)
+        // Directory approved + base permission is Allow (downgraded only
+        // because of the workspace restriction) → auto-approve.
+        if dirs_ok && permissions.was_downgraded(mode, tool_name, args) {
+            return true;
+        }
+        false
     }
 
     /// Check whether a specific pattern string is already present in the
@@ -625,17 +671,18 @@ impl RuntimeApprovals {
         if paths.is_empty() {
             return true;
         }
-        let all_dirs: Vec<&PathBuf> = self
+        let all_dirs: Vec<PathBuf> = self
             .session_dirs
             .iter()
             .chain(self.workspace_dirs.iter())
+            .map(|d| crate::paths::expand_tilde(d))
             .collect();
         if all_dirs.is_empty() {
             return false;
         }
         paths.iter().all(|p| {
-            let path = Path::new(p);
-            let dir = path.parent().unwrap_or(path);
+            let path = crate::paths::expand_tilde(Path::new(p));
+            let dir = path.parent().unwrap_or(&path);
             all_dirs
                 .iter()
                 .any(|ad| dir.starts_with(ad) || path.starts_with(ad))
@@ -2536,6 +2583,252 @@ mod tests {
             "bash",
             &args,
             "rm -rf /home/user/project/target",
+        ));
+    }
+
+    // --- tilde path normalization in dirs_approved ---
+
+    #[test]
+    fn dirs_approved_tilde_stored_absolute_queried() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing"));
+        let home = crate::paths::home_dir();
+        let abs = format!("{}/syncthing/vault/file.txt", home.display());
+        assert!(rt.dirs_approved(&[abs]));
+    }
+
+    #[test]
+    fn dirs_approved_absolute_stored_tilde_queried() {
+        let home = crate::paths::home_dir();
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(home.join("syncthing"));
+        assert!(rt.dirs_approved(&["~/syncthing/vault/file.txt".to_string()]));
+    }
+
+    #[test]
+    fn dirs_approved_both_tilde() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing"));
+        assert!(rt.dirs_approved(&["~/syncthing/vault".to_string()]));
+    }
+
+    #[test]
+    fn dirs_approved_both_absolute() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("/tmp/data"));
+        assert!(rt.dirs_approved(&["/tmp/data/subdir/file.txt".to_string()]));
+    }
+
+    #[test]
+    fn dirs_approved_no_false_prefix_match() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/sync"));
+        // ~/syncthing should NOT match ~/sync (different directory)
+        assert!(!rt.dirs_approved(&["~/syncthing/file.txt".to_string()]));
+    }
+
+    #[test]
+    fn dirs_approved_exact_dir_match() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing/vault"));
+        // File directly in the approved dir
+        assert!(rt.dirs_approved(&["~/syncthing/vault/file.txt".to_string()]));
+    }
+
+    #[test]
+    fn dirs_approved_parent_not_covered() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing/vault"));
+        // Parent dir is NOT covered
+        assert!(!rt.dirs_approved(&["~/syncthing/other/file.txt".to_string()]));
+    }
+
+    #[test]
+    fn dirs_approved_path_is_dir_itself() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        // Path that IS the approved dir (e.g. a directory argument)
+        assert!(rt.dirs_approved(&["/tmp".to_string()]));
+    }
+
+    #[test]
+    fn dirs_approved_multiple_paths_all_covered() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing"));
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        assert!(rt.dirs_approved(&[
+            "~/syncthing/vault/a.txt".to_string(),
+            "/tmp/b.txt".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn dirs_approved_multiple_paths_one_uncovered() {
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing"));
+        assert!(!rt.dirs_approved(&[
+            "~/syncthing/vault/a.txt".to_string(),
+            "/tmp/b.txt".to_string(),
+        ]));
+    }
+
+    // --- tilde normalization in is_auto_approved ---
+
+    fn perms_with_workspace_default_bash(workspace: &str) -> Permissions {
+        let mode = ModePerms {
+            tools: {
+                let mut m = HashMap::new();
+                m.insert("read_file".to_string(), Decision::Allow);
+                m.insert("write_file".to_string(), Decision::Allow);
+                m.insert("edit_file".to_string(), Decision::Allow);
+                m.insert("glob".to_string(), Decision::Allow);
+                m.insert("grep".to_string(), Decision::Allow);
+                m.insert("bash".to_string(), Decision::Allow);
+                m
+            },
+            bash: RuleSet {
+                allow: compile_patterns(
+                    &DEFAULT_BASH_ALLOW
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                ask: vec![],
+                deny: vec![],
+            },
+            web_fetch: empty_ruleset(),
+            mcp: empty_ruleset(),
+        };
+        Permissions {
+            normal: mode.clone(),
+            plan: mode.clone(),
+            apply: mode.clone(),
+            yolo: mode,
+            restrict_to_workspace: true,
+            workspace: PathBuf::from(workspace),
+        }
+    }
+
+    #[test]
+    fn tilde_dir_approval_works_for_absolute_read_file() {
+        let home = crate::paths::home_dir();
+        let workspace = format!("{}/dev/project", home.display());
+        let p = perms_with_workspace(&workspace);
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing"));
+        let file = format!("{}/syncthing/vault/notes.md", home.display());
+        let args = args_with("file_path", &file);
+        // read_file is Allow by default, downgraded to Ask by workspace restriction.
+        // Dir approval should lift the restriction.
+        assert!(rt.is_auto_approved(&p, Mode::Normal, "read_file", &args, &file));
+    }
+
+    #[test]
+    fn absolute_dir_approval_works_for_tilde_bash() {
+        let home = crate::paths::home_dir();
+        let workspace = format!("{}/dev/project", home.display());
+        let p = perms_with_workspace(&workspace);
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(home.join("syncthing"));
+        let args = args_with("command", "cat ~/syncthing/vault/notes.md");
+        assert!(rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "cat ~/syncthing/vault/notes.md",
+        ));
+    }
+
+    #[test]
+    fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
+        let home = crate::paths::home_dir();
+        let workspace = format!("{}/dev/project", home.display());
+        let p = perms_with_workspace_default_bash(&workspace);
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing"));
+        // `rm` is not in DEFAULT_BASH_ALLOW → Ask. Dir approval alone shouldn't
+        // auto-approve a command that requires its own permission.
+        let args = args_with("command", "rm ~/syncthing/vault/old.md");
+        assert!(!rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "rm ~/syncthing/vault/old.md",
+        ));
+    }
+
+    #[test]
+    fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
+        let home = crate::paths::home_dir();
+        let workspace = format!("{}/dev/project", home.display());
+        let p = perms_with_workspace_default_bash(&workspace);
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("~/syncthing"));
+        rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
+        let args = args_with("command", "rm ~/syncthing/vault/old.md");
+        assert!(rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "rm ~/syncthing/vault/old.md",
+        ));
+    }
+
+    #[test]
+    fn compound_command_default_allowed_with_dir_approval() {
+        // `find | sort` — both are in DEFAULT_BASH_ALLOW.
+        // With wildcard bash allow (perms_with_workspace), both are allowed
+        // at the base level, so was_downgraded is true and dir approval suffices.
+        let p = perms_with_workspace("/home/user/project");
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        let args = args_with("command", "find /tmp/data -type f | sort");
+        assert!(rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "find /tmp/data -type f | sort",
+        ));
+    }
+
+    #[test]
+    fn compound_command_with_ask_subcommand_needs_tool_approval() {
+        // `find | python3` — find is in DEFAULT_BASH_ALLOW, python3 is not.
+        // Dir approval alone is insufficient; the Ask subcommand needs its own approval.
+        let home = crate::paths::home_dir();
+        let workspace = format!("{}/dev/project", home.display());
+        let p = perms_with_workspace_default_bash(&workspace);
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        let args = args_with("command", "find /tmp/data -name '*.py' | python3");
+        assert!(!rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "find /tmp/data -name '*.py' | python3",
+        ));
+    }
+
+    #[test]
+    fn compound_command_with_ask_subcommand_and_tool_approval() {
+        let home = crate::paths::home_dir();
+        let workspace = format!("{}/dev/project", home.display());
+        let p = perms_with_workspace_default_bash(&workspace);
+        let mut rt = RuntimeApprovals::new();
+        rt.add_session_dir(PathBuf::from("/tmp"));
+        rt.add_session_tool("bash", vec![glob::Pattern::new("python3 *").unwrap()]);
+        let args = args_with("command", "find /tmp/data -name '*.py' | python3");
+        assert!(rt.is_auto_approved(
+            &p,
+            Mode::Normal,
+            "bash",
+            &args,
+            "find /tmp/data -name '*.py' | python3",
         ));
     }
 }
