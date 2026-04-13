@@ -277,6 +277,7 @@ fn resize_during_dialog_keeps_overlay_coherent() {
     dialog.handle_resize();
 
     // Re-draw a frame with the new dialog height.
+    h.screen.set_constrain_dialog(dialog.constrain_height());
     let dh = dialog.height();
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());

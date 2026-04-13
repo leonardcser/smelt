@@ -3,7 +3,7 @@ use crate::render::{draw_bar, ResumeEntry};
 use crate::{session, theme};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
-use crossterm::{terminal, QueueableCommand};
+use crossterm::QueueableCommand;
 use std::time::Instant;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
@@ -21,14 +21,9 @@ pub struct ResumeDialog {
 }
 
 impl ResumeDialog {
-    pub fn new(
-        entries: Vec<ResumeEntry>,
-        current_cwd: String,
-        max_height: Option<u16>,
-        vim_enabled: bool,
-    ) -> Self {
+    pub fn new(entries: Vec<ResumeEntry>, current_cwd: String, vim_enabled: bool) -> Self {
         let filtered = filter_resume_entries(&entries, "", true, &current_cwd);
-        let list = ListState::new(filtered.len().max(1), max_height);
+        let list = ListState::new(filtered.len().max(1));
         Self {
             entries,
             current_cwd,
@@ -67,13 +62,16 @@ impl super::Dialog for ResumeDialog {
         self.list.height(self.filtered.len().max(1), 4)
     }
 
+    fn constrain_height(&self) -> bool {
+        true
+    }
+
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
     }
 
     fn handle_resize(&mut self) {
-        self.list
-            .handle_resize(terminal::size().ok().map(|(_, h)| h));
+        self.list.handle_resize();
         self.refilter();
     }
 

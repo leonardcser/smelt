@@ -16,10 +16,6 @@ pub struct HelpDialog {
 
 impl HelpDialog {
     pub fn new(vim_enabled: bool) -> Self {
-        Self::with_max_height(vim_enabled, None)
-    }
-
-    pub fn with_max_height(vim_enabled: bool, max_height: Option<u16>) -> Self {
         let sections = hints::help_sections(vim_enabled);
         let total_rows = sections
             .iter()
@@ -27,7 +23,7 @@ impl HelpDialog {
             .map(|(i, (_, entries))| entries.len() + if i + 1 < sections.len() { 1 } else { 0 })
             .sum();
         Self {
-            list: ListState::new(0, max_height),
+            list: ListState::new(0),
             sections,
             total_rows,
             vim_enabled,
@@ -40,13 +36,16 @@ impl super::Dialog for HelpDialog {
         self.list.height(self.total_rows, 5)
     }
 
+    fn constrain_height(&self) -> bool {
+        true
+    }
+
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
     }
 
     fn handle_resize(&mut self) {
-        self.list
-            .handle_resize(terminal::size().ok().map(|(_, h)| h));
+        self.list.handle_resize();
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {

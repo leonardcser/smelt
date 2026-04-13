@@ -434,6 +434,7 @@ impl TestHarness {
         self.screen.render_pending_blocks();
         self.screen.erase_prompt();
         self.screen.set_dialog_open(true);
+        self.screen.set_constrain_dialog(dialog.constrain_height());
         let dialog_height = dialog.height();
 
         {

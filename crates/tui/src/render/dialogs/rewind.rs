@@ -3,7 +3,7 @@ use crate::render::draw_bar;
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
-use crossterm::{terminal, QueueableCommand};
+use crossterm::QueueableCommand;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
@@ -14,14 +14,10 @@ pub struct RewindDialog {
 }
 
 impl RewindDialog {
-    pub fn new(
-        turns: Vec<(usize, String)>,
-        restore_vim_insert: bool,
-        max_height: Option<u16>,
-    ) -> Self {
+    pub fn new(turns: Vec<(usize, String)>, restore_vim_insert: bool) -> Self {
         // +1 for the "(current)" sentinel entry at the end.
         let total = turns.len() + 1;
-        let mut list = ListState::new(total, max_height);
+        let mut list = ListState::new(total);
         list.selected = total.saturating_sub(1);
         list.scroll_offset = total.saturating_sub(list.max_visible);
         Self {
@@ -45,13 +41,16 @@ impl super::Dialog for RewindDialog {
         self.list.height(self.total_items(), 4)
     }
 
+    fn constrain_height(&self) -> bool {
+        true
+    }
+
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
     }
 
     fn handle_resize(&mut self) {
-        self.list
-            .handle_resize(terminal::size().ok().map(|(_, h)| h));
+        self.list.handle_resize();
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {

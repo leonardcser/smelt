@@ -32,7 +32,6 @@ impl App {
                     CommandAction::OpenDialog(Box::new(render::ResumeDialog::new(
                         entries,
                         self.cwd.clone(),
-                        Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
                         self.input.vim_enabled(),
                     )))
                 }
@@ -49,7 +48,6 @@ impl App {
                     CommandAction::OpenDialog(Box::new(render::RewindDialog::new(
                         turns,
                         restore_vim_insert,
-                        Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
                     )))
                 }
             }
@@ -72,11 +70,9 @@ impl App {
                     self.screen.notify_error("no subagents running".into());
                     CommandAction::Continue
                 } else {
-                    let max_h = terminal::size().ok().map(|(_, h)| h / 2);
                     CommandAction::OpenDialog(Box::new(render::AgentsDialog::new(
                         my_pid,
                         self.agent_snapshots.clone(),
-                        max_h,
                         self.input.vim_enabled(),
                     )))
                 }
@@ -86,10 +82,8 @@ impl App {
                     self.screen.notify_error("no background processes".into());
                     CommandAction::Continue
                 } else {
-                    let max_h = terminal::size().ok().map(|(_, h)| h / 2);
                     CommandAction::OpenDialog(Box::new(render::PsDialog::new(
                         self.engine.processes.clone(),
-                        max_h,
                     )))
                 }
             }
@@ -103,7 +97,6 @@ impl App {
                     CommandAction::OpenDialog(Box::new(render::PermissionsDialog::new(
                         session_entries,
                         workspace_rules,
-                        Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
                         self.input.vim_enabled(),
                     )))
                 }

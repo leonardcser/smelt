@@ -392,7 +392,6 @@ impl App {
                     return EventOutcome::OpenDialog(Box::new(render::RewindDialog::new(
                         turns,
                         restore_vim_insert,
-                        Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
                     )));
                 }
                 // Single Esc in normal mode — start timer.
@@ -467,13 +466,9 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         KeyAction::OpenHelp => {
-                            let max_h = crossterm::terminal::size().ok().map(|(_, h)| h / 2);
-                            return EventOutcome::OpenDialog(Box::new(
-                                render::HelpDialog::with_max_height(
-                                    self.input.vim_enabled(),
-                                    max_h,
-                                ),
-                            ));
+                            return EventOutcome::OpenDialog(Box::new(render::HelpDialog::new(
+                                self.input.vim_enabled(),
+                            )));
                         }
                         KeyAction::OpenHistorySearch => {
                             if self.input.history_search_query().is_none() {
@@ -900,10 +895,12 @@ impl App {
         &mut self,
         out: &mut render::RenderOut,
         dialog_height: u16,
+        constrain: bool,
     ) -> (bool, Option<render::DialogPlacement>) {
         let _perf = crate::perf::begin("app:tick");
         let w = render::term_width();
         self.screen.set_dialog_open(true);
+        self.screen.set_constrain_dialog(constrain);
         self.screen.draw_frame(out, w, None, Some(dialog_height))
     }
 

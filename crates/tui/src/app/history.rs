@@ -1,7 +1,5 @@
 use super::*;
 
-use crate::render::TerminalBackend;
-use crossterm::{event, event::Event, event::KeyEvent, terminal};
 use std::collections::HashMap;
 
 impl App {
@@ -161,52 +159,6 @@ impl App {
         // Drain stale engine events so old snapshots don't overwrite
         // the loaded session's state.
         while self.engine.try_recv().is_ok() {}
-    }
-
-    pub fn resume_session_before_run(&mut self) {
-        let entries = self.resume_entries();
-        if entries.is_empty() {
-            eprintln!("no saved sessions");
-            return;
-        }
-
-        let mut dialog = render::ResumeDialog::new(
-            entries,
-            self.cwd.clone(),
-            Some(terminal::size().map(|(_, h)| h / 2).unwrap_or(12)),
-            self.input.vim_enabled(),
-        );
-        terminal::enable_raw_mode().ok();
-        loop {
-            {
-                let mut frame = render::Frame::begin(&render::StdioBackend);
-                let (w, h) = render::StdioBackend.size();
-                dialog.draw(&mut frame, 0, w, h);
-            }
-            match event::read() {
-                Ok(Event::Key(KeyEvent {
-                    code, modifiers, ..
-                })) => {
-                    if let Some(result) = dialog.handle_key(code, modifiers) {
-                        terminal::disable_raw_mode().ok();
-                        let _ = std::io::stdout().execute(crossterm::cursor::Show);
-                        if let render::DialogResult::Resume {
-                            session_id: Some(id),
-                        } = result
-                        {
-                            if let Some(loaded) = session::load(&id) {
-                                self.load_session(loaded);
-                            }
-                        }
-                        return;
-                    }
-                }
-                Ok(Event::Resize(..)) => {
-                    dialog.handle_resize();
-                }
-                _ => {}
-            }
-        }
     }
 
     pub(super) fn resume_entries(&self) -> Vec<ResumeEntry> {

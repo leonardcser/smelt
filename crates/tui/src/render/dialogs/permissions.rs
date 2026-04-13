@@ -3,7 +3,7 @@ use crate::render::draw_bar;
 use crate::{theme, workspace_permissions};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Color, Print};
-use crossterm::{terminal, QueueableCommand};
+use crossterm::QueueableCommand;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
@@ -34,12 +34,11 @@ impl PermissionsDialog {
     pub fn new(
         session_entries: Vec<PermissionEntry>,
         workspace_rules: Vec<workspace_permissions::Rule>,
-        max_height: Option<u16>,
         vim_enabled: bool,
     ) -> Self {
         let items = build_items(&session_entries, &workspace_rules);
         let total = display_row_count(&session_entries, &workspace_rules, &items);
-        let list = ListState::new(total.max(1), max_height);
+        let list = ListState::new(total.max(1));
         Self {
             session_entries,
             workspace_rules,
@@ -90,13 +89,16 @@ impl super::Dialog for PermissionsDialog {
         self.list.height(total.max(1), 3)
     }
 
+    fn constrain_height(&self) -> bool {
+        true
+    }
+
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
     }
 
     fn handle_resize(&mut self) {
-        self.list
-            .handle_resize(terminal::size().ok().map(|(_, h)| h));
+        self.list.handle_resize();
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {

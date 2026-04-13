@@ -147,7 +147,7 @@ async fn main() {
         eprintln!("{info}");
     }));
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Handle subcommands before loading config.
     if let Some(Commands::Auth) = args.command {
@@ -641,7 +641,9 @@ async fn main() {
 
     if let Some(ref resume_val) = args.resume {
         if resume_val.is_empty() {
-            app.resume_session_before_run();
+            // Open the resume dialog inside `run()` so dismissal goes
+            // through the normal dialog lifecycle (clear_dialog_area).
+            args.message = Some("/resume".to_string());
         } else if let Some(loaded) = tui::session::load(resume_val) {
             app.load_session(loaded);
         } else {

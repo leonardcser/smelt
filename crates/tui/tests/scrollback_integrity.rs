@@ -673,7 +673,7 @@ fn rewind_dialog_does_not_shift_prompt() {
 
     // Open the rewind dialog (non-blocking, like Esc-Esc or /rewind).
     let turns = vec![(0, "What is 2+2?".to_string())];
-    let mut dialog = RewindDialog::new(turns, false, Some(12));
+    let mut dialog = RewindDialog::new(turns, false);
 
     // Simulate the real app flow: erase_prompt → dialog draws → tick with dialog.
     h.screen.erase_prompt();
@@ -1359,6 +1359,7 @@ fn resize_during_active_overlay_visible_matches_fresh() {
 /// Mirrors the real `render_frame` path for active non-blocking dialogs.
 fn draw_dialog_frame(h: &mut TestHarness, dialog: &mut dyn Dialog) {
     h.screen.set_dialog_open(true);
+    h.screen.set_constrain_dialog(dialog.constrain_height());
     let dh = dialog.height();
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
@@ -1412,7 +1413,7 @@ fn nonblocking_dialog_with_growing_overlay() {
 
     // Open non-blocking dialog while tool is active.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     // Stream assistant text over several dialog-mode frames.
@@ -1483,7 +1484,7 @@ fn nonblocking_dialog_tool_starts_while_open() {
 
     // Open non-blocking dialog with no ephemeral content yet.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     // Start a tool while the dialog is open.
@@ -1538,7 +1539,7 @@ fn nonblocking_dialog_viewport_overflow() {
 
     // Open non-blocking dialog.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     // Stream text while dialog is open.
@@ -1591,7 +1592,7 @@ fn nonblocking_dialog_tool_completes_while_open() {
 
     // Open non-blocking dialog.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     // Tool completes while dialog is open.
@@ -1644,7 +1645,7 @@ fn nonblocking_dialog_repeated_open_close() {
 
         // Open dialog.
         h.screen.erase_prompt();
-        let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+        let mut dialog = HelpDialog::new(false);
         draw_dialog_frame(&mut h, &mut dialog);
 
         // Stream more while dialog is open.
@@ -1715,7 +1716,7 @@ fn nonblocking_dialog_tool_visible_every_frame() {
 
     // Open non-blocking dialog.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     // Multiple timer-tick frames (dialog dirty, no content change).
@@ -1771,7 +1772,7 @@ fn nonblocking_dialog_small_terminal_tool_visible() {
 
     // Open dialog.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     let v = harness::visible_content(&h.parser);
@@ -1809,7 +1810,7 @@ fn nonblocking_dialog_streaming_preserves_tools() {
 
     // Open dialog.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     // Stream more text while dialog is open.
@@ -1852,7 +1853,7 @@ fn dialog_open_close_scrollback_integrity_simple() {
 
     // Open dialog, draw a few frames.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
     draw_dialog_frame(&mut h, &mut dialog);
 
@@ -1894,7 +1895,7 @@ fn dialog_open_close_scrollback_integrity_with_streaming() {
 
     // Open dialog, stream while open.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     for i in 0..3 {
@@ -1943,7 +1944,7 @@ fn dialog_open_close_scrollback_integrity_with_history() {
     h.draw_prompt();
 
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
     tick_dialog_animation(&mut h, &mut dialog);
     tick_dialog_animation(&mut h, &mut dialog);
@@ -1987,7 +1988,7 @@ fn agent_message_during_dialog_no_blank_gap() {
 
     // Open non-blocking dialog.
     h.screen.erase_prompt();
-    let mut dialog = HelpDialog::with_max_height(false, Some(h.height / 2));
+    let mut dialog = HelpDialog::new(false);
     draw_dialog_frame(&mut h, &mut dialog);
 
     // A large agent message arrives while the dialog is open.

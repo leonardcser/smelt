@@ -56,14 +56,9 @@ pub struct AgentsDialog {
 }
 
 impl AgentsDialog {
-    pub fn new(
-        my_pid: u32,
-        snapshots: SharedSnapshots,
-        max_height: Option<u16>,
-        vim: bool,
-    ) -> Self {
+    pub fn new(my_pid: u32, snapshots: SharedSnapshots, vim: bool) -> Self {
         let agents = Self::fetch(my_pid);
-        let list = ListState::new(agents.len().max(1), max_height);
+        let list = ListState::new(agents.len().max(1));
         Self {
             my_pid,
             agents,
@@ -163,13 +158,17 @@ impl super::Dialog for AgentsDialog {
         }
     }
 
+    fn constrain_height(&self) -> bool {
+        true
+    }
+
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
     }
 
     fn handle_resize(&mut self) {
         self.term_size = crossterm::terminal::size().unwrap_or(self.term_size);
-        self.list.handle_resize(Some(self.term_size.1));
+        self.list.handle_resize();
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
@@ -195,7 +194,7 @@ impl super::Dialog for AgentsDialog {
                 match nav_lookup(code, mods) {
                     Some(NavAction::Dismiss) => {
                         self.view = View::List;
-                        self.list = ListState::new(self.agents.len().max(1), None);
+                        self.list = ListState::new(self.agents.len().max(1));
                         self.list.selected = self.list_selected;
                         None
                     }

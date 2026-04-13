@@ -3,7 +3,7 @@ use crate::render::draw_bar;
 use crate::{theme, utils::format_duration};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
-use crossterm::{terminal, QueueableCommand};
+use crossterm::QueueableCommand;
 use engine::tools::ProcessInfo;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
@@ -16,9 +16,9 @@ pub struct PsDialog {
 }
 
 impl PsDialog {
-    pub fn new(registry: engine::tools::ProcessRegistry, max_height: Option<u16>) -> Self {
+    pub fn new(registry: engine::tools::ProcessRegistry) -> Self {
         let procs = Self::fetch_procs(&registry, &[]);
-        let list = ListState::new(procs.len().max(1), max_height);
+        let list = ListState::new(procs.len().max(1));
         Self {
             registry,
             procs,
@@ -44,13 +44,16 @@ impl super::Dialog for PsDialog {
         self.list.height(self.procs.len().max(1), 4)
     }
 
+    fn constrain_height(&self) -> bool {
+        true
+    }
+
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
     }
 
     fn handle_resize(&mut self) {
-        self.list
-            .handle_resize(terminal::size().ok().map(|(_, h)| h));
+        self.list.handle_resize();
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {

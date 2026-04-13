@@ -1376,6 +1376,9 @@ pub struct Screen {
     pending_dialog: bool,
     /// A dialog is currently open (confirm, rewind, etc.).
     dialog_open: bool,
+    /// Whether the active dialog's height should be constrained to
+    /// `max(h/2, natural_space)` to limit scroll-up.
+    constrain_dialog: bool,
     running_procs: usize,
     running_agents: usize,
     show_tps: bool,
@@ -1447,6 +1450,7 @@ impl Screen {
             defer_pending_render: false,
             pending_dialog: false,
             dialog_open: false,
+            constrain_dialog: false,
             running_procs: 0,
             running_agents: 0,
             show_tps: true,
@@ -2577,6 +2581,10 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    pub fn set_constrain_dialog(&mut self, constrain: bool) {
+        self.constrain_dialog = constrain;
+    }
+
     /// Pause the working spinner. Used when a blocking dialog (confirm,
     /// question) opens and the agent is suspended.
     pub fn pause_spinner(&mut self) {
@@ -3242,11 +3250,26 @@ impl Screen {
             // Content hasn't changed — skip the expensive repaint but
             // return the last placement so the dialog can still draw.
             let placement = self.prompt.prev_dialog_row.map(|row| {
-                let usable = self.size().1.saturating_sub(1);
-                let dh = dialog_height.unwrap_or(0);
+                let mut dh = dialog_height.unwrap_or(0);
+                if self.constrain_dialog {
+                    let (_, th) = self.size();
+                    let half_h = th / 2;
+                    // Use the stored anchor and prev_rows (overlay+gap)
+                    // from the previous frame as approximation.
+                    let anchor = self.prompt.anchor_row.unwrap_or(0);
+                    let overhead = self.prompt.prev_rows + 2;
+                    let natural = th.saturating_sub(anchor + overhead);
+                    dh = dh.min(half_h.max(natural));
+                }
+                let max_avail = self.size().1.saturating_sub(1 + row);
+                let avail = if dh < max_avail {
+                    max_avail.saturating_sub(1)
+                } else {
+                    max_avail
+                };
                 DialogPlacement {
                     row,
-                    granted_rows: dh.min(usable.saturating_sub(row)),
+                    granted_rows: dh.min(avail),
                 }
             });
             return (false, placement);
@@ -3298,14 +3321,36 @@ impl Screen {
 
         // ── Measure total mutable region ────────────────────────────
         let prompt_gap: u16 = if self.has_content() { 1 } else { 0 };
+        // For constrained dialogs, cap the effective height to
+        // max(h/2, natural_space) so the dialog doesn't scroll the
+        // viewport more than half the terminal.  Unconstrained dialogs
+        // (confirm, question) use their full requested height.
+        let raw_dialog_height = dialog_height;
+        let dialog_height = if is_dialog && self.constrain_dialog {
+            dialog_height.map(|dh| {
+                let half_h = term_h / 2;
+                let overhead = overlay_rows + prompt_gap + 2;
+                let natural = term_h.saturating_sub(base_anchor + overhead);
+                dh.min(half_h.max(natural))
+            })
+        } else {
+            dialog_height
+        };
+
         let prompt_height: u16 = if let Some(ref p) = prompt {
             self.measure_prompt_height(p.state, width, p.queued, p.prediction)
         } else {
-            // Reserve dialog + bottom gap + status bar.  Non-blocking
-            // dialogs have max_height = term_h/2 which limits them;
-            // blocking dialogs need the full budget on small terminals.
+            // Reserve dialog + bottom gap + status bar.
             let dh = dialog_height.unwrap_or(self.prompt.prev_prompt_ui_rows.max(1));
-            (dh + 2).min(term_h)
+            // Constrained dialogs leave room for the ephemeral overlay
+            // so it doesn't get tail-cropped.  Unconstrained dialogs
+            // (confirm, question) take priority over the overlay.
+            let cap = if self.constrain_dialog {
+                term_h.saturating_sub(overlay_rows)
+            } else {
+                term_h
+            };
+            (dh + 2).min(cap)
         };
         let total_mutable = overlay_rows + prompt_gap + prompt_height;
 
@@ -3420,14 +3465,22 @@ impl Screen {
             let overlay_end = final_anchor + ephemeral_rows;
             let dialog_row = overlay_end + gap;
 
-            let usable_height = term_h.saturating_sub(1);
             let dh = dialog_height.unwrap_or(0);
-            let available_for_dialog = usable_height.saturating_sub(dialog_row);
+            // Reserve 1 row for the status bar. Also reserve 1 row for
+            // the gap between dialog and status bar when the dialog
+            // doesn't need all available space.
+            let max_available = term_h.saturating_sub(1 + dialog_row);
+            let reserve_gap = dh < max_available;
+            let available_for_dialog = if reserve_gap {
+                max_available.saturating_sub(1)
+            } else {
+                max_available
+            };
             let granted_rows = dh.min(available_for_dialog);
 
             self.prompt.anchor_row = Some(final_anchor);
             self.prompt.prev_dialog_row = Some(dialog_row);
-            self.prompt.prev_dialog_height = dialog_height.unwrap_or(0);
+            self.prompt.prev_dialog_height = raw_dialog_height.unwrap_or(0);
             self.prompt.prev_rows = ephemeral_rows + gap;
             self.prompt.drawn = true;
             self.prompt.dirty = false;

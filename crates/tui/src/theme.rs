@@ -307,7 +307,7 @@ pub fn scrollbar_thumb() -> Color {
     }
 }
 
-pub const HEADING: Color = Color::AnsiValue(141);
+pub const HEADING: Color = Color::AnsiValue(117);
 
 pub fn muted() -> Color {
     Color::AnsiValue(244)

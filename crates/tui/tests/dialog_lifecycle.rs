@@ -461,6 +461,7 @@ fn parallel_tools_all_visible_during_dialog() {
     h.screen.erase_prompt();
     let dialog_height = dialog.height();
     h.screen.set_dialog_open(true);
+    h.screen.set_constrain_dialog(dialog.constrain_height());
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
         let (_redirtied, placement) =

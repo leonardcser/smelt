@@ -7,7 +7,7 @@ mod history;
 use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
 use crate::render::{
     tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmDialog, ConfirmRequest,
-    Dialog as _, FramePrompt, QuestionDialog, ResumeEntry, Screen, ToolOutput, ToolStatus,
+    FramePrompt, QuestionDialog, ResumeEntry, Screen, ToolOutput, ToolStatus,
 };
 use crate::session::Session;
 use crate::{render, session, state, vim};
@@ -1435,8 +1435,9 @@ impl App {
     ) {
         if let Some(d) = active_dialog.as_mut() {
             let dialog_height = d.height();
+            let constrain = d.constrain_height();
             let mut frame = render::Frame::begin(self.screen.backend());
-            let (redirtied, placement) = self.tick_dialog(&mut frame, dialog_height);
+            let (redirtied, placement) = self.tick_dialog(&mut frame, dialog_height, constrain);
             if redirtied {
                 d.mark_dirty();
             }

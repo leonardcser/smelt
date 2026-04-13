@@ -61,6 +61,13 @@ pub trait Dialog {
     fn handle_resize(&mut self);
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult>;
 
+    /// Whether the layout engine should apply a dynamic height cap
+    /// (`max(h/2, natural_space)`) to limit scroll-up.  List-based
+    /// dialogs return true; confirm/question dialogs return false.
+    fn constrain_height(&self) -> bool {
+        false
+    }
+
     /// Seed the dialog's kill ring from the main input's kill ring.
     fn set_kill_ring(&mut self, _contents: String) {}
     /// Retrieve the dialog's kill ring so the main input can sync it back.
@@ -73,43 +80,29 @@ pub(crate) struct ListState {
     pub selected: usize,
     pub scroll_offset: usize,
     pub max_visible: usize,
-    max_height: Option<u16>,
     pub dirty: bool,
 }
 
 impl ListState {
-    pub fn new(item_count: usize, max_height: Option<u16>) -> Self {
-        let max_visible = Self::cap_visible(max_height, item_count);
+    pub fn new(item_count: usize) -> Self {
         Self {
             selected: 0,
             scroll_offset: 0,
-            max_visible,
-            max_height,
+            max_visible: item_count,
             dirty: true,
         }
     }
 
-    fn cap_visible(max_height: Option<u16>, count: usize) -> usize {
-        max_height
-            .map(|h| h as usize)
-            .unwrap_or(usize::MAX)
-            .min(count)
-    }
-
     /// Report the dialog's total desired height.  `chrome` is the
     /// number of non-item rows the dialog will render (bar, header,
-    /// hints, etc.) — computed by the caller, not stored.
+    /// hints, etc.) — computed by the caller, not stored.  The layout
+    /// engine caps this to the actually available space.
     pub fn height(&self, item_count: usize, chrome: u16) -> u16 {
-        let wanted = (item_count as u16).saturating_add(chrome);
-        if let Some(cap) = self.max_height {
-            wanted.min(cap)
-        } else {
-            wanted
-        }
+        (item_count as u16).saturating_add(chrome)
     }
 
     pub fn set_items(&mut self, count: usize) {
-        self.max_visible = Self::cap_visible(self.max_height, count);
+        self.max_visible = count;
         if count == 0 {
             self.selected = 0;
             self.scroll_offset = 0;
@@ -122,8 +115,7 @@ impl ListState {
         self.dirty = true;
     }
 
-    pub fn handle_resize(&mut self, term_height: Option<u16>) {
-        self.max_height = term_height.map(|h| h / 2);
+    pub fn handle_resize(&mut self) {
         self.dirty = true;
     }
 
