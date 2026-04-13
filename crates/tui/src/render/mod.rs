@@ -3261,15 +3261,10 @@ impl Screen {
                     let natural = th.saturating_sub(anchor + overhead);
                     dh = dh.min(half_h.max(natural));
                 }
-                let max_avail = self.size().1.saturating_sub(1 + row);
-                let avail = if dh < max_avail {
-                    max_avail.saturating_sub(1)
-                } else {
-                    max_avail
-                };
+                let max_avail = self.size().1.saturating_sub(2 + row);
                 DialogPlacement {
                     row,
-                    granted_rows: dh.min(avail),
+                    granted_rows: dh.min(max_avail),
                 }
             });
             return (false, placement);
@@ -3352,7 +3347,13 @@ impl Screen {
             };
             (dh + 2).min(cap)
         };
-        let total_mutable = overlay_rows + prompt_gap + prompt_height;
+        // Only count overlay rows that will actually be visible. When
+        // an unconstrained dialog fills the terminal, the overlay is
+        // fully cropped — including it in total_mutable would scroll
+        // extra blank lines into scrollback.
+        let viewport_for_overlay = term_h.saturating_sub(prompt_gap + prompt_height);
+        let effective_overlay = overlay_rows.min(viewport_for_overlay);
+        let total_mutable = effective_overlay + prompt_gap + prompt_height;
 
         // ── ScrollUp if mutable region overflows viewport ────────
         let _ = out.queue(cursor::MoveTo(0, base_anchor));
@@ -3452,9 +3453,13 @@ impl Screen {
             // ── Dialog mode ─────────────────────────────────────────
             // Gap between chat content and dialog top — mirrors the
             // prompt_gap above, but only when there IS content above
-            // (not when the dialog is fullscreen at row 0).
+            // AND the dialog doesn't fill the full available space
+            // (otherwise the gap wastes a valuable row).
             let has_content_above = block_rows > 0 || ephemeral_rows > 0 || self.has_content();
-            let gap: u16 = if has_content_above {
+            let overlay_end = final_anchor + ephemeral_rows;
+            let dh = dialog_height.unwrap_or(0);
+            let max_no_gap = term_h.saturating_sub(1 + overlay_end);
+            let gap: u16 = if has_content_above && dh < max_no_gap {
                 out.overlay_newline();
                 1
             } else {
@@ -3462,21 +3467,11 @@ impl Screen {
             };
 
             let content_rows = block_rows + ephemeral_rows + gap;
-            let overlay_end = final_anchor + ephemeral_rows;
             let dialog_row = overlay_end + gap;
-
-            let dh = dialog_height.unwrap_or(0);
-            // Reserve 1 row for the status bar. Also reserve 1 row for
-            // the gap between dialog and status bar when the dialog
-            // doesn't need all available space.
-            let max_available = term_h.saturating_sub(1 + dialog_row);
-            let reserve_gap = dh < max_available;
-            let available_for_dialog = if reserve_gap {
-                max_available.saturating_sub(1)
-            } else {
-                max_available
-            };
-            let granted_rows = dh.min(available_for_dialog);
+            // Reserve 1 row for the status bar and 1 row for the gap
+            // between dialog and status bar (always present).
+            let max_available = term_h.saturating_sub(2 + dialog_row);
+            let granted_rows = dh.min(max_available);
 
             self.prompt.anchor_row = Some(final_anchor);
             self.prompt.prev_dialog_row = Some(dialog_row);

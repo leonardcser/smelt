@@ -453,6 +453,54 @@ impl TestHarness {
         dialog
     }
 
+    /// Open a confirm dialog with custom args (e.g. file content for preview).
+    pub fn open_confirm_dialog_with_args(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        summary: &str,
+        args: HashMap<String, serde_json::Value>,
+    ) -> ConfirmDialog {
+        self.actions.push(format!(
+            "open_confirm_dialog_with_args({call_id}, {name}, {summary})"
+        ));
+
+        let req = ConfirmRequest {
+            call_id: call_id.into(),
+            tool_name: name.into(),
+            desc: summary.into(),
+            args,
+            approval_patterns: vec![],
+            outside_dir: None,
+            summary: Some(summary.into()),
+            request_id: 1,
+        };
+        let mut dialog = ConfirmDialog::new(&req, false);
+        dialog.set_term_size(self.width, self.height);
+
+        self.screen.set_active_status(call_id, ToolStatus::Confirm);
+        self.screen.render_pending_blocks();
+        self.screen.erase_prompt();
+        self.screen.set_dialog_open(true);
+        self.screen.set_constrain_dialog(dialog.constrain_height());
+        let dialog_height = dialog.height();
+
+        {
+            let mut frame = tui::render::Frame::begin(self.screen.backend());
+            let (_redirtied, placement) =
+                self.screen
+                    .draw_frame(&mut frame, self.width as usize, None, Some(dialog_height));
+            if let Some(ref p) = placement {
+                dialog.draw(&mut frame, p.row, self.width, p.granted_rows);
+                self.screen.queue_dialog_gap(&mut frame);
+                self.screen.queue_status_line(&mut frame);
+            }
+        }
+        self.drain_sink();
+
+        dialog
+    }
+
     /// Run a full confirm dialog cycle: open, draw, dismiss, finish tool.
     ///
     /// Draws a prompt frame first to establish anchor_row and prompt state,

@@ -941,8 +941,7 @@ impl super::Dialog for ConfirmDialog {
             }
         }
 
-        // footer: blank line + hint
-        out.overlay_newline();
+        // footer: blank + hint (queue_dialog_gap provides the gap below)
         out.overlay_newline();
         out.push_dim();
         let hint = if self.editing {

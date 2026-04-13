@@ -496,3 +496,68 @@ fn parallel_tools_all_visible_during_dialog() {
         );
     }
 }
+
+/// A full-screen confirm dialog (write_file with large content) should not
+/// leak the tool-call overlay into scrollback.  When the dialog fills the
+/// terminal the overlay is fully cropped, so nothing should be scrolled up.
+#[test]
+fn fullscreen_dialog_scrollback_integrity() {
+    let height = 16;
+    let mut h = TestHarness::new(80, height, "fullscreen_dialog_scrollback_integrity");
+
+    // Some conversation history.
+    h.push_and_render(Block::User {
+        text: "Write a poem".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: "Sure, here it is.".into(),
+    });
+    h.draw_prompt();
+
+    // Start a write_file tool with enough content to fill the terminal.
+    let file_content = (1..=30)
+        .map(|i| format!("Line {i} of the poem"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut args = std::collections::HashMap::new();
+    args.insert(
+        "file_path".into(),
+        serde_json::Value::String("poem.txt".into()),
+    );
+    args.insert(
+        "content".into(),
+        serde_json::Value::String(file_content.clone()),
+    );
+    h.screen.start_tool(
+        "c1".into(),
+        "write_file".into(),
+        "poem.txt".into(),
+        args.clone(),
+    );
+    let _dialog = h.open_confirm_dialog_with_args("c1", "write_file", "poem.txt", args);
+
+    // Dismiss dialog.
+    h.screen.clear_dialog_area();
+    h.screen.set_dialog_open(false);
+    h.drain_sink();
+
+    // Finish tool.
+    h.screen.finish_tool(
+        "c1",
+        tui::render::ToolStatus::Ok,
+        Some(Box::new(tui::render::ToolOutput {
+            content: "File written.".into(),
+            is_error: false,
+            metadata: None,
+            render_cache: None,
+        })),
+        Some(std::time::Duration::from_millis(100)),
+    );
+    h.screen.flush_blocks();
+    h.drain_sink();
+    h.draw_prompt();
+
+    // Scrollback must match a fresh render of the same blocks.
+    h.assert_scrollback_integrity();
+}
