@@ -196,6 +196,10 @@ impl ListState {
             self.scroll_offset = self
                 .scroll_offset
                 .min(item_count.saturating_sub(self.max_visible));
+            // Ensure the selected item stays visible after recalculation.
+            if self.max_visible > 0 && self.selected >= self.scroll_offset + self.max_visible {
+                self.scroll_offset = self.selected + 1 - self.max_visible;
+            }
         }
 
         Some(width as usize)
