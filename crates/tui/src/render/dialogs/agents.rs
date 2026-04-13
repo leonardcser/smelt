@@ -1,6 +1,6 @@
 use crate::app::AgentToolEntry;
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar, wrap_line};
+use crate::render::{draw_bar, wrap_line};
 use crate::utils::format_duration;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
@@ -11,14 +11,6 @@ use std::sync::{Arc, Mutex};
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
-/// List-view chrome rows: bar + header + blank + hints. Used as the
-/// `overhead` argument to `ListState::new`.
-const LIST_OVERHEAD: u16 = 4;
-
-/// Detail-view chrome rows: header(2) + blank + blank + hints. Used
-/// when computing how many lines of agent detail content fit.
-const DETAIL_CHROME_ROWS: u16 = 5;
-
 /// Minimum number of detail content lines the dialog will show, even
 /// on a very short terminal. Below this it would be unreadable.
 const MIN_DETAIL_LINES: usize = 3;
@@ -27,9 +19,7 @@ const MIN_DETAIL_LINES: usize = 3;
 /// height. Caps at half the terminal minus the chrome, with a floor
 /// of `MIN_DETAIL_LINES` so the dialog stays usable on short screens.
 fn detail_max_lines(term_h: usize) -> usize {
-    (term_h / 2)
-        .saturating_sub(DETAIL_CHROME_ROWS as usize)
-        .max(MIN_DETAIL_LINES)
+    (term_h / 2).saturating_sub(5).max(MIN_DETAIL_LINES)
 }
 
 /// Snapshot of a tracked agent's state, passed to the dialog for rendering.
@@ -73,7 +63,7 @@ impl AgentsDialog {
         vim: bool,
     ) -> Self {
         let agents = Self::fetch(my_pid);
-        let list = ListState::new(agents.len().max(1), max_height, LIST_OVERHEAD);
+        let list = ListState::new(agents.len().max(1), max_height);
         Self {
             my_pid,
             agents,
@@ -97,6 +87,38 @@ impl AgentsDialog {
 
     fn max_detail_lines(&self) -> usize {
         detail_max_lines(self.term_size.1 as usize)
+    }
+
+    /// Compute the detail-view height from the current snapshot.
+    fn compute_detail_height(&self, agent_id: &str) -> u16 {
+        let w = self.term_size.0 as usize;
+        let n = if let Some(ref snap) = self.find_snapshot(agent_id) {
+            Self::detail_line_count(snap, w)
+        } else {
+            1
+        };
+        let max_content = self.max_detail_lines();
+        let content = n.min(max_content) as u16;
+        let wanted = content + 5;
+        let half = self.term_size.1 / 2;
+        if n > max_content {
+            wanted.max(half)
+        } else {
+            wanted
+        }
+    }
+
+    /// Count detail view lines without allocating. Used by `height()`
+    /// which runs every tick; the full Vec is only built in `draw()`.
+    fn detail_line_count(snapshot: &AgentSnapshot, width: usize) -> usize {
+        let content_width = width.saturating_sub(2);
+        let mut count = 1; // "Prompt:" label
+        for raw_line in snapshot.prompt.lines() {
+            count += wrap_line(raw_line, content_width).len();
+        }
+        count += 1; // blank
+        count += snapshot.tool_calls.len().max(1); // tool calls or "(no tool calls yet)"
+        count
     }
 
     /// Build the detail view lines for an agent: prompt + tool calls.
@@ -136,25 +158,8 @@ enum DetailLine {
 impl super::Dialog for AgentsDialog {
     fn height(&self) -> u16 {
         match &self.view {
-            View::List => self.list.height(self.agents.len().max(1)),
-            View::Detail { agent_id, .. } => {
-                let w = self.term_size.0 as usize;
-                let n = if let Some(ref snap) = self.find_snapshot(agent_id) {
-                    Self::detail_lines(snap, w).len()
-                } else {
-                    1
-                };
-                let max_content = self.max_detail_lines();
-                let content = n.min(max_content) as u16;
-                let wanted = content + DETAIL_CHROME_ROWS;
-                // Expand to half the terminal when content is scrollable.
-                let half = self.term_size.1 / 2;
-                if n > max_content {
-                    wanted.max(half)
-                } else {
-                    wanted
-                }
-            }
+            View::List => self.list.height(self.agents.len().max(1), 4),
+            View::Detail { agent_id, .. } => self.compute_detail_height(agent_id),
         }
     }
 
@@ -162,13 +167,9 @@ impl super::Dialog for AgentsDialog {
         self.list.dirty = true;
     }
 
-    fn anchor_row(&self) -> Option<u16> {
-        self.list.anchor_row
-    }
-
     fn handle_resize(&mut self) {
-        self.list
-            .handle_resize(terminal::size().ok().map(|(_, h)| h));
+        self.term_size = crossterm::terminal::size().unwrap_or(self.term_size);
+        self.list.handle_resize(Some(self.term_size.1));
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult> {
@@ -194,9 +195,8 @@ impl super::Dialog for AgentsDialog {
                 match nav_lookup(code, mods) {
                     Some(NavAction::Dismiss) => {
                         self.view = View::List;
-                        self.list = ListState::new(self.agents.len().max(1), None, LIST_OVERHEAD);
+                        self.list = ListState::new(self.agents.len().max(1), None);
                         self.list.selected = self.list_selected;
-                        self.list.anchor_row = None;
                         None
                     }
                     Some(NavAction::Up) => {
@@ -247,8 +247,6 @@ impl super::Dialog for AgentsDialog {
                             scroll: 0,
                             follow: true,
                         };
-                        // Reset anchor so the dialog can reposition at the new size.
-                        self.list.anchor_row = None;
                         self.list.dirty = true;
                     }
                     return None;
@@ -279,8 +277,7 @@ impl super::Dialog for AgentsDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
-        self.term_size = (width, height);
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         match &self.view {
             View::Detail {
                 agent_id,
@@ -310,15 +307,15 @@ impl super::Dialog for AgentsDialog {
 
                 let visible = total.min(max_vis);
 
-                let Some((w, _)) = self
-                    .list
-                    .begin_draw(out, start_row, visible + 2, width, height)
+                let Some(w) =
+                    self.list
+                        .begin_draw(out, start_row, visible + 2, width, granted_rows, 5)
                 else {
                     return;
                 };
 
                 draw_bar(out, w, None, None, crate::theme::AGENT);
-                crlf(out);
+                out.overlay_newline();
 
                 // Header: agent name + slug
                 let _ = out.queue(Print(" "));
@@ -356,8 +353,8 @@ impl super::Dialog for AgentsDialog {
                         out.pop_style();
                     }
                 }
-                crlf(out);
-                crlf(out);
+                out.overlay_newline();
+                out.overlay_newline();
 
                 // Content
                 for line in lines.iter().skip(scroll).take(visible) {
@@ -366,17 +363,17 @@ impl super::Dialog for AgentsDialog {
                             out.push_dim();
                             let _ = out.queue(Print(format!("  {text}")));
                             out.pop_style();
-                            crlf(out);
+                            out.overlay_newline();
                         }
                         DetailLine::Text(text) => {
                             let _ = out.queue(Print(format!(
                                 "   {}",
                                 truncate_str(text, w.saturating_sub(4))
                             )));
-                            crlf(out);
+                            out.overlay_newline();
                         }
                         DetailLine::Blank => {
-                            crlf(out);
+                            out.overlay_newline();
                         }
                         DetailLine::ToolCall(entry) => {
                             let _ = out.queue(Print("  "));
@@ -398,13 +395,13 @@ impl super::Dialog for AgentsDialog {
                                     out.pop_style();
                                 }
                             }
-                            crlf(out);
+                            out.overlay_newline();
                         }
                     }
                 }
 
                 // Hints
-                crlf(out);
+                out.overlay_newline();
                 out.push_dim();
                 let can_scroll = total > max_vis;
                 if can_scroll {
@@ -434,26 +431,30 @@ impl super::Dialog for AgentsDialog {
                 }
                 self.agents = fresh;
 
-                let Some((w, _)) =
-                    self.list
-                        .begin_draw(out, start_row, self.agents.len().max(1), width, height)
-                else {
+                let Some(w) = self.list.begin_draw(
+                    out,
+                    start_row,
+                    self.agents.len().max(1),
+                    width,
+                    granted_rows,
+                    4,
+                ) else {
                     return;
                 };
 
                 draw_bar(out, w, None, None, crate::theme::AGENT);
-                crlf(out);
+                out.overlay_newline();
 
                 out.push_dim();
                 let _ = out.queue(Print(" Agents"));
                 out.pop_style();
-                crlf(out);
+                out.overlay_newline();
 
                 if self.agents.is_empty() {
                     out.push_dim();
                     let _ = out.queue(Print("  No subagents running"));
                     out.pop_style();
-                    crlf(out);
+                    out.overlay_newline();
                 } else {
                     let name_w = self
                         .agents
@@ -504,11 +505,11 @@ impl super::Dialog for AgentsDialog {
                                 out.pop_style();
                             }
                         }
-                        crlf(out);
+                        out.overlay_newline();
                     }
                 }
 
-                crlf(out);
+                out.overlay_newline();
                 out.push_dim();
                 let _ = out.queue(Print(&hints::join(&[
                     "enter: view",

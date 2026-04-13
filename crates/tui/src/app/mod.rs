@@ -1436,14 +1436,17 @@ impl App {
         if let Some(d) = active_dialog.as_mut() {
             let dialog_height = d.height();
             let mut frame = render::Frame::begin(self.screen.backend());
-            let redirtied = self.tick_dialog(&mut frame, dialog_height);
+            let (redirtied, placement) = self.tick_dialog(&mut frame, dialog_height);
             if redirtied {
                 d.mark_dirty();
             }
-            let (w, h) = self.screen.size();
-            let dialog_row = self.screen.dialog_row();
-            d.draw(&mut frame, dialog_row, w, h);
-            self.screen.sync_dialog_anchor(d.anchor_row());
+            if let Some(p) = placement {
+                let w = self.screen.size().0;
+                d.draw(&mut frame, p.row, w, p.granted_rows);
+            }
+            // Global gap + cleanup: blank line between dialog and
+            // status bar, then clear any stale rows below.
+            self.screen.queue_dialog_gap(&mut frame);
             self.screen.queue_status_line(&mut frame);
         } else {
             self.tick_prompt(agent_running);
@@ -1459,6 +1462,8 @@ impl App {
         let scr = &mut self.screen;
         scr.render_pending_blocks();
         scr.erase_prompt();
+        // Pause the spinner — the agent is suspended until the user responds.
+        scr.pause_spinner();
         // Share the kill ring so Ctrl+K/Y work across input ↔ dialog.
         dialog.set_kill_ring(self.input.take_kill_ring());
         *active_dialog = Some(dialog);

@@ -1,5 +1,5 @@
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar, ResumeEntry};
+use crate::render::{draw_bar, ResumeEntry};
 use crate::{session, theme};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
@@ -7,10 +7,6 @@ use crossterm::{terminal, QueueableCommand};
 use std::time::Instant;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
-
-/// Chrome rows around the item list: bar + "Resume" header + blank
-/// separator + hints footer.
-const LIST_OVERHEAD: u16 = 4;
 
 pub struct ResumeDialog {
     entries: Vec<ResumeEntry>,
@@ -32,7 +28,7 @@ impl ResumeDialog {
         vim_enabled: bool,
     ) -> Self {
         let filtered = filter_resume_entries(&entries, "", true, &current_cwd);
-        let list = ListState::new(filtered.len().max(1), max_height, LIST_OVERHEAD);
+        let list = ListState::new(filtered.len().max(1), max_height);
         Self {
             entries,
             current_cwd,
@@ -68,15 +64,11 @@ impl ResumeDialog {
 
 impl super::Dialog for ResumeDialog {
     fn height(&self) -> u16 {
-        self.list.height(self.filtered.len().max(1))
+        self.list.height(self.filtered.len().max(1), 4)
     }
 
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
-    }
-
-    fn anchor_row(&self) -> Option<u16> {
-        self.list.anchor_row
     }
 
     fn handle_resize(&mut self) {
@@ -178,7 +170,7 @@ impl super::Dialog for ResumeDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         if !self.list.dirty {
             let freshest = self.filtered.iter().map(resume_ts).max().unwrap_or(0);
             let age_s = session::now_ms().saturating_sub(freshest) / 1000;
@@ -198,17 +190,21 @@ impl super::Dialog for ResumeDialog {
         }
         self.last_drawn = Instant::now();
 
-        let Some((w, _)) =
-            self.list
-                .begin_draw(out, start_row, self.filtered.len().max(1), width, height)
-        else {
+        let Some(w) = self.list.begin_draw(
+            out,
+            start_row,
+            self.filtered.len().max(1),
+            width,
+            granted_rows,
+            4,
+        ) else {
             return;
         };
 
         let now_ms = session::now_ms();
 
         draw_bar(out, w, None, None, theme::accent());
-        crlf(out);
+        out.overlay_newline();
 
         out.push_dim();
         if self.workspace_only {
@@ -219,13 +215,13 @@ impl super::Dialog for ResumeDialog {
         out.pop_style();
         let _ = out.queue(Print(" "));
         let _ = out.queue(Print(&self.query));
-        crlf(out);
+        out.overlay_newline();
 
         if self.filtered.is_empty() {
             out.push_dim();
             let _ = out.queue(Print("  No matches"));
             out.pop_style();
-            crlf(out);
+            out.overlay_newline();
         } else {
             let range = self.list.visible_range(self.filtered.len());
             for (i, entry) in self
@@ -255,11 +251,11 @@ impl super::Dialog for ResumeDialog {
                 out.push_dim();
                 let _ = out.queue(Print(&time_ago));
                 out.pop_style();
-                crlf(out);
+                out.overlay_newline();
             }
         }
 
-        crlf(out);
+        out.overlay_newline();
         out.push_dim();
         let toggle = if self.workspace_only {
             "ctrl+w: all sessions"

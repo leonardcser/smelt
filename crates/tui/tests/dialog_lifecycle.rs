@@ -460,16 +460,16 @@ fn parallel_tools_all_visible_during_dialog() {
     h.screen.render_pending_blocks();
     h.screen.erase_prompt();
     let dialog_height = dialog.height();
+    h.screen.set_dialog_open(true);
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
-        h.screen
-            .draw_frame(&mut frame, 80, None, Some(dialog_height));
-        let dr = h.screen.dialog_row();
-        dialog.draw(&mut frame, dr, 80, height);
+        let (_redirtied, placement) =
+            h.screen
+                .draw_frame(&mut frame, 80, None, Some(dialog_height));
+        if let Some(p) = placement {
+            dialog.draw(&mut frame, p.row, 80, p.granted_rows);
+        }
     }
-    h.drain_sink();
-    let da = dialog.anchor_row();
-    h.screen.sync_dialog_anchor(da);
     h.drain_sink();
 
     let text = h.full_text();
@@ -483,7 +483,7 @@ fn parallel_tools_all_visible_during_dialog() {
     }
 
     // After dialog dismiss, every tool is still there.
-    h.screen.clear_dialog_area(da);
+    h.screen.clear_dialog_area();
     h.drain_sink();
     h.draw_prompt();
 

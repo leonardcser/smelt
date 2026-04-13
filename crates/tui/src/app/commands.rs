@@ -72,10 +72,11 @@ impl App {
                     self.screen.notify_error("no subagents running".into());
                     CommandAction::Continue
                 } else {
+                    let max_h = terminal::size().ok().map(|(_, h)| h / 2);
                     CommandAction::OpenDialog(Box::new(render::AgentsDialog::new(
                         my_pid,
                         self.agent_snapshots.clone(),
-                        None,
+                        max_h,
                         self.input.vim_enabled(),
                     )))
                 }
@@ -85,9 +86,10 @@ impl App {
                     self.screen.notify_error("no background processes".into());
                     CommandAction::Continue
                 } else {
+                    let max_h = terminal::size().ok().map(|(_, h)| h / 2);
                     CommandAction::OpenDialog(Box::new(render::PsDialog::new(
                         self.engine.processes.clone(),
-                        None,
+                        max_h,
                     )))
                 }
             }

@@ -1,5 +1,5 @@
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar};
+use crate::render::draw_bar;
 use crate::{theme, utils::format_duration};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
@@ -7,10 +7,6 @@ use crossterm::{terminal, QueueableCommand};
 use engine::tools::ProcessInfo;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
-
-/// Chrome rows around the item list: bar + "Background Processes"
-/// header + blank separator + hints footer.
-const LIST_OVERHEAD: u16 = 4;
 
 pub struct PsDialog {
     registry: engine::tools::ProcessRegistry,
@@ -22,7 +18,7 @@ pub struct PsDialog {
 impl PsDialog {
     pub fn new(registry: engine::tools::ProcessRegistry, max_height: Option<u16>) -> Self {
         let procs = Self::fetch_procs(&registry, &[]);
-        let list = ListState::new(procs.len().max(1), max_height, LIST_OVERHEAD);
+        let list = ListState::new(procs.len().max(1), max_height);
         Self {
             registry,
             procs,
@@ -45,15 +41,11 @@ impl PsDialog {
 
 impl super::Dialog for PsDialog {
     fn height(&self) -> u16 {
-        self.list.height(self.procs.len().max(1))
+        self.list.height(self.procs.len().max(1), 4)
     }
 
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
-    }
-
-    fn anchor_row(&self) -> Option<u16> {
-        self.list.anchor_row
     }
 
     fn handle_resize(&mut self) {
@@ -95,34 +87,38 @@ impl super::Dialog for PsDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         let fresh = Self::fetch_procs(&self.registry, &self.killed);
         if fresh.len() != self.procs.len() {
             self.list.set_items(fresh.len().max(1));
         }
         self.procs = fresh;
 
-        let Some((w, _)) =
-            self.list
-                .begin_draw(out, start_row, self.procs.len().max(1), width, height)
-        else {
+        let Some(w) = self.list.begin_draw(
+            out,
+            start_row,
+            self.procs.len().max(1),
+            width,
+            granted_rows,
+            4,
+        ) else {
             return;
         };
         let now = std::time::Instant::now();
 
         draw_bar(out, w, None, None, theme::accent());
-        crlf(out);
+        out.overlay_newline();
 
         out.push_dim();
         let _ = out.queue(Print(" Background Processes"));
         out.pop_style();
-        crlf(out);
+        out.overlay_newline();
 
         if self.procs.is_empty() {
             out.push_dim();
             let _ = out.queue(Print("  No processes"));
             out.pop_style();
-            crlf(out);
+            out.overlay_newline();
         } else {
             let range = self.list.visible_range(self.procs.len());
             for (i, proc) in self
@@ -150,11 +146,11 @@ impl super::Dialog for PsDialog {
                 out.push_dim();
                 let _ = out.queue(Print(format!("{time} {}", proc.id)));
                 out.pop_style();
-                crlf(out);
+                out.overlay_newline();
             }
         }
 
-        crlf(out);
+        out.overlay_newline();
         out.push_dim();
         let _ = out.queue(Print(&hints::join(&[hints::CLOSE, hints::KILL_PROC])));
         out.pop_style();

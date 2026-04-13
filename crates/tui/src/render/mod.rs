@@ -18,6 +18,12 @@ pub use dialogs::{
     ResumeDialog, RewindDialog, SharedSnapshots,
 };
 
+/// Layout placement computed by `draw_frame` for the active dialog.
+pub struct DialogPlacement {
+    pub row: u16,
+    pub granted_rows: u16,
+}
+
 use crate::attachment::{AttachmentId, AttachmentStore};
 use crate::input::{InputSnapshot, InputState, ATTACHMENT_MARKER};
 use crate::keymap::hints;
@@ -170,7 +176,7 @@ pub struct RenderOut {
     /// `Frame::drop` for bench instrumentation, then reset on flush.
     pub(super) bytes_queued: usize,
     /// Tracked cursor row. Updated by every cursor-moving operation
-    /// (`\r\n`, `MoveTo`, `ScrollUp`, `crlf`). Eliminates all derived
+    /// (`\r\n`, `MoveTo`, `ScrollUp`, `newline`). Eliminates all derived
     /// cursor-position approximations in `draw_frame` — the row is
     /// always ground truth.
     pub(super) cursor_row: u16,
@@ -399,6 +405,55 @@ impl RenderOut {
         let _ = self.queue(terminal::ScrollUp(n));
     }
 
+    // ── Newline helpers ─────────────────────────────────────────────
+
+    /// Advance to the next line, clearing trailing content on the
+    /// current line.  Works in both scroll and overlay mode:
+    ///
+    /// - **Scroll mode** (`row` is `None`): emits `\r\n` which commits
+    ///   the line to scrollback.  The cursor advances by 1 row, capped
+    ///   at the last terminal row (where the terminal scrolls instead).
+    /// - **Overlay mode** (`row` is `Some`): emits `MoveTo(0, row+1)`
+    ///   so the position stays exact without relying on the terminal's
+    ///   linefeed behaviour.
+    ///
+    /// When the caller knows which mode is active, prefer
+    /// [`scroll_newline`] or [`overlay_newline`] for compile-time
+    /// documentation and a debug-mode assertion.
+    pub fn newline(&mut self) {
+        let _ = self.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        if let Some(r) = &mut self.row {
+            *r += 1;
+            let next = *r;
+            let _ = self.queue(cursor::MoveTo(0, next));
+            self.cursor_row = next;
+        } else {
+            let _ = self.queue(Print("\r\n"));
+            if self.term_height > 0 {
+                self.cursor_row = self.cursor_row.saturating_add(1).min(self.term_height - 1);
+            }
+        }
+        self.line_cols = 0;
+    }
+
+    /// Newline in scroll mode — emits `\r\n` that commits to scrollback.
+    /// Panics in debug builds if `row` is `Some` (overlay mode).
+    pub fn scroll_newline(&mut self) {
+        debug_assert!(
+            self.row.is_none(),
+            "scroll_newline called in overlay mode (row={:?})",
+            self.row
+        );
+        self.newline();
+    }
+
+    /// Newline in overlay mode — emits `MoveTo` to the next row.
+    /// Panics in debug builds if `row` is `None` (scroll mode).
+    pub fn overlay_newline(&mut self) {
+        debug_assert!(self.row.is_some(), "overlay_newline called in scroll mode");
+        self.newline();
+    }
+
     /// Diff to `target` and replace `current` without growing the
     /// push/pop stack. Used by the paint stage which emits flat
     /// sequences rather than nested style scopes.
@@ -558,44 +613,6 @@ impl io::Write for RenderOut {
     fn flush(&mut self) -> io::Result<()> {
         self.out.flush()
     }
-}
-
-/// Clear remaining characters on the current line and advance to the next.
-///
-/// In scroll mode (`row: None`) this emits `\r\n`, pushing content into
-/// terminal scrollback. In overlay mode (`row: Some`) it uses `MoveTo` to
-/// reposition without scrolling — dialogs use this to avoid polluting
-/// scrollback.
-///
-/// In overlay mode, Clear is issued on the *current* row (after the
-/// content just printed) and then the cursor advances to the next row
-/// *without* clearing it. The next row's stale content is overwritten
-/// by the subsequent `Print`. This avoids a visible blank→content
-/// flash on terminals that don't fully support synchronized updates.
-///
-/// Both modes emit `Clear::UntilNewLine` before advancing so every
-/// painted row cleans up its own trailing residue. Callers must ensure
-/// the current background color is either unset or is the color they
-/// want the cleared tail to carry (`paint_block` resets bg explicitly;
-/// the prompt-section helpers pop their style scope before calling).
-pub(super) fn crlf(out: &mut RenderOut) {
-    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-    if let Some(r) = &mut out.row {
-        // Overlay mode: reposition with MoveTo so we don't rely on the
-        // terminal's linefeed behaviour at the bottom of the viewport.
-        *r += 1;
-        let next = *r;
-        let _ = out.queue(cursor::MoveTo(0, next));
-        out.cursor_row = next;
-    } else {
-        // Scroll mode: linefeed. The cursor advances by 1 row, capped
-        // at the last row (where the terminal scrolls instead).
-        let _ = out.queue(Print("\r\n"));
-        if out.term_height > 0 {
-            out.cursor_row = out.cursor_row.saturating_add(1).min(out.term_height - 1);
-        }
-    }
-    out.line_cols = 0;
 }
 
 /// Colors for the software block cursor, adapted to light/dark theme.
@@ -1257,7 +1274,7 @@ impl BlockHistory {
             };
             first = false;
             for _ in 0..gap {
-                crlf(out);
+                out.scroll_newline();
             }
 
             let id = self.order[i];
@@ -1698,21 +1715,22 @@ impl Screen {
         self.prompt.prev_dialog_row.unwrap_or(0)
     }
 
-    /// After a dialog draws (and potentially ScrollUp's), reconcile the
-    /// screen's anchor with the dialog's actual position so subsequent
-    /// `draw_frame` calls render the active tool at the correct row.
-    pub fn sync_dialog_anchor(&mut self, actual: Option<u16>) {
-        let Some(actual) = actual else { return };
-        let expected = self.prompt.prev_dialog_row.unwrap_or(actual);
-        if actual >= expected {
+    /// Emit a blank gap line after the dialog, then clear any stale
+    /// rows between the dialog and the status bar.  Called globally
+    /// from `render_frame` so every dialog gets the same gap without
+    /// each one needing to emit it.
+    ///
+    /// Only emits when `out` is in overlay mode (`out.row` is `Some`).
+    /// On early-exit frames where the dialog didn't redraw, `out.row`
+    /// stays `None` (scroll mode) and a newline would push a `\r\n`
+    /// into scrollback, polluting the scroll buffer and shifting the
+    /// visible dialog.
+    pub fn queue_dialog_gap(&self, out: &mut RenderOut) {
+        if out.row.is_none() {
             return;
         }
-        let deficit = expected - actual;
-        if let Some(ref mut a) = self.prompt.anchor_row {
-            *a = a.saturating_sub(deficit);
-        }
-        self.has_scrollback = true;
-        self.prompt.prev_dialog_row = Some(actual);
+        out.overlay_newline();
+        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
     }
 
     /// Render the status line at the very last row of the terminal into
@@ -1725,9 +1743,10 @@ impl Screen {
         }
         let _ = out.queue(cursor::SavePosition);
         let _ = out.queue(cursor::MoveTo(0, h - 1));
-        // Status-line frames also use a fresh `RenderOut`, so force a real
-        // terminal reset before styling the row.
-        out.force_reset_style();
+        // Only emit a reset if the tracked style has actually drifted.
+        // force_reset_style unconditionally emits SGR reset codes which
+        // can cause a flash on the status-bar row.
+        out.reset_style();
         self.render_status_line(out);
         let _ = out.queue(cursor::RestorePosition);
     }
@@ -1934,8 +1953,8 @@ impl Screen {
     /// Clears from the screen anchor (or the dialog row, whichever is
     /// higher) down, so any ephemeral overlay shifted upward by
     /// `ScrollUp` is wiped along with the dialog bar itself.
-    pub fn clear_dialog_area(&mut self, dialog_anchor: Option<u16>) {
-        let dialog_row = dialog_anchor.unwrap_or(0);
+    pub fn clear_dialog_area(&mut self) {
+        let dialog_row = self.prompt.prev_dialog_row.unwrap_or(0);
         let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
         let clear_from = screen_anchor.min(dialog_row);
 
@@ -1945,13 +1964,13 @@ impl Screen {
             let _ = frame.queue(cursor::MoveTo(0, row));
             let _ = frame.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         }
-        // When the dialog used ScrollUp, the prompt gap that was between
-        // the last block and the prompt was pushed into scrollback.  The
-        // next block render would emit gap_between() again, creating a
-        // double blank line (one in scrollback, one in visible).  Suppress
-        // the leading gap when the anchor was pushed to row 0 — meaning
-        // the previous block's trailing gap is now in scrollback.
-        if screen_anchor == 0 && self.has_scrollback {
+        // When the dialog scrolled enough to push the anchor to row 0,
+        // the prompt gap that was between the last block and the prompt
+        // got pushed into scrollback.  The next block render would emit
+        // gap_between() again, creating a double blank line.  Suppress
+        // the leading gap so only the scrollback copy remains.
+        let scrolled_by_dialog = screen_anchor == 0 && self.has_scrollback;
+        if scrolled_by_dialog {
             self.history.suppress_leading_gap = true;
         }
         self.defer_pending_render = true;
@@ -1959,7 +1978,6 @@ impl Screen {
         // (prompt was physically moved). For non-scrolled dialogs the
         // prompt is still in its original position — just mark dirty so
         // it redraws in place.
-        let scrolled_by_dialog = screen_anchor == 0 && self.has_scrollback;
         if scrolled_by_dialog || self.prompt.anchor_row.is_none() {
             self.prompt.anchor_row = Some(clear_from);
             self.prompt.prev_rows = 0;
@@ -2547,12 +2565,21 @@ impl Screen {
             return;
         }
         self.dialog_open = open;
-        if open {
-            self.working.pause();
-        } else {
-            self.working.resume();
-        }
+        // Spinner pause/resume is handled by the caller based on
+        // whether the dialog blocks the agent — non-blocking dialogs
+        // keep the spinner animating.
         self.prompt.dirty = true;
+    }
+
+    /// Pause the working spinner. Used when a blocking dialog (confirm,
+    /// question) opens and the agent is suspended.
+    pub fn pause_spinner(&mut self) {
+        self.working.pause();
+    }
+
+    /// Resume the working spinner after a blocking dialog closes.
+    pub fn resume_spinner(&mut self) {
+        self.working.resume();
     }
 
     pub fn mark_dirty(&mut self) {
@@ -3184,7 +3211,7 @@ impl Screen {
         width: usize,
         prompt: Option<FramePrompt>,
         dialog_height: Option<u16>,
-    ) -> bool {
+    ) -> (bool, Option<DialogPlacement>) {
         let _perf = crate::perf::begin("render:frame");
 
         self.update_spinner();
@@ -3193,14 +3220,34 @@ impl Screen {
         let is_dialog = prompt.is_none();
         let has_ephemeral = self.has_ephemeral();
 
-        // Dialog mode: only redraw when new blocks land or the overlay
-        // has streaming content and something is dirty.
-        if is_dialog && !has_new_blocks && !(has_ephemeral && self.prompt.dirty) {
-            return false;
+        // Dialog mode: only repaint the content region when new blocks
+        // land, the overlay has changed, or the dialog height changed
+        // (needs full layout recomputation).  But ALWAYS return a
+        // valid placement so the dialog itself can redraw (e.g. after
+        // the user navigated within it).
+        let dialog_height_changed =
+            is_dialog && dialog_height.unwrap_or(0) != self.prompt.prev_dialog_height;
+        if is_dialog
+            && self.prompt.drawn
+            && !has_new_blocks
+            && !dialog_height_changed
+            && !(has_ephemeral && self.prompt.dirty)
+        {
+            // Content hasn't changed — skip the expensive repaint but
+            // return the last placement so the dialog can still draw.
+            let placement = self.prompt.prev_dialog_row.map(|row| {
+                let usable = self.size().1.saturating_sub(1);
+                let dh = dialog_height.unwrap_or(0);
+                DialogPlacement {
+                    row,
+                    granted_rows: dh.min(usable.saturating_sub(row)),
+                }
+            });
+            return (false, placement);
         }
         // Full mode: skip if nothing changed.
         if !is_dialog && !has_new_blocks && !self.prompt.dirty {
-            return false;
+            return (false, None);
         }
 
         // ── Position cursor ─────────────────────────────────────────────
@@ -3216,15 +3263,21 @@ impl Screen {
         if self.prompt.drawn || explicit_anchor.is_some() {
             out.move_to(0, draw_start_row);
         }
-        if is_dialog {
-            out.row = Some(draw_start_row);
-        }
+        // NOTE: out.row stays None during history.render so blocks use
+        // scroll-mode newline (\r\n → scrollback), not overlay-mode
+        // newline (MoveTo).  Set it to Some only after blocks are done.
 
         // ── Render blocks (scroll mode — commits to scrollback) ─────
         let block_rows = self.history.render(out, width, self.show_thinking);
 
         // `cursor_row` is ground truth after scroll-mode rendering.
         let base_anchor = out.cursor_row;
+
+        // Switch to overlay positioning for the ephemeral content and
+        // dialog that follow.
+        if is_dialog {
+            out.row = Some(base_anchor);
+        }
 
         // ── Lay out ephemeral overlay (measure only) ────────────────
         let (overlay_flat, overlay_rows) = if has_ephemeral {
@@ -3242,7 +3295,11 @@ impl Screen {
         let prompt_height: u16 = if let Some(ref p) = prompt {
             self.measure_prompt_height(p.state, width, p.queued, p.prediction)
         } else {
-            dialog_height.unwrap_or(self.prompt.prev_prompt_ui_rows.max(1))
+            // Reserve dialog + bottom gap + status bar.  Non-blocking
+            // dialogs have max_height = term_h/2 which limits them;
+            // blocking dialogs need the full budget on small terminals.
+            let dh = dialog_height.unwrap_or(self.prompt.prev_prompt_ui_rows.max(1));
+            (dh + 2).min(term_h)
         };
         let total_mutable = overlay_rows + prompt_gap + prompt_height;
 
@@ -3251,19 +3308,14 @@ impl Screen {
         let available = term_h.saturating_sub(base_anchor);
         let scroll_amount = total_mutable.saturating_sub(available);
 
-        // Clear upfront only when necessary: scrolling (prevents stale
-        // content from entering scrollback) or dialog mode (dialog
-        // overlay needs a clean canvas).  In the common streaming
-        // prompt path we skip the bulk clear — each painted line
-        // already clears its trailing residue via `crlf`, and leftover
-        // rows are erased *after* painting so the old content stays
-        // visible until overwritten, eliminating the flash.
-        let deferred_clear = scroll_amount == 0 && !is_dialog;
-        if !deferred_clear {
+        // Clear upfront only when scrolling. Without scrolling, each
+        // painted line already clears its own trailing residue via
+        // newline, and the dialog/prompt cleans up below itself — so
+        // skipping the bulk clear avoids a visible blank→repaint flash
+        // on terminals with imperfect synchronized-update support.
+        let needs_scroll = scroll_amount > 0;
+        if needs_scroll {
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-        }
-
-        if scroll_amount > 0 {
             out.scroll_up(scroll_amount);
             self.has_scrollback = true;
         }
@@ -3298,10 +3350,10 @@ impl Screen {
         if let Some(p) = prompt {
             // Gap between content and prompt.
             for _ in 0..prompt_gap {
-                crlf(out);
+                out.overlay_newline();
             }
 
-            // `out.row` is set, so all crlf calls inside
+            // `out.row` is set, so all newline calls inside
             // draw_prompt_sections use MoveTo — position is exact.
             let prompt_start_row = out.row.unwrap();
             let available_height = term_h.saturating_sub(prompt_start_row) as usize;
@@ -3334,7 +3386,7 @@ impl Screen {
             // (deferred_clear), erase stale rows that linger below the
             // freshly painted content. SavePosition / RestorePosition
             // preserve the input cursor that draw_prompt_sections placed.
-            if deferred_clear {
+            if !needs_scroll {
                 let cleanup = prompt_start_row + new_rows;
                 if cleanup < term_h {
                     let _ = out.queue(cursor::SavePosition);
@@ -3344,11 +3396,15 @@ impl Screen {
                 }
             }
 
-            false
+            (false, None)
         } else {
             // ── Dialog mode ─────────────────────────────────────────
-            let gap: u16 = if block_rows > 0 || ephemeral_rows > 0 {
-                crlf(out);
+            // Gap between chat content and dialog top — mirrors the
+            // prompt_gap above, but only when there IS content above
+            // (not when the dialog is fullscreen at row 0).
+            let has_content_above = block_rows > 0 || ephemeral_rows > 0 || self.has_content();
+            let gap: u16 = if has_content_above {
+                out.overlay_newline();
                 1
             } else {
                 0
@@ -3357,13 +3413,28 @@ impl Screen {
             let content_rows = block_rows + ephemeral_rows + gap;
             let overlay_end = final_anchor + ephemeral_rows;
             let dialog_row = overlay_end + gap;
+
+            let usable_height = term_h.saturating_sub(1);
+            let dh = dialog_height.unwrap_or(0);
+            let available_for_dialog = usable_height.saturating_sub(dialog_row);
+            let granted_rows = dh.min(available_for_dialog);
+
             self.prompt.anchor_row = Some(final_anchor);
             self.prompt.prev_dialog_row = Some(dialog_row);
+            self.prompt.prev_dialog_height = dialog_height.unwrap_or(0);
             self.prompt.prev_rows = ephemeral_rows + gap;
             self.prompt.drawn = true;
             self.prompt.dirty = false;
 
-            content_rows > 0
+            let placement = if granted_rows > 0 {
+                Some(DialogPlacement {
+                    row: dialog_row,
+                    granted_rows,
+                })
+            } else {
+                None
+            };
+            (content_rows > 0, placement)
         }
     }
 
@@ -3658,9 +3729,12 @@ impl Screen {
         if show_prediction {
             let pred = prediction.unwrap();
             let first_line = pred.lines().next().unwrap_or(pred);
-            let _ = out.queue(Print(" "));
+            // Draw the cursor at column 1 (after the leading space).
+            let cursor_row = out.row.unwrap_or(0);
+            draw_soft_cursor(out, 1, cursor_row);
+            let _ = out.queue(cursor::MoveTo(2, cursor_row));
             out.push_dim();
-            let msg: String = first_line.chars().take(usable.saturating_sub(1)).collect();
+            let msg: String = first_line.chars().take(usable.saturating_sub(2)).collect();
             let _ = out.queue(Print(&msg));
             out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
@@ -3886,7 +3960,7 @@ fn render_notification(
     out.push_dim();
     let _ = out.queue(Print(&msg));
     out.pop_style();
-    crlf(out);
+    out.overlay_newline();
     1
 }
 
@@ -3904,7 +3978,7 @@ fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usiz
     });
     let _ = out.queue(Print(display));
     out.pop_style();
-    crlf(out);
+    out.overlay_newline();
     1
 }
 
@@ -3940,7 +4014,7 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
                 out.push_bg(theme::user_bg());
                 let _ = out.queue(Print(" ".repeat(fill)));
                 out.pop_style();
-                crlf(out);
+                out.overlay_newline();
                 rows += 1;
                 continue;
             }
@@ -3962,7 +4036,7 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
                 blocks::print_user_highlights(out, chunk, &[], is_command);
                 let _ = out.queue(Print(" ".repeat(trailing)));
                 out.pop_style();
-                crlf(out);
+                out.overlay_newline();
                 rows += 1;
             }
         }
@@ -4000,7 +4074,7 @@ fn render_btw(
     let max_q = usable.saturating_sub(6); // " /btw " = 6 chars
     let q: String = btw.question.chars().take(max_q).collect();
     blocks::print_user_highlights(out, &q, &btw.image_labels, false);
-    crlf(out);
+    out.overlay_newline();
     rows += 1;
 
     // Body: response or spinner.
@@ -4038,12 +4112,12 @@ fn render_btw(
 
             for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
                 let _ = out.queue(Print(line));
-                crlf(out);
+                out.overlay_newline();
                 rows += 1;
             }
 
             // Blank line before hint.
-            crlf(out);
+            out.overlay_newline();
             rows += 1;
 
             // Scroll hint or dismiss hint.
@@ -4059,7 +4133,7 @@ fn render_btw(
                 let _ = out.queue(Print("   esc: close"));
             }
             out.pop_style();
-            crlf(out);
+            out.overlay_newline();
             rows += 1;
         }
         None => {
@@ -4072,13 +4146,13 @@ fn render_btw(
             out.push_fg(theme::muted());
             let _ = out.queue(Print(format!("   {} thinking", SPINNER_FRAMES[frame])));
             out.pop_style();
-            crlf(out);
+            out.overlay_newline();
             rows += 1;
         }
     }
 
     // Blank separator line before the bar.
-    crlf(out);
+    out.overlay_newline();
     rows += 1;
 
     rows
@@ -4896,7 +4970,7 @@ fn draw_completions(
             out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             if show_hints && max_rows > hint_rows + empty_gap {
-                crlf(out);
+                out.newline();
                 draw_settings_hints(out, vim_enabled);
                 return 1 + empty_gap + hint_rows;
             }
@@ -4987,7 +5061,7 @@ fn draw_completions(
 
         drawn += 1;
         if i < last || show_hints {
-            crlf(out);
+            out.newline();
         } else {
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         }
@@ -5002,7 +5076,7 @@ fn draw_completions(
 }
 
 fn draw_settings_hints(out: &mut RenderOut, vim_enabled: bool) {
-    crlf(out);
+    out.newline();
     out.push_dim();
     let _ = out.queue(Print(crate::keymap::hints::join(&[
         crate::keymap::hints::picker_nav(vim_enabled),
@@ -5097,7 +5171,7 @@ fn draw_stats_sequential(
             break;
         }
         if already_drawn + count > 0 {
-            crlf(out);
+            out.newline();
         }
         let _ = out.queue(Print("  "));
         draw_stats_line(out, line, lc);
@@ -5134,7 +5208,7 @@ fn draw_stats(
     if !side_by_side {
         let mut drawn = draw_stats_sequential(out, left, 0, max_rows);
         if !right.is_empty() && drawn < max_rows {
-            crlf(out);
+            out.newline();
             drawn += 1;
             drawn += draw_stats_sequential(out, right, drawn, max_rows);
         }
@@ -5150,7 +5224,7 @@ fn draw_stats(
             break;
         }
         if drawn > 0 {
-            crlf(out);
+            out.newline();
         }
 
         let lw = if i < left.len() {
@@ -5277,27 +5351,29 @@ mod selection_tests {
     }
 
     #[test]
-    fn dialog_render_resets_terminal_style_before_first_line() {
+    fn dialog_render_starts_with_cursor_position() {
         let mut out = RenderOut::buffer();
         let mut dialog = crate::render::HelpDialog::new(false);
         dialog.draw(&mut out, 0, 40, 12);
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        // begin_dialog_draw positions the cursor at (0, start_row).
         assert!(
-            rendered.starts_with("\u{1b}[0m\u{1b}[0m"),
-            "rendered: {rendered:?}"
+            rendered.starts_with("\u{1b}[1;1H"),
+            "dialog should start with cursor position, got: {rendered:?}"
         );
     }
 
     #[test]
-    fn status_line_resets_terminal_style_before_rendering() {
+    fn status_line_renders_content() {
         let mut screen = Screen::with_backend(Box::new(StdioBackend));
         screen.set_running_procs(1);
         let mut out = RenderOut::buffer();
         screen.queue_status_line(&mut out);
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        // Status line should contain the "proc" indicator.
         assert!(
-            rendered.contains("\u{1b}[0m\u{1b}[0m"),
-            "rendered: {rendered:?}"
+            rendered.contains("proc"),
+            "status line missing proc indicator: {rendered:?}"
         );
     }
 
@@ -5403,7 +5479,7 @@ mod selection_tests {
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("thinking (2 lines)"));
         // Gap row is either "\r\n\r\n" (new form, since scroll-mode
-        // `crlf` drops the redundant Clear::UntilNewLine) or
+        // `scroll_newline` drops the redundant Clear::UntilNewLine) or
         // "\r\n\x1b[K\r\n" (old form), depending on history path.
         assert!(
             rendered.contains("\r\n\r\n") || rendered.contains("\r\n\u{1b}[K\r\n"),

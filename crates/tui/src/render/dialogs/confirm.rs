@@ -6,7 +6,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::highlight::{
     count_inline_diff_rows, print_inline_diff, print_syntax_file, BashHighlighter,
 };
-use crate::render::{crlf, draw_bar, ConfirmChoice, RenderOut};
+use crate::render::{draw_bar, ConfirmChoice, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
@@ -149,7 +149,7 @@ impl ConfirmPreview {
                     }
                     let _ = out.queue(Print(" "));
                     bh.print_line(out, line);
-                    crlf(out);
+                    out.overlay_newline();
                     emitted += 1;
                 }
             }
@@ -174,7 +174,7 @@ impl ConfirmPreview {
                         break;
                     }
                     let _ = out.queue(Print(*line));
-                    crlf(out);
+                    out.overlay_newline();
                     emitted += 1;
                 }
             }
@@ -351,7 +351,7 @@ fn render_notebook_preview(
         out.push_fg(theme::muted());
         let _ = out.queue(Print(line));
         out.pop_style();
-        crlf(out);
+        out.overlay_newline();
         emitted += 1;
     }
 
@@ -402,8 +402,6 @@ pub struct ConfirmDialog {
     editing: bool,
     dirty: bool,
     request_id: u64,
-    /// The anchor row where this dialog is positioned. None on first draw.
-    pub anchor_row: Option<u16>,
     /// Row where the options section begins (used for partial redraws).
     options_row: u16,
     vim_enabled: bool,
@@ -493,7 +491,6 @@ impl ConfirmDialog {
             textarea: TextArea::new(),
             kill_ring: String::new(),
             editing: false,
-            anchor_row: None,
             options_row: 0,
             dirty: true,
             request_id: req.request_id,
@@ -615,12 +612,8 @@ impl super::Dialog for ConfirmDialog {
     }
 
     fn handle_resize(&mut self) {
-        self.anchor_row = None;
+        self.term_size = terminal::size().unwrap_or(self.term_size);
         self.dirty = true;
-    }
-
-    fn anchor_row(&self) -> Option<u16> {
-        self.anchor_row
     }
 
     fn set_kill_ring(&mut self, contents: String) {
@@ -729,30 +722,23 @@ impl super::Dialog for ConfirmDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         if !self.dirty {
             return;
         }
         self.dirty = false;
 
-        self.term_size = (width, height);
         let w = width as usize;
 
-        let ly = self.layout(width, height);
+        let ly = self.layout(width, granted_rows);
         let ta_visible = self.editing || !self.textarea.is_empty();
 
         // Clamp scroll
         let max_scroll = (ly.total_preview as usize).saturating_sub(ly.viewport_rows as usize);
         self.preview_scroll = self.preview_scroll.min(max_scroll);
 
-        let (bar_row, _) = begin_dialog_draw(
-            out,
-            start_row,
-            ly.total_rows,
-            height,
-            None,
-            &mut self.anchor_row,
-        );
+        begin_dialog_draw(out, start_row);
+        let bar_row = start_row;
 
         // Where the options section should begin in the current layout.
         let preview_section = if ly.has_preview {
@@ -791,7 +777,7 @@ impl super::Dialog for ConfirmDialog {
                 theme::accent()
             };
             draw_bar(out, w, None, None, title_color);
-            crlf(out);
+            out.overlay_newline();
             row += 1;
 
             // Title
@@ -824,7 +810,7 @@ impl super::Dialog for ConfirmDialog {
                 } else {
                     let _ = out.queue(Print(seg));
                 }
-                crlf(out);
+                out.overlay_newline();
                 row += 1;
             }
 
@@ -837,7 +823,7 @@ impl super::Dialog for ConfirmDialog {
                     out.push_fg(theme::muted());
                     let _ = out.queue(Print(seg));
                     out.pop_style();
-                    crlf(out);
+                    out.overlay_newline();
                     row += 1;
                 }
             }
@@ -849,7 +835,7 @@ impl super::Dialog for ConfirmDialog {
                     out.push_fg(theme::bar());
                     let _ = out.queue(Print(&separator));
                     out.pop_style();
-                    crlf(out);
+                    out.overlay_newline();
                     row += 1;
                 }
                 self.preview
@@ -873,12 +859,12 @@ impl super::Dialog for ConfirmDialog {
                     let _ = out.queue(Print(&separator));
                     out.pop_style();
                 }
-                crlf(out);
+                out.overlay_newline();
                 row += 1;
             }
 
             if !ly.has_preview {
-                crlf(out);
+                out.overlay_newline();
                 row += 1;
             }
             // Action prompt
@@ -887,7 +873,7 @@ impl super::Dialog for ConfirmDialog {
             out.push_dim();
             let _ = out.queue(Print(prompt_text));
             out.pop_style();
-            crlf(out);
+            out.overlay_newline();
             row += 1;
         }
 
@@ -930,7 +916,7 @@ impl super::Dialog for ConfirmDialog {
                     let _ = out.queue(Print(line));
                 }
                 if li < lines.len() - 1 {
-                    crlf(out);
+                    out.overlay_newline();
                     row += 1;
                 }
             }
@@ -950,14 +936,14 @@ impl super::Dialog for ConfirmDialog {
                 row = new_row;
                 cursor_pos = cpos;
             } else {
-                crlf(out);
+                out.overlay_newline();
                 row += 1;
             }
         }
 
         // footer: blank line + hint
-        crlf(out);
-        crlf(out);
+        out.overlay_newline();
+        out.overlay_newline();
         out.push_dim();
         let hint = if self.editing {
             hints::join(&[hints::SEND, hints::CANCEL])
@@ -986,7 +972,7 @@ impl super::Dialog for ConfirmDialog {
         // Only clear below the dialog if there's actually viewport space left.
         // When the dialog fills the full terminal, the cursor is at or past
         // the bottom row -- clearing there wipes the last visible option.
-        if out.row.is_some_and(|r| r < height) {
+        if out.row.is_some_and(|r| r < start_row + granted_rows) {
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         }
 

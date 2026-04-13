@@ -1,5 +1,5 @@
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar};
+use crate::render::draw_bar;
 use crate::{theme, workspace_permissions};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::{Color, Print};
@@ -30,9 +30,6 @@ pub struct PermissionsDialog {
     vim_enabled: bool,
 }
 
-/// Number of non-item rows: bar + empty-line above hint + hint line.
-const OVERHEAD: u16 = 3;
-
 impl PermissionsDialog {
     pub fn new(
         session_entries: Vec<PermissionEntry>,
@@ -42,7 +39,7 @@ impl PermissionsDialog {
     ) -> Self {
         let items = build_items(&session_entries, &workspace_rules);
         let total = display_row_count(&session_entries, &workspace_rules, &items);
-        let list = ListState::new(total.max(1), max_height, OVERHEAD);
+        let list = ListState::new(total.max(1), max_height);
         Self {
             session_entries,
             workspace_rules,
@@ -90,15 +87,11 @@ impl PermissionsDialog {
 impl super::Dialog for PermissionsDialog {
     fn height(&self) -> u16 {
         let total = display_row_count(&self.session_entries, &self.workspace_rules, &self.items);
-        self.list.height(total.max(1))
+        self.list.height(total.max(1), 3)
     }
 
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
-    }
-
-    fn anchor_row(&self) -> Option<u16> {
-        self.list.anchor_row
     }
 
     fn handle_resize(&mut self) {
@@ -153,23 +146,23 @@ impl super::Dialog for PermissionsDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         let total = display_row_count(&self.session_entries, &self.workspace_rules, &self.items);
-        let Some((w, _)) = self
+        let Some(w) = self
             .list
-            .begin_draw(out, start_row, total.max(1), width, height)
+            .begin_draw(out, start_row, total.max(1), width, granted_rows, 3)
         else {
             return;
         };
 
         draw_bar(out, w, None, None, theme::accent());
-        crlf(out);
+        out.overlay_newline();
 
         if self.items.is_empty() {
             out.push_dim();
             let _ = out.queue(Print(" No permissions"));
             out.pop_style();
-            crlf(out);
+            out.overlay_newline();
         } else {
             let mut printed_workspace = false;
             for (i, item) in self.items.iter().enumerate() {
@@ -179,7 +172,7 @@ impl super::Dialog for PermissionsDialog {
                 if matches!(item, Item::Workspace(_, _)) && !printed_workspace {
                     printed_workspace = true;
                     if i > 0 {
-                        crlf(out);
+                        out.overlay_newline();
                     }
                     print_header(out, " Workspace");
                 }
@@ -192,7 +185,7 @@ impl super::Dialog for PermissionsDialog {
             }
         }
 
-        crlf(out);
+        out.overlay_newline();
         out.push_dim();
         let hint = if self.pending_d {
             hints::join(&[hints::DD_PENDING, hints::CLOSE])
@@ -209,7 +202,7 @@ fn print_header(out: &mut crate::render::RenderOut, label: &str) {
     out.push_dim();
     let _ = out.queue(Print(label));
     out.pop_style();
-    crlf(out);
+    out.overlay_newline();
 }
 
 fn render_entry_row(
@@ -229,7 +222,7 @@ fn render_entry_row(
         let _ = out.queue(Print("  "));
         let _ = out.queue(Print(&label));
     }
-    crlf(out);
+    out.overlay_newline();
 }
 
 fn build_items(

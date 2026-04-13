@@ -413,7 +413,7 @@ impl TestHarness {
         call_id: &str,
         name: &str,
         summary: &str,
-    ) -> (ConfirmDialog, Option<u16>) {
+    ) -> ConfirmDialog {
         self.actions
             .push(format!("open_confirm_dialog({call_id}, {name}, {summary})"));
 
@@ -433,20 +433,23 @@ impl TestHarness {
         self.screen.set_active_status(call_id, ToolStatus::Confirm);
         self.screen.render_pending_blocks();
         self.screen.erase_prompt();
+        self.screen.set_dialog_open(true);
         let dialog_height = dialog.height();
 
         {
             let mut frame = tui::render::Frame::begin(self.screen.backend());
-            self.screen
-                .draw_frame(&mut frame, self.width as usize, None, Some(dialog_height));
-            let dr = self.screen.dialog_row();
-            dialog.draw(&mut frame, dr, self.width, self.height);
+            let (_redirtied, placement) =
+                self.screen
+                    .draw_frame(&mut frame, self.width as usize, None, Some(dialog_height));
+            if let Some(ref p) = placement {
+                dialog.draw(&mut frame, p.row, self.width, p.granted_rows);
+                self.screen.queue_dialog_gap(&mut frame);
+                self.screen.queue_status_line(&mut frame);
+            }
         }
-        let da = dialog.anchor_row();
-        self.screen.sync_dialog_anchor(da);
         self.drain_sink();
 
-        (dialog, da)
+        dialog
     }
 
     /// Run a full confirm dialog cycle: open, draw, dismiss, finish tool.
@@ -464,10 +467,11 @@ impl TestHarness {
 
         self.screen
             .start_tool(call_id.into(), name.into(), summary.into(), HashMap::new());
-        let (_dialog, da) = self.open_confirm_dialog(call_id, name, summary);
+        let _dialog = self.open_confirm_dialog(call_id, name, summary);
 
         // Dismiss dialog.
-        self.screen.clear_dialog_area(da);
+        self.screen.clear_dialog_area();
+        self.screen.set_dialog_open(false);
         self.drain_sink();
 
         // Finish tool.

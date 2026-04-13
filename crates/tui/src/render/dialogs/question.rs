@@ -3,7 +3,7 @@ use super::{
     TextArea,
 };
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar, RenderOut};
+use crate::render::{draw_bar, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
@@ -78,9 +78,7 @@ pub struct QuestionDialog {
     answered: Vec<bool>,
     dirty: bool,
     request_id: u64,
-    /// The anchor row where this dialog is positioned. None on first draw.
-    pub anchor_row: Option<u16>,
-    /// Cached terminal size, updated each draw().
+    /// Cached terminal size, updated on resize.
     term_size: (u16, u16),
 }
 
@@ -103,7 +101,6 @@ impl QuestionDialog {
             visited: vec![false; n],
             answered: vec![false; n],
             dirty: true,
-            anchor_row: None,
             request_id,
             term_size: terminal::size().unwrap_or((80, 24)),
         }
@@ -197,12 +194,8 @@ impl super::Dialog for QuestionDialog {
     }
 
     fn handle_resize(&mut self) {
-        self.anchor_row = None;
+        self.term_size = terminal::size().unwrap_or(self.term_size);
         self.dirty = true;
-    }
-
-    fn anchor_row(&self) -> Option<u16> {
-        self.anchor_row
     }
 
     fn set_kill_ring(&mut self, contents: String) {
@@ -352,16 +345,13 @@ impl super::Dialog for QuestionDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         if !self.dirty {
             return;
         }
         self.dirty = false;
 
-        self.term_size = (width, height);
         let w = width as usize;
-
-        let content_rows = self.content_rows(width);
 
         let ta = &self.other_areas[self.active_tab];
         let ta_visible = self.editing_other[self.active_tab] || !ta.is_empty();
@@ -376,18 +366,12 @@ impl super::Dialog for QuestionDialog {
 
         let q = &self.questions[self.active_tab];
 
-        let (bar_row, _) = begin_dialog_draw(
-            out,
-            start_row,
-            content_rows,
-            height,
-            None,
-            &mut self.anchor_row,
-        );
+        begin_dialog_draw(out, start_row);
+        let bar_row = start_row;
         let mut row = bar_row;
 
         draw_bar(out, w, None, None, theme::accent());
-        crlf(out);
+        out.overlay_newline();
         row += 1;
 
         if self.has_tabs {
@@ -419,7 +403,7 @@ impl super::Dialog for QuestionDialog {
                     out.pop_style();
                 }
             }
-            crlf(out);
+            out.overlay_newline();
             row += 1;
         }
 
@@ -440,11 +424,11 @@ impl super::Dialog for QuestionDialog {
                 let _ = out.queue(Print(suffix));
                 out.pop_style();
             }
-            crlf(out);
+            out.overlay_newline();
             row += 1;
         }
 
-        crlf(out);
+        out.overlay_newline();
         row += 1;
 
         for (i, opt) in q.options.iter().enumerate() {
@@ -494,7 +478,7 @@ impl super::Dialog for QuestionDialog {
                     out.pop_style();
                 }
             }
-            crlf(out);
+            out.overlay_newline();
             row += 1;
         }
 
@@ -541,12 +525,12 @@ impl super::Dialog for QuestionDialog {
             row = new_row;
             cursor_pos = cpos;
         } else {
-            crlf(out);
+            out.overlay_newline();
         }
         let _ = row;
 
         // Footer
-        crlf(out);
+        out.overlay_newline();
         out.push_dim();
         let hint = if editing {
             hints::join(&[hints::CANCEL, hints::CONFIRM])
@@ -560,7 +544,7 @@ impl super::Dialog for QuestionDialog {
         // Only clear below the dialog if there's viewport space left.
         // When the dialog fills the full terminal, clearing here wipes
         // the last visible line.
-        if out.row.is_some_and(|r| r < height) {
+        if out.row.is_some_and(|r| r < start_row + granted_rows) {
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         }
 

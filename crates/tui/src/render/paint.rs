@@ -6,7 +6,7 @@
 
 use super::display::{ColorRole, ColorValue, DisplayBlock, DisplayLine, SpanStyle};
 use super::layout_out::display_width;
-use super::{crlf, PaintContext, RenderOut, StyleState};
+use super::{PaintContext, RenderOut, StyleState};
 use crate::theme::Theme;
 use crossterm::style::{Color, Print};
 use crossterm::QueueableCommand;
@@ -37,8 +37,8 @@ pub(super) fn paint_block(
 }
 
 /// Paint a single `DisplayLine`: emit its spans, fill the row bg if
-/// requested, then advance via `crlf`. Drops the bg before `crlf` so
-/// `Clear::UntilNewLine` doesn't bleed the fill color into scrollback.
+/// requested, then advance via `newline`. Drops the bg before `newline`
+/// so `Clear::UntilNewLine` doesn't bleed the fill color into scrollback.
 pub(super) fn paint_line(out: &mut RenderOut, line: &DisplayLine, ctx: &PaintContext) {
     let mut visible_cols: u16 = 0;
     for span in &line.spans {
@@ -62,7 +62,7 @@ pub(super) fn paint_line(out: &mut RenderOut, line: &DisplayLine, ctx: &PaintCon
         }
     }
     out.set_bg_only(None);
-    crlf(out);
+    out.newline();
 }
 
 #[inline]

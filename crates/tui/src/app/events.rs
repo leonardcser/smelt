@@ -72,8 +72,8 @@ impl App {
                         .decide(self.mode, &ctx.tool_name, &ctx.args, false)
                         == Decision::Allow
                     {
-                        let d = active_dialog.take().unwrap();
-                        self.screen.clear_dialog_area(d.anchor_row());
+                        let _d = active_dialog.take().unwrap();
+                        self.screen.clear_dialog_area();
                         self.screen
                             .set_active_status(&ctx.call_id, ToolStatus::Pending);
                         self.send_permission_decision(ctx.request_id, true, None);
@@ -88,14 +88,19 @@ impl App {
                 code, modifiers, ..
             }) = ev
             {
+                // Ctrl+L: full redraw (same as outside a dialog).
+                if code == KeyCode::Char('l') && modifiers.contains(KeyModifiers::CONTROL) {
+                    self.purge_redraw_debounced();
+                    active_dialog.as_mut().unwrap().mark_dirty();
+                    return false;
+                }
                 let mut d = active_dialog.take().unwrap();
                 if let Some(result) = d.handle_key(code, modifiers) {
                     // Sync kill ring back from dialog.
                     if let Some(kr) = d.kill_ring() {
                         self.input.set_kill_ring(kr.to_string());
                     }
-                    let anchor = d.anchor_row();
-                    self.handle_dialog_result(result, anchor, agent);
+                    self.handle_dialog_result(result, agent);
                     self.input.restore_stash();
                 } else {
                     *active_dialog = Some(d);
@@ -462,9 +467,13 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         KeyAction::OpenHelp => {
-                            return EventOutcome::OpenDialog(Box::new(render::HelpDialog::new(
-                                self.input.vim_enabled(),
-                            )));
+                            let max_h = crossterm::terminal::size().ok().map(|(_, h)| h / 2);
+                            return EventOutcome::OpenDialog(Box::new(
+                                render::HelpDialog::with_max_height(
+                                    self.input.vim_enabled(),
+                                    max_h,
+                                ),
+                            ));
                         }
                         KeyAction::OpenHistorySearch => {
                             if self.input.history_search_query().is_none() {
@@ -884,8 +893,14 @@ impl App {
     // ── Tick ─────────────────────────────────────────────────────────────
 
     /// Render a dialog-mode frame into the provided output buffer.
-    /// Returns true if content was drawn (caller should re-dirty the dialog).
-    pub(super) fn tick_dialog(&mut self, out: &mut render::RenderOut, dialog_height: u16) -> bool {
+    /// Returns `(redirtied, placement)` — the bool indicates whether
+    /// content was drawn (caller should re-dirty the dialog), and the
+    /// placement carries the row budget for the dialog.
+    pub(super) fn tick_dialog(
+        &mut self,
+        out: &mut render::RenderOut,
+        dialog_height: u16,
+    ) -> (bool, Option<render::DialogPlacement>) {
         let _perf = crate::perf::begin("app:tick");
         let w = render::term_width();
         self.screen.set_dialog_open(true);

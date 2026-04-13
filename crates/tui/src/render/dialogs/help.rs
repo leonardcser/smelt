@@ -1,17 +1,11 @@
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar};
+use crate::render::draw_bar;
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
 use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, DialogResult, ListState, RenderOut};
-
-/// Chrome rows around the item list: bar + "help" header + blank
-/// separator below header + blank separator above hints + hints
-/// footer. One row taller than the other dialogs because help has an
-/// extra blank line between its header and content.
-const LIST_OVERHEAD: u16 = 5;
 
 pub struct HelpDialog {
     list: ListState,
@@ -22,6 +16,10 @@ pub struct HelpDialog {
 
 impl HelpDialog {
     pub fn new(vim_enabled: bool) -> Self {
+        Self::with_max_height(vim_enabled, None)
+    }
+
+    pub fn with_max_height(vim_enabled: bool, max_height: Option<u16>) -> Self {
         let sections = hints::help_sections(vim_enabled);
         let total_rows = sections
             .iter()
@@ -29,7 +27,7 @@ impl HelpDialog {
             .map(|(i, (_, entries))| entries.len() + if i + 1 < sections.len() { 1 } else { 0 })
             .sum();
         Self {
-            list: ListState::new(0, None, LIST_OVERHEAD),
+            list: ListState::new(0, max_height),
             sections,
             total_rows,
             vim_enabled,
@@ -39,15 +37,11 @@ impl HelpDialog {
 
 impl super::Dialog for HelpDialog {
     fn height(&self) -> u16 {
-        self.list.height(self.total_rows)
+        self.list.height(self.total_rows, 5)
     }
 
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
-    }
-
-    fn anchor_row(&self) -> Option<u16> {
-        self.list.anchor_row
     }
 
     fn handle_resize(&mut self) {
@@ -96,7 +90,7 @@ impl super::Dialog for HelpDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         let label_col = self
             .sections
             .iter()
@@ -117,9 +111,9 @@ impl super::Dialog for HelpDialog {
         }
         let total_content = content_lines.len();
 
-        let Some((w, _)) = self
+        let Some(w) = self
             .list
-            .begin_draw(out, start_row, total_content, width, height)
+            .begin_draw(out, start_row, total_content, width, granted_rows, 5)
         else {
             return;
         };
@@ -130,13 +124,13 @@ impl super::Dialog for HelpDialog {
         self.list.scroll_offset = self.list.scroll_offset.min(max_scroll);
 
         draw_bar(out, w, None, None, theme::accent());
-        crlf(out);
+        out.overlay_newline();
 
         out.push_dim();
         let _ = out.queue(Print(" help"));
         out.pop_style();
-        crlf(out);
-        crlf(out);
+        out.overlay_newline();
+        out.overlay_newline();
 
         for &(label, detail) in content_lines
             .iter()
@@ -144,7 +138,7 @@ impl super::Dialog for HelpDialog {
             .take(max_visible)
         {
             if label.is_empty() && detail.is_empty() {
-                crlf(out);
+                out.overlay_newline();
             } else {
                 let _ = out.queue(Print("  "));
                 out.push_fg(theme::muted());
@@ -155,11 +149,11 @@ impl super::Dialog for HelpDialog {
                 let _ = out.queue(Print(format!("{padding}{detail}")));
                 out.pop_style();
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                crlf(out);
+                out.overlay_newline();
             }
         }
 
-        crlf(out);
+        out.overlay_newline();
         out.push_dim();
         let _ = out.queue(Print(&hints::join(&[
             hints::CLOSE,
@@ -168,7 +162,6 @@ impl super::Dialog for HelpDialog {
         ])));
         out.pop_style();
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-
         end_dialog_draw(out);
     }
 }

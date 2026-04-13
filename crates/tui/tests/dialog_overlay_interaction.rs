@@ -29,7 +29,7 @@ fn dialog_with_three_parallel_tools_all_visible() {
     h.start_bash_tool("c2", "MARKER_BBB");
     h.start_bash_tool("c3", "MARKER_CCC");
 
-    let (_dialog, _da) = h.open_confirm_dialog("c2", "bash", "MARKER_BBB");
+    let _dialog = h.open_confirm_dialog("c2", "bash", "MARKER_BBB");
 
     let v = h.visible();
     for marker in ["MARKER_AAA", "MARKER_BBB", "MARKER_CCC"] {
@@ -55,7 +55,7 @@ fn dialog_with_multiline_bash_command() {
     let multi_line = "for i in 1 2 3; do\n  echo line_$i\n  sleep 1\ndone\necho all_done";
     h.start_bash_tool("c1", multi_line);
 
-    let (_dialog, _da) = h.open_confirm_dialog("c1", "bash", multi_line);
+    let _dialog = h.open_confirm_dialog("c1", "bash", multi_line);
 
     let v = h.visible();
     // The most recent line of the command (the tail) should be visible.
@@ -92,7 +92,7 @@ fn dialog_with_overflowing_parallel_multiline_tools() {
     h.start_bash_tool("c2", &mk_cmd("BBB"));
     h.start_bash_tool("c3", &mk_cmd("CCC"));
 
-    let (_dialog, _da) = h.open_confirm_dialog("c3", "bash", &mk_cmd("CCC"));
+    let _dialog = h.open_confirm_dialog("c3", "bash", &mk_cmd("CCC"));
 
     let v = h.visible();
     // The last tool's tail should be present (freshest).
@@ -126,7 +126,7 @@ fn dialog_with_streaming_text_and_tool() {
         .append_streaming_text("Live streaming paragraph from the assistant.\n");
     h.start_bash_tool("c1", "echo hi");
 
-    let (_dialog, _da) = h.open_confirm_dialog("c1", "bash", "echo hi");
+    let _dialog = h.open_confirm_dialog("c1", "bash", "echo hi");
 
     let v = h.visible();
     assert!(
@@ -162,7 +162,7 @@ fn fullscreen_dialog_collapses_overlay() {
 
     h.start_bash_tool("c1", "echo SMALL");
 
-    let (_dialog, _da) = h.open_confirm_dialog("c1", "bash", "echo SMALL");
+    let _dialog = h.open_confirm_dialog("c1", "bash", "echo SMALL");
 
     let v = h.visible();
     // Dialog hint should still be visible (the dialog clamped to fit).
@@ -192,7 +192,7 @@ fn dialog_opens_when_committed_fills_viewport() {
     h.drain_sink();
 
     h.start_bash_tool("c1", "echo HELLO");
-    let (_dialog, _da) = h.open_confirm_dialog("c1", "bash", "echo HELLO");
+    let _dialog = h.open_confirm_dialog("c1", "bash", "echo HELLO");
 
     let v = h.visible();
     // The tool overlay must be visible above the dialog.
@@ -230,10 +230,10 @@ fn dialog_dismiss_restores_clean_overlay() {
     h.start_bash_tool("c1", "MARKER_X");
     h.start_bash_tool("c2", "MARKER_Y");
 
-    let (_dialog, da) = h.open_confirm_dialog("c2", "bash", "MARKER_Y");
+    let _dialog = h.open_confirm_dialog("c2", "bash", "MARKER_Y");
 
     // Dismiss.
-    h.screen.clear_dialog_area(da);
+    h.screen.clear_dialog_area();
     h.drain_sink();
     h.draw_prompt();
 
@@ -268,7 +268,7 @@ fn resize_during_dialog_keeps_overlay_coherent() {
 
     h.start_bash_tool("c1", "MARKER_RESIZE");
 
-    let (mut dialog, _da) = h.open_confirm_dialog("c1", "bash", "MARKER_RESIZE");
+    let mut dialog = h.open_confirm_dialog("c1", "bash", "MARKER_RESIZE");
 
     // Shrink the terminal — the dialog handles its own resize, and
     // the next draw should still keep the overlay tail visible.
@@ -280,10 +280,12 @@ fn resize_during_dialog_keeps_overlay_coherent() {
     let dh = dialog.height();
     {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
-        h.screen
-            .draw_frame(&mut frame, h.width as usize, None, Some(dh));
-        let dr = h.screen.dialog_row();
-        dialog.draw(&mut frame, dr, h.width, h.height);
+        let (_redirtied, placement) =
+            h.screen
+                .draw_frame(&mut frame, h.width as usize, None, Some(dh));
+        if let Some(p) = placement {
+            dialog.draw(&mut frame, p.row, h.width, p.granted_rows);
+        }
     }
     h.drain_sink();
 

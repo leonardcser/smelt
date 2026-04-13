@@ -19,7 +19,7 @@ pub use rewind::RewindDialog;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{cursor, style::Print, terminal, QueueableCommand};
 
-use super::{crlf, draw_soft_cursor, wrap_line, ConfirmChoice, RenderOut};
+use super::{draw_soft_cursor, wrap_line, ConfirmChoice, RenderOut};
 
 pub enum DialogResult {
     Dismissed,
@@ -55,11 +55,10 @@ pub trait Dialog {
     }
     fn height(&self) -> u16;
     fn mark_dirty(&mut self);
-    /// Render the dialog into the provided output buffer.
-    /// The caller owns the sync frame — this method only queues draw commands.
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16);
+    /// Render the dialog. `granted_rows` is the exact row budget from
+    /// draw_frame — the dialog must not exceed `start_row + granted_rows`.
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16);
     fn handle_resize(&mut self);
-    fn anchor_row(&self) -> Option<u16>;
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<DialogResult>;
 
     /// Seed the dialog's kill ring from the main input's kill ring.
@@ -75,40 +74,33 @@ pub(crate) struct ListState {
     pub scroll_offset: usize,
     pub max_visible: usize,
     max_height: Option<u16>,
-    overhead: u16,
-    pub anchor_row: Option<u16>,
     pub dirty: bool,
 }
 
 impl ListState {
-    /// `overhead` = chrome rows the dialog draws around the item list:
-    /// title bar, header label, blank lines, hint footer, etc. The
-    /// item area gets `max_height - overhead` rows when `max_height`
-    /// is set; otherwise items can grow unbounded. Each dialog
-    /// declares its own overhead constant so the value isn't a magic
-    /// integer at the call site.
-    pub fn new(item_count: usize, max_height: Option<u16>, overhead: u16) -> Self {
-        let max_visible = Self::cap(max_height, overhead, item_count);
+    pub fn new(item_count: usize, max_height: Option<u16>) -> Self {
+        let max_visible = Self::cap_visible(max_height, item_count);
         Self {
             selected: 0,
             scroll_offset: 0,
             max_visible,
             max_height,
-            overhead,
-            anchor_row: None,
             dirty: true,
         }
     }
 
-    fn cap(max_height: Option<u16>, overhead: u16, item_count: usize) -> usize {
+    fn cap_visible(max_height: Option<u16>, count: usize) -> usize {
         max_height
-            .map(|h| (h as usize).saturating_sub(overhead as usize))
+            .map(|h| h as usize)
             .unwrap_or(usize::MAX)
-            .min(item_count)
+            .min(count)
     }
 
-    pub fn height(&self, item_count: usize) -> u16 {
-        let wanted = (item_count as u16).saturating_add(self.overhead);
+    /// Report the dialog's total desired height.  `chrome` is the
+    /// number of non-item rows the dialog will render (bar, header,
+    /// hints, etc.) — computed by the caller, not stored.
+    pub fn height(&self, item_count: usize, chrome: u16) -> u16 {
+        let wanted = (item_count as u16).saturating_add(chrome);
         if let Some(cap) = self.max_height {
             wanted.min(cap)
         } else {
@@ -117,7 +109,7 @@ impl ListState {
     }
 
     pub fn set_items(&mut self, count: usize) {
-        self.max_visible = Self::cap(self.max_height, self.overhead, count);
+        self.max_visible = Self::cap_visible(self.max_height, count);
         if count == 0 {
             self.selected = 0;
             self.scroll_offset = 0;
@@ -132,7 +124,6 @@ impl ListState {
 
     pub fn handle_resize(&mut self, term_height: Option<u16>) {
         self.max_height = term_height.map(|h| h / 2);
-        self.anchor_row = None;
         self.dirty = true;
     }
 
@@ -176,30 +167,26 @@ impl ListState {
         self.dirty = true;
     }
 
+    /// Begin drawing the dialog.  `chrome` is the number of non-item
+    /// rows the caller will render (bar, header, blanks, hints).
+    /// `max_visible` is recomputed from `granted_rows - chrome`.
     pub fn begin_draw(
         &mut self,
         out: &mut RenderOut,
         start_row: u16,
         item_count: usize,
         width: u16,
-        height: u16,
-    ) -> Option<(usize, u16)> {
+        granted_rows: u16,
+        chrome: u16,
+    ) -> Option<usize> {
         if !self.dirty {
             return None;
         }
         self.dirty = false;
 
-        let wanted_rows = (item_count as u16).saturating_add(self.overhead);
-        let (bar_row, granted) = begin_dialog_draw(
-            out,
-            start_row,
-            wanted_rows,
-            height,
-            self.max_height,
-            &mut self.anchor_row,
-        );
-        self.max_visible = (granted as usize)
-            .saturating_sub(self.overhead as usize)
+        begin_dialog_draw(out, start_row);
+        self.max_visible = (granted_rows as usize)
+            .saturating_sub(chrome as usize)
             .min(item_count);
         if item_count == 0 {
             self.selected = 0;
@@ -211,7 +198,7 @@ impl ListState {
                 .min(item_count.saturating_sub(self.max_visible));
         }
 
-        Some((width as usize, bar_row))
+        Some(width as usize)
     }
 
     pub fn visible_range(&self, item_count: usize) -> std::ops::Range<usize> {
@@ -572,56 +559,23 @@ pub(crate) fn render_inline_textarea(
         if editing && vi == vis_cursor.0 {
             cursor_pos = Some((text_col + vis_cursor.1 as u16, row));
         }
-        crlf(out);
+        out.overlay_newline();
         row += 1;
     }
     (row, cursor_pos)
 }
 
-pub(crate) fn begin_dialog_draw(
-    out: &mut RenderOut,
-    start_row: u16,
-    content_rows: u16,
-    height: u16,
-    max_rows: Option<u16>,
-    anchor_row: &mut Option<u16>,
-) -> (u16, u16) {
-    // Dialogs paint after conversation content that may have left SGR
-    // attributes active in the terminal. Frames use a fresh `RenderOut`, so
-    // reset the terminal unconditionally before drawing the overlay.
-    out.force_reset_style();
-    // Reserve the last row for the status bar.
-    let usable_height = height.saturating_sub(1);
-
-    let granted = if let Some(cap) = max_rows {
-        content_rows.min(cap)
-    } else {
-        content_rows
-    };
-    let granted = granted.min(usable_height);
-
-    let bar_row = if let Some(anchor) = *anchor_row {
-        anchor
-    } else {
-        let available = usable_height.saturating_sub(start_row);
-        let row = if granted <= available {
-            start_row
-        } else {
-            let deficit = granted.saturating_sub(available);
-            let _ = out.queue(terminal::ScrollUp(deficit));
-            usable_height.saturating_sub(granted)
-        };
-        *anchor_row = Some(row);
-        row
-    };
-
-    let _ = out.queue(cursor::MoveTo(0, bar_row));
-    out.row = Some(bar_row);
-    (bar_row, granted)
+pub(crate) fn begin_dialog_draw(out: &mut RenderOut, start_row: u16) {
+    // Reset styling to a clean state before the dialog paints.
+    // Use the tracked reset (not force) to avoid emitting unnecessary
+    // SGR codes that can flash on screen.
+    out.reset_style();
+    let _ = out.queue(cursor::MoveTo(0, start_row));
+    out.row = Some(start_row);
 }
 
 pub(crate) fn end_dialog_draw(out: &mut RenderOut) {
-    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
+    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
 }
 
 pub(crate) fn finish_dialog_frame(

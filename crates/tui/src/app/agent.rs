@@ -933,9 +933,10 @@ impl App {
     pub(super) fn handle_dialog_result(
         &mut self,
         result: render::DialogResult,
-        anchor: Option<u16>,
         agent: &mut Option<TurnState>,
     ) {
+        // Resume the spinner if a blocking dialog paused it.
+        self.screen.resume_spinner();
         match result {
             render::DialogResult::Confirm {
                 choice,
@@ -956,7 +957,7 @@ impl App {
                     &tool_name,
                     agent,
                 );
-                self.screen.clear_dialog_area(anchor);
+                self.screen.clear_dialog_area();
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
                     *agent = None;
@@ -964,7 +965,7 @@ impl App {
             }
             render::DialogResult::Question { answer, request_id } => {
                 let should_cancel = self.resolve_question(answer, request_id, agent);
-                self.screen.clear_dialog_area(anchor);
+                self.screen.clear_dialog_area();
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
                     *agent = None;
@@ -991,7 +992,7 @@ impl App {
                     if restore_vim_insert {
                         self.input.set_vim_mode(vim::ViMode::Insert);
                     }
-                    self.screen.clear_dialog_area(anchor);
+                    self.screen.clear_dialog_area();
                 }
             }
             render::DialogResult::Resume { session_id } => {
@@ -1008,7 +1009,7 @@ impl App {
                     }
                 }
                 if clear {
-                    self.screen.clear_dialog_area(anchor);
+                    self.screen.clear_dialog_area();
                 }
             }
             render::DialogResult::PermissionsClosed {
@@ -1016,14 +1017,14 @@ impl App {
                 workspace_remaining,
             } => {
                 self.sync_permissions(session_remaining, workspace_remaining);
-                self.screen.clear_dialog_area(anchor);
+                self.screen.clear_dialog_area();
             }
             render::DialogResult::AgentsClosed => {
-                self.screen.clear_dialog_area(anchor);
+                self.screen.clear_dialog_area();
                 self.refresh_agent_counts();
             }
             render::DialogResult::PsClosed | render::DialogResult::Dismissed => {
-                self.screen.clear_dialog_area(anchor);
+                self.screen.clear_dialog_area();
             }
         }
     }
@@ -1355,8 +1356,8 @@ impl App {
                 }
 
                 // Close any non-blocking dialog (e.g. Ps) to make room.
-                if let Some(prev) = active_dialog.take() {
-                    self.screen.clear_dialog_area(prev.anchor_row());
+                if active_dialog.take().is_some() {
+                    self.screen.clear_dialog_area();
                 }
                 self.confirm_context = Some(ConfirmContext {
                     call_id: req.call_id.clone(),
@@ -1378,8 +1379,8 @@ impl App {
                 }
 
                 // Close any non-blocking dialog (e.g. Ps) to make room.
-                if let Some(prev) = active_dialog.take() {
-                    self.screen.clear_dialog_area(prev.anchor_row());
+                if active_dialog.take().is_some() {
+                    self.screen.clear_dialog_area();
                 }
                 // ask_user_question doesn't have a call_id in the permission flow,
                 // use empty string (it targets the last active tool via fallback).

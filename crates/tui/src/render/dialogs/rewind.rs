@@ -1,15 +1,11 @@
 use crate::keymap::{hints, nav_lookup, NavAction};
-use crate::render::{crlf, draw_bar};
+use crate::render::draw_bar;
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::style::Print;
 use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
-
-/// Chrome rows around the item list: bar + "Rewind to:" header +
-/// blank separator + hints footer.
-const LIST_OVERHEAD: u16 = 4;
 
 pub struct RewindDialog {
     turns: Vec<(usize, String)>,
@@ -25,7 +21,7 @@ impl RewindDialog {
     ) -> Self {
         // +1 for the "(current)" sentinel entry at the end.
         let total = turns.len() + 1;
-        let mut list = ListState::new(total, max_height, LIST_OVERHEAD);
+        let mut list = ListState::new(total, max_height);
         list.selected = total.saturating_sub(1);
         list.scroll_offset = total.saturating_sub(list.max_visible);
         Self {
@@ -46,15 +42,11 @@ impl RewindDialog {
 
 impl super::Dialog for RewindDialog {
     fn height(&self) -> u16 {
-        self.list.height(self.total_items())
+        self.list.height(self.total_items(), 4)
     }
 
     fn mark_dirty(&mut self) {
         self.list.dirty = true;
-    }
-
-    fn anchor_row(&self) -> Option<u16> {
-        self.list.anchor_row
     }
 
     fn handle_resize(&mut self) {
@@ -103,19 +95,22 @@ impl super::Dialog for RewindDialog {
         }
     }
 
-    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, height: u16) {
+    fn draw(&mut self, out: &mut RenderOut, start_row: u16, width: u16, granted_rows: u16) {
         let n = self.total_items();
-        let Some((w, _)) = self.list.begin_draw(out, start_row, n, width, height) else {
+        let Some(w) = self
+            .list
+            .begin_draw(out, start_row, n, width, granted_rows, 4)
+        else {
             return;
         };
 
         draw_bar(out, w, None, None, theme::accent());
-        crlf(out);
+        out.overlay_newline();
 
         out.push_dim();
         let _ = out.queue(Print(" Rewind to:"));
         out.pop_style();
-        crlf(out);
+        out.overlay_newline();
 
         let num_width = n.to_string().len();
         let range = self.list.visible_range(n);
@@ -142,10 +137,10 @@ impl super::Dialog for RewindDialog {
                 let _ = out.queue(Print(" "));
                 let _ = out.queue(Print(&truncated));
             }
-            crlf(out);
+            out.overlay_newline();
         }
 
-        crlf(out);
+        out.overlay_newline();
         out.push_dim();
         let _ = out.queue(Print(&hints::join(&[hints::SELECT, hints::CANCEL])));
         out.pop_style();

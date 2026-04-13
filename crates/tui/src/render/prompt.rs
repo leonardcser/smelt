@@ -15,6 +15,10 @@ pub(super) struct PromptState {
     /// Computed each frame inside `draw_frame`, exposed via `dialog_row()`
     /// getter for the app loop.
     pub prev_dialog_row: Option<u16>,
+    /// Dialog height from the last full layout pass. When the dialog
+    /// height changes, the early-exit path must be skipped to
+    /// recompute scroll and placement.
+    pub prev_dialog_height: u16,
     /// Persisted scroll offset for multi-line input (vim-style viewport).
     pub input_scroll: usize,
 }
@@ -28,6 +32,7 @@ impl PromptState {
             prev_prompt_ui_rows: 0,
             anchor_row: None,
             prev_dialog_row: None,
+            prev_dialog_height: 0,
             input_scroll: 0,
         }
     }
