@@ -172,8 +172,8 @@ pub async fn engine_task(
                             }
                         }
                     }
-                    UiCommand::GenerateTitle { user_messages, model, api_base, api_key } => {
-                        spawn_title_generation(&config, &client, &model, user_messages, api_base, api_key, &event_tx);
+                    UiCommand::GenerateTitle { last_user_message, assistant_tail, model, api_base, api_key } => {
+                        spawn_title_generation(&config, &client, &model, last_user_message, assistant_tail, api_base, api_key, &event_tx);
                     }
                     UiCommand::Btw { question, history, model, reasoning_effort, api_base, api_key } => {
                         spawn_btw_request(&config, &client, &model, reasoning_effort, question, history, api_base, api_key, &event_tx);
@@ -199,11 +199,13 @@ pub async fn engine_task(
 
 /// Spawn title generation as a background task so it doesn't block the engine
 /// loop or get swallowed by a running turn.
+#[allow(clippy::too_many_arguments)]
 fn spawn_title_generation(
     config: &EngineConfig,
     client: &reqwest::Client,
     model: &str,
-    user_messages: Vec<String>,
+    last_user_message: String,
+    assistant_tail: String,
     api_base: Option<String>,
     api_key: Option<String>,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
@@ -215,16 +217,21 @@ fn spawn_title_generation(
     let pricing = PricingContext::from_config(config);
     let redact = config.redact_secrets;
     tokio::spawn(async move {
-        let user_messages: Vec<String> = user_messages
-            .into_iter()
-            .map(|m| crate::redact::maybe_redact(m, redact))
-            .collect();
+        let last_user_message = crate::redact::maybe_redact(last_user_message, redact);
+        let assistant_tail = crate::redact::maybe_redact(assistant_tail, redact);
         log::entry(
             log::Level::Info,
             "title_request",
-            &serde_json::json!({"message_count": user_messages.len(), "model": &model}),
+            &serde_json::json!({
+                "user_chars": last_user_message.len(),
+                "assistant_chars": assistant_tail.len(),
+                "model": &model,
+            }),
         );
-        match provider.complete_title(&user_messages, &model).await {
+        match provider
+            .complete_title(&last_user_message, &assistant_tail, &model)
+            .await
+        {
             Ok(((ref title, ref slug), usage)) => {
                 pricing.emit(&tx, &model, usage);
                 log::entry(
@@ -250,9 +257,10 @@ fn spawn_title_generation(
                     });
                     return;
                 }
-                let fallback = user_messages
-                    .last()
-                    .and_then(|m| m.lines().next())
+                let fallback = last_user_message
+                    .lines()
+                    .next()
+                    .filter(|l| !l.is_empty())
                     .unwrap_or("Untitled");
                 let mut title = fallback.to_string();
                 if title.len() > 48 {
@@ -620,7 +628,8 @@ impl<'a> Turn<'a> {
     fn handle_background_cmd(&self, cmd: UiCommand) -> bool {
         match cmd {
             UiCommand::GenerateTitle {
-                user_messages,
+                last_user_message,
+                assistant_tail,
                 model,
                 api_base,
                 api_key,
@@ -629,7 +638,8 @@ impl<'a> Turn<'a> {
                     self.config,
                     self.http_client,
                     &model,
-                    user_messages,
+                    last_user_message,
+                    assistant_tail,
                     api_base,
                     api_key,
                     self.event_tx,
@@ -1282,6 +1292,7 @@ impl<'a> Turn<'a> {
                 cancel: &self.cancel,
                 on_retry: Some(&on_retry),
                 on_delta: Some(&on_delta),
+                response_format: None,
             };
             let redacted_messages;
             let chat_messages: &[Message] = if self.config.redact_secrets {

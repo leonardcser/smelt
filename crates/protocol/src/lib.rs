@@ -405,9 +405,11 @@ pub enum UiCommand {
         instructions: Option<String>,
     },
 
-    /// Generate a title for the session based on recent user messages.
+    /// Generate a title for the session based on the latest user message and
+    /// the tail of the assistant's response.
     GenerateTitle {
-        user_messages: Vec<String>,
+        last_user_message: String,
+        assistant_tail: String,
         model: String,
         api_base: Option<String>,
         api_key: Option<String>,

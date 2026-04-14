@@ -325,11 +325,23 @@ impl ProviderKind {
 
 // ── Chat options ────────────────────────────────────────────────────────────
 
+/// Request a structured JSON response that conforms to `schema`. Each
+/// provider adapter translates this to its native field (`text.format` for the
+/// OpenAI Responses API, `response_format.json_schema` for chat/completions).
+/// Providers that don't support structured outputs ignore it; the model still
+/// usually emits valid JSON thanks to the prompt, but without enforcement.
+#[derive(Clone)]
+pub struct ResponseFormat {
+    pub name: String,
+    pub schema: serde_json::Value,
+}
+
 /// Execution-time options for a `Provider::chat()` call.
 pub struct ChatOptions<'a> {
     pub cancel: &'a CancellationToken,
     pub on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
     pub on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
+    pub response_format: Option<ResponseFormat>,
 }
 
 impl<'a> ChatOptions<'a> {
@@ -338,7 +350,13 @@ impl<'a> ChatOptions<'a> {
             cancel,
             on_retry: None,
             on_delta: None,
+            response_format: None,
         }
+    }
+
+    pub fn with_response_format(mut self, fmt: ResponseFormat) -> Self {
+        self.response_format = Some(fmt);
+        self
     }
 }
 
@@ -497,6 +515,10 @@ impl Provider {
                 (url, body)
             }
         };
+
+        if let Some(fmt) = opts.response_format.as_ref() {
+            apply_response_format(&mut body, self.kind, fmt);
+        }
 
         let use_stream = opts.on_delta.is_some() || is_codex;
         if use_stream {
@@ -841,16 +863,13 @@ impl Provider {
         &self,
         messages: &[Message],
         model: &str,
+        response_format: Option<ResponseFormat>,
     ) -> Result<(String, TokenUsage), ProviderError> {
         let cancel = CancellationToken::new();
+        let mut opts = ChatOptions::new(&cancel);
+        opts.response_format = response_format;
         let resp = self
-            .chat(
-                messages,
-                &[],
-                model,
-                ReasoningEffort::Off,
-                &ChatOptions::new(&cancel),
-            )
+            .chat(messages, &[], model, ReasoningEffort::Off, &opts)
             .await?;
         let usage = resp.usage;
         let text = resp.content.unwrap_or_default().trim().to_string();
@@ -866,19 +885,21 @@ impl Provider {
         messages: &[protocol::Message],
         model: &str,
     ) -> Result<(String, TokenUsage), ProviderError> {
-        self.complete_simple(messages, model).await
+        self.complete_simple(messages, model, None).await
     }
 
     async fn complete_short(
         &self,
         prompt: &str,
         model: &str,
+        response_format: Option<ResponseFormat>,
     ) -> Result<(String, TokenUsage), ProviderError> {
         let messages = vec![
             Message::system("Reasoning: low".to_string()),
             Message::user(Content::text(prompt)),
         ];
-        self.complete_simple(&messages, model).await
+        self.complete_simple(&messages, model, response_format)
+            .await
     }
 
     pub async fn extract_web_content(
@@ -895,30 +916,58 @@ impl Provider {
                 "<content>\n{content}\n</content>\n\n{prompt}"
             ))),
         ];
-        self.complete_simple(&messages, model).await
+        self.complete_simple(&messages, model, None).await
     }
 
     pub async fn complete_title(
         &self,
-        user_messages: &[String],
+        last_user_message: &str,
+        assistant_tail: &str,
         model: &str,
     ) -> Result<((String, String), TokenUsage), ProviderError> {
-        let numbered: Vec<String> = user_messages
-            .iter()
-            .enumerate()
-            .map(|(i, m)| format!("{}. {}", i + 1, m.replace('\n', " ")))
-            .collect();
+        let assistant_block = if assistant_tail.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n\nAssistant response (tail):\n{}", assistant_tail)
+        };
         let prompt = format!(
-            "Generate a short session title and slug for a coding session. \
-             Focus on the most recent topic/task, not earlier ones. \
-             Reply with exactly two lines, no quotes:\n\
-             title: <3-6 word title>\n\
-             slug: <1-5 lowercase words separated by dashes, like a git branch name>\n\n\
-             User messages (oldest to newest):\n{}",
-            numbered.join("\n")
+            "Generate a concise session title and git-branch-style slug for a coding session.\n\
+             \n\
+             Title: 3-6 words, sentence case (capitalize only the first word and proper nouns, not Title Case), \
+             clear enough that the user can recognize the session in a list.\n\
+             Slug: 1-5 lowercase words separated by dashes, like a git branch name.\n\
+             \n\
+             Respond with a single JSON object, no markdown fences, no prose: \
+             {{\"title\": \"...\", \"slug\": \"...\"}}\n\
+             \n\
+             Good examples:\n\
+             {{\"title\": \"Fix login button on mobile\", \"slug\": \"fix-mobile-login\"}}\n\
+             {{\"title\": \"Add OAuth authentication\", \"slug\": \"add-oauth\"}}\n\
+             {{\"title\": \"Debug failing CI tests\", \"slug\": \"debug-ci-tests\"}}\n\
+             {{\"title\": \"Refactor API client error handling\", \"slug\": \"refactor-api-errors\"}}\n\
+             \n\
+             Bad (too vague): {{\"title\": \"Code changes\", \"slug\": \"changes\"}}\n\
+             Bad (too long): {{\"title\": \"Investigate and fix the issue where the login button does not respond on mobile\", \"slug\": \"fix\"}}\n\
+             Bad (wrong case): {{\"title\": \"Fix Login Button On Mobile\", \"slug\": \"fix-login\"}}\n\
+             \n\
+             User message:\n{}{}",
+            last_user_message, assistant_block
         );
 
-        let (raw, usage) = self.complete_short(&prompt, model).await?;
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "slug": {"type": "string"},
+            },
+            "required": ["title", "slug"],
+            "additionalProperties": false,
+        });
+        let fmt = ResponseFormat {
+            name: "session_title".to_string(),
+            schema,
+        };
+        let (raw, usage) = self.complete_short(&prompt, model, Some(fmt)).await?;
         let (title, slug) = parse_title_and_slug(&raw);
 
         Ok(((title, slug), usage))
@@ -927,24 +976,16 @@ impl Provider {
 
 // ── Free functions ──────────────────────────────────────────────────────────
 
-fn parse_title_and_slug(raw: &str) -> (String, String) {
-    let mut title = String::new();
-    let mut slug = String::new();
+#[derive(serde::Deserialize)]
+struct TitleSlug {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    slug: String,
+}
 
-    for line in raw.lines() {
-        let line = line.trim();
-        if let Some(rest) = line
-            .strip_prefix("title:")
-            .or_else(|| line.strip_prefix("Title:"))
-        {
-            title = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-        } else if let Some(rest) = line
-            .strip_prefix("slug:")
-            .or_else(|| line.strip_prefix("Slug:"))
-        {
-            slug = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-        }
-    }
+fn parse_title_and_slug(raw: &str) -> (String, String) {
+    let (mut title, mut slug) = extract_json_title_slug(raw).unwrap_or_default();
 
     if title.is_empty() {
         title = normalize_short(raw);
@@ -966,6 +1007,75 @@ fn parse_title_and_slug(raw: &str) -> (String, String) {
     }
 
     (title, slug)
+}
+
+/// Patch a built request body with provider-native structured-output fields.
+/// - OpenAI Responses API (and Codex): `text.format` with a `json_schema` entry.
+/// - chat/completions-style (Local/vLLM/llama.cpp/OpenAI-compatible):
+///   `response_format` with a `json_schema` entry.
+/// - Anthropic: no patch yet; falls back to prompt-based JSON.
+fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: &ResponseFormat) {
+    match kind {
+        ProviderKind::OpenAi | ProviderKind::Codex => {
+            body["text"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": fmt.name,
+                    "schema": fmt.schema,
+                    "strict": true,
+                }
+            });
+        }
+        ProviderKind::Local => {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": fmt.name,
+                    "schema": fmt.schema,
+                    "strict": true,
+                }
+            });
+        }
+        ProviderKind::Anthropic => {
+            // Gate on models that support native structured outputs (GA as of
+            // 2025-11). Older models (Haiku 3.5, Sonnet 3.7, etc.) would 400
+            // if the field were sent, so we skip silently and let prompt-based
+            // JSON handle those.
+            let model = body["model"].as_str().unwrap_or("");
+            if !anthropic_supports_structured_output(model) {
+                return;
+            }
+            let format_val = serde_json::json!({
+                "type": "json_schema",
+                "schema": fmt.schema,
+            });
+            match body.get_mut("output_config") {
+                Some(v) if v.is_object() => {
+                    v["format"] = format_val;
+                }
+                _ => {
+                    body["output_config"] = serde_json::json!({ "format": format_val });
+                }
+            }
+        }
+    }
+}
+
+fn anthropic_supports_structured_output(model: &str) -> bool {
+    model.contains("-4-5") || model.contains("-4-6") || model.contains("mythos")
+}
+
+fn extract_json_title_slug(raw: &str) -> Option<(String, String)> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let parsed: TitleSlug = serde_json::from_str(&raw[start..=end]).ok()?;
+    Some((
+        parsed.title.trim().to_string(),
+        parsed.slug.trim().to_string(),
+    ))
 }
 
 pub fn slugify(title: &str) -> String {

@@ -460,19 +460,21 @@ impl App {
             );
             return;
         }
-        let mut user_messages: Vec<String> = self
+        let last_user_idx = self
             .history
             .iter()
-            .filter(|m| matches!(m.role, protocol::Role::User))
-            .filter_map(|m| m.content.as_ref().map(|c| c.text_content()))
-            .filter(|t| !t.is_empty())
-            .collect();
-        if let Some(msg) = current_message {
-            if !msg.is_empty() {
-                user_messages.push(msg.to_string());
-            }
-        }
-        if user_messages.is_empty() {
+            .rposition(|m| matches!(m.role, protocol::Role::User));
+        let last_user_message = match (last_user_idx, current_message) {
+            (_, Some(msg)) if !msg.is_empty() => msg.to_string(),
+            (Some(i), _) => self
+                .history
+                .get(i)
+                .and_then(|m| m.content.as_ref())
+                .map(|c| c.text_content())
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        if last_user_message.is_empty() {
             engine::log::entry(
                 engine::log::Level::Debug,
                 "title_skip",
@@ -480,26 +482,33 @@ impl App {
             );
             return;
         }
-        // Send last 5 user messages for title generation (recency-weighted).
-        let start = user_messages.len().saturating_sub(5);
-        let recent: Vec<String> = user_messages
-            .drain(start..)
-            .map(|s| {
-                if s.len() > 500 {
-                    s[..s.floor_char_boundary(500)].to_string()
-                } else {
-                    s
-                }
-            })
-            .collect();
+        // Tail of assistant text after the last user message (bounded to 1000 chars).
+        let tail_start = last_user_idx.map(|i| i + 1).unwrap_or(0);
+        let mut assistant_tail: String = self.history[tail_start..]
+            .iter()
+            .filter(|m| matches!(m.role, protocol::Role::Assistant))
+            .filter_map(|m| m.content.as_ref().map(|c| c.text_content()))
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if assistant_tail.len() > 1000 {
+            let cut = assistant_tail.len() - 1000;
+            let boundary = assistant_tail.ceil_char_boundary(cut);
+            assistant_tail = assistant_tail[boundary..].to_string();
+        }
         engine::log::entry(
             engine::log::Level::Info,
             "title_generate",
-            &serde_json::json!({"message_count": recent.len(), "current_title": self.session.title}),
+            &serde_json::json!({
+                "user_chars": last_user_message.len(),
+                "assistant_chars": assistant_tail.len(),
+                "current_title": self.session.title,
+            }),
         );
         self.pending_title = true;
         self.engine.send(UiCommand::GenerateTitle {
-            user_messages: recent,
+            last_user_message,
+            assistant_tail,
             model: self.model.clone(),
             api_base: Some(self.api_base.clone()),
             api_key: Some(self.api_key()),

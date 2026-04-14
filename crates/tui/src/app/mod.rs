@@ -1305,7 +1305,8 @@ impl App {
         let text = content.text_content();
         if self.session.slug.is_none() && !text.is_empty() {
             self.engine.send(UiCommand::GenerateTitle {
-                user_messages: vec![text],
+                last_user_message: text,
+                assistant_tail: String::new(),
                 model: self.model.clone(),
                 api_base: Some(self.api_base.clone()),
                 api_key: Some(self.api_key()),
