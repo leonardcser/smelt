@@ -36,8 +36,9 @@ use crossterm::{
     },
     terminal, QueueableCommand,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
@@ -158,6 +159,79 @@ impl std::ops::DerefMut for Frame {
     }
 }
 
+// 1 MiB is enough for any realistic full redraw payload (~640 KB for a
+// 360-block session at 120 cols). `bin/term_bench` confirms there's no
+// measurable gain from a larger buffer.
+const STDOUT_BUF_CAPACITY: usize = 1 << 20;
+
+thread_local! {
+    /// Stashed buffer returned by a dropped `PooledBufWriter`, reused by the
+    /// next frame's writer instead of re-allocating 1 MiB every paint.
+    static BUFFER_POOL: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+/// `BufWriter` analogue that recycles its 1 MiB backing buffer across frames
+/// via a thread-local pool. Behaviour matches `std::io::BufWriter`: write
+/// into the buffer, flush when it's full, pass large writes straight through.
+pub struct PooledBufWriter<W: Write> {
+    inner: W,
+    buf: Vec<u8>,
+}
+
+impl<W: Write> PooledBufWriter<W> {
+    pub fn new(inner: W) -> Self {
+        let buf = BUFFER_POOL
+            .with(|p| p.borrow_mut().take())
+            .unwrap_or_else(|| Vec::with_capacity(STDOUT_BUF_CAPACITY));
+        Self { inner, buf }
+    }
+
+    fn flush_buf(&mut self) -> io::Result<()> {
+        if !self.buf.is_empty() {
+            self.inner.write_all(&self.buf)?;
+            self.buf.clear();
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for PooledBufWriter<W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.buf.len() + data.len() > self.buf.capacity() {
+            self.flush_buf()?;
+        }
+        if data.len() >= self.buf.capacity() {
+            self.inner.write(data)
+        } else {
+            self.buf.extend_from_slice(data);
+            Ok(data.len())
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_buf()?;
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Drop for PooledBufWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush_buf();
+        let mut buf = std::mem::take(&mut self.buf);
+        // Only return buffers that match the pool's target capacity — a
+        // shrunk or oversized buffer defeats the pool's purpose.
+        if buf.capacity() == STDOUT_BUF_CAPACITY {
+            buf.clear();
+            BUFFER_POOL.with(|p| {
+                let mut slot = p.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(buf);
+                }
+            });
+        }
+    }
+}
+
 /// Output wrapper that selects the line-advance strategy (scroll vs overlay).
 pub struct RenderOut {
     pub out: Box<dyn Write>,
@@ -206,14 +280,7 @@ impl RenderOut {
     /// Create a scroll-mode output (for blocks + prompt).
     /// Dialogs switch to overlay mode by setting `out.row = Some(r)`.
     pub fn scroll() -> Self {
-        // 1 MiB is enough for any realistic full redraw payload (~640 KB
-        // for a 360-block session at 120 cols). `bin/term_bench` confirms
-        // there's no measurable gain from a larger buffer (scenarios 6, 7).
-        const STDOUT_BUF_CAPACITY: usize = 1 << 20;
-        Self::new(
-            Box::new(BufWriter::with_capacity(STDOUT_BUF_CAPACITY, io::stdout())),
-            None,
-        )
+        Self::new(Box::new(PooledBufWriter::new(io::stdout())), None)
     }
 
     /// Create a scroll-mode output writing to a shared buffer (for testing).
