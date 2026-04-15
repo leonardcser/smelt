@@ -11,11 +11,6 @@
   generation, analysis, and assistance.
 </p>
 
-> [!WARNING]
->
-> **This is an early-stage project.** Expect bugs, incomplete features, and
-> breaking changes. Make sure to regularly update.
-
 <p align="center">
   <img src="assets/demo.gif" alt="demo" width="800">
 </p>
