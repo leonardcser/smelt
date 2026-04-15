@@ -8,8 +8,7 @@ use super::display::{ColorRole, ColorValue, DisplayBlock, DisplayLine, SpanStyle
 use super::layout_out::display_width;
 use super::{PaintContext, RenderOut, StyleState};
 use crate::theme::Theme;
-use crossterm::style::{Color, Print};
-use crossterm::QueueableCommand;
+use crossterm::style::Color;
 
 /// Static buffer of spaces sliced (and looped) for end-of-line bg
 /// padding. Avoids a per-line `String::with_capacity + repeat`
@@ -43,7 +42,7 @@ pub(super) fn paint_line(out: &mut RenderOut, line: &DisplayLine, ctx: &PaintCon
     let mut visible_cols: u16 = 0;
     for span in &line.spans {
         apply_style(out, &span.style, ctx.theme);
-        let _ = out.queue(Print(&span.text));
+        out.print(&span.text);
         visible_cols = visible_cols.saturating_add(display_width(&span.text) as u16);
     }
     if let Some(fill) = line.fill_bg {
@@ -56,7 +55,7 @@ pub(super) fn paint_line(out: &mut RenderOut, line: &DisplayLine, ctx: &PaintCon
             let mut remaining = pad as usize;
             while remaining > 0 {
                 let chunk = remaining.min(PAD_SPACES.len());
-                let _ = out.queue(Print(&PAD_SPACES[..chunk]));
+                out.print(&PAD_SPACES[..chunk]);
                 remaining -= chunk;
             }
         }

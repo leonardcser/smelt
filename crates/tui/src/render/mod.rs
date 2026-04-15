@@ -257,6 +257,8 @@ pub struct RenderOut {
     /// Terminal height for clamping cursor_row during scroll-mode
     /// `\r\n` (the cursor can't exceed term_h - 1).
     pub(super) term_height: u16,
+    /// Cached terminal width; see `newline` for the DECAWM rationale.
+    pub(super) term_width: u16,
 }
 
 impl RenderOut {
@@ -274,6 +276,7 @@ impl RenderOut {
             bytes_queued: 0,
             cursor_row: 0,
             term_height: 0,
+            term_width: 0,
         }
     }
 
@@ -454,8 +457,9 @@ impl RenderOut {
     // ── Cursor-tracking helpers ───────────────────────────────────
 
     /// Initialize cursor tracking at the start of a frame.
-    pub(super) fn init_cursor(&mut self, row: u16, term_height: u16) {
+    pub(super) fn init_cursor(&mut self, row: u16, term_width: u16, term_height: u16) {
         self.cursor_row = row;
+        self.term_width = term_width;
         self.term_height = term_height;
     }
 
@@ -463,6 +467,28 @@ impl RenderOut {
     pub(super) fn move_to(&mut self, col: u16, row: u16) {
         let _ = self.queue(cursor::MoveTo(col, row));
         self.cursor_row = row;
+        self.line_cols = col;
+    }
+
+    /// Emit visible text and keep `line_cols` in sync. This is the sole
+    /// supported way to write printable content through a `RenderOut` —
+    /// raw `queue(Print(...))` calls bypass column tracking and can leave
+    /// `newline`'s last-column guard stale. Escape sequences (SGR, cursor
+    /// moves, clears) should continue to go through `queue`.
+    pub fn print(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.line_cols = self
+            .line_cols
+            .saturating_add(crate::render::layout_out::display_width(text) as u16);
+        let _ = self.queue(Print(text));
+    }
+
+    /// Formatted variant of [`print`] for `Display` values that aren't
+    /// already `&str`. Allocates; prefer `print(&str)` when possible.
+    pub fn print_fmt<D: std::fmt::Display>(&mut self, text: D) {
+        self.print(&text.to_string());
     }
 
     /// Queue a ScrollUp. Does not move the cursor — only shifts
@@ -488,7 +514,15 @@ impl RenderOut {
     /// [`scroll_newline`] or [`overlay_newline`] for compile-time
     /// documentation and a debug-mode assertion.
     pub fn newline(&mut self) {
-        let _ = self.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        // Skip `Clear::UntilNewLine` when the row was painted to the full
+        // terminal width. Issuing `CSI K` with the cursor sitting on the
+        // last-painted column erases that glyph on some terminals
+        // (Terminal.app, iTerm2, some Alacritty builds) — there is nothing
+        // to clear anyway, so we just drop the sequence. Otherwise EL runs
+        // to clear trailing residue from the previous frame.
+        if self.term_width == 0 || self.line_cols < self.term_width {
+            let _ = self.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+        }
         if let Some(r) = &mut self.row {
             *r += 1;
             let next = *r;
@@ -698,7 +732,7 @@ pub(super) fn draw_soft_cursor(out: &mut RenderOut, col: u16, row: u16) {
     let _ = out.queue(cursor::MoveTo(col, row));
     out.set_fg(fg);
     out.set_bg(bg);
-    let _ = out.queue(Print(" "));
+    out.print(" ");
     out.reset_style();
 }
 
@@ -2084,10 +2118,11 @@ impl Screen {
         if let Some((col, row)) = self.prompt.soft_cursor {
             let _ = out.queue(cursor::MoveTo(col, row));
             let _ = out.queue(ResetColor);
-            let _ = out.queue(Print(' '));
+            out.print(" ");
         }
         let _ = out.queue(cursor::MoveTo(0, last_row.min(height.saturating_sub(1))));
         let _ = out.queue(Print("\r\n\r\n"));
+        out.line_cols = 0;
         if clear_below {
             let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
         }
@@ -3313,6 +3348,11 @@ impl Screen {
         let is_dialog = prompt.is_none();
         let has_ephemeral = self.has_ephemeral();
 
+        // Seed `term_width` before the dialog-only fast path below,
+        // which returns without reaching the main `init_cursor` call.
+        let (seed_term_w, seed_term_h) = self.size();
+        out.init_cursor(out.cursor_row, seed_term_w, seed_term_h);
+
         // Dialog mode: only repaint the content region when new blocks
         // land, the overlay has changed, or the dialog height changed
         // (needs full layout recomputation).  But ALWAYS return a
@@ -3354,12 +3394,12 @@ impl Screen {
         }
 
         // ── Position cursor ─────────────────────────────────────────────
-        let (_term_w, term_h) = self.size();
+        let (term_w, term_h) = self.size();
         let explicit_anchor = self.prompt.anchor_row.take();
         let draw_start_row = explicit_anchor.unwrap_or_else(|| self.cursor_y());
 
         // Initialize cursor tracking for this frame.
-        out.init_cursor(draw_start_row, term_h);
+        out.init_cursor(draw_start_row, term_w, term_h);
         // Reposition when the prompt was previously drawn (incremental
         // update) OR when an explicit anchor was set (e.g. after
         // redraw/clear/rewind where the cursor may not match the anchor).
@@ -3869,7 +3909,7 @@ impl Screen {
             let _ = out.queue(cursor::MoveTo(2, cursor_row));
             out.push_dim();
             let msg: String = first_line.chars().take(usable.saturating_sub(2)).collect();
-            let _ = out.queue(Print(&msg));
+            out.print(&msg);
             out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             out.newline();
@@ -3923,7 +3963,7 @@ impl Screen {
             } else {
                 None
             };
-            let _ = out.queue(Print(" "));
+            out.print(" ");
             if has_arg_space && abs_idx == 0 {
                 // Command prefix in accent, argument text in normal style.
                 let (prefix, hint) = cmd_hint.as_ref().unwrap();
@@ -3945,9 +3985,9 @@ impl Screen {
                         } else {
                             hint.clone()
                         };
-                        let _ = out.queue(Print(" "));
+                        out.print(" ");
                         out.push_dim();
-                        let _ = out.queue(Print(&truncated));
+                        out.print(&truncated);
                         out.pop_style();
                     }
                 }
@@ -3965,7 +4005,7 @@ impl Screen {
                     let (fg, bg) = cursor_colors();
                     out.set_fg(fg);
                     out.set_bg(bg);
-                    let _ = out.queue(Print("!"));
+                    out.print("!");
                     out.reset_style();
                 } else {
                     out.push_style(StyleState {
@@ -3978,7 +4018,7 @@ impl Screen {
                         bold: true,
                         ..StyleState::default()
                     });
-                    let _ = out.queue(Print("!"));
+                    out.print("!");
                     out.pop_style();
                 }
                 // Shift selection range by 1 for the remaining text.
@@ -4008,7 +4048,7 @@ impl Screen {
                 };
                 let _ = out.queue(cursor::MoveToColumn((width as u16).saturating_sub(1)));
                 out.push_bg(bg);
-                let _ = out.queue(Print(" "));
+                out.print(" ");
                 out.pop_style();
             }
             out.newline();
@@ -4079,7 +4119,7 @@ fn render_notification(
     };
     let max_msg = usable.saturating_sub(label.len() + 3);
 
-    let _ = out.queue(Print(" "));
+    out.print(" ");
     out.push_style(StyleState {
         fg: if notification.is_error {
             Some(theme::ERROR)
@@ -4089,13 +4129,13 @@ fn render_notification(
         bold: true,
         ..StyleState::default()
     });
-    let _ = out.queue(Print(label));
+    out.print(label);
     out.pop_style();
-    let _ = out.queue(Print("  "));
+    out.print("  ");
 
     let msg: String = notification.message.chars().take(max_msg).collect();
     out.push_dim();
-    let _ = out.queue(Print(&msg));
+    out.print(&msg);
     out.pop_style();
     out.overlay_newline();
     1
@@ -4107,13 +4147,13 @@ fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usiz
     };
     let text = "› Stashed (ctrl+s to unstash)";
     let display: String = text.chars().take(usable).collect();
-    let _ = out.queue(Print("  "));
+    out.print("  ");
     out.push_style(StyleState {
         fg: Some(theme::muted()),
         dim: true,
         ..StyleState::default()
     });
-    let _ = out.queue(Print(display));
+    out.print(&display);
     out.pop_style();
     out.overlay_newline();
     1
@@ -4147,9 +4187,9 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
         for line in &all_lines {
             if line.is_empty() {
                 let fill = if block_w > 0 { block_w + 1 } else { 2 };
-                let _ = out.queue(Print(" ".repeat(indent)));
+                out.print(&" ".repeat(indent));
                 out.push_bg(theme::user_bg());
-                let _ = out.queue(Print(" ".repeat(fill)));
+                out.print(&" ".repeat(fill));
                 out.pop_style();
                 out.overlay_newline();
                 rows += 1;
@@ -4163,15 +4203,15 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
                 } else {
                     1
                 };
-                let _ = out.queue(Print(" ".repeat(indent)));
+                out.print(&" ".repeat(indent));
                 out.push_style(StyleState {
                     bg: Some(theme::user_bg()),
                     bold: true,
                     ..StyleState::default()
                 });
-                let _ = out.queue(Print(" "));
+                out.print(" ");
                 blocks::print_user_highlights(out, chunk, &[], is_command);
-                let _ = out.queue(Print(" ".repeat(trailing)));
+                out.print(&" ".repeat(trailing));
                 out.pop_style();
                 out.overlay_newline();
                 rows += 1;
@@ -4203,11 +4243,11 @@ fn render_btw(
     let mut rows = 0u16;
 
     // Header: "/btw" in accent, question with @path and image highlighting.
-    let _ = out.queue(Print(" "));
+    out.print(" ");
     out.push_fg(theme::accent());
-    let _ = out.queue(Print("/btw"));
+    out.print("/btw");
     out.pop_style();
-    let _ = out.queue(Print(" "));
+    out.print(" ");
     let max_q = usable.saturating_sub(6); // " /btw " = 6 chars
     let q: String = btw.question.chars().take(max_q).collect();
     blocks::print_user_highlights(out, &q, &btw.image_labels, false);
@@ -4248,7 +4288,7 @@ fn render_btw(
             let can_scroll = total > max_lines;
 
             for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
-                let _ = out.queue(Print(line));
+                out.print(line);
                 out.overlay_newline();
                 rows += 1;
             }
@@ -4261,13 +4301,13 @@ fn render_btw(
             out.push_fg(theme::muted());
             if can_scroll {
                 let end = (btw.scroll_offset + visible).min(total);
-                let _ = out.queue(Print(format!(
+                out.print(&format!(
                     "   [{end}/{total}]  {}  {}  esc: close",
                     hints::nav(vim_enabled),
                     hints::scroll(vim_enabled),
-                )));
+                ));
             } else {
-                let _ = out.queue(Print("   esc: close"));
+                out.print("   esc: close");
             }
             out.pop_style();
             out.overlay_newline();
@@ -4281,7 +4321,7 @@ fn render_btw(
                 / 150) as usize
                 % SPINNER_FRAMES.len();
             out.push_fg(theme::muted());
-            let _ = out.queue(Print(format!("   {} thinking", SPINNER_FRAMES[frame])));
+            out.print(&format!("   {} thinking", SPINNER_FRAMES[frame]));
             out.pop_style();
             out.overlay_newline();
             rows += 1;
@@ -4672,12 +4712,12 @@ fn render_status_spans(
     for span in spans.iter() {
         if span.group && col > 0 {
             out.push_style(sep_style.clone());
-            let _ = out.queue(Print(STATUS_SEP));
+            out.print(STATUS_SEP);
             out.pop_style();
             col += STATUS_SEP_LEN;
         }
         out.push_style(span.style.clone());
-        let _ = out.queue(Print(&span.text));
+        out.print(&span.text);
         out.pop_style();
         col += span.text.chars().count();
     }
@@ -4788,14 +4828,14 @@ pub(super) fn draw_bar(
                 dim: span.dim,
                 ..StyleState::default()
             });
-            let _ = out.queue(Print(&span.text));
+            out.print(&span.text);
             out.pop_style();
         }
-        let _ = out.queue(Print(" "));
+        out.print(" ");
     }
 
     out.push_fg(bar_color);
-    let _ = out.queue(Print(dash.repeat(bar_len)));
+    out.print(&dash.repeat(bar_len));
     out.pop_style();
 
     if !right_filtered.is_empty() {
@@ -4807,12 +4847,12 @@ pub(super) fn draw_bar(
                 dim: span.dim,
                 ..StyleState::default()
             });
-            let _ = out.queue(Print(&span.text));
+            out.print(&span.text);
             out.pop_style();
         }
-        let _ = out.queue(Print(" "));
+        out.print(" ");
         out.push_fg(bar_color);
-        let _ = out.queue(Print(dash));
+        out.print(dash);
         out.pop_style();
     }
 }
@@ -5029,7 +5069,7 @@ fn render_styled_chars(
             in_sel = want_sel;
             in_cursor = want_cursor;
         }
-        let _ = out.queue(Print(ch));
+        out.print(ch.encode_utf8(&mut [0u8; 4]));
     }
     // Render a cursor block past the end of the line.
     if cursor_pos == Some(char_count) {
@@ -5039,7 +5079,7 @@ fn render_styled_chars(
         let (fg, bg) = cursor_colors();
         out.set_fg(fg);
         out.set_bg(bg);
-        let _ = out.queue(Print(' '));
+        out.print(" ");
         out.reset_style();
         return;
     }
@@ -5049,7 +5089,7 @@ fn render_styled_chars(
             if !in_sel {
                 out.set_bg(theme::selection_bg());
             }
-            let _ = out.queue(Print(' '));
+            out.print(" ");
             out.reset_style();
             return;
         }
@@ -5103,7 +5143,7 @@ fn draw_completions(
     if comp.results.is_empty() {
         if comp.is_picker() {
             out.push_dim();
-            let _ = out.queue(Print("  no results"));
+            out.print("  no results");
             out.pop_style();
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             if show_hints && max_rows > hint_rows + empty_gap {
@@ -5154,43 +5194,43 @@ fn draw_completions(
         let label: String = raw.chars().take(avail).collect();
 
         if is_color_picker {
-            let _ = out.queue(Print("  "));
+            out.print("  ");
             if selected {
                 let ansi = item.ansi_color.unwrap_or(theme::accent_value());
                 out.push_fg(Color::AnsiValue(ansi));
-                let _ = out.queue(Print(format!("● {}", label)));
+                out.print(&format!("● {}", label));
                 out.pop_style();
             } else {
                 out.push_dim();
-                let _ = out.queue(Print(format!("  {}", label)));
+                out.print(&format!("  {}", label));
                 out.pop_style();
             }
             if let Some(ref desc) = item.description {
                 let pad = (max_label + 2).saturating_sub(label.len());
                 out.push_dim();
-                let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                out.print(&format!("{:>width$}{}", "", desc, width = pad));
                 out.pop_style();
             }
         } else {
-            let _ = out.queue(Print("  "));
+            out.print("  ");
             if selected {
                 out.push_fg(theme::accent());
-                let _ = out.queue(Print(&label));
+                out.print(&label);
                 if let Some(ref desc) = item.description {
                     let pad = max_label - label.len() + 2;
                     out.pop_style();
                     out.push_dim();
-                    let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                    out.print(&format!("{:>width$}{}", "", desc, width = pad));
                     out.pop_style();
                 } else {
                     out.pop_style();
                 }
             } else {
                 out.push_dim();
-                let _ = out.queue(Print(&label));
+                out.print(&label);
                 if let Some(ref desc) = item.description {
                     let pad = max_label - label.len() + 2;
-                    let _ = out.queue(Print(format!("{:>width$}{}", "", desc, width = pad)));
+                    out.print(&format!("{:>width$}{}", "", desc, width = pad));
                 }
                 out.pop_style();
             }
@@ -5215,11 +5255,11 @@ fn draw_completions(
 fn draw_settings_hints(out: &mut RenderOut, vim_enabled: bool) {
     out.newline();
     out.push_dim();
-    let _ = out.queue(Print(crate::keymap::hints::join(&[
+    out.print(&crate::keymap::hints::join(&[
         crate::keymap::hints::picker_nav(vim_enabled),
         "enter/space: toggle",
         crate::keymap::hints::CANCEL,
-    ])));
+    ]));
     out.pop_style();
     let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
 }
@@ -5254,38 +5294,38 @@ fn draw_stats_line(out: &mut RenderOut, line: &crate::metrics::StatsLine, label_
     match line {
         StatsLine::Kv { label, value } => {
             out.push_dim();
-            let _ = out.queue(Print(label));
+            out.print(label);
             out.pop_style();
             let col = label_col.max(label.len() + 2);
             let padding = " ".repeat(col.saturating_sub(label.len()));
-            let _ = out.queue(Print(padding));
-            let _ = out.queue(Print(value));
+            out.print(&padding);
+            out.print(value);
         }
         StatsLine::Heading(text) | StatsLine::SparklineLegend(text) => {
             out.push_dim();
-            let _ = out.queue(Print(text));
+            out.print(text);
             out.pop_style();
         }
         StatsLine::SparklineBars(bars) => {
             out.push_fg(theme::accent());
-            let _ = out.queue(Print(bars));
+            out.print(bars);
             out.pop_style();
         }
         StatsLine::HeatRow { label, cells } => {
             out.push_dim();
-            let _ = out.queue(Print(format!("{label} ")));
+            out.print(&format!("{label} "));
             out.pop_style();
             for cell in cells {
                 match cell {
                     crate::metrics::HeatCell::Empty => {
                         out.push_fg(Color::AnsiValue(238));
-                        let _ = out.queue(Print(format!("{HEAT_EMPTY} ")));
+                        out.print(&format!("{HEAT_EMPTY} "));
                         out.pop_style();
                     }
                     crate::metrics::HeatCell::Level(lvl) => {
                         let color = HEAT_COLORS[(*lvl as usize).min(3)];
                         out.push_fg(color);
-                        let _ = out.queue(Print(format!("{HEAT_CHAR} ")));
+                        out.print(&format!("{HEAT_CHAR} "));
                         out.pop_style();
                     }
                 }
@@ -5310,7 +5350,7 @@ fn draw_stats_sequential(
         if already_drawn + count > 0 {
             out.newline();
         }
-        let _ = out.queue(Print("  "));
+        out.print("  ");
         draw_stats_line(out, line, lc);
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         count += 1;
@@ -5365,7 +5405,7 @@ fn draw_stats(
         }
 
         let lw = if i < left.len() {
-            let _ = out.queue(Print("  "));
+            out.print("  ");
             draw_stats_line(out, &left[i], left_lc);
             2 + stats_line_width(&left[i], left_lc)
         } else {
@@ -5374,7 +5414,7 @@ fn draw_stats(
 
         if i < right.len() {
             let pad = right_col.saturating_sub(lw);
-            let _ = out.queue(Print(" ".repeat(pad)));
+            out.print(&" ".repeat(pad));
             draw_stats_line(out, &right[i], right_lc);
         }
 

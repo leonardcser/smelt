@@ -8,8 +8,7 @@
 
 use super::display::{ColorValue, DisplayBlock, DisplayLine, DisplaySpan, SpanStyle};
 use super::RenderOut;
-use crossterm::style::{Color, Print};
-use crossterm::QueueableCommand;
+use crossterm::style::Color;
 use unicode_width::UnicodeWidthStr;
 
 /// Display-column width of a string slice. Used for visible-width
@@ -288,12 +287,7 @@ fn state_to_span(state: &super::StyleState) -> SpanStyle {
 
 impl LayoutSink for RenderOut {
     fn print(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let w = display_width(text) as u16;
-        self.line_cols = self.line_cols.saturating_add(w);
-        let _ = self.queue(Print(text.to_string()));
+        RenderOut::print(self, text);
     }
 
     fn newline(&mut self) {
@@ -313,8 +307,7 @@ impl LayoutSink for RenderOut {
         if pad > 0 {
             let c = resolve_live(bg);
             RenderOut::set_bg(self, c);
-            let _ = self.queue(Print(" ".repeat(pad as usize)));
-            self.line_cols = self.line_cols.saturating_add(pad);
+            self.print(&" ".repeat(pad as usize));
         }
     }
 

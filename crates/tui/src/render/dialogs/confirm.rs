@@ -9,7 +9,6 @@ use crate::render::highlight::{
 use crate::render::{draw_bar, ConfirmChoice, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::Print;
 use crossterm::{cursor, terminal, QueueableCommand};
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
@@ -147,7 +146,7 @@ impl ConfirmPreview {
                     if emitted >= viewport {
                         break;
                     }
-                    let _ = out.queue(Print(" "));
+                    out.print(" ");
                     bh.print_line(out, line);
                     out.overlay_newline();
                     emitted += 1;
@@ -173,7 +172,7 @@ impl ConfirmPreview {
                     if emitted >= viewport {
                         break;
                     }
-                    let _ = out.queue(Print(*line));
+                    out.print(line);
                     out.overlay_newline();
                     emitted += 1;
                 }
@@ -347,9 +346,9 @@ fn render_notebook_preview(
         if viewport > 0 && emitted >= viewport {
             return;
         }
-        let _ = out.queue(Print(" "));
+        out.print(" ");
         out.push_fg(theme::muted());
-        let _ = out.queue(Print(line));
+        out.print(line);
         out.pop_style();
         out.overlay_newline();
         emitted += 1;
@@ -802,18 +801,18 @@ impl super::Dialog for ConfirmDialog {
             };
             for (i, seg) in segments.iter().enumerate() {
                 if i == 0 {
-                    let _ = out.queue(Print(" "));
+                    out.print(" ");
                     out.push_fg(title_color);
-                    let _ = out.queue(Print(&self.display_name));
+                    out.print(&self.display_name);
                     out.pop_style();
-                    let _ = out.queue(Print(": "));
+                    out.print(": ");
                 } else {
-                    let _ = out.queue(Print(" "));
+                    out.print(" ");
                 }
                 if let Some(ref mut h) = bh {
                     h.print_line(out, seg);
                 } else {
-                    let _ = out.queue(Print(seg));
+                    out.print(seg);
                 }
                 out.overlay_newline();
                 row += 1;
@@ -824,9 +823,9 @@ impl super::Dialog for ConfirmDialog {
                 let max_cols = w.saturating_sub(1);
                 let segments = wrap_line(summary, max_cols);
                 for seg in &segments {
-                    let _ = out.queue(Print(" "));
+                    out.print(" ");
                     out.push_fg(theme::muted());
-                    let _ = out.queue(Print(seg));
+                    out.print(seg);
                     out.pop_style();
                     out.overlay_newline();
                     row += 1;
@@ -838,7 +837,7 @@ impl super::Dialog for ConfirmDialog {
                 // Top separator (only for tools that request it)
                 if self.preview.has_top_separator() {
                     out.push_fg(theme::bar());
-                    let _ = out.queue(Print(&separator));
+                    out.print(&separator);
                     out.pop_style();
                     out.overlay_newline();
                     row += 1;
@@ -855,13 +854,13 @@ impl super::Dialog for ConfirmDialog {
                         ly.total_preview
                     );
                     let sep_len = w.saturating_sub(pos.len());
-                    let _ = out.queue(Print("\u{254c}".repeat(sep_len)));
+                    out.print(&"\u{254c}".repeat(sep_len));
                     out.pop_style();
                     out.push_fg(theme::muted());
-                    let _ = out.queue(Print(&pos));
+                    out.print(&pos);
                     out.pop_style();
                 } else {
-                    let _ = out.queue(Print(&separator));
+                    out.print(&separator);
                     out.pop_style();
                 }
                 out.overlay_newline();
@@ -876,7 +875,7 @@ impl super::Dialog for ConfirmDialog {
             let is_plan = matches!(self.preview, ConfirmPreview::PlanContent { .. });
             let prompt_text = if is_plan { " Implement?" } else { " Allow?" };
             out.push_dim();
-            let _ = out.queue(Print(prompt_text));
+            out.print(prompt_text);
             out.pop_style();
             out.overlay_newline();
             row += 1;
@@ -899,26 +898,26 @@ impl super::Dialog for ConfirmDialog {
 
             for (li, line) in lines.iter().enumerate() {
                 if li == 0 {
-                    let _ = out.queue(Print("  "));
+                    out.print("  ");
                     if highlighted {
                         out.push_dim();
-                        let _ = out.queue(Print(format!("{}.", i + 1)));
+                        out.print(&format!("{}.", i + 1));
                         out.pop_style();
-                        let _ = out.queue(Print(" "));
+                        out.print(" ");
                     } else {
                         out.push_dim();
-                        let _ = out.queue(Print(format!("{}. ", i + 1)));
+                        out.print(&format!("{}. ", i + 1));
                         out.pop_style();
                     }
                 } else {
-                    let _ = out.queue(Print(" ".repeat(prefix_cols)));
+                    out.print(&" ".repeat(prefix_cols));
                 }
                 if highlighted {
                     out.push_fg(theme::accent());
-                    let _ = out.queue(Print(line));
+                    out.print(line);
                     out.pop_style();
                 } else {
-                    let _ = out.queue(Print(line));
+                    out.print(line);
                 }
                 if li < lines.len() - 1 {
                     out.overlay_newline();
@@ -971,7 +970,7 @@ impl super::Dialog for ConfirmDialog {
         } else {
             hints::join(&[hints::CONFIRM, hints::ADD_MSG, hints::CANCEL])
         };
-        let _ = out.queue(Print(&hint));
+        out.print(&hint);
         out.pop_style();
         // Only clear below the dialog if there's actually viewport space left.
         // When the dialog fills the full terminal, the cursor is at or past

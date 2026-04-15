@@ -2,8 +2,6 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{draw_bar, ResumeEntry};
 use crate::{session, theme};
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::Print;
-use crossterm::QueueableCommand;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -264,18 +262,18 @@ impl super::Dialog for ResumeDialog {
 
         out.push_dim();
         if self.workspace_only {
-            let _ = out.queue(Print(" Resume (workspace):"));
+            out.print(" Resume (workspace):");
         } else {
-            let _ = out.queue(Print(" Resume (all):"));
+            out.print(" Resume (all):");
         }
         out.pop_style();
-        let _ = out.queue(Print(" "));
-        let _ = out.queue(Print(&self.query));
+        out.print(" ");
+        out.print(&self.query);
         out.overlay_newline();
 
         if self.filtered.is_empty() {
             out.push_dim();
-            let _ = out.queue(Print("  No matches"));
+            out.print("  No matches");
             out.pop_style();
             out.overlay_newline();
         } else {
@@ -309,20 +307,20 @@ impl super::Dialog for ResumeDialog {
                 let truncated = truncate_str(&title, title_col);
 
                 out.push_dim();
-                let _ = out.queue(Print(&" ".repeat(LEADING)));
-                let _ = out.queue(Print(&size_pad));
-                let _ = out.queue(Print(&size_str));
-                let _ = out.queue(Print(&" ".repeat(GAP)));
-                let _ = out.queue(Print(&time_ago));
-                let _ = out.queue(Print(&time_pad));
+                out.print(&" ".repeat(LEADING));
+                out.print(&size_pad);
+                out.print(&size_str);
+                out.print(&" ".repeat(GAP));
+                out.print(&time_ago);
+                out.print(&time_pad);
                 out.pop_style();
-                let _ = out.queue(Print(&" ".repeat(GAP + tree_indent)));
+                out.print(&" ".repeat(GAP + tree_indent));
                 if i == self.list.selected {
                     out.push_fg(theme::accent());
-                    let _ = out.queue(Print(&truncated));
+                    out.print(&truncated);
                     out.pop_style();
                 } else {
-                    let _ = out.queue(Print(&truncated));
+                    out.print(&truncated);
                 }
                 out.overlay_newline();
             }
@@ -335,12 +333,12 @@ impl super::Dialog for ResumeDialog {
         } else {
             "ctrl+w: this workspace"
         };
-        let _ = out.queue(Print(&hints::join(&[
+        out.print(&hints::join(&[
             hints::SELECT,
             hints::del_delete(self.vim_enabled),
             hints::CANCEL,
             toggle,
-        ])));
+        ]));
         out.pop_style();
         end_dialog_draw(out);
     }

@@ -2,8 +2,6 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::draw_bar;
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::Print;
-use crossterm::QueueableCommand;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
@@ -107,7 +105,7 @@ impl super::Dialog for RewindDialog {
         out.overlay_newline();
 
         out.push_dim();
-        let _ = out.queue(Print(" Rewind to:"));
+        out.print(" Rewind to:");
         out.pop_style();
         out.overlay_newline();
 
@@ -125,23 +123,23 @@ impl super::Dialog for RewindDialog {
             let max_label = w.saturating_sub(pad);
             let truncated = truncate_str(label, max_label);
             out.push_dim();
-            let _ = out.queue(Print(format!("  {:>width$}.", num, width = num_width)));
+            out.print(&format!("  {:>width$}.", num, width = num_width));
             out.pop_style();
             if i == self.list.selected {
-                let _ = out.queue(Print(" "));
+                out.print(" ");
                 out.push_fg(theme::accent());
-                let _ = out.queue(Print(&truncated));
+                out.print(&truncated);
                 out.pop_style();
             } else {
-                let _ = out.queue(Print(" "));
-                let _ = out.queue(Print(&truncated));
+                out.print(" ");
+                out.print(&truncated);
             }
             out.overlay_newline();
         }
 
         out.overlay_newline();
         out.push_dim();
-        let _ = out.queue(Print(&hints::join(&[hints::SELECT, hints::CANCEL])));
+        out.print(&hints::join(&[hints::SELECT, hints::CANCEL]));
         out.pop_style();
         end_dialog_draw(out);
     }

@@ -6,7 +6,6 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{draw_bar, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::Print;
 use crossterm::terminal;
 use crossterm::QueueableCommand;
 use std::collections::HashMap;
@@ -375,7 +374,7 @@ impl super::Dialog for QuestionDialog {
         row += 1;
 
         if self.has_tabs {
-            let _ = out.queue(Print(" "));
+            out.print(" ");
             for (i, q) in self.questions.iter().enumerate() {
                 let bullet = if self.answered[i] || self.visited[i] {
                     "\u{25a0}"
@@ -388,18 +387,18 @@ impl super::Dialog for QuestionDialog {
                         bold: true,
                         ..Default::default()
                     });
-                    let _ = out.queue(Print(format!(" {} {} ", bullet, q.header)));
+                    out.print(&format!(" {} {} ", bullet, q.header));
                     out.pop_style();
                 } else if self.answered[i] {
                     out.push_fg(theme::SUCCESS);
-                    let _ = out.queue(Print(format!(" {}", bullet)));
+                    out.print(&format!(" {}", bullet));
                     out.pop_style();
                     out.push_dim();
-                    let _ = out.queue(Print(format!(" {} ", q.header)));
+                    out.print(&format!(" {} ", q.header));
                     out.pop_style();
                 } else {
                     out.push_dim();
-                    let _ = out.queue(Print(format!(" {} {} ", bullet, q.header)));
+                    out.print(&format!(" {} {} ", bullet, q.header));
                     out.pop_style();
                 }
             }
@@ -415,13 +414,13 @@ impl super::Dialog for QuestionDialog {
         let q_max = w.saturating_sub(1 + suffix.len());
         let segments = wrap_line(&q.question, q_max);
         for (i, seg) in segments.iter().enumerate() {
-            let _ = out.queue(Print(" "));
+            out.print(" ");
             out.push_bold();
-            let _ = out.queue(Print(seg));
+            out.print(seg);
             out.pop_style();
             if i == 0 && !suffix.is_empty() {
                 out.push_dim();
-                let _ = out.queue(Print(suffix));
+                out.print(suffix);
                 out.pop_style();
             }
             out.overlay_newline();
@@ -432,7 +431,7 @@ impl super::Dialog for QuestionDialog {
         row += 1;
 
         for (i, opt) in q.options.iter().enumerate() {
-            let _ = out.queue(Print("  "));
+            out.print("  ");
             let is_current = sel == i;
             let is_toggled = is_multi && self.multi_toggles[self.active_tab][i];
 
@@ -440,26 +439,26 @@ impl super::Dialog for QuestionDialog {
                 let check = if is_toggled { "\u{25c9}" } else { "\u{25cb}" };
                 if is_current {
                     out.push_fg(theme::accent());
-                    let _ = out.queue(Print(format!("{} ", check)));
-                    let _ = out.queue(Print(&opt.label));
+                    out.print(&format!("{} ", check));
+                    out.print(&opt.label);
                     out.pop_style();
                 } else {
                     out.push_dim();
-                    let _ = out.queue(Print(format!("{} ", check)));
+                    out.print(&format!("{} ", check));
                     out.pop_style();
-                    let _ = out.queue(Print(&opt.label));
+                    out.print(&opt.label);
                 }
             } else {
                 out.push_dim();
-                let _ = out.queue(Print(format!("{}.", i + 1)));
+                out.print(&format!("{}.", i + 1));
                 out.pop_style();
-                let _ = out.queue(Print(" "));
+                out.print(" ");
                 if is_current {
                     out.push_fg(theme::accent());
-                    let _ = out.queue(Print(&opt.label));
+                    out.print(&opt.label);
                     out.pop_style();
                 } else {
-                    let _ = out.queue(Print(&opt.label));
+                    out.print(&opt.label);
                 }
             }
 
@@ -474,7 +473,7 @@ impl super::Dialog for QuestionDialog {
                 if remaining > 3 {
                     let desc: String = opt.description.chars().take(remaining).collect();
                     out.push_dim();
-                    let _ = out.queue(Print(format!("  {desc}")));
+                    out.print(&format!("  {desc}"));
                     out.pop_style();
                 }
             }
@@ -483,7 +482,7 @@ impl super::Dialog for QuestionDialog {
         }
 
         // "Other" option with inline textarea
-        let _ = out.queue(Print("  "));
+        out.print("  ");
         let is_other_current = sel == other_idx;
         let is_other_toggled = is_multi && self.multi_toggles[self.active_tab][other_idx];
 
@@ -495,25 +494,25 @@ impl super::Dialog for QuestionDialog {
             };
             if is_other_current {
                 out.push_fg(theme::accent());
-                let _ = out.queue(Print(format!("{} Other", check)));
+                out.print(&format!("{} Other", check));
                 out.pop_style();
             } else {
                 out.push_dim();
-                let _ = out.queue(Print(format!("{} ", check)));
+                out.print(&format!("{} ", check));
                 out.pop_style();
-                let _ = out.queue(Print("Other"));
+                out.print("Other");
             }
         } else {
             out.push_dim();
-            let _ = out.queue(Print(format!("{}.", other_idx + 1)));
+            out.print(&format!("{}.", other_idx + 1));
             out.pop_style();
-            let _ = out.queue(Print(" "));
+            out.print(" ");
             if is_other_current {
                 out.push_fg(theme::accent());
-                let _ = out.queue(Print("Other"));
+                out.print("Other");
                 out.pop_style();
             } else {
-                let _ = out.queue(Print("Other"));
+                out.print("Other");
             }
         }
 
@@ -539,7 +538,7 @@ impl super::Dialog for QuestionDialog {
         } else {
             hints::join(&[hints::CONFIRM, hints::CANCEL])
         };
-        let _ = out.queue(Print(&hint));
+        out.print(&hint);
         out.pop_style();
         // Only clear below the dialog if there's viewport space left.
         // When the dialog fills the full terminal, clearing here wipes

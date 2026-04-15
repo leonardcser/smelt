@@ -2,8 +2,6 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::draw_bar;
 use crate::{theme, utils::format_duration};
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::Print;
-use crossterm::QueueableCommand;
 use engine::tools::ProcessInfo;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
@@ -113,13 +111,13 @@ impl super::Dialog for PsDialog {
         out.overlay_newline();
 
         out.push_dim();
-        let _ = out.queue(Print(" Background Processes"));
+        out.print(" Background Processes");
         out.pop_style();
         out.overlay_newline();
 
         if self.procs.is_empty() {
             out.push_dim();
-            let _ = out.queue(Print("  No processes"));
+            out.print("  No processes");
             out.pop_style();
             out.overlay_newline();
         } else {
@@ -137,17 +135,17 @@ impl super::Dialog for PsDialog {
                 let max_cmd = w.saturating_sub(meta_len + 4);
                 let cmd_display = truncate_str(&proc.command, max_cmd);
                 if i == self.list.selected {
-                    let _ = out.queue(Print("  "));
+                    out.print("  ");
                     out.push_fg(theme::accent());
-                    let _ = out.queue(Print(&cmd_display));
+                    out.print(&cmd_display);
                     out.pop_style();
                 } else {
-                    let _ = out.queue(Print("  "));
-                    let _ = out.queue(Print(&cmd_display));
+                    out.print("  ");
+                    out.print(&cmd_display);
                 }
-                let _ = out.queue(Print(" "));
+                out.print(" ");
                 out.push_dim();
-                let _ = out.queue(Print(format!("{time} {}", proc.id)));
+                out.print(&format!("{time} {}", proc.id));
                 out.pop_style();
                 out.overlay_newline();
             }
@@ -155,7 +153,7 @@ impl super::Dialog for PsDialog {
 
         out.overlay_newline();
         out.push_dim();
-        let _ = out.queue(Print(&hints::join(&[hints::CLOSE, hints::KILL_PROC])));
+        out.print(&hints::join(&[hints::CLOSE, hints::KILL_PROC]));
         out.pop_style();
         end_dialog_draw(out);
     }

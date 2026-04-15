@@ -2,8 +2,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::draw_bar;
 use crate::{theme, workspace_permissions};
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::{Color, Print};
-use crossterm::QueueableCommand;
+use crossterm::style::Color;
 
 use super::{end_dialog_draw, truncate_str, DialogResult, ListState, RenderOut};
 
@@ -162,7 +161,7 @@ impl super::Dialog for PermissionsDialog {
 
         if self.items.is_empty() {
             out.push_dim();
-            let _ = out.queue(Print(" No permissions"));
+            out.print(" No permissions");
             out.pop_style();
             out.overlay_newline();
         } else {
@@ -194,7 +193,7 @@ impl super::Dialog for PermissionsDialog {
         } else {
             hints::join(&[hints::dd_delete(self.vim_enabled), hints::CLOSE])
         };
-        let _ = out.queue(Print(&hint));
+        out.print(&hint);
         out.pop_style();
         end_dialog_draw(out);
     }
@@ -202,7 +201,7 @@ impl super::Dialog for PermissionsDialog {
 
 fn print_header(out: &mut crate::render::RenderOut, label: &str) {
     out.push_dim();
-    let _ = out.queue(Print(label));
+    out.print(label);
     out.pop_style();
     out.overlay_newline();
 }
@@ -216,13 +215,13 @@ fn render_entry_row(
 ) {
     let label = truncate_str(label, width.saturating_sub(4));
     if selected {
-        let _ = out.queue(Print("  "));
+        out.print("  ");
         out.push_fg(accent);
-        let _ = out.queue(Print(&label));
+        out.print(&label);
         out.pop_style();
     } else {
-        let _ = out.queue(Print("  "));
-        let _ = out.queue(Print(&label));
+        out.print("  ");
+        out.print(&label);
     }
     out.overlay_newline();
 }

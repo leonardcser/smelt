@@ -2,7 +2,6 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::draw_bar;
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::Print;
 use crossterm::{terminal, QueueableCommand};
 
 use super::{end_dialog_draw, DialogResult, ListState, RenderOut};
@@ -126,7 +125,7 @@ impl super::Dialog for HelpDialog {
         out.overlay_newline();
 
         out.push_dim();
-        let _ = out.queue(Print(" help"));
+        out.print(" help");
         out.pop_style();
         out.overlay_newline();
         out.overlay_newline();
@@ -139,13 +138,13 @@ impl super::Dialog for HelpDialog {
             if label.is_empty() && detail.is_empty() {
                 out.overlay_newline();
             } else {
-                let _ = out.queue(Print("  "));
+                out.print("  ");
                 out.push_fg(theme::muted());
-                let _ = out.queue(Print(label));
+                out.print(label);
                 out.pop_style();
                 let padding = " ".repeat(label_col.saturating_sub(label.len()));
                 out.push_dim();
-                let _ = out.queue(Print(format!("{padding}{detail}")));
+                out.print(&format!("{padding}{detail}"));
                 out.pop_style();
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
                 out.overlay_newline();
@@ -154,11 +153,11 @@ impl super::Dialog for HelpDialog {
 
         out.overlay_newline();
         out.push_dim();
-        let _ = out.queue(Print(&hints::join(&[
+        out.print(&hints::join(&[
             hints::CLOSE,
             hints::nav(self.vim_enabled),
             hints::scroll(self.vim_enabled),
-        ])));
+        ]));
         out.pop_style();
         let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
         end_dialog_draw(out);

@@ -3,9 +3,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::{draw_bar, wrap_line};
 use crate::utils::format_duration;
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::style::Print;
 use crossterm::terminal;
-use crossterm::QueueableCommand;
 use engine::registry::{AgentStatus, RegistryEntry};
 use std::sync::{Arc, Mutex};
 
@@ -317,13 +315,13 @@ impl super::Dialog for AgentsDialog {
                 out.overlay_newline();
 
                 // Header: agent name + slug
-                let _ = out.queue(Print(" "));
+                out.print(" ");
                 out.push_style(crate::render::StyleState {
                     fg: Some(crate::theme::AGENT),
                     bold: true,
                     ..Default::default()
                 });
-                let _ = out.queue(Print(&agent_id));
+                out.print(&agent_id);
                 out.pop_style();
 
                 // Find status from registry entries
@@ -332,23 +330,20 @@ impl super::Dialog for AgentsDialog {
                         AgentStatus::Working => {}
                         AgentStatus::Idle => {
                             out.push_fg(crate::theme::SUCCESS);
-                            let _ = out.queue(Print(" \u{2713}"));
+                            out.print(" \u{2713}");
                             out.pop_style();
                         }
                     }
                     if let Some(ref slug) = entry.task_slug {
                         out.push_dim();
-                        let _ = out.queue(Print(format!(" \u{00b7} {slug}")));
+                        out.print(&format!(" \u{00b7} {slug}"));
                         out.pop_style();
                     }
                 }
                 if let Some(ref snap) = snapshot {
                     if snap.cost_usd > 0.0 {
                         out.push_dim();
-                        let _ = out.queue(Print(format!(
-                            "  {}",
-                            crate::metrics::format_cost(snap.cost_usd)
-                        )));
+                        out.print(&format!("  {}", crate::metrics::format_cost(snap.cost_usd)));
                         out.pop_style();
                     }
                 }
@@ -360,37 +355,28 @@ impl super::Dialog for AgentsDialog {
                     match line {
                         DetailLine::Label(text) => {
                             out.push_dim();
-                            let _ = out.queue(Print(format!("  {text}")));
+                            out.print(&format!("  {text}"));
                             out.pop_style();
                             out.overlay_newline();
                         }
                         DetailLine::Text(text) => {
-                            let _ = out.queue(Print(format!(
-                                "   {}",
-                                truncate_str(text, w.saturating_sub(4))
-                            )));
+                            out.print(&format!("   {}", truncate_str(text, w.saturating_sub(4))));
                             out.overlay_newline();
                         }
                         DetailLine::Blank => {
                             out.overlay_newline();
                         }
                         DetailLine::ToolCall(entry) => {
-                            let _ = out.queue(Print("  "));
+                            out.print("  ");
                             out.push_dim();
-                            let _ = out.queue(Print(&entry.tool_name));
+                            out.print(&entry.tool_name);
                             out.pop_style();
                             let max_summary = w.saturating_sub(5 + entry.tool_name.len());
-                            let _ = out.queue(Print(format!(
-                                " {}",
-                                truncate_str(&entry.summary, max_summary)
-                            )));
+                            out.print(&format!(" {}", truncate_str(&entry.summary, max_summary)));
                             if let Some(d) = entry.elapsed {
                                 if d.as_secs_f64() >= 0.1 {
                                     out.push_dim();
-                                    let _ = out.queue(Print(format!(
-                                        "  {}",
-                                        format_duration(d.as_secs())
-                                    )));
+                                    out.print(&format!("  {}", format_duration(d.as_secs())));
                                     out.pop_style();
                                 }
                             }
@@ -405,14 +391,14 @@ impl super::Dialog for AgentsDialog {
                 let can_scroll = total > max_vis;
                 if can_scroll {
                     let end = (scroll + visible).min(total);
-                    let _ = out.queue(Print(format!(
+                    out.print(&format!(
                         " [{end}/{total}]  {}  {}  {}",
                         hints::nav(self.vim),
                         hints::scroll(self.vim),
                         hints::BACK,
-                    )));
+                    ));
                 } else {
-                    let _ = out.queue(Print(&hints::join(&[hints::BACK])));
+                    out.print(&hints::join(&[hints::BACK]));
                 }
                 out.pop_style();
                 end_dialog_draw(out);
@@ -445,13 +431,13 @@ impl super::Dialog for AgentsDialog {
                 out.overlay_newline();
 
                 out.push_dim();
-                let _ = out.queue(Print(" Agents"));
+                out.print(" Agents");
                 out.pop_style();
                 out.overlay_newline();
 
                 if self.agents.is_empty() {
                     out.push_dim();
-                    let _ = out.queue(Print("  No subagents running"));
+                    out.print("  No subagents running");
                     out.pop_style();
                     out.overlay_newline();
                 } else {
@@ -474,7 +460,7 @@ impl super::Dialog for AgentsDialog {
                             AgentStatus::Idle => "idle   ",
                         };
 
-                        let _ = out.queue(Print("  "));
+                        out.print("  ");
                         let padded_name = format!("{:<name_w$}", agent.agent_id);
                         if i == self.list.selected {
                             out.push_style(crate::render::StyleState {
@@ -482,25 +468,25 @@ impl super::Dialog for AgentsDialog {
                                 bold: true,
                                 ..Default::default()
                             });
-                            let _ = out.queue(Print(&padded_name));
+                            out.print(&padded_name);
                             out.pop_style();
                         } else {
-                            let _ = out.queue(Print(&padded_name));
+                            out.print(&padded_name);
                         }
                         out.push_dim();
-                        let _ = out.queue(Print(format!("  {status_str}")));
+                        out.print(&format!("  {status_str}"));
                         out.pop_style();
                         if let Some(slug) = &agent.task_slug {
                             let max = w.saturating_sub(name_w + 12);
-                            let _ = out.queue(Print(format!("  {}", truncate_str(slug, max))));
+                            out.print(&format!("  {}", truncate_str(slug, max)));
                         }
                         if let Some(snap) = self.find_snapshot(&agent.agent_id) {
                             if snap.cost_usd > 0.0 {
                                 out.push_dim();
-                                let _ = out.queue(Print(format!(
+                                out.print(&format!(
                                     "  {}",
                                     crate::metrics::format_cost(snap.cost_usd)
-                                )));
+                                ));
                                 out.pop_style();
                             }
                         }
@@ -510,11 +496,11 @@ impl super::Dialog for AgentsDialog {
 
                 out.overlay_newline();
                 out.push_dim();
-                let _ = out.queue(Print(&hints::join(&[
+                out.print(&hints::join(&[
                     "enter: view",
                     hints::KILL_PROC,
                     hints::CLOSE,
-                ])));
+                ]));
                 out.pop_style();
                 end_dialog_draw(out);
             }

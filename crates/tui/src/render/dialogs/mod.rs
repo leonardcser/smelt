@@ -17,7 +17,7 @@ pub use resume::ResumeDialog;
 pub use rewind::RewindDialog;
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::{cursor, style::Print, terminal, QueueableCommand};
+use crossterm::{cursor, terminal, QueueableCommand};
 
 use super::{draw_soft_cursor, wrap_line, ConfirmChoice, RenderOut};
 
@@ -554,11 +554,11 @@ pub(crate) fn render_inline_textarea(
     let mut cursor_pos = None;
     for (vi, vl) in vis_lines.iter().enumerate() {
         if vi == 0 {
-            let _ = out.queue(Print(", "));
+            out.print(", ");
         } else {
-            let _ = out.queue(Print(&pad));
+            out.print(&pad);
         }
-        let _ = out.queue(Print(vl));
+        out.print(vl);
         if editing && vi == vis_cursor.0 {
             cursor_pos = Some((text_col + vis_cursor.1 as u16, row));
         }
