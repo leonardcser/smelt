@@ -48,7 +48,6 @@ impl App {
         self.input_prediction = None;
         self.screen.begin_turn();
         self.sync_session_snapshot();
-        // Agent messages are already in history; send empty content.
         self.dispatch_turn(Content::text(""))
     }
 

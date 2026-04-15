@@ -128,7 +128,6 @@ pub struct InputState {
     /// Cleared on any manual character input.
     from_paste: bool,
     kill_ring: KillRing,
-    /// Undo history for non-vim mode (redo unused).
     history: crate::undo::UndoHistory,
     /// Chord state: true after Ctrl+X, waiting for second key.
     pending_ctrl_x: bool,

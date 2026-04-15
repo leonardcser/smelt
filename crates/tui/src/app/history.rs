@@ -523,11 +523,9 @@ impl App {
         }
 
         // Replace history with the compacted messages (summary + kept turns).
-        // Old token/cost snapshots refer to positions in the pre-compaction
-        // history and are no longer valid.
+        // Old snapshots key into pre-compaction positions and are no longer
+        // valid, but the running cost carries forward.
         self.history = messages;
-        // Old snapshots refer to positions in the pre-compaction history and
-        // are no longer valid. The running cost carries forward.
         let carried_cost = self.session_cost_usd;
         self.clear_snapshots();
         self.session_cost_usd = carried_cost;
@@ -626,9 +624,6 @@ fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
 }
 
 impl App {
-    /// Clear all per-turn snapshots and reset the running session cost.
-    /// Does not touch the screen cost readout; callers decide whether to
-    /// propagate the new zero value.
     pub(super) fn clear_snapshots(&mut self) {
         self.token_snapshots.clear();
         self.cost_snapshots.clear();
@@ -636,9 +631,6 @@ impl App {
         self.session_cost_usd = 0.0;
     }
 
-    /// Drop snapshot entries beyond `hist_idx` and re-anchor `session_cost_usd`
-    /// to the latest remaining cost (or 0.0). Mirrors the pattern used by
-    /// rewind: token/cost/meta stay in lockstep.
     pub(super) fn truncate_snapshots_to(&mut self, hist_idx: usize) {
         truncate_keyed(&mut self.token_snapshots, hist_idx);
         truncate_keyed(&mut self.cost_snapshots, hist_idx);
@@ -646,15 +638,12 @@ impl App {
         self.session_cost_usd = self.cost_snapshots.last().map(|&(_, c)| c).unwrap_or(0.0);
     }
 
-    /// Mirror in-memory snapshots into `self.session` for persistence.
     pub(super) fn save_snapshots_to_session(&mut self) {
         self.session.token_snapshots = self.token_snapshots.clone();
         self.session.cost_snapshots = self.cost_snapshots.clone();
         self.session.turn_metas = self.turn_metas.clone();
     }
 
-    /// Pull snapshots from `self.session`, trimming any entries past the
-    /// current history length, and re-anchor `session_cost_usd`.
     pub(super) fn restore_snapshots_from_session(&mut self) {
         let hist_len = self.history.len();
         self.token_snapshots = self.session.token_snapshots.clone();
