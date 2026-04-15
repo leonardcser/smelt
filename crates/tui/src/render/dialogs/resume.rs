@@ -101,10 +101,10 @@ impl super::Dialog for ResumeDialog {
                     self.delete_selected();
                 } else {
                     let len = self.query.len();
-                    let target = crate::vim::word_backward_pos(
+                    let target = crate::text_utils::word_backward_pos(
                         &self.query,
                         len,
-                        crate::vim::CharClass::Word,
+                        crate::text_utils::CharClass::Word,
                     );
                     self.query.truncate(target);
                     self.refilter();

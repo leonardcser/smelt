@@ -1,4 +1,7 @@
 use crate::attachment::AttachmentId;
+use crate::text_utils::{
+    char_class, line_end, line_start, word_backward_pos, word_forward_pos, CharClass,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -1858,36 +1861,6 @@ impl Vim {
 
 // ── Character classification ────────────────────────────────────────────────
 
-#[derive(Clone, Copy)]
-pub(crate) enum CharClass {
-    /// vim "word" boundaries: alphanumeric+underscore vs punctuation vs whitespace.
-    Word,
-    /// vim "WORD" boundaries: non-whitespace vs whitespace.
-    #[allow(clippy::upper_case_acronyms)]
-    WORD,
-}
-
-fn char_class(c: char, mode: CharClass) -> u8 {
-    match mode {
-        CharClass::Word => {
-            if c.is_alphanumeric() || c == '_' {
-                1
-            } else if c.is_whitespace() {
-                0
-            } else {
-                2
-            }
-        }
-        CharClass::WORD => {
-            if c.is_whitespace() {
-                0
-            } else {
-                1
-            }
-        }
-    }
-}
-
 // ── Motion helpers ──────────────────────────────────────────────────────────
 
 fn move_left(buf: &str, cpos: usize) -> usize {
@@ -1923,49 +1896,6 @@ fn move_right_inclusive(buf: &str, cpos: usize) -> usize {
     next_char_boundary(buf, cpos).min(buf.len())
 }
 
-pub(crate) fn word_forward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
-    let chars: Vec<(usize, char)> = buf[cpos..].char_indices().collect();
-    if chars.is_empty() {
-        return cpos;
-    }
-    let mut i = 0;
-    let start_class = char_class(chars[0].1, mode);
-    // Skip same class.
-    while i < chars.len() && char_class(chars[i].1, mode) == start_class {
-        i += 1;
-    }
-    // Skip whitespace.
-    while i < chars.len() && char_class(chars[i].1, mode) == 0 {
-        i += 1;
-    }
-    if i < chars.len() {
-        cpos + chars[i].0
-    } else {
-        buf.len()
-    }
-}
-
-pub(crate) fn word_backward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
-    if cpos == 0 {
-        return 0;
-    }
-    let chars: Vec<(usize, char)> = buf[..cpos].char_indices().collect();
-    if chars.is_empty() {
-        return 0;
-    }
-    let mut i = chars.len() - 1;
-    // Skip whitespace backward.
-    while i > 0 && char_class(chars[i].1, mode) == 0 {
-        i -= 1;
-    }
-    let target_class = char_class(chars[i].1, mode);
-    // Skip same class backward.
-    while i > 0 && char_class(chars[i - 1].1, mode) == target_class {
-        i -= 1;
-    }
-    chars[i].0
-}
-
 fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
     let next = next_char_boundary(buf, cpos);
     if next >= buf.len() {
@@ -1989,14 +1919,6 @@ fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
         i += 1;
     }
     next + chars[i].0
-}
-
-pub(crate) fn line_start(buf: &str, cpos: usize) -> usize {
-    buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0)
-}
-
-pub(crate) fn line_end(buf: &str, cpos: usize) -> usize {
-    cpos + buf[cpos..].find('\n').unwrap_or(buf.len() - cpos)
 }
 
 /// End of line for normal mode (on last char, not past it).

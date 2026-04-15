@@ -718,12 +718,12 @@ impl InputState {
                 }
             }
             KeyAction::MoveStartOfLine => {
-                self.cpos = vim::line_start(&self.buf, self.cpos);
+                self.cpos = crate::text_utils::line_start(&self.buf, self.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
             KeyAction::MoveEndOfLine => {
-                self.cpos = vim::line_end(&self.buf, self.cpos);
+                self.cpos = crate::text_utils::line_end(&self.buf, self.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
@@ -929,22 +929,30 @@ impl InputState {
             }
             KeyAction::SelectWordForward => {
                 self.extend_selection();
-                self.cpos = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+                self.cpos = crate::text_utils::word_forward_pos(
+                    &self.buf,
+                    self.cpos,
+                    crate::text_utils::CharClass::Word,
+                );
                 Action::Redraw
             }
             KeyAction::SelectWordBackward => {
                 self.extend_selection();
-                self.cpos = vim::word_backward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+                self.cpos = crate::text_utils::word_backward_pos(
+                    &self.buf,
+                    self.cpos,
+                    crate::text_utils::CharClass::Word,
+                );
                 Action::Redraw
             }
             KeyAction::SelectStartOfLine => {
                 self.extend_selection();
-                self.cpos = vim::line_start(&self.buf, self.cpos);
+                self.cpos = crate::text_utils::line_start(&self.buf, self.cpos);
                 Action::Redraw
             }
             KeyAction::SelectEndOfLine => {
                 self.extend_selection();
-                self.cpos = vim::line_end(&self.buf, self.cpos);
+                self.cpos = crate::text_utils::line_end(&self.buf, self.cpos);
                 Action::Redraw
             }
         }
@@ -1657,7 +1665,11 @@ impl InputState {
         if self.cpos == 0 {
             return;
         }
-        let target = vim::word_backward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let target = crate::text_utils::word_backward_pos(
+            &self.buf,
+            self.cpos,
+            crate::text_utils::CharClass::Word,
+        );
         if target == 0 {
             self.from_paste = false;
         }
@@ -1685,7 +1697,11 @@ impl InputState {
         if self.cpos >= self.buf.len() {
             return;
         }
-        let target = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let target = crate::text_utils::word_forward_pos(
+            &self.buf,
+            self.cpos,
+            crate::text_utils::CharClass::Word,
+        );
         self.remove_attachments_in_range(self.cpos, target);
         self.buf.drain(self.cpos..target);
         self.recompute_completer();
@@ -1728,7 +1744,11 @@ impl InputState {
     }
 
     fn uppercase_word(&mut self) {
-        let end = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let end = crate::text_utils::word_forward_pos(
+            &self.buf,
+            self.cpos,
+            crate::text_utils::CharClass::Word,
+        );
         if end == self.cpos {
             return;
         }
@@ -1739,7 +1759,11 @@ impl InputState {
     }
 
     fn lowercase_word(&mut self) {
-        let end = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let end = crate::text_utils::word_forward_pos(
+            &self.buf,
+            self.cpos,
+            crate::text_utils::CharClass::Word,
+        );
         if end == self.cpos {
             return;
         }
@@ -1750,7 +1774,11 @@ impl InputState {
     }
 
     fn capitalize_word(&mut self) {
-        let end = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let end = crate::text_utils::word_forward_pos(
+            &self.buf,
+            self.cpos,
+            crate::text_utils::CharClass::Word,
+        );
         if end == self.cpos {
             return;
         }
@@ -1785,7 +1813,11 @@ impl InputState {
         if self.cpos >= self.buf.len() {
             return false;
         }
-        let target = vim::word_forward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let target = crate::text_utils::word_forward_pos(
+            &self.buf,
+            self.cpos,
+            crate::text_utils::CharClass::Word,
+        );
         if target != self.cpos {
             self.cpos = target;
             self.recompute_completer();
@@ -1799,7 +1831,11 @@ impl InputState {
         if self.cpos == 0 {
             return false;
         }
-        let target = vim::word_backward_pos(&self.buf, self.cpos, vim::CharClass::Word);
+        let target = crate::text_utils::word_backward_pos(
+            &self.buf,
+            self.cpos,
+            crate::text_utils::CharClass::Word,
+        );
         if target != self.cpos {
             self.cpos = target;
             self.recompute_completer();

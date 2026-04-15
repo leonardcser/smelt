@@ -306,7 +306,11 @@ impl TextArea {
         }
         let line = &self.lines[self.row];
         let byte_pos = char_to_byte(line, self.col);
-        let target = crate::vim::word_backward_pos(line, byte_pos, crate::vim::CharClass::Word);
+        let target = crate::text_utils::word_backward_pos(
+            line,
+            byte_pos,
+            crate::text_utils::CharClass::Word,
+        );
         let target_col = line[..target].chars().count();
         let end_byte = char_to_byte(&self.lines[self.row], self.col);
         self.lines[self.row].drain(target..end_byte);
@@ -365,7 +369,8 @@ impl TextArea {
             return;
         }
         let byte = char_to_byte(line, self.col);
-        let target = crate::vim::word_forward_pos(line, byte, crate::vim::CharClass::Word);
+        let target =
+            crate::text_utils::word_forward_pos(line, byte, crate::text_utils::CharClass::Word);
         self.col = line[..target].chars().count();
     }
 
@@ -379,7 +384,8 @@ impl TextArea {
         }
         let line = &self.lines[self.row];
         let byte = char_to_byte(line, self.col);
-        let target = crate::vim::word_backward_pos(line, byte, crate::vim::CharClass::Word);
+        let target =
+            crate::text_utils::word_backward_pos(line, byte, crate::text_utils::CharClass::Word);
         self.col = line[..target].chars().count();
     }
 
@@ -401,7 +407,8 @@ impl TextArea {
             return;
         }
         let byte = char_to_byte(line, self.col);
-        let target = crate::vim::word_forward_pos(line, byte, crate::vim::CharClass::Word);
+        let target =
+            crate::text_utils::word_forward_pos(line, byte, crate::text_utils::CharClass::Word);
         self.lines[self.row].drain(byte..target);
     }
 
