@@ -432,9 +432,16 @@ impl App {
                     .flatten(),
             )
         };
+        let blobs = self
+            .input
+            .store
+            .image_blobs()
+            .into_iter()
+            .map(|(filename, data_url)| crate::persist::Blob { filename, data_url })
+            .collect();
         self.persister.save(crate::persist::PersistRequest {
             session: self.session.clone(),
-            blobs: self.input.store.image_blobs(),
+            blobs,
             redact_secrets: self.settings.redact_secrets,
             render_cache,
             layout_cache,

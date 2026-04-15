@@ -120,19 +120,16 @@ impl AttachmentStore {
 
     // ── Blob persistence ─────────────────────────────────────────────────
 
-    /// Snapshot (filename, data_url) pairs for every image attachment.
+    /// Snapshot `(filename, data_url)` pairs for every image attachment.
     /// Shared by the background persister and the sync `save_blobs` path.
-    pub fn image_blobs(&self) -> Vec<crate::persist::Blob> {
+    pub fn image_blobs(&self) -> Vec<(String, String)> {
         self.entries
             .values()
             .filter_map(|att| match att {
                 Attachment::Image { data_url, .. } => {
                     let hash = att.content_hash();
                     let ext = mime_to_ext(data_url);
-                    Some(crate::persist::Blob {
-                        filename: format!("{hash}.{ext}"),
-                        data_url: data_url.clone(),
-                    })
+                    Some((format!("{hash}.{ext}"), data_url.clone()))
                 }
                 _ => None,
             })
@@ -148,12 +145,12 @@ impl AttachmentStore {
         }
         let _ = fs::create_dir_all(blob_dir);
         let mut url_to_blob = HashMap::with_capacity(blobs.len());
-        for b in blobs {
-            let blob_path = blob_dir.join(&b.filename);
+        for (filename, data_url) in blobs {
+            let blob_path = blob_dir.join(&filename);
             if !blob_path.exists() {
-                let _ = fs::write(&blob_path, b.data_url.as_bytes());
+                let _ = fs::write(&blob_path, data_url.as_bytes());
             }
-            url_to_blob.insert(b.data_url, format!("blob:{}", b.filename));
+            url_to_blob.insert(data_url, format!("blob:{filename}"));
         }
         url_to_blob
     }
