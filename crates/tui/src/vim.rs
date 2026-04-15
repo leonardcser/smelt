@@ -2,6 +2,7 @@ use crate::attachment::AttachmentId;
 use crate::text_utils::{
     char_class, line_end, line_start, word_backward_pos, word_forward_pos, CharClass,
 };
+use crate::undo::{UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -89,12 +90,6 @@ enum SubState {
     WaitingVisualTextObj(bool),
 }
 
-struct UndoEntry {
-    buf: String,
-    cpos: usize,
-    attachments: Vec<AttachmentId>,
-}
-
 // ── Vim state ───────────────────────────────────────────────────────────────
 
 pub struct Vim {
@@ -107,8 +102,7 @@ pub struct Vim {
     last_find: Option<(FindKind, char)>,
     register: String,
     register_linewise: bool,
-    undo_stack: Vec<UndoEntry>,
-    redo_stack: Vec<UndoEntry>,
+    history: UndoHistory,
     /// Byte position of the visual mode anchor (where 'v'/'V' was pressed).
     visual_anchor: usize,
     /// Desired column for vertical motions (j/k). Preserved across vertical
@@ -133,8 +127,7 @@ impl Vim {
             last_find: None,
             register: String::new(),
             register_linewise: false,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(None),
             visual_anchor: 0,
             curswant: None,
         }
@@ -1786,22 +1779,13 @@ impl Vim {
 
     /// Save the current state for undo. Call this before making changes to buf/attachments.
     pub fn save_undo(&mut self, buf: &str, cpos: usize, att: &[AttachmentId]) {
-        self.redo_stack.clear();
-        self.undo_stack.push(UndoEntry {
-            buf: buf.to_string(),
-            cpos,
-            attachments: att.to_vec(),
-        });
+        self.history.save(UndoEntry::snapshot(buf, cpos, att));
     }
 
     /// Undo to the previous state.
     pub fn undo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<AttachmentId>) {
-        if let Some(entry) = self.undo_stack.pop() {
-            self.redo_stack.push(UndoEntry {
-                buf: buf.clone(),
-                cpos: *cpos,
-                attachments: att.clone(),
-            });
+        let current = UndoEntry::snapshot(buf, *cpos, att);
+        if let Some(entry) = self.history.undo(current) {
             *buf = entry.buf;
             *cpos = entry.cpos;
             *att = entry.attachments;
@@ -1811,12 +1795,8 @@ impl Vim {
 
     /// Redo to the next state.
     pub fn redo(&mut self, buf: &mut String, cpos: &mut usize, att: &mut Vec<AttachmentId>) {
-        if let Some(entry) = self.redo_stack.pop() {
-            self.undo_stack.push(UndoEntry {
-                buf: buf.clone(),
-                cpos: *cpos,
-                attachments: att.clone(),
-            });
+        let current = UndoEntry::snapshot(buf, *cpos, att);
+        if let Some(entry) = self.history.redo(current) {
             *buf = entry.buf;
             *cpos = entry.cpos;
             *att = entry.attachments;

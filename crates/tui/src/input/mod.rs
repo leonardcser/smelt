@@ -128,8 +128,8 @@ pub struct InputState {
     /// Cleared on any manual character input.
     from_paste: bool,
     kill_ring: KillRing,
-    /// Undo stack for non-vim mode.
-    undo_stack: Vec<(String, usize, Vec<AttachmentId>)>,
+    /// Undo history for non-vim mode (redo unused).
+    history: crate::undo::UndoHistory,
     /// Chord state: true after Ctrl+X, waiting for second key.
     pending_ctrl_x: bool,
     /// Completable arguments for commands like `/model`, `/theme`, `/color`.
@@ -176,7 +176,7 @@ impl InputState {
             stash: None,
             from_paste: false,
             kill_ring: KillRing::new(),
-            undo_stack: Vec::new(),
+            history: crate::undo::UndoHistory::new(Some(100)),
             pending_ctrl_x: false,
             command_arg_sources: Vec::new(),
             selection_anchor: None,
@@ -1587,11 +1587,11 @@ impl InputState {
             }
             vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
         } else {
-            self.undo_stack
-                .push((self.buf.clone(), self.cpos, self.attachment_ids.clone()));
-            if self.undo_stack.len() > 100 {
-                self.undo_stack.remove(0);
-            }
+            self.history.save(crate::undo::UndoEntry::snapshot(
+                &self.buf,
+                self.cpos,
+                &self.attachment_ids,
+            ));
         }
     }
 
@@ -1801,10 +1801,14 @@ impl InputState {
     fn undo(&mut self) {
         if let Some(ref mut vim) = self.vim {
             vim.undo(&mut self.buf, &mut self.cpos, &mut self.attachment_ids);
-        } else if let Some((buf, cpos, att)) = self.undo_stack.pop() {
-            self.buf = buf;
-            self.cpos = cpos;
-            self.attachment_ids = att;
+        } else {
+            let current =
+                crate::undo::UndoEntry::snapshot(&self.buf, self.cpos, &self.attachment_ids);
+            if let Some(entry) = self.history.undo(current) {
+                self.buf = entry.buf;
+                self.cpos = entry.cpos;
+                self.attachment_ids = entry.attachments;
+            }
         }
         self.recompute_completer();
     }
