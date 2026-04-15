@@ -75,9 +75,7 @@ impl App {
         // before clearing state so stale events don't restore old data.
         self.engine.send(UiCommand::Cancel);
         self.history.clear();
-        self.token_snapshots.clear();
-        self.cost_snapshots.clear();
-        self.turn_metas.clear();
+        self.clear_snapshots();
         self.pending_agent_blocks.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
@@ -87,7 +85,6 @@ impl App {
         self.engine.processes.clear();
         self.reset_subagents_for_new_session();
         self.session = session::Session::new();
-        self.session_cost_usd = 0.0;
         self.screen.set_session_cost(0.0);
         self.pending_title = false;
         self.compact_epoch += 1;
@@ -141,17 +138,8 @@ impl App {
             self.screen.set_task_label(slug.clone());
         }
         self.history = self.session.messages.clone();
-        self.token_snapshots = self.session.token_snapshots.clone();
-        self.token_snapshots
-            .retain(|(len, _)| *len <= self.history.len());
-        self.cost_snapshots = self.session.cost_snapshots.clone();
-        self.cost_snapshots
-            .retain(|(len, _)| *len <= self.history.len());
-        if let Some(&(_, cost)) = self.cost_snapshots.last() {
-            self.session_cost_usd = cost;
-            self.screen.set_session_cost(cost);
-        }
-        self.turn_metas = self.session.turn_metas.clone();
+        self.restore_snapshots_from_session();
+        self.screen.set_session_cost(self.session_cost_usd);
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.input.clear();
@@ -428,9 +416,7 @@ impl App {
         if self.history.is_empty() {
             return;
         }
-        self.session.token_snapshots = self.token_snapshots.clone();
-        self.session.cost_snapshots = self.cost_snapshots.clone();
-        self.session.turn_metas = self.turn_metas.clone();
+        self.save_snapshots_to_session();
         self.sync_session_snapshot();
         session::save(
             &self.session,
@@ -540,9 +526,11 @@ impl App {
         // Old token/cost snapshots refer to positions in the pre-compaction
         // history and are no longer valid.
         self.history = messages;
-        self.token_snapshots.clear();
-        self.cost_snapshots.clear();
-        self.turn_metas.clear();
+        // Old snapshots refer to positions in the pre-compaction history and
+        // are no longer valid. The running cost carries forward.
+        let carried_cost = self.session_cost_usd;
+        self.clear_snapshots();
+        self.session_cost_usd = carried_cost;
 
         self.restore_screen();
         self.screen.clear_context_tokens();
@@ -606,16 +594,8 @@ impl App {
             .unwrap_or_default();
 
         self.history.truncate(hist_idx);
-        truncate_keyed(&mut self.token_snapshots, hist_idx);
-        truncate_keyed(&mut self.cost_snapshots, hist_idx);
-        truncate_keyed(&mut self.turn_metas, hist_idx);
-        if let Some(&(_, cost)) = self.cost_snapshots.last() {
-            self.session_cost_usd = cost;
-            self.screen.set_session_cost(cost);
-        } else {
-            self.session_cost_usd = 0.0;
-            self.screen.set_session_cost(0.0);
-        }
+        self.truncate_snapshots_to(hist_idx);
+        self.screen.set_session_cost(self.session_cost_usd);
         if let Some(&(_, tokens)) = self.token_snapshots.last() {
             self.screen.set_context_tokens(tokens);
         } else {
@@ -642,5 +622,46 @@ impl App {
 fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
     while snapshots.last().is_some_and(|(len, _)| *len > hist_idx) {
         snapshots.pop();
+    }
+}
+
+impl App {
+    /// Clear all per-turn snapshots and reset the running session cost.
+    /// Does not touch the screen cost readout; callers decide whether to
+    /// propagate the new zero value.
+    pub(super) fn clear_snapshots(&mut self) {
+        self.token_snapshots.clear();
+        self.cost_snapshots.clear();
+        self.turn_metas.clear();
+        self.session_cost_usd = 0.0;
+    }
+
+    /// Drop snapshot entries beyond `hist_idx` and re-anchor `session_cost_usd`
+    /// to the latest remaining cost (or 0.0). Mirrors the pattern used by
+    /// rewind: token/cost/meta stay in lockstep.
+    pub(super) fn truncate_snapshots_to(&mut self, hist_idx: usize) {
+        truncate_keyed(&mut self.token_snapshots, hist_idx);
+        truncate_keyed(&mut self.cost_snapshots, hist_idx);
+        truncate_keyed(&mut self.turn_metas, hist_idx);
+        self.session_cost_usd = self.cost_snapshots.last().map(|&(_, c)| c).unwrap_or(0.0);
+    }
+
+    /// Mirror in-memory snapshots into `self.session` for persistence.
+    pub(super) fn save_snapshots_to_session(&mut self) {
+        self.session.token_snapshots = self.token_snapshots.clone();
+        self.session.cost_snapshots = self.cost_snapshots.clone();
+        self.session.turn_metas = self.turn_metas.clone();
+    }
+
+    /// Pull snapshots from `self.session`, trimming any entries past the
+    /// current history length, and re-anchor `session_cost_usd`.
+    pub(super) fn restore_snapshots_from_session(&mut self) {
+        let hist_len = self.history.len();
+        self.token_snapshots = self.session.token_snapshots.clone();
+        self.token_snapshots.retain(|(len, _)| *len <= hist_len);
+        self.cost_snapshots = self.session.cost_snapshots.clone();
+        self.cost_snapshots.retain(|(len, _)| *len <= hist_len);
+        self.turn_metas = self.session.turn_metas.clone();
+        self.session_cost_usd = self.cost_snapshots.last().map(|&(_, c)| c).unwrap_or(0.0);
     }
 }
