@@ -75,6 +75,11 @@ pub struct SessionMeta {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
+    /// Approximate byte size of the session's text content (message bodies,
+    /// reasoning, tool-call args). Used to show session size in the resume
+    /// dialog without loading full session.json.
+    #[serde(default)]
+    pub text_bytes: Option<u64>,
 }
 
 impl Default for Session {
@@ -124,6 +129,7 @@ impl Session {
             cwd: self.cwd.clone(),
             parent_id: self.parent_id.clone(),
             context_tokens: self.context_tokens,
+            text_bytes: Some(compute_text_bytes(&self.messages)),
         }
     }
 
@@ -223,21 +229,27 @@ pub fn save_with_blobs(
         std::borrow::Cow::Borrowed(session)
     };
 
-    let path = session_dir.join("session.json");
-    let tmp = session_dir.join(format!("session.{ts}.tmp"));
     if let Ok(json) = serde_json::to_string(&*session_out) {
-        if fs::write(&tmp, json).is_ok() {
-            let _ = fs::rename(&tmp, &path);
-        }
+        atomic_write(&session_dir.join("session.json"), json.as_bytes(), ts);
     }
-
-    let meta_path = session_dir.join("meta.json");
-    let meta_tmp = session_dir.join(format!("meta.{ts}.tmp"));
     let meta = session_out.meta();
     if let Ok(json) = serde_json::to_string(&meta) {
-        if fs::write(&meta_tmp, json).is_ok() {
-            let _ = fs::rename(&meta_tmp, &meta_path);
-        }
+        atomic_write(&session_dir.join("meta.json"), json.as_bytes(), ts);
+    }
+    // Searchable plain-text blob for the resume dialog.
+    let blob = build_search_blob(&session_out.messages);
+    atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), ts);
+}
+
+/// Write `contents` to `path` atomically via a tmp file + rename.
+fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
+    let Some(dir) = path.parent() else { return };
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let tmp = dir.join(format!("{name}.{ts}.tmp"));
+    if fs::write(&tmp, contents).is_ok() {
+        let _ = fs::rename(&tmp, path);
     }
 }
 
@@ -365,35 +377,135 @@ pub fn list_sessions() -> Vec<SessionMeta> {
         return Vec::new();
     };
 
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
+    let paths: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            p.is_dir().then_some(p)
+        })
+        .collect();
+    let mut out = crate::utils::parallel_filter_map(paths, load_meta_for_dir);
+    out.sort_by_key(|b| std::cmp::Reverse(session_updated_at(b)));
+    out
+}
 
-        // Try fast sidecar meta first.
-        if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
-            if let Ok(meta) = serde_json::from_str::<SessionMeta>(&contents) {
-                out.push(meta);
-                continue;
+/// Load a session's metadata from its on-disk directory. Uses the fast
+/// `meta.json` sidecar when present; falls back to parsing `session.json`
+/// (and persists a regenerated sidecar) for legacy sessions.
+fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
+    if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
+        if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
+            if meta.text_bytes.is_none() {
+                backfill_text_bytes(&path, &mut meta);
             }
+            return Some(meta);
         }
-        // Fall back to full session file.
-        if let Ok(contents) = fs::read_to_string(path.join("session.json")) {
-            if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
-                if meta.id.is_empty() {
-                    meta.id = name.to_string();
-                }
-                out.push(meta);
+    }
+    let contents = fs::read_to_string(path.join("session.json")).ok()?;
+    let session: Session = serde_json::from_str(&contents).ok()?;
+    let mut meta = session.meta();
+    if meta.id.is_empty() {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            meta.id = name.to_string();
+        }
+    }
+    write_meta(&path, &meta);
+    Some(meta)
+}
+
+/// Compute the approximate text byte size of a session's messages:
+/// sum of text content, reasoning, and tool-call argument lengths.
+fn compute_text_bytes(messages: &[Message]) -> u64 {
+    let mut total: u64 = 0;
+    for msg in messages {
+        if let Some(ref c) = msg.content {
+            total += c.text_content().len() as u64;
+        }
+        if let Some(ref r) = msg.reasoning_content {
+            total += r.len() as u64;
+        }
+        if let Some(ref calls) = msg.tool_calls {
+            for call in calls {
+                total += call.function.name.len() as u64;
+                total += call.function.arguments.len() as u64;
             }
         }
     }
-    out.sort_by_key(|b| std::cmp::Reverse(session_updated_at(b)));
+    total
+}
+
+/// Format a byte count as a human-readable string (e.g. "12.3 KB").
+pub fn format_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes}B")
+    } else if b < MB {
+        format!("{:.1}KB", b / KB)
+    } else if b < GB {
+        format!("{:.1}MB", b / MB)
+    } else {
+        format!("{:.1}GB", b / GB)
+    }
+}
+
+/// Read session.json, compute text_bytes, and rewrite meta.json to cache it.
+fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
+    let Ok(contents) = fs::read_to_string(session_dir.join("session.json")) else {
+        return;
+    };
+    let Ok(session) = serde_json::from_str::<Session>(&contents) else {
+        return;
+    };
+    let bytes = compute_text_bytes(&session.messages);
+    meta.text_bytes = Some(bytes);
+    write_meta(session_dir, meta);
+}
+
+/// Build the search blob for a session: user, assistant, and inter-agent
+/// message text, separated by newlines. Reasoning, tool output, and system
+/// messages are excluded.
+fn build_search_blob(messages: &[Message]) -> String {
+    use protocol::Role;
+    let mut out = String::new();
+    for msg in messages {
+        match msg.role {
+            Role::User | Role::Assistant | Role::Agent => {
+                if let Some(ref c) = msg.content {
+                    let text = c.text_content();
+                    if !text.is_empty() {
+                        out.push_str(&text);
+                        out.push('\n');
+                    }
+                }
+            }
+            Role::Tool | Role::System => {}
+        }
+    }
     out
+}
+
+/// Load the searchable content blob for a session. If the `content.txt`
+/// sidecar is missing (legacy sessions), regenerate it from `session.json`
+/// and cache it on disk.
+pub fn load_search_blob(session_id: &str) -> Option<String> {
+    let session_dir = sessions_dir().join(session_id);
+    if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
+        return Some(contents);
+    }
+    let full = fs::read_to_string(session_dir.join("session.json")).ok()?;
+    let session: Session = serde_json::from_str(&full).ok()?;
+    let blob = build_search_blob(&session.messages);
+    atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
+    Some(blob)
+}
+
+fn write_meta(session_dir: &std::path::Path, meta: &SessionMeta) {
+    if let Ok(json) = serde_json::to_string(meta) {
+        atomic_write(&session_dir.join("meta.json"), json.as_bytes(), now_ms());
+    }
 }
 
 /// Replace inline `data:` URLs in messages with `blob:` refs.

@@ -19,9 +19,47 @@ pub fn format_duration(secs: u64) -> String {
     }
 }
 
+/// Map `f` over `items` across `available_parallelism()` worker threads,
+/// dropping `None` results. Output order is not stable across threads.
+pub fn parallel_filter_map<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
+where
+    T: Send + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> Option<R> + Send + Sync + Clone + 'static,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(items.len())
+        .max(1);
+    let chunk_size = items.len().div_ceil(n_workers).max(1);
+
+    let mut remaining = items;
+    let mut handles = Vec::with_capacity(n_workers);
+    while !remaining.is_empty() {
+        let take = chunk_size.min(remaining.len());
+        let chunk: Vec<T> = remaining.drain(..take).collect();
+        let f = f.clone();
+        handles.push(std::thread::spawn(move || -> Vec<R> {
+            chunk.into_iter().filter_map(&f).collect()
+        }));
+    }
+
+    let mut out = Vec::with_capacity(handles.len() * chunk_size);
+    for h in handles {
+        if let Ok(part) = h.join() {
+            out.extend(part);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_duration;
+    use super::*;
 
     #[test]
     fn formats_seconds_only() {

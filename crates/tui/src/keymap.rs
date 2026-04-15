@@ -631,6 +631,13 @@ pub mod hints {
             "\u{232b}/dd: delete"
         }
     }
+    pub fn del_delete(vim: bool) -> &'static str {
+        if vim {
+            "dd/del: delete"
+        } else {
+            "del: delete"
+        }
+    }
     pub const DD_PENDING: &str = "press d to confirm delete";
     pub const KILL_PROC: &str = "\u{232b}: kill selected";
     pub const BACK: &str = "esc: back";

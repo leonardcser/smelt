@@ -169,6 +169,7 @@ impl App {
                 cwd: s.cwd,
                 parent_id: s.parent_id,
                 depth: 0,
+                size_bytes: s.text_bytes,
             })
             .collect();
         super::build_session_tree(flat)

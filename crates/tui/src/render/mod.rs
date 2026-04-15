@@ -890,6 +890,8 @@ pub struct ResumeEntry {
     pub parent_id: Option<String>,
     /// Nesting depth for display (0 = root, 1 = fork, etc.)
     pub depth: usize,
+    /// Cached text-content size in bytes (None if unknown).
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Clone, serde::Serialize)]

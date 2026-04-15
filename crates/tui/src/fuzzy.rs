@@ -98,6 +98,28 @@ pub fn fuzzy_match(text: &str, query: &str) -> bool {
     fuzzy_score(text, query).is_some()
 }
 
+/// Non-allocating boolean fuzzy match for pre-lowercased inputs. Both
+/// `hay` and `need` must already be lowercase. Used on hot paths where
+/// the haystack is cached.
+pub fn fuzzy_match_lower(hay: &str, need: &str) -> bool {
+    if need.is_empty() {
+        return true;
+    }
+    let mut need_iter = need.chars();
+    let Some(mut want) = need_iter.next() else {
+        return true;
+    };
+    for hc in hay.chars() {
+        if hc == want {
+            match need_iter.next() {
+                Some(next) => want = next,
+                None => return true,
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

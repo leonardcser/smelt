@@ -88,7 +88,7 @@ fn alloc_samples() -> &'static AllocSamples {
 
 // Total visual width of the table:
 // 30 (label) + 1 + 8 (calls) + 6 * (1 + 10) = 30 + 1 + 8 + 66 = 105
-const TABLE_WIDTH: usize = 105;
+const TABLE_WIDTH: usize = 115;
 
 /// Print a summary table of all recorded timings to stdout.
 pub fn print_summary() {
@@ -201,7 +201,7 @@ pub fn print_summary() {
 
 fn print_header(first: &str, bar: &str) {
     println!(
-        "{:<30} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "{:<40} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
         first, "count", "total", "avg", "p50", "p95", "p99", "max"
     );
     println!("{}", bar);
@@ -223,7 +223,7 @@ where
     };
     let max = *samples.last().unwrap();
     format!(
-        "{:<30} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "{:<40} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
         label,
         count,
         fmt(total),
