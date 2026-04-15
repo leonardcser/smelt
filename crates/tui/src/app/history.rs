@@ -60,13 +60,13 @@ impl App {
             self.screen.notify_error("nothing to fork".into());
             return;
         }
-        // Save current session first.
         self.save_session();
+        self.flush_persist();
         let original_id = self.session.id.clone();
-        // Create the fork and switch to it.
         let forked = self.session.fork();
         self.session = forked;
         self.save_session();
+        self.flush_persist();
         self.screen.notify(format!("forked from {original_id}"));
     }
 
@@ -99,6 +99,7 @@ impl App {
     pub fn load_session(&mut self, loaded: session::Session) {
         // Resume starts a fresh session view: stop/clear existing subagents tabs.
         self.reset_subagents_for_new_session();
+        self.flush_persist();
 
         // Restore per-session settings
         if let Some(ref mode_str) = loaded.mode {
@@ -418,23 +419,32 @@ impl App {
         }
         self.save_snapshots_to_session();
         self.sync_session_snapshot();
-        session::save(
-            &self.session,
-            &self.input.store,
-            self.settings.redact_secrets,
-        );
         // Skip persisting render/layout caches when redaction is enabled —
         // they contain raw source text from tool output that would leak secrets.
-        if !self.settings.redact_secrets {
-            if let Some(cache) = self.screen.export_render_cache() {
-                session::save_render_cache(&self.session, &cache);
-            }
-            if self.screen.layout_cache_dirty() {
-                if let Some(cache) = self.screen.export_layout_cache() {
-                    session::save_layout_cache(&self.session, &cache);
-                }
-            }
-        }
+        let (render_cache, layout_cache) = if self.settings.redact_secrets {
+            (None, None)
+        } else {
+            (
+                self.screen.export_render_cache(),
+                self.screen
+                    .layout_cache_dirty()
+                    .then(|| self.screen.export_layout_cache())
+                    .flatten(),
+            )
+        };
+        self.persister.save(crate::persist::PersistRequest {
+            session: self.session.clone(),
+            blobs: self.input.store.image_blobs(),
+            redact_secrets: self.settings.redact_secrets,
+            render_cache,
+            layout_cache,
+        });
+    }
+
+    /// Block until all queued persist writes have completed. Call before
+    /// code paths that read session files off disk (load, fork, shutdown).
+    pub(super) fn flush_persist(&self) {
+        self.persister.flush();
     }
 
     pub(super) fn maybe_generate_title(&mut self, current_message: Option<&str>) {

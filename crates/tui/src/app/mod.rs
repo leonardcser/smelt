@@ -113,6 +113,7 @@ pub struct App {
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
+    persister: crate::persist::Persister,
     /// Receiver for child agent permission requests (fed by socket bridge).
     child_permission_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
     /// Reply channels for pending child permission requests, keyed by synthetic request_id.
@@ -480,6 +481,7 @@ impl App {
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
+            persister: crate::persist::Persister::spawn(),
             child_permission_rx: {
                 let (_, rx) = tokio::sync::mpsc::unbounded_channel();
                 rx

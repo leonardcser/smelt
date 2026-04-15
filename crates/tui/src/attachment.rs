@@ -141,6 +141,26 @@ impl AttachmentStore {
         url_to_blob
     }
 
+    /// Snapshot (filename, data_url) pairs for every image attachment.
+    /// Used by the background persister, which owns its own clones so the
+    /// main thread can keep mutating the store.
+    pub fn image_blobs(&self) -> Vec<crate::persist::Blob> {
+        self.entries
+            .values()
+            .filter_map(|att| match att {
+                Attachment::Image { data_url, .. } => {
+                    let hash = att.content_hash();
+                    let ext = mime_to_ext(data_url);
+                    Some(crate::persist::Blob {
+                        filename: format!("{hash}.{ext}"),
+                        data_url: data_url.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Read blob files and resolve `blob:` refs back to data URLs.
     /// Returns a map from `blob:<filename>` → data URL string.
     pub fn load_blobs(blob_dir: &Path) -> HashMap<String, String> {

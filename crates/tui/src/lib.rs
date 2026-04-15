@@ -11,6 +11,7 @@ pub mod instructions;
 pub mod keymap;
 pub mod metrics;
 pub mod perf;
+pub mod persist;
 pub mod render;
 pub mod session;
 pub mod sleep_inhibit;
