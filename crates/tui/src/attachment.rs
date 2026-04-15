@@ -120,30 +120,8 @@ impl AttachmentStore {
 
     // ── Blob persistence ─────────────────────────────────────────────────
 
-    /// Write all image attachments referenced in messages as blob files.
-    /// Returns a map from data_url hash → blob filename for URL replacement.
-    pub fn save_blobs(&self, blob_dir: &Path) -> HashMap<String, String> {
-        let mut url_to_blob = HashMap::new();
-        let _ = fs::create_dir_all(blob_dir);
-
-        for att in self.entries.values() {
-            if let Attachment::Image { data_url, .. } = att {
-                let hash = att.content_hash();
-                let ext = mime_to_ext(data_url);
-                let filename = format!("{hash}.{ext}");
-                let blob_path = blob_dir.join(&filename);
-                if !blob_path.exists() {
-                    let _ = fs::write(&blob_path, data_url.as_bytes());
-                }
-                url_to_blob.insert(data_url.clone(), format!("blob:{filename}"));
-            }
-        }
-        url_to_blob
-    }
-
     /// Snapshot (filename, data_url) pairs for every image attachment.
-    /// Used by the background persister, which owns its own clones so the
-    /// main thread can keep mutating the store.
+    /// Shared by the background persister and the sync `save_blobs` path.
     pub fn image_blobs(&self) -> Vec<crate::persist::Blob> {
         self.entries
             .values()
@@ -159,6 +137,25 @@ impl AttachmentStore {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Write all image attachments as blob files and return the
+    /// data_url → `blob:<filename>` replacement map.
+    pub fn save_blobs(&self, blob_dir: &Path) -> HashMap<String, String> {
+        let blobs = self.image_blobs();
+        if blobs.is_empty() {
+            return HashMap::new();
+        }
+        let _ = fs::create_dir_all(blob_dir);
+        let mut url_to_blob = HashMap::with_capacity(blobs.len());
+        for b in blobs {
+            let blob_path = blob_dir.join(&b.filename);
+            if !blob_path.exists() {
+                let _ = fs::write(&blob_path, b.data_url.as_bytes());
+            }
+            url_to_blob.insert(b.data_url, format!("blob:{}", b.filename));
+        }
+        url_to_blob
     }
 
     /// Read blob files and resolve `blob:` refs back to data URLs.

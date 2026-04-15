@@ -37,7 +37,7 @@ enum Cmd {
 }
 
 pub struct Persister {
-    tx: Sender<Cmd>,
+    tx: Option<Sender<Cmd>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -49,19 +49,26 @@ impl Persister {
             .spawn(move || worker_loop(rx))
             .expect("spawn persist worker");
         Self {
-            tx,
+            tx: Some(tx),
             handle: Some(handle),
         }
     }
 
     pub fn save(&self, req: PersistRequest) {
-        let _ = self.tx.send(Cmd::Save(Box::new(req)));
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Cmd::Save(Box::new(req)));
+        }
     }
 
-    /// Block until all queued saves have been written.
+    /// Block until all queued saves have been written. No-op if the worker
+    /// has already exited (panic or shutdown).
     pub fn flush(&self) {
+        let Some(tx) = &self.tx else { return };
+        if self.handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
         let (done_tx, done_rx) = mpsc::channel();
-        if self.tx.send(Cmd::Flush(done_tx)).is_ok() {
+        if tx.send(Cmd::Flush(done_tx)).is_ok() {
             let _ = done_rx.recv();
         }
     }
@@ -70,8 +77,8 @@ impl Persister {
 impl Drop for Persister {
     fn drop(&mut self) {
         self.flush();
-        // Close the sender so the worker's recv loop exits.
-        drop(std::mem::replace(&mut self.tx, mpsc::channel().0));
+        // Drop the sender so the worker's recv loop exits, then join.
+        self.tx = None;
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
