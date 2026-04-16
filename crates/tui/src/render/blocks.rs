@@ -864,7 +864,7 @@ fn print_tool_output<S: LayoutSink>(
         "web_fetch" if !is_error => print_dim_count(out, content.lines().count(), "line", "lines"),
         "edit_file" if !is_error => render_edit_output(out, output, args),
         "write_file" if !is_error => render_write_output(out, args),
-        "notebook_edit" if !is_error => render_notebook_output(out, output, width),
+        "edit_notebook" if !is_error => render_notebook_output(out, output, width),
         "ask_user_question" if !is_error => render_question_output(out, content, width),
         "exit_plan_mode" if !is_error => render_plan_output(out, args, width),
         "bash" | "read_process_output" | "stop_process" => {

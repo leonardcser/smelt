@@ -2,7 +2,7 @@
 //!
 //! - `RenderCache` (`render_cache.ir.bin`) — tool-output intermediate
 //!   representations: pre-computed `CachedInlineDiff`s for `edit_file` /
-//!   `notebook_edit`. The IR is width-independent and survives layout
+//!   `edit_notebook`. The IR is width-independent and survives layout
 //!   invalidation, so a terminal resize can re-lay out diff blocks
 //!   without re-running the LCS / syntect passes.
 //!
@@ -206,7 +206,7 @@ pub fn build_tool_output_render_cache(
                 build_inline_diff_cache_ext(old, new, path, new, None),
             ))
         }
-        "notebook_edit" => {
+        "edit_notebook" => {
             let meta = metadata?;
             let data = serde_json::from_value::<NotebookRenderData>(meta.clone()).ok()?;
             let diff = if data.edit_mode == "insert" {

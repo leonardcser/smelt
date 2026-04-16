@@ -18,7 +18,7 @@ preview of the new content is shown.
 Applies diff-based edits to an existing file. The confirm dialog shows a
 scrollable inline diff (old vs. new).
 
-### `notebook_edit`
+### `edit_notebook`
 
 Edits Jupyter notebook (`.ipynb`) cells. Supports replacing, inserting, and
 deleting cells. Identify cells by `cell_id` or `cell_number` (0-indexed).

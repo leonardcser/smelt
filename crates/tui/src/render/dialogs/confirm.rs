@@ -24,7 +24,7 @@ enum ConfirmPreview {
         new: String,
         path: String,
     },
-    /// Notebook cell preview/diff for notebook_edit.
+    /// Notebook cell preview/diff for edit_notebook.
     Notebook(NotebookRenderData),
     /// Syntax-highlighted file content for write_file.
     FileContent { content: String, path: String },
@@ -58,7 +58,7 @@ impl ConfirmPreview {
                     .to_string();
                 ConfirmPreview::Diff { old, new, path }
             }
-            "notebook_edit" => build_notebook_preview(args),
+            "edit_notebook" => build_notebook_preview(args),
             "write_file" => {
                 let content = args
                     .get("content")

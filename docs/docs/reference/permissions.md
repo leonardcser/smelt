@@ -22,7 +22,7 @@ Normal/Plan/Apply or **Allow** in Yolo.
 | `read_file`           | Allow  | Allow | Allow | Allow |
 | `edit_file`           | Ask    | Ask   | Allow | Allow |
 | `write_file`          | Ask    | Ask   | Allow | Allow |
-| `notebook_edit`       | Ask    | Ask   | Ask   | Allow |
+| `edit_notebook`       | Ask    | Ask   | Ask   | Allow |
 | `glob`                | Allow  | Allow | Allow | Allow |
 | `grep`                | Allow  | Allow | Allow | Allow |
 | `bash`                | Ask    | Ask   | Ask   | Allow |

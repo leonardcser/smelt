@@ -320,7 +320,7 @@ pub struct NotebookEditTool {
 
 impl Tool for NotebookEditTool {
     fn name(&self) -> &str {
-        "notebook_edit"
+        "edit_notebook"
     }
 
     fn description(&self) -> &str {

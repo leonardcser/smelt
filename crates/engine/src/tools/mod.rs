@@ -220,7 +220,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
     match tool_name {
         "bash" => str_arg(args, "command"),
         "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
-        "notebook_edit" => display_path(&str_arg(args, "notebook_path")),
+        "edit_notebook" => display_path(&str_arg(args, "notebook_path")),
         "glob" | "grep" => {
             confirm_with_optional_path(str_arg(args, "pattern"), &str_arg(args, "path"))
                 .unwrap_or_default()
@@ -450,7 +450,7 @@ pub(crate) struct FlockGuard {
 }
 
 /// Per-path locks that serialize concurrent file-mutating operations.
-/// Concurrent tool calls (edit_file, write_file, notebook_edit) targeting
+/// Concurrent tool calls (edit_file, write_file, edit_notebook) targeting
 /// the same file will execute sequentially, while different files remain
 /// parallel. Entries are pruned when no one else holds a reference.
 #[derive(Clone, Default)]

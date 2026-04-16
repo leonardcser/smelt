@@ -1,6 +1,6 @@
 use super::{
-    bool_arg, display_path, hash_content, str_arg, FileHashes, Tool, ToolContext, ToolFuture,
-    ToolResult,
+    bool_arg, display_path, hash_content, notebook, str_arg, FileHashes, Tool, ToolContext,
+    ToolFuture, ToolResult,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -84,6 +84,13 @@ impl Tool for EditFileTool {
 impl EditFileTool {
     fn run(&self, args: &HashMap<String, Value>) -> ToolResult {
         let path = str_arg(args, "file_path");
+
+        if notebook::is_notebook(&path) {
+            return ToolResult::err(
+                "Cannot use edit_file on a Jupyter notebook. Use edit_notebook instead.",
+            );
+        }
+
         let old_string = str_arg(args, "old_string");
         let new_string = str_arg(args, "new_string");
         let replace_all = bool_arg(args, "replace_all");

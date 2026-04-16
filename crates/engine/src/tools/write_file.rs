@@ -1,5 +1,6 @@
 use super::{
-    display_path, hash_content, str_arg, FileHashes, Tool, ToolContext, ToolFuture, ToolResult,
+    display_path, hash_content, notebook, str_arg, FileHashes, Tool, ToolContext, ToolFuture,
+    ToolResult,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -67,6 +68,12 @@ impl WriteFileTool {
     fn run(&self, args: &HashMap<String, Value>) -> ToolResult {
         let path = str_arg(args, "file_path");
         let content = str_arg(args, "content");
+
+        if notebook::is_notebook(&path) {
+            return ToolResult::err(
+                "Cannot use write_file on a Jupyter notebook. Use edit_notebook instead.",
+            );
+        }
 
         // Acquire cross-process advisory lock if the file exists.
         let _flock = if Path::new(&path).exists() {
