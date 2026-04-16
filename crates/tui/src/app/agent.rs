@@ -615,15 +615,15 @@ impl App {
             // Ignore stale Messages snapshots from cancelled/completed turns.
             // These would overwrite a freshly cleared history (e.g. after /clear).
             EngineEvent::Messages { .. } => {}
-            EngineEvent::TurnComplete { messages, .. } => {
+            EngineEvent::TurnComplete { messages, .. }
                 // Accept final messages from a just-cancelled turn so that
                 // partial assistant content and tool results are persisted.
                 // Don't rebuild the screen — the displayed blocks already
                 // reflect what the user saw at cancel time.
-                if !messages.is_empty() {
-                    self.set_history(messages);
-                    self.save_session();
-                }
+                if !messages.is_empty() =>
+            {
+                self.set_history(messages);
+                self.save_session();
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
@@ -638,10 +638,10 @@ impl App {
             EngineEvent::BtwResponse { content } => {
                 self.screen.set_btw_response(content);
             }
-            EngineEvent::InputPrediction { text, generation } => {
-                if generation == self.predict_generation {
-                    self.handle_input_prediction(text);
-                }
+            EngineEvent::InputPrediction { text, generation }
+                if generation == self.predict_generation =>
+            {
+                self.handle_input_prediction(text);
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);

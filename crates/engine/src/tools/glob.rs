@@ -87,7 +87,7 @@ impl Tool for GlobTool {
                     }
                 }
 
-                entries.sort_by(|a, b| b.0.cmp(&a.0));
+                entries.sort_by_key(|e| std::cmp::Reverse(e.0));
                 let matches: Vec<String> = entries.into_iter().map(|(_, p)| p).collect();
 
                 if matches.is_empty() {

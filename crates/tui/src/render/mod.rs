@@ -3925,11 +3925,10 @@ impl Screen {
         let (thumb_start, thumb_end) = if has_scrollbar {
             let thumb_size = (content_rows * content_rows / total_content_rows).max(1);
             let max_scroll = total_content_rows - content_rows;
-            let thumb_pos = if max_scroll > 0 {
-                scroll_offset * content_rows.saturating_sub(thumb_size) / max_scroll
-            } else {
-                0
-            };
+            let thumb_pos = scroll_offset
+                .checked_mul(content_rows.saturating_sub(thumb_size))
+                .and_then(|v| v.checked_div(max_scroll))
+                .unwrap_or(0);
             (thumb_pos, thumb_pos + thumb_size)
         } else {
             (0, 0)

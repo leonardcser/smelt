@@ -236,7 +236,7 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
         left.push(StatsLine::Blank);
         left.push(StatsLine::Heading("per model".into()));
         let mut models: Vec<_> = stats.by_model.iter().collect();
-        models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+        models.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
         let max_model_len = models.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
         let max_calls_len = models
             .iter()

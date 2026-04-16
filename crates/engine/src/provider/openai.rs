@@ -247,15 +247,15 @@ pub(super) async fn read_stream(
         let ev_type = ev["type"].as_str().unwrap_or("");
 
         match ev_type {
-            "response.output_item.added" => {
-                if ev["item"]["type"].as_str() == Some("function_call") {
-                    let item = &ev["item"];
-                    let id = item["id"].as_str().unwrap_or("").to_string();
-                    let call_id = item["call_id"].as_str().unwrap_or("").to_string();
-                    let name = item["name"].as_str().unwrap_or("").to_string();
-                    if !id.is_empty() && !name.is_empty() {
-                        tool_calls.insert(id, (call_id, name, String::new()));
-                    }
+            "response.output_item.added"
+                if ev["item"]["type"].as_str() == Some("function_call") =>
+            {
+                let item = &ev["item"];
+                let id = item["id"].as_str().unwrap_or("").to_string();
+                let call_id = item["call_id"].as_str().unwrap_or("").to_string();
+                let name = item["name"].as_str().unwrap_or("").to_string();
+                if !id.is_empty() && !name.is_empty() {
+                    tool_calls.insert(id, (call_id, name, String::new()));
                 }
             }
             "response.output_text.delta" => {

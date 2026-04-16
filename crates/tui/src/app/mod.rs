@@ -1053,11 +1053,9 @@ impl App {
                     } => {
                         pending_tools.insert(call_id, (tool_name, summary, String::new()));
                     }
-                    EngineEvent::ToolOutput { call_id, chunk } => {
-                        if verbose {
-                            if let Some((_, _, output)) = pending_tools.get_mut(&call_id) {
-                                output.push_str(&chunk);
-                            }
+                    EngineEvent::ToolOutput { call_id, chunk } if verbose => {
+                        if let Some((_, _, output)) = pending_tools.get_mut(&call_id) {
+                            output.push_str(&chunk);
                         }
                     }
                     EngineEvent::ToolFinished {
