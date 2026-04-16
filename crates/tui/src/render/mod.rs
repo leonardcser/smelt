@@ -133,6 +133,17 @@ impl Frame {
 impl Drop for Frame {
     fn drop(&mut self) {
         let _perf = crate::perf::begin("frame:flush");
+        // Neutralize SGR before handing the terminal back. A new `Frame`
+        // starts with `current = StyleState::default()`, so the terminal
+        // must actually match that — otherwise attributes like dim/italic
+        // from the last painted span bleed into the first span of the next
+        // frame (e.g. a dialog opened after a thinking block under Ctrl+L).
+        // Emitted inside the synchronized-update envelope, so no flicker.
+        if self.out.current != StyleState::default() {
+            let _ = self.out.queue(SetAttribute(Attribute::Reset));
+            let _ = self.out.queue(ResetColor);
+            self.out.current = StyleState::default();
+        }
         let _ = self.out.queue(terminal::EndSynchronizedUpdate);
         let bytes = self.out.bytes_queued;
         {
@@ -442,18 +453,6 @@ impl RenderOut {
         }
     }
 
-    /// Emit an unconditional terminal style reset and forget any saved scopes.
-    ///
-    /// Use this at render boundaries where terminal state may have drifted
-    /// from `self.current` — for example across frames, or after drawing raw
-    /// ANSI bytes that bypass `RenderOut`'s diff engine.
-    pub fn force_reset_style(&mut self) {
-        let _ = self.queue(SetAttribute(Attribute::Reset));
-        let _ = self.queue(ResetColor);
-        self.current = StyleState::default();
-        self.stack.clear();
-    }
-
     // ── Cursor-tracking helpers ───────────────────────────────────
 
     /// Initialize cursor tracking at the start of a frame.
@@ -564,16 +563,6 @@ impl RenderOut {
         }
         self.emit_diff(&target);
         self.current = target;
-    }
-
-    /// Mark style state as unknown (after replaying cached bytes).
-    /// Forces the next style call to emit unconditionally.
-    pub fn invalidate_style(&mut self) {
-        // Setting everything to default without emitting — next set_* call
-        // will see a mismatch and emit. Stack is cleared since cached blocks
-        // are self-contained.
-        self.current = StyleState::default();
-        self.stack.clear();
     }
 
     // ── Internal diff engine ─────────────────────────────────────────
@@ -1860,9 +1849,6 @@ impl Screen {
         }
         let _ = out.queue(cursor::SavePosition);
         let _ = out.queue(cursor::MoveTo(0, h - 1));
-        // Only emit a reset if the tracked style has actually drifted.
-        // force_reset_style unconditionally emits SGR reset codes which
-        // can cause a flash on the status-bar row.
         out.reset_style();
         self.render_status_line(out);
         let _ = out.queue(cursor::RestorePosition);
@@ -3704,13 +3690,10 @@ impl Screen {
         self.last_mode = mode;
         self.prompt.soft_cursor = None;
         let usable = width.saturating_sub(2);
-        // Reset SGR state before painting any prompt section. The previous
-        // frame may have ended with styled content (for example a dim/italic
-        // thinking line or a dialog/status-line row), and `self.current`
-        // only tracks what this `RenderOut` instance emitted. Prompt frames
-        // get a fresh `RenderOut`, so we must force a terminal reset here
-        // instead of relying on the diff engine's cached state.
-        out.force_reset_style();
+        // Neutralize any styling carried over from the preceding
+        // history/overlay paint in this same frame before the prompt
+        // sections start printing plain text.
+        out.reset_style();
         let notification_rows = render_notification(out, self.notification.as_ref(), usable);
         let queued_visual = render_queued(out, queued, usable);
         let queued_rows = queued_visual as usize;
@@ -5516,14 +5499,6 @@ mod selection_tests {
         );
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 8);
-    }
-
-    #[test]
-    fn force_reset_style_emits_reset_even_when_state_looks_clean() {
-        let mut out = RenderOut::buffer();
-        out.force_reset_style();
-        let rendered = String::from_utf8(out.into_bytes()).unwrap();
-        assert_eq!(rendered, "\u{1b}[0m\u{1b}[0m");
     }
 
     #[test]
