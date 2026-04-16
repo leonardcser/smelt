@@ -871,6 +871,7 @@ impl App {
                 status: super::AgentTrackStatus::Working,
                 blocking: child.blocking,
                 started_at: Instant::now(),
+                context_tokens: None,
                 cost_usd: 0.0,
             });
         }
@@ -923,10 +924,22 @@ impl App {
                     EngineEvent::TurnComplete { .. } => {
                         agent.status = super::AgentTrackStatus::Idle;
                     }
-                    EngineEvent::TokenUsage { cost_usd, .. } => {
+                    EngineEvent::TokenUsage {
+                        cost_usd,
+                        usage,
+                        background,
+                        ..
+                    } => {
                         let cost = cost_usd.unwrap_or(0.0);
                         agent.cost_usd += cost;
                         session_cost_delta += cost;
+                        if !background {
+                            if let Some(tokens) = usage.prompt_tokens {
+                                if tokens > 0 {
+                                    agent.context_tokens = Some(tokens);
+                                }
+                            }
+                        }
                     }
                     EngineEvent::TurnError { .. } => {
                         agent.status = super::AgentTrackStatus::Error;
@@ -975,6 +988,7 @@ impl App {
                 agent_id: a.agent_id.clone(),
                 prompt: a.prompt.clone(),
                 tool_calls: a.tool_calls.clone(),
+                context_tokens: a.context_tokens,
                 cost_usd: a.cost_usd,
             })
             .collect();

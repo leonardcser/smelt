@@ -54,6 +54,8 @@ pub struct TrackedAgent {
     /// Whether the parent LLM is waiting for this agent (blocking spawn).
     pub blocking: bool,
     pub started_at: Instant,
+    /// Latest prompt-token count reported for this subagent.
+    pub context_tokens: Option<u32>,
     /// Accumulated cost in USD from this subagent's TokenUsage events.
     pub cost_usd: f64,
 }

@@ -26,6 +26,7 @@ pub struct AgentSnapshot {
     pub agent_id: String,
     pub prompt: std::sync::Arc<String>,
     pub tool_calls: Vec<AgentToolEntry>,
+    pub context_tokens: Option<u32>,
     pub cost_usd: f64,
 }
 
@@ -341,6 +342,11 @@ impl super::Dialog for AgentsDialog {
                     }
                 }
                 if let Some(ref snap) = snapshot {
+                    if let Some(tokens) = snap.context_tokens {
+                        out.push_dim();
+                        out.print(&format!("  {}", crate::render::format_tokens(tokens)));
+                        out.pop_style();
+                    }
                     if snap.cost_usd > 0.0 {
                         out.push_dim();
                         out.print(&format!("  {}", crate::metrics::format_cost(snap.cost_usd)));
@@ -481,6 +487,11 @@ impl super::Dialog for AgentsDialog {
                             out.print(&format!("  {}", truncate_str(slug, max)));
                         }
                         if let Some(snap) = self.find_snapshot(&agent.agent_id) {
+                            if let Some(tokens) = snap.context_tokens {
+                                out.push_dim();
+                                out.print(&format!("  {}", crate::render::format_tokens(tokens)));
+                                out.pop_style();
+                            }
                             if snap.cost_usd > 0.0 {
                                 out.push_dim();
                                 out.print(&format!(
