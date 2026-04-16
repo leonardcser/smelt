@@ -152,6 +152,7 @@ pub struct App {
     cli_api_base_override: bool,
     /// Whether api_key_env was explicitly provided via CLI (takes precedence over session).
     cli_api_key_env_override: bool,
+    startup_auth_error: Option<String>,
 }
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
@@ -402,6 +403,7 @@ impl App {
         cli_model_override: bool,
         cli_api_base_override: bool,
         cli_api_key_env_override: bool,
+        startup_auth_error: Option<String>,
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
@@ -504,6 +506,7 @@ impl App {
             cli_model_override,
             cli_api_base_override,
             cli_api_key_env_override,
+            startup_auth_error,
         }
     }
 
@@ -546,6 +549,10 @@ impl App {
         }
         self.screen
             .draw_prompt(&self.input, self.mode, render::term_width());
+
+        if let Some(message) = self.startup_auth_error.take() {
+            self.screen.notify_error(message);
+        }
 
         let mut term_events = EventStream::new();
         let mut agent: Option<TurnState> = None;

@@ -5,6 +5,21 @@ use crossterm::ExecutableCommand;
 use protocol::{Mode, ReasoningEffort};
 use std::sync::{Arc, Mutex};
 
+fn resolve_api_key(key_env: &str) -> Result<String, String> {
+    if key_env.is_empty() {
+        return Ok(String::new());
+    }
+    match std::env::var(key_env) {
+        Ok(key) => Ok(key),
+        Err(std::env::VarError::NotPresent) => Err(format!(
+            "environment variable '{key_env}' is not set but is required for API authentication"
+        )),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "environment variable '{key_env}' contains non-Unicode data and cannot be used as an API key"
+        )),
+    }
+}
+
 #[global_allocator]
 static ALLOCATOR: tui::alloc::Counting = tui::alloc::Counting;
 
@@ -204,6 +219,8 @@ async fn main() {
         });
     }
 
+    let mut startup_auth_error: Option<String> = None;
+
     // Resolve the active model: CLI flags > defaults.model (if set) > last_used (if no default) > first in config
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
         let resolved = if let Some(ref cli_model) = args.model {
@@ -232,7 +249,13 @@ async fn main() {
                 .api_key_env
                 .clone()
                 .unwrap_or_else(|| r.api_key_env.clone());
-            let key = std::env::var(&key_env).unwrap_or_default();
+            let key = match resolve_api_key(&key_env) {
+                Ok(key) => key,
+                Err(err) => {
+                    startup_auth_error = Some(err);
+                    String::new()
+                }
+            };
             (
                 base,
                 key,
@@ -250,7 +273,13 @@ async fn main() {
             cfg = tui::config::Config::load_from(&cfg.path);
             let models = cfg.resolve_models();
             if let Some(r) = models.first() {
-                let key = std::env::var(&r.api_key_env).unwrap_or_default();
+                let key = match resolve_api_key(&r.api_key_env) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        startup_auth_error = Some(err);
+                        String::new()
+                    }
+                };
                 (
                     r.api_base.clone(),
                     key,
@@ -265,7 +294,13 @@ async fn main() {
             }
         } else if let Some(base) = args.api_base.clone() {
             let key_env = args.api_key_env.clone().unwrap_or_default();
-            let key = std::env::var(&key_env).unwrap_or_default();
+            let key = match resolve_api_key(&key_env) {
+                Ok(key) => key,
+                Err(err) => {
+                    startup_auth_error = Some(err);
+                    String::new()
+                }
+            };
             let Some(model) = args.model.clone() else {
                 eprintln!("error: --model is required when using --api-base without a config file");
                 std::process::exit(1);
@@ -398,6 +433,14 @@ async fn main() {
                 .and_then(ReasoningEffort::parse)
         })
         .unwrap_or(app_state.reasoning_effort);
+
+    if (args.headless || args.subagent) && startup_auth_error.is_some() {
+        eprintln!(
+            "error: {}",
+            startup_auth_error.as_deref().unwrap_or_default()
+        );
+        std::process::exit(1);
+    }
 
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
     let mut reasoning_cycle = args
@@ -604,7 +647,7 @@ async fn main() {
             .api_key_env
             .as_deref()
             .or_else(|| available_models.first().map(|m| m.api_key_env.as_str()))
-            .map(|env| std::env::var(env).unwrap_or_default())
+            .and_then(|env| resolve_api_key(env).ok())
             .unwrap_or_default();
         let ctx_model = model.clone();
         let ctx_provider_type = initial_provider_type.clone();
@@ -641,6 +684,7 @@ async fn main() {
         args.model.is_some(),
         args.api_base.is_some(),
         args.api_key_env.is_some(),
+        startup_auth_error,
     );
     app.model_config = (&model_config).into();
     if let Some(mode) = mode_override {

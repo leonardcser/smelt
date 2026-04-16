@@ -54,6 +54,15 @@ impl App {
     /// Mark the engine busy, allocate a turn id, and send `StartTurn` with the
     /// current app state. Callers own any history/session prep before this.
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
+        let Some(api_key) = self.resolve_api_key() else {
+            self.screen.set_throbber(render::Throbber::Done);
+            return TurnState {
+                turn_id: 0,
+                pending: Vec::new(),
+                _perf: crate::perf::begin("agent:turn"),
+            };
+        };
+
         self.screen.set_throbber(render::Throbber::Working);
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
@@ -68,7 +77,7 @@ impl App {
             reasoning_effort: self.reasoning_effort,
             history: self.history.clone(),
             api_base: Some(self.api_base.clone()),
-            api_key: Some(self.api_key()),
+            api_key: Some(api_key),
             session_id: self.session.id.clone(),
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
@@ -109,14 +118,26 @@ impl App {
                         model_match && prov_match
                     })
                 })
-                .flatten();
+                .flatten()
+                .map(|r| {
+                    (
+                        r.model_name.clone(),
+                        r.api_base.clone(),
+                        r.api_key_env.clone(),
+                    )
+                });
             match resolved {
-                Some(r) => (
-                    r.model_name.clone(),
-                    r.api_base.clone(),
-                    std::env::var(&r.api_key_env).unwrap_or_default(),
+                Some((model_name, api_base, api_key_env)) => (
+                    model_name,
+                    api_base,
+                    self.resolve_api_key_for_env(&api_key_env)
+                        .unwrap_or_default(),
                 ),
-                None => (self.model.clone(), self.api_base.clone(), self.api_key()),
+                None => (
+                    self.model.clone(),
+                    self.api_base.clone(),
+                    self.resolve_api_key().unwrap_or_default(),
+                ),
             }
         };
 
@@ -704,6 +725,52 @@ impl App {
 
     pub(super) fn api_key(&self) -> String {
         std::env::var(&self.api_key_env).unwrap_or_default()
+    }
+
+    pub(super) fn resolve_api_key(&mut self) -> Option<String> {
+        if self.api_key_env.is_empty() {
+            return Some(String::new());
+        }
+        match std::env::var(&self.api_key_env) {
+            Ok(key) => Some(key),
+            Err(std::env::VarError::NotPresent) => {
+                self.screen.notify_error(format!(
+                    "environment variable '{}' is not set but is required for API authentication",
+                    self.api_key_env
+                ));
+                None
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                self.screen.notify_error(format!(
+                    "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
+                    self.api_key_env
+                ));
+                None
+            }
+        }
+    }
+
+    pub(super) fn resolve_api_key_for_env(&mut self, key_env: &str) -> Option<String> {
+        if key_env.is_empty() {
+            return Some(String::new());
+        }
+        match std::env::var(key_env) {
+            Ok(key) => Some(key),
+            Err(std::env::VarError::NotPresent) => {
+                self.screen.notify_error(format!(
+                    "environment variable '{}' is not set but is required for API authentication",
+                    key_env
+                ));
+                None
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                self.screen.notify_error(format!(
+                    "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
+                    key_env
+                ));
+                None
+            }
+        }
     }
 
     fn handle_agent_exited(&mut self, agent_id: &str, exit_code: Option<i32>) {

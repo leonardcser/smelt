@@ -329,11 +329,12 @@ impl App {
         self.provider_type = resolved.provider_type.clone();
         self.model_config = (&resolved.config).into();
         self.screen.set_model_label(self.model.clone());
+        let api_key = self.resolve_api_key().unwrap_or_default();
         state::set_selected_model(key.to_string());
         self.engine.send(UiCommand::SetModel {
             model: self.model.clone(),
             api_base: self.api_base.clone(),
-            api_key: std::env::var(&self.api_key_env).unwrap_or_default(),
+            api_key,
             provider_type: self.provider_type.clone(),
         });
         true
@@ -346,13 +347,17 @@ impl App {
         image_labels: Vec<String>,
     ) {
         self.screen.set_btw(display_question, image_labels);
+        let api_key = match self.resolve_api_key() {
+            Some(key) => key,
+            None => return,
+        };
         self.engine.send(UiCommand::Btw {
             question,
             history: self.history.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort,
             api_base: Some(self.api_base.clone()),
-            api_key: Some(self.api_key()),
+            api_key: Some(api_key),
         });
     }
 
