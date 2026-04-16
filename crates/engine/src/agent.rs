@@ -1216,8 +1216,16 @@ impl<'a> Turn<'a> {
                 if let Some(ref msg) = slot.confirm_msg {
                     tool_content.push_str(&format!("\n\nUser message: {msg}"));
                 }
+                let history_content = match tools::result_dedup::duplicate_of(
+                    &tool_content,
+                    is_error,
+                    &self.messages,
+                ) {
+                    Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
+                    None => tool_content,
+                };
                 self.messages
-                    .push(Message::tool(slot.tc.id.clone(), tool_content, is_error));
+                    .push(Message::tool(slot.tc.id.clone(), history_content, is_error));
                 self.emit_messages_snapshot();
                 self.emit(EngineEvent::ToolFinished {
                     call_id: slot.tc.id.clone(),
@@ -1406,8 +1414,16 @@ impl<'a> Turn<'a> {
         is_error: bool,
         started_at: Option<Instant>,
     ) {
-        self.messages
-            .push(Message::tool(tool_call_id.to_string(), content, is_error));
+        let history_content =
+            match tools::result_dedup::duplicate_of(content, is_error, &self.messages) {
+                Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
+                None => content.to_string(),
+            };
+        self.messages.push(Message::tool(
+            tool_call_id.to_string(),
+            history_content,
+            is_error,
+        ));
         self.emit(EngineEvent::ToolFinished {
             call_id: tool_call_id.to_string(),
             result: ToolOutcome {

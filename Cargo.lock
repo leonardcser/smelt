@@ -627,6 +627,7 @@ dependencies = [
  "serde_json",
  "serde_yml",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "url",

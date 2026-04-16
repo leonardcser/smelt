@@ -1,12 +1,12 @@
 use super::{
-    bool_arg, display_path, hash_content, notebook, str_arg, FileHashes, Tool, ToolContext,
+    bool_arg, display_path, notebook, staleness_error, str_arg, FileStateCache, Tool, ToolContext,
     ToolFuture, ToolResult,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 
 pub struct EditFileTool {
-    pub hashes: FileHashes,
+    pub files: FileStateCache,
 }
 
 impl Tool for EditFileTool {
@@ -49,23 +49,7 @@ impl Tool for EditFileTool {
 
     fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
         let path = str_arg(args, "file_path");
-        if let Ok(map) = self.hashes.lock() {
-            match map.get(&path) {
-                None => {
-                    return Some(
-                        "You must use read_file before editing. Read the file first.".into(),
-                    );
-                }
-                Some(&stored_hash) => {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if stored_hash != hash_content(&content) {
-                            return Some("File has been modified since last read. You must use read_file to read the current contents before editing.".into());
-                        }
-                    }
-                }
-            }
-        }
-        None
+        staleness_error(&self.files, &path, "file")
     }
 
     fn execute<'a>(
@@ -95,7 +79,10 @@ impl EditFileTool {
         let new_string = str_arg(args, "new_string");
         let replace_all = bool_arg(args, "replace_all");
 
-        // Acquire cross-process advisory lock (non-blocking).
+        if let Some(err) = staleness_error(&self.files, &path, "file") {
+            return ToolResult::err(err);
+        }
+
         let _flock = match super::try_flock(&path) {
             Ok(guard) => Some(guard),
             Err(e) => return ToolResult::err(e),
@@ -105,22 +92,6 @@ impl EditFileTool {
             Ok(c) => c,
             Err(e) => return ToolResult::err(e.to_string()),
         };
-
-        if let Ok(map) = self.hashes.lock() {
-            match map.get(&path) {
-                None => {
-                    return ToolResult::err(
-                        "You must use read_file before editing. Read the file first.",
-                    );
-                }
-                Some(&stored_hash) => {
-                    let current_hash = hash_content(&content);
-                    if stored_hash != current_hash {
-                        return ToolResult::err("File has been modified since last read. You must use read_file to read the current contents before editing.");
-                    }
-                }
-            }
-        }
 
         if old_string == new_string {
             return ToolResult::err("old_string and new_string are identical");
@@ -145,12 +116,122 @@ impl EditFileTool {
 
         match std::fs::write(&path, &new_content) {
             Ok(_) => {
-                if let Ok(mut map) = self.hashes.lock() {
-                    map.insert(path.clone(), hash_content(&new_content));
-                }
+                self.files.record_write(&path, new_content);
                 ToolResult::ok(format!("edited {}", display_path(&path)))
             }
             Err(e) => ToolResult::err(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn mk_tool() -> (EditFileTool, FileStateCache) {
+        let files = FileStateCache::new();
+        (
+            EditFileTool {
+                files: files.clone(),
+            },
+            files,
+        )
+    }
+
+    fn args(path: &str, old: &str, new: &str, all: bool) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("file_path".into(), Value::String(path.into()));
+        m.insert("old_string".into(), Value::String(old.into()));
+        m.insert("new_string".into(), Value::String(new.into()));
+        if all {
+            m.insert("replace_all".into(), Value::Bool(true));
+        }
+        m
+    }
+
+    fn cached_read(cache: &FileStateCache, path: &str, content: &str) {
+        cache.record_read(path, content.into(), (1, 2000));
+    }
+
+    #[test]
+    fn preflight_errors_when_file_not_read() {
+        let (tool, _cache) = mk_tool();
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hello\n").unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+        let err = tool
+            .preflight(&args(&path, "hello", "world", false))
+            .expect("preflight error");
+        assert!(err.contains("must use read_file"));
+        assert!(err.contains("file"));
+    }
+
+    #[test]
+    fn preflight_errors_on_stale_mtime() {
+        use std::thread::sleep;
+        use std::time::Duration;
+        let (tool, cache) = mk_tool();
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hello\n").unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+        cached_read(&cache, &path, "hello\n");
+        sleep(Duration::from_millis(1100));
+        std::fs::write(tmp.path(), "modified\n").unwrap();
+        let err = tool
+            .preflight(&args(&path, "modified", "changed", false))
+            .expect("preflight error");
+        assert!(err.contains("modified since last read"));
+    }
+
+    #[test]
+    fn preflight_passes_when_fresh() {
+        let (tool, cache) = mk_tool();
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hello world\n").unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+        cached_read(&cache, &path, "hello world\n");
+        assert!(tool.preflight(&args(&path, "hello", "hi", false)).is_none());
+    }
+
+    #[test]
+    fn run_updates_cache_with_new_content_and_no_range() {
+        let (tool, cache) = mk_tool();
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "aaa\nbbb\n").unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+        cached_read(&cache, &path, "aaa\nbbb\n");
+        let r = tool.run(&args(&path, "aaa", "xxx", false));
+        assert!(!r.is_error, "edit failed: {}", r.content);
+        let cached = cache.get(&path).unwrap();
+        assert_eq!(cached.content, "xxx\nbbb\n");
+        assert_eq!(cached.read_range, None);
+    }
+
+    #[test]
+    fn run_rejects_edit_without_prior_read() {
+        let (tool, _cache) = mk_tool();
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hi\n").unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+        let r = tool.run(&args(&path, "hi", "yo", false));
+        assert!(r.is_error);
+        assert!(r.content.contains("must use read_file"));
+    }
+
+    #[test]
+    fn run_detects_mid_flight_mtime_change() {
+        use std::thread::sleep;
+        use std::time::Duration;
+        let (tool, cache) = mk_tool();
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "original\n").unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+        cached_read(&cache, &path, "original\n");
+        sleep(Duration::from_millis(1100));
+        std::fs::write(tmp.path(), "different\n").unwrap();
+        let r = tool.run(&args(&path, "different", "changed", false));
+        assert!(r.is_error);
+        assert!(r.content.contains("modified since last read"));
     }
 }

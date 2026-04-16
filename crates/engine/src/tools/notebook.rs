@@ -5,7 +5,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    display_path, hash_content, str_arg, FileHashes, Tool, ToolContext, ToolFuture, ToolResult,
+    display_path, staleness_error, str_arg, FileStateCache, Tool, ToolContext, ToolFuture,
+    ToolResult,
 };
 
 /// Check whether a file path looks like a Jupyter notebook.
@@ -315,7 +316,7 @@ fn render_data_from_snapshots(
 // ---------------------------------------------------------------------------
 
 pub struct NotebookEditTool {
-    pub hashes: FileHashes,
+    pub files: FileStateCache,
 }
 
 impl Tool for NotebookEditTool {
@@ -368,23 +369,7 @@ impl Tool for NotebookEditTool {
 
     fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
         let path = str_arg(args, "notebook_path");
-        if let Ok(map) = self.hashes.lock() {
-            match map.get(&path) {
-                None => {
-                    return Some(
-                        "You must use read_file before editing. Read the notebook first.".into(),
-                    );
-                }
-                Some(&stored_hash) => {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if stored_hash != hash_content(&content) {
-                            return Some("Notebook has been modified since last read. Use read_file to read the current contents before editing.".into());
-                        }
-                    }
-                }
-            }
-        }
-        None
+        staleness_error(&self.files, &path, "notebook")
     }
 
     fn execute<'a>(
@@ -395,12 +380,12 @@ impl Tool for NotebookEditTool {
         Box::pin(async move {
             let path = str_arg(&args, "notebook_path");
             let _guard = ctx.file_locks.lock(&path).await;
-            tokio::task::block_in_place(|| run_edit(&args, &self.hashes))
+            tokio::task::block_in_place(|| run_edit(&args, &self.files))
         })
     }
 }
 
-fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
+fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> ToolResult {
     let path = str_arg(args, "notebook_path");
 
     if path.is_empty() {
@@ -447,27 +432,14 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
         return ToolResult::err("cell_type is required when inserting a new cell");
     }
 
+    if let Some(err) = staleness_error(files, &path, "notebook") {
+        return ToolResult::err(err);
+    }
+
     let raw = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => return ToolResult::err(e.to_string()),
     };
-
-    // Check staleness against stored hash
-    if let Ok(map) = hashes.lock() {
-        match map.get(&path) {
-            None => {
-                return ToolResult::err(
-                    "You must use read_file before editing. Read the notebook first.",
-                );
-            }
-            Some(&stored_hash) => {
-                let current_hash = hash_content(&raw);
-                if stored_hash != current_hash {
-                    return ToolResult::err("Notebook has been modified since last read. Use read_file to read the current contents before editing.");
-                }
-            }
-        }
-    }
 
     let mut nb: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
@@ -533,7 +505,7 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
                 &path,
                 &nb,
                 &format!("replaced cell {idx}"),
-                hashes,
+                files,
                 Some(render),
             )
         }
@@ -571,7 +543,7 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
                 &path,
                 &nb,
                 &format!("inserted {cell_type} cell at position {insert_at}"),
-                hashes,
+                files,
                 Some(render),
             )
         }
@@ -597,7 +569,7 @@ fn run_edit(args: &HashMap<String, Value>, hashes: &FileHashes) -> ToolResult {
                 &path,
                 &nb,
                 &format!("deleted cell {idx}"),
-                hashes,
+                files,
                 Some(render),
             )
         }
@@ -675,7 +647,7 @@ fn write_notebook(
     path: &str,
     nb: &Value,
     action: &str,
-    hashes: &FileHashes,
+    files: &FileStateCache,
     render: Option<NotebookRenderData>,
 ) -> ToolResult {
     // 1-space indent matches Jupyter/JupyterLab convention
@@ -690,16 +662,13 @@ fn write_notebook(
         Err(e) => return ToolResult::err(format!("failed to serialize notebook: {e}")),
     };
 
-    // Ensure trailing newline
     if !json.ends_with('\n') {
         json.push('\n');
     }
 
     match std::fs::write(path, &json) {
         Ok(_) => {
-            if let Ok(mut map) = hashes.lock() {
-                map.insert(path.to_string(), hash_content(&json));
-            }
+            files.record_write(path, json);
             if let Some(render) = render {
                 ToolResult::ok(format!("{action} in {}", display_path(path)))
                     .with_metadata(render_data_metadata(&render))

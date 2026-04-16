@@ -4,6 +4,7 @@ mod bash;
 mod bash_background;
 mod edit_file;
 mod exit_plan_mode;
+mod file_state;
 mod glob;
 mod grep;
 mod list_agents;
@@ -12,6 +13,7 @@ mod message_agent;
 mod notebook;
 mod peek_agent;
 mod read_file;
+pub mod result_dedup;
 mod spawn_agent;
 mod stop_agent;
 pub(crate) mod web_cache;
@@ -19,6 +21,8 @@ mod web_fetch;
 mod web_search;
 mod web_shared;
 mod write_file;
+
+pub use file_state::{file_mtime_ms, normalize_path, staleness_error, FileState, FileStateCache};
 
 use crate::cancel::CancellationToken;
 use crate::permissions::{Decision, Permissions};
@@ -398,21 +402,6 @@ pub(crate) fn run_command_with_timeout(
     }
 }
 
-/// Computes a simple hash of file contents for staleness detection.
-pub(crate) fn hash_content(content: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Shared map of file_path -> content hash, updated on read and edit.
-pub type FileHashes = Arc<Mutex<HashMap<String, u64>>>;
-
-pub fn new_file_hashes() -> FileHashes {
-    Arc::new(Mutex::new(HashMap::new()))
-}
-
 /// Acquire an exclusive, non-blocking advisory lock on the given file path.
 /// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
 /// locked by another process (EWOULDBLOCK) or on any other I/O error.
@@ -510,16 +499,16 @@ pub fn build_tools(
     ma: Option<MultiAgentToolConfig>,
     skills: Option<std::sync::Arc<crate::skills::SkillLoader>>,
 ) -> ToolRegistry {
-    let hashes = new_file_hashes();
+    let files = FileStateCache::new();
     let mut r = ToolRegistry::new();
     r.register(Box::new(ReadFileTool {
-        hashes: hashes.clone(),
+        files: files.clone(),
     }));
     r.register(Box::new(WriteFileTool {
-        hashes: hashes.clone(),
+        files: files.clone(),
     }));
     r.register(Box::new(EditFileTool {
-        hashes: hashes.clone(),
+        files: files.clone(),
     }));
     r.register(Box::new(BashTool));
     r.register(Box::new(GlobTool));
@@ -529,7 +518,7 @@ pub fn build_tools(
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(WebSearchTool));
     r.register(Box::new(NotebookEditTool {
-        hashes: hashes.clone(),
+        files: files.clone(),
     }));
     r.register(Box::new(ReadProcessOutputTool {
         registry: processes.clone(),

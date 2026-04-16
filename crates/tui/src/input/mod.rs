@@ -14,6 +14,10 @@ use protocol::Content;
 
 pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
 
+/// Back-reference emitted in place of repeated paste expansions so the model
+/// sees the placement without paying tokens for the duplicate body.
+const PASTE_STUB: &str = "[see earlier pasted content]";
+
 // ── Kill ring ─────────────────────────────────────────────────────────────────
 
 const KILL_RING_MAX: usize = 32;
@@ -485,13 +489,25 @@ impl InputState {
 
     /// Expand attachment markers and return the final text for submission.
     /// Pastes are inlined; image markers are stripped (images go via Content::Parts).
+    ///
+    /// When the same attachment id appears more than once in the buffer we
+    /// expand it only on the first occurrence. Subsequent occurrences emit a
+    /// short back-reference so the model still sees the placement without
+    /// spending tokens on duplicate content. The back-reference is omitted
+    /// for images entirely — their content is carried via `Content::Parts`,
+    /// not inline text, so repeating the (empty) image expansion is a no-op.
     pub fn expanded_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
+        let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
         for c in self.buf.chars() {
             if c == ATTACHMENT_MARKER {
                 if let Some(&id) = self.attachment_ids.get(att_idx) {
-                    result.push_str(self.store.expanded_text(id));
+                    if seen.insert(id) {
+                        result.push_str(self.store.expanded_text(id));
+                    } else if matches!(self.store.get(id), Some(Attachment::Paste { .. })) {
+                        result.push_str(PASTE_STUB);
+                    }
                 }
                 att_idx += 1;
             } else {
@@ -539,11 +555,17 @@ impl InputState {
     }
 
     /// Build the message content combining text and any attached images.
+    ///
+    /// Images referenced multiple times in the buffer are emitted only once
+    /// in `Content::Parts` — the payload is a base64 data URL (large), and
+    /// the model gets nothing extra from seeing it twice.
     pub fn build_content(&self) -> Content {
         let text = self.expanded_text();
+        let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
         let images: Vec<(String, String)> = self
             .attachment_ids
             .iter()
+            .filter(|&&id| seen.insert(id))
             .filter_map(|&id| match self.store.get(id) {
                 Some(Attachment::Image { label, data_url }) => {
                     Some((label.clone(), data_url.clone()))
@@ -2866,6 +2888,106 @@ mod tests {
             input.attachment_ids.is_empty(),
             "Attachment should be removed"
         );
+    }
+
+    // ── Attachment dedup within a single message ───────────────────────
+
+    /// Place two markers in the buffer that both point at `id`.
+    fn buf_with_two_markers(input: &mut InputState, id: AttachmentId) {
+        input.buf = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
+        input.cpos = input.buf.len();
+        input.attachment_ids = vec![id, id];
+    }
+
+    #[test]
+    fn expanded_text_inlines_paste_once_for_duplicate_ids() {
+        let mut input = InputState::new();
+        let body = "secret pasted block".to_string();
+        let id = input.store.insert_paste(body.clone());
+        buf_with_two_markers(&mut input, id);
+
+        let text = input.expanded_text();
+        assert_eq!(
+            text.matches(&body).count(),
+            1,
+            "paste body should appear exactly once"
+        );
+        assert!(text.contains(PASTE_STUB));
+    }
+
+    #[test]
+    fn expanded_text_distinct_pastes_both_expand() {
+        let mut input = InputState::new();
+        let id1 = input.store.insert_paste("alpha body long enough".into());
+        let id2 = input.store.insert_paste("beta body different".into());
+        input.buf = format!("{m}and{m}", m = ATTACHMENT_MARKER);
+        input.cpos = input.buf.len();
+        input.attachment_ids = vec![id1, id2];
+        let text = input.expanded_text();
+        assert!(text.contains("alpha body long enough"));
+        assert!(text.contains("beta body different"));
+        assert!(!text.contains("[see earlier"));
+    }
+
+    #[test]
+    fn expanded_text_three_identical_ids_emits_one_body_two_stubs() {
+        let mut input = InputState::new();
+        let body = "repeated content".to_string();
+        let id = input.store.insert_paste(body.clone());
+        input.buf = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
+        input.cpos = input.buf.len();
+        input.attachment_ids = vec![id, id, id];
+        let text = input.expanded_text();
+        assert_eq!(text.matches(&body).count(), 1);
+        assert_eq!(text.matches(PASTE_STUB).count(), 2);
+    }
+
+    #[test]
+    fn build_content_dedups_repeated_image_in_parts() {
+        let mut input = InputState::new();
+        let id = input
+            .store
+            .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
+        buf_with_two_markers(&mut input, id);
+        let content = input.build_content();
+        assert_eq!(
+            content.image_count(),
+            1,
+            "repeated image should appear once in Content::Parts"
+        );
+    }
+
+    #[test]
+    fn build_content_preserves_distinct_images() {
+        let mut input = InputState::new();
+        let id1 = input
+            .store
+            .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
+        let id2 = input
+            .store
+            .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
+        input.buf = format!("{m}{m}", m = ATTACHMENT_MARKER);
+        input.cpos = input.buf.len();
+        input.attachment_ids = vec![id1, id2];
+        let content = input.build_content();
+        assert_eq!(content.image_count(), 2);
+    }
+
+    #[test]
+    fn build_content_dedups_interleaved_image_references() {
+        // Pattern: img A, img B, img A again. Parts should be [A, B].
+        let mut input = InputState::new();
+        let id_a = input
+            .store
+            .insert_image("a.png".into(), "data:image/png;base64,AAA".into());
+        let id_b = input
+            .store
+            .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
+        input.buf = format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER);
+        input.cpos = input.buf.len();
+        input.attachment_ids = vec![id_a, id_b, id_a];
+        let content = input.build_content();
+        assert_eq!(content.image_count(), 2);
     }
 
     use crate::keymap::KeyAction;
