@@ -1093,6 +1093,14 @@ impl App {
                     self.screen.clear_dialog_area();
                 }
             }
+            render::DialogResult::Export { target } => {
+                match target {
+                    Some(render::ExportTarget::Clipboard) => self.export_to_clipboard(),
+                    Some(render::ExportTarget::File) => self.export_to_file(),
+                    None => {}
+                }
+                self.screen.clear_dialog_area();
+            }
             render::DialogResult::PermissionsClosed {
                 session_remaining,
                 workspace_remaining,

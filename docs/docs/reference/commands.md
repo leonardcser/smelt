@@ -11,7 +11,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/resume`                 | Resume a saved session                        |
 | `/compact [instructions]` | Summarize older history to free context       |
 | `/fork`, `/branch`        | Fork the current session                      |
-| `/export`                 | Copy conversation to clipboard as markdown    |
+| `/export`                 | Export conversation (clipboard or file)       |
 | `/model [provider/model]` | Switch model (opens picker if no name given)  |
 | `/settings`               | Toggle runtime settings                       |
 | `/theme [name]`           | Change accent color                           |

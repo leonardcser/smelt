@@ -67,8 +67,12 @@ impl App {
                 CommandAction::Continue
             }
             "/export" => {
-                self.export_to_clipboard();
-                CommandAction::Continue
+                if self.history.is_empty() {
+                    self.screen.notify_error("nothing to export".into());
+                    CommandAction::Continue
+                } else {
+                    CommandAction::OpenDialog(Box::new(render::ExportDialog::new()))
+                }
             }
             "/agents" if self.multi_agent => {
                 let my_pid = std::process::id();
@@ -402,10 +406,117 @@ impl App {
         }
     }
 
+    pub(super) fn export_to_file(&mut self) {
+        let text = self.format_conversation_text();
+        if text.is_empty() {
+            self.screen.notify_error("nothing to export".into());
+            return;
+        }
+        let dir = std::path::PathBuf::from(&self.cwd);
+        let slug = export_filename_slug(self.session.title.as_deref());
+        let stamp = file_timestamp(self.session.created_at_ms);
+        let path = unique_export_path(&dir, &slug, &stamp);
+        match std::fs::write(&path, &text) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                self.screen.notify(format!("exported to {name}"));
+            }
+            Err(e) => {
+                self.screen.notify_error(format!("export failed: {e}"));
+            }
+        }
+    }
+
     pub(super) fn format_conversation_text(&self) -> String {
         // History is redacted at ingress; export reads straight from it.
         format_conversation_markdown(&self.history, &self.session)
     }
+}
+
+fn export_filename_slug(title: Option<&str>) -> String {
+    let raw = title
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("conversation");
+    let mut slug = String::with_capacity(raw.len());
+    let mut prev_dash = false;
+    for c in raw.chars() {
+        let keep = if c.is_ascii_alphanumeric() {
+            Some(c.to_ascii_lowercase())
+        } else if c.is_ascii_whitespace() || matches!(c, '-' | '_' | '/') {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(ch) = keep {
+            if ch == '-' {
+                if prev_dash || slug.is_empty() {
+                    continue;
+                }
+                prev_dash = true;
+            } else {
+                prev_dash = false;
+            }
+            slug.push(ch);
+            if slug.len() >= 40 {
+                break;
+            }
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug.push_str("conversation");
+    }
+    slug
+}
+
+fn file_timestamp(epoch_ms: u64) -> String {
+    let ms = if epoch_ms == 0 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    } else {
+        epoch_ms
+    };
+    let s = ms / 1000;
+    let days = s / 86400;
+    let time = s % 86400;
+    let h = time / 3600;
+    let mi = (time % 3600) / 60;
+    let sec = time % 60;
+
+    let z = days as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+
+    format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{sec:02}")
+}
+
+fn unique_export_path(dir: &std::path::Path, slug: &str, stamp: &str) -> std::path::PathBuf {
+    let base = dir.join(format!("smelt-{slug}-{stamp}.md"));
+    if !base.exists() {
+        return base;
+    }
+    for n in 1..1000 {
+        let candidate = dir.join(format!("smelt-{slug}-{stamp}-{n}.md"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
 }
 
 // ── Markdown export ─────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 mod agents;
 mod confirm;
+mod export;
 mod help;
 mod permissions;
 mod ps;
@@ -9,6 +10,7 @@ mod rewind;
 
 pub use agents::{AgentSnapshot, AgentsDialog, SharedSnapshots};
 pub use confirm::ConfirmDialog;
+pub use export::{ExportDialog, ExportTarget};
 pub use help::HelpDialog;
 pub use permissions::{PermissionEntry, PermissionsDialog};
 pub use ps::PsDialog;
@@ -39,6 +41,9 @@ pub enum DialogResult {
     },
     Resume {
         session_id: Option<String>,
+    },
+    Export {
+        target: Option<ExportTarget>,
     },
     PsClosed,
     PermissionsClosed {

@@ -13,9 +13,9 @@ use prompt::PromptState;
 use working::WorkingState;
 
 pub use dialogs::{
-    parse_questions, AgentSnapshot, AgentsDialog, ConfirmDialog, Dialog, DialogResult, HelpDialog,
-    PermissionEntry, PermissionsDialog, PsDialog, Question, QuestionDialog, QuestionOption,
-    ResumeDialog, RewindDialog, SharedSnapshots,
+    parse_questions, AgentSnapshot, AgentsDialog, ConfirmDialog, Dialog, DialogResult,
+    ExportDialog, ExportTarget, HelpDialog, PermissionEntry, PermissionsDialog, PsDialog, Question,
+    QuestionDialog, QuestionOption, ResumeDialog, RewindDialog, SharedSnapshots,
 };
 
 /// Layout placement computed by `draw_frame` for the active dialog.
