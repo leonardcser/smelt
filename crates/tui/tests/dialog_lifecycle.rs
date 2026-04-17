@@ -561,3 +561,136 @@ fn fullscreen_dialog_scrollback_integrity() {
     // Scrollback must match a fresh render of the same blocks.
     h.assert_scrollback_integrity();
 }
+
+/// Focus change events (FocusGained/FocusLost) must not push a fullscreen
+/// confirm dialog into scrollback. The dialog is a temporary overlay —
+/// redrawing it because the prompt went dirty should never commit its
+/// contents to scrollback.
+#[test]
+fn fullscreen_dialog_focus_event_no_duplicate() {
+    let height = 16;
+    let mut h = TestHarness::new(80, height, "fullscreen_dialog_focus_event_no_duplicate");
+
+    h.push_and_render(Block::User {
+        text: "Write a poem".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: "Sure, here it is.".into(),
+    });
+    h.draw_prompt();
+
+    let file_content = (1..=30)
+        .map(|i| format!("Line {i} of the poem"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut args = std::collections::HashMap::new();
+    args.insert(
+        "file_path".into(),
+        serde_json::Value::String("poem.txt".into()),
+    );
+    args.insert(
+        "content".into(),
+        serde_json::Value::String(file_content.clone()),
+    );
+    h.screen.start_tool(
+        "c1".into(),
+        "write_file".into(),
+        "poem.txt".into(),
+        args.clone(),
+    );
+    let mut dialog = h.open_confirm_dialog_with_args("c1", "write_file", "poem.txt", args);
+
+    // Simulate the event loop receiving several focus toggles while the
+    // dialog is open. Each focus change marks the prompt dirty and the
+    // next tick calls draw_frame(prompt=None) to redraw the dialog.
+    for _ in 0..3 {
+        h.screen.set_focused(false);
+        h.draw_dialog_tick(&mut dialog);
+        h.screen.set_focused(true);
+        h.draw_dialog_tick(&mut dialog);
+    }
+
+    // Dismiss dialog and finish the tool normally.
+    h.screen.clear_dialog_area();
+    h.screen.set_dialog_open(false);
+    h.drain_sink();
+    h.screen.finish_tool(
+        "c1",
+        tui::render::ToolStatus::Ok,
+        Some(Box::new(tui::render::ToolOutput {
+            content: "File written.".into(),
+            is_error: false,
+            metadata: None,
+            render_cache: None,
+        })),
+        Some(std::time::Duration::from_millis(100)),
+    );
+    h.screen.flush_blocks();
+    h.drain_sink();
+    h.draw_prompt();
+
+    h.assert_scrollback_integrity();
+}
+
+/// Focus toggles while a dialog is open must be byte-for-byte no-ops.
+/// Any output at all flashes the dialog (the bottom-gap cleanup clears
+/// the screen below the dialog's anchor row).
+#[test]
+fn focus_toggle_while_dialog_open_emits_nothing() {
+    let mut h = TestHarness::new(80, 16, "focus_toggle_while_dialog_open");
+
+    h.push_and_render(Block::User {
+        text: "Write a poem".into(),
+        image_labels: vec![],
+    });
+    h.push_and_render(Block::Text {
+        content: "Sure, here it is.".into(),
+    });
+    h.draw_prompt();
+
+    let file_content = (1..=30)
+        .map(|i| format!("Line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut args = std::collections::HashMap::new();
+    args.insert(
+        "file_path".into(),
+        serde_json::Value::String("poem.txt".into()),
+    );
+    args.insert("content".into(), serde_json::Value::String(file_content));
+    h.screen.start_tool(
+        "c1".into(),
+        "write_file".into(),
+        "poem.txt".into(),
+        args.clone(),
+    );
+    let mut dialog = h.open_confirm_dialog_with_args("c1", "write_file", "poem.txt", args);
+
+    let before = harness::visible_content(&h.parser);
+
+    // Toggle focus. Since the dialog is open and nothing about the
+    // dialog depends on focus, this must emit zero output.
+    h.screen.set_focused(false);
+    h.draw_dialog_tick(&mut dialog);
+    let bytes_after_unfocus = h.take_sink_bytes();
+    assert!(
+        bytes_after_unfocus.is_empty(),
+        "focus-lost while dialog open emitted {} bytes:\n{}",
+        bytes_after_unfocus.len(),
+        String::from_utf8_lossy(&bytes_after_unfocus)
+    );
+
+    h.screen.set_focused(true);
+    h.draw_dialog_tick(&mut dialog);
+    let bytes_after_refocus = h.take_sink_bytes();
+    assert!(
+        bytes_after_refocus.is_empty(),
+        "focus-gained while dialog open emitted {} bytes:\n{}",
+        bytes_after_refocus.len(),
+        String::from_utf8_lossy(&bytes_after_refocus)
+    );
+
+    let after = harness::visible_content(&h.parser);
+    assert_eq!(before, after, "dialog viewport changed after focus toggle");
+}

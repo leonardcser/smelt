@@ -1582,7 +1582,14 @@ impl Screen {
             return;
         }
         self.focused = focused;
-        self.prompt.dirty = true;
+        // Focus only affects the prompt's soft cursor visual.  When a
+        // dialog is open, the prompt isn't drawn — marking it dirty
+        // would force a full dialog-mode repaint whose bottom-gap
+        // cleanup (`queue_dialog_gap`) clears the screen below the
+        // dialog's anchor row, flashing the dialog off and on.
+        if !self.dialog_open {
+            self.prompt.dirty = true;
+        }
     }
 
     /// Set the prompt anchor row explicitly (used by test harness).
@@ -2068,12 +2075,15 @@ impl Screen {
             let _ = frame.queue(terminal::Clear(terminal::ClearType::CurrentLine));
         }
         // When the dialog scrolled enough to push the anchor to row 0,
-        // the prompt gap that was between the last block and the prompt
+        // the prompt gap that was between the last block and the dialog
         // got pushed into scrollback.  The next block render would emit
         // gap_between() again, creating a double blank line.  Suppress
         // the leading gap so only the scrollback copy remains.
+        // Fullscreen dialogs omit the gap (see the `gap` calc in
+        // `draw_frame` dialog mode) — nothing was scrolled into
+        // scrollback to duplicate, so don't suppress.
         let scrolled_by_dialog = screen_anchor == 0 && self.has_scrollback;
-        if scrolled_by_dialog {
+        if scrolled_by_dialog && self.prompt.prev_dialog_gap > 0 {
             self.history.suppress_leading_gap = true;
         }
         self.defer_pending_render = true;
@@ -3420,21 +3430,40 @@ impl Screen {
         };
 
         // ── Measure total mutable region ────────────────────────────
-        let prompt_gap: u16 = if self.has_content() { 1 } else { 0 };
         // For constrained dialogs, cap the effective height to
         // max(h/2, natural_space) so the dialog doesn't scroll the
         // viewport more than half the terminal.  Unconstrained dialogs
         // (confirm, question) use their full requested height.
         let raw_dialog_height = dialog_height;
+        let unconstrained_prompt_gap: u16 = if self.has_content() { 1 } else { 0 };
         let dialog_height = if is_dialog && self.constrain_dialog {
             dialog_height.map(|dh| {
                 let half_h = term_h / 2;
-                let overhead = overlay_rows + prompt_gap + 2;
+                let overhead = overlay_rows + unconstrained_prompt_gap + 2;
                 let natural = term_h.saturating_sub(base_anchor + overhead);
                 dh.min(half_h.max(natural))
             })
         } else {
             dialog_height
+        };
+        // In dialog mode, the gap between content and dialog is only
+        // rendered when `dh < term_h - 1 - overlay_end` (see the
+        // `gap` computation below).  A fullscreen dialog (one whose
+        // requested height + status bar already exceeds the viewport)
+        // omits the gap.  The measurement must match, otherwise every
+        // redraw of a fullscreen dialog emits a spurious scroll_up(1)
+        // and leaks blank rows into scrollback — notably on focus
+        // change, which marks the prompt dirty and forces a re-render.
+        let prompt_gap: u16 = if is_dialog {
+            let dh = dialog_height.unwrap_or(0);
+            // Matches `gap` below with the worst-case overlay_end = 0.
+            if self.has_content() && dh + 1 < term_h {
+                1
+            } else {
+                0
+            }
+        } else {
+            unconstrained_prompt_gap
         };
 
         let prompt_height: u16 = if let Some(ref p) = prompt {
@@ -3581,6 +3610,7 @@ impl Screen {
             self.prompt.anchor_row = Some(final_anchor);
             self.prompt.prev_dialog_row = Some(dialog_row);
             self.prompt.prev_dialog_height = raw_dialog_height.unwrap_or(0);
+            self.prompt.prev_dialog_gap = gap;
             self.prompt.prev_rows = ephemeral_rows + gap;
             self.prompt.drawn = true;
             self.prompt.dirty = false;

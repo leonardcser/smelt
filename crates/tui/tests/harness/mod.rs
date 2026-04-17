@@ -501,6 +501,30 @@ impl TestHarness {
         dialog
     }
 
+    /// Draw a single dialog-mode frame (prompt=None). Mirrors the real
+    /// event loop's `render_frame` path when an active dialog is open.
+    pub fn draw_dialog_tick(&mut self, dialog: &mut dyn Dialog) {
+        self.actions.push("draw_dialog_tick".into());
+        self.screen.set_dialog_open(true);
+        self.screen.set_constrain_dialog(dialog.constrain_height());
+        let dh = dialog.height();
+        {
+            let mut frame = tui::render::Frame::begin(self.screen.backend());
+            let (redirtied, placement) =
+                self.screen
+                    .draw_frame(&mut frame, self.width as usize, None, Some(dh));
+            if redirtied {
+                dialog.mark_dirty();
+            }
+            if let Some(p) = placement {
+                dialog.draw(&mut frame, p.row, self.width, p.granted_rows);
+                self.screen.queue_dialog_gap(&mut frame);
+                self.screen.queue_status_line(&mut frame);
+            }
+        }
+        self.drain_sink();
+    }
+
     /// Run a full confirm dialog cycle: open, draw, dismiss, finish tool.
     ///
     /// Draws a prompt frame first to establish anchor_row and prompt state,
@@ -670,6 +694,15 @@ impl TestHarness {
     }
 
     // ── Internal ────────────────────────────────────────────────────
+
+    /// Snapshot the backend's output sink without processing it. Used
+    /// to assert that no bytes were emitted for a given operation.
+    pub fn take_sink_bytes(&mut self) -> Vec<u8> {
+        let mut buf = self.sink.lock().unwrap();
+        let b = buf.clone();
+        buf.clear();
+        b
+    }
 
     pub fn drain_sink(&mut self) {
         let bytes = {
