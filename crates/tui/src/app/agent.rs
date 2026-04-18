@@ -296,8 +296,10 @@ impl App {
                     combined.push('\n');
                     combined.push_str(&self.input.buf);
                 }
-                self.input.buf = combined;
-                self.input.cpos = self.input.buf.len();
+                self.input.apply(crate::pane::Mutation::Replace {
+                    text: combined,
+                    cursor: None,
+                });
             }
         } else {
             self.screen.set_throbber(render::Throbber::Done);

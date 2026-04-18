@@ -389,8 +389,11 @@ impl App {
                 match keymap::lookup(code, modifiers, &ctx) {
                     Some(KeyAction::AcceptGhostText) => {
                         let full = self.input_prediction.take().unwrap();
-                        self.input.buf = full.lines().next().unwrap_or(&full).to_string();
-                        self.input.cpos = self.input.buf.len();
+                        let line = full.lines().next().unwrap_or(&full).to_string();
+                        self.input.apply(crate::pane::Mutation::Replace {
+                            text: line,
+                            cursor: None,
+                        });
                         self.screen.mark_dirty();
                         return EventOutcome::Redraw;
                     }
@@ -550,8 +553,10 @@ impl App {
                         combined.push('\n');
                         combined.push_str(&self.input.buf);
                     }
-                    self.input.buf = combined;
-                    self.input.cpos = self.input.buf.len();
+                    self.input.apply(crate::pane::Mutation::Replace {
+                        text: combined,
+                        cursor: None,
+                    });
                     self.queued_messages.clear();
                     self.screen.mark_dirty();
                 }
@@ -702,9 +707,10 @@ impl App {
         match status {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
-                    self.input.save_undo();
-                    self.input.buf = new;
-                    self.input.cpos = self.input.buf.len();
+                    self.input.apply(crate::pane::Mutation::Replace {
+                        text: new,
+                        cursor: None,
+                    });
                 }
                 Err(e) => self.screen.notify_error(format!("read tmp: {e}")),
             },
@@ -888,6 +894,27 @@ impl App {
         self.screen.set_dialog_open(false);
 
         let visual = self.content_visual_range(w);
+        // If the viewport is pinned (active selection / drag), adjust
+        // `scroll_offset` against the current transcript row count so
+        // new rows appearing at the bottom push into scrollback
+        // instead of shifting the visible slice. Compute the dims
+        // before the `&self` borrows below.
+        if self.content_pane.is_pinned() {
+            let (total, viewport) = self.transcript_dims();
+            self.content_pane.apply_pin(total, viewport);
+        }
+        // Status bar shows the *focused* window's vim mode. Without
+        // this, the status bar caches the prompt's mode even when the
+        // transcript window has focus.
+        let (status_vim_enabled, status_vim_mode) = match self.app_focus {
+            crate::app::AppFocus::Content => (
+                self.content_pane.vim.is_some(),
+                self.content_pane.vim.as_ref().map(|v| v.mode()),
+            ),
+            crate::app::AppFocus::Prompt => (self.input.vim_enabled(), self.input.vim_mode()),
+        };
+        self.screen
+            .set_status_vim(status_vim_enabled, status_vim_mode);
         let (queued, prediction): (&[String], Option<&str>) = if show_queued {
             (&self.queued_messages, None)
         } else {
@@ -992,6 +1019,9 @@ impl App {
                     self.screen
                         .notify(format!("yanked {} chars", text.chars().count()));
                 }
+                // Live-streaming updates can't shift the transcript
+                // under the user while a visual selection is active.
+                self.sync_transcript_pin();
                 self.screen.mark_dirty();
                 true
             }
@@ -1004,7 +1034,7 @@ impl App {
         if self.app_focus != crate::app::AppFocus::Content {
             return None;
         }
-        let vim = self.content_pane.buffer.vim.as_ref()?;
+        let vim = self.content_pane.vim.as_ref()?;
         let kind = match vim.mode() {
             crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
             crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
@@ -1015,7 +1045,7 @@ impl App {
             return None;
         }
         let buf = rows.join("\n");
-        let (s, e) = vim.visual_range(&buf, self.content_pane.buffer.cpos)?;
+        let (s, e) = vim.visual_range(&buf, self.content_pane.cpos)?;
         let offset_to_line_col = |off: usize| -> (usize, usize) {
             let off = off.min(buf.len());
             let prefix = &buf[..off];
@@ -1052,24 +1082,71 @@ impl App {
         self.last_height.saturating_sub(prompt_rows + gap).max(1)
     }
 
+    /// Single source of truth for whether the transcript viewport
+    /// should be pinned. The viewport pins when the user has an
+    /// active selection *or* is in the middle of a mouse drag — new
+    /// agent output then flows into scrollback without shifting the
+    /// rows the user is looking at. When the pin releases, scroll
+    /// resumes its normal stuck-to-bottom behavior.
+    fn sync_transcript_pin(&mut self) {
+        let has_selection = self.content_pane.selection_range().is_some();
+        let in_vim_visual = matches!(
+            self.content_pane.vim.as_ref().map(|v| v.mode()),
+            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
+        );
+        let want_pin = has_selection || in_vim_visual || self.mouse_drag_active;
+        if want_pin {
+            if !self.content_pane.is_pinned() {
+                let (total, viewport) = self.transcript_dims();
+                self.content_pane.pin(total, viewport);
+            }
+        } else {
+            self.content_pane.unpin();
+        }
+    }
+
+    /// Current (total_transcript_rows, viewport_rows) — needed by the
+    /// pin math. Reads the width from the renderer and measures the
+    /// transcript against it.
+    fn transcript_dims(&mut self) -> (u16, u16) {
+        let w = render::term_width();
+        let total = self.screen.full_transcript_text(w).len() as u16;
+        let viewport = self.viewport_rows_estimate();
+        (total, viewport)
+    }
+
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
-        // Drag + release drive tmux-style click-drag-copy in the content
-        // pane. Down (primary) enters visual mode and anchors the
-        // selection; Drag extends it; Up copies the selected text to the
-        // system clipboard and exits visual mode.
+        // Drag + release drive tmux-style click-drag-copy. Works in
+        // both the prompt and the content pane — each extends its own
+        // buffer's selection anchor.
         match me.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.app_focus == crate::app::AppFocus::Content {
-                    self.extend_content_selection_to(me.row, me.column);
+                self.mouse_drag_active = true;
+                match self.app_focus {
+                    crate::app::AppFocus::Content => {
+                        self.extend_content_selection_to(me.row, me.column);
+                    }
+                    crate::app::AppFocus::Prompt => {
+                        self.extend_prompt_selection_to(me.row, me.column);
+                    }
                 }
+                self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.app_focus == crate::app::AppFocus::Content {
-                    self.copy_content_selection_and_clear();
+                let dragged = self.mouse_drag_active;
+                match self.app_focus {
+                    crate::app::AppFocus::Content => {
+                        self.copy_content_selection_and_clear(dragged);
+                    }
+                    crate::app::AppFocus::Prompt => {
+                        self.copy_prompt_selection_on_release();
+                    }
                 }
+                self.mouse_drag_active = false;
+                self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
             _ => {}
@@ -1085,6 +1162,16 @@ impl App {
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
+                // Double-click detection: two primary-button Downs on
+                // the same cell within 400ms → word-select + copy.
+                let now = Instant::now();
+                let double = self.last_click.is_some_and(|(t, r, c)| {
+                    now.duration_since(t) < Duration::from_millis(400)
+                        && r == me.row
+                        && c == me.column
+                });
+                self.last_click = Some((now, me.row, me.column));
+
                 // First, check if the click lands inside the input text
                 // region — that's the only prompt-area hit we position
                 // for. Clicks on queued messages, bars, status line etc.
@@ -1099,6 +1186,9 @@ impl App {
                             gutter,
                             usable,
                         );
+                        if double {
+                            self.select_and_copy_word_in_prompt();
+                        }
                         return EventOutcome::Redraw;
                     }
                 }
@@ -1120,12 +1210,16 @@ impl App {
                 // clears visual so nothing gets selected.
                 self.app_focus = crate::app::AppFocus::Content;
                 self.position_content_cursor_from_click(me.row, me.column);
+                if double {
+                    self.select_and_copy_word_in_content();
+                    return EventOutcome::Redraw;
+                }
                 // Anchor the visual selection at the click position, not
                 // wherever the cursor happened to be before — otherwise
                 // a click selects everything between the previous
                 // cursor and the click point.
-                let anchor = self.content_pane.buffer.cpos;
-                if let Some(vim) = self.content_pane.buffer.vim.as_mut() {
+                let anchor = self.content_pane.cpos;
+                if let Some(vim) = self.content_pane.vim.as_mut() {
                     vim.begin_visual(crate::vim::ViMode::Visual, anchor);
                 }
                 EventOutcome::Redraw
@@ -1233,8 +1327,6 @@ impl App {
             })
             .unwrap_or(buf.len());
         self.input.cpos = cpos.min(buf.len());
-        // Clear any vim pending-op and drop visual selection.
-        self.input.clear_selection();
         self.screen.mark_dirty();
     }
 
@@ -1246,31 +1338,92 @@ impl App {
         self.position_content_cursor_from_click(row, col);
     }
 
-    /// Finalise a drag-select: if there is a non-empty visual selection
-    /// in the content pane, copy its text to the system clipboard (like
-    /// tmux mouse-select) and leave visual mode. A bare click (no drag)
-    /// results in an empty selection and simply exits Visual mode.
-    fn copy_content_selection_and_clear(&mut self) {
-        let width = render::term_width();
-        let rows = self.screen.full_transcript_text(width);
-        let buf = rows.join("\n");
+    /// Extend the prompt's shift-selection anchor to the click position.
+    /// On the first drag tick the anchor is set at the current cursor
+    /// position (where the drag started); subsequent drags only move
+    /// the cursor so the selection widens or shrinks.
+    fn extend_prompt_selection_to(&mut self, row: u16, col: u16) {
+        if self.input.selection_anchor.is_none() {
+            self.input.selection_anchor = Some(self.input.cpos);
+        }
+        if let Some((top, rows, scroll, gutter, usable)) = self.screen.input_region() {
+            if row >= top && row < top + rows {
+                self.position_prompt_cursor_from_click(row - top, col, scroll, gutter, usable);
+                return;
+            }
+        }
+        self.screen.mark_dirty();
+    }
+
+    /// Finalise a prompt drag-select: copy any non-empty selection to
+    /// the clipboard and clear the anchor. A bare click (no drag) has
+    /// anchor == cpos, so this is a no-op in that case.
+    fn copy_prompt_selection_on_release(&mut self) {
+        if let Some((s, e)) = self.input.selection_range() {
+            let text: String = self.input.buffer.buf[s..e].to_string();
+            let chars = text.chars().count();
+            let _ = crate::app::commands::copy_to_clipboard(&text);
+            self.screen.notify(format!("copied {} chars", chars));
+        }
+        self.input.selection_anchor = None;
+        self.screen.mark_dirty();
+    }
+
+    /// Double-click on the prompt: select the word under the cursor
+    /// (if any) via the shared `Buffer::select_word_at` helper, and
+    /// copy it to the clipboard.
+    fn select_and_copy_word_in_prompt(&mut self) {
+        let cpos = self.input.cpos;
+        if let Some((s, e)) = self.input.select_word_at(cpos) {
+            let text = self.input.buffer.buf[s..e].to_string();
+            let chars = text.chars().count();
+            let _ = crate::app::commands::copy_to_clipboard(&text);
+            self.screen.notify(format!("copied {} chars", chars));
+        }
+        self.screen.mark_dirty();
+    }
+
+    /// Double-click on the content pane: enter vim Visual over the
+    /// word under the cursor and copy it.
+    fn select_and_copy_word_in_content(&mut self) {
+        let cpos = self.content_pane.cpos;
+        if let Some((s, e)) = self.content_pane.select_word_at(cpos) {
+            let text = self.content_pane.buffer.buf[s..e].to_string();
+            let chars = text.chars().count();
+            let _ = crate::app::commands::copy_to_clipboard(&text);
+            self.screen.notify(format!("copied {} chars", chars));
+        }
+        self.sync_transcript_pin();
+        self.screen.mark_dirty();
+    }
+
+    /// Finalise a mouse interaction. Only copies when `dragged` is true —
+    /// a bare click (no drag) exits Visual mode without copying, even
+    /// though vim Visual selects the char under the cursor by default.
+    fn copy_content_selection_and_clear(&mut self, dragged: bool) {
         let mut copied_len: Option<usize> = None;
-        if let Some(vim) = self.content_pane.buffer.vim.as_ref() {
-            if let Some((s, e)) = vim.visual_range(&buf, self.content_pane.buffer.cpos) {
-                if s < e {
-                    let selection = buf[s..e].to_string();
-                    let chars = selection.chars().count();
-                    let _ = crate::app::commands::copy_to_clipboard(&selection);
-                    copied_len = Some(chars);
+        if dragged {
+            let width = render::term_width();
+            let rows = self.screen.full_transcript_text(width);
+            let buf = rows.join("\n");
+            if let Some(vim) = self.content_pane.vim.as_ref() {
+                if let Some((s, e)) = vim.visual_range(&buf, self.content_pane.cpos) {
+                    if s < e {
+                        let selection = buf[s..e].to_string();
+                        let chars = selection.chars().count();
+                        let _ = crate::app::commands::copy_to_clipboard(&selection);
+                        copied_len = Some(chars);
+                    }
                 }
             }
         }
-        if let Some(vim) = self.content_pane.buffer.vim.as_mut() {
+        if let Some(vim) = self.content_pane.vim.as_mut() {
             vim.set_mode(crate::vim::ViMode::Normal);
         }
         if let Some(n) = copied_len {
             self.screen.notify(format!("copied {} chars", n));
         }
+        self.sync_transcript_pin();
         self.screen.mark_dirty();
     }
 
@@ -1344,6 +1497,21 @@ impl App {
             crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
             crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
         };
+        if self.app_focus == crate::app::AppFocus::Content {
+            self.refocus_content();
+        }
+    }
+
+    /// Warm up the content pane on focus switch: mount the transcript,
+    /// clamp cpos into range, sync cursor line/col. Without this, a
+    /// resumed session has stale/zero state and the first key press
+    /// is a no-op until the user triggers a click-to-position.
+    fn refocus_content(&mut self) {
+        let w = render::term_width();
+        let rows = self.screen.full_transcript_text(w);
+        let viewport = self.viewport_rows_estimate();
+        self.content_pane.refocus(&rows, viewport);
+        self.screen.mark_dirty();
     }
 }
 

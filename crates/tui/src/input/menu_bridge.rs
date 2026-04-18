@@ -50,7 +50,7 @@ impl InputState {
     pub fn open_settings(&mut self, state: &SettingsState) {
         self.menu = None;
         if self.history_saved_buf.is_none() {
-            self.history_saved_buf = Some((self.buffer.buf.clone(), self.buffer.cpos));
+            self.history_saved_buf = Some((self.buffer.buf.clone(), self.cpos));
         }
         let mut comp = Completer::settings(state);
         comp.update_query(self.buffer.buf.clone());
@@ -86,7 +86,7 @@ impl InputState {
 
     pub fn open_model_completer(&mut self, models: &[(String, String, String)]) {
         self.menu = None;
-        self.history_saved_buf = Some((self.buffer.buf.clone(), self.buffer.cpos));
+        self.history_saved_buf = Some((self.buffer.buf.clone(), self.cpos));
         let mut comp = Completer::models(models);
         comp.update_query(self.buffer.buf.clone());
         self.completer = Some(comp);
@@ -94,7 +94,7 @@ impl InputState {
 
     pub fn open_theme_completer(&mut self) {
         self.menu = None;
-        self.history_saved_buf = Some((self.buffer.buf.clone(), self.buffer.cpos));
+        self.history_saved_buf = Some((self.buffer.buf.clone(), self.cpos));
         let mut comp = Completer::themes(crate::theme::accent_value());
         comp.update_query(self.buffer.buf.clone());
         self.completer = Some(comp);
@@ -102,7 +102,7 @@ impl InputState {
 
     pub fn open_color_completer(&mut self) {
         self.menu = None;
-        self.history_saved_buf = Some((self.buffer.buf.clone(), self.buffer.cpos));
+        self.history_saved_buf = Some((self.buffer.buf.clone(), self.cpos));
         let mut comp = Completer::colors(crate::theme::slug_color_value());
         comp.update_query(self.buffer.buf.clone());
         self.completer = Some(comp);
@@ -110,7 +110,7 @@ impl InputState {
 
     /// Open history fuzzy search using the completer component.
     pub fn open_history_search(&mut self, history: &History) {
-        self.history_saved_buf = Some((self.buffer.buf.clone(), self.buffer.cpos));
+        self.history_saved_buf = Some((self.buffer.buf.clone(), self.cpos));
         // Keep buf as-is so the current content becomes the initial search query.
         let mut comp = Completer::history(history.entries());
         comp.update_query(self.buffer.buf.clone());

@@ -1502,6 +1502,20 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
+    /// Override the vim mode shown in the status bar. Called by the
+    /// app each frame with the **focused window's** vim mode so the
+    /// status bar is contextual — prompt mode when the prompt is
+    /// focused, transcript mode when the transcript window is
+    /// focused. Without this, the cached value from the last prompt
+    /// render is stale relative to the focused window.
+    pub fn set_status_vim(&mut self, enabled: bool, mode: Option<crate::vim::ViMode>) {
+        if self.last_vim_enabled != enabled || self.last_vim_mode != mode {
+            self.last_vim_enabled = enabled;
+            self.last_vim_mode = mode;
+            self.prompt.dirty = true;
+        }
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.prompt.dirty || self.history.has_unflushed()
     }
@@ -2437,7 +2451,10 @@ impl Screen {
             .total_rows(width, self.show_thinking)
             .saturating_add(ephemeral_lines.len() as u16);
 
-        // Paint transcript slice (history + ephemeral tail) into the viewport.
+        // Paint transcript slice (history + ephemeral tail) into the
+        // viewport. We always repaint — keeping the viewport visually
+        // stable during selection is handled by the caller pinning
+        // `scroll_offset`, not by skipping the paint.
         let clamped = self.history.paint_viewport(
             out,
             width,
@@ -2641,9 +2658,11 @@ impl Screen {
         height: usize,
     ) -> u16 {
         let _perf = crate::perf::begin("render:prompt");
-        // Cache state for dialog-mode status line rendering.
-        self.last_vim_enabled = state.vim_enabled();
-        self.last_vim_mode = state.vim_mode();
+        // Note: `last_vim_enabled` and `last_vim_mode` are now set by
+        // `App::tick_prompt` via `set_status_vim(...)` so the status
+        // bar reflects the *focused* window's vim mode, not whatever
+        // the prompt happened to be in. Only `last_mode` is cached
+        // here since it's the agent mode, not the vim mode.
         self.last_mode = mode;
         self.prompt.soft_cursor = None;
         let usable = width.saturating_sub(2);

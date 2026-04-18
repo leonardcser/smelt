@@ -162,6 +162,13 @@ pub struct App {
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
     pub content_pane: crate::pane::ContentPane,
+    /// Last primary-mouse-Down time and cell. Used to detect
+    /// double-clicks (two rapid clicks on the same cell → word-select).
+    pub last_click: Option<(Instant, u16, u16)>,
+    /// Primary mouse button is held — we're mid-drag. The transcript
+    /// stays frozen from Down to Up so selected text can't shift
+    /// under the user's cursor while the agent streams new rows.
+    pub mouse_drag_active: bool,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -533,6 +540,8 @@ impl App {
             startup_auth_error,
             app_focus: AppFocus::Prompt,
             content_pane: crate::pane::ContentPane::new(),
+            last_click: None,
+            mouse_drag_active: false,
         }
     }
 
