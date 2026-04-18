@@ -364,6 +364,10 @@ pub(super) struct BlockHistory {
     /// When false, `save_session` skips writing the layout cache file.
     pub(super) cache_dirty: bool,
     pub(super) flushed: usize,
+    /// Block ids that transitioned from `Streaming` to `Done` since the
+    /// last drain. Drained by the app loop to emit `block_done`
+    /// autocmds into the Lua runtime.
+    pub(super) finished_blocks: Vec<BlockId>,
 }
 
 impl BlockHistory {
@@ -380,7 +384,14 @@ impl BlockHistory {
             cache_width: 0,
             cache_dirty: false,
             flushed: 0,
+            finished_blocks: Vec::new(),
         }
+    }
+
+    /// Drain block ids that transitioned `Streaming` → `Done` since the
+    /// last call.
+    pub(super) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
+        std::mem::take(&mut self.finished_blocks)
     }
 
     /// Cached content hash for `id`. Falls back to re-hashing if the
@@ -440,8 +451,15 @@ impl BlockHistory {
     /// Set the status for `id`. Does not invalidate the layout cache —
     /// status is a style concern, not a layout one.
     pub(super) fn set_status(&mut self, id: BlockId, status: Status) {
+        let was_streaming = matches!(
+            self.statuses.get(&id).copied().unwrap_or_default(),
+            Status::Streaming
+        );
         if matches!(status, Status::Done) {
             self.statuses.remove(&id);
+            if was_streaming {
+                self.finished_blocks.push(id);
+            }
         } else {
             self.statuses.insert(id, status);
         }

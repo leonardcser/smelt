@@ -1685,6 +1685,13 @@ impl Screen {
         self.history.set_status(id, status);
     }
 
+    /// Drain block ids that just transitioned `Streaming` → `Done`. The
+    /// app loop forwards these to the Lua runtime as `block_done`
+    /// autocmds.
+    pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
+        self.history.drain_finished_blocks()
+    }
+
     /// Replace a block's content in place. Preserves its `BlockId` so
     /// long-lived handles (streaming writers) stay valid across
     /// mutations; the layout cache auto-invalidates via the updated

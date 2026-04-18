@@ -663,6 +663,9 @@ impl App {
             // notifications / errors Lua callbacks queued. Keeps the Lua
             // runtime observable even when the user isn't interacting.
             self.lua.tick_timers();
+            for _id in self.screen.drain_finished_blocks() {
+                self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
+            }
             for msg in self.lua.drain_notifications() {
                 self.screen.notify(msg);
             }
