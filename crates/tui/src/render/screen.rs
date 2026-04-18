@@ -2411,8 +2411,13 @@ impl Screen {
         out.move_to(0, 0);
 
         // Measure prompt so we know how many rows to reserve at the bottom.
-        let prompt_height =
+        // The prompt pane is capped at half the terminal height — anything
+        // taller becomes scrollable inside its own viewport (same vim-style
+        // viewport logic as a long multi-line input already uses).
+        let natural_prompt_height =
             self.measure_prompt_height(prompt.state, width, prompt.queued, prompt.prediction);
+        let max_prompt_height = (term_h / 2).max(3);
+        let prompt_height = natural_prompt_height.min(max_prompt_height);
         // One-row gap between transcript and prompt.
         let gap_rows: u16 = 1;
         let viewport_rows = term_h.saturating_sub(prompt_height + gap_rows);

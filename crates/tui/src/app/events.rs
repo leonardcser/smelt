@@ -903,14 +903,14 @@ impl App {
                 queued,
                 prediction,
             },
-            self.history_scroll_offset,
-            self.history_cursor_line,
-            self.history_cursor_col,
+            self.content_pane.scroll_offset,
+            self.content_pane.cursor_line,
+            self.content_pane.cursor_col,
             visual,
         );
-        self.history_scroll_offset = clamped_scroll;
-        self.history_cursor_line = clamped_line;
-        self.history_cursor_col = clamped_col;
+        self.content_pane.scroll_offset = clamped_scroll;
+        self.content_pane.cursor_line = clamped_line;
+        self.content_pane.cursor_col = clamped_col;
     }
 
     // ── Content pane key handler — drives `Vim` over a readonly
@@ -1008,18 +1008,18 @@ impl App {
             .nth(col)
             .map(|(b, _)| b)
             .unwrap_or(line.len());
-        self.content_buffer.cpos = acc + byte_off;
+        self.content_pane.buffer.cpos = acc + byte_off;
 
         let total = rows.len();
         let line_from_bottom = (total - 1).saturating_sub(line_idx) as u16;
-        self.history_cursor_line = line_from_bottom;
-        self.history_cursor_col = col as u16;
+        self.content_pane.cursor_line = line_from_bottom;
+        self.content_pane.cursor_col = col as u16;
 
         let viewport = self.viewport_rows_estimate();
-        if line_from_bottom >= self.history_scroll_offset + viewport {
-            self.history_scroll_offset = line_from_bottom + 1 - viewport;
-        } else if line_from_bottom < self.history_scroll_offset {
-            self.history_scroll_offset = line_from_bottom;
+        if line_from_bottom >= self.content_pane.scroll_offset + viewport {
+            self.content_pane.scroll_offset = line_from_bottom + 1 - viewport;
+        } else if line_from_bottom < self.content_pane.scroll_offset {
+            self.content_pane.scroll_offset = line_from_bottom;
         }
         self.screen.mark_dirty();
     }
@@ -1048,9 +1048,9 @@ impl App {
         // position before handing off. Without this, a fresh resume
         // (buffer cpos=0 at top, but cursor shown at bottom of viewport)
         // would snap to the wrong line on the first motion.
-        self.content_buffer.buf = rows.join("\n");
+        self.content_pane.buffer.buf = rows.join("\n");
         let transcript_from_bottom =
-            (self.history_cursor_line as usize) + (self.history_scroll_offset as usize);
+            (self.content_pane.cursor_line as usize) + (self.content_pane.scroll_offset as usize);
         let visible_line_idx = (total_lines - 1)
             .saturating_sub(transcript_from_bottom)
             .min(total_lines - 1);
@@ -1058,53 +1058,56 @@ impl App {
         let visible_line_len = rows[visible_line_idx].len();
         let col_byte = rows[visible_line_idx]
             .char_indices()
-            .nth(self.history_cursor_col as usize)
+            .nth(self.content_pane.cursor_col as usize)
             .map(|(b, _)| b)
             .unwrap_or(visible_line_len);
-        self.content_buffer.cpos =
-            (visible_line_start + col_byte).min(self.content_buffer.buf.len());
+        self.content_pane.buffer.cpos =
+            (visible_line_start + col_byte).min(self.content_pane.buffer.buf.len());
 
-        if !self.content_buffer.handle_vim_key(k) {
+        if !self.content_pane.buffer.handle_vim_key(k) {
             return false;
         }
 
         // On yank (kill_ring updated), push to the system clipboard.
-        let yanked = self.content_buffer.kill_ring.current().to_string();
+        let yanked = self.content_pane.buffer.kill_ring.current().to_string();
         if !yanked.is_empty() {
             let _ = crate::app::commands::copy_to_clipboard(&yanked);
             self.screen
                 .notify(format!("yanked {} chars", yanked.chars().count()));
-            self.content_buffer
+            self.content_pane
+                .buffer
                 .kill_ring
                 .set_with_linewise(String::new(), false);
         }
 
         // Map cpos back to (line_idx, col). `line_from_bottom` is the
         // absolute transcript position measured from the bottom.
-        self.content_buffer.cpos = self.content_buffer.cpos.min(
+        self.content_pane.buffer.cpos = self.content_pane.buffer.cpos.min(
             line_start_offsets.last().copied().unwrap_or(0) + rows.last().map_or(0, |r| r.len()),
         );
-        let line_idx = match line_start_offsets.binary_search(&self.content_buffer.cpos) {
+        let line_idx = match line_start_offsets.binary_search(&self.content_pane.buffer.cpos) {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         };
-        let col = self.content_buffer.cpos - line_start_offsets[line_idx];
+        let col = self.content_pane.buffer.cpos - line_start_offsets[line_idx];
         let line_from_bottom = ((total_lines - 1).saturating_sub(line_idx)) as u16;
-        self.history_cursor_col = col as u16;
+        self.content_pane.cursor_col = col as u16;
 
         // Adjust scroll so the cursor row stays inside the viewport.
         let viewport = self.viewport_rows_estimate();
         let top_lfb = self
-            .history_scroll_offset
+            .content_pane
+            .scroll_offset
             .saturating_add(viewport.saturating_sub(1));
-        let bottom_lfb = self.history_scroll_offset;
+        let bottom_lfb = self.content_pane.scroll_offset;
         if line_from_bottom > top_lfb {
-            self.history_scroll_offset =
+            self.content_pane.scroll_offset =
                 line_from_bottom.saturating_sub(viewport.saturating_sub(1));
         } else if line_from_bottom < bottom_lfb {
-            self.history_scroll_offset = line_from_bottom;
+            self.content_pane.scroll_offset = line_from_bottom;
         }
-        self.history_cursor_line = line_from_bottom.saturating_sub(self.history_scroll_offset);
+        self.content_pane.cursor_line =
+            line_from_bottom.saturating_sub(self.content_pane.scroll_offset);
 
         self.screen.mark_dirty();
         true
@@ -1116,7 +1119,7 @@ impl App {
         if self.app_focus != crate::app::AppFocus::Content {
             return None;
         }
-        let vim = self.content_buffer.vim.as_ref()?;
+        let vim = self.content_pane.buffer.vim.as_ref()?;
         let kind = match vim.mode() {
             crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
             crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
@@ -1127,7 +1130,7 @@ impl App {
             return None;
         }
         let buf = rows.join("\n");
-        let (s, e) = vim.visual_range(&buf, self.content_buffer.cpos)?;
+        let (s, e) = vim.visual_range(&buf, self.content_pane.buffer.cpos)?;
         let offset_to_line_col = |off: usize| -> (usize, usize) {
             let off = off.min(buf.len());
             let prefix = &buf[..off];
@@ -1296,7 +1299,7 @@ impl App {
         }
         let total = rows.len();
         let max_scroll = total.saturating_sub(viewport_rows as usize);
-        let scroll = (self.history_scroll_offset as usize).min(max_scroll);
+        let scroll = (self.content_pane.scroll_offset as usize).min(max_scroll);
         let skip = total
             .saturating_sub(viewport_rows as usize)
             .saturating_sub(scroll);

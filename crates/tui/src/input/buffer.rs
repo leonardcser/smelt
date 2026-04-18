@@ -227,7 +227,11 @@ impl InputState {
     }
 
     pub(super) fn undo(&mut self) {
-        let current = crate::undo::UndoEntry::snapshot(&self.buffer.buf, self.buffer.cpos, &self.buffer.attachment_ids);
+        let current = crate::undo::UndoEntry::snapshot(
+            &self.buffer.buf,
+            self.buffer.cpos,
+            &self.buffer.attachment_ids,
+        );
         if let Some(entry) = self.buffer.history.undo(current) {
             self.buffer.buf = entry.buf;
             self.buffer.cpos = entry.cpos;

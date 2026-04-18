@@ -174,7 +174,8 @@ impl InputState {
 
     /// Returns true if vim is enabled and currently in insert mode.
     pub fn vim_in_insert_mode(&self) -> bool {
-        self.buffer.vim
+        self.buffer
+            .vim
             .as_ref()
             .is_some_and(|v| v.mode() == ViMode::Insert)
     }
@@ -380,7 +381,8 @@ impl InputState {
     }
 
     pub fn image_count(&self) -> usize {
-        self.buffer.attachment_ids
+        self.buffer
+            .attachment_ids
             .iter()
             .filter(|&&id| matches!(self.store.get(id), Some(Attachment::Image { .. })))
             .count()
@@ -577,7 +579,8 @@ impl InputState {
                 }
             }
             KeyAction::MoveStartOfLine => {
-                self.buffer.cpos = crate::text_utils::line_start(&self.buffer.buf, self.buffer.cpos);
+                self.buffer.cpos =
+                    crate::text_utils::line_start(&self.buffer.buf, self.buffer.cpos);
                 self.recompute_completer();
                 Action::Redraw
             }
@@ -687,7 +690,11 @@ impl InputState {
                 if self.has_selection() {
                     self.delete_selection();
                 }
-                if let Some(new_cpos) = self.buffer.kill_ring.yank(&mut self.buffer.buf, self.buffer.cpos) {
+                if let Some(new_cpos) = self
+                    .buffer
+                    .kill_ring
+                    .yank(&mut self.buffer.buf, self.buffer.cpos)
+                {
                     self.buffer.cpos = new_cpos;
                     self.recompute_completer();
                 }
@@ -806,7 +813,8 @@ impl InputState {
             }
             KeyAction::SelectStartOfLine => {
                 self.extend_selection();
-                self.buffer.cpos = crate::text_utils::line_start(&self.buffer.buf, self.buffer.cpos);
+                self.buffer.cpos =
+                    crate::text_utils::line_start(&self.buffer.buf, self.buffer.cpos);
                 Action::Redraw
             }
             KeyAction::SelectEndOfLine => {

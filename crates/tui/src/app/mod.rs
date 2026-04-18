@@ -158,21 +158,10 @@ pub struct App {
     startup_auth_error: Option<String>,
     /// App-level focus (Prompt = editing buffer; History = navigating transcript).
     pub app_focus: AppFocus,
-    /// Scroll offset in rows for the history viewport (0 = stuck to bottom).
-    /// Increases as the user scrolls up (via wheel or j/k in History focus).
-    pub history_scroll_offset: u16,
-    /// Cursor position within the history viewport, measured as lines
-    /// *from the bottom*. 0 = bottom-most visible row; when this would
-    /// exceed the viewport, the caller scrolls instead.
-    pub history_cursor_line: u16,
-    /// Cursor column within the history viewport (0-indexed).
-    pub history_cursor_col: u16,
-    /// Readonly buffer backing the content pane. Owns the transcript-
-    /// as-text snapshot, the vim state driving motions / visual / yank,
-    /// and per-buffer kill ring + undo. Viewport scroll / cursor row /
-    /// col live on `App` for now (mirrored with buffer state before and
-    /// after each key dispatch).
-    pub content_buffer: crate::buffer::Buffer,
+    /// Readonly pane showing the transcript. Owns its `Buffer`
+    /// (vim + kill ring + undo) and the viewport scroll / cursor
+    /// position.
+    pub content_pane: crate::pane::ContentPane,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -543,10 +532,7 @@ impl App {
             cli_api_key_env_override,
             startup_auth_error,
             app_focus: AppFocus::Prompt,
-            history_scroll_offset: 0,
-            history_cursor_line: 0,
-            history_cursor_col: 0,
-            content_buffer: crate::buffer::Buffer::readonly(),
+            content_pane: crate::pane::ContentPane::new(),
         }
     }
 

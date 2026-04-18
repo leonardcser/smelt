@@ -11,6 +11,7 @@ pub mod input;
 pub mod instructions;
 pub mod keymap;
 pub mod metrics;
+pub mod pane;
 pub mod perf;
 pub mod persist;
 pub mod render;
