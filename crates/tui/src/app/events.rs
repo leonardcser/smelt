@@ -934,11 +934,13 @@ impl App {
         self.screen.set_dialog_open(false);
 
         let visual = self.content_visual_range(w);
-        // If the viewport is pinned (active selection / drag), adjust
-        // `scroll_offset` against the current transcript row count so
-        // new rows appearing at the bottom push into scrollback
-        // instead of shifting the visible slice. Compute the dims
-        // before the `&self` borrows below.
+        // Refresh the pin state every tick so that *any* reason to
+        // stabilize the viewport — active selection, vim visual,
+        // mouse drag, or simply the user being scrolled up — keeps
+        // streaming rows from shifting the visible slice. The pin
+        // auto-engages when `scroll_offset > 0` and auto-releases
+        // when the user scrolls back to the bottom.
+        self.sync_transcript_pin();
         if self.transcript_window.is_pinned() {
             let (total, viewport) = self.transcript_dims();
             self.transcript_window.apply_pin(total, viewport);
@@ -1287,7 +1289,15 @@ impl App {
             self.transcript_window.vim.as_ref().map(|v| v.mode()),
             Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
         );
-        let want_pin = has_selection || in_vim_visual || self.mouse_drag_active;
+        // Auto-pin whenever the user is scrolled up off the bottom:
+        // new streaming rows grow off-screen below rather than pushing
+        // the visible rows upward. `scroll_offset == 0` means stuck to
+        // bottom, the normal "follow tail" behavior, so we release the
+        // pin there. Prompt input scroll is top-anchored and needs no
+        // equivalent: content growth naturally stays below the visible
+        // window.
+        let scrolled_up = self.transcript_window.scroll_offset > 0;
+        let want_pin = has_selection || in_vim_visual || self.mouse_drag_active || scrolled_up;
         if want_pin {
             if !self.transcript_window.is_pinned() {
                 let (total, viewport) = self.transcript_dims();
