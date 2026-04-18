@@ -296,34 +296,42 @@ impl App {
 
     // ── Idle event handler ───────────────────────────────────────────────
 
-    fn handle_event_idle(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
+    /// Shared event-routing preamble for both the idle and
+    /// agent-running paths. Handles the routes that behave identically
+    /// regardless of whether the agent is streaming: paste (drops the
+    /// prompt prediction), resize, mouse (wheel + click + drag-select
+    /// + scrollbar), `Ctrl-W` pane chord, transcript-window key
+    /// routing when `Content` has focus, and dialog/overlay keys.
+    ///
+    /// Returns `Some(outcome)` when the event was fully handled and
+    /// the caller should return immediately; `None` when the caller
+    /// should continue with its path-specific logic (esc handling,
+    /// keymap lookups, delegation to `InputState`).
+    fn dispatch_common(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
         if matches!(ev, Event::Paste(_)) {
             self.input_prediction = None;
         }
-        if let Event::Resize(w, h) = ev {
+        if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
-            return EventOutcome::Noop;
+            return Some(EventOutcome::Noop);
         }
-
-        // ── Mouse events (wheel + click → pane focus) ─────────────────────
-        if let Event::Mouse(me) = ev {
-            return self.handle_mouse(me);
+        if let Event::Mouse(me) = *ev {
+            return Some(self.handle_mouse(me));
         }
-
-        // ── Ctrl-W pane chord ─────────────────────────────────────────────
-        // First press primes the chord; the next keypress within
-        // `PANE_CHORD_WINDOW` is consumed as the navigation command.
-        if let Some(outcome) = self.handle_pane_chord(&ev, t) {
-            return outcome;
+        if let Some(outcome) = self.handle_pane_chord(ev, t) {
+            return Some(outcome);
         }
-
-        // ── App NORMAL (History focus): intercept keys before anything else.
-        // Dialogs/completers still take precedence — handled inside.
         if self.app_focus == crate::app::AppFocus::Content && !self.input.has_modal() {
-            return self.handle_event_app_history(ev);
+            return Some(self.handle_event_app_history(ev));
         }
+        if let Some(outcome) = self.handle_overlay_keys(ev) {
+            return Some(outcome);
+        }
+        None
+    }
 
-        if let Some(outcome) = self.handle_overlay_keys(&ev) {
+    fn handle_event_idle(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
+        if let Some(outcome) = self.dispatch_common(&ev, t) {
             return outcome;
         }
 
@@ -457,35 +465,7 @@ impl App {
     // ── Running event handler ────────────────────────────────────────────
 
     fn handle_event_running(&mut self, ev: Event, t: &mut Timers) -> EventOutcome {
-        if matches!(ev, Event::Paste(_)) {
-            self.input_prediction = None;
-        }
-        if let Event::Resize(w, h) = ev {
-            self.handle_resize(w, h);
-            return EventOutcome::Noop;
-        }
-
-        // Mouse (wheel, click-to-focus, drag-to-select) must keep
-        // working while the agent streams — otherwise the user can't
-        // switch windows, click on the transcript, or drag-select live
-        // content. Mirrors the idle path.
-        if let Event::Mouse(me) = ev {
-            return self.handle_mouse(me);
-        }
-
-        // Ctrl-W pane chord. Same as idle so window-switching works
-        // mid-stream.
-        if let Some(outcome) = self.handle_pane_chord(&ev, t) {
-            return outcome;
-        }
-
-        // When the transcript window has focus, keys drive its vim-style
-        // motions and yank — same routing as the idle path.
-        if self.app_focus == crate::app::AppFocus::Content && !self.input.has_modal() {
-            return self.handle_event_app_history(ev);
-        }
-
-        if let Some(outcome) = self.handle_overlay_keys(&ev) {
+        if let Some(outcome) = self.dispatch_common(&ev, t) {
             return outcome;
         }
 
@@ -1005,9 +985,10 @@ impl App {
     // ── Content pane key handler — drives `Vim` over a readonly
     // transcript buffer so Normal / Visual / VisualLine motions and
     // yank behave exactly like they do in the prompt.
-    fn handle_event_app_history(&mut self, ev: Event) -> EventOutcome {
-        let Event::Key(k) = ev else {
-            return EventOutcome::Noop;
+    fn handle_event_app_history(&mut self, ev: &Event) -> EventOutcome {
+        let k = match ev {
+            Event::Key(k) => *k,
+            _ => return EventOutcome::Noop,
         };
         use crossterm::event::KeyModifiers as M;
 
