@@ -819,35 +819,61 @@ impl App {
                 biased;
 
                 Some(Ok(ev)) = stream_next(&mut term_events) => {
-                    let is_mouse = matches!(ev, event::Event::Mouse(_));
-                    if self.dispatch_terminal_event(
-                        ev, &mut agent, &mut t, &mut active_dialog,
-                    ) {
-                        break 'main;
-                    }
-                    // For mouse events (scroll, drag) render immediately
-                    // after each one so the user sees continuous feedback
-                    // during bursts instead of a single batched frame.
-                    if is_mouse {
-                        self.render_frame(agent.is_some(), &mut active_dialog);
+                    // Batch scroll wheel ticks across the drain so a
+                    // rapid burst collapses into a single motion + one
+                    // render — otherwise each tick repaints the whole
+                    // screen and the terminal can't keep up, making
+                    // fast scrolling feel laggy or frozen.
+                    let mut scroll_delta: isize = 0;
+                    let mut scroll_row: u16 = 0;
+                    let absorb = |ev: event::Event,
+                                      delta: &mut isize,
+                                      row: &mut u16|
+                     -> Option<event::Event> {
+                        if let event::Event::Mouse(m) = &ev {
+                            match m.kind {
+                                event::MouseEventKind::ScrollUp => {
+                                    *delta -= 3;
+                                    *row = m.row;
+                                    return None;
+                                }
+                                event::MouseEventKind::ScrollDown => {
+                                    *delta += 3;
+                                    *row = m.row;
+                                    return None;
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(ev)
+                    };
+
+                    if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
+                        if self.dispatch_terminal_event(
+                            ev, &mut agent, &mut t, &mut active_dialog,
+                        ) {
+                            break 'main;
+                        }
                     }
 
-                    // Drain buffered terminal events
+                    // Drain buffered terminal events (coalesce scroll).
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
-                            let is_mouse = matches!(ev, event::Event::Mouse(_));
-                            if self.dispatch_terminal_event(
-                                ev, &mut agent, &mut t, &mut active_dialog,
-                            ) {
-                                break 'main;
-                            }
-                            if is_mouse {
-                                self.render_frame(agent.is_some(), &mut active_dialog);
+                            if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
+                                if self.dispatch_terminal_event(
+                                    ev, &mut agent, &mut t, &mut active_dialog,
+                                ) {
+                                    break 'main;
+                                }
                             }
                         }
                     }
 
-                    // Final render after non-mouse events for responsive typing.
+                    // Apply any accumulated scroll as a single motion.
+                    if scroll_delta != 0 {
+                        self.scroll_under_mouse(scroll_row, scroll_delta);
+                    }
+
                     self.render_frame(agent.is_some(), &mut active_dialog);
                     last_frame = Instant::now();
                 }

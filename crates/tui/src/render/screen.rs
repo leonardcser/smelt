@@ -2497,7 +2497,17 @@ impl Screen {
                 let max_col = (width as u16).saturating_sub(1);
                 let col = history_cursor_col.min(max_col);
                 let cursor_row = viewport_rows.saturating_sub(1 + line);
-                draw_soft_cursor(out, col, cursor_row);
+                // Pluck the character under the cursor from the
+                // viewport text so `draw_soft_cursor` can re-render it
+                // with inverted fg/bg (matching the prompt's cursor
+                // style, which preserves the underlying glyph).
+                let under: String = self
+                    .last_viewport_text
+                    .get(cursor_row as usize)
+                    .and_then(|row| row.chars().nth(col as usize))
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| " ".to_string());
+                draw_soft_cursor(out, col, cursor_row, &under);
                 (line, col)
             } else {
                 (history_cursor_line, history_cursor_col)
@@ -2851,7 +2861,7 @@ impl Screen {
                 out.print(&rest);
                 out.pop_style();
             } else {
-                draw_soft_cursor(out, 1, cursor_row);
+                draw_soft_cursor(out, 1, cursor_row, " ");
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
             out.newline();

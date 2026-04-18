@@ -714,14 +714,17 @@ pub(super) fn cursor_colors() -> (Color, Color) {
     }
 }
 
-/// Draw a software cursor (block) at the given position.
-/// The native terminal cursor stays hidden to avoid flickering.
-pub(super) fn draw_soft_cursor(out: &mut RenderOut, col: u16, row: u16) {
+/// Draw a software cursor at the given position. Any character passed
+/// as `under` is re-rendered with the cursor fg/bg inverted so the
+/// glyph under the cursor stays visible (as in the prompt). Pass `" "`
+/// for an empty cell.
+pub(super) fn draw_soft_cursor(out: &mut RenderOut, col: u16, row: u16, under: &str) {
     let (fg, bg) = cursor_colors();
     let _ = out.queue(cursor::MoveTo(col, row));
     out.set_fg(fg);
     out.set_bg(bg);
-    out.print(" ");
+    let glyph = if under.is_empty() { " " } else { under };
+    out.print(glyph);
     out.reset_style();
 }
 

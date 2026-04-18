@@ -608,7 +608,7 @@ pub(crate) fn finish_dialog_frame(
 ) {
     if editing {
         if let Some((col, r)) = cursor_pos {
-            draw_soft_cursor(out, col, r);
+            draw_soft_cursor(out, col, r, " ");
         }
     }
 }

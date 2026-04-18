@@ -1099,7 +1099,7 @@ impl App {
     /// buffer; scrolling anywhere else drives the content pane. This
     /// keeps wheel behaviour consistent with the "buffer scroll is
     /// cursor motion" model used by keyboard navigation.
-    fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
+    pub(super) fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
         if let Some((top, rows, _, _, _)) = self.screen.input_region() {
             if row >= top && row < top + rows {
                 self.app_focus = crate::app::AppFocus::Prompt;
