@@ -1050,12 +1050,16 @@ impl App {
         };
 
         // Sync `content_cpos` from the visible cursor before handing off
-        // to vim. Without this, a freshly resumed session (where history
-        // is populated but `content_cpos` is still 0 = top of transcript,
-        // while `history_cursor_line` = 0 = bottom-of-viewport) would
-        // snap to the top on the first motion.
+        // to vim. `history_cursor_line` is viewport-relative (0 = bottom
+        // row of the viewport) and `history_scroll_offset` is how far
+        // the viewport has been scrolled up from the transcript bottom.
+        // Without this sync a fresh resume (cpos=0 at top, but cursor
+        // shown at bottom of viewport) would snap to the wrong line on
+        // the first motion.
+        let transcript_from_bottom =
+            (self.history_cursor_line as usize) + (self.history_scroll_offset as usize);
         let visible_line_idx = (total_lines - 1)
-            .saturating_sub(self.history_cursor_line as usize)
+            .saturating_sub(transcript_from_bottom)
             .min(total_lines - 1);
         let visible_line_start = line_start_offsets[visible_line_idx];
         let visible_line_len = rows[visible_line_idx].len();
@@ -1093,7 +1097,8 @@ impl App {
             self.content_kill.set_with_linewise(String::new(), false);
         }
 
-        // Map cpos back to (line_idx, col) and sync scroll/cursor.
+        // Map cpos back to (line_idx, col). `line_from_bottom` is the
+        // absolute transcript position measured from the bottom.
         self.content_cpos = cpos.min(
             line_start_offsets.last().copied().unwrap_or(0) + rows.last().map_or(0, |r| r.len()),
         );
@@ -1102,18 +1107,25 @@ impl App {
             Err(i) => i.saturating_sub(1),
         };
         let col = self.content_cpos - line_start_offsets[line_idx];
-        let line_from_bottom = (total_lines - 1).saturating_sub(line_idx) as u16;
-        self.history_cursor_line = line_from_bottom;
+        let line_from_bottom = ((total_lines - 1).saturating_sub(line_idx)) as u16;
         self.history_cursor_col = col as u16;
 
-        // Scroll so the cursor line is visible. Viewport height is
-        // estimated — the render pass clamps the final values.
+        // Adjust scroll so the cursor row stays inside the viewport.
+        // `scroll_offset` is the absolute distance the viewport has been
+        // pushed up from the transcript bottom; `history_cursor_line` is
+        // viewport-relative (0 = bottom row, viewport-1 = top row).
         let viewport = self.viewport_rows_estimate();
-        if line_from_bottom >= viewport {
-            self.history_scroll_offset = line_from_bottom - (viewport - 1);
-        } else if line_from_bottom < self.history_scroll_offset.saturating_sub(viewport - 1) {
+        let top_lfb = self
+            .history_scroll_offset
+            .saturating_add(viewport.saturating_sub(1));
+        let bottom_lfb = self.history_scroll_offset;
+        if line_from_bottom > top_lfb {
+            self.history_scroll_offset =
+                line_from_bottom.saturating_sub(viewport.saturating_sub(1));
+        } else if line_from_bottom < bottom_lfb {
             self.history_scroll_offset = line_from_bottom;
         }
+        self.history_cursor_line = line_from_bottom.saturating_sub(self.history_scroll_offset);
 
         self.screen.mark_dirty();
         true
