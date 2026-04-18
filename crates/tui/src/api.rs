@@ -160,4 +160,34 @@ pub mod win {
     pub fn set_scroll_top(win: &mut dyn Window, row: u16) {
         win.set_scroll_top(row);
     }
+
+    /// Scroll the window by `delta` rows (positive = scroll down =
+    /// reveal newer content; negative = scroll up = older content).
+    /// The canonical semantic intent for wheel handlers — avoids
+    /// synthesizing `KeyCode::Down/Up` chords.
+    pub fn scroll(win: &mut dyn Window, delta: i32) {
+        let cur = win.scroll_top() as i32;
+        let next = (cur + delta).max(0) as u16;
+        win.set_scroll_top(next);
+    }
+}
+
+/// Mouse / wheel semantic intents. Event translators build one of
+/// these instead of synthesizing keyboard events; handlers read the
+/// intent and call the matching `api::win::*` primitive.
+pub mod intent {
+    /// What the dispatcher wants a window to do with an input event.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PaneIntent {
+        /// Scroll by `delta` rows (positive = down).
+        Scroll { delta: i32 },
+        /// Move the cursor to `(row, col)` within the window's content rect.
+        MoveCursor { row: u16, col: u16 },
+        /// Begin a selection anchor at `(row, col)`.
+        BeginSelection { row: u16, col: u16 },
+        /// Extend the active selection to `(row, col)`.
+        ExtendSelection { row: u16, col: u16 },
+        /// Yank the active selection to the system clipboard.
+        YankSelection,
+    }
 }

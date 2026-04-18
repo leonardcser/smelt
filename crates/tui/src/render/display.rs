@@ -42,6 +42,31 @@ pub struct DisplayLine {
 pub struct DisplaySpan {
     pub text: String,
     pub style: SpanStyle,
+    #[serde(default)]
+    pub meta: SpanMeta,
+}
+
+/// Per-span selection + copy semantics. Carried alongside `SpanStyle`
+/// so the copy path and hit-testing don't have to parse layout
+/// structure after the fact.
+///
+/// - `selectable = false` cells are skipped by selection (diff gutter,
+///   quote bar, line-number column, left/right padding).
+/// - `copy_as = Some(s)` substitutes `s` for each cell on copy;
+///   `Some("")` drops the cell; `None` emits the underlying char.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpanMeta {
+    pub selectable: bool,
+    pub copy_as: Option<String>,
+}
+
+impl Default for SpanMeta {
+    fn default() -> Self {
+        Self {
+            selectable: true,
+            copy_as: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

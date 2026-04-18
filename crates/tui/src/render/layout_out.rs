@@ -196,6 +196,7 @@ impl LayoutSink for SpanCollector {
         self.cur_line.spans.push(DisplaySpan {
             text: text.to_string(),
             style: self.cur_style.clone(),
+            meta: Default::default(),
         });
     }
 

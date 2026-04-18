@@ -67,6 +67,7 @@ fn apply_view_state(display: &mut super::display::DisplayBlock, state: ViewState
                     dim: true,
                     ..SpanStyle::default()
                 },
+                meta: Default::default(),
             }],
             fill_bg: None,
             fill_right_margin: 0,
