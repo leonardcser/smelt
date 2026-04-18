@@ -1136,6 +1136,7 @@ impl App {
                     }
                 }
                 self.mouse_drag_active = false;
+                self.drag_autoscroll_since = None;
                 self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
@@ -1332,26 +1333,37 @@ impl App {
     }
 
     /// Frame-tick hook: if the user is mid-drag with the content cursor
-    /// on the top or bottom row of the viewport, scroll one line so the
-    /// selection widens past the visible area. Called from the main
-    /// loop's frame timer — no-op when there is no active drag.
+    /// on the top or bottom row of the viewport, scroll so the
+    /// selection widens past the visible area. Speed ramps with how
+    /// long the cursor has been parked at the edge: starts at 2
+    /// lines/tick and climbs +1 every 250 ms, capped at 10.
     pub(super) fn tick_drag_autoscroll(&mut self) {
         if !self.mouse_drag_active || self.app_focus != crate::app::AppFocus::Content {
+            self.drag_autoscroll_since = None;
             return;
         }
         let viewport = self.viewport_rows_estimate();
         if viewport == 0 {
+            self.drag_autoscroll_since = None;
             return;
         }
         // `cursor_line` is measured from the bottom of the viewport:
         // 0 = bottom row, viewport-1 = top row.
-        if self.content_pane.cursor_line >= viewport.saturating_sub(1) {
-            self.move_content_cursor_by_lines(-1);
-            self.sync_transcript_pin();
+        let delta: isize = if self.content_pane.cursor_line >= viewport.saturating_sub(1) {
+            -1
         } else if self.content_pane.cursor_line == 0 {
-            self.move_content_cursor_by_lines(1);
-            self.sync_transcript_pin();
-        }
+            1
+        } else {
+            self.drag_autoscroll_since = None;
+            return;
+        };
+        let started = *self
+            .drag_autoscroll_since
+            .get_or_insert_with(std::time::Instant::now);
+        let held_ms = started.elapsed().as_millis() as usize;
+        let lines = (2 + held_ms / 250).min(10) as isize;
+        self.move_content_cursor_by_lines(delta * lines);
+        self.sync_transcript_pin();
     }
 
     /// Extend the prompt's shift-selection anchor to the click position.
