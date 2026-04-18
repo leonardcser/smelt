@@ -589,8 +589,25 @@ impl BlockHistory {
         }
     }
 
+    /// True iff the block at `i` participates in the main paint path.
+    /// Streaming blocks are invisible to the transcript paint — the
+    /// ephemeral overlay owns their display until the stream closes
+    /// and their status flips to `Done`. Invariant: streaming blocks
+    /// only appear at the tail, so gap/adjacency math on live blocks
+    /// is unaffected.
+    pub(super) fn is_live(&self, i: usize) -> bool {
+        let id = self.order[i];
+        !matches!(self.status(id), Status::Streaming)
+    }
+
     /// Gap (in rows) before the block at `i`, based on adjacency rules.
+    /// Streaming blocks contribute no gap — they're invisible in the
+    /// main paint path, so callers that iterate over every index can
+    /// consume this directly without a per-site `is_live` check.
     pub(super) fn block_gap(&self, i: usize) -> u16 {
+        if !self.is_live(i) {
+            return 0;
+        }
         if i > 0 {
             gap_between(
                 &Element::Block(self.block_at(i - 1)),
@@ -617,6 +634,9 @@ impl BlockHistory {
     }
 
     pub(super) fn ensure_rows(&mut self, i: usize, base: LayoutKey) -> u16 {
+        if !self.is_live(i) {
+            return 0;
+        }
         let id = self.order[i];
         let key = self.resolve_key(id, base);
         if let Some(rows) = self
@@ -713,6 +733,9 @@ impl BlockHistory {
         // mid-block visually.
         let head_skip = std::mem::take(&mut self.pending_head_skip);
         for i in self.flushed..self.order.len() {
+            if !self.is_live(i) {
+                continue;
+            }
             let head_skip_block = if first { head_skip } else { 0 };
             let gap = if first && (self.suppress_leading_gap || head_skip > 0) {
                 0
@@ -1169,6 +1192,38 @@ mod tests {
             .map(|(k, _)| k.content_hash)
             .collect();
         assert!(keys.contains(&h1), "new content hash cached: {keys:?}");
+    }
+
+    #[test]
+    fn streaming_blocks_consume_no_rows_or_gap() {
+        // A streaming block at the tail must be invisible to every
+        // paint path — the ephemeral overlay owns its display until
+        // the stream closes.
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "hello".into(),
+        });
+        let base_rows = history.total_rows(80, false);
+        let streaming_id = history.push(Block::Text {
+            content: "streaming content".into(),
+        });
+        history.set_status(streaming_id, Status::Streaming);
+        assert_eq!(
+            history.total_rows(80, false),
+            base_rows,
+            "streaming block must not affect total_rows"
+        );
+        assert_eq!(history.block_gap(1), 0, "streaming block has no gap");
+        let key = LayoutKey {
+            width: 80,
+            show_thinking: false,
+            view_state: ViewState::Expanded,
+            content_hash: 0,
+        };
+        assert_eq!(history.ensure_rows(1, key), 0);
+        // Flipping to Done un-hides it.
+        history.set_status(streaming_id, Status::Done);
+        assert!(history.total_rows(80, false) > base_rows);
     }
 
     #[test]
