@@ -20,8 +20,8 @@ pub(crate) use region::{ScrollbarGeom, TranscriptHit};
 pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
 
 pub use history::{
-    ActiveAgent, ActiveExec, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact,
-    BlockId, ConfirmChoice, ConfirmRequest, LayoutKey, ResumeEntry, Status, Throbber, ToolOutput,
+    ActiveAgent, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact, BlockId,
+    ConfirmChoice, ConfirmRequest, LayoutKey, ResumeEntry, Status, Throbber, ToolOutput,
     ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 

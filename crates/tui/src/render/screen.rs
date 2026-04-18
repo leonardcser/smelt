@@ -9,15 +9,14 @@
 
 use super::blocks;
 use super::blocks::{
-    collect_trailing_thinking, gap_between, render_active_exec, render_block,
-    render_thinking_summary, render_tool, thinking_summary, Element,
+    collect_trailing_thinking, gap_between, render_block, render_thinking_summary, render_tool,
+    thinking_summary, Element,
 };
 use super::cache::{PersistedLayoutCache, RenderCache};
 use super::completions::{completion_reserved_rows, draw_completions, draw_menu};
 use super::history::{
-    ActiveAgent, ActiveExec, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block,
-    BlockHistory, BlockId, Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
-    ViewState,
+    ActiveAgent, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block, BlockHistory,
+    BlockId, Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 
 /// Visual selection in the content pane, captured from vim state.
@@ -68,9 +67,9 @@ pub struct Screen {
     history: BlockHistory,
     active_thinking: Option<ActiveThinking>,
     active_text: Option<ActiveText>,
+    stream_exec_id: Option<BlockId>,
     active_tools: Vec<ActiveTool>,
     active_agents: Vec<ActiveAgent>,
-    active_exec: Option<ActiveExec>,
     prompt: PromptState,
     working: WorkingState,
     context_tokens: Option<u32>,
@@ -168,9 +167,9 @@ impl Screen {
             history: BlockHistory::new(),
             active_thinking: None,
             active_text: None,
+            stream_exec_id: None,
             active_tools: Vec::new(),
             active_agents: Vec::new(),
-            active_exec: None,
             prompt: PromptState::new(),
             working: WorkingState::new(),
             context_tokens: None,
@@ -852,6 +851,7 @@ impl Screen {
         let at = self.active_thinking.get_or_insert_with(|| ActiveThinking {
             current_line: String::new(),
             paragraph: String::new(),
+            streaming_id: None,
         });
 
         for ch in delta.chars() {
@@ -863,7 +863,12 @@ impl Screen {
                 if line.trim().is_empty() && !at.paragraph.is_empty() {
                     at.paragraph.push('\n');
                     let para = std::mem::take(&mut at.paragraph);
-                    self.history.push(Block::Thinking { content: para });
+                    if let Some(id) = at.streaming_id.take() {
+                        self.history.rewrite(id, Block::Thinking { content: para });
+                        self.history.set_status(id, Status::Done);
+                    } else {
+                        self.history.push(Block::Thinking { content: para });
+                    }
                 } else {
                     if !at.paragraph.is_empty() {
                         at.paragraph.push('\n');
@@ -872,6 +877,24 @@ impl Screen {
                 }
             } else {
                 at.current_line.push(ch);
+            }
+        }
+        // Reflect the buffered paragraph (including the in-progress line)
+        // as a streaming block so it flows through `paint_viewport`.
+        let preview = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
+            (true, true) => None,
+            (true, false) => Some(at.current_line.clone()),
+            (false, true) => Some(at.paragraph.clone()),
+            (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
+        };
+        if let Some(content) = preview.filter(|t| !t.trim().is_empty()) {
+            let block = Block::Thinking { content };
+            if let Some(id) = at.streaming_id {
+                self.history.rewrite(id, block);
+            } else {
+                let id = self.history.push(block);
+                self.history.set_status(id, Status::Streaming);
+                at.streaming_id = Some(id);
             }
         }
         self.prompt.dirty = true;
@@ -886,11 +909,22 @@ impl Screen {
                 }
                 at.paragraph.push_str(&at.current_line);
             }
-            let trimmed = at.paragraph.trim();
-            if !trimmed.is_empty() {
-                self.history.push(Block::Thinking {
-                    content: trimmed.to_string(),
-                });
+            let trimmed = at.paragraph.trim().to_string();
+            if let Some(id) = at.streaming_id {
+                if trimmed.is_empty() {
+                    self.history.rewrite(
+                        id,
+                        Block::Thinking {
+                            content: String::new(),
+                        },
+                    );
+                } else {
+                    self.history
+                        .rewrite(id, Block::Thinking { content: trimmed });
+                }
+                self.history.set_status(id, Status::Done);
+            } else if !trimmed.is_empty() {
+                self.history.push(Block::Thinking { content: trimmed });
             }
             self.prompt.dirty = true;
         }
@@ -1068,49 +1102,65 @@ impl Screen {
     }
 
     pub fn start_exec(&mut self, command: String) {
-        self.active_exec = Some(ActiveExec {
+        let id = self.history.push(Block::Exec {
             command,
             output: String::new(),
-            start_time: Instant::now(),
-            finished: false,
-            exit_code: None,
         });
+        self.history.set_status(id, Status::Streaming);
+        self.stream_exec_id = Some(id);
         self.prompt.dirty = true;
     }
 
     pub fn append_exec_output(&mut self, chunk: &str) {
-        if let Some(ref mut exec) = self.active_exec {
-            if !exec.output.is_empty() && !exec.output.ends_with('\n') {
-                exec.output.push('\n');
-            }
-            exec.output.push_str(chunk);
-            self.prompt.dirty = true;
+        let Some(id) = self.stream_exec_id else {
+            return;
+        };
+        let Some(Block::Exec { command, output }) = self.history.blocks.get(&id).cloned() else {
+            return;
+        };
+        let mut new_output = output;
+        if !new_output.is_empty() && !new_output.ends_with('\n') {
+            new_output.push('\n');
         }
+        new_output.push_str(chunk);
+        self.history.rewrite(
+            id,
+            Block::Exec {
+                command,
+                output: new_output,
+            },
+        );
+        self.prompt.dirty = true;
     }
 
-    pub fn finish_exec(&mut self, exit_code: Option<i32>) {
-        if let Some(ref mut exec) = self.active_exec {
-            exec.finished = true;
-            exec.exit_code = exit_code;
-            self.prompt.dirty = true;
-        }
+    pub fn finish_exec(&mut self, _exit_code: Option<i32>) {
+        // exit_code is currently not persisted on Block::Exec; placeholder
+        // for future use if the block grows a status field.
+        self.prompt.dirty = true;
     }
 
     /// Commit the active exec to block history.
     pub fn commit_exec(&mut self) {
-        if let Some(exec) = self.active_exec.take() {
-            let mut output = exec.output;
-            output.truncate(output.trim_end().len());
-            self.history.push(Block::Exec {
-                command: exec.command,
-                output,
-            });
-            self.prompt.dirty = true;
+        let Some(id) = self.stream_exec_id.take() else {
+            return;
+        };
+        if let Some(Block::Exec { command, output }) = self.history.blocks.get(&id).cloned() {
+            let mut trimmed = output;
+            trimmed.truncate(trimmed.trim_end().len());
+            self.history.rewrite(
+                id,
+                Block::Exec {
+                    command,
+                    output: trimmed,
+                },
+            );
         }
+        self.history.set_status(id, Status::Done);
+        self.prompt.dirty = true;
     }
 
     pub fn has_active_exec(&self) -> bool {
-        self.active_exec.is_some()
+        self.stream_exec_id.is_some()
     }
 
     /// Index of an active tool by call_id. Empty call_id (e.g.
@@ -1692,7 +1742,6 @@ impl Screen {
         self.active_text = None;
         self.active_tools.clear();
         self.active_agents.clear();
-        self.active_exec = None;
         self.prompt = PromptState::new();
         self.prompt.anchor_row = Some(0);
         self.working.clear();
@@ -1929,27 +1978,9 @@ impl Screen {
         let last_committed: Option<&Block> = self.history.last_block();
         let mut prev_synth: Option<Block> = None;
 
-        // ── Active thinking ─────────────────────────────────────────
+        // ── Active thinking (animated summary only when hidden) ────
         if let Some(ref at) = self.active_thinking {
-            if self.show_thinking {
-                let content = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
-                    (true, true) => None,
-                    (true, false) => Some(at.current_line.clone()),
-                    (false, true) => Some(at.paragraph.clone()),
-                    (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
-                };
-                if let Some(content) = content.filter(|t| !t.trim().is_empty()) {
-                    let block = Block::Thinking { content };
-                    let gap = prev_synth
-                        .as_ref()
-                        .or(last_committed)
-                        .map(|p| gap_between(&Element::Block(p), &Element::Block(&block)))
-                        .unwrap_or(0);
-                    emit_newlines(out, gap);
-                    render_block(out, &block, None, width, self.show_thinking);
-                    prev_synth = Some(block);
-                }
-            } else {
+            if !self.show_thinking {
                 // Animated summary: aggregate committed Thinking blocks
                 // with the in-flight text so the count keeps ticking
                 // even right after a paragraph commit.
@@ -2090,19 +2121,6 @@ impl Screen {
                 elapsed: Some(elapsed),
             };
             render_block(out, &agent_block, None, width, self.show_thinking);
-        }
-
-        // ── Active exec ────────────────────────────────────────────
-        if let Some(ref exec) = self.active_exec {
-            let exec_gap = if !self.active_agents.is_empty() || tool_count > 0 {
-                1
-            } else if let Some(p) = prev_synth.as_ref().or(last_committed) {
-                gap_between(&Element::Block(p), &Element::ActiveExec)
-            } else {
-                0
-            };
-            emit_newlines(out, exec_gap);
-            render_active_exec(out, exec, width);
         }
     }
 

@@ -14,14 +14,6 @@ use crossterm::QueueableCommand;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-pub struct ActiveExec {
-    pub command: String,
-    pub output: String,
-    pub start_time: Instant,
-    pub finished: bool,
-    pub exit_code: Option<i32>,
-}
-
 /// A blocking agent rendered in the dynamic section (like an active tool).
 pub struct ActiveAgent {
     pub agent_id: String,
@@ -970,6 +962,7 @@ impl BlockHistory {
 pub(super) struct ActiveThinking {
     pub(super) current_line: String,
     pub(super) paragraph: String,
+    pub(super) streaming_id: Option<BlockId>,
 }
 
 /// Streaming state for incremental LLM text output.

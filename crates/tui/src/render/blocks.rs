@@ -12,8 +12,8 @@ use super::highlight::{
 use super::history::ViewState;
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::{
-    truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, LayoutContext,
-    ToolOutput, ToolState, ToolStatus,
+    truncate_str, wrap_line, ApprovalScope, Block, ConfirmChoice, LayoutContext, ToolOutput,
+    ToolState, ToolStatus,
 };
 
 /// Cap on the number of rows a single tool block contributes to the
@@ -198,7 +198,6 @@ pub(super) fn render_thinking_summary<S: LayoutSink>(
 pub(super) enum Element<'a> {
     Block(&'a Block),
     ActiveTool,
-    ActiveExec,
 }
 
 /// Number of blank lines to insert between two adjacent elements.
@@ -254,8 +253,6 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
             }
         }
         (Element::ActiveTool, Element::ActiveTool) => 1,
-        (_, Element::ActiveExec) => 1,
-        (Element::ActiveExec, _) => 1,
         _ => 0,
     }
 }
@@ -1579,45 +1576,6 @@ pub(super) fn print_user_highlights<S: LayoutSink>(
         }
     }
     flush(out, &mut plain);
-}
-
-// ── Active exec rendering ────────────────────────────────────────────────────
-
-pub(super) fn render_active_exec<S: LayoutSink>(
-    out: &mut S,
-    exec: &ActiveExec,
-    width: usize,
-) -> u16 {
-    let char_len = exec.command.chars().count() + 1;
-    let pad_width = (char_len + 2).min(width);
-    let trailing = pad_width.saturating_sub(char_len + 1);
-
-    let elapsed = exec.start_time.elapsed();
-    let time_str = format!(" {}", format_duration(elapsed.as_secs()));
-
-    LayoutSink::push_style(
-        out,
-        SpanStyle {
-            bg: Some(ColorValue::Role(ColorRole::UserBg)),
-            fg: Some(theme::EXEC.into()),
-            bold: true,
-            ..Default::default()
-        },
-    );
-    LayoutSink::print(out, " !");
-    LayoutSink::set_fg(out, ColorValue::Named(NamedColor::Reset));
-    LayoutSink::print_string(out, format!("{}{}", exec.command, " ".repeat(trailing)));
-    LayoutSink::pop_style(out);
-    LayoutSink::push_dim(out);
-    LayoutSink::print(out, &time_str);
-    LayoutSink::pop_style(out);
-    LayoutSink::newline(out);
-    let mut rows = 1u16;
-
-    if !exec.output.is_empty() {
-        rows += render_wrapped_output(out, &exec.output, false, width);
-    }
-    rows
 }
 
 #[cfg(test)]
