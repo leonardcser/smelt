@@ -34,7 +34,13 @@ impl InputState {
         };
         let key_ev: KeyEvent = *key_ev;
 
+        // Seed vim's curswant from the window cursor so a prior
+        // shift+arrow-driven vertical motion's preferred column is
+        // preserved when the user next hits j/k, and write it back out
+        // after — one source of truth, one `curswant`.
+        let seed = self.cursor.curswant();
         let vim = self.vim.as_mut().unwrap();
+        vim.set_curswant(seed);
         let result = {
             let mut ctx = VimContext {
                 buf: &mut self.buffer.buf,
@@ -45,6 +51,8 @@ impl InputState {
             };
             vim.handle_key(key_ev, &mut ctx)
         };
+        let post = self.vim.as_ref().unwrap().curswant();
+        self.cursor.set_curswant(post);
 
         match result {
             vim::Action::Consumed => {

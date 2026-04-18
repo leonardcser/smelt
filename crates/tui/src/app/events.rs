@@ -890,17 +890,17 @@ impl App {
         // new rows appearing at the bottom push into scrollback
         // instead of shifting the visible slice. Compute the dims
         // before the `&self` borrows below.
-        if self.content_pane.is_pinned() {
+        if self.transcript_window.is_pinned() {
             let (total, viewport) = self.transcript_dims();
-            self.content_pane.apply_pin(total, viewport);
+            self.transcript_window.apply_pin(total, viewport);
         }
         // Status bar shows the *focused* window's vim mode. Without
         // this, the status bar caches the prompt's mode even when the
         // transcript window has focus.
         let (status_vim_enabled, status_vim_mode) = match self.app_focus {
             crate::app::AppFocus::Content => (
-                self.content_pane.vim.is_some(),
-                self.content_pane.vim.as_ref().map(|v| v.mode()),
+                self.transcript_window.vim.is_some(),
+                self.transcript_window.vim.as_ref().map(|v| v.mode()),
             ),
             crate::app::AppFocus::Prompt => (self.input.vim_enabled(), self.input.vim_mode()),
         };
@@ -921,14 +921,14 @@ impl App {
                 queued,
                 prediction,
             },
-            self.content_pane.scroll_offset,
-            self.content_pane.cursor_line,
-            self.content_pane.cursor_col,
+            self.transcript_window.scroll_offset,
+            self.transcript_window.cursor_line,
+            self.transcript_window.cursor_col,
             visual,
         );
-        self.content_pane.scroll_offset = clamped_scroll;
-        self.content_pane.cursor_line = clamped_line;
-        self.content_pane.cursor_col = clamped_col;
+        self.transcript_window.scroll_offset = clamped_scroll;
+        self.transcript_window.cursor_line = clamped_line;
+        self.transcript_window.cursor_col = clamped_col;
     }
 
     // ── Content pane key handler — drives `Vim` over a readonly
@@ -988,7 +988,7 @@ impl App {
         {
             return self.handle_content_novim_key(k);
         }
-        if self.content_pane.vim_enabled() {
+        if self.transcript_window.vim_enabled() {
             if self.handle_content_vim_key(k) {
                 return EventOutcome::Redraw;
             }
@@ -1012,9 +1012,9 @@ impl App {
         let w = render::term_width();
         let rows = self.screen.full_transcript_text(w);
         let viewport = self.viewport_rows_estimate();
-        self.content_pane.resync(&rows, viewport);
+        self.transcript_window.resync(&rows, viewport);
         let ctx = KeyContext {
-            buf_empty: self.content_pane.buffer.buf.is_empty(),
+            buf_empty: self.transcript_window.buffer.buf.is_empty(),
             vim_non_insert: false,
             vim_enabled: false,
             agent_running: false,
@@ -1041,10 +1041,10 @@ impl App {
                 | KeyAction::MoveEndOfLine
                 | KeyAction::MoveWordForward
                 | KeyAction::MoveWordBackward => {
-                    self.content_pane.selection.clear();
+                    self.transcript_window.cursor.clear_anchor();
                 }
                 _ if extending => {
-                    self.content_pane.selection.extend(self.content_pane.cpos);
+                    self.transcript_window.cursor.extend(self.transcript_window.cpos);
                 }
                 _ => {}
             }
@@ -1058,36 +1058,36 @@ impl App {
                 self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
-            let buf = self.content_pane.buffer.buf.clone();
+            let buf = self.transcript_window.buffer.buf.clone();
             let mv: Option<usize> = match action {
                 KeyAction::MoveLeft | KeyAction::SelectLeft => {
-                    Some(crate::text_utils::prev_char_boundary(&buf, self.content_pane.cpos))
+                    Some(crate::text_utils::prev_char_boundary(&buf, self.transcript_window.cpos))
                 }
                 KeyAction::MoveRight | KeyAction::SelectRight => {
-                    Some(crate::text_utils::next_char_boundary(&buf, self.content_pane.cpos))
+                    Some(crate::text_utils::next_char_boundary(&buf, self.transcript_window.cpos))
                 }
                 KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
-                    Some(crate::text_utils::line_start(&buf, self.content_pane.cpos))
+                    Some(crate::text_utils::line_start(&buf, self.transcript_window.cpos))
                 }
                 KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                    Some(crate::text_utils::line_end(&buf, self.content_pane.cpos))
+                    Some(crate::text_utils::line_end(&buf, self.transcript_window.cpos))
                 }
                 KeyAction::MoveWordForward | KeyAction::SelectWordForward => Some(
                     crate::text_utils::word_forward_pos(
                         &buf,
-                        self.content_pane.cpos,
+                        self.transcript_window.cpos,
                         crate::text_utils::CharClass::Word,
                     ),
                 ),
                 KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => Some(
                     crate::text_utils::word_backward_pos(
                         &buf,
-                        self.content_pane.cpos,
+                        self.transcript_window.cpos,
                         crate::text_utils::CharClass::Word,
                     ),
                 ),
                 KeyAction::CopySelection => {
-                    if let Some((s, e)) = self.content_pane.selection_range() {
+                    if let Some((s, e)) = self.transcript_window.selection_range() {
                         let s = crate::text_utils::snap(&buf, s);
                         let e = crate::text_utils::snap(&buf, e);
                         if s < e {
@@ -1103,11 +1103,11 @@ impl App {
                 _ => None,
             };
             if let Some(new_cpos) = mv {
-                self.content_pane.cpos = new_cpos;
+                self.transcript_window.cpos = new_cpos;
                 let w = render::term_width();
                 let rows = self.screen.full_transcript_text(w);
                 let viewport = self.viewport_rows_estimate();
-                self.content_pane.resync(&rows, viewport);
+                self.transcript_window.resync(&rows, viewport);
                 self.sync_transcript_pin();
                 self.screen.mark_dirty();
                 return EventOutcome::Redraw;
@@ -1120,14 +1120,14 @@ impl App {
     }
 
     /// Move the content-pane cursor by `delta` lines. Delegates to
-    /// `ContentPane::scroll_by_lines`, which reuses vim `j`/`k` so
+    /// `TranscriptWindow::scroll_by_lines`, which reuses vim `j`/`k` so
     /// vertical motion shares one code path (with `curswant`) across
     /// mouse wheel, Ctrl-U/D, arrows and j/k.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
         let w = render::term_width();
         let rows = self.screen.full_transcript_text(w);
         let viewport = self.viewport_rows_estimate();
-        self.content_pane.scroll_by_lines(delta, &rows, viewport);
+        self.transcript_window.scroll_by_lines(delta, &rows, viewport);
         self.screen.mark_dirty();
     }
 
@@ -1139,7 +1139,7 @@ impl App {
         let w = render::term_width();
         let rows = self.screen.full_transcript_text(w);
         let viewport = self.viewport_rows_estimate();
-        match self.content_pane.handle_key(k, &rows, viewport) {
+        match self.transcript_window.handle_key(k, &rows, viewport) {
             None => false,
             Some(yanked) => {
                 if let Some(text) = yanked {
@@ -1167,16 +1167,16 @@ impl App {
             return None;
         }
         let buf = rows.join("\n");
-        let (s, e, kind) = if let Some(vim) = self.content_pane.vim.as_ref() {
+        let (s, e, kind) = if let Some(vim) = self.transcript_window.vim.as_ref() {
             let kind = match vim.mode() {
                 crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
                 crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
                 _ => return None,
             };
-            let (s, e) = vim.visual_range(&buf, self.content_pane.cpos)?;
+            let (s, e) = vim.visual_range(&buf, self.transcript_window.cpos)?;
             (s, e, kind)
         } else {
-            let (s, e) = self.content_pane.selection.range(self.content_pane.cpos)?;
+            let (s, e) = self.transcript_window.cursor.range(self.transcript_window.cpos)?;
             (s, e, render::ContentVisualKind::Char)
         };
         let offset_to_line_col = |off: usize| -> (usize, usize) {
@@ -1192,7 +1192,7 @@ impl App {
         // painter can walk `last_viewport_text` directly.
         let viewport = self.viewport_rows_estimate() as usize;
         let total = rows.len();
-        let scroll = self.content_pane.scroll_offset as usize;
+        let scroll = self.transcript_window.scroll_offset as usize;
         let view_top = total.saturating_sub(viewport).saturating_sub(scroll);
         let to_view = |abs: usize| abs.saturating_sub(view_top);
         Some(render::ContentVisualRange {
@@ -1221,19 +1221,19 @@ impl App {
     /// rows the user is looking at. When the pin releases, scroll
     /// resumes its normal stuck-to-bottom behavior.
     fn sync_transcript_pin(&mut self) {
-        let has_selection = self.content_pane.selection_range().is_some();
+        let has_selection = self.transcript_window.selection_range().is_some();
         let in_vim_visual = matches!(
-            self.content_pane.vim.as_ref().map(|v| v.mode()),
+            self.transcript_window.vim.as_ref().map(|v| v.mode()),
             Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
         );
         let want_pin = has_selection || in_vim_visual || self.mouse_drag_active;
         if want_pin {
-            if !self.content_pane.is_pinned() {
+            if !self.transcript_window.is_pinned() {
                 let (total, viewport) = self.transcript_dims();
-                self.content_pane.pin(total, viewport);
+                self.transcript_window.pin(total, viewport);
             }
         } else {
-            self.content_pane.unpin();
+            self.transcript_window.unpin();
         }
     }
 
@@ -1241,6 +1241,9 @@ impl App {
     /// pin math. Reads the width from the renderer and measures the
     /// transcript against it.
     fn transcript_dims(&mut self) -> (u16, u16) {
+        if let Some(region) = self.screen.transcript_region() {
+            return (region.total_rows, region.rows);
+        }
         let w = render::term_width();
         let total = self.screen.full_transcript_text(w).len() as u16;
         let viewport = self.viewport_rows_estimate();
@@ -1268,7 +1271,7 @@ impl App {
                 return EventOutcome::Redraw;
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let dragged = self.mouse_drag_active && !self.drag_on_scrollbar;
+                let dragged = self.mouse_drag_active && self.drag_on_scrollbar.is_none();
                 match self.app_focus {
                     crate::app::AppFocus::Content => {
                         self.copy_content_selection_and_clear(dragged);
@@ -1279,7 +1282,7 @@ impl App {
                 }
                 self.mouse_drag_active = false;
                 self.drag_autoscroll_since = None;
-                self.drag_on_scrollbar = false;
+                self.drag_on_scrollbar = None;
                 self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
@@ -1313,6 +1316,17 @@ impl App {
                 if let Some((top, rows, scroll, gutter, usable)) = self.screen.input_region() {
                     if me.row >= top && me.row < top + rows {
                         self.app_focus = crate::app::AppFocus::Prompt;
+                        // Prompt scrollbar click intercepts the hit —
+                        // same model as the transcript side, using the
+                        // shared `ScrollbarGeom` recorded at paint time.
+                        if self.begin_scrollbar_drag_if_hit(
+                            me.row,
+                            me.column,
+                            crate::app::AppFocus::Prompt,
+                        ) {
+                            return EventOutcome::Redraw;
+                        }
+                        self.drag_on_scrollbar = None;
                         self.position_prompt_cursor_from_click(
                             me.row - top,
                             me.column,
@@ -1343,18 +1357,36 @@ impl App {
                 // user just clicks without dragging, the subsequent Up
                 // clears visual so nothing gets selected.
                 self.app_focus = crate::app::AppFocus::Content;
-                // Click on the scrollbar column jumps the viewport to
-                // that fraction of the transcript; no cursor/selection.
-                // `drag_on_scrollbar` latches the mode so subsequent
-                // drag ticks keep scrolling even if the pointer wanders
-                // off the thumb column.
-                let w = render::term_width() as u16;
-                if me.column + 1 == w && self.jump_scroll_to_row(me.row) {
-                    self.drag_on_scrollbar = true;
+                // Route the event through the `TranscriptRegion`
+                // recorded by the last paint: scrollbar clicks latch a
+                // `ScrollbarDrag` so subsequent drag ticks keep
+                // scrolling with the same thumb-relative offset;
+                // content clicks position the cursor at already-clamped
+                // (row, col).
+                if self.begin_scrollbar_drag_if_hit(
+                    me.row,
+                    me.column,
+                    crate::app::AppFocus::Content,
+                ) {
                     return EventOutcome::Redraw;
                 }
-                self.drag_on_scrollbar = false;
-                self.position_content_cursor_from_click(me.row, me.column);
+                self.drag_on_scrollbar = None;
+                match self
+                    .screen
+                    .transcript_region()
+                    .and_then(|r| r.hit(me.row, me.column))
+                {
+                    Some(render::TranscriptHit::Scrollbar { .. }) => {
+                        // Unreachable: begin_scrollbar_drag_if_hit above
+                        // handles Scrollbar hits. Kept for exhaustiveness.
+                    }
+                    Some(render::TranscriptHit::Content { row, col }) => {
+                        self.position_content_cursor_from_hit(row, col);
+                    }
+                    None => {
+                        self.screen.mark_dirty();
+                    }
+                }
                 if double {
                     self.select_and_copy_word_in_content();
                     return EventOutcome::Redraw;
@@ -1363,11 +1395,11 @@ impl App {
                 // wherever the cursor happened to be before — otherwise
                 // a click selects everything between the previous
                 // cursor and the click point.
-                let anchor = self.content_pane.cpos;
-                if let Some(vim) = self.content_pane.vim.as_mut() {
+                let anchor = self.transcript_window.cpos;
+                if let Some(vim) = self.transcript_window.vim.as_mut() {
                     vim.begin_visual(crate::vim::ViMode::Visual, anchor);
                 } else {
-                    self.content_pane.selection.set(Some(anchor));
+                    self.transcript_window.cursor.set_anchor(Some(anchor));
                 }
                 EventOutcome::Redraw
             }
@@ -1485,11 +1517,22 @@ impl App {
     /// [`tick_drag_autoscroll`] on the frame tick, so holding the mouse
     /// still at the edge keeps extending the selection.
     fn extend_content_selection_to(&mut self, row: u16, col: u16) {
-        if self.drag_on_scrollbar {
-            self.jump_scroll_to_row(row);
+        if self.drag_on_scrollbar.is_some() {
+            self.apply_scrollbar_drag(row);
             return;
         }
-        self.position_content_cursor_from_click(row, col);
+        // Clamp against the transcript region so drags off the
+        // scrollbar column or outside the viewport still land on a
+        // valid content cell.
+        if let Some(region) = self.screen.transcript_region() {
+            let rel_row = row
+                .saturating_sub(region.top_row)
+                .min(region.rows.saturating_sub(1));
+            let col = col.min(region.content_width.saturating_sub(1));
+            self.position_content_cursor_from_hit(rel_row, col);
+        } else {
+            self.position_content_cursor_from_hit(row, col);
+        }
     }
 
     /// Frame-tick hook: if the user is mid-drag with the content cursor
@@ -1499,7 +1542,10 @@ impl App {
     /// its sleep interval down the longer the cursor stays at the edge,
     /// which is how acceleration happens.
     pub(super) fn tick_drag_autoscroll(&mut self) {
-        if !self.mouse_drag_active || self.app_focus != crate::app::AppFocus::Content {
+        if !self.mouse_drag_active
+            || self.app_focus != crate::app::AppFocus::Content
+            || self.drag_on_scrollbar.is_some()
+        {
             self.drag_autoscroll_since = None;
             return;
         }
@@ -1510,9 +1556,9 @@ impl App {
         }
         // `cursor_line` is measured from the bottom of the viewport:
         // 0 = bottom row, viewport-1 = top row.
-        let delta: isize = if self.content_pane.cursor_line >= viewport.saturating_sub(1) {
+        let delta: isize = if self.transcript_window.cursor_line >= viewport.saturating_sub(1) {
             -1
-        } else if self.content_pane.cursor_line == 0 {
+        } else if self.transcript_window.cursor_line == 0 {
             1
         } else {
             self.drag_autoscroll_since = None;
@@ -1529,7 +1575,11 @@ impl App {
     /// position (where the drag started); subsequent drags only move
     /// the cursor so the selection widens or shrinks.
     fn extend_prompt_selection_to(&mut self, row: u16, col: u16) {
-        self.input.selection.extend(self.input.cpos);
+        if self.drag_on_scrollbar.is_some() {
+            self.apply_scrollbar_drag(row);
+            return;
+        }
+        self.input.cursor.extend(self.input.cpos);
         if let Some((top, rows, scroll, gutter, usable)) = self.screen.input_region() {
             if row >= top && row < top + rows {
                 self.position_prompt_cursor_from_click(row - top, col, scroll, gutter, usable);
@@ -1549,7 +1599,7 @@ impl App {
             let _ = crate::app::commands::copy_to_clipboard(&text);
             self.screen.notify(format!("copied {} chars", chars));
         }
-        self.input.selection.clear();
+        self.input.cursor.clear_anchor();
         self.screen.mark_dirty();
     }
 
@@ -1570,9 +1620,9 @@ impl App {
     /// Double-click on the content pane: enter vim Visual over the
     /// word under the cursor and copy it.
     fn select_and_copy_word_in_content(&mut self) {
-        let cpos = self.content_pane.cpos;
-        if let Some((s, e)) = self.content_pane.select_word_at(cpos) {
-            let text = self.content_pane.buffer.buf[s..e].to_string();
+        let cpos = self.transcript_window.cpos;
+        if let Some((s, e)) = self.transcript_window.select_word_at(cpos) {
+            let text = self.transcript_window.buffer.buf[s..e].to_string();
             let chars = text.chars().count();
             let _ = crate::app::commands::copy_to_clipboard(&text);
             self.screen.notify(format!("copied {} chars", chars));
@@ -1590,10 +1640,10 @@ impl App {
             let width = render::term_width();
             let rows = self.screen.full_transcript_text(width);
             let buf = rows.join("\n");
-            let range = if let Some(vim) = self.content_pane.vim.as_ref() {
-                vim.visual_range(&buf, self.content_pane.cpos)
+            let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
+                vim.visual_range(&buf, self.transcript_window.cpos)
             } else {
-                self.content_pane.selection.range(self.content_pane.cpos)
+                self.transcript_window.cursor.range(self.transcript_window.cpos)
             };
             if let Some((s, e)) = range {
                 let s = crate::text_utils::snap(&buf, s);
@@ -1606,10 +1656,10 @@ impl App {
                 }
             }
         }
-        if let Some(vim) = self.content_pane.vim.as_mut() {
+        if let Some(vim) = self.transcript_window.vim.as_mut() {
             vim.set_mode(crate::vim::ViMode::Normal);
         } else {
-            self.content_pane.selection.clear();
+            self.transcript_window.cursor.clear_anchor();
         }
         if let Some(n) = copied_len {
             self.screen.notify(format!("copied {} chars", n));
@@ -1618,59 +1668,117 @@ impl App {
         self.screen.mark_dirty();
     }
 
-    /// Handle a click on the scrollbar column: map `row` (0-based from
-    /// the top of the viewport) to a scroll offset and snap the view
-    /// there. Returns `true` when the click was consumed (scrollbar
-    /// visible + click on a valid row).
-    fn jump_scroll_to_row(&mut self, row: u16) -> bool {
-        let w = render::term_width();
-        let rows = self.screen.full_transcript_text(w);
-        let total = rows.len();
-        let viewport = self.viewport_rows_estimate() as usize;
-        if total <= viewport || row as usize >= viewport {
+    /// Snap the viewport so the scrollbar thumb lands at screen row
+    /// `screen_row`. Uses the `TranscriptRegion` recorded by the last
+    /// paint — no re-measuring of the transcript on drag. Returns
+    /// `true` when the region has a visible scrollbar and the jump was
+    /// applied.
+    /// If `(row, col)` lands on the scrollbar of `target`'s pane, latch
+    /// a `ScrollbarDrag` that preserves the click's offset within the
+    /// thumb, and snap the buffer's scroll so the thumb stays under the
+    /// pointer. Returns `true` when the event was consumed.
+    fn begin_scrollbar_drag_if_hit(
+        &mut self,
+        row: u16,
+        col: u16,
+        target: crate::app::AppFocus,
+    ) -> bool {
+        let Some(bar) = self.scrollbar_for(target) else {
+            return false;
+        };
+        if !bar.contains(row, col) {
             return false;
         }
-        let max_scroll = total - viewport;
-        // Content pane `scroll_offset` is rows above the bottom of the
-        // viewport. Clicking the top of the track → full scroll_offset,
-        // clicking the bottom → 0.
-        let denom = viewport.saturating_sub(1).max(1);
-        let from_top = (row as usize).saturating_mul(max_scroll) / denom;
-        let scroll = max_scroll.saturating_sub(from_top);
-        self.content_pane.scroll_offset = scroll.min(u16::MAX as usize) as u16;
-        let viewport_u16 = self.viewport_rows_estimate();
-        self.content_pane.resync(&rows, viewport_u16);
-        self.screen.mark_dirty();
+        // Simple model: every scrollbar interaction places the thumb's
+        // top at the pointer row (clamped). Mousedown jumps the thumb
+        // there; subsequent drag ticks reuse the same mapping, so the
+        // thumb tracks the mouse 1:1 on screen while the buffer scrolls
+        // proportionally more (the thumb-scale ↔ buffer-scale mapping
+        // lives in `ScrollbarGeom::scroll_from_top_for_thumb`).
+        self.drag_on_scrollbar = Some(target);
+        self.apply_scrollbar_drag(row);
         true
     }
 
-    /// Translate a click at screen (row, col) within the content pane
-    /// into a transcript (line, col) and jump the content cursor there.
-    fn position_content_cursor_from_click(&mut self, row: u16, col: u16) {
+    /// Apply an in-flight `ScrollbarDrag` to the current pointer row:
+    /// translate the thumb-relative anchor back into a thumb-top, then
+    /// into a buffer scroll offset via the region's proportional map.
+    fn apply_scrollbar_drag(&mut self, row: u16) {
+        let Some(target) = self.drag_on_scrollbar else {
+            return;
+        };
+        let Some(bar) = self.scrollbar_for(target) else {
+            return;
+        };
+        let max_thumb = bar.max_thumb_top();
+        let rel_row = row.saturating_sub(bar.top_row);
+        let thumb_top = rel_row.min(max_thumb);
+        let from_top = bar.scroll_from_top_for_thumb(thumb_top);
+        match target {
+            crate::app::AppFocus::Content => {
+                // Transcript stores bottom-relative scroll; invert.
+                let offset = bar.max_scroll().saturating_sub(from_top);
+                self.transcript_window.scroll_offset = offset;
+                // Reanchor the cursor to the same screen row and
+                // recompute the column against whichever transcript
+                // line is now under it (via `curswant`). Without this
+                // the cursor would appear frozen — its stored
+                // `cursor_line` is measured relative to the old scroll
+                // and drifts off-screen as the viewport moves.
+                let w = render::term_width();
+                let rows = self.screen.full_transcript_text(w);
+                let viewport = self
+                    .screen
+                    .transcript_region()
+                    .map(|r| r.rows)
+                    .unwrap_or_else(|| self.viewport_rows_estimate());
+                self.transcript_window
+                    .reanchor_to_visible_row(&rows, viewport);
+            }
+            crate::app::AppFocus::Prompt => {
+                self.screen.set_input_scroll(from_top as usize);
+            }
+        }
+        self.screen.mark_dirty();
+    }
+
+    /// Lookup the currently-painted scrollbar geometry for a pane.
+    fn scrollbar_for(
+        &self,
+        target: crate::app::AppFocus,
+    ) -> Option<render::ScrollbarGeom> {
+        match target {
+            crate::app::AppFocus::Content => self.screen.transcript_region()?.scrollbar,
+            crate::app::AppFocus::Prompt => self.screen.input_scrollbar(),
+        }
+    }
+
+
+    /// Translate a click inside the transcript viewport into a
+    /// (line, col) in the full transcript and jump the content cursor
+    /// there. Reads geometry from the `TranscriptRegion` recorded at
+    /// paint time so viewport rows, content width and scroll offset
+    /// all match what the user is actually looking at. `rel_row` and
+    /// `col` are already clamped against the region by the caller.
+    fn position_content_cursor_from_hit(&mut self, rel_row: u16, col: u16) {
         let w = render::term_width();
         let rows = self.screen.full_transcript_text(w);
         if rows.is_empty() {
             self.screen.mark_dirty();
             return;
         }
-        let (_, height) = self.screen.size();
-        let prompt_rows = self.screen.prev_prompt_rows();
-        let prompt_top = height.saturating_sub(prompt_rows);
-        let gap_rows: u16 = 1;
-        let viewport_rows = prompt_top.saturating_sub(gap_rows);
-        if row >= viewport_rows {
-            // Click on the gap row — ignore.
-            self.screen.mark_dirty();
+        let Some(region) = self.screen.transcript_region() else {
             return;
-        }
+        };
+        let viewport_rows = region.rows;
         let total = rows.len();
         let max_scroll = total.saturating_sub(viewport_rows as usize);
-        let scroll = (self.content_pane.scroll_offset as usize).min(max_scroll);
+        let scroll = (self.transcript_window.scroll_offset as usize).min(max_scroll);
         let skip = total
             .saturating_sub(viewport_rows as usize)
             .saturating_sub(scroll);
-        let line_idx = (skip + row as usize).min(total - 1);
-        self.content_pane
+        let line_idx = (skip + rel_row as usize).min(total - 1);
+        self.transcript_window
             .jump_to_line_col(&rows, line_idx, col as usize, viewport_rows);
         self.screen.mark_dirty();
     }
@@ -1727,7 +1835,7 @@ impl App {
         let w = render::term_width();
         let rows = self.screen.full_transcript_text(w);
         let viewport = self.viewport_rows_estimate();
-        self.content_pane.refocus(&rows, viewport);
+        self.transcript_window.refocus(&rows, viewport);
         self.screen.mark_dirty();
     }
 }

@@ -1,4 +1,4 @@
-//! Pane abstraction — UI containers that own a `Buffer` + viewport
+//! Window abstraction — UI containers that own a `Buffer` + viewport
 //! state and handle their own focus/mouse/scroll.
 //!
 //! The TUI currently has two panes:
@@ -8,41 +8,55 @@
 //! - **Content** — readonly buffer that mirrors the rendered
 //!   transcript; drives vim motions, visual selection, yank.
 //!
-//! This module holds `ContentPane`, the state + behaviour formerly
+//! This module holds `TranscriptWindow`, the state + behaviour formerly
 //! spread across `App.content_buffer` + `history_cursor_line/col` +
 //! `history_scroll_offset`. The prompt pane is kept as `InputState`
 //! (plus its completer/menu side-car) so the rich edit stack there
 //! doesn't have to be wrapped in a trait object right now.
 
-use crate::buffer::TextBuffer;
+use crate::buffer::Buffer;
 use crate::text_utils::{byte_to_cell, cell_to_byte};
 use crossterm::event::{KeyCode, KeyEvent};
 
-/// Common pane interface. Typed buffer mutations live on `crate::api::buf`
-/// — this trait is the minimal shared surface (text access + current
-/// selection range) that the prompt and transcript windows both expose.
-pub trait Pane {
-    fn text(&self) -> &TextBuffer;
-    fn text_mut(&mut self) -> &mut TextBuffer;
+/// Common window interface — the shared shape every pane (prompt,
+/// transcript, future floats) exposes. Typed mutations live on
+/// `crate::api::{buf, win}`; this trait is the minimum every caller
+/// reads from.
+///
+/// Mirrors nvim's split between **buffer** (text) and **window**
+/// (cursor + selection + scroll). `text()` returns the buffer handle;
+/// `cursor`, `selection`, `scroll_top` live on the window.
+pub trait Window {
+    fn text(&self) -> &Buffer;
+    fn text_mut(&mut self) -> &mut Buffer;
+    fn cursor(&self) -> usize;
+    fn set_cursor(&mut self, pos: usize);
     fn selection(&self) -> Option<(usize, usize)>;
+    fn clear_selection(&mut self);
+    /// Top-of-viewport offset in rows. Interpretation is window-role
+    /// dependent (prompt = top-relative; transcript = bottom-relative
+    /// until Stage 7 lands the unified top-relative model).
+    fn scroll_top(&self) -> u16;
+    fn set_scroll_top(&mut self, row: u16);
 }
 
 /// Readonly pane showing the scrollback / transcript. Owns its
 /// window-level state (cursor, vim, selection, kill ring, scroll)
-/// and carries a readonly `TextBuffer` that holds the joined
+/// and carries a readonly `Buffer` that holds the joined
 /// transcript text — the buffer is refreshed from the rendered
 /// transcript on every key dispatch (the transcript is rebuilt
 /// each frame).
-pub struct ContentPane {
+pub struct TranscriptWindow {
     /// Underlying content-only buffer.
-    pub buffer: TextBuffer,
+    pub buffer: Buffer,
     /// Cursor byte offset into `buffer.buf` — window-level.
     pub cpos: usize,
     /// Per-window vim state (mode, visual_anchor, curswant).
     pub vim: Option<crate::vim::Vim>,
-    /// Non-vim shift+arrow selection (shared type with the prompt
-    /// window). Vim Visual mode takes priority when active.
-    pub selection: crate::selection::ShiftSelection,
+    /// Shared per-window cursor state — selection anchor + curswant.
+    /// Vim Visual mode drives the same anchor; every vertical motion
+    /// (j/k, shift+arrow, wheel) goes through `cursor.move_vertical`.
+    pub cursor: crate::cursor::WindowCursor,
     /// Per-window kill ring — yanking from the transcript copies
     /// here; `handle_key` lifts it to the system clipboard.
     pub kill_ring: crate::input::KillRing,
@@ -66,13 +80,13 @@ pub struct ContentPane {
     pub pinned_last_total: Option<u16>,
 }
 
-impl ContentPane {
+impl TranscriptWindow {
     pub fn new() -> Self {
         Self {
-            buffer: TextBuffer::readonly(),
+            buffer: Buffer::readonly(),
             cpos: 0,
             vim: None,
-            selection: crate::selection::ShiftSelection::new(),
+            cursor: crate::cursor::WindowCursor::new(),
             kill_ring: crate::input::KillRing::new(),
             scroll_offset: 0,
             cursor_line: 0,
@@ -91,7 +105,7 @@ impl ContentPane {
             }
         } else {
             self.vim = None;
-            self.selection.clear();
+            self.cursor.clear_anchor();
         }
     }
 
@@ -107,7 +121,7 @@ impl ContentPane {
                 return Some(range);
             }
         }
-        self.selection.range(self.cpos)
+        self.cursor.range(self.cpos)
     }
 
     /// Select the word at `cpos` and enter vim Visual anchored at its
@@ -122,7 +136,7 @@ impl ContentPane {
             // ShiftSelection is half-open [anchor, cpos); place the
             // cursor past the last char so the whole word is in range.
             self.cpos = end;
-            self.selection.set(Some(start));
+            self.cursor.set_anchor(Some(start));
         }
         Some((start, end))
     }
@@ -157,6 +171,45 @@ impl ContentPane {
         }
         let offsets = self.mount(rows);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
+        // Seed `curswant` from the current display column so the very
+        // first `j`/`k` after focus preserves the column. Without this
+        // the first vertical motion collapses to column 0 because
+        // `curswant` is `None`.
+        if self.cursor.curswant().is_none() {
+            self.cursor.set_curswant(Some(self.cursor_col as usize));
+        }
+    }
+
+    /// Reanchor the cursor after an external scroll change (e.g.
+    /// scrollbar drag) that moved the viewport without touching
+    /// `cpos`. Keeps the cursor at the same *screen* row and rebuilds
+    /// `cpos` + `cursor_col` from whichever transcript line is now at
+    /// that row, using `curswant` for the column (so the cursor keeps
+    /// its visual column across lines of different lengths — vim
+    /// `curswant` semantics).
+    pub fn reanchor_to_visible_row(&mut self, rows: &[String], viewport_rows: u16) {
+        if rows.is_empty() {
+            return;
+        }
+        let offsets = Self::line_start_offsets(rows);
+        self.buffer.buf = rows.join("\n");
+        let total = rows.len() as u16;
+        let max_scroll = total.saturating_sub(viewport_rows);
+        let scroll = self.scroll_offset.min(max_scroll);
+        self.scroll_offset = scroll;
+        let cursor_line = self.cursor_line.min(viewport_rows.saturating_sub(1));
+        let line_from_bottom = scroll.saturating_add(cursor_line);
+        let target_line = (total.saturating_sub(1).saturating_sub(line_from_bottom)) as usize;
+        let target_line = target_line.min(rows.len() - 1);
+        let line = &rows[target_line];
+        let want = self
+            .cursor
+            .curswant()
+            .unwrap_or(self.cursor_col as usize);
+        let col_bytes = cell_to_byte(line, want);
+        self.cpos = offsets[target_line] + col_bytes;
+        self.cursor_col = byte_to_cell(line, col_bytes) as u16;
+        self.cursor_line = cursor_line;
     }
 
     /// Enter pin mode. Call this when starting a selection / visual
@@ -309,9 +362,7 @@ impl ContentPane {
             return false;
         };
         // Map arrow keys to j/k/h/l so vertical motion on the readonly
-        // transcript always takes the curswant-preserving path (`j`/`k`
-        // in Normal / Visual), regardless of whether the source was an
-        // arrow key, j/k, the mouse wheel, or Ctrl-U/D/B/F.
+        // transcript always takes the curswant-preserving path.
         let key = match key.code {
             KeyCode::Up => KeyEvent { code: KeyCode::Char('k'), ..key },
             KeyCode::Down => KeyEvent { code: KeyCode::Char('j'), ..key },
@@ -319,6 +370,11 @@ impl ContentPane {
             KeyCode::Right => KeyEvent { code: KeyCode::Char('l'), ..key },
             _ => key,
         };
+        // Seed vim's curswant from the window cursor so a prior
+        // shift+arrow vertical motion's preferred column is preserved,
+        // and write it back afterwards — single source of truth lives
+        // on `self.cursor`.
+        vim.set_curswant(self.cursor.curswant());
         let mut cpos = self.cpos;
         let mut ctx = crate::vim::VimContext {
             buf: &mut self.buffer.buf,
@@ -329,6 +385,7 @@ impl ContentPane {
         };
         let action = vim.handle_key(key, &mut ctx);
         self.cpos = cpos;
+        self.cursor.set_curswant(vim.curswant());
         !matches!(action, crate::vim::Action::Passthrough)
     }
 
@@ -342,46 +399,19 @@ impl ContentPane {
             return;
         }
         let offsets = self.mount(rows);
-        if self.vim.is_some() {
-            let (code, count) = if delta > 0 {
-                (KeyCode::Char('j'), delta as usize)
-            } else {
-                (KeyCode::Char('k'), (-delta) as usize)
-            };
-            let key = KeyEvent {
-                code,
-                modifiers: crossterm::event::KeyModifiers::NONE,
-                kind: crossterm::event::KeyEventKind::Press,
-                state: crossterm::event::KeyEventState::empty(),
-            };
-            for _ in 0..count {
-                self.dispatch_vim_key(key);
+        // One path for vertical motion regardless of vim state: ask the
+        // shared `WindowCursor` to step the cpos by `delta` lines,
+        // updating its `curswant` internally. Vim's Visual mode — if
+        // active — gets the same column preservation because the next
+        // dispatch syncs `cursor.curswant` → `vim.curswant` via
+        // `dispatch_vim_key`.
+        let new_cpos = self.cursor.move_vertical(&self.buffer.buf, self.cpos, delta);
+        self.cpos = new_cpos;
+        // A readonly transcript should never land in Insert.
+        if let Some(vim) = self.vim.as_mut() {
+            if vim.mode() == crate::vim::ViMode::Insert {
+                vim.set_mode(crate::vim::ViMode::Normal);
             }
-            if let Some(vim) = self.vim.as_mut() {
-                if vim.mode() == crate::vim::ViMode::Insert {
-                    vim.set_mode(crate::vim::ViMode::Normal);
-                }
-            }
-        } else {
-            // Vim disabled: step the cursor line-by-line, preserving
-            // the current display column as a stand-in for `curswant`.
-            use crate::text_utils::{byte_to_cell, cell_to_byte};
-            let total = rows.len();
-            let mut line_idx = match offsets.binary_search(&self.cpos) {
-                Ok(i) => i,
-                Err(i) => i.saturating_sub(1),
-            };
-            let target_col =
-                byte_to_cell(&rows[line_idx], self.cpos.saturating_sub(offsets[line_idx]));
-            let steps = delta.unsigned_abs();
-            for _ in 0..steps {
-                line_idx = if delta > 0 {
-                    (line_idx + 1).min(total - 1)
-                } else {
-                    line_idx.saturating_sub(1)
-                };
-            }
-            self.cpos = offsets[line_idx] + cell_to_byte(&rows[line_idx], target_col);
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
     }
@@ -409,29 +439,52 @@ impl ContentPane {
     }
 }
 
-impl Default for ContentPane {
+impl Default for TranscriptWindow {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Pane for ContentPane {
-    fn text(&self) -> &TextBuffer {
+impl Window for TranscriptWindow {
+    fn text(&self) -> &Buffer {
         &self.buffer
     }
-    fn text_mut(&mut self) -> &mut TextBuffer {
+    fn text_mut(&mut self) -> &mut Buffer {
         &mut self.buffer
     }
+    fn cursor(&self) -> usize {
+        self.cpos
+    }
+    fn set_cursor(&mut self, pos: usize) {
+        self.cpos = pos.min(self.buffer.buf.len());
+    }
     fn selection(&self) -> Option<(usize, usize)> {
-        ContentPane::selection_range(self)
+        TranscriptWindow::selection_range(self)
+    }
+    fn clear_selection(&mut self) {
+        self.cursor.clear_anchor();
+        if let Some(vim) = self.vim.as_mut() {
+            if matches!(
+                vim.mode(),
+                crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine
+            ) {
+                vim.set_mode(crate::vim::ViMode::Normal);
+            }
+        }
+    }
+    fn scroll_top(&self) -> u16 {
+        self.scroll_offset
+    }
+    fn set_scroll_top(&mut self, row: u16) {
+        self.scroll_offset = row;
     }
 }
 
 /// Identifier for which pane currently holds focus. `AppFocus` in
 /// `app/mod.rs` mirrors these values — both will be unified once the
-/// prompt side migrates to a `PromptPane` wrapper.
+/// prompt side migrates to a `PromptWindow` wrapper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneId {
+pub enum WinId {
     Prompt,
     Content,
 }

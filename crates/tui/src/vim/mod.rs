@@ -173,9 +173,11 @@ pub struct Vim {
     last_find: Option<(FindKind, char)>,
     /// Byte position of the visual mode anchor (where 'v'/'V' was pressed).
     visual_anchor: usize,
-    /// Desired column for vertical motions (j/k). Preserved across vertical
-    /// moves so the cursor snaps back after passing through short lines.
-    /// Cleared by any horizontal motion.
+    /// Desired column for vertical motions (j/k). Synchronised with
+    /// the owning window's `WindowCursor.curswant` at every entry to
+    /// `handle_key` so the keymap's shift+arrow path and vim's j/k
+    /// share one source of truth — vertical motion behaves identically
+    /// regardless of which key produced it.
     curswant: Option<usize>,
 }
 
@@ -231,6 +233,20 @@ impl Vim {
         self.mode = mode;
         self.sub = SubState::Ready;
         self.reset_counts();
+    }
+
+    /// Read the current preferred vertical-motion column. Callers sync
+    /// this back to the owning window's `WindowCursor` after a dispatch
+    /// so shift+arrow and vim j/k share one curswant.
+    pub fn curswant(&self) -> Option<usize> {
+        self.curswant
+    }
+
+    /// Seed `curswant` before a dispatch (from the window's
+    /// `WindowCursor.curswant`). Vim's j / k / visual-j / visual-k then
+    /// read and update this value; the caller writes it back out.
+    pub fn set_curswant(&mut self, c: Option<usize>) {
+        self.curswant = c;
     }
 
     /// Anchor visual selection at `cpos` and enter the requested visual

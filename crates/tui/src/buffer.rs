@@ -1,4 +1,4 @@
-//! `TextBuffer` — pure content. Holds the text, the undo stack, and
+//! `Buffer` — pure content. Holds the text, the undo stack, and
 //! attachment markers. Nothing else.
 //!
 //! Cursor position, selection, vim state, and the kill ring live on
@@ -16,7 +16,7 @@ use crate::undo::UndoHistory;
 
 /// Pure-content buffer. The owning window provides cursor / vim /
 /// selection state when operating on it.
-pub struct TextBuffer {
+pub struct Buffer {
     /// Raw UTF-8 text content.
     pub buf: String,
     /// Attachment markers inside `buf`.
@@ -29,7 +29,7 @@ pub struct TextBuffer {
     pub readonly: bool,
 }
 
-impl TextBuffer {
+impl Buffer {
     /// A new empty writable buffer with a default-sized undo stack.
     pub fn new() -> Self {
         Self {
@@ -89,7 +89,7 @@ impl TextBuffer {
     }
 }
 
-impl Default for TextBuffer {
+impl Default for Buffer {
     fn default() -> Self {
         Self::new()
     }

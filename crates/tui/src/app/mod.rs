@@ -1,5 +1,5 @@
 mod agent;
-mod commands;
+pub mod commands;
 pub(crate) use commands::copy_to_clipboard;
 mod events;
 mod history;
@@ -161,7 +161,7 @@ pub struct App {
     /// Readonly pane showing the transcript. Owns its `Buffer`
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
-    pub content_pane: crate::pane::ContentPane,
+    pub transcript_window: crate::window::TranscriptWindow,
     /// Last primary-mouse-Down time and cell. Used to detect
     /// double-clicks (two rapid clicks on the same cell → word-select).
     pub last_click: Option<(Instant, u16, u16)>,
@@ -174,11 +174,12 @@ pub struct App {
     /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
     /// up the longer the cursor stays at the edge.
     pub drag_autoscroll_since: Option<std::time::Instant>,
-    /// When the initial mouse-down landed on the transcript scrollbar
-    /// column, every subsequent drag tick jumps the scroll instead of
-    /// extending a visual selection — even if the pointer wanders off
-    /// the track column.
-    pub drag_on_scrollbar: bool,
+    /// When the initial mouse-down landed on a scrollbar (prompt or
+    /// transcript), every subsequent drag tick re-maps the pointer row
+    /// to a scroll offset instead of extending a visual selection —
+    /// even if the pointer wanders off the track column. The stored
+    /// value records which pane's scrollbar owns the gesture.
+    pub drag_on_scrollbar: Option<AppFocus>,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -228,7 +229,7 @@ enum EventOutcome {
     ),
 }
 
-enum CommandAction {
+pub enum CommandAction {
     Continue,
     Quit,
     CancelAndClear,
@@ -550,15 +551,15 @@ impl App {
             cli_api_key_env_override,
             startup_auth_error,
             app_focus: AppFocus::Prompt,
-            content_pane: {
-                let mut p = crate::pane::ContentPane::new();
+            transcript_window: {
+                let mut p = crate::window::TranscriptWindow::new();
                 p.set_vim_enabled(vim_enabled);
                 p
             },
             last_click: None,
             mouse_drag_active: false,
             drag_autoscroll_since: None,
-            drag_on_scrollbar: false,
+            drag_on_scrollbar: None,
         }
     }
 

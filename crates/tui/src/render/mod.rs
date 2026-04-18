@@ -9,6 +9,7 @@ mod history;
 mod layout_out;
 mod paint;
 mod prompt;
+mod region;
 mod screen;
 mod scrollbar;
 mod selection;
@@ -16,6 +17,7 @@ mod status;
 mod working;
 
 pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
+pub(crate) use region::{ScrollbarGeom, TranscriptHit};
 
 pub use history::{
     ActiveAgent, ActiveExec, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact,

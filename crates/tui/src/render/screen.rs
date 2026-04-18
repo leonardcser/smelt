@@ -117,6 +117,10 @@ pub struct Screen {
     /// during `draw_viewport_frame`. Used by the content pane's motion
     /// handlers and yank to reason over what the user actually sees.
     last_viewport_text: Vec<String>,
+    /// Transcript viewport region recorded during the last paint. Used
+    /// by mouse hit-testing and scroll math. `None` before the first
+    /// viewport frame.
+    last_transcript_region: Option<super::region::TranscriptRegion>,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -194,6 +198,7 @@ impl Screen {
             last_cursor_line: 0,
             last_cursor_col: 0,
             last_viewport_text: Vec::new(),
+            last_transcript_region: None,
             btw: None,
             notification: None,
             task_label: None,
@@ -204,6 +209,14 @@ impl Screen {
 
     pub fn size(&self) -> (u16, u16) {
         self.backend.size()
+    }
+
+    /// Width available for transcript content. Reserves the rightmost
+    /// column for the scrollbar track so the scrollbar never overpaints
+    /// rendered content and mouse hit-testing has a stable target.
+    pub fn transcript_width(&self) -> usize {
+        let (w, _) = self.backend.size();
+        (w as usize).saturating_sub(1).max(1)
     }
 
     fn cursor_y(&self) -> u16 {
@@ -1331,11 +1344,31 @@ impl Screen {
     /// Screen region `(top_row, rows, scroll_offset, gutter, usable_width)`
     /// occupied by the input text area in the last frame. Used by mouse
     /// hit-testing for click-to-position on the prompt.
+    /// Transcript viewport region recorded during the last paint. Used
+    /// by mouse hit-testing and scroll math.
+    pub(crate) fn transcript_region(&self) -> Option<super::region::TranscriptRegion> {
+        self.last_transcript_region
+    }
+
     pub fn input_region(&self) -> Option<(u16, u16, usize, u16, u16)> {
         self.prompt
             .input_region
             .map(|r| (r.top_row, r.rows, r.scroll_offset, r.gutter, r.usable_width))
     }
+
+    /// Scrollbar geometry for the prompt input area recorded during the
+    /// last paint. `None` when the input fits in its viewport.
+    pub(crate) fn input_scrollbar(&self) -> Option<super::region::ScrollbarGeom> {
+        self.prompt.input_region.and_then(|r| r.scrollbar)
+    }
+
+    /// Overwrite the prompt's top-relative input scroll offset. Used by
+    /// scrollbar click/drag to jump the input viewport.
+    pub(crate) fn set_input_scroll(&mut self, offset: usize) {
+        self.prompt.input_scroll = offset;
+        self.prompt.dirty = true;
+    }
+
 
     /// Plain-text rendering of the last-painted viewport rows (top to
     /// bottom). Used by the content pane's vim-style motions and yank.
@@ -1413,10 +1446,15 @@ impl Screen {
     /// vim buffer so motions span the entire conversation, not just the
     /// current viewport slice.
     pub fn full_transcript_text(&mut self, width: usize) -> Vec<String> {
-        let mut rows = self.history.full_text(width, self.show_thinking);
+        // Ignore the caller-supplied width: transcript layout always
+        // uses `transcript_width` so scrollbar hit-testing, cursor
+        // positioning and paint math stay in lockstep.
+        let _ = width;
+        let tw = self.transcript_width();
+        let mut rows = self.history.full_text(tw, self.show_thinking);
         if self.has_ephemeral() {
-            let mut col = SpanCollector::new(width as u16);
-            self.render_ephemeral_into(&mut col, width);
+            let mut col = SpanCollector::new(tw as u16);
+            self.render_ephemeral_into(&mut col, tw);
             for line in col.finish().lines {
                 let mut s = String::new();
                 for span in &line.spans {
@@ -2424,10 +2462,16 @@ impl Screen {
         let gap_rows: u16 = 1;
         let viewport_rows = term_h.saturating_sub(prompt_height + gap_rows);
 
+        // Reserve the rightmost column for the scrollbar track so the
+        // bar never overpaints transcript content. Layout width must
+        // match across total_rows / paint / viewport_text or mouse
+        // hit-testing drifts relative to what's actually drawn.
+        let tw = (width.saturating_sub(1)).max(1);
+
         // Build ephemeral tail (streaming overlays) as a flat DisplayBlock.
         let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
-            let mut col = SpanCollector::new(width as u16);
-            self.render_ephemeral_into(&mut col, width);
+            let mut col = SpanCollector::new(tw as u16);
+            self.render_ephemeral_into(&mut col, tw);
             col.finish().lines
         } else {
             Vec::new()
@@ -2437,7 +2481,7 @@ impl Screen {
         // scrollbar at column 0 over the viewport.
         let total_transcript_rows = self
             .history
-            .total_rows(width, self.show_thinking)
+            .total_rows(tw, self.show_thinking)
             .saturating_add(ephemeral_lines.len() as u16);
 
         // Paint transcript slice (history + ephemeral tail) into the
@@ -2446,7 +2490,7 @@ impl Screen {
         // `scroll_offset`, not by skipping the paint.
         let clamped = self.history.paint_viewport(
             out,
-            width,
+            tw,
             self.show_thinking,
             0,
             viewport_rows,
@@ -2457,26 +2501,38 @@ impl Screen {
         // Scrollbar on the rightmost column, matching the prompt.
         // Visible whenever content overflows the viewport so the user
         // has a predictable target to click / drag.
-        if (total_transcript_rows as usize) > viewport_rows as usize {
-            let max_scroll =
-                (total_transcript_rows as usize).saturating_sub(viewport_rows as usize);
-            let inverted = max_scroll.saturating_sub(clamped as usize);
-            let scrollbar = super::scrollbar::Scrollbar::new(
-                total_transcript_rows as usize,
-                viewport_rows as usize,
-                inverted,
-            );
-            super::scrollbar::paint_column(
-                out,
-                (width as u16).saturating_sub(1),
-                0,
-                viewport_rows,
-                &scrollbar,
-            );
-        }
+        let scrollbar_col = (width as u16).saturating_sub(1);
+        let scrollbar_geom: Option<super::region::ScrollbarGeom> =
+            if (total_transcript_rows as usize) > viewport_rows as usize {
+                let max_scroll =
+                    (total_transcript_rows as usize).saturating_sub(viewport_rows as usize);
+                let inverted = max_scroll.saturating_sub(clamped as usize);
+                let scrollbar = super::scrollbar::Scrollbar::new(
+                    total_transcript_rows as usize,
+                    viewport_rows as usize,
+                    inverted,
+                );
+                super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
+                Some(super::region::ScrollbarGeom {
+                    col: scrollbar_col,
+                    top_row: 0,
+                    rows: viewport_rows,
+                    total_rows: total_transcript_rows,
+                })
+            } else {
+                None
+            };
+        self.last_transcript_region = Some(super::region::TranscriptRegion {
+            top_row: 0,
+            rows: viewport_rows,
+            content_width: tw as u16,
+            scrollbar: scrollbar_geom,
+            total_rows: total_transcript_rows,
+            scroll_offset: clamped,
+        });
         // Record plain text for the content pane's motion handlers.
         self.last_viewport_text = self.history.viewport_text(
-            width,
+            tw,
             self.show_thinking,
             viewport_rows,
             clamped,
@@ -2485,7 +2541,7 @@ impl Screen {
 
         // Overlay visual selection highlighting before drawing the cursor.
         if let Some(range) = visual_range {
-            self.paint_visual_range(out, viewport_rows, width as u16, &range);
+            self.paint_visual_range(out, viewport_rows, tw as u16, &range);
         }
 
         // When the content pane has focus, paint a block cursor at
@@ -2495,7 +2551,7 @@ impl Screen {
             if self.last_app_focus == crate::app::AppFocus::Content && viewport_rows > 0 {
                 let max_line = viewport_rows.saturating_sub(1);
                 let line = history_cursor_line.min(max_line);
-                let max_col = (width as u16).saturating_sub(1);
+                let max_col = (tw as u16).saturating_sub(1);
                 let col = history_cursor_col.min(max_col);
                 let cursor_row = viewport_rows.saturating_sub(1 + line);
                 // Pluck the character under the cursor from the
@@ -2895,12 +2951,30 @@ impl Screen {
                 .take(content_rows)
                 .count() as u16
         };
+        // Mirror the transcript scrollbar geometry so prompt scrollbar
+        // clicks/drags use the same `ScrollbarGeom::scroll_offset_for_row`
+        // implementation. The prompt stores `scroll_offset` top-relative
+        // (unlike the transcript's bottom-relative offset); the geometry
+        // record captures only paint coordinates, leaving the interpretation
+        // to the event handler.
+        let bar_col = (width as u16).saturating_sub(1);
+        let input_scrollbar = if total_content_rows > content_rows && painted_input_rows > 0 {
+            Some(super::region::ScrollbarGeom {
+                col: bar_col,
+                top_row: input_top_row,
+                rows: painted_input_rows,
+                total_rows: total_content_rows as u16,
+            })
+        } else {
+            None
+        };
         self.prompt.input_region = Some(super::prompt::InputRegion {
             top_row: input_top_row,
             rows: painted_input_rows,
             scroll_offset,
             gutter: 1,
             usable_width: usable as u16,
+            scrollbar: input_scrollbar,
         });
         for (li, (line, kinds)) in visual_lines
             .iter()

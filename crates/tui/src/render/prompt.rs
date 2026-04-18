@@ -51,6 +51,10 @@ pub(crate) struct InputRegion {
     pub gutter: u16,
     /// Usable text width per visual line, i.e. wrap width.
     pub usable_width: u16,
+    /// Scrollbar painted on the right edge of the input area when the
+    /// input overflows its viewport. Mirrors the transcript side so
+    /// prompt and content share one hit-test + scroll implementation.
+    pub scrollbar: Option<super::region::ScrollbarGeom>,
 }
 
 impl PromptState {

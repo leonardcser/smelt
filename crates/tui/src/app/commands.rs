@@ -5,6 +5,30 @@ pub(super) enum ExecEvent {
     Done(Option<i32>),
 }
 
+/// Stable command outcome exposed through `api::cmd::run`. Internally
+/// this is the same as the private `CommandAction` — kept as a public
+/// alias so the API surface can evolve independently of the internal
+/// enum variants. For now it's just a re-export.
+pub type CommandOutcome = CommandAction;
+
+/// Public command runner used by `crate::api::cmd::run`. Accepts raw
+/// command lines (`/quit`, `:q`, `/compact foo`, etc.) and dispatches
+/// through the existing `handle_command` match. When the command
+/// registry lands, this grows a lookup step *before* the legacy
+/// fallback — existing call sites don't need to change.
+///
+/// Normalises a leading `:` to `/` so `/quit` and `:quit` hit the
+/// same match arm.
+pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
+    let line = line.trim();
+    let normalized: String = if let Some(rest) = line.strip_prefix(':') {
+        format!("/{rest}")
+    } else {
+        line.to_string()
+    };
+    app.handle_command(&normalized)
+}
+
 impl App {
     // ── Commands ─────────────────────────────────────────────────────────
 
@@ -416,7 +440,7 @@ impl App {
         let prev_show_thinking = self.settings.show_thinking;
         f(&mut self.settings);
         self.input.set_vim_enabled(self.settings.vim);
-        self.content_pane.set_vim_enabled(self.settings.vim);
+        self.transcript_window.set_vim_enabled(self.settings.vim);
         self.screen.apply_settings(&self.settings);
         state::save_settings(&self.settings);
         if self.settings.show_thinking != prev_show_thinking {

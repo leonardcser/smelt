@@ -31,6 +31,58 @@ pub fn byte_to_cell(line: &str, byte: usize) -> usize {
     UnicodeWidthStr::width(&line[..snap(line, byte)])
 }
 
+/// Shared vertical-motion helper: move `cpos` up or down by one line in
+/// `buf`, preserving the preferred display column (`curswant`). Returns
+/// `(new_cpos, new_curswant)` where `new_curswant` is the column the
+/// caller should remember for the next vertical motion — either the
+/// supplied one (if we landed short of it on a shorter line) or the
+/// current cell column (on the first vertical motion after a horizontal
+/// one, when `curswant` is `None`).
+///
+/// This is the single code path for every vertical-motion source that
+/// wants vim's "stay on the column you wanted, even if the intermediate
+/// line was too short" behaviour: shift+arrow, vim j/k in Normal,
+/// vim j/k in Visual, mouse-wheel scroll, Ctrl+U/D half-page, etc.
+///
+/// Columns are in terminal display cells, so wide glyphs (`⏺`, `─`,
+/// CJK) behave correctly — you end up under the glyph, not mid-bytes.
+pub fn vertical_move(
+    buf: &str,
+    cpos: usize,
+    delta_lines: isize,
+    curswant: Option<usize>,
+) -> (usize, usize) {
+    let cpos = snap(buf, cpos);
+    // Build (line_start, line_end) pairs by walking `\n`.
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    for (i, &b) in buf.as_bytes().iter().enumerate() {
+        if b == b'\n' {
+            lines.push((start, i));
+            start = i + 1;
+        }
+    }
+    lines.push((start, buf.len()));
+    let cur_line = lines
+        .iter()
+        .position(|&(s, e)| cpos >= s && cpos <= e)
+        .unwrap_or(lines.len() - 1);
+    let (cur_sol, _) = lines[cur_line];
+    let cur_col = byte_to_cell(&buf[cur_sol..], cpos - cur_sol);
+    let want = curswant.unwrap_or(cur_col);
+    if delta_lines == 0 {
+        return (cpos, want);
+    }
+    let target_line = if delta_lines > 0 {
+        (cur_line + delta_lines as usize).min(lines.len() - 1)
+    } else {
+        cur_line.saturating_sub((-delta_lines) as usize)
+    };
+    let (sol, eol) = lines[target_line];
+    let byte_in_line = cell_to_byte(&buf[sol..eol], want);
+    (sol + byte_in_line, want)
+}
+
 /// Byte offset of the char boundary before `pos`. Returns 0 at start.
 pub fn prev_char_boundary(s: &str, pos: usize) -> usize {
     if pos == 0 {

@@ -47,20 +47,20 @@ pub struct InputSnapshot {
 /// `selection_anchor` are window-level: the cursor is a byte offset
 /// into `buffer.buf`, owned here. Call sites access these fields
 /// directly (`input.cpos`, `input.vim`, `input.buf`) — the `Deref<
-/// Target = TextBuffer>` impl gives free access to buffer fields
+/// Target = Buffer>` impl gives free access to buffer fields
 /// like `input.buf`.
 pub struct InputState {
     /// The underlying editable buffer (pure content). Owns `buf`,
     /// `history`, `attachment_ids`.
-    pub buffer: crate::buffer::TextBuffer,
+    pub buffer: crate::buffer::Buffer,
     /// Cursor byte offset into `buffer.buf` — window-level.
     pub cpos: usize,
     /// Per-window vim state (mode, visual_anchor, curswant).
     pub vim: Option<Vim>,
-    /// Non-vim shift+arrow selection anchor (shared type across the
-    /// prompt and transcript windows). Vim Visual mode takes priority
-    /// when active.
-    pub selection: crate::selection::ShiftSelection,
+    /// Shared per-window cursor state — selection anchor + curswant.
+    /// One type, one API, one source of truth used by every motion and
+    /// selection path regardless of vim mode.
+    pub cursor: crate::cursor::WindowCursor,
     /// Kill ring for yank/paste.
     pub kill_ring: KillRing,
     pub store: AttachmentStore,
@@ -80,28 +80,46 @@ pub struct InputState {
 }
 
 impl std::ops::Deref for InputState {
-    type Target = crate::buffer::TextBuffer;
-    fn deref(&self) -> &crate::buffer::TextBuffer {
+    type Target = crate::buffer::Buffer;
+    fn deref(&self) -> &crate::buffer::Buffer {
         &self.buffer
     }
 }
 
-impl std::ops::DerefMut for InputState {
-    fn deref_mut(&mut self) -> &mut crate::buffer::TextBuffer {
-        &mut self.buffer
-    }
-}
-
-impl crate::pane::Pane for InputState {
-    fn text(&self) -> &crate::buffer::TextBuffer {
+impl crate::window::Window for InputState {
+    fn text(&self) -> &crate::buffer::Buffer {
         &self.buffer
     }
-    fn text_mut(&mut self) -> &mut crate::buffer::TextBuffer {
+    fn text_mut(&mut self) -> &mut crate::buffer::Buffer {
         &mut self.buffer
+    }
+    fn cursor(&self) -> usize {
+        self.cpos
+    }
+    fn set_cursor(&mut self, pos: usize) {
+        self.cpos = pos.min(self.buffer.buf.len());
     }
     fn selection(&self) -> Option<(usize, usize)> {
         self.selection_range()
     }
+    fn clear_selection(&mut self) {
+        self.cursor.clear_anchor();
+        if let Some(vim) = self.vim.as_mut() {
+            if matches!(
+                vim.mode(),
+                crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine
+            ) {
+                vim.set_mode(crate::vim::ViMode::Normal);
+            }
+        }
+    }
+    fn scroll_top(&self) -> u16 {
+        // Prompt's internal scroll lives on Screen; this wrapper will
+        // grow to forward in a later stage. No per-InputState scroll
+        // state today.
+        0
+    }
+    fn set_scroll_top(&mut self, _row: u16) {}
 }
 
 /// What the caller should do after `handle_event`.
@@ -129,10 +147,10 @@ impl Default for InputState {
 impl InputState {
     pub fn new() -> Self {
         Self {
-            buffer: crate::buffer::TextBuffer::new(),
+            buffer: crate::buffer::Buffer::new(),
             cpos: 0,
             vim: None,
-            selection: crate::selection::ShiftSelection::new(),
+            cursor: crate::cursor::WindowCursor::new(),
             kill_ring: KillRing::new(),
             store: AttachmentStore::new(),
             completer: None,
@@ -154,7 +172,7 @@ impl InputState {
                 return Some(range);
             }
         }
-        self.selection.range(self.cpos)
+        self.cursor.range(self.cpos)
     }
 
     fn has_selection(&self) -> bool {
@@ -163,7 +181,7 @@ impl InputState {
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
     pub fn clear_selection(&mut self) {
-        self.selection.clear();
+        self.cursor.clear_anchor();
     }
 
     /// Select the word at `cpos`. Used by mouse double-click.
@@ -173,14 +191,14 @@ impl InputState {
         if let Some(vim) = self.vim.as_mut() {
             vim.begin_visual(crate::vim::ViMode::Visual, start);
         } else {
-            self.selection.set(Some(start));
+            self.cursor.set_anchor(Some(start));
         }
         Some((start, end))
     }
 
     /// Start or extend selection at current cursor position (non-vim shift+key).
     fn extend_selection(&mut self) {
-        self.selection.extend(self.cpos);
+        self.cursor.extend(self.cpos);
     }
 
     /// Delete the currently selected text, returning it. Handles attachment cleanup.
@@ -190,7 +208,7 @@ impl InputState {
         self.remove_attachments_in_range(start, end);
         self.buffer.buf.drain(start..end);
         self.cpos = start;
-        self.selection.clear();
+        self.cursor.clear_anchor();
         Some(deleted)
     }
 
@@ -261,7 +279,7 @@ impl InputState {
         self.menu = None;
         self.history_saved_buf = None;
         self.from_paste = false;
-        self.selection.clear();
+        self.cursor.clear_anchor();
         // Note: stash and store are intentionally NOT cleared here.
     }
 
@@ -276,7 +294,7 @@ impl InputState {
         self.buffer.buf = text;
         self.cpos = cpos;
         self.buffer.attachment_ids.clear();
-        self.selection.clear();
+        self.cursor.clear_anchor();
         self.from_paste = false;
         self.completer = None;
         self.recompute_completer();
@@ -489,6 +507,17 @@ impl InputState {
         if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
             self.kill_ring.clear_yank();
         }
+        // Any non-vertical action abandons the preferred column so the
+        // next vertical motion picks up wherever the user is now.
+        if !matches!(
+            action,
+            KeyAction::MoveUp
+                | KeyAction::MoveDown
+                | KeyAction::SelectUp
+                | KeyAction::SelectDown
+        ) {
+            self.cursor.clear_curswant();
+        }
         // Selection actions extend; editing actions consume; everything else clears.
         let is_select = matches!(
             action,
@@ -597,7 +626,7 @@ impl InputState {
                 }
             }
             KeyAction::MoveUp => {
-                let new_pos = crate::vim::move_up(&self.buffer.buf, self.cpos);
+                let new_pos = self.cursor.move_vertical(&self.buffer.buf, self.cpos, -1);
                 if new_pos != self.cpos {
                     self.cpos = new_pos;
                     self.recompute_completer();
@@ -605,6 +634,7 @@ impl InputState {
                 } else if let Some(entry) = history.and_then(|h| h.up(&self.buffer.buf)) {
                     self.buffer.buf = entry.to_string();
                     self.cpos = 0;
+                    self.cursor.clear_curswant();
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -612,7 +642,7 @@ impl InputState {
                 }
             }
             KeyAction::MoveDown => {
-                let new_pos = crate::vim::move_down(&self.buffer.buf, self.cpos);
+                let new_pos = self.cursor.move_vertical(&self.buffer.buf, self.cpos, 1);
                 if new_pos != self.cpos {
                     self.cpos = new_pos;
                     self.recompute_completer();
@@ -620,6 +650,7 @@ impl InputState {
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
                     self.buffer.buf = entry.to_string();
                     self.cpos = self.buffer.buf.len();
+                    self.cursor.clear_curswant();
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -838,12 +869,12 @@ impl InputState {
             }
             KeyAction::SelectUp => {
                 self.extend_selection();
-                self.cpos = crate::vim::move_up(&self.buffer.buf, self.cpos);
+                self.cpos = self.cursor.move_vertical(&self.buffer.buf, self.cpos, -1);
                 Action::Redraw
             }
             KeyAction::SelectDown => {
                 self.extend_selection();
-                self.cpos = crate::vim::move_down(&self.buffer.buf, self.cpos);
+                self.cpos = self.cursor.move_vertical(&self.buffer.buf, self.cpos, 1);
                 Action::Redraw
             }
             KeyAction::SelectWordForward => {
@@ -1605,7 +1636,7 @@ mod tests {
         input.buffer.buf = "hello".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.selection.anchor(), Some(0));
+        assert_eq!(input.cursor.anchor(), Some(0));
         assert_eq!(input.cpos, 1);
         assert_eq!(input.selection_range(), Some((0, 1)));
     }
@@ -1618,7 +1649,7 @@ mod tests {
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
         input.execute_key_action(KeyAction::SelectRight, None);
-        assert_eq!(input.selection.anchor(), Some(0));
+        assert_eq!(input.cursor.anchor(), Some(0));
         assert_eq!(input.cpos, 3);
         assert_eq!(input.selection_range(), Some((0, 3)));
     }
@@ -1682,7 +1713,7 @@ mod tests {
         input.cpos = 5;
         input.execute_key_action(KeyAction::SelectLeft, None);
         input.execute_key_action(KeyAction::SelectLeft, None);
-        assert_eq!(input.selection.anchor(), Some(5));
+        assert_eq!(input.cursor.anchor(), Some(5));
         assert_eq!(input.cpos, 3);
         assert_eq!(input.selection_range(), Some((3, 5)));
     }
@@ -1693,7 +1724,7 @@ mod tests {
         input.buffer.buf = "hello world foo".to_string();
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectWordForward, None);
-        assert_eq!(input.selection.anchor(), Some(0));
+        assert_eq!(input.cursor.anchor(), Some(0));
         // word_forward_pos from 0 should be 6 (start of "world").
         assert_eq!(input.cpos, 6);
         input.execute_key_action(KeyAction::Backspace, None);
@@ -1775,7 +1806,7 @@ mod tests {
         let mut input = InputState::new();
         input.buffer.buf = "hello".to_string();
         input.cpos = 3;
-        input.selection.set(Some(3));
+        input.cursor.set_anchor(Some(3));
         assert_eq!(input.selection_range(), None);
     }
 
@@ -1834,7 +1865,7 @@ mod tests {
         input.cpos = 0;
         input.execute_key_action(KeyAction::SelectLeft, None);
         assert_eq!(input.cpos, 0);
-        assert_eq!(input.selection.anchor(), Some(0));
+        assert_eq!(input.cursor.anchor(), Some(0));
     }
 
     #[test]
@@ -1928,9 +1959,9 @@ mod tests {
         input.buffer.buf = format!("ab{}cd", ATTACHMENT_MARKER);
         input.cpos = 0;
         let id = input.store.insert_paste("pasted".to_string());
-        input.attachment_ids.push(id);
+        input.buffer.attachment_ids.push(id);
         // Select "b[paste]c" (bytes 1..5 — marker is 3 bytes)
-        input.selection.set(Some(1));
+        input.cursor.set_anchor(Some(1));
         input.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1; // b + marker + c
         assert!(input.selection_range().is_some());
         let deleted = input.delete_selection();
@@ -1948,7 +1979,7 @@ mod tests {
     fn buf_with_two_markers(input: &mut InputState, id: AttachmentId) {
         input.buffer.buf = format!("pre{m}mid{m}post", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
-        input.attachment_ids = vec![id, id];
+        input.buffer.attachment_ids = vec![id, id];
     }
 
     #[test]
@@ -1974,7 +2005,7 @@ mod tests {
         let id2 = input.store.insert_paste("beta body different".into());
         input.buffer.buf = format!("{m}and{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
-        input.attachment_ids = vec![id1, id2];
+        input.buffer.attachment_ids = vec![id1, id2];
         let text = input.expanded_text();
         assert!(text.contains("alpha body long enough"));
         assert!(text.contains("beta body different"));
@@ -1988,7 +2019,7 @@ mod tests {
         let id = input.store.insert_paste(body.clone());
         input.buffer.buf = format!("{m}a{m}b{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
-        input.attachment_ids = vec![id, id, id];
+        input.buffer.attachment_ids = vec![id, id, id];
         let text = input.expanded_text();
         assert_eq!(text.matches(&body).count(), 1);
         assert_eq!(text.matches(PASTE_STUB).count(), 2);
@@ -2020,7 +2051,7 @@ mod tests {
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
         input.buffer.buf = format!("{m}{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
-        input.attachment_ids = vec![id1, id2];
+        input.buffer.attachment_ids = vec![id1, id2];
         let content = input.build_content();
         assert_eq!(content.image_count(), 2);
     }
@@ -2037,7 +2068,7 @@ mod tests {
             .insert_image("b.png".into(), "data:image/png;base64,BBB".into());
         input.buffer.buf = format!("{m}x{m}y{m}", m = ATTACHMENT_MARKER);
         input.cpos = input.buf.len();
-        input.attachment_ids = vec![id_a, id_b, id_a];
+        input.buffer.attachment_ids = vec![id_a, id_b, id_a];
         let content = input.build_content();
         assert_eq!(content.image_count(), 2);
     }
