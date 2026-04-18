@@ -2290,6 +2290,8 @@ impl Screen {
         self.prompt.dirty = false;
         self.prompt.prev_rows = prompt_height;
         self.prompt.anchor_row = Some(prompt_top);
+        self.prompt.prev_dialog_row = Some(prompt_top);
+        self.prompt.prev_prompt_ui_rows = prompt_height;
         self.content_start_row = Some(0);
         self.has_scrollback = false;
         // Fully flushed — every frame re-renders everything.

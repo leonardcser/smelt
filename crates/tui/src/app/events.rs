@@ -968,12 +968,22 @@ impl App {
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         match me.kind {
             MouseEventKind::ScrollUp => {
+                // Scrolling up enters history focus so motions stay consistent.
+                if self.app_focus == crate::app::AppFocus::Prompt {
+                    self.app_focus = crate::app::AppFocus::History;
+                }
                 self.history_scroll_offset = self.history_scroll_offset.saturating_add(3);
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
             MouseEventKind::ScrollDown => {
                 self.history_scroll_offset = self.history_scroll_offset.saturating_sub(3);
+                // When the user scrolls back to the bottom, return focus to the prompt.
+                if self.history_scroll_offset == 0
+                    && self.app_focus == crate::app::AppFocus::History
+                {
+                    self.app_focus = crate::app::AppFocus::Prompt;
+                }
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
