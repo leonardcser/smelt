@@ -1449,34 +1449,15 @@ impl Screen {
     }
 
     pub fn render_pending_blocks(&mut self) {
+        // Under the flat-line viewport model, blocks are never flushed
+        // to scrollback — the next frame repaints the transcript from
+        // scratch. Just mark the screen dirty so the tick loop picks
+        // up any newly-pushed blocks.
         if self.defer_pending_render {
             self.defer_pending_render = false;
             return;
         }
-        if !self.history.has_unflushed() {
-            return;
-        }
-        let mut frame = Frame::begin(&*self.backend);
-        let start_row = if self.prompt.drawn {
-            let row = self.prompt.anchor_row.unwrap_or(0);
-            let _ = frame.queue(cursor::MoveTo(0, row));
-            let _ = frame.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            self.prompt.drawn = false;
-            self.prompt.prev_rows = 0;
-            row
-        } else {
-            self.prompt
-                .anchor_row
-                .take()
-                .unwrap_or_else(|| self.cursor_y())
-        };
-        let (w, h) = self.size();
-        let block_rows = self
-            .history
-            .render(&mut frame, w as usize, self.show_thinking);
-        // Cap anchor at the last terminal row — scroll-mode rendering may
-        // have pushed past the bottom, making start_row + block_rows overshoot.
-        self.prompt.anchor_row = Some((start_row + block_rows).min(h.saturating_sub(1)));
+        self.prompt.dirty = true;
     }
 
     /// Mark the prompt as needing a full redraw.  Does NOT perform any
@@ -1491,47 +1472,22 @@ impl Screen {
         }
     }
 
-    /// Clear screen + scrollback and repaint the last
-    /// `MAX_REDRAW_LINES` rows of committed history in scroll mode.
-    /// Rows past the viewport scroll into the fresh scrollback so the
-    /// user can scroll back through recent history. Purging scrollback
-    /// is what keeps a resize from leaving duplicate rows across the
-    /// viewport and scrollback.
+    /// Force a full repaint on the next tick. Under the flat-line
+    /// viewport model this just clears the current screen and marks
+    /// the prompt dirty — the next `draw_viewport_frame` will rebuild
+    /// everything from scratch.
     pub fn redraw(&mut self) {
         let _perf = crate::perf::begin("redraw");
-        let (w, height) = self.size();
+        let (w, _) = self.size();
+        if w as usize != self.history.cache_width {
+            self.history.invalidate_for_width(w as usize);
+        }
         let mut frame = Frame::begin(&*self.backend);
         let _ = frame.queue(cursor::MoveTo(0, 0));
         let _ = frame.queue(terminal::Clear(terminal::ClearType::All));
-        let _ = frame.queue(terminal::Clear(terminal::ClearType::Purge));
-        // Drop stale layouts from a previous width before laying out
-        // anything new.
-        if w as usize != self.history.cache_width {
-            let _p = crate::perf::begin("redraw:invalidate");
-            self.history.invalidate_for_width(w as usize);
-        }
-        let key = LayoutKey {
-            width: w,
-            show_thinking: self.show_thinking,
-        };
-        let (start_idx, head_skip) = {
-            let _p = crate::perf::begin("redraw:start_idx");
-            self.history.redraw_start(MAX_REDRAW_LINES, key)
-        };
-        self.history.flushed = start_idx;
-        self.history.last_block_rows = 0;
-        self.history.pending_head_skip = head_skip;
-        let block_rows = {
-            let _p = crate::perf::begin("redraw:render_blocks");
-            self.history
-                .render(&mut frame, w as usize, self.show_thinking)
-        };
         self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
-        self.content_start_row = Some(0);
-        self.has_scrollback = false;
-        self.prompt.anchor_row = Some(block_rows.min(height.saturating_sub(1)));
     }
 
     pub fn clear(&mut self) {
@@ -2291,7 +2247,9 @@ impl Screen {
         // Measure prompt so we know how many rows to reserve at the bottom.
         let prompt_height =
             self.measure_prompt_height(prompt.state, width, prompt.queued, prompt.prediction);
-        let viewport_rows = term_h.saturating_sub(prompt_height);
+        // One-row gap between transcript and prompt.
+        let gap_rows: u16 = 1;
+        let viewport_rows = term_h.saturating_sub(prompt_height + gap_rows);
 
         // Build ephemeral tail (streaming overlays) as a flat DisplayBlock.
         let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
@@ -2313,9 +2271,10 @@ impl Screen {
             &ephemeral_lines,
         );
 
-        // Paint prompt stack at the bottom.
-        out.row = Some(viewport_rows);
-        out.move_to(0, viewport_rows);
+        // Paint prompt stack at the bottom, leaving the gap row blank.
+        let prompt_top = viewport_rows + gap_rows;
+        out.row = Some(prompt_top);
+        out.move_to(0, prompt_top);
         self.draw_prompt_sections(
             out,
             prompt.state,
@@ -2330,7 +2289,7 @@ impl Screen {
         self.prompt.drawn = true;
         self.prompt.dirty = false;
         self.prompt.prev_rows = prompt_height;
-        self.prompt.anchor_row = Some(viewport_rows);
+        self.prompt.anchor_row = Some(prompt_top);
         self.content_start_row = Some(0);
         self.has_scrollback = false;
         // Fully flushed — every frame re-renders everything.
