@@ -1,24 +1,10 @@
 mod setup;
+mod startup;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::ExecutableCommand;
-use protocol::{Mode, ReasoningEffort};
+use startup::resolve_api_key;
 use std::sync::{Arc, Mutex};
-
-fn resolve_api_key(key_env: &str) -> Result<String, String> {
-    if key_env.is_empty() {
-        return Ok(String::new());
-    }
-    match std::env::var(key_env) {
-        Ok(key) => Ok(key),
-        Err(std::env::VarError::NotPresent) => Err(format!(
-            "environment variable '{key_env}' is not set but is required for API authentication"
-        )),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "environment variable '{key_env}' contains non-Unicode data and cannot be used as an API key"
-        )),
-    }
-}
 
 #[global_allocator]
 static ALLOCATOR: tui::alloc::Counting = tui::alloc::Counting;
@@ -26,7 +12,7 @@ static ALLOCATOR: tui::alloc::Counting = tui::alloc::Counting;
 #[derive(Parser)]
 #[command(name = "smelt", about = "Coding agent TUI", version)]
 #[command(args_conflicts_with_subcommands = true)]
-struct Args {
+pub struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
     /// Initial message to send (auto-submits on startup)
@@ -174,209 +160,25 @@ async fn main() {
         return;
     }
 
-    let mut cfg = match args.config {
-        Some(ref path) => {
-            let c = tui::config::Config::load_from(std::path::Path::new(path));
-            match c.source {
-                Some(tui::config::ConfigSource::NotFound) => {
-                    eprintln!("error: config file not found: {path}");
-                    std::process::exit(1);
-                }
-                Some(tui::config::ConfigSource::ParseError) => {
-                    // warning already printed by load_from
-                    std::process::exit(1);
-                }
-                _ => c,
-            }
-        }
-        None => tui::config::Config::load(),
-    };
-
-    for pair in &args.set {
-        let Some((key, value)) = pair.split_once('=') else {
-            eprintln!("error: --set requires KEY=VALUE format, got '{pair}'");
-            std::process::exit(1);
-        };
-        if let Err(e) = cfg.settings.apply(key, value) {
-            eprintln!("error: --set {pair}: {e}");
-            std::process::exit(1);
-        }
-    }
-    let app_state = tui::state::State::load();
-    let mut available_models = cfg.resolve_models();
-
-    // For Codex providers, fetch models dynamically from the API (with cache).
-    // Use cached models for instant startup; always refresh in background.
-    // Done before auxiliary validation so cached codex slugs are in scope.
-    if cfg.has_codex_provider() {
-        let cached = engine::provider::codex::load_cached_models();
-        if !cached.is_empty() {
-            let slugs: Vec<String> = cached.into_iter().map(|m| m.slug).collect();
-            cfg.inject_codex_models(&mut available_models, &slugs);
-        }
-        tokio::spawn(async move {
-            let client = reqwest::Client::new();
-            let _ = engine::provider::codex::refresh_models_cache(&client).await;
-        });
-    }
-
-    // Same pattern for GitHub Copilot.
-    if cfg.has_copilot_provider() {
-        let cached = engine::provider::copilot::load_cached_models();
-        if !cached.is_empty() {
-            let ids: Vec<String> = cached.into_iter().map(|m| m.id).collect();
-            cfg.inject_copilot_models(&mut available_models, &ids);
-        }
-        tokio::spawn(async move {
-            let client = reqwest::Client::new();
-            let _ = engine::provider::copilot::refresh_models_cache(&client).await;
-        });
-    }
-
-    let auxiliary_routing = match cfg.resolve_auxiliary_routing(&available_models) {
-        Ok(routing) => routing,
-        Err(err) => {
-            eprintln!("error: auxiliary.model: {err}");
-            std::process::exit(1);
-        }
-    };
-
-    let resolve_model_reference = |reference: &str,
-                                   models: &[tui::config::ResolvedModel],
-                                   allow_not_found: bool|
-     -> Option<tui::config::ResolvedModel> {
-        match tui::config::resolve_model_ref(models, reference) {
-            Ok(model) => Some(model.clone()),
-            Err(tui::config::ResolveModelRefError::NotFound { .. }) if allow_not_found => None,
-            Err(err) => {
-                eprintln!("error: {err}");
-                std::process::exit(1);
-            }
-        }
-    };
-
-    let mut startup_auth_error: Option<String> = None;
-
-    // Resolve the active model: CLI flags > defaults.model (if set) > last_used (if no default) > first in config
-    let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolved = if let Some(ref cli_model) = args.model {
-            resolve_model_reference(cli_model, &available_models, args.api_base.is_some())
-        } else if let Some(default) = cfg.get_default_model() {
-            // Config has a default: use it, ignore cached selection
-            resolve_model_reference(default, &available_models, false)
-        } else if let Some(ref cached) = app_state.selected_model {
-            // No config default: use last used model, fall back to first if stale
-            tui::config::resolve_model_ref(&available_models, cached)
-                .ok()
-                .cloned()
-                .or_else(|| available_models.first().cloned())
-        } else {
-            // Fallback to first model in config
-            available_models.first().cloned()
-        };
-
-        if let Some(r) = resolved {
-            let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
-            let key_env = args
-                .api_key_env
-                .clone()
-                .unwrap_or_else(|| r.api_key_env.clone());
-            let key = match resolve_api_key(&key_env) {
-                Ok(key) => key,
-                Err(err) => {
-                    startup_auth_error = Some(err);
-                    String::new()
-                }
-            };
-            (
-                base,
-                key,
-                key_env,
-                r.provider_type.clone(),
-                r.model_name.clone(),
-                r.config.clone(),
-            )
-        } else if cfg.source == Some(tui::config::ConfigSource::NotFound) && args.api_base.is_none()
-        {
-            // No config at all — run the interactive setup wizard.
-            if !setup::run_initial_setup(&cfg.path).await {
-                std::process::exit(1);
-            }
-            cfg = tui::config::Config::load_from(&cfg.path);
-            let models = cfg.resolve_models();
-            if let Some(r) = models.first() {
-                let key = match resolve_api_key(&r.api_key_env) {
-                    Ok(key) => key,
-                    Err(err) => {
-                        startup_auth_error = Some(err);
-                        String::new()
-                    }
-                };
-                (
-                    r.api_base.clone(),
-                    key,
-                    r.api_key_env.clone(),
-                    r.provider_type.clone(),
-                    r.model_name.clone(),
-                    r.config.clone(),
-                )
-            } else {
-                eprintln!("error: setup completed but no models found in config");
-                std::process::exit(1);
-            }
-        } else if let Some(base) = args.api_base.clone() {
-            let key_env = args.api_key_env.clone().unwrap_or_default();
-            let key = match resolve_api_key(&key_env) {
-                Ok(key) => key,
-                Err(err) => {
-                    startup_auth_error = Some(err);
-                    String::new()
-                }
-            };
-            let Some(model) = args.model.clone() else {
-                eprintln!("error: --model is required when using --api-base without a config file");
-                std::process::exit(1);
-            };
-            (
-                base.clone(),
-                key,
-                key_env,
-                engine::ProviderKind::detect_from_url(&base)
-                    .as_config_str()
-                    .to_string(),
-                model,
-                tui::config::ModelConfig::default(),
-            )
-        } else {
-            match cfg.source {
-                Some(tui::config::ConfigSource::ParseError) => {
-                    eprintln!(
-                        "error: config file at {} failed to parse (see warning above)\n\
-                         Fix the config or provide --api-base and --model.",
-                        cfg.path.display()
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "error: no providers with models found in {}\n\
-                         Add a provider with models, or provide --api-base and --model.",
-                        cfg.path.display()
-                    );
-                }
-            }
-            std::process::exit(1);
-        }
-    };
-
-    // CLI --type overrides config/auto-detected provider type.
-    // CLI --api-base re-triggers auto-detect when no --type is given.
-    if let Some(ref t) = args.r#type {
-        provider_type = t.clone();
-    } else if args.api_base.is_some() {
-        provider_type = engine::ProviderKind::detect_from_url(&api_base)
-            .as_config_str()
-            .to_string();
-    }
+    let s = startup::resolve(&args).await;
+    let startup::ResolvedStartup {
+        cfg,
+        available_models,
+        auxiliary,
+        api_base,
+        api_key,
+        api_key_env,
+        provider_type,
+        model,
+        model_config,
+        settings,
+        multi_agent,
+        mode_override,
+        mode_cycle,
+        reasoning_effort,
+        reasoning_cycle,
+        mut startup_auth_error,
+    } = s;
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
         engine::log::set_level(level);
@@ -413,84 +215,6 @@ async fn main() {
         }
     }
 
-    // Resolve multi-agent: CLI flags override config.
-    let multi_agent = if args.no_multi_agent {
-        false
-    } else if args.multi_agent || args.subagent {
-        true
-    } else {
-        cfg.settings.multi_agent.unwrap_or(false)
-    };
-
-    let mode_override = args
-        .mode
-        .as_deref()
-        .or(cfg.defaults.mode.as_deref())
-        .map(|s| {
-            Mode::parse(s).unwrap_or_else(|| {
-                eprintln!("warning: unknown mode '{s}', defaulting to normal");
-                Mode::Normal
-            })
-        });
-
-    let mut settings = app_state.settings.resolve(&cfg.settings);
-    // Force auto_compact on for subagent/headless mode.
-    if args.subagent || args.headless {
-        settings.auto_compact = true;
-    }
-
-    // Apply CLI sampling overrides to model_config
-    if let Some(v) = args.temperature {
-        model_config.temperature = Some(v);
-    }
-    if let Some(v) = args.top_p {
-        model_config.top_p = Some(v);
-    }
-    if let Some(v) = args.top_k {
-        model_config.top_k = Some(v);
-    }
-    if args.no_tool_calling {
-        model_config.tool_calling = Some(false);
-    }
-
-    let mut resolve_aux_request = |task: tui::config::AuxiliaryTask| {
-        auxiliary_routing.model_for(task).map(|resolved| {
-            let key = resolve_api_key(&resolved.api_key_env).unwrap_or_else(|err| {
-                startup_auth_error.get_or_insert(err);
-                String::new()
-            });
-            engine::RequestModelConfig {
-                model: resolved.model_name.clone(),
-                api: engine::ApiConfig {
-                    base: resolved.api_base.clone(),
-                    key,
-                    key_env: resolved.api_key_env.clone(),
-                    provider_type: resolved.provider_type.clone(),
-                    model_config: (&resolved.config).into(),
-                },
-            }
-        })
-    };
-    let auxiliary = engine::AuxiliaryModelConfig {
-        title: resolve_aux_request(tui::config::AuxiliaryTask::Title),
-        prediction: resolve_aux_request(tui::config::AuxiliaryTask::Prediction),
-        compaction: resolve_aux_request(tui::config::AuxiliaryTask::Compaction),
-        btw: resolve_aux_request(tui::config::AuxiliaryTask::Btw),
-    };
-
-    // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
-    let reasoning_effort = args
-        .reasoning_effort
-        .as_deref()
-        .and_then(ReasoningEffort::parse)
-        .or_else(|| {
-            cfg.defaults
-                .reasoning_effort
-                .as_deref()
-                .and_then(ReasoningEffort::parse)
-        })
-        .unwrap_or(app_state.reasoning_effort);
-
     if (args.headless || args.subagent) && startup_auth_error.is_some() {
         eprintln!(
             "error: {}",
@@ -499,27 +223,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let provider_kind = engine::ProviderKind::from_config(&provider_type);
-    let mut reasoning_cycle = args
-        .reasoning_cycle
-        .as_deref()
-        .or(cfg.defaults.reasoning_cycle.as_deref())
-        .map(ReasoningEffort::parse_list)
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| provider_kind.default_reasoning_cycle().to_vec());
-    if !reasoning_cycle.contains(&reasoning_effort) {
-        reasoning_cycle.push(reasoning_effort);
-    }
-
-    let mode_cycle = args
-        .mode_cycle
-        .as_deref()
-        .or(cfg.defaults.mode_cycle.as_deref())
-        .map(Mode::parse_list)
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| Mode::ALL.to_vec());
-
-    // Parse theme accent from config
+    // Parse theme accent from config.
     if let Some(ref accent) = cfg.theme.accent {
         let theme_value = if let Ok(v) = accent.parse::<u8>() {
             v
@@ -593,7 +297,7 @@ async fn main() {
         });
     }
 
-    // Load instructions and workspace
+    // Load instructions and workspace.
     let cwd = std::env::current_dir().unwrap_or_default();
     let instructions = if args.no_system_prompt {
         None
@@ -603,7 +307,7 @@ async fn main() {
     let system_prompt_override = if args.no_system_prompt {
         Some(String::new())
     } else {
-        args.system_prompt.map(|s| {
+        args.system_prompt.take().map(|s| {
             let path = std::path::Path::new(&s);
             if path.is_file() {
                 std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -619,7 +323,7 @@ async fn main() {
         })
     };
 
-    // Start the engine
+    // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
     let mut permissions = engine::Permissions::load();
     permissions.set_workspace(workspace);
@@ -627,7 +331,7 @@ async fn main() {
     let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();
-    let engine_injector;
+
     // Pick the interactive root agent ID once and share it across
     // engine tools + registry registration to avoid identity drift.
     let planned_agent_id = if multi_agent && !args.subagent {
@@ -688,7 +392,7 @@ async fn main() {
         context_window: cfg.settings.context_window,
         redact_secrets: settings.redact_secrets,
     });
-    engine_injector = engine_handle.injector();
+    let engine_injector = engine_handle.injector();
 
     // Fetch context window in background (only needed for interactive TUI display).
     // If the user set it in config, skip the fetch entirely.
@@ -721,7 +425,7 @@ async fn main() {
         None
     };
 
-    // Build the TUI app
+    // Build the TUI app.
     let mut app = tui::app::App::new(
         model,
         initial_api_base,
@@ -739,7 +443,7 @@ async fn main() {
         args.model.is_some(),
         args.api_base.is_some(),
         args.api_key_env.is_some(),
-        startup_auth_error,
+        startup_auth_error.take(),
     );
     app.model_config = (&model_config).into();
     if let Some(mode) = mode_override {

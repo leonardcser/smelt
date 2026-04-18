@@ -52,18 +52,11 @@ impl App {
                 }
             }
             "/vim" => {
-                let enabled = !self.input.vim_enabled();
-                self.input.set_vim_enabled(enabled);
-                self.settings.vim = enabled;
-                state::save_settings(&self.settings);
-                self.screen.mark_dirty();
+                self.update_settings(|s| s.vim = !s.vim);
                 CommandAction::Continue
             }
             "/thinking" => {
-                self.settings.show_thinking = !self.settings.show_thinking;
-                self.screen.apply_settings(&self.settings);
-                state::save_settings(&self.settings);
-                self.screen.redraw();
+                self.update_settings(|s| s.show_thinking = !s.show_thinking);
                 CommandAction::Continue
             }
             "/export" => {
@@ -180,9 +173,7 @@ impl App {
             _ if input.starts_with("/theme ") => {
                 let name = input.strip_prefix("/theme ").unwrap().trim();
                 if let Some(value) = crate::theme::preset_by_name(name) {
-                    crate::theme::set_accent(value);
-                    state::set_accent(value);
-                    self.screen.redraw();
+                    self.apply_accent(value);
                 } else {
                     self.screen.notify_error(format!("unknown theme: {}", name));
                 }
@@ -370,11 +361,40 @@ impl App {
         });
     }
 
-    pub(super) fn toggle_mode(&mut self) {
-        self.mode = self.mode.cycle_within(&self.mode_cycle);
+    /// Mutate resolved settings in place, then persist + propagate to
+    /// input/screen. Centralizes the pattern that used to be scattered across
+    /// the command handlers.
+    pub(super) fn update_settings<F: FnOnce(&mut state::ResolvedSettings)>(&mut self, f: F) {
+        let prev_show_thinking = self.settings.show_thinking;
+        f(&mut self.settings);
+        self.input.set_vim_enabled(self.settings.vim);
+        self.screen.apply_settings(&self.settings);
+        state::save_settings(&self.settings);
+        if self.settings.show_thinking != prev_show_thinking {
+            self.screen.redraw();
+        } else {
+            self.screen.mark_dirty();
+        }
+    }
+
+    /// Replace all resolved settings at once (from a settings dialog result),
+    /// persisting + propagating to input/screen.
+    pub(super) fn set_settings(&mut self, new: state::ResolvedSettings) {
+        self.update_settings(|slot| *slot = new);
+    }
+
+    /// Set the agent mode, persist it, and notify the engine. Marks the
+    /// screen dirty so the mode indicator refreshes.
+    pub(super) fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
         state::set_mode(self.mode);
         self.engine.send(UiCommand::SetMode { mode: self.mode });
         self.screen.mark_dirty();
+    }
+
+    pub(super) fn toggle_mode(&mut self) {
+        let next = self.mode.cycle_within(&self.mode_cycle);
+        self.set_mode(next);
     }
 
     pub(super) fn cycle_reasoning(&mut self) {
@@ -387,6 +407,13 @@ impl App {
         self.screen.set_reasoning_effort(effort);
         state::set_reasoning_effort(effort);
         self.engine.send(UiCommand::SetReasoningEffort { effort });
+    }
+
+    /// Apply an accent color: update the global theme, persist, and redraw.
+    pub(super) fn apply_accent(&mut self, value: u8) {
+        crate::theme::set_accent(value);
+        state::set_accent(value);
+        self.screen.redraw();
     }
 
     pub(super) fn export_to_clipboard(&mut self) {

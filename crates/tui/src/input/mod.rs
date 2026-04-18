@@ -1,16 +1,23 @@
+mod buffer;
+mod completer_bridge;
 mod history;
+mod kill_ring;
+mod menu_bridge;
 mod settings;
+mod vim_bridge;
 
 pub use history::History;
+pub use kill_ring::KillRing;
 pub use settings::{Menu, MenuAction, MenuKind, MenuResult, MenuState, SettingsState};
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::{Completer, CompleterKind};
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::render;
-use crate::vim::{self, ViMode, Vim};
+use crate::vim::{ViMode, Vim};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
+use vim_bridge::VimBridgeResult;
 
 pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
 
@@ -18,89 +25,6 @@ pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
 /// sees the placement without paying tokens for the duplicate body.
 const PASTE_STUB: &str = "[see earlier pasted content]";
 
-// ── Kill ring ─────────────────────────────────────────────────────────────────
-
-const KILL_RING_MAX: usize = 32;
-
-/// Emacs-style kill ring with yank-pop support.
-struct KillRing {
-    current: String,
-    history: Vec<String>,
-    /// Byte range of the last yank insertion, for yank-pop replacement.
-    last_yank: Option<(usize, usize)>,
-    pop_idx: usize,
-}
-
-impl KillRing {
-    fn new() -> Self {
-        Self {
-            current: String::new(),
-            history: Vec::new(),
-            last_yank: None,
-            pop_idx: 0,
-        }
-    }
-
-    /// Push a new kill, rotating the previous current into history.
-    fn kill(&mut self, text: String) {
-        if text.is_empty() {
-            return;
-        }
-        if !self.current.is_empty() {
-            self.history.insert(0, std::mem::take(&mut self.current));
-            if self.history.len() > KILL_RING_MAX {
-                self.history.pop();
-            }
-        }
-        self.current = text;
-        self.last_yank = None;
-    }
-
-    /// Yank the current kill into `buf` at `cpos`. Returns new cpos.
-    fn yank(&mut self, buf: &mut String, cpos: usize) -> Option<usize> {
-        if self.current.is_empty() {
-            return None;
-        }
-        buf.insert_str(cpos, &self.current);
-        let end = cpos + self.current.len();
-        self.last_yank = Some((cpos, end));
-        self.pop_idx = 0;
-        Some(end)
-    }
-
-    /// Replace the last yank with the next history entry. Returns new cpos.
-    fn yank_pop(&mut self, buf: &mut String) -> Option<usize> {
-        let (start, end) = self.last_yank?;
-        if self.history.is_empty() {
-            return None;
-        }
-        let text = &self.history[self.pop_idx % self.history.len()];
-        let new_end = start + text.len();
-        buf.replace_range(start..end, text);
-        self.last_yank = Some((start, new_end));
-        self.pop_idx = (self.pop_idx + 1) % self.history.len();
-        Some(new_end)
-    }
-
-    /// Clear last-yank tracking (call on any non-yank editing action).
-    fn clear_yank(&mut self) {
-        self.last_yank = None;
-    }
-
-    /// Take the current kill text (for dialog sync).
-    fn take(&mut self) -> String {
-        std::mem::take(&mut self.current)
-    }
-
-    /// Set the current kill text (for dialog sync).
-    fn set(&mut self, text: String) {
-        self.current = text;
-    }
-
-    fn current(&self) -> &str {
-        &self.current
-    }
-}
 const PASTE_LINE_THRESHOLD: usize = 12;
 
 /// Snapshot of the input buffer state (used for Ctrl+S stash).
@@ -124,15 +48,15 @@ pub struct InputState {
     pub store: AttachmentStore,
     pub completer: Option<Completer>,
     pub menu: Option<MenuState>,
-    vim: Option<Vim>,
+    pub(super) vim: Option<Vim>,
     /// Saved buffer before history search, restored on cancel.
-    history_saved_buf: Option<(String, usize)>,
+    pub(super) history_saved_buf: Option<(String, usize)>,
     pub stash: Option<InputSnapshot>,
     /// Tracks whether the current buffer content originated from a paste.
     /// Cleared on any manual character input.
-    from_paste: bool,
-    kill_ring: KillRing,
-    history: crate::undo::UndoHistory,
+    pub(super) from_paste: bool,
+    pub(super) kill_ring: KillRing,
+    pub(super) history: crate::undo::UndoHistory,
     /// Chord state: true after Ctrl+X, waiting for second key.
     pending_ctrl_x: bool,
     /// Completable arguments for commands like `/model`, `/theme`, `/color`.
@@ -214,7 +138,7 @@ impl InputState {
     }
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
-    fn clear_selection(&mut self) {
+    pub(super) fn clear_selection(&mut self) {
         self.selection_anchor = None;
     }
 
@@ -368,67 +292,6 @@ impl InputState {
         self.attachment_ids = ids;
     }
 
-    pub fn open_settings(&mut self, state: &SettingsState) {
-        self.menu = None;
-        if self.history_saved_buf.is_none() {
-            self.history_saved_buf = Some((self.buf.clone(), self.cpos));
-        }
-        let mut comp = Completer::settings(state);
-        comp.update_query(self.buf.clone());
-        self.completer = Some(comp);
-    }
-
-    pub fn open_stats(&mut self, stats: crate::metrics::StatsOutput) {
-        self.completer = None;
-        self.menu = Some(MenuState {
-            nav: Menu {
-                selected: 0,
-                len: 0,
-                select_on_enter: false,
-            },
-            kind: MenuKind::Stats {
-                left: stats.left,
-                right: stats.right,
-            },
-        });
-    }
-
-    pub fn open_cost(&mut self, lines: Vec<crate::metrics::StatsLine>) {
-        self.completer = None;
-        self.menu = Some(MenuState {
-            nav: Menu {
-                selected: 0,
-                len: 0,
-                select_on_enter: false,
-            },
-            kind: MenuKind::Cost { lines },
-        });
-    }
-
-    pub fn open_model_completer(&mut self, models: &[(String, String, String)]) {
-        self.menu = None;
-        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
-        let mut comp = Completer::models(models);
-        comp.update_query(self.buf.clone());
-        self.completer = Some(comp);
-    }
-
-    pub fn open_theme_completer(&mut self) {
-        self.menu = None;
-        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
-        let mut comp = Completer::themes(crate::theme::accent_value());
-        comp.update_query(self.buf.clone());
-        self.completer = Some(comp);
-    }
-
-    pub fn open_color_completer(&mut self) {
-        self.menu = None;
-        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
-        let mut comp = Completer::colors(crate::theme::slug_color_value());
-        comp.update_query(self.buf.clone());
-        self.completer = Some(comp);
-    }
-
     pub fn has_modal(&self) -> bool {
         self.menu.is_some()
             || self.completer.as_ref().is_some_and(|c| {
@@ -443,26 +306,6 @@ impl InputState {
             })
     }
 
-    /// Dismiss the current menu, returning the appropriate result.
-    pub fn dismiss_menu(&mut self) -> Option<MenuResult> {
-        let ms = self.menu.take()?;
-        Some(match ms.kind {
-            MenuKind::Stats { .. } => MenuResult::Stats,
-            MenuKind::Cost { .. } => MenuResult::Cost,
-        })
-    }
-
-    /// Number of rows the current menu needs (0 if no menu).
-    pub fn menu_rows(&self) -> usize {
-        match &self.menu {
-            Some(ms) => match &ms.kind {
-                MenuKind::Stats { left, right } => crate::metrics::stats_row_count(left, right),
-                MenuKind::Cost { lines } => lines.len(),
-            },
-            None => 0,
-        }
-    }
-
     /// Returns the history search query if a history completer is active.
     pub fn history_search_query(&self) -> Option<&str> {
         self.completer.as_ref().and_then(|c| {
@@ -472,15 +315,6 @@ impl InputState {
                 None
             }
         })
-    }
-
-    /// Open history fuzzy search using the completer component.
-    pub fn open_history_search(&mut self, history: &History) {
-        self.history_saved_buf = Some((self.buf.clone(), self.cpos));
-        // Keep buf as-is so the current content becomes the initial search query.
-        let mut comp = Completer::history(history.entries());
-        comp.update_query(self.buf.clone());
-        self.completer = Some(comp);
     }
 
     pub fn cursor_char(&self) -> usize {
@@ -709,7 +543,7 @@ impl InputState {
                 }
             }
             KeyAction::MoveUp => {
-                let new_pos = vim::move_up(&self.buf, self.cpos);
+                let new_pos = crate::vim::move_up(&self.buf, self.cpos);
                 if new_pos != self.cpos {
                     self.cpos = new_pos;
                     self.recompute_completer();
@@ -724,7 +558,7 @@ impl InputState {
                 }
             }
             KeyAction::MoveDown => {
-                let new_pos = vim::move_down(&self.buf, self.cpos);
+                let new_pos = crate::vim::move_down(&self.buf, self.cpos);
                 if new_pos != self.cpos {
                     self.cpos = new_pos;
                     self.recompute_completer();
@@ -980,80 +814,33 @@ impl InputState {
     }
 
     /// Process a terminal event. Returns what the caller should do next.
+    ///
+    /// Priority ladder: menu → completer → vim → paste → resize → keymap → insert.
     pub fn handle_event(&mut self, ev: Event, mut history: Option<&mut History>) -> Action {
-        // Menu intercepts all keys when open.
+        // 1. Menu intercepts all keys when open.
         if self.menu.is_some() {
             return self.handle_menu_event(&ev);
         }
 
-        // Completer intercepts navigation keys when active.
+        // 2. Completer intercepts navigation keys when active.
         if self.completer.is_some() {
             if let Some(action) = self.handle_completer_event(&ev) {
                 return action;
             }
         }
 
-        // Vim mode intercepts key events.
-        if let Some(ref mut vim) = self.vim {
-            if let Event::Key(key_ev) = ev {
-                // Sync kill ring → vim register so `p` can paste emacs-killed text.
-                if vim.register() != self.kill_ring.current() {
-                    vim.set_register(self.kill_ring.current().to_string());
-                }
-                match vim.handle_key(
-                    key_ev,
-                    &mut self.buf,
-                    &mut self.cpos,
-                    &mut self.attachment_ids,
-                ) {
-                    vim::Action::Consumed => {
-                        // Sync vim register → kill ring so `Ctrl+Y` can paste vim-yanked text.
-                        self.sync_vim_register();
-                        // Clear shift+key selection on any vim-consumed key
-                        // (e.g. Esc in insert mode, Esc in visual mode).
-                        self.clear_selection();
-                        self.recompute_completer();
-                        return Action::Redraw;
-                    }
-                    vim::Action::Submit => {
-                        if self.buf.is_empty() && self.attachment_ids.is_empty() {
-                            return Action::SubmitEmpty;
-                        }
-                        let display = self.message_display_text();
-                        let content = self.build_content();
-                        self.clear();
-                        return Action::Submit { content, display };
-                    }
-                    vim::Action::HistoryPrev => {
-                        if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buf)) {
-                            self.buf = entry.to_string();
-                            self.cpos = 0;
-                            self.sync_completer();
-                        }
-                        return Action::Redraw;
-                    }
-                    vim::Action::HistoryNext => {
-                        if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                            self.buf = entry.to_string();
-                            self.cpos = self.buf.len();
-                            self.sync_completer();
-                        }
-                        return Action::Redraw;
-                    }
-                    vim::Action::EditInEditor => {
-                        return Action::EditInEditor;
-                    }
-                    vim::Action::CenterScroll => {
-                        return Action::CenterScroll;
-                    }
-                    vim::Action::Passthrough => {
-                        // Fall through to keymap / char insert below.
-                    }
-                }
+        // 3. Vim mode intercepts key events.
+        match self.dispatch_vim(&ev, &mut history) {
+            VimBridgeResult::Handled(action) => return action,
+            VimBridgeResult::Passthrough => {
+                // Fall through to keymap / char insert below.
+            }
+            VimBridgeResult::NotAKey => {
+                // Not a key event or vim disabled — handle paste/resize/key below.
             }
         }
 
-        // Paste events (not key events — handled before keymap).
+        // 4. Paste events.
         if let Event::Paste(data) = ev {
             self.save_undo();
             if self.selection_range().is_some() {
@@ -1083,7 +870,7 @@ impl InputState {
             return Action::Redraw;
         }
 
-        // Resize events.
+        // 5. Resize events.
         if let Event::Resize(w, h) = ev {
             return Action::Resize {
                 width: w as usize,
@@ -1091,7 +878,7 @@ impl InputState {
             };
         }
 
-        // Key events — look up in the keymap.
+        // 6. Key events — look up in the keymap.
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev
@@ -1141,805 +928,6 @@ impl InputState {
 
         Action::Noop
     }
-
-    // ── Completer ────────────────────────────────────────────────────────
-
-    fn handle_menu_event(&mut self, ev: &Event) -> Action {
-        let ms = self.menu.as_mut().unwrap();
-        match ms.nav.handle_event(ev) {
-            MenuAction::Toggle(_) => Action::Redraw,
-            MenuAction::Tab => Action::Redraw,
-            MenuAction::Select(_) => Action::Redraw,
-            MenuAction::Dismiss => Action::MenuResult(self.dismiss_menu().unwrap()),
-            MenuAction::Redraw => Action::Redraw,
-            MenuAction::Noop => Action::Noop,
-        }
-    }
-
-    /// Accept the selected item from a Model/Theme/Color picker, clear the buffer,
-    /// apply side effects, and return the appropriate action.
-    fn accept_picker(&mut self, comp: Completer) -> Action {
-        self.history_saved_buf = None;
-        self.buf.clear();
-        self.cpos = 0;
-        match comp.kind {
-            CompleterKind::Model => match comp.accept_extra().map(|s| s.to_string()) {
-                Some(k) => Action::MenuResult(MenuResult::ModelSelect(k)),
-                None => Action::Redraw,
-            },
-            CompleterKind::Theme => match comp.selected_item().and_then(|i| i.ansi_color) {
-                Some(v) => {
-                    crate::theme::set_accent(v);
-                    Action::MenuResult(MenuResult::ThemeSelect(v))
-                }
-                None => Action::Redraw,
-            },
-            CompleterKind::Color => match comp.selected_item().and_then(|i| i.ansi_color) {
-                Some(v) => {
-                    crate::theme::set_slug_color(v);
-                    Action::MenuResult(MenuResult::ColorSelect(v))
-                }
-                None => Action::Redraw,
-            },
-            _ => Action::Redraw,
-        }
-    }
-
-    fn toggle_selected_setting(&self, comp: &Completer) -> Action {
-        let Some(key) = comp.accept_extra() else {
-            return Action::Redraw;
-        };
-        let s = |k: &str| Self::self_setting_bool(comp, k);
-        let mut state = SettingsState {
-            vim: s("vim"),
-            auto_compact: s("auto_compact"),
-            show_tps: s("show_tps"),
-            show_tokens: s("show_tokens"),
-            show_cost: s("show_cost"),
-            show_prediction: s("show_prediction"),
-            show_slug: s("show_slug"),
-            show_thinking: s("show_thinking"),
-            restrict_to_workspace: s("restrict_to_workspace"),
-            redact_secrets: s("redact_secrets"),
-        };
-        match key {
-            "vim" => state.vim ^= true,
-            "auto_compact" => state.auto_compact ^= true,
-            "show_tps" => state.show_tps ^= true,
-            "show_tokens" => state.show_tokens ^= true,
-            "show_cost" => state.show_cost ^= true,
-            "show_prediction" => state.show_prediction ^= true,
-            "show_slug" => state.show_slug ^= true,
-            "show_thinking" => state.show_thinking ^= true,
-            "restrict_to_workspace" => state.restrict_to_workspace ^= true,
-            "redact_secrets" => state.redact_secrets ^= true,
-            _ => return Action::Redraw,
-        }
-        Action::MenuResult(MenuResult::Settings(state))
-    }
-
-    /// Try to handle the event as a completer navigation. Returns Some if consumed.
-    fn handle_completer_event(&mut self, ev: &Event) -> Option<Action> {
-        let kind = self.completer.as_ref().map(|c| c.kind)?;
-        let is_picker = matches!(
-            kind,
-            CompleterKind::History
-                | CompleterKind::Model
-                | CompleterKind::Theme
-                | CompleterKind::Color
-                | CompleterKind::Settings
-        );
-
-        match ev {
-            Event::Key(KeyEvent {
-                code: KeyCode::Enter,
-                modifiers,
-                ..
-            }) if !modifiers.contains(KeyModifiers::SHIFT) => {
-                if kind == CompleterKind::Settings {
-                    let comp = self.completer.as_ref().unwrap();
-                    return Some(self.toggle_selected_setting(comp));
-                }
-                let comp = self.completer.take().unwrap();
-                match comp.kind {
-                    CompleterKind::History => {
-                        if let Some(label) = comp.accept() {
-                            self.buf = label.to_string();
-                            self.cpos = self.buf.len();
-                        }
-                        self.history_saved_buf = None;
-                        Some(Action::Redraw)
-                    }
-                    CompleterKind::Model | CompleterKind::Theme | CompleterKind::Color => {
-                        Some(self.accept_picker(comp))
-                    }
-                    _ => {
-                        let kind = comp.kind;
-                        self.accept_completion(&comp);
-                        if kind == CompleterKind::Command {
-                            let display = self.message_display_text();
-                            let content = self.build_content();
-                            self.clear();
-                            Some(Action::Submit { content, display })
-                        } else {
-                            Some(Action::Redraw)
-                        }
-                    }
-                }
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char(' '),
-                modifiers: KeyModifiers::NONE,
-                ..
-            }) if kind == CompleterKind::Settings => {
-                let comp = self.completer.as_ref().unwrap();
-                Some(self.toggle_selected_setting(comp))
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Esc, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                let comp = self.completer.take().unwrap();
-                // Restore original theme/color on dismiss.
-                match comp.kind {
-                    CompleterKind::Theme => {
-                        if let Some(orig) = comp.original_value {
-                            crate::theme::set_accent(orig);
-                        }
-                    }
-                    CompleterKind::Color => {
-                        if let Some(orig) = comp.original_value {
-                            crate::theme::set_slug_color(orig);
-                        }
-                    }
-                    _ => {}
-                }
-                // Restore saved buffer for all picker types.
-                if is_picker {
-                    if let Some((buf, cpos)) = self.history_saved_buf.take() {
-                        self.buf = buf;
-                        self.cpos = cpos;
-                    }
-                }
-                Some(Action::Redraw)
-            }
-            // Ctrl+R cycles forward through history matches.
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) if kind == CompleterKind::History => {
-                let comp = self.completer.as_mut().unwrap();
-                comp.move_down();
-                Some(Action::Redraw)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Up, ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('k' | 'p'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                let comp = self.completer.as_mut().unwrap();
-                if comp.results.len() <= 1 && !is_picker {
-                    return None;
-                }
-                comp.move_up();
-                self.live_preview_picker();
-                Some(Action::Redraw)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Down,
-                ..
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Char('j' | 'n'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                let comp = self.completer.as_mut().unwrap();
-                if comp.results.len() <= 1 && !is_picker {
-                    return None;
-                }
-                comp.move_down();
-                self.live_preview_picker();
-                Some(Action::Redraw)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Tab, ..
-            }) => {
-                let comp = self.completer.take().unwrap();
-                match comp.kind {
-                    CompleterKind::History => {
-                        if let Some(label) = comp.accept() {
-                            self.buf = label.to_string();
-                            self.cpos = self.buf.len();
-                        }
-                        self.history_saved_buf = None;
-                    }
-                    CompleterKind::Settings => {
-                        // Put it back — settings toggle doesn't close the picker.
-                        self.completer = Some(comp);
-                        let c = self.completer.as_ref().unwrap();
-                        return Some(self.toggle_selected_setting(c));
-                    }
-                    CompleterKind::Model | CompleterKind::Theme | CompleterKind::Color => {
-                        return Some(self.accept_picker(comp));
-                    }
-                    _ => {
-                        let was_command = comp.kind == CompleterKind::Command;
-                        self.accept_completion(&comp);
-                        if was_command {
-                            self.sync_completer();
-                        }
-                    }
-                }
-                Some(Action::Redraw)
-            }
-            _ => None,
-        }
-    }
-
-    fn self_setting_bool(comp: &Completer, key: &str) -> bool {
-        comp.all_items()
-            .iter()
-            .find(|item| item.extra.as_deref() == Some(key))
-            .is_some_and(|item| item.description.as_deref() == Some("on"))
-    }
-
-    fn accept_completion(&mut self, comp: &Completer) {
-        if let Some(label) = comp.accept() {
-            let end = self.cpos;
-            let start = comp.anchor;
-            if comp.kind == CompleterKind::CommandArg {
-                // Replace just the argument portion after the command prefix.
-                self.buf.replace_range(start..end, label);
-                self.cpos = start + label.len();
-            } else {
-                let trigger = &self.buf[start..start + 1];
-                let replacement = if trigger == "/" {
-                    format!("/{} ", label)
-                } else if label.contains(' ') {
-                    format!("@\"{}\" ", label)
-                } else {
-                    format!("@{} ", label)
-                };
-                self.buf.replace_range(start..end, &replacement);
-                self.cpos = start + replacement.len();
-            }
-        }
-    }
-
-    /// Activate completer if the buffer looks like a command or file ref.
-    fn sync_completer(&mut self) {
-        if let Some((src_idx, arg_anchor)) = self.find_command_arg_zone() {
-            let items = self.command_arg_sources[src_idx].1.clone();
-            let query = self.arg_query(arg_anchor);
-            self.set_or_update_completer(
-                CompleterKind::CommandArg,
-                || Completer::command_args(arg_anchor, &items),
-                query,
-            );
-        } else if find_slash_anchor(&self.buf, self.cpos).is_some() {
-            let query = self.buf[1..self.cpos].to_string();
-            self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
-        } else {
-            self.completer = None;
-        }
-    }
-
-    /// Live-preview theme/color while navigating in a picker completer.
-    fn live_preview_picker(&self) {
-        if let Some(comp) = &self.completer {
-            if let Some(item) = comp.results.get(comp.selected) {
-                match comp.kind {
-                    CompleterKind::Theme => {
-                        if let Some(c) = item.ansi_color {
-                            crate::theme::set_accent(c);
-                        }
-                    }
-                    CompleterKind::Color => {
-                        if let Some(c) = item.ansi_color {
-                            crate::theme::set_slug_color(c);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    /// Recompute the completer based on where the cursor currently sits.
-    /// Shows the file or command picker if the cursor is inside an @/slash zone,
-    /// hides it otherwise. Never touches a history/picker completer.
-    fn recompute_completer(&mut self) {
-        if self.completer.as_ref().is_some_and(|c| {
-            matches!(
-                c.kind,
-                CompleterKind::History
-                    | CompleterKind::Model
-                    | CompleterKind::Theme
-                    | CompleterKind::Color
-                    | CompleterKind::Settings
-            )
-        }) {
-            let query = self.buf.clone();
-            self.completer.as_mut().unwrap().update_query(query);
-            self.live_preview_picker();
-            return;
-        }
-        if let Some(at_pos) = cursor_in_at_zone(&self.buf, self.cpos) {
-            let query = if self.cpos > at_pos + 1 {
-                self.buf[at_pos + 1..self.cpos].to_string()
-            } else {
-                String::new()
-            };
-            if self
-                .completer
-                .as_ref()
-                .is_some_and(|c| c.kind == CompleterKind::File && c.anchor == at_pos)
-            {
-                self.completer.as_mut().unwrap().update_query(query);
-            } else {
-                let mut comp = Completer::files(at_pos);
-                comp.update_query(query);
-                self.completer = Some(comp);
-            }
-        } else if let Some((src_idx, arg_anchor)) = self.find_command_arg_zone() {
-            let items = self.command_arg_sources[src_idx].1.clone();
-            let query = self.arg_query(arg_anchor);
-            self.set_or_update_completer(
-                CompleterKind::CommandArg,
-                || Completer::command_args(arg_anchor, &items),
-                query,
-            );
-        } else if find_slash_anchor(&self.buf, self.cpos).is_some()
-            || (self.cpos == 0 && self.buf.starts_with('/'))
-        {
-            let end = self.cpos.max(1);
-            let query = self.buf[1..end].to_string();
-            self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
-        } else {
-            self.completer = None;
-        }
-    }
-
-    /// Reuse the current completer if it matches `kind`, otherwise create a new
-    /// one via `make`. Either way, update the query.
-    fn set_or_update_completer(
-        &mut self,
-        kind: CompleterKind,
-        make: impl FnOnce() -> Completer,
-        query: String,
-    ) {
-        if self.completer.as_ref().is_some_and(|c| c.kind == kind) {
-            self.completer.as_mut().unwrap().update_query(query);
-        } else {
-            let mut comp = make();
-            comp.update_query(query);
-            self.completer = Some(comp);
-        }
-    }
-
-    fn arg_query(&self, anchor: usize) -> String {
-        if self.cpos > anchor {
-            self.buf[anchor..self.cpos].to_string()
-        } else {
-            String::new()
-        }
-    }
-
-    /// Check if the cursor is inside a command argument zone (e.g. `/model foo`).
-    /// Returns `(source_index, arg_anchor)` where source_index indexes into
-    /// `command_arg_sources` and arg_anchor is the byte offset after the space.
-    fn find_command_arg_zone(&self) -> Option<(usize, usize)> {
-        for (i, (cmd, _)) in self.command_arg_sources.iter().enumerate() {
-            let anchor = cmd.len() + 1; // "/cmd" + space
-            if self.buf.len() >= anchor
-                && self.buf.starts_with(cmd.as_str())
-                && self.buf.as_bytes()[cmd.len()] == b' '
-                && self.cpos >= anchor
-            {
-                return Some((i, anchor));
-            }
-        }
-        None
-    }
-
-    /// Move cursor to the beginning of the given line number (0-indexed).
-    fn move_to_line(&mut self, target_line: usize) {
-        let mut line = 0;
-        let mut pos = 0;
-        for (i, c) in self.buf.char_indices() {
-            if line == target_line {
-                pos = i;
-                break;
-            }
-            if c == '\n' {
-                line += 1;
-                if line == target_line {
-                    pos = i + 1;
-                    break;
-                }
-            }
-        }
-        if line < target_line {
-            // target beyond end, go to last line start
-            pos = self.buf.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        }
-        self.cpos = pos;
-        self.recompute_completer();
-    }
-
-    // ── Editing primitives ───────────────────────────────────────────────
-
-    /// Kill text into the kill ring and copy to the system clipboard.
-    fn kill_and_copy(&mut self, text: String) {
-        if !text.is_empty() {
-            let _ = crate::app::copy_to_clipboard(&text);
-        }
-        self.kill_ring.kill(text);
-    }
-
-    /// Sync vim register → kill ring after vim modifies it.
-    /// Also copies to the system clipboard.
-    fn sync_vim_register(&mut self) {
-        if let Some(ref vim) = self.vim {
-            if vim.register() != self.kill_ring.current() {
-                let text = vim.register().to_string();
-                let _ = crate::app::copy_to_clipboard(&text);
-                self.kill_ring.set(text);
-            }
-        }
-    }
-
-    /// Save undo state before an editing operation.
-    /// When vim is in insert mode, skip — the entire insert session is
-    /// already covered by the undo entry saved on insert entry.
-    pub fn save_undo(&mut self) {
-        if let Some(ref mut vim) = self.vim {
-            if vim.mode() == ViMode::Insert {
-                return; // insert session groups all edits into one undo step
-            }
-            vim.save_undo(&self.buf, self.cpos, &self.attachment_ids);
-        } else {
-            self.history.save(crate::undo::UndoEntry::snapshot(
-                &self.buf,
-                self.cpos,
-                &self.attachment_ids,
-            ));
-        }
-    }
-
-    fn insert_char(&mut self, c: char) {
-        self.from_paste = false;
-        if self.selection_range().is_some() {
-            self.save_undo();
-            self.delete_selection();
-        }
-        self.buf.insert(self.cpos, c);
-        self.cpos += c.len_utf8();
-        self.recompute_completer();
-    }
-
-    fn backspace(&mut self) {
-        if self.selection_range().is_some() {
-            self.save_undo();
-            self.delete_selection();
-            self.recompute_completer();
-            return;
-        }
-        if self.cpos == 0 {
-            return;
-        }
-        // If deleting the closing `"` of a `"@path"` token, remove the whole token.
-        if let Some(start) = self.quoted_at_ref_start() {
-            // Clear from_paste if deleting from the beginning of the buffer
-            if start == 0 {
-                self.from_paste = false;
-            }
-            self.buf.drain(start..self.cpos);
-            self.cpos = start;
-            self.recompute_completer();
-            return;
-        }
-        let prev = self.buf[..self.cpos]
-            .char_indices()
-            .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        // Clear from_paste if modifying the beginning of the buffer
-        if prev == 0 {
-            self.from_paste = false;
-        }
-        self.maybe_remove_attachment(prev);
-        self.buf.drain(prev..self.cpos);
-        self.cpos = prev;
-        self.recompute_completer();
-    }
-
-    /// If the cursor is right after the closing `"` of a `"@path"` token,
-    /// return the byte offset of the opening `"`.
-    fn quoted_at_ref_start(&self) -> Option<usize> {
-        let before = &self.buf[..self.cpos];
-        if !before.ends_with('"') {
-            return None;
-        }
-        let inner = &before[..before.len() - 1];
-        let at_pos = inner.rfind("@\"")?;
-        if at_pos > 0 && !self.buf[..at_pos].ends_with(char::is_whitespace) {
-            return None;
-        }
-        // Reject if the content between @" and closing " contains another quote.
-        if inner[at_pos + 2..].contains('"') {
-            return None;
-        }
-        Some(at_pos)
-    }
-
-    fn delete_word_backward(&mut self) {
-        if self.cpos == 0 {
-            return;
-        }
-        let target = crate::text_utils::word_backward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
-        );
-        if target == 0 {
-            self.from_paste = false;
-        }
-        self.remove_attachments_in_range(target, self.cpos);
-        self.buf.drain(target..self.cpos);
-        self.cpos = target;
-        self.recompute_completer();
-    }
-
-    fn delete_char_forward(&mut self) {
-        if self.cpos >= self.buf.len() {
-            return;
-        }
-        self.maybe_remove_attachment(self.cpos);
-        let next = self.buf[self.cpos..]
-            .char_indices()
-            .nth(1)
-            .map(|(i, _)| self.cpos + i)
-            .unwrap_or(self.buf.len());
-        self.buf.drain(self.cpos..next);
-        self.recompute_completer();
-    }
-
-    fn delete_word_forward(&mut self) {
-        if self.cpos >= self.buf.len() {
-            return;
-        }
-        let target = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
-        );
-        self.remove_attachments_in_range(self.cpos, target);
-        self.buf.drain(self.cpos..target);
-        self.recompute_completer();
-    }
-
-    fn kill_to_end_of_line(&mut self) {
-        let end = self.buf[self.cpos..]
-            .find('\n')
-            .map(|i| self.cpos + i)
-            .unwrap_or(self.buf.len());
-        let killed = self.buf[self.cpos..end].to_string();
-        self.remove_attachments_in_range(self.cpos, end);
-        self.buf.drain(self.cpos..end);
-        self.kill_and_copy(killed);
-        self.recompute_completer();
-    }
-
-    fn kill_to_start_of_line(&mut self) {
-        let start = self.buf[..self.cpos]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let killed = self.buf[start..self.cpos].to_string();
-        self.remove_attachments_in_range(start, self.cpos);
-        self.buf.drain(start..self.cpos);
-        self.cpos = start;
-        self.kill_and_copy(killed);
-        self.recompute_completer();
-    }
-
-    fn delete_to_start_of_line(&mut self) {
-        let start = self.buf[..self.cpos]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        self.remove_attachments_in_range(start, self.cpos);
-        self.buf.drain(start..self.cpos);
-        self.cpos = start;
-        self.recompute_completer();
-    }
-
-    fn uppercase_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
-        );
-        if end == self.cpos {
-            return;
-        }
-        let upper: String = self.buf[self.cpos..end].to_uppercase();
-        self.buf.replace_range(self.cpos..end, &upper);
-        self.cpos += upper.len();
-        self.recompute_completer();
-    }
-
-    fn lowercase_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
-        );
-        if end == self.cpos {
-            return;
-        }
-        let lower: String = self.buf[self.cpos..end].to_lowercase();
-        self.buf.replace_range(self.cpos..end, &lower);
-        self.cpos += lower.len();
-        self.recompute_completer();
-    }
-
-    fn capitalize_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
-        );
-        if end == self.cpos {
-            return;
-        }
-        let word = &self.buf[self.cpos..end];
-        let mut cap = String::with_capacity(word.len());
-        let mut first = true;
-        for c in word.chars() {
-            if first && c.is_alphabetic() {
-                cap.extend(c.to_uppercase());
-                first = false;
-            } else {
-                cap.push(c);
-            }
-        }
-        self.buf.replace_range(self.cpos..end, &cap);
-        self.cpos += cap.len();
-        self.recompute_completer();
-    }
-
-    fn undo(&mut self) {
-        if let Some(ref mut vim) = self.vim {
-            vim.undo(&mut self.buf, &mut self.cpos, &mut self.attachment_ids);
-        } else {
-            let current =
-                crate::undo::UndoEntry::snapshot(&self.buf, self.cpos, &self.attachment_ids);
-            if let Some(entry) = self.history.undo(current) {
-                self.buf = entry.buf;
-                self.cpos = entry.cpos;
-                self.attachment_ids = entry.attachments;
-            }
-        }
-        self.recompute_completer();
-    }
-
-    fn move_word_forward(&mut self) -> bool {
-        if self.cpos >= self.buf.len() {
-            return false;
-        }
-        let target = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
-        );
-        if target != self.cpos {
-            self.cpos = target;
-            self.recompute_completer();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn move_word_backward(&mut self) -> bool {
-        if self.cpos == 0 {
-            return false;
-        }
-        let target = crate::text_utils::word_backward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
-        );
-        if target != self.cpos {
-            self.cpos = target;
-            self.recompute_completer();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn insert_paste(&mut self, data: String) {
-        // Normalize line endings: terminals (especially macOS) send \r for
-        // newlines in bracketed paste mode.  Convert \r\n and lone \r to \n
-        // so that line counting and display work correctly.
-        let data = data.replace("\r\n", "\n").replace('\r', "\n");
-
-        // Don't set from_paste for empty pastes
-        if data.is_empty() {
-            return;
-        }
-
-        let lines = data.lines().count();
-        let char_threshold = PASTE_LINE_THRESHOLD * (crate::render::term_width().saturating_sub(1));
-        // Mark as from_paste if inserting at the beginning of the current line.
-        // This prevents pasted content starting with '!' from being treated as a shell escape.
-        let line_start = self.buf[..self.cpos]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        if self.cpos == line_start {
-            self.from_paste = true;
-        }
-        if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {
-            let id = self.store.insert_paste(data);
-            self.insert_attachment_id(id);
-        } else {
-            self.buf.insert_str(self.cpos, &data);
-            self.cpos += data.len();
-        }
-    }
-
-    fn insert_attachment_id(&mut self, id: AttachmentId) {
-        let idx = self.buf[..self.cpos]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        self.attachment_ids.insert(idx, id);
-        self.buf.insert(self.cpos, ATTACHMENT_MARKER);
-        self.cpos += ATTACHMENT_MARKER.len_utf8();
-    }
-
-    /// Remove attachment IDs for any markers in `buf[start..end]`.
-    fn remove_attachments_in_range(&mut self, start: usize, end: usize) {
-        let before = self.buf[..start]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        let count = self.buf[start..end]
-            .chars()
-            .filter(|&c| c == ATTACHMENT_MARKER)
-            .count();
-        for i in (0..count).rev() {
-            let idx = before + i;
-            if idx < self.attachment_ids.len() {
-                self.attachment_ids.remove(idx);
-            }
-        }
-    }
-
-    fn maybe_remove_attachment(&mut self, byte_pos: usize) {
-        if self.buf[byte_pos..].starts_with(ATTACHMENT_MARKER) {
-            let idx = self.buf[..byte_pos]
-                .chars()
-                .filter(|&c| c == ATTACHMENT_MARKER)
-                .count();
-            if idx < self.attachment_ids.len() {
-                self.attachment_ids.remove(idx);
-            }
-        }
-    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1962,7 +950,7 @@ fn current_line(buf: &str, cpos: usize) -> usize {
 }
 
 /// Like find_at_anchor but also matches when the cursor is ON the '@' itself.
-fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
+pub(super) fn cursor_in_at_zone(buf: &str, cpos: usize) -> Option<usize> {
     if !buf.is_char_boundary(cpos) {
         return None;
     }
@@ -2041,7 +1029,7 @@ fn clipboard_image_to_data_url() -> Option<String> {
     Some(format!("data:image/png;base64,{b64}"))
 }
 
-fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
+pub(super) fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
     // Only valid when `/` is at position 0 and no whitespace in the query.
     if !buf.starts_with('/') || !buf.is_char_boundary(cpos) {
         return None;

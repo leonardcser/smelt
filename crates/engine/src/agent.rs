@@ -477,6 +477,32 @@ fn build_provider(
 
 // ── Turn ────────────────────────────────────────────────────────────────────
 
+/// A tool call awaiting execution. Borrows the `ToolCall` from the parent
+/// assistant message and the tool impl from the registry; lifetime `'a`
+/// ties both to the turn iteration that built the plan.
+struct ToolSlot<'a> {
+    tc: &'a protocol::ToolCall,
+    args: HashMap<String, Value>,
+    tool: &'a dyn tools::Tool,
+    confirm_msg: Option<String>,
+    start: Instant,
+}
+
+/// Tool calls from one LLM response, sorted by how they execute.
+///
+/// Tools whose base decision is `Allow` go into `ready` (run concurrently)
+/// or `sequential` (one at a time, currently only `ask_user_question`).
+/// Tools whose decision is `Ask` go into `pending_perms`; they sit in
+/// `slots` waiting for a `PermissionDecision` to either launch or cancel.
+/// `Deny` decisions don't land here at all — they produce a synthetic
+/// tool-result message inside [`Turn::classify_tools`] and are dropped.
+struct ToolExecutionPlan<'a> {
+    slots: Vec<ToolSlot<'a>>,
+    ready: Vec<usize>,
+    pending_perms: Vec<(usize, u64)>,
+    sequential: Vec<usize>,
+}
+
 /// Encapsulates the state of a single agent turn.
 struct Turn<'a> {
     provider: Provider,
@@ -955,7 +981,10 @@ impl<'a> Turn<'a> {
                 return;
             }
 
-            // Has tool calls — execute them
+            // Has tool calls — commit the assistant message (with the
+            // tool_calls attached) then classify → execute → collect.
+            // Deferred commands are replayed after results land in history
+            // so steered user messages appear in the right position.
             empty_retries = 0;
             self.messages.push(Message::assistant(
                 content,
@@ -964,341 +993,351 @@ impl<'a> Turn<'a> {
             ));
             self.emit_messages_snapshot();
 
-            // Phase 1: Classify tools (sync permission checks).
-            // Allow/Deny are instant; Ask tools are deferred so that
-            // already-approved tools can start executing immediately.
-            struct ToolSlot<'b> {
-                tc: &'b protocol::ToolCall,
-                args: HashMap<String, Value>,
-                tool: &'b dyn tools::Tool,
-                confirm_msg: Option<String>,
-                start: Instant,
+            let mut plan = self.classify_tools(&tool_calls);
+            let mut completed: Vec<Option<ToolResult>> =
+                (0..plan.slots.len()).map(|_| None).collect();
+            let (cancelled, deferred) = self.execute_concurrent(&mut plan, &mut completed).await;
+            if !cancelled {
+                self.run_sequential(&plan, &mut completed).await;
+            } else {
+                self.mark_unfinished_cancelled(&plan, &completed);
+            }
+            self.collect_results(&plan, completed);
+            for cmd in deferred {
+                self.handle_turn_cmd(cmd);
+            }
+        }
+    }
+
+    /// Phase 1: turn LLM-emitted tool calls into a plan of slots with their
+    /// permission decisions resolved. Allow/Deny are terminal here (Deny
+    /// emits a synthetic tool result); Ask lands in `pending_perms` and
+    /// waits for a `PermissionDecision` during [`execute_concurrent`].
+    fn classify_tools<'b>(&mut self, tool_calls: &'b [protocol::ToolCall]) -> ToolExecutionPlan<'b>
+    where
+        'a: 'b,
+    {
+        let mut plan = ToolExecutionPlan {
+            slots: Vec::new(),
+            ready: Vec::new(),
+            pending_perms: Vec::new(),
+            sequential: Vec::new(),
+        };
+
+        for tc in tool_calls {
+            self.drain_commands();
+            if self.cancel.is_cancelled() {
+                break;
             }
 
-            let mut slots: Vec<ToolSlot<'_>> = Vec::new();
-            let mut ready_indices: Vec<usize> = Vec::new();
-            // (slot index, request_id) for tools that need user permission
-            let mut pending_perms: Vec<(usize, u64)> = Vec::new();
-            let mut sequential_indices: Vec<usize> = Vec::new();
+            let args: HashMap<String, Value> =
+                serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
-            for tc in &tool_calls {
-                self.drain_commands();
-                if self.cancel.is_cancelled() {
-                    break;
+            let summary = tools::tool_arg_summary(&tc.function.name, &args);
+            let tool_start = Instant::now();
+            self.emit(EngineEvent::ToolStarted {
+                call_id: tc.id.clone(),
+                tool_name: tc.function.name.clone(),
+                args: args.clone(),
+                summary,
+            });
+
+            let tool = match self.registry.get(&tc.function.name) {
+                Some(t) => t,
+                None => {
+                    self.push_tool_result(
+                        &tc.id,
+                        &format!("unknown tool: {}", tc.function.name),
+                        true,
+                        Some(tool_start),
+                    );
+                    continue;
                 }
+            };
 
-                let args: HashMap<String, Value> =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-
-                let summary = tools::tool_arg_summary(&tc.function.name, &args);
-                let tool_start = Instant::now();
-                self.emit(EngineEvent::ToolStarted {
-                    call_id: tc.id.clone(),
-                    tool_name: tc.function.name.clone(),
-                    args: args.clone(),
-                    summary,
-                });
-
-                let tool = match self.registry.get(&tc.function.name) {
-                    Some(t) => t,
-                    None => {
-                        self.push_tool_result(
-                            &tc.id,
-                            &format!("unknown tool: {}", tc.function.name),
-                            true,
-                            Some(tool_start),
-                        );
-                        continue;
-                    }
-                };
-
-                // Plan-mode auto-allow for plan files.
-                let plan_auto = self.mode == Mode::Plan
-                    && tc.function.name == "edit_file"
-                    && args
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|p| crate::plan::is_plan_file(&self.session_dir, p));
-
-                let mut decision = if plan_auto {
-                    Decision::Allow
-                } else {
+            let mut decision = tool
+                .decide_override(&args, self.mode, &self.session_dir)
+                .unwrap_or_else(|| {
                     self.permissions
                         .decide(self.mode, &tc.function.name, &args, tool.is_mcp())
-                };
+                });
 
-                // Check runtime approvals (session + workspace) for Ask decisions.
-                if decision == Decision::Ask {
-                    let rt = self.runtime_approvals.read().unwrap();
+            // Runtime approvals (session + workspace) can turn Ask → Allow.
+            if decision == Decision::Ask {
+                let rt = self.runtime_approvals.read().unwrap();
+                let desc = tool
+                    .needs_confirm(&args)
+                    .unwrap_or_else(|| tc.function.name.clone());
+                if rt.is_auto_approved(self.permissions, self.mode, &tc.function.name, &args, &desc)
+                {
+                    decision = Decision::Allow;
+                }
+            }
+
+            // Pre-flight validation: catch errors before prompting (e.g. stale file hash).
+            if let Some(err) = tool.preflight(&args) {
+                self.push_tool_result(&tc.id, &err, true, None);
+                continue;
+            }
+
+            let idx = plan.slots.len();
+            match decision {
+                Decision::Allow => {
+                    plan.slots.push(ToolSlot {
+                        tc,
+                        args,
+                        tool,
+                        confirm_msg: None,
+                        start: tool_start,
+                    });
+                    if tc.function.name == "ask_user_question" {
+                        plan.sequential.push(idx);
+                    } else {
+                        plan.ready.push(idx);
+                    }
+                }
+                Decision::Deny => {
+                    self.push_tool_result(
+                        &tc.id,
+                        "The user's permission settings blocked this tool call. \
+                         Try a different approach or ask the user for guidance.",
+                        false,
+                        None,
+                    );
+                }
+                Decision::Ask => {
                     let desc = tool
                         .needs_confirm(&args)
                         .unwrap_or_else(|| tc.function.name.clone());
-                    if rt.is_auto_approved(
-                        self.permissions,
-                        self.mode,
-                        &tc.function.name,
-                        &args,
-                        &desc,
-                    ) {
-                        decision = Decision::Allow;
-                    }
+                    let approval_patterns = tool.approval_patterns(&args);
+                    let cmd_summary = if tc.function.name == "bash" {
+                        let d = tools::str_arg(&args, "description");
+                        (!d.is_empty()).then_some(d)
+                    } else {
+                        None
+                    };
+                    let request_id = next_request_id();
+                    self.emit(EngineEvent::RequestPermission {
+                        request_id,
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function.name.clone(),
+                        args: args.clone(),
+                        confirm_message: desc,
+                        approval_patterns,
+                        summary: cmd_summary,
+                    });
+                    plan.slots.push(ToolSlot {
+                        tc,
+                        args,
+                        tool,
+                        confirm_msg: None,
+                        start: tool_start,
+                    });
+                    plan.pending_perms.push((idx, request_id));
                 }
+            }
+        }
 
-                // Pre-flight validation: catch errors before showing the
-                // permission dialog (e.g. stale file hash).
-                if let Some(err) = tool.preflight(&args) {
-                    self.push_tool_result(&tc.id, &err, true, None);
-                    continue;
+        plan
+    }
+
+    /// Phase 2: run ready tools concurrently while draining the command
+    /// channel. `PermissionDecision` for any pending tool launches it
+    /// mid-flight (approved) or records a denial (rejected). Mid-turn
+    /// steering / mode / model commands are collected into `deferred` and
+    /// replayed after results are committed to history.
+    ///
+    /// Returns `(cancelled, deferred_commands)`.
+    async fn execute_concurrent<'b>(
+        &mut self,
+        plan: &mut ToolExecutionPlan<'b>,
+        completed: &mut [Option<ToolResult>],
+    ) -> (bool, Vec<UiCommand>) {
+        use futures_util::stream::StreamExt;
+
+        type TaggedFut<'x> =
+            std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ToolResult)> + Send + 'x>>;
+
+        let contexts: Vec<_> = plan
+            .slots
+            .iter()
+            .map(|s| ToolContext {
+                event_tx: self.event_tx,
+                call_id: &s.tc.id,
+                cancel: &self.cancel,
+                processes: self.processes,
+                proc_done_tx: self.proc_done_tx,
+                provider: &self.provider,
+                model: &self.model,
+                session_id: &self.session_id,
+                session_dir: &self.session_dir,
+                file_locks: self.file_locks,
+                engine_config: self.config,
+            })
+            .collect();
+
+        let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
+            futures_util::stream::FuturesUnordered::new();
+
+        for &i in &plan.ready {
+            let fut = plan.slots[i]
+                .tool
+                .execute(plan.slots[i].args.clone(), &contexts[i]);
+            futs.push(Box::pin(async move { (i, fut.await) }));
+        }
+
+        let mut outstanding = plan.ready.len() + plan.pending_perms.len();
+        let cancel = &self.cancel;
+        let cmd_rx = &mut self.cmd_rx;
+        let mut deferred: Vec<UiCommand> = Vec::new();
+
+        let cancelled = loop {
+            if outstanding == 0 {
+                break false;
+            }
+            tokio::select! {
+                Some((idx, result)) = futs.next(), if !futs.is_empty() => {
+                    completed[idx] = Some(result);
+                    outstanding -= 1;
                 }
-
-                let idx = slots.len();
-                match decision {
-                    Decision::Allow => {
-                        slots.push(ToolSlot {
-                            tc,
-                            args,
-                            tool,
-                            confirm_msg: None,
-                            start: tool_start,
-                        });
-                        if tc.function.name == "ask_user_question" {
-                            sequential_indices.push(idx);
-                        } else {
-                            ready_indices.push(idx);
-                        }
-                    }
-                    Decision::Deny => {
-                        self.push_tool_result(
-                            &tc.id,
-                            "The user's permission settings blocked this tool call. \
-                             Try a different approach or ask the user for guidance.",
-                            false,
-                            None,
-                        );
-                    }
-                    Decision::Ask => {
-                        let desc = tool
-                            .needs_confirm(&args)
-                            .unwrap_or_else(|| tc.function.name.clone());
-                        let approval_patterns = tool.approval_patterns(&args);
-                        let cmd_summary = if tc.function.name == "bash" {
-                            let d = tools::str_arg(&args, "description");
-                            if d.is_empty() {
-                                None
+                _ = cancel.cancelled() => break true,
+                Some(cmd) = cmd_rx.recv() => match cmd {
+                    UiCommand::Cancel => cancel.cancel(),
+                    UiCommand::PermissionDecision { request_id, approved, message } => {
+                        if let Some(pos) = plan
+                            .pending_perms
+                            .iter()
+                            .position(|(_, rid)| *rid == request_id)
+                        {
+                            let (idx, _) = plan.pending_perms.swap_remove(pos);
+                            if approved {
+                                plan.slots[idx].confirm_msg = message;
+                                let fut = plan.slots[idx]
+                                    .tool
+                                    .execute(plan.slots[idx].args.clone(), &contexts[idx]);
+                                futs.push(Box::pin(async move { (idx, fut.await) }));
                             } else {
-                                Some(d)
-                            }
-                        } else {
-                            None
-                        };
-                        let request_id = next_request_id();
-                        self.emit(EngineEvent::RequestPermission {
-                            request_id,
-                            call_id: tc.id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            args: args.clone(),
-                            confirm_message: desc,
-                            approval_patterns,
-                            summary: cmd_summary,
-                        });
-                        slots.push(ToolSlot {
-                            tc,
-                            args,
-                            tool,
-                            confirm_msg: None,
-                            start: tool_start,
-                        });
-                        pending_perms.push((idx, request_id));
-                    }
-                }
-            }
-
-            // Phase 2: Execute approved tools concurrently while resolving
-            // pending permissions. Tools that get approved mid-flight are
-            // launched immediately alongside already-running tools.
-            //
-            // contexts/futs are scoped so they drop before we need &mut self
-            // again (for handle_turn_cmd, push_tool_result, ask_user).
-            let mut completed: Vec<Option<ToolResult>> = (0..slots.len()).map(|_| None).collect();
-
-            let (cancelled, deferred_tool_cmds) = {
-                use futures_util::stream::StreamExt;
-
-                type TaggedFut<'x> = std::pin::Pin<
-                    Box<dyn std::future::Future<Output = (usize, ToolResult)> + Send + 'x>,
-                >;
-
-                let contexts: Vec<_> = slots
-                    .iter()
-                    .map(|s| ToolContext {
-                        event_tx: self.event_tx,
-                        call_id: &s.tc.id,
-                        cancel: &self.cancel,
-                        processes: self.processes,
-                        proc_done_tx: self.proc_done_tx,
-                        provider: &self.provider,
-                        model: &self.model,
-                        session_id: &self.session_id,
-                        session_dir: &self.session_dir,
-                        file_locks: self.file_locks,
-                        engine_config: self.config,
-                    })
-                    .collect();
-
-                let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
-                    futures_util::stream::FuturesUnordered::new();
-
-                for &i in &ready_indices {
-                    let fut = slots[i].tool.execute(slots[i].args.clone(), &contexts[i]);
-                    futs.push(Box::pin(async move { (i, fut.await) }));
-                }
-
-                let mut outstanding = ready_indices.len() + pending_perms.len();
-                let cancel = &self.cancel;
-                let cmd_rx = &mut self.cmd_rx;
-                let mut deferred: Vec<UiCommand> = Vec::new();
-
-                let cancelled = loop {
-                    if outstanding == 0 {
-                        break false;
-                    }
-                    tokio::select! {
-                        Some((idx, result)) = futs.next(), if !futs.is_empty() => {
-                            completed[idx] = Some(result);
-                            outstanding -= 1;
-                        }
-                        _ = cancel.cancelled() => break true,
-                        Some(cmd) = cmd_rx.recv() => match cmd {
-                            UiCommand::Cancel => cancel.cancel(),
-                            UiCommand::PermissionDecision {
-                                request_id,
-                                approved,
-                                message,
-                            } => {
-                                if let Some(pos) = pending_perms
-                                    .iter()
-                                    .position(|(_, rid)| *rid == request_id)
-                                {
-                                    let (idx, _) = pending_perms.swap_remove(pos);
-                                    if approved {
-                                        slots[idx].confirm_msg = message;
-                                        let fut = slots[idx]
-                                            .tool
-                                            .execute(slots[idx].args.clone(), &contexts[idx]);
-                                        futs.push(Box::pin(async move { (idx, fut.await) }));
-                                    } else {
-                                        let denial = if let Some(ref msg) = message {
-                                            format!(
-                                                "The user denied this tool call with message: {msg}"
-                                            )
-                                        } else {
-                                            "The user denied this tool call. Try a different \
+                                let denial = match message {
+                                    Some(msg) => format!(
+                                        "The user denied this tool call with message: {msg}"
+                                    ),
+                                    None => "The user denied this tool call. Try a different \
                                              approach or ask the user for guidance."
-                                                .to_string()
-                                        };
-                                        completed[idx] = Some(ToolResult {
-                                            content: denial,
-                                            is_error: false,
-                                            metadata: None,
-                                        });
-                                        outstanding -= 1;
-                                    }
-                                }
+                                        .to_string(),
+                                };
+                                completed[idx] = Some(ToolResult {
+                                    content: denial,
+                                    is_error: false,
+                                    metadata: None,
+                                });
+                                outstanding -= 1;
                             }
-                            UiCommand::AgentMessage { .. }
-                            | UiCommand::Steer { .. }
-                            | UiCommand::Unsteer { .. }
-                            | UiCommand::SetMode { .. }
-                            | UiCommand::SetReasoningEffort { .. }
-                            | UiCommand::SetModel { .. } => deferred.push(cmd),
-                            _ => {}
-                        },
+                        }
                     }
-                };
+                    UiCommand::AgentMessage { .. }
+                    | UiCommand::Steer { .. }
+                    | UiCommand::Unsteer { .. }
+                    | UiCommand::SetMode { .. }
+                    | UiCommand::SetReasoningEffort { .. }
+                    | UiCommand::SetModel { .. } => deferred.push(cmd),
+                    _ => {}
+                },
+            }
+        };
 
-                (cancelled, deferred)
+        (cancelled, deferred)
+    }
+
+    /// When the turn was cancelled mid-flight, emit a cancelled-result
+    /// message for every slot that never completed. Permissions that were
+    /// still pending (no approval ever arrived) also land here.
+    fn mark_unfinished_cancelled(
+        &mut self,
+        plan: &ToolExecutionPlan<'_>,
+        completed: &[Option<ToolResult>],
+    ) {
+        let starts: Vec<_> = plan
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| completed[*i].is_none())
+            .map(|(_, slot)| (slot.tc.id.clone(), slot.start))
+            .collect();
+        for (call_id, start) in starts {
+            self.push_tool_result(&call_id, "cancelled", true, Some(start));
+        }
+    }
+
+    /// Phase 2b: sequential tools (currently only `ask_user_question`).
+    async fn run_sequential(
+        &mut self,
+        plan: &ToolExecutionPlan<'_>,
+        completed: &mut [Option<ToolResult>],
+    ) {
+        for &i in &plan.sequential {
+            let result = self.ask_user(&plan.slots[i].args).await;
+            completed[i] = Some(result);
+        }
+    }
+
+    /// Phase 3: commit each tool's result to history, emit `ToolFinished`,
+    /// and record elapsed times. Duplicate detection replaces identical
+    /// prior results with a dedup stub to keep context small.
+    fn collect_results(
+        &mut self,
+        plan: &ToolExecutionPlan<'_>,
+        mut completed: Vec<Option<ToolResult>>,
+    ) {
+        for (i, slot) in plan.slots.iter().enumerate() {
+            let Some(result) = completed[i].take() else {
+                continue;
             };
-            // contexts and futs are now dropped — safe to use &mut self.
+            let ToolResult {
+                content,
+                is_error,
+                metadata,
+            } = result;
 
-            if cancelled {
-                for (i, slot) in slots.iter().enumerate() {
-                    if completed[i].is_none() {
-                        self.push_tool_result(&slot.tc.id, "cancelled", true, Some(slot.start));
-                    }
+            if log::Level::Debug.enabled() {
+                let mut preview = content[..content.floor_char_boundary(500)].to_string();
+                if self.config.redact_secrets {
+                    preview = crate::redact::redact(&preview);
                 }
+                log::entry(
+                    log::Level::Debug,
+                    "tool_result",
+                    &serde_json::json!({
+                        "tool": slot.tc.function.name,
+                        "id": slot.tc.id,
+                        "is_error": is_error,
+                        "content_len": content.len(),
+                        "content_preview": preview,
+                    }),
+                );
             }
 
-            // Phase 2b: Execute sequential tools (ask_user_question).
-            if !cancelled {
-                for &i in &sequential_indices {
-                    let result = self.ask_user(&slots[i].args).await;
-                    completed[i] = Some(result);
-                }
+            let elapsed_ms = slot.start.elapsed().as_millis() as u64;
+            self.tool_elapsed.insert(slot.tc.id.clone(), elapsed_ms);
+            let mut tool_content = content.clone();
+            if let Some(ref msg) = slot.confirm_msg {
+                tool_content.push_str(&format!("\n\nUser message: {msg}"));
             }
-
-            // Phase 3: Collect results.
-            for (i, slot) in slots.iter().enumerate() {
-                let result = match completed[i].take() {
-                    Some(r) => r,
-                    None => continue,
-                };
-                let ToolResult {
-                    content,
-                    is_error,
-                    metadata,
-                } = result;
-
-                if log::Level::Debug.enabled() {
-                    let mut preview = content[..content.floor_char_boundary(500)].to_string();
-                    if self.config.redact_secrets {
-                        preview = crate::redact::redact(&preview);
-                    }
-                    log::entry(
-                        log::Level::Debug,
-                        "tool_result",
-                        &serde_json::json!({
-                            "tool": slot.tc.function.name,
-                            "id": slot.tc.id,
-                            "is_error": is_error,
-                            "content_len": content.len(),
-                            "content_preview": preview,
-                        }),
-                    );
-                }
-
-                let elapsed_ms = slot.start.elapsed().as_millis() as u64;
-                self.tool_elapsed.insert(slot.tc.id.clone(), elapsed_ms);
-                let mut tool_content = content.clone();
-                if let Some(ref msg) = slot.confirm_msg {
-                    tool_content.push_str(&format!("\n\nUser message: {msg}"));
-                }
-                let history_content = match tools::result_dedup::duplicate_of(
-                    &tool_content,
-                    is_error,
-                    &self.messages,
-                ) {
+            let history_content =
+                match tools::result_dedup::duplicate_of(&tool_content, is_error, &self.messages) {
                     Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
                     None => tool_content,
                 };
-                self.push_message(Message::tool(slot.tc.id.clone(), history_content, is_error));
-                self.emit_messages_snapshot();
-                self.emit(EngineEvent::ToolFinished {
-                    call_id: slot.tc.id.clone(),
-                    result: ToolOutcome {
-                        content,
-                        is_error,
-                        metadata,
-                    },
-                    elapsed_ms: Some(elapsed_ms),
-                });
-            }
-
-            // Process deferred Steer/AgentMessage commands AFTER tool results
-            // are in history, so steered user messages appear in the correct
-            // chronological position.
-            for cmd in deferred_tool_cmds {
-                self.handle_turn_cmd(cmd);
-            }
+            self.push_message(Message::tool(slot.tc.id.clone(), history_content, is_error));
+            self.emit_messages_snapshot();
+            self.emit(EngineEvent::ToolFinished {
+                call_id: slot.tc.id.clone(),
+                result: ToolOutcome {
+                    content,
+                    is_error,
+                    metadata,
+                },
+                elapsed_ms: Some(elapsed_ms),
+            });
         }
     }
 

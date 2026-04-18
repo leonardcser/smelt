@@ -1,0 +1,234 @@
+//! Wire protocol between the engine and the UI.
+
+use crate::content::Content;
+use crate::message::{Message, ToolOutcome};
+use crate::mode::{Mode, ReasoningEffort};
+use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMeta};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Events emitted by the engine. The UI consumes these to update its display.
+///
+/// Most variants are fire-and-forget. The exceptions are `RequestPermission`
+/// and `RequestAnswer`, which carry a `request_id` that the UI must eventually
+/// reply to via `UiCommand`.
+///
+/// Event ordering within a turn:
+///   Ready → (Thinking* → Text* → ToolStarted → ToolOutput* → ToolFinished)*
+///         → TurnComplete | TurnError
+///
+/// ProcessCompleted can arrive at any time (including between turns).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EngineEvent {
+    /// Engine has initialized and is ready to accept commands.
+    Ready,
+
+    /// Extended thinking / chain-of-thought text.
+    Thinking { content: String },
+
+    /// Incremental thinking token from the LLM (streaming delta).
+    ThinkingDelta { delta: String },
+
+    /// Streamed assistant text (may arrive in chunks).
+    Text { content: String },
+
+    /// Incremental text token from the LLM (streaming delta).
+    TextDelta { delta: String },
+
+    /// A queued user message was consumed by the engine.
+    Steered { text: String, count: usize },
+
+    /// A tool call has started.
+    ToolStarted {
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+        summary: String,
+    },
+
+    /// Incremental output from a running tool (stdout/stderr lines).
+    ToolOutput { call_id: String, chunk: String },
+
+    /// A tool call has finished.
+    ToolFinished {
+        call_id: String,
+        result: ToolOutcome,
+        elapsed_ms: Option<u64>,
+    },
+
+    /// Engine needs user permission before executing a tool.
+    RequestPermission {
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+        confirm_message: String,
+        approval_patterns: Vec<String>,
+        summary: Option<String>,
+    },
+
+    /// Engine needs the user to answer a question (ask_user_question tool).
+    RequestAnswer {
+        request_id: u64,
+        args: HashMap<String, serde_json::Value>,
+    },
+
+    /// Token usage update after an LLM call.
+    TokenUsage {
+        usage: TokenUsage,
+        tokens_per_sec: Option<f64>,
+        cost_usd: Option<f64>,
+        /// True for background requests (title, compaction, btw, predict)
+        /// whose prompt_tokens should not update the displayed context usage.
+        #[serde(default)]
+        background: bool,
+    },
+
+    /// LLM call failed, engine is retrying.
+    Retrying { delay_ms: u64, attempt: u32 },
+
+    /// A background process has finished.
+    ProcessCompleted { id: String, exit_code: Option<i32> },
+
+    /// Response to `UiCommand::Compact`.
+    CompactionComplete { messages: Vec<Message> },
+
+    /// Response to `UiCommand::GenerateTitle`.
+    TitleGenerated { title: String, slug: String },
+
+    /// Response to `UiCommand::Btw`.
+    BtwResponse { content: String },
+
+    /// Predicted next user input (ghost text autocomplete).
+    InputPrediction { text: String, generation: u64 },
+
+    /// Snapshot of the engine's message list, sent after each significant step.
+    Messages {
+        turn_id: u64,
+        messages: Vec<Message>,
+    },
+
+    /// The agent turn completed successfully.
+    TurnComplete {
+        turn_id: u64,
+        messages: Vec<Message>,
+        meta: Option<TurnMeta>,
+    },
+
+    /// The agent turn ended with an error.
+    TurnError { message: String },
+
+    /// Engine is shutting down.
+    Shutdown { reason: Option<String> },
+
+    /// A subagent exited (expected or unexpected).
+    AgentExited {
+        agent_id: String,
+        exit_code: Option<i32>,
+    },
+
+    /// An inter-agent message arrived via the socket.
+    AgentMessage {
+        from_id: String,
+        from_slug: String,
+        message: String,
+    },
+}
+
+/// Commands sent from the UI to the engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum UiCommand {
+    /// Start a new agent turn.
+    StartTurn {
+        turn_id: u64,
+        content: Content,
+        mode: Mode,
+        model: String,
+        reasoning_effort: ReasoningEffort,
+        history: Vec<Message>,
+        /// Override API base URL for this turn (uses engine default if None).
+        api_base: Option<String>,
+        /// Override API key for this turn (uses engine default if None).
+        api_key: Option<String>,
+        /// Session ID for plan file storage.
+        session_id: String,
+        /// On-disk directory for this session (date-bucketed).
+        session_dir: std::path::PathBuf,
+        /// Per-turn model parameter overrides (from custom commands).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        model_config_overrides: Option<ModelConfigOverrides>,
+        /// Per-turn permission overrides (from custom commands).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        permission_overrides: Option<PermissionOverrides>,
+    },
+
+    /// Inject a message mid-turn (steering / type-ahead).
+    Steer { text: String },
+
+    /// Remove the last `count` steered messages (user unqueued them).
+    Unsteer { count: usize },
+
+    /// Reply to a `RequestPermission` event.
+    PermissionDecision {
+        request_id: u64,
+        approved: bool,
+        message: Option<String>,
+    },
+
+    /// Reply to a `RequestAnswer` event.
+    QuestionAnswer {
+        request_id: u64,
+        answer: Option<String>,
+    },
+
+    /// Change the active mode while the engine is running.
+    SetMode { mode: Mode },
+
+    /// Change reasoning effort while the engine is running.
+    SetReasoningEffort { effort: ReasoningEffort },
+
+    /// Change the model/provider while the engine is running.
+    SetModel {
+        model: String,
+        api_base: String,
+        api_key: String,
+        provider_type: String,
+    },
+
+    /// Compact conversation history.
+    Compact {
+        history: Vec<Message>,
+        instructions: Option<String>,
+    },
+
+    /// Generate a title for the session based on the latest user message and
+    /// the tail of the assistant's response.
+    GenerateTitle {
+        last_user_message: String,
+        assistant_tail: String,
+    },
+
+    /// Ask an ephemeral side question (no tools, not added to history).
+    Btw {
+        question: String,
+        history: Vec<Message>,
+        reasoning_effort: ReasoningEffort,
+    },
+
+    /// Predict the user's next input based on conversation history.
+    PredictInput {
+        history: Vec<Message>,
+        generation: u64,
+    },
+
+    /// Cancel the current turn.
+    Cancel,
+
+    /// Inject an inter-agent message as a steer message.
+    AgentMessage {
+        from_id: String,
+        from_slug: String,
+        message: String,
+    },
+}

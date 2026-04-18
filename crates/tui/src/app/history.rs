@@ -108,15 +108,13 @@ impl App {
         self.reset_subagents_for_new_session();
         self.flush_persist();
 
-        // Restore per-session settings
-        if let Some(ref mode_str) = loaded.mode {
-            if let Some(mode) = Mode::parse(mode_str) {
-                self.mode = mode;
-            }
+        // Restore per-session settings through the canonical helpers so
+        // state.json + engine + screen all stay in sync with `self`.
+        if let Some(mode) = loaded.mode.as_deref().and_then(Mode::parse) {
+            self.set_mode(mode);
         }
         if let Some(effort) = loaded.reasoning_effort {
-            self.reasoning_effort = effort;
-            self.screen.set_reasoning_effort(effort);
+            self.set_reasoning_effort(effort);
         }
         // Only restore model/API settings if not overridden by CLI.
         if !self.cli_model_override && !self.cli_api_base_override && !self.cli_api_key_env_override

@@ -571,7 +571,7 @@ impl App {
                 }
             } else if trimmed == "/resume" {
                 if let CommandAction::OpenDialog(dlg) = self.handle_command(trimmed) {
-                    active_dialog = Some(dlg);
+                    self.open_dialog(dlg, &mut active_dialog);
                 }
             } else if trimmed == "/settings" {
                 self.input.open_settings(&self.settings_state());
@@ -692,8 +692,7 @@ impl App {
                         }
                         InputOutcome::Continue | InputOutcome::Quit => {}
                         InputOutcome::OpenDialog(dlg) => {
-                            self.screen.erase_prompt();
-                            active_dialog = Some(dlg);
+                            self.open_dialog(dlg, &mut active_dialog);
                         }
                     }
                 }
@@ -1445,20 +1444,36 @@ impl App {
         }
     }
 
-    fn open_blocking_dialog(
+    /// Open a dialog, applying all the side-effects the host needs so no
+    /// call site has to remember them:
+    ///  - erase the prompt
+    ///  - share the kill ring so Ctrl+K/Y span input ↔ dialog
+    ///  - for blocking dialogs: flush pending blocks to scrollback and
+    ///    pause the working-spinner clock (the agent is suspended until
+    ///    the user responds)
+    ///
+    /// Any dialog currently in `active_dialog` is replaced; the caller is
+    /// expected to have finalized it already (via `finalize_dialog_close`).
+    pub(super) fn open_dialog(
         &mut self,
         mut dialog: Box<dyn render::Dialog>,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) {
-        // Flush pending blocks to scroll mode so they persist in scrollback.
-        let scr = &mut self.screen;
-        scr.render_pending_blocks();
-        scr.erase_prompt();
-        // Pause the spinner — the agent is suspended until the user responds.
-        scr.pause_spinner();
-        // Share the kill ring so Ctrl+K/Y work across input ↔ dialog.
+        if dialog.blocks_agent() {
+            self.screen.render_pending_blocks();
+            self.screen.pause_spinner();
+        }
+        self.screen.erase_prompt();
         dialog.set_kill_ring(self.input.take_kill_ring());
         *active_dialog = Some(dialog);
+    }
+
+    /// Clean up the screen after a dialog has been removed from
+    /// `active_dialog`. Idempotent: safe to call when no blocking dialog
+    /// was ever opened (`resume_spinner` is a no-op in that case).
+    pub(super) fn finalize_dialog_close(&mut self) {
+        self.screen.clear_dialog_area();
+        self.screen.resume_spinner();
     }
 }
 

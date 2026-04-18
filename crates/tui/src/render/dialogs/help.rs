@@ -163,3 +163,22 @@ impl super::Dialog for HelpDialog {
         end_dialog_draw(out);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::Dialog;
+
+    #[test]
+    fn dialog_render_starts_with_cursor_position() {
+        let mut out = RenderOut::buffer();
+        let mut dialog = HelpDialog::new(false);
+        dialog.draw(&mut out, 0, 40, 12);
+        let rendered = String::from_utf8(out.into_bytes()).unwrap();
+        // begin_dialog_draw positions the cursor at (0, start_row).
+        assert!(
+            rendered.starts_with("\u{1b}[1;1H"),
+            "dialog should start with cursor position, got: {rendered:?}"
+        );
+    }
+}

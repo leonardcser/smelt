@@ -1,4 +1,5 @@
 mod agent;
+pub mod auth;
 pub mod cancel;
 pub mod compact;
 pub mod config;

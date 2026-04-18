@@ -2,8 +2,11 @@ use super::{
     bool_arg, display_path, notebook, staleness_error, str_arg, FileStateCache, Tool, ToolContext,
     ToolFuture, ToolResult,
 };
+use crate::permissions::Decision;
+use protocol::Mode;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub struct EditFileTool {
     pub files: FileStateCache,
@@ -50,6 +53,22 @@ impl Tool for EditFileTool {
     fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
         let path = str_arg(args, "file_path");
         staleness_error(&self.files, &path, "file")
+    }
+
+    /// In Plan mode, auto-allow edits to files the agent itself created inside
+    /// the session's plans directory.
+    fn decide_override(
+        &self,
+        args: &HashMap<String, Value>,
+        mode: Mode,
+        session_dir: &Path,
+    ) -> Option<Decision> {
+        let path = str_arg(args, "file_path");
+        if mode == Mode::Plan && !path.is_empty() && crate::plan::is_plan_file(session_dir, &path) {
+            Some(Decision::Allow)
+        } else {
+            None
+        }
     }
 
     fn execute<'a>(

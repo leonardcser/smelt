@@ -346,7 +346,6 @@ impl App {
         }
         self.snapshot_tokens();
         self.save_session();
-        state::set_mode(self.mode);
         self.maybe_auto_compact();
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Idle);
     }
@@ -1016,8 +1015,10 @@ impl App {
         result: render::DialogResult,
         agent: &mut Option<TurnState>,
     ) {
-        // Resume the spinner if a blocking dialog paused it.
-        self.screen.resume_spinner();
+        // Dialog-area cleanup + spinner resume happen once here.  Arms that
+        // do a full-screen repaint (rewind, resume) still work — clearing
+        // an already-repainted region is a no-op.
+        self.finalize_dialog_close();
         match result {
             render::DialogResult::Confirm {
                 choice,
@@ -1038,7 +1039,6 @@ impl App {
                     &tool_name,
                     agent,
                 );
-                self.screen.clear_dialog_area();
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
                     *agent = None;
@@ -1046,7 +1046,6 @@ impl App {
             }
             render::DialogResult::Question { answer, request_id } => {
                 let should_cancel = self.resolve_question(answer, request_id, agent);
-                self.screen.clear_dialog_area();
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
                     *agent = None;
@@ -1068,16 +1067,11 @@ impl App {
                     // drain stale engine events and save the truncated state.
                     while self.engine.try_recv().is_ok() {}
                     self.save_session();
-                } else {
-                    // Dialog was cancelled — clean up the dialog overlay.
-                    if restore_vim_insert {
-                        self.input.set_vim_mode(vim::ViMode::Insert);
-                    }
-                    self.screen.clear_dialog_area();
+                } else if restore_vim_insert {
+                    self.input.set_vim_mode(vim::ViMode::Insert);
                 }
             }
             render::DialogResult::Resume { session_id } => {
-                let mut clear = true;
                 if let Some(id) = session_id {
                     if let Some(loaded) = session::load(&id) {
                         self.load_session(loaded);
@@ -1086,35 +1080,24 @@ impl App {
                             self.screen.set_context_tokens(tokens);
                         }
                         self.screen.flush_blocks();
-                        clear = false;
                     }
                 }
-                if clear {
-                    self.screen.clear_dialog_area();
-                }
             }
-            render::DialogResult::Export { target } => {
-                match target {
-                    Some(render::ExportTarget::Clipboard) => self.export_to_clipboard(),
-                    Some(render::ExportTarget::File) => self.export_to_file(),
-                    None => {}
-                }
-                self.screen.clear_dialog_area();
-            }
+            render::DialogResult::Export { target } => match target {
+                Some(render::ExportTarget::Clipboard) => self.export_to_clipboard(),
+                Some(render::ExportTarget::File) => self.export_to_file(),
+                None => {}
+            },
             render::DialogResult::PermissionsClosed {
                 session_remaining,
                 workspace_remaining,
             } => {
                 self.sync_permissions(session_remaining, workspace_remaining);
-                self.screen.clear_dialog_area();
             }
             render::DialogResult::AgentsClosed => {
-                self.screen.clear_dialog_area();
                 self.refresh_agent_counts();
             }
-            render::DialogResult::PsClosed | render::DialogResult::Dismissed => {
-                self.screen.clear_dialog_area();
-            }
+            render::DialogResult::PsClosed | render::DialogResult::Dismissed => {}
         }
     }
 
@@ -1212,10 +1195,7 @@ impl App {
                 self.screen.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
                 if matches!(choice, ConfirmChoice::YesAutoApply) {
-                    self.mode = Mode::Apply;
-                    state::set_mode(self.mode);
-                    self.engine.send(UiCommand::SetMode { mode: self.mode });
-                    self.screen.mark_dirty();
+                    self.set_mode(Mode::Apply);
                 }
                 false
             }
@@ -1445,7 +1425,7 @@ impl App {
 
                 // Close any non-blocking dialog (e.g. Ps) to make room.
                 if active_dialog.take().is_some() {
-                    self.screen.clear_dialog_area();
+                    self.finalize_dialog_close();
                 }
                 self.confirm_context = Some(ConfirmContext {
                     call_id: req.call_id.clone(),
@@ -1456,7 +1436,7 @@ impl App {
                 self.screen
                     .set_active_status(&req.call_id, ToolStatus::Confirm);
                 let dialog = Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
-                self.open_blocking_dialog(dialog, active_dialog);
+                self.open_dialog(dialog, active_dialog);
                 LoopAction::Continue
             }
             SessionControl::NeedsAskQuestion { args, request_id } => {
@@ -1468,14 +1448,14 @@ impl App {
 
                 // Close any non-blocking dialog (e.g. Ps) to make room.
                 if active_dialog.take().is_some() {
-                    self.screen.clear_dialog_area();
+                    self.finalize_dialog_close();
                 }
                 // ask_user_question doesn't have a call_id in the permission flow,
                 // use empty string (it targets the last active tool via fallback).
                 self.screen.set_active_status("", ToolStatus::Confirm);
                 let questions = render::parse_questions(&args);
                 let dialog = Box::new(QuestionDialog::new(questions, request_id));
-                self.open_blocking_dialog(dialog, active_dialog);
+                self.open_dialog(dialog, active_dialog);
                 LoopAction::Continue
             }
         }

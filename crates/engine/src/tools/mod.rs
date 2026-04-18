@@ -156,6 +156,18 @@ pub trait Tool: Send + Sync {
     fn preflight(&self, _args: &HashMap<String, Value>) -> Option<String> {
         None
     }
+
+    /// Optional decision override, consulted before the config rule-set.
+    /// Used by tools with dynamic scope (e.g. `edit_file` auto-allowed on
+    /// plan files in Plan mode). Returning `None` defers to the rules.
+    fn decide_override(
+        &self,
+        _args: &HashMap<String, Value>,
+        _mode: Mode,
+        _session_dir: &std::path::Path,
+    ) -> Option<Decision> {
+        None
+    }
 }
 
 #[derive(Default)]

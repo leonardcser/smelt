@@ -26,14 +26,7 @@ impl App {
     }
 
     fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
-        let needs_redraw = self.settings.show_thinking != s.show_thinking;
-        self.input.set_vim_enabled(s.vim);
-        self.settings = s.clone();
-        self.screen.apply_settings(s);
-        state::save_settings(s);
-        if needs_redraw {
-            self.screen.redraw();
-        }
+        self.set_settings(s.clone());
     }
 
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -76,8 +69,8 @@ impl App {
                         .decide(self.mode, &ctx.tool_name, &ctx.args, false)
                         == Decision::Allow
                     {
-                        let _d = active_dialog.take().unwrap();
-                        self.screen.clear_dialog_area();
+                        active_dialog.take();
+                        self.finalize_dialog_close();
                         self.screen
                             .set_active_status(&ctx.call_id, ToolStatus::Pending);
                         self.send_permission_decision(ctx.request_id, true, None);
@@ -204,9 +197,7 @@ impl App {
                         // mirror it explicitly so settings.json and the
                         // atomic stay in lockstep regardless of preview
                         // state.
-                        crate::theme::set_accent(value);
-                        state::set_accent(value);
-                        self.screen.redraw();
+                        self.apply_accent(value);
                     }
                     MenuResult::ColorSelect(_) => {
                         self.screen.redraw();
@@ -220,10 +211,8 @@ impl App {
                 self.screen.mark_dirty();
                 false
             }
-            EventOutcome::OpenDialog(mut dlg) => {
-                self.screen.erase_prompt();
-                dlg.set_kill_ring(self.input.take_kill_ring());
-                *active_dialog = Some(dlg);
+            EventOutcome::OpenDialog(dlg) => {
+                self.open_dialog(dlg, active_dialog);
                 false
             }
             EventOutcome::Exec(rx, kill) => {
@@ -289,8 +278,7 @@ impl App {
                             InputOutcome::Continue => {}
                             InputOutcome::Quit => return true,
                             InputOutcome::OpenDialog(dlg) => {
-                                self.screen.erase_prompt();
-                                *active_dialog = Some(dlg);
+                                self.open_dialog(dlg, active_dialog);
                             }
                         }
                     } else if !self.queued_messages.is_empty() {
@@ -334,8 +322,7 @@ impl App {
                                 InputOutcome::Continue => {}
                                 InputOutcome::Quit => return true,
                                 InputOutcome::OpenDialog(dlg) => {
-                                    self.screen.erase_prompt();
-                                    *active_dialog = Some(dlg);
+                                    self.open_dialog(dlg, active_dialog);
                                 }
                             }
                         }
@@ -869,7 +856,6 @@ impl App {
 
         let trimmed = input.trim();
         self.input_history.push(input.to_string());
-        state::set_mode(self.mode);
 
         // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();
