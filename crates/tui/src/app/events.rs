@@ -1047,6 +1047,27 @@ impl App {
 
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
+        use crossterm::event::MouseButton;
+        // Drag + release drive tmux-style click-drag-copy in the content
+        // pane. Down (primary) enters visual mode and anchors the
+        // selection; Drag extends it; Up copies the selected text to the
+        // system clipboard and exits visual mode.
+        match me.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.app_focus == crate::app::AppFocus::Content {
+                    self.extend_content_selection_to(me.row, me.column);
+                }
+                return EventOutcome::Redraw;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.app_focus == crate::app::AppFocus::Content {
+                    self.copy_content_selection_and_clear();
+                }
+                return EventOutcome::Redraw;
+            }
+            _ => {}
+        }
+
         match me.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll_under_mouse(me.row, -3);
@@ -1086,9 +1107,15 @@ impl App {
                     }
                     return EventOutcome::Noop;
                 }
-                // Content pane click: focus + move cursor.
+                // Content pane click: focus + move cursor + anchor a
+                // potential drag-selection in vim Visual mode. If the
+                // user just clicks without dragging, the subsequent Up
+                // clears visual so nothing gets selected.
                 self.app_focus = crate::app::AppFocus::Content;
                 self.position_content_cursor_from_click(me.row, me.column);
+                if let Some(vim) = self.content_pane.buffer.vim.as_mut() {
+                    vim.set_mode(crate::vim::ViMode::Visual);
+                }
                 EventOutcome::Redraw
             }
             _ => EventOutcome::Noop,
@@ -1196,6 +1223,42 @@ impl App {
         self.input.cpos = cpos.min(buf.len());
         // Clear any vim pending-op and drop visual selection.
         self.input.clear_selection();
+        self.screen.mark_dirty();
+    }
+
+    /// Extend the content-pane visual selection to the cell under the
+    /// current drag position. Runs while the user holds mouse-1 and
+    /// moves — each update moves the cursor inside vim Visual mode so
+    /// the existing visual range widens or shrinks accordingly.
+    fn extend_content_selection_to(&mut self, row: u16, col: u16) {
+        self.position_content_cursor_from_click(row, col);
+    }
+
+    /// Finalise a drag-select: if there is a non-empty visual selection
+    /// in the content pane, copy its text to the system clipboard (like
+    /// tmux mouse-select) and leave visual mode. A bare click (no drag)
+    /// results in an empty selection and simply exits Visual mode.
+    fn copy_content_selection_and_clear(&mut self) {
+        let width = render::term_width();
+        let rows = self.screen.full_transcript_text(width);
+        let buf = rows.join("\n");
+        let mut copied_len: Option<usize> = None;
+        if let Some(vim) = self.content_pane.buffer.vim.as_ref() {
+            if let Some((s, e)) = vim.visual_range(&buf, self.content_pane.buffer.cpos) {
+                if s < e {
+                    let selection = buf[s..e].to_string();
+                    let chars = selection.chars().count();
+                    let _ = crate::app::commands::copy_to_clipboard(&selection);
+                    copied_len = Some(chars);
+                }
+            }
+        }
+        if let Some(vim) = self.content_pane.buffer.vim.as_mut() {
+            vim.set_mode(crate::vim::ViMode::Normal);
+        }
+        if let Some(n) = copied_len {
+            self.screen.notify(format!("copied {} chars", n));
+        }
         self.screen.mark_dirty();
     }
 
