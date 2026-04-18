@@ -31,6 +31,39 @@ pub mod buf {
     }
 }
 
+/// Per-block mutations on the transcript — view state (collapsed /
+/// trimmed / expanded) and lifecycle status (streaming / done). This
+/// is the surface "click to expand", "collapse long tool output",
+/// "agent re-runs a block" and similar features will grow against.
+///
+/// Only view state + status land in this slice; `append_text`,
+/// `rewrite`, `invoke`, and per-block keymaps arrive in Stage 3.5's
+/// subsequent slices as the `active_*` → live-block collapse progresses.
+pub mod block {
+    use crate::render::{BlockId, Screen, Status, ViewState};
+
+    /// Current view state of a block.
+    pub fn view_state(screen: &Screen, id: BlockId) -> ViewState {
+        screen.block_view_state(id)
+    }
+
+    /// Set a block's view state. Invalidates that block's layout cache
+    /// so the next frame re-lays-out against the new state.
+    pub fn set_view_state(screen: &mut Screen, id: BlockId, state: ViewState) {
+        screen.set_block_view_state(id, state);
+    }
+
+    /// Current lifecycle status of a block.
+    pub fn status(screen: &Screen, id: BlockId) -> Status {
+        screen.block_status(id)
+    }
+
+    /// Set a block's lifecycle status.
+    pub fn set_status(screen: &mut Screen, id: BlockId, status: Status) {
+        screen.set_block_status(id, status);
+    }
+}
+
 /// Command dispatch — the single entry point for `/cmd` and `:cmd`
 /// style actions. Internal handlers and (future) plugin handlers both
 /// register here; keybindings resolve to names that route through

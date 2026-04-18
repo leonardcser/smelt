@@ -249,12 +249,49 @@ pub enum Throbber {
 )]
 pub struct BlockId(pub u64);
 
+/// Per-block view state — how the block is presented inside the
+/// transcript. Independent of the block's [`Status`] (a still-streaming
+/// block can be `Collapsed`; a finished block can be `TrimmedHead`).
+///
+/// The layout cache keys on this so flipping view states invalidates
+/// only the affected block, not the whole cache.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub enum ViewState {
+    /// Full content — default.
+    #[default]
+    Expanded,
+    /// One summary line only.
+    Collapsed,
+    /// Show the first `keep` rows of the block's content, elide the rest.
+    TrimmedHead { keep: u16 },
+    /// Show the last `keep` rows of the block's content, elide the rest.
+    TrimmedTail { keep: u16 },
+}
+
+/// Lifecycle state of a block. Orthogonal to [`ViewState`]: a block
+/// can be `Streaming` + `Collapsed`, `Done` + `Expanded`, etc.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub enum Status {
+    /// Block content is still being produced (active stream, running
+    /// tool). The layout cache should expect invalidation on every
+    /// chunk; the renderer may apply a "live" style.
+    Streaming,
+    /// Block is final. Cached layouts remain valid until width changes.
+    #[default]
+    Done,
+}
+
 /// Cache key for a single `DisplayBlock` layout — the inputs to
 /// `layout_block` that affect the laid-out output for a given block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutKey {
     pub width: u16,
     pub show_thinking: bool,
+    pub view_state: ViewState,
 }
 
 /// Per-block cached artifacts. Keeps a bounded LRU of the most recent
@@ -308,6 +345,15 @@ pub(super) struct BlockHistory {
     pub(super) artifacts: HashMap<BlockId, BlockArtifact>,
     /// Mutable sidecar state for `Block::ToolCall` entries, keyed by `call_id`.
     pub(super) tool_states: HashMap<String, ToolState>,
+    /// Per-block view state (collapsed / trimmed / expanded). Absent
+    /// entries default to `ViewState::Expanded`. Mutating this map
+    /// invalidates that block's layout cache — `LayoutKey` includes
+    /// `view_state`.
+    pub(super) view_states: HashMap<BlockId, ViewState>,
+    /// Per-block lifecycle state (streaming vs done). Absent entries
+    /// default to `Status::Done`. Streaming blocks signal to callers
+    /// that layout may change on the next frame.
+    pub(super) statuses: HashMap<BlockId, Status>,
     /// Terminal width when artifacts were last width-pruned.
     pub(super) cache_width: usize,
     /// True iff the layout cache has changed since the last persisted save.
@@ -331,6 +377,8 @@ impl BlockHistory {
             blocks: HashMap::new(),
             artifacts: HashMap::new(),
             tool_states: HashMap::new(),
+            view_states: HashMap::new(),
+            statuses: HashMap::new(),
             cache_width: 0,
             cache_dirty: false,
             flushed: 0,
@@ -354,6 +402,45 @@ impl BlockHistory {
 
     pub(super) fn last_block(&self) -> Option<&Block> {
         self.order.last().and_then(|id| self.blocks.get(id))
+    }
+
+    /// Current view state for `id`. Defaults to [`ViewState::Expanded`]
+    /// when no explicit state has been set.
+    pub(super) fn view_state(&self, id: BlockId) -> ViewState {
+        self.view_states.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Set the view state for `id`. Invalidates cached layouts for
+    /// that block so the next paint re-lays-out under the new state.
+    pub(super) fn set_view_state(&mut self, id: BlockId, state: ViewState) {
+        let prev = self.view_states.get(&id).copied().unwrap_or_default();
+        if prev == state {
+            return;
+        }
+        if matches!(state, ViewState::Expanded) {
+            self.view_states.remove(&id);
+        } else {
+            self.view_states.insert(id, state);
+        }
+        if let Some(art) = self.artifacts.get_mut(&id) {
+            art.clear();
+        }
+        self.cache_dirty = true;
+    }
+
+    /// Current status for `id`. Defaults to [`Status::Done`].
+    pub(super) fn status(&self, id: BlockId) -> Status {
+        self.statuses.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Set the status for `id`. Does not invalidate the layout cache —
+    /// status is a style concern, not a layout one.
+    pub(super) fn set_status(&mut self, id: BlockId, status: Status) {
+        if matches!(status, Status::Done) {
+            self.statuses.remove(&id);
+        } else {
+            self.statuses.insert(id, status);
+        }
     }
 
     /// Append `block` and return its `BlockId`. Duplicate content merges
@@ -530,6 +617,7 @@ impl BlockHistory {
             term_width: width as u16,
         };
         let key = LayoutKey {
+            view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
         };
@@ -618,6 +706,7 @@ impl BlockHistory {
     /// without painting anything. Used for scrollbar geometry.
     pub(super) fn total_rows(&mut self, width: usize, show_thinking: bool) -> u16 {
         let key = LayoutKey {
+            view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
         };
@@ -631,6 +720,7 @@ impl BlockHistory {
 
     pub(super) fn full_text(&mut self, width: usize, show_thinking: bool) -> Vec<String> {
         let key = LayoutKey {
+            view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
         };
@@ -673,6 +763,7 @@ impl BlockHistory {
             return Vec::new();
         }
         let key = LayoutKey {
+            view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
         };
@@ -760,6 +851,7 @@ impl BlockHistory {
             self.cache_width = width;
         }
         let key = LayoutKey {
+            view_state: super::history::ViewState::Expanded,
             width: width as u16,
             show_thinking,
         };
@@ -932,10 +1024,12 @@ mod tests {
         let k100 = LayoutKey {
             width: 100,
             show_thinking: true,
+            view_state: ViewState::Expanded,
         };
         let k80 = LayoutKey {
             width: 80,
             show_thinking: true,
+            view_state: ViewState::Expanded,
         };
         assert!(keys.contains(&k100), "expected width=100 cached: {keys:?}");
         assert!(keys.contains(&k80), "expected width=80 cached: {keys:?}");

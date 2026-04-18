@@ -17,7 +17,8 @@ use super::completions::{completion_reserved_rows, draw_completions, draw_menu};
 use super::context::PaintContext;
 use super::history::{
     ActiveAgent, ActiveExec, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block,
-    BlockHistory, BlockId, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
+    BlockHistory, BlockId, Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
+    ViewState,
 };
 
 /// Visual selection in the content pane, captured from vim state.
@@ -1613,6 +1614,27 @@ impl Screen {
     /// Read-only view of a committed tool's mutable state.
     pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
         self.history.tool_states.get(call_id)
+    }
+
+    /// Per-block view state — default `Expanded` when none set.
+    pub fn block_view_state(&self, id: BlockId) -> ViewState {
+        self.history.view_state(id)
+    }
+
+    /// Set the view state for a block. Invalidates its layout cache.
+    pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
+        self.history.set_view_state(id, state);
+        self.prompt.dirty = true;
+    }
+
+    /// Per-block lifecycle status — default `Done` when none set.
+    pub fn block_status(&self, id: BlockId) -> Status {
+        self.history.status(id)
+    }
+
+    /// Set the lifecycle status for a block.
+    pub fn set_block_status(&mut self, id: BlockId, status: Status) {
+        self.history.set_status(id, status);
     }
 
     /// Mutate a committed tool's state and invalidate its layout cache so

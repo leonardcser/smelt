@@ -21,8 +21,8 @@ pub(crate) use region::{ScrollbarGeom, TranscriptHit};
 
 pub use history::{
     ActiveAgent, ActiveExec, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact,
-    BlockId, ConfirmChoice, ConfirmRequest, LayoutKey, ResumeEntry, Throbber, ToolOutput,
-    ToolOutputRef, ToolState, ToolStatus,
+    BlockId, ConfirmChoice, ConfirmRequest, LayoutKey, ResumeEntry, Status, Throbber, ToolOutput,
+    ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
