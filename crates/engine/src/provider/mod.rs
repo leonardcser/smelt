@@ -1,4 +1,5 @@
 mod anthropic;
+mod auth_storage;
 mod chat_completions;
 pub mod codex;
 pub mod copilot;

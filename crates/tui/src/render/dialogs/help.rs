@@ -97,7 +97,6 @@ impl super::Dialog for HelpDialog {
             .unwrap_or(0)
             + 4;
 
-        // Collect content lines for scrolling.
         let mut content_lines: Vec<(&str, &str)> = Vec::new();
         for (si, (_, entries)) in self.sections.iter().enumerate() {
             for &(label, detail) in entries {

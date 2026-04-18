@@ -210,6 +210,54 @@ impl App {
         }
     }
 
+    /// Apply the result of `process_input` to app state (starting an agent,
+    /// running a command, opening a dialog, etc.). Returns `true` if the app
+    /// should quit. Centralizes the dispatch previously duplicated across the
+    /// Submit path, queued-message fallback, and auto-start-from-queued loop.
+    pub(super) fn apply_input_outcome(
+        &mut self,
+        outcome: InputOutcome,
+        content: Content,
+        display: &str,
+        agent: &mut Option<TurnState>,
+        active_dialog: &mut Option<Box<dyn render::Dialog>>,
+    ) -> bool {
+        match outcome {
+            InputOutcome::StartAgent => {
+                self.screen.erase_prompt();
+                *agent = Some(self.begin_agent_turn(display, content));
+            }
+            InputOutcome::CustomCommand(cmd) => {
+                self.screen.erase_prompt();
+                *agent = Some(self.begin_custom_command_turn(*cmd));
+            }
+            InputOutcome::Compact { instructions } => {
+                self.screen.erase_prompt();
+                if self.history.is_empty() {
+                    self.screen.notify_error("nothing to compact".into());
+                } else {
+                    self.compact_history(instructions);
+                }
+            }
+            InputOutcome::Exec(rx, kill) => {
+                self.screen.erase_prompt();
+                self.exec_rx = Some(rx);
+                self.exec_kill = Some(kill);
+            }
+            InputOutcome::CancelAndClear => {
+                self.screen.erase_prompt();
+                self.reset_session();
+                *agent = None;
+            }
+            InputOutcome::OpenDialog(dlg) => {
+                self.open_dialog(dlg, active_dialog);
+            }
+            InputOutcome::Continue => {}
+            InputOutcome::Quit => return true,
+        }
+        false
+    }
+
     /// Execute a command while the agent is running.
     /// Returns the `EventOutcome` to use, or `None` to queue as a message.
     pub(super) fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {

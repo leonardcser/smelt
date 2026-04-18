@@ -68,23 +68,11 @@ impl super::Dialog for PsDialog {
         let n = self.procs.len();
         match nav_lookup(code, mods) {
             Some(NavAction::Dismiss) => Some(DialogResult::PsClosed),
-            Some(NavAction::Up) => {
-                self.list.select_prev(n);
+            Some(nav) => {
+                self.list.handle_nav(nav, n);
                 None
             }
-            Some(NavAction::Down) => {
-                self.list.select_next(n);
-                None
-            }
-            Some(NavAction::PageUp) => {
-                self.list.page_up();
-                None
-            }
-            Some(NavAction::PageDown) => {
-                self.list.page_down(n);
-                None
-            }
-            _ => None,
+            None => None,
         }
     }
 

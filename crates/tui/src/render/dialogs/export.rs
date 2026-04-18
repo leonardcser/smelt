@@ -81,15 +81,11 @@ impl super::Dialog for ExportDialog {
                 target: Some(self.selected_target()),
             }),
             Some(NavAction::Dismiss) => Some(DialogResult::Export { target: None }),
-            Some(NavAction::Up) => {
-                self.list.select_prev(n);
+            Some(nav) => {
+                self.list.handle_nav(nav, n);
                 None
             }
-            Some(NavAction::Down) => {
-                self.list.select_next(n);
-                None
-            }
-            _ => None,
+            None => None,
         }
     }
 

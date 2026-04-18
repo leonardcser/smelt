@@ -185,26 +185,7 @@ impl super::Dialog for ResumeDialog {
                     .map(|e| e.id.clone()),
             }),
             Some(NavAction::Dismiss) => Some(DialogResult::Resume { session_id: None }),
-            Some(NavAction::Up) => {
-                self.list.select_prev(n);
-                None
-            }
-            Some(NavAction::Down) => {
-                self.list.select_next(n);
-                None
-            }
-            Some(NavAction::PageUp) => {
-                if !self.filtered.is_empty() {
-                    self.list.page_up();
-                }
-                None
-            }
-            Some(NavAction::PageDown) => {
-                if !self.filtered.is_empty() {
-                    self.list.page_down(n);
-                }
-                None
-            }
+            Some(nav) if self.list.handle_nav(nav, n) => None,
             _ => {
                 // Unhandled keys: insert as search query chars.
                 if let KeyCode::Char(c) = code {

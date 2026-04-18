@@ -127,23 +127,11 @@ impl super::Dialog for PermissionsDialog {
         let n = self.items.len();
         match nav_lookup(code, mods) {
             Some(NavAction::Dismiss) => Some(self.close_result()),
-            Some(NavAction::Up) => {
-                self.list.select_prev(n);
+            Some(nav) => {
+                self.list.handle_nav(nav, n);
                 None
             }
-            Some(NavAction::Down) => {
-                self.list.select_next(n);
-                None
-            }
-            Some(NavAction::PageUp) => {
-                self.list.page_up();
-                None
-            }
-            Some(NavAction::PageDown) => {
-                self.list.page_down(n);
-                None
-            }
-            _ => None,
+            None => None,
         }
     }
 

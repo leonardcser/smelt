@@ -159,7 +159,6 @@ pub fn evaluate(body: &str) -> String {
 
     while let Some(line) = lines.next() {
         if is_exec_fence(line) {
-            // Collect the code block content
             let mut script = String::new();
             for inner in lines.by_ref() {
                 if inner.trim_start().starts_with("```") {

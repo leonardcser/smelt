@@ -164,6 +164,21 @@ impl ListState {
         self.dirty = true;
     }
 
+    /// Handle the four navigation arrows (Up/Down/PageUp/PageDown) uniformly.
+    /// Returns `true` if the action was consumed, `false` otherwise so callers
+    /// can fall through to dialog-specific handling (Dismiss, Confirm, Edit).
+    pub fn handle_nav(&mut self, action: crate::keymap::NavAction, item_count: usize) -> bool {
+        use crate::keymap::NavAction;
+        match action {
+            NavAction::Up => self.select_prev(item_count),
+            NavAction::Down => self.select_next(item_count),
+            NavAction::PageUp => self.page_up(),
+            NavAction::PageDown => self.page_down(item_count),
+            _ => return false,
+        }
+        true
+    }
+
     /// Begin drawing the dialog.  `chrome` is the number of non-item
     /// rows the caller will render (bar, header, blanks, hints).
     /// `max_visible` is recomputed from `granted_rows - chrome`.

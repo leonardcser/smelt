@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::auth_storage::CredStore;
 use super::unix_now;
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -35,13 +36,15 @@ const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 
 pub const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
-const KEYRING_SERVICE: &str = "smelt-copilot-auth";
-const KEYRING_USER: &str = "default";
-
 // ── Persisted tokens ───────────────────────────────────────────────────────
 
-fn token_path() -> PathBuf {
-    state_dir().join("copilot_auth.json")
+fn cred_store() -> CredStore {
+    CredStore {
+        keyring_service: "smelt-copilot-auth",
+        keyring_user: "default",
+        file_path: state_dir().join("copilot_auth.json"),
+        env_var: COPILOT_TOKENS_ENV,
+    }
 }
 
 /// Persisted Copilot credentials.
@@ -73,59 +76,17 @@ impl CopilotTokens {
 
     pub fn save(&self) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        file_save(&json)?;
-        let _ = keyring_save(&json);
-        Ok(())
+        cred_store().save(&json)
     }
 
     pub fn load() -> Option<Self> {
-        if let Ok(json) = std::env::var(COPILOT_TOKENS_ENV) {
-            if let Ok(tokens) = serde_json::from_str(&json) {
-                return Some(tokens);
-            }
-        }
-        if let Some(json) = keyring_load() {
-            if let Ok(tokens) = serde_json::from_str(&json) {
-                return Some(tokens);
-            }
-        }
-        let data = std::fs::read_to_string(token_path()).ok()?;
-        serde_json::from_str(&data).ok()
+        let json = cred_store().load()?;
+        serde_json::from_str(&json).ok()
     }
 
     pub fn delete() {
-        let _ = keyring_delete();
-        let _ = std::fs::remove_file(token_path());
+        cred_store().delete();
     }
-}
-
-fn file_save(json: &str) -> Result<(), String> {
-    let path = token_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
-}
-
-fn keyring_save(json: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())?;
-    entry.set_password(json).map_err(|e| e.to_string())
-}
-
-fn keyring_load() -> Option<String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
-    entry.get_password().ok()
-}
-
-fn keyring_delete() -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())?;
-    entry.delete_credential().map_err(|e| e.to_string())
 }
 
 // ── Client ID decoding ─────────────────────────────────────────────────────

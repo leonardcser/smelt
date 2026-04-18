@@ -72,23 +72,11 @@ impl super::Dialog for RewindDialog {
                 block_idx: None,
                 restore_vim_insert: self.restore_vim_insert,
             }),
-            Some(NavAction::Up) => {
-                self.list.select_prev(n);
+            Some(nav) => {
+                self.list.handle_nav(nav, n);
                 None
             }
-            Some(NavAction::Down) => {
-                self.list.select_next(n);
-                None
-            }
-            Some(NavAction::PageUp) => {
-                self.list.page_up();
-                None
-            }
-            Some(NavAction::PageDown) => {
-                self.list.page_down(n);
-                None
-            }
-            _ => None,
+            None => None,
         }
     }
 

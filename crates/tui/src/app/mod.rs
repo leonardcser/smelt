@@ -662,39 +662,17 @@ impl App {
                     self.screen.erase_prompt();
                     agent = Some(self.begin_custom_command_turn(cmd));
                 } else if !text.is_empty() {
-                    match self.process_input(&text) {
-                        InputOutcome::StartAgent => {
-                            self.screen.erase_prompt();
-                            let content = Content::text(text.clone());
-                            agent = Some(self.begin_agent_turn(&text, content));
-                        }
-                        InputOutcome::Compact { instructions } => {
-                            self.screen.erase_prompt();
-                            if self.history.is_empty() {
-                                self.screen.notify_error("nothing to compact".into());
-                            } else {
-                                self.compact_history(instructions);
-                            }
-                        }
-                        InputOutcome::CustomCommand(cmd) => {
-                            self.screen.erase_prompt();
-                            agent = Some(self.begin_custom_command_turn(*cmd));
-                        }
-                        InputOutcome::Exec(rx, kill) => {
-                            self.screen.erase_prompt();
-                            self.exec_rx = Some(rx);
-                            self.exec_kill = Some(kill);
-                        }
-                        InputOutcome::CancelAndClear => {
-                            self.screen.erase_prompt();
-                            self.reset_session();
-                            agent = None;
-                        }
-                        InputOutcome::Continue | InputOutcome::Quit => {}
-                        InputOutcome::OpenDialog(dlg) => {
-                            self.open_dialog(dlg, &mut active_dialog);
-                        }
-                    }
+                    let outcome = self.process_input(&text);
+                    let content = Content::text(text.clone());
+                    // Quit is ignored here: a queued "/exit" shouldn't terminate
+                    // the main loop from this re-entry point.
+                    self.apply_input_outcome(
+                        outcome,
+                        content,
+                        &text,
+                        &mut agent,
+                        &mut active_dialog,
+                    );
                 }
             }
 

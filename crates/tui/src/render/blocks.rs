@@ -788,10 +788,8 @@ fn print_agent_summary<S: LayoutSink>(out: &mut S, summary: &str) {
     let mut end = 0;
     let mut rest = summary;
     loop {
-        // Skip leading whitespace.
         let trimmed = rest.trim_start();
         let skipped = rest.len() - trimmed.len();
-        // Find end of next word.
         let word_end = trimmed.find([' ', ',']).unwrap_or(trimmed.len());
         if word_end == 0 {
             break;

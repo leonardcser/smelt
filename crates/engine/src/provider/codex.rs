@@ -2,7 +2,6 @@ use crate::log;
 use crate::paths::state_dir;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use std::path::PathBuf;
 use std::time::Duration;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -13,16 +12,19 @@ const REFRESH_INTERVAL_SECS: u64 = 8 * 3600; // 8 hours
 
 pub const CODEX_TOKENS_ENV: &str = "SMELT_CODEX_TOKENS";
 
+use super::auth_storage::CredStore;
 use super::unix_now;
 
 // ── Persisted tokens ───────────────────────────────────────────────────────
 
-fn token_path() -> PathBuf {
-    state_dir().join("codex_auth.json")
+fn cred_store() -> CredStore {
+    CredStore {
+        keyring_service: "smelt-codex-auth",
+        keyring_user: "default",
+        file_path: state_dir().join("codex_auth.json"),
+        env_var: CODEX_TOKENS_ENV,
+    }
 }
-
-const KEYRING_SERVICE: &str = "smelt-codex-auth";
-const KEYRING_USER: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexTokens {
@@ -46,64 +48,21 @@ impl CodexTokens {
 
     pub fn save(&self) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-
-        file_save(&json)?;
-        let _ = keyring_save(&json);
-        Ok(())
+        cred_store().save(&json)
     }
 
     pub fn load() -> Option<Self> {
-        if let Ok(json) = std::env::var(CODEX_TOKENS_ENV) {
-            if let Ok(tokens) = serde_json::from_str(&json) {
-                return Some(tokens);
-            }
-        }
-        if let Some(json) = keyring_load() {
-            if let Ok(tokens) = serde_json::from_str(&json) {
-                return Some(tokens);
-            }
-        }
-        let data = std::fs::read_to_string(token_path()).ok()?;
-        serde_json::from_str(&data).ok()
+        let json = cred_store().load()?;
+        serde_json::from_str(&json).ok()
     }
 
     pub fn delete() {
-        let _ = keyring_delete();
-        let _ = std::fs::remove_file(token_path());
+        cred_store().delete();
     }
 
     pub fn to_env_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
-}
-
-fn file_save(json: &str) -> Result<(), String> {
-    let path = token_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
-}
-
-fn keyring_save(json: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())?;
-    entry.set_password(json).map_err(|e| e.to_string())
-}
-
-fn keyring_load() -> Option<String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
-    entry.get_password().ok()
-}
-
-fn keyring_delete() -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())?;
-    entry.delete_credential().map_err(|e| e.to_string())
 }
 
 // ── JWT helpers ────────────────────────────────────────────────────────────

@@ -248,38 +248,14 @@ impl App {
                         } else {
                             self.process_input(&text)
                         };
-                        match outcome {
-                            InputOutcome::StartAgent => {
-                                self.screen.erase_prompt();
-                                *agent = Some(self.begin_agent_turn(&display, content));
-                            }
-                            InputOutcome::CustomCommand(cmd) => {
-                                self.screen.erase_prompt();
-                                *agent = Some(self.begin_custom_command_turn(*cmd));
-                            }
-                            InputOutcome::Compact { instructions } => {
-                                self.screen.erase_prompt();
-                                if self.history.is_empty() {
-                                    self.screen.notify_error("nothing to compact".into());
-                                } else {
-                                    self.compact_history(instructions);
-                                }
-                            }
-                            InputOutcome::Exec(rx, kill) => {
-                                self.screen.erase_prompt();
-                                self.exec_rx = Some(rx);
-                                self.exec_kill = Some(kill);
-                            }
-                            InputOutcome::CancelAndClear => {
-                                self.screen.erase_prompt();
-                                self.reset_session();
-                                *agent = None;
-                            }
-                            InputOutcome::Continue => {}
-                            InputOutcome::Quit => return true,
-                            InputOutcome::OpenDialog(dlg) => {
-                                self.open_dialog(dlg, active_dialog);
-                            }
+                        if self.apply_input_outcome(
+                            outcome,
+                            content,
+                            &display,
+                            agent,
+                            active_dialog,
+                        ) {
+                            return true;
                         }
                     } else if !self.queued_messages.is_empty() {
                         // Empty submit with queued messages: pop and send the
@@ -291,39 +267,16 @@ impl App {
                             self.screen.erase_prompt();
                             *agent = Some(self.begin_custom_command_turn(cmd));
                         } else {
-                            match self.process_input(&queued) {
-                                InputOutcome::StartAgent => {
-                                    self.screen.erase_prompt();
-                                    let content = Content::text(queued.clone());
-                                    *agent = Some(self.begin_agent_turn(&queued, content));
-                                }
-                                InputOutcome::CustomCommand(cmd) => {
-                                    self.screen.erase_prompt();
-                                    *agent = Some(self.begin_custom_command_turn(*cmd));
-                                }
-                                InputOutcome::Compact { instructions } => {
-                                    self.screen.erase_prompt();
-                                    if self.history.is_empty() {
-                                        self.screen.notify_error("nothing to compact".into());
-                                    } else {
-                                        self.compact_history(instructions);
-                                    }
-                                }
-                                InputOutcome::Exec(rx, kill) => {
-                                    self.screen.erase_prompt();
-                                    self.exec_rx = Some(rx);
-                                    self.exec_kill = Some(kill);
-                                }
-                                InputOutcome::CancelAndClear => {
-                                    self.screen.erase_prompt();
-                                    self.reset_session();
-                                    *agent = None;
-                                }
-                                InputOutcome::Continue => {}
-                                InputOutcome::Quit => return true,
-                                InputOutcome::OpenDialog(dlg) => {
-                                    self.open_dialog(dlg, active_dialog);
-                                }
+                            let outcome = self.process_input(&queued);
+                            let content = Content::text(queued.clone());
+                            if self.apply_input_outcome(
+                                outcome,
+                                content,
+                                &queued,
+                                agent,
+                                active_dialog,
+                            ) {
+                                return true;
                             }
                         }
                     }
