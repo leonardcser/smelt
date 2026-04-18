@@ -88,6 +88,8 @@ pub struct Screen {
     last_vim_enabled: bool,
     last_vim_mode: Option<crate::vim::ViMode>,
     last_mode: protocol::Mode,
+    /// App-level focus (Prompt / History). Driven by App::app_focus.
+    last_app_focus: crate::app::AppFocus,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -160,6 +162,7 @@ impl Screen {
             last_vim_enabled: false,
             last_vim_mode: None,
             last_mode: protocol::Mode::Normal,
+            last_app_focus: crate::app::AppFocus::Prompt,
             btw: None,
             notification: None,
             task_label: None,
@@ -527,6 +530,24 @@ impl Screen {
                 });
             }
         }
+
+        // App focus pill (always shown; two-level mode on top of vim).
+        let (focus_label, focus_fg) = match self.last_app_focus {
+            crate::app::AppFocus::Prompt => ("PROMPT", Color::AnsiValue(74)),
+            crate::app::AppFocus::History => ("HISTORY", Color::AnsiValue(214)),
+        };
+        spans.push(StatusSpan {
+            text: format!(" {focus_label} "),
+            style: StyleState {
+                fg: Some(focus_fg),
+                bg: Some(Color::AnsiValue(236)),
+                bold: true,
+                ..StyleState::default()
+            },
+            priority: 2,
+            group: false,
+            truncatable: false,
+        });
 
         // Vim mode.
         if self.last_vim_enabled {
@@ -1251,6 +1272,13 @@ impl Screen {
     pub fn set_reasoning_effort(&mut self, effort: protocol::ReasoningEffort) {
         self.reasoning_effort = effort;
         self.prompt.dirty = true;
+    }
+
+    pub fn set_app_focus(&mut self, focus: crate::app::AppFocus) {
+        if self.last_app_focus != focus {
+            self.last_app_focus = focus;
+            self.prompt.dirty = true;
+        }
     }
 
     pub fn working_throbber(&self) -> Option<Throbber> {

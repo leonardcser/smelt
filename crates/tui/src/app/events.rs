@@ -2,7 +2,7 @@ use super::*;
 
 use crate::keymap::{self, KeyAction};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, MouseEvent, MouseEventKind},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -305,6 +305,17 @@ impl App {
             return EventOutcome::Noop;
         }
 
+        // ── Mouse events (wheel scrolls history) ─────────────────────────
+        if let Event::Mouse(me) = ev {
+            return self.handle_mouse(me);
+        }
+
+        // ── App NORMAL (History focus): intercept keys before anything else.
+        // Dialogs/completers still take precedence — handled inside.
+        if self.app_focus == crate::app::AppFocus::History && !self.input.has_modal() {
+            return self.handle_event_app_history(ev);
+        }
+
         if let Some(outcome) = self.handle_overlay_keys(&ev) {
             return outcome;
         }
@@ -328,7 +339,7 @@ impl App {
                     t.last_esc = None;
                     let restore_mode = t.esc_vim_mode.take();
 
-                    // Cancel in-flight compaction instead of opening rewind.
+                    // Cancel in-flight compaction instead of switching focus.
                     if self.screen.working_throbber() == Some(render::Throbber::Compacting) {
                         self.compact_epoch += 1;
                         self.screen.set_throbber(render::Throbber::Interrupted);
@@ -339,16 +350,10 @@ impl App {
                         return EventOutcome::Noop;
                     }
 
-                    let turns = self.screen.user_turns();
-                    if turns.is_empty() {
-                        return EventOutcome::Noop;
-                    }
-                    self.screen.erase_prompt();
-                    let restore_vim_insert = restore_mode == Some(vim::ViMode::Insert);
-                    return EventOutcome::OpenDialog(Box::new(render::RewindDialog::new(
-                        turns,
-                        restore_vim_insert,
-                    )));
+                    // Double-Esc from prompt NORMAL → app NORMAL (history focus).
+                    self.app_focus = crate::app::AppFocus::History;
+                    self.screen.mark_dirty();
+                    return EventOutcome::Redraw;
                 }
                 // Single Esc in normal mode — start timer.
                 t.last_esc = Some(Instant::now());
@@ -901,5 +906,78 @@ impl App {
             }),
             None,
         );
+    }
+
+    // ── App NORMAL (History focus) key handler ──────────────────────────
+    fn handle_event_app_history(&mut self, ev: Event) -> EventOutcome {
+        let Event::Key(k) = ev else {
+            return EventOutcome::Noop;
+        };
+        use crossterm::event::KeyModifiers as M;
+        match (k.code, k.modifiers) {
+            // Back to prompt.
+            (KeyCode::Char('i'), M::NONE)
+            | (KeyCode::Char('a'), M::NONE)
+            | (KeyCode::Char('o'), M::NONE)
+            | (KeyCode::Esc, _) => {
+                self.app_focus = crate::app::AppFocus::Prompt;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            // Quit.
+            (KeyCode::Char('q'), M::NONE) => EventOutcome::Quit,
+            // Scroll motions: stubbed as offset changes. Actual viewport
+            // rendering honors these once the flat-line model lands.
+            (KeyCode::Char('j'), M::NONE) | (KeyCode::Down, _) => {
+                self.history_scroll_offset = self.history_scroll_offset.saturating_sub(1);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('k'), M::NONE) | (KeyCode::Up, _) => {
+                self.history_scroll_offset = self.history_scroll_offset.saturating_add(1);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('d'), M::CONTROL) => {
+                let half = (self.last_height / 2).max(1);
+                self.history_scroll_offset = self.history_scroll_offset.saturating_sub(half);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('u'), M::CONTROL) => {
+                let half = (self.last_height / 2).max(1);
+                self.history_scroll_offset = self.history_scroll_offset.saturating_add(half);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('G'), _) => {
+                self.history_scroll_offset = 0;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('g'), M::NONE) => {
+                self.history_scroll_offset = u16::MAX;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            _ => EventOutcome::Noop,
+        }
+    }
+
+    // ── Mouse event dispatch (wheel → history scroll) ───────────────────
+    fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
+        match me.kind {
+            MouseEventKind::ScrollUp => {
+                self.history_scroll_offset = self.history_scroll_offset.saturating_add(3);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            MouseEventKind::ScrollDown => {
+                self.history_scroll_offset = self.history_scroll_offset.saturating_sub(3);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            _ => EventOutcome::Noop,
+        }
     }
 }

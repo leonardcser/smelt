@@ -156,6 +156,21 @@ pub struct App {
     /// Whether api_key_env was explicitly provided via CLI (takes precedence over session).
     cli_api_key_env_override: bool,
     startup_auth_error: Option<String>,
+    /// App-level focus (Prompt = editing buffer; History = navigating transcript).
+    pub app_focus: AppFocus,
+    /// Scroll offset in rows for the history viewport (0 = stuck to bottom).
+    /// Increases as the user scrolls up (via wheel or j/k in History focus).
+    pub history_scroll_offset: u16,
+}
+
+/// Two-level focus on top of the existing vim modes.
+///
+/// * `Prompt` — prompt owns input; vim Insert/Normal/Visual live inside.
+/// * `History` — transcript is the target of motions; prompt is frozen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppFocus {
+    Prompt,
+    History,
 }
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
@@ -510,6 +525,8 @@ impl App {
             cli_api_base_override,
             cli_api_key_env_override,
             startup_auth_error,
+            app_focus: AppFocus::Prompt,
+            history_scroll_offset: 0,
         }
     }
 
@@ -1406,6 +1423,7 @@ impl App {
         agent_running: bool,
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) {
+        self.screen.set_app_focus(self.app_focus);
         if let Some(d) = active_dialog.as_mut() {
             let dialog_height = d.height();
             let constrain = d.constrain_height();
