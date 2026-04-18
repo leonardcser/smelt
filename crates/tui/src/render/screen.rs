@@ -90,6 +90,11 @@ pub struct Screen {
     last_mode: protocol::Mode,
     /// App-level focus (Prompt / History). Driven by App::app_focus.
     last_app_focus: crate::app::AppFocus,
+    /// Last scroll offset / cursor position reported by the viewport draw.
+    /// Used by the status bar to render contextual info for the Content pane.
+    last_scroll_offset: u16,
+    last_cursor_line: u16,
+    last_cursor_col: u16,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -163,6 +168,9 @@ impl Screen {
             last_vim_mode: None,
             last_mode: protocol::Mode::Normal,
             last_app_focus: crate::app::AppFocus::Prompt,
+            last_scroll_offset: 0,
+            last_cursor_line: 0,
+            last_cursor_col: 0,
             btw: None,
             notification: None,
             task_label: None,
@@ -549,8 +557,37 @@ impl Screen {
             truncatable: false,
         });
 
-        // Vim mode.
-        if self.last_vim_enabled {
+        // Contextual pane info.
+        if self.last_app_focus == crate::app::AppFocus::Content {
+            let text = if self.last_scroll_offset > 0 {
+                format!(
+                    " L{}:C{} scroll:{} ",
+                    self.last_cursor_line + 1,
+                    self.last_cursor_col + 1,
+                    self.last_scroll_offset,
+                )
+            } else {
+                format!(
+                    " L{}:C{} ",
+                    self.last_cursor_line + 1,
+                    self.last_cursor_col + 1,
+                )
+            };
+            spans.push(StatusSpan {
+                text,
+                style: StyleState {
+                    fg: Some(theme::muted()),
+                    bg: Some(Color::AnsiValue(234)),
+                    ..StyleState::default()
+                },
+                priority: 3,
+                group: false,
+                truncatable: true,
+            });
+        }
+
+        // Vim mode — only relevant in the prompt pane.
+        if self.last_vim_enabled && self.last_app_focus == crate::app::AppFocus::Prompt {
             let vim_label = vim_mode_label(self.last_vim_mode).unwrap_or("NORMAL");
             let vim_fg = match self.last_vim_mode {
                 Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
@@ -2320,6 +2357,11 @@ impl Screen {
         self.has_scrollback = false;
         // Fully flushed — every frame re-renders everything.
         self.history.flushed = self.history.order.len();
+
+        // Record cursor/scroll state for the status bar.
+        self.last_scroll_offset = clamped;
+        self.last_cursor_line = clamped_cursor_line;
+        self.last_cursor_col = clamped_cursor_col;
 
         (clamped, clamped_cursor_line, clamped_cursor_col)
     }
