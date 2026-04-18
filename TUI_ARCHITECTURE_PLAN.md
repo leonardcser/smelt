@@ -286,6 +286,13 @@ Do all five `active_*` migrations in **one** coherent patch, not per-variant dua
 
 ## Phase B — Centralize viewport/cursor/scroll geometry
 
+**Status**
+- ✅ **B1**: `render/viewport.rs` ships `ViewportGeom` with `max_scroll` / `clamped_scroll` / `skip_from_top` / `leading_blanks` / `row_of_line` / `line_of_row` / `stuck_to_bottom` / `apply_growth` and 8 unit tests covering the boundary matrix (short buffer, exact fit, overflow stuck-to-bottom, mid-scroll, scroll-past-max, growth preserves pin, growth while stuck, empty buffer).
+- ✅ **B3 partial**: `BlockHistory::paint_viewport` and `BlockHistory::viewport_text` both consume `ViewportGeom` for scroll/skip/leading-blank math — the two hottest paths no longer reinvent the mapping.
+- ⬜ **B3 remainder**: `TranscriptWindow::{sync_from_cpos, visible_cpos, mount, reanchor_to_visible_row, apply_pin}` still open-code the math. `events.rs::position_content_cursor_from_hit` still uses `skip + rel_row`.
+- ⬜ **B4**: the two cursor bugs (j/k locked on resume; click offset inverted on short buffers) have not been verified or regression-tested yet.
+
+
 Four cursor/scroll bugs this session all had the same shape: the mapping `(viewport_rows, total, scroll_offset) ↔ (row_on_screen, line_in_buffer)` was reinvented at each call site. Centralize.
 
 ### B1 — New `render/viewport.rs` module
