@@ -1411,6 +1411,14 @@ impl App {
             let buf = rows.join("\n");
             if let Some(vim) = self.content_pane.vim.as_ref() {
                 if let Some((s, e)) = vim.visual_range(&buf, self.content_pane.cpos) {
+                    let mut s = s.min(buf.len());
+                    let mut e = e.min(buf.len());
+                    while s > 0 && !buf.is_char_boundary(s) {
+                        s -= 1;
+                    }
+                    while e < buf.len() && !buf.is_char_boundary(e) {
+                        e += 1;
+                    }
                     if s < e {
                         let selection = buf[s..e].to_string();
                         let chars = selection.chars().count();
