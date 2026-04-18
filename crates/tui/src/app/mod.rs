@@ -17,10 +17,11 @@ use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCom
 use crossterm::{
     cursor,
     event::{
-        self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
-        EventStream, KeyCode, KeyEvent, KeyModifiers,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, EventStream, KeyCode, KeyEvent, KeyModifiers,
     },
-    terminal, ExecutableCommand,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
 };
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -535,9 +536,11 @@ impl App {
     ) {
         crate::theme::detect_background();
         terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(EnterAlternateScreen);
         let _ = io::stdout().execute(cursor::Hide);
         let _ = io::stdout().execute(EnableBracketedPaste);
         let _ = io::stdout().execute(EnableFocusChange);
+        let _ = io::stdout().execute(EnableMouseCapture);
 
         if !self.history.is_empty() {
             self.restore_screen();
@@ -900,6 +903,8 @@ impl App {
         // When there is session history, clear below for a clean resume hint area.
         let clear_below = !self.session.messages.is_empty();
         self.screen.move_cursor_past_prompt(clear_below);
+        let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(LeaveAlternateScreen);
         let _ = io::stdout().execute(cursor::Show);
         let _ = io::stdout().execute(DisableBracketedPaste);
         let _ = io::stdout().execute(DisableFocusChange);

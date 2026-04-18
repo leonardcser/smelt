@@ -145,6 +145,8 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     std::panic::set_hook(Box::new(|info| {
+        let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
+        let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
         let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
@@ -283,6 +285,8 @@ async fn main() {
             } else {
                 None
             };
+            let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
+            let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);

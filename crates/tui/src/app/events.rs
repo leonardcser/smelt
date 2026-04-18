@@ -1,7 +1,11 @@
 use super::*;
 
 use crate::keymap::{self, KeyAction};
-use crossterm::{event::Event, terminal};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, Event},
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
+};
 use std::time::{Duration, Instant};
 
 /// Coalesce-window for repeated `Action::PurgeRedraw` (Ctrl+L) presses.
@@ -675,13 +679,17 @@ impl App {
             return;
         }
 
-        // Suspend raw mode so the editor gets a normal terminal.
+        // Suspend TUI so the editor gets a normal terminal.
+        let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(LeaveAlternateScreen);
         terminal::disable_raw_mode().ok();
 
         let status = std::process::Command::new(&editor).arg(tmp.path()).status();
 
-        // Resume raw mode.
+        // Resume TUI.
         terminal::enable_raw_mode().ok();
+        let _ = io::stdout().execute(EnterAlternateScreen);
+        let _ = io::stdout().execute(EnableMouseCapture);
 
         match status {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
