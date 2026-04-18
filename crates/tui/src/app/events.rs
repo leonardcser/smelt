@@ -898,10 +898,15 @@ impl App {
             }
         };
         let buf: &str = buf_ref.as_ref();
-        let cpos = cpos.min(buf.len());
-        // Line: 1-indexed count of '\n' before cpos.
+        // Clamp + snap down to the nearest char boundary. `cpos` is
+        // normally a boundary, but when the transcript mutates between
+        // when `cpos` was last set and this read (e.g. streaming adds
+        // multibyte glyphs), the stale offset may land mid-codepoint.
+        let mut cpos = cpos.min(buf.len());
+        while cpos > 0 && !buf.is_char_boundary(cpos) {
+            cpos -= 1;
+        }
         let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
-        // Column: display width of the current line up to cpos.
         let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
         let col_cells = byte_to_cell(&buf[line_start..], cpos - line_start);
         let total_lines = buf.bytes().filter(|&b| b == b'\n').count() + 1;

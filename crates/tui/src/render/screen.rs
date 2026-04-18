@@ -2957,22 +2957,33 @@ impl Screen {
             let pred = prediction.unwrap();
             let first_line = pred.lines().next().unwrap_or(pred);
             let cursor_row = out.row.unwrap_or(0);
+            let prompt_focused =
+                self.focused && self.last_app_focus == crate::app::AppFocus::Prompt;
             // Match the one-space gutter used for normal input lines so the
             // prediction aligns with where real characters would be typed.
             out.print(" ");
             let max_chars = usable.saturating_sub(1);
             let mut chars = first_line.chars().take(max_chars);
             if let Some(first) = chars.next() {
-                let (fg, bg) = cursor_colors();
-                out.set_fg(fg);
-                out.set_bg(bg);
-                out.print(&first.to_string());
-                out.reset_style();
+                if prompt_focused {
+                    // Only the focused window draws a block cursor —
+                    // otherwise the transcript window's cursor + this
+                    // one render as two simultaneous cursors.
+                    let (fg, bg) = cursor_colors();
+                    out.set_fg(fg);
+                    out.set_bg(bg);
+                    out.print(&first.to_string());
+                    out.reset_style();
+                } else {
+                    out.push_dim();
+                    out.print(&first.to_string());
+                    out.pop_style();
+                }
                 out.push_dim();
                 let rest: String = chars.collect();
                 out.print(&rest);
                 out.pop_style();
-            } else {
+            } else if prompt_focused {
                 draw_soft_cursor(out, 1, cursor_row, " ");
             }
             let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
