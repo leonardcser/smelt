@@ -6,6 +6,17 @@
 //! `buf::*` operates on buffer text; `win::*` on cursor + viewport +
 //! selection. The same surface internal code uses is what plugins will
 //! eventually use — keep it small, named, and intent-shaped.
+//!
+//! # Stability
+//!
+//! Breaking changes to any `pub fn` in this module bump [`VERSION`].
+//! User scripts (Lua, Rust plugins) can branch on it to target a
+//! specific API generation.
+
+/// Semantic-version tag for the public API surface. Increments on any
+/// signature change, removal, or behaviour-altering rename. Additive
+/// changes (new functions) do not bump the version.
+pub const VERSION: &str = "1";
 
 /// Buffer-level operations — text, attachments, whole-buffer replace.
 pub mod buf {

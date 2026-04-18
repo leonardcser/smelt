@@ -18,6 +18,42 @@ use crate::buffer::Buffer;
 use crate::text_utils::{byte_to_cell, cell_to_byte};
 use crossterm::event::{KeyCode, KeyEvent};
 
+/// Side of a window a gutter column sits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GutterSide {
+    Left,
+    Right,
+}
+
+/// Per-window gutter reservations. Content-rect width is
+/// `window.rect.width - pad_left - pad_right`. Cursor columns live in
+/// content-rect coords — clicks in gutters route to the gutter widget
+/// (scrollbar) or snap into the content rect.
+///
+/// Extension points: `numbercol_width`, `signcol_width`, `foldcol_width`
+/// slot into the same computation without call-site changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowGutters {
+    pub pad_left: u16,
+    pub pad_right: u16,
+    /// `None` = no scrollbar column reserved; `Some(side)` = one column
+    /// inside the matching pad is dedicated to the scrollbar track.
+    pub scrollbar: Option<GutterSide>,
+}
+
+impl WindowGutters {
+    /// Total horizontal reservation in cells.
+    pub fn total(&self) -> u16 {
+        self.pad_left + self.pad_right
+    }
+
+    /// Content width after subtracting gutter reservations. Saturating
+    /// so a narrow terminal never underflows to `u16::MAX`.
+    pub fn content_width(&self, window_width: u16) -> u16 {
+        window_width.saturating_sub(self.total())
+    }
+}
+
 /// Common window interface — the shared shape every pane (prompt,
 /// transcript, future floats) exposes. Typed mutations live on
 /// `crate::api::{buf, win}`; this trait is the minimum every caller
