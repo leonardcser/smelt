@@ -1049,10 +1049,22 @@ impl App {
             v
         };
 
-        // Clamp cpos into the current buffer.
-        if self.content_cpos > buf.len() {
-            self.content_cpos = buf.len();
-        }
+        // Sync `content_cpos` from the visible cursor before handing off
+        // to vim. Without this, a freshly resumed session (where history
+        // is populated but `content_cpos` is still 0 = top of transcript,
+        // while `history_cursor_line` = 0 = bottom-of-viewport) would
+        // snap to the top on the first motion.
+        let visible_line_idx = (total_lines - 1)
+            .saturating_sub(self.history_cursor_line as usize)
+            .min(total_lines - 1);
+        let visible_line_start = line_start_offsets[visible_line_idx];
+        let visible_line_len = rows[visible_line_idx].len();
+        let col_byte = rows[visible_line_idx]
+            .char_indices()
+            .nth(self.history_cursor_col as usize)
+            .map(|(b, _)| b)
+            .unwrap_or(visible_line_len);
+        self.content_cpos = (visible_line_start + col_byte).min(buf.len());
         let mut cpos = self.content_cpos;
         let mut attachments: Vec<crate::attachment::AttachmentId> = Vec::new();
         let mut ctx = crate::vim::VimContext {
