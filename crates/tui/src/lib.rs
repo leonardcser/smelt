@@ -1,6 +1,7 @@
 pub mod alloc;
 pub mod app;
 pub mod attachment;
+pub mod buffer;
 pub mod builtin_commands;
 pub mod completer;
 pub mod config;

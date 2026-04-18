@@ -167,18 +167,12 @@ pub struct App {
     pub history_cursor_line: u16,
     /// Cursor column within the history viewport (0-indexed).
     pub history_cursor_col: u16,
-    /// Vim state driving the content pane (Normal / Visual / VisualLine).
-    /// The content pane treats the transcript as a readonly buffer and
-    /// reuses vim for motions, visual selection and yank.
-    pub content_vim: crate::vim::Vim,
-    /// Flat char-offset of the cursor into the transcript buffer.
-    pub content_cpos: usize,
-    /// Scratch kill ring used by content-pane yank; copied to the system
-    /// clipboard after each yank action.
-    pub content_kill: crate::input::KillRing,
-    /// Scratch undo stack — required by `VimContext` but discarded each
-    /// turn since the content buffer is readonly.
-    pub content_undo: crate::undo::UndoHistory,
+    /// Readonly buffer backing the content pane. Owns the transcript-
+    /// as-text snapshot, the vim state driving motions / visual / yank,
+    /// and per-buffer kill ring + undo. Viewport scroll / cursor row /
+    /// col live on `App` for now (mirrored with buffer state before and
+    /// after each key dispatch).
+    pub content_buffer: crate::buffer::Buffer,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -552,10 +546,7 @@ impl App {
             history_scroll_offset: 0,
             history_cursor_line: 0,
             history_cursor_col: 0,
-            content_vim: crate::vim::Vim::new(),
-            content_cpos: 0,
-            content_kill: crate::input::KillRing::new(),
-            content_undo: crate::undo::UndoHistory::new(None),
+            content_buffer: crate::buffer::Buffer::readonly(),
         }
     }
 

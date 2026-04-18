@@ -965,11 +965,10 @@ impl App {
     }
 
     /// Move the content-pane cursor by `delta` lines (positive = down,
-    /// negative = up) by synthesizing vim `j`/`k` keys and feeding them
-    /// through `handle_content_vim_key`. This reuses vim's own vertical
-    /// motion — including `curswant` (desired column) tracking — so
-    /// mouse-wheel scroll, Ctrl-U/Ctrl-D, arrow keys, and j/k all take
-    /// the same code path.
+    /// negative = up) by routing synthetic `j`/`k` keys through the
+    /// same vim path as real keypresses. This reuses vim's vertical
+    /// motion — including `curswant` — so mouse wheel, Ctrl-U/D, arrow
+    /// keys and j/k all share one code path.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
         let (code, count) = if delta >= 0 {
             (KeyCode::Char('j'), delta as usize)
@@ -1009,7 +1008,7 @@ impl App {
             .nth(col)
             .map(|(b, _)| b)
             .unwrap_or(line.len());
-        self.content_cpos = acc + byte_off;
+        self.content_buffer.cpos = acc + byte_off;
 
         let total = rows.len();
         let line_from_bottom = (total - 1).saturating_sub(line_idx) as u16;
@@ -1035,27 +1034,21 @@ impl App {
         if rows.is_empty() {
             return false;
         }
-        let mut buf = rows.join("\n");
         let total_lines = rows.len();
 
-        // Start-of-bottom-line offset (what cpos maps to when scroll=0).
-        let line_start_offsets: Vec<usize> = {
-            let mut v = Vec::with_capacity(total_lines);
-            let mut acc = 0usize;
-            for r in &rows {
-                v.push(acc);
-                acc += r.len() + 1; // include '\n'
-            }
-            v
-        };
+        // Per-line byte offsets into the joined buffer.
+        let mut line_start_offsets: Vec<usize> = Vec::with_capacity(total_lines);
+        let mut acc = 0usize;
+        for r in &rows {
+            line_start_offsets.push(acc);
+            acc += r.len() + 1;
+        }
 
-        // Sync `content_cpos` from the visible cursor before handing off
-        // to vim. `history_cursor_line` is viewport-relative (0 = bottom
-        // row of the viewport) and `history_scroll_offset` is how far
-        // the viewport has been scrolled up from the transcript bottom.
-        // Without this sync a fresh resume (cpos=0 at top, but cursor
-        // shown at bottom of viewport) would snap to the wrong line on
-        // the first motion.
+        // Sync the buffer's text and cursor from the visible cursor
+        // position before handing off. Without this, a fresh resume
+        // (buffer cpos=0 at top, but cursor shown at bottom of viewport)
+        // would snap to the wrong line on the first motion.
+        self.content_buffer.buf = rows.join("\n");
         let transcript_from_bottom =
             (self.history_cursor_line as usize) + (self.history_scroll_offset as usize);
         let visible_line_idx = (total_lines - 1)
@@ -1068,52 +1061,38 @@ impl App {
             .nth(self.history_cursor_col as usize)
             .map(|(b, _)| b)
             .unwrap_or(visible_line_len);
-        self.content_cpos = (visible_line_start + col_byte).min(buf.len());
-        let mut cpos = self.content_cpos;
-        let mut attachments: Vec<crate::attachment::AttachmentId> = Vec::new();
-        let mut ctx = crate::vim::VimContext {
-            buf: &mut buf,
-            cpos: &mut cpos,
-            attachments: &mut attachments,
-            kill_ring: &mut self.content_kill,
-            history: &mut self.content_undo,
-        };
-        let action = self.content_vim.handle_key(k, &mut ctx);
-        // Insert mode in the content pane would expose editing — snap
-        // back to Normal so the pane stays readonly.
-        if self.content_vim.mode() == crate::vim::ViMode::Insert {
-            self.content_vim.set_mode(crate::vim::ViMode::Normal);
-        }
-        if matches!(action, crate::vim::Action::Passthrough) {
+        self.content_buffer.cpos =
+            (visible_line_start + col_byte).min(self.content_buffer.buf.len());
+
+        if !self.content_buffer.handle_vim_key(k) {
             return false;
         }
 
         // On yank (kill_ring updated), push to the system clipboard.
-        let yanked = self.content_kill.current().to_string();
+        let yanked = self.content_buffer.kill_ring.current().to_string();
         if !yanked.is_empty() {
             let _ = crate::app::commands::copy_to_clipboard(&yanked);
             self.screen
                 .notify(format!("yanked {} chars", yanked.chars().count()));
-            self.content_kill.set_with_linewise(String::new(), false);
+            self.content_buffer
+                .kill_ring
+                .set_with_linewise(String::new(), false);
         }
 
         // Map cpos back to (line_idx, col). `line_from_bottom` is the
         // absolute transcript position measured from the bottom.
-        self.content_cpos = cpos.min(
+        self.content_buffer.cpos = self.content_buffer.cpos.min(
             line_start_offsets.last().copied().unwrap_or(0) + rows.last().map_or(0, |r| r.len()),
         );
-        let line_idx = match line_start_offsets.binary_search(&self.content_cpos) {
+        let line_idx = match line_start_offsets.binary_search(&self.content_buffer.cpos) {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         };
-        let col = self.content_cpos - line_start_offsets[line_idx];
+        let col = self.content_buffer.cpos - line_start_offsets[line_idx];
         let line_from_bottom = ((total_lines - 1).saturating_sub(line_idx)) as u16;
         self.history_cursor_col = col as u16;
 
         // Adjust scroll so the cursor row stays inside the viewport.
-        // `scroll_offset` is the absolute distance the viewport has been
-        // pushed up from the transcript bottom; `history_cursor_line` is
-        // viewport-relative (0 = bottom row, viewport-1 = top row).
         let viewport = self.viewport_rows_estimate();
         let top_lfb = self
             .history_scroll_offset
@@ -1137,8 +1116,8 @@ impl App {
         if self.app_focus != crate::app::AppFocus::Content {
             return None;
         }
-        let mode = self.content_vim.mode();
-        let kind = match mode {
+        let vim = self.content_buffer.vim.as_ref()?;
+        let kind = match vim.mode() {
             crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
             crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
             _ => return None,
@@ -1148,7 +1127,7 @@ impl App {
             return None;
         }
         let buf = rows.join("\n");
-        let (s, e) = self.content_vim.visual_range(&buf, self.content_cpos)?;
+        let (s, e) = vim.visual_range(&buf, self.content_buffer.cpos)?;
         let offset_to_line_col = |off: usize| -> (usize, usize) {
             let off = off.min(buf.len());
             let prefix = &buf[..off];
