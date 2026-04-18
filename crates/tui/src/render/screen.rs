@@ -2240,27 +2240,27 @@ impl Screen {
         // Scrollbar on the rightmost column, matching the prompt.
         // Visible whenever content overflows the viewport so the user
         // has a predictable target to click / drag.
+        let geom =
+            super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
         let scrollbar_col = (width as u16).saturating_sub(1);
-        let scrollbar_geom: Option<super::region::ScrollbarGeom> =
-            if (total_transcript_rows as usize) > viewport_rows as usize {
-                let max_scroll =
-                    (total_transcript_rows as usize).saturating_sub(viewport_rows as usize);
-                let inverted = max_scroll.saturating_sub(clamped as usize);
-                let scrollbar = super::scrollbar::Scrollbar::new(
-                    total_transcript_rows as usize,
-                    viewport_rows as usize,
-                    inverted,
-                );
-                super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
-                Some(super::region::ScrollbarGeom {
-                    col: scrollbar_col,
-                    top_row: 0,
-                    rows: viewport_rows,
-                    total_rows: total_transcript_rows,
-                })
-            } else {
-                None
-            };
+        let scrollbar_geom: Option<super::region::ScrollbarGeom> = if geom.max_scroll() > 0 {
+            let max_scroll = geom.max_scroll() as usize;
+            let inverted = max_scroll.saturating_sub(clamped as usize);
+            let scrollbar = super::scrollbar::Scrollbar::new(
+                total_transcript_rows as usize,
+                viewport_rows as usize,
+                inverted,
+            );
+            super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
+            Some(super::region::ScrollbarGeom {
+                col: scrollbar_col,
+                top_row: 0,
+                rows: viewport_rows,
+                total_rows: total_transcript_rows,
+            })
+        } else {
+            None
+        };
         self.last_transcript_region = Some(super::region::TranscriptRegion {
             top_row: 0,
             rows: viewport_rows,
@@ -2285,7 +2285,9 @@ impl Screen {
 
         // When the content pane has focus, paint a block cursor at
         // (col, row) within the viewport using the same colors as the
-        // prompt's soft cursor.
+        // prompt's soft cursor. `history_cursor_line` is the
+        // bottom-relative row (0 = bottom row of the viewport); the
+        // painter writes in top-down coords.
         let (clamped_cursor_line, clamped_cursor_col) =
             if self.last_app_focus == crate::app::AppFocus::Content && viewport_rows > 0 {
                 let max_line = viewport_rows.saturating_sub(1);
@@ -2436,26 +2438,26 @@ impl Screen {
 
         // Scrollbar on the rightmost column over the transcript region.
         let scrollbar_col = (width as u16).saturating_sub(1);
-        let scrollbar_geom: Option<super::region::ScrollbarGeom> =
-            if (total_transcript_rows as usize) > viewport_rows as usize {
-                let max_scroll =
-                    (total_transcript_rows as usize).saturating_sub(viewport_rows as usize);
-                let inverted = max_scroll.saturating_sub(clamped as usize);
-                let scrollbar = super::scrollbar::Scrollbar::new(
-                    total_transcript_rows as usize,
-                    viewport_rows as usize,
-                    inverted,
-                );
-                super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
-                Some(super::region::ScrollbarGeom {
-                    col: scrollbar_col,
-                    top_row: 0,
-                    rows: viewport_rows,
-                    total_rows: total_transcript_rows,
-                })
-            } else {
-                None
-            };
+        let dialog_geom =
+            super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
+        let scrollbar_geom: Option<super::region::ScrollbarGeom> = if dialog_geom.max_scroll() > 0 {
+            let max_scroll = dialog_geom.max_scroll() as usize;
+            let inverted = max_scroll.saturating_sub(clamped as usize);
+            let scrollbar = super::scrollbar::Scrollbar::new(
+                total_transcript_rows as usize,
+                viewport_rows as usize,
+                inverted,
+            );
+            super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
+            Some(super::region::ScrollbarGeom {
+                col: scrollbar_col,
+                top_row: 0,
+                rows: viewport_rows,
+                total_rows: total_transcript_rows,
+            })
+        } else {
+            None
+        };
         self.last_transcript_region = Some(super::region::TranscriptRegion {
             top_row: 0,
             rows: viewport_rows,
