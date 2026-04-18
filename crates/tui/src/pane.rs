@@ -16,6 +16,7 @@
 
 use crate::buffer::TextBuffer;
 use crossterm::event::{KeyCode, KeyEvent};
+use unicode_width::UnicodeWidthStr;
 
 /// Common pane interface. Typed buffer mutations live on `crate::api::buf`
 /// — this trait is the minimal shared surface (text access + current
@@ -189,11 +190,19 @@ impl ContentPane {
         let from_bottom = self.cursor_line as usize + self.scroll_offset as usize;
         let line_idx = (total - 1).saturating_sub(from_bottom).min(total - 1);
         let line = &rows[line_idx];
-        let col_byte = line
-            .char_indices()
-            .nth(self.cursor_col as usize)
-            .map(|(b, _)| b)
-            .unwrap_or(line.len());
+        // `cursor_col` is in display cells; walk the line accumulating
+        // cell widths until we hit the target (or land on the char that
+        // crosses it, for wide glyphs).
+        let target = self.cursor_col as usize;
+        let mut acc = 0usize;
+        let mut col_byte = line.len();
+        for (b, ch) in line.char_indices() {
+            if acc >= target {
+                col_byte = b;
+                break;
+            }
+            acc += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
         offsets[line_idx] + col_byte
     }
 
@@ -212,7 +221,18 @@ impl ContentPane {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         };
-        let col = self.cpos - offsets[line_idx];
+        // `col` must be in display columns (terminal cells), not bytes —
+        // multibyte glyphs like `⏺` or `─` are 3 bytes but only 1 cell.
+        // Storing byte counts here made the cursor render 2 cells past
+        // the intended position and, worse, produced off-by-bytes in
+        // selection bounds (byte offsets mid-char → panic).
+        let line = &rows[line_idx];
+        let byte_col = self.cpos.saturating_sub(offsets[line_idx]).min(line.len());
+        let mut byte_col = byte_col;
+        while byte_col > 0 && !line.is_char_boundary(byte_col) {
+            byte_col -= 1;
+        }
+        let col = UnicodeWidthStr::width(&line[..byte_col]);
         let line_from_bottom = ((total - 1).saturating_sub(line_idx)) as u16;
         self.cursor_col = col as u16;
         let top_lfb = self
@@ -355,12 +375,16 @@ impl ContentPane {
         let line_idx = line_idx.min(rows.len() - 1);
         let offsets = Self::line_start_offsets(rows);
         let line = &rows[line_idx];
-        let clamped_col = col.min(line.chars().count());
-        let byte_off = line
-            .char_indices()
-            .nth(clamped_col)
-            .map(|(b, _)| b)
-            .unwrap_or(line.len());
+        // `col` is in display cells (matches click column / cursor_col).
+        let mut acc = 0usize;
+        let mut byte_off = line.len();
+        for (b, ch) in line.char_indices() {
+            if acc >= col {
+                byte_off = b;
+                break;
+            }
+            acc += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
         self.cpos = offsets[line_idx] + byte_off;
         self.sync_from_cpos(rows, &offsets, viewport_rows);
     }

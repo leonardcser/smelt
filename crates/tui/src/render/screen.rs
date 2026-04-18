@@ -1360,13 +1360,15 @@ impl Screen {
         }
         // `range` is viewport-relative: line 0 = top of viewport.
         // `last_viewport_text` indexes top-down.
+        use unicode_width::UnicodeWidthStr;
         for line_idx in range.start_line..=range.end_line.min(rows.len().saturating_sub(1)) {
             if line_idx >= rows.len() || (line_idx as u16) >= viewport_rows {
                 break;
             }
             let line = &rows[line_idx];
             let viewport_row = line_idx;
-            let line_len = line.chars().count();
+            // Columns are in display cells (set by `content_visual_range`).
+            let line_cells = UnicodeWidthStr::width(line.as_str());
             let (sel_start, sel_end) = match range.kind {
                 ContentVisualKind::Char => {
                     let start = if line_idx == range.start_line {
@@ -1375,33 +1377,44 @@ impl Screen {
                         0
                     };
                     let end = if line_idx == range.end_line {
-                        range.end_col.min(line_len)
+                        range.end_col.min(line_cells)
                     } else {
-                        line_len
+                        line_cells
                     };
                     (start, end)
                 }
-                ContentVisualKind::Line => (0, line_len),
+                ContentVisualKind::Line => (0, line_cells),
             };
             if sel_end <= sel_start {
                 continue;
             }
+            // Walk chars accumulating display width; grab the byte slice
+            // whose cell range matches `[sel_start, sel_end)`.
+            let (mut byte_start, mut byte_end) = (line.len(), line.len());
+            let mut acc = 0usize;
+            for (b, ch) in line.char_indices() {
+                if acc == sel_start {
+                    byte_start = b;
+                }
+                if acc >= sel_end {
+                    byte_end = b;
+                    break;
+                }
+                acc += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            }
+            if byte_start > byte_end {
+                continue;
+            }
+            let sub = &line[byte_start..byte_end];
             let y = viewport_row as u16;
             out.move_to(sel_start as u16, y);
             out.push_style(StyleState {
                 bg: Some(theme::selection_bg()),
                 ..StyleState::default()
             });
-            // Emit the original substring so underlying chars remain visible.
-            let sub: String = line
-                .chars()
-                .skip(sel_start)
-                .take(sel_end - sel_start)
-                .collect();
-            out.print(&sub);
-            // Pad to end of line for Line-wise visuals so the full row is highlighted.
+            out.print(sub);
             if matches!(range.kind, ContentVisualKind::Line) {
-                let used = (sel_end - sel_start) as u16;
+                let used = UnicodeWidthStr::width(sub) as u16;
                 let remaining = width.saturating_sub(sel_start as u16 + used);
                 for _ in 0..remaining {
                     out.print(" ");
@@ -2509,12 +2522,28 @@ impl Screen {
                 // viewport text so `draw_soft_cursor` can re-render it
                 // with inverted fg/bg (matching the prompt's cursor
                 // style, which preserves the underlying glyph).
-                let under: String = self
-                    .last_viewport_text
-                    .get(cursor_row as usize)
-                    .and_then(|row| row.chars().nth(col as usize))
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| " ".to_string());
+                // `col` is a display-cell column; walk chars until their
+                // accumulated width reaches it so wide glyphs render
+                // under the cursor correctly.
+                let under: String = {
+                    let row = self.last_viewport_text.get(cursor_row as usize);
+                    let target = col as usize;
+                    let mut found: Option<char> = None;
+                    if let Some(row) = row {
+                        let mut acc = 0usize;
+                        for ch in row.chars() {
+                            if acc == target {
+                                found = Some(ch);
+                                break;
+                            }
+                            acc += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                            if acc > target {
+                                break;
+                            }
+                        }
+                    }
+                    found.map(|c| c.to_string()).unwrap_or_else(|| " ".to_string())
+                };
                 draw_soft_cursor(out, col, cursor_row, &under);
                 (line, col)
             } else {

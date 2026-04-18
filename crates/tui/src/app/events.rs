@@ -1045,7 +1045,9 @@ impl App {
             let prefix = &buf[..off];
             let line = prefix.bytes().filter(|&b| b == b'\n').count();
             let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
-            let col = buf[line_start..off].chars().count();
+            // Display-cell column so the painter's x-coordinate lines up
+            // with wide glyphs (`⏺`, CJK, …).
+            let col = unicode_width::UnicodeWidthStr::width(&buf[line_start..off]);
             (line, col)
         };
         let (start_line_abs, start_col) = offset_to_line_col(s);
@@ -1327,8 +1329,22 @@ impl App {
     /// Extend the content-pane visual selection to the cell under the
     /// current drag position. Runs while the user holds mouse-1 and
     /// moves — each update moves the cursor inside vim Visual mode so
-    /// the existing visual range widens or shrinks accordingly.
+    /// the existing visual range widens or shrinks accordingly. When
+    /// the drag reaches the top or bottom row of the content viewport
+    /// the transcript scrolls one line per event so the user can extend
+    /// the selection past what's visible.
     fn extend_content_selection_to(&mut self, row: u16, col: u16) {
+        let viewport = self.viewport_rows_estimate();
+        if viewport > 0 {
+            if row == 0 {
+                self.move_content_cursor_by_lines(-1);
+                return;
+            }
+            if row >= viewport.saturating_sub(1) {
+                self.move_content_cursor_by_lines(1);
+                return;
+            }
+        }
         self.position_content_cursor_from_click(row, col);
     }
 

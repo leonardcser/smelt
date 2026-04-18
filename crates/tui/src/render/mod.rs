@@ -721,6 +721,10 @@ pub(super) fn cursor_colors() -> (Color, Color) {
 pub(super) fn draw_soft_cursor(out: &mut RenderOut, col: u16, row: u16, under: &str) {
     let (fg, bg) = cursor_colors();
     let _ = out.queue(cursor::MoveTo(col, row));
+    // Reset first so any lingering DIM / italic / underline style from
+    // the surrounding paint doesn't wash out the cursor — we want a
+    // hard-contrast black-on-white (or white-on-black) cell.
+    out.reset_style();
     out.set_fg(fg);
     out.set_bg(bg);
     let glyph = if under.is_empty() { " " } else { under };
