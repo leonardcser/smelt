@@ -176,6 +176,9 @@ pub struct App {
     /// even if the pointer wanders off the track column. The stored
     /// value records which pane's scrollbar owns the gesture.
     pub drag_on_scrollbar: Option<AppFocus>,
+    /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
+    /// user-registered commands / keymaps / autocmds.
+    pub lua: crate::lua::LuaRuntime,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -555,6 +558,7 @@ impl App {
             mouse_drag_active: false,
             drag_autoscroll_since: None,
             drag_on_scrollbar: None,
+            lua: crate::lua::LuaRuntime::new(),
         }
     }
 
@@ -602,6 +606,14 @@ impl App {
 
         if let Some(message) = self.startup_auth_error.take() {
             self.screen.notify_error(message);
+        }
+
+        // Surface any Lua load errors on the first frame.
+        if let Some(err) = self.lua.load_error.take() {
+            self.screen.notify_error(format!("lua init: {err}"));
+        }
+        for msg in self.lua.drain_notifications() {
+            self.screen.notify(msg);
         }
 
         let mut term_events = EventStream::new();

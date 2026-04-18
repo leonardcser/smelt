@@ -26,6 +26,27 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
     } else {
         line.to_string()
     };
+    // Lua-registered user commands take precedence over built-ins so
+    // users can override `/help`, `/export`, etc. from init.lua.
+    let name_arg = normalized.trim_start_matches('/');
+    let (name, arg) = match name_arg.find(char::is_whitespace) {
+        Some(idx) => (
+            &name_arg[..idx],
+            Some(name_arg[idx + 1..].trim().to_string()),
+        ),
+        None => (name_arg, None),
+    };
+    if !name.is_empty() && app.lua.has_command(name) {
+        app.lua.run_command(name, arg);
+        // Drain and surface any notifications / errors the handler queued.
+        for msg in app.lua.drain_notifications() {
+            app.screen.notify(msg);
+        }
+        for err in app.lua.drain_errors() {
+            app.screen.notify_error(err);
+        }
+        return CommandAction::Continue;
+    }
     app.handle_command(&normalized)
 }
 
