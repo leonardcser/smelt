@@ -658,6 +658,18 @@ impl App {
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
         'main: loop {
+            // ── Lua timer + notification pump ────────────────────────────
+            // Fire any `smelt.defer` timers that came due, then drain any
+            // notifications / errors Lua callbacks queued. Keeps the Lua
+            // runtime observable even when the user isn't interacting.
+            self.lua.tick_timers();
+            for msg in self.lua.drain_notifications() {
+                self.screen.notify(msg);
+            }
+            for err in self.lua.drain_errors() {
+                self.screen.notify_error(err);
+            }
+
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
