@@ -104,6 +104,17 @@ impl ContentPane {
         self.cursor_line = line_from_bottom.saturating_sub(self.scroll_offset);
     }
 
+    /// Sync the underlying buffer's `buf` + `cpos` from the current
+    /// view (visible cursor line/col + transcript rows). Returns the
+    /// per-line offsets cache so repeated operations within one frame
+    /// can reuse them without rejoining the text.
+    fn mount(&mut self, rows: &[String]) -> Vec<usize> {
+        let offsets = Self::line_start_offsets(rows);
+        self.buffer.buf = rows.join("\n");
+        self.buffer.cpos = self.visible_cpos(rows, &offsets);
+        offsets
+    }
+
     /// Dispatch a key through the buffer's vim instance. Returns
     /// `Some(yanked)` when vim consumed the key and there is new
     /// content in the kill ring (caller should copy to the system
@@ -117,9 +128,7 @@ impl ContentPane {
         if rows.is_empty() {
             return None;
         }
-        let offsets = Self::line_start_offsets(rows);
-        self.buffer.buf = rows.join("\n");
-        self.buffer.cpos = self.visible_cpos(rows, &offsets);
+        let offsets = self.mount(rows);
         if !self.buffer.handle_vim_key(k) {
             return None;
         }
@@ -137,22 +146,27 @@ impl ContentPane {
     }
 
     /// Move the content cursor by `delta` lines (positive = down). Uses
-    /// vim `j` / `k` via `handle_key` so vertical motion shares the
-    /// same path — including `curswant` — as real keypresses.
+    /// vim `j` / `k` via the underlying buffer so vertical motion shares
+    /// the same path — including `curswant` — as real keypresses. The
+    /// transcript is mounted once before the loop so a large `delta`
+    /// doesn't pay the string-join + offset cost on every iteration.
     pub fn scroll_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
+        if rows.is_empty() {
+            return;
+        }
         let (code, count) = if delta >= 0 {
             (KeyCode::Char('j'), delta as usize)
         } else {
             (KeyCode::Char('k'), (-delta) as usize)
         };
+        let offsets = self.mount(rows);
+        let k = synth_key(code);
         for _ in 0..count {
-            if self
-                .handle_key(synth_key(code), rows, viewport_rows)
-                .is_none()
-            {
+            if !self.buffer.handle_vim_key(k) {
                 break;
             }
         }
+        self.sync_from_cpos(rows, &offsets, viewport_rows);
     }
 
     /// Jump the cursor to the transcript `(line_idx, col)` position and
