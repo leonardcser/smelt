@@ -494,6 +494,8 @@ impl InputState {
             action,
             KeyAction::SelectLeft
                 | KeyAction::SelectRight
+                | KeyAction::SelectUp
+                | KeyAction::SelectDown
                 | KeyAction::SelectWordForward
                 | KeyAction::SelectWordBackward
                 | KeyAction::SelectStartOfLine
@@ -832,6 +834,16 @@ impl InputState {
                     let cp = char_pos(&self.buffer.buf, self.cpos);
                     self.cpos = byte_of_char(&self.buffer.buf, cp + 1);
                 }
+                Action::Redraw
+            }
+            KeyAction::SelectUp => {
+                self.extend_selection();
+                self.cpos = crate::vim::move_up(&self.buffer.buf, self.cpos);
+                Action::Redraw
+            }
+            KeyAction::SelectDown => {
+                self.extend_selection();
+                self.cpos = crate::vim::move_down(&self.buffer.buf, self.cpos);
                 Action::Redraw
             }
             KeyAction::SelectWordForward => {

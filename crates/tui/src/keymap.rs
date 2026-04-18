@@ -69,6 +69,8 @@ pub enum KeyAction {
     // Selection (shift+movement extends selection)
     SelectLeft,
     SelectRight,
+    SelectUp,
+    SelectDown,
     SelectWordForward,
     SelectWordBackward,
     SelectStartOfLine,
@@ -150,10 +152,6 @@ impl When {
         self
     }
 
-    const fn not_vim(mut self) -> Self {
-        self.vim_enabled = Cond::No;
-        self
-    }
 
     const fn idle(mut self) -> Self {
         self.agent_running = Cond::No;
@@ -414,51 +412,33 @@ static BINDINGS: &[Binding] = &[
     bind(
         KeyCode::Left,
         SHIFT.union(ALT),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordBackward,
     ),
     bind(
         KeyCode::Right,
         SHIFT.union(ALT),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordForward,
     ),
     bind(
         KeyCode::Left,
         SHIFT.union(CTRL),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordBackward,
     ),
     bind(
         KeyCode::Right,
         SHIFT.union(CTRL),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordForward,
     ),
-    bind(
-        KeyCode::Left,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectLeft,
-    ),
-    bind(
-        KeyCode::Right,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectRight,
-    ),
-    bind(
-        KeyCode::Home,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectStartOfLine,
-    ),
-    bind(
-        KeyCode::End,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectEndOfLine,
-    ),
+    bind(KeyCode::Left, SHIFT, when(), KeyAction::SelectLeft),
+    bind(KeyCode::Right, SHIFT, when(), KeyAction::SelectRight),
+    bind(KeyCode::Up, SHIFT, when(), KeyAction::SelectUp),
+    bind(KeyCode::Down, SHIFT, when(), KeyAction::SelectDown),
+    bind(KeyCode::Home, SHIFT, when(), KeyAction::SelectStartOfLine),
+    bind(KeyCode::End, SHIFT, when(), KeyAction::SelectEndOfLine),
     // ── Arrow / Home / End navigation ───────────────────────────────────
     bind(KeyCode::Left, ALT, when(), KeyAction::MoveWordBackward),
     bind(KeyCode::Left, SUPER, when(), KeyAction::MoveStartOfLine),

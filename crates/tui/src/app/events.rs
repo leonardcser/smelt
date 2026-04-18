@@ -971,6 +971,23 @@ impl App {
             }
         }
 
+        // Shift+arrow / Shift+Home/End extends selection via the shared
+        // keymap regardless of vim mode — the anchor logic lives in
+        // one place (`ShiftSelection`). Vim's own v/V remain for users
+        // who prefer them.
+        if k.modifiers.contains(M::SHIFT)
+            && matches!(
+                k.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+        {
+            return self.handle_content_novim_key(k);
+        }
         if self.content_pane.vim_enabled() {
             if self.handle_content_vim_key(k) {
                 return EventOutcome::Redraw;
@@ -1008,6 +1025,8 @@ impl App {
                 action,
                 KeyAction::SelectLeft
                     | KeyAction::SelectRight
+                    | KeyAction::SelectUp
+                    | KeyAction::SelectDown
                     | KeyAction::SelectWordForward
                     | KeyAction::SelectWordBackward
                     | KeyAction::SelectStartOfLine
@@ -1030,12 +1049,13 @@ impl App {
                 _ => {}
             }
             let delta: Option<isize> = match action {
-                KeyAction::MoveUp => Some(-1),
-                KeyAction::MoveDown => Some(1),
+                KeyAction::MoveUp | KeyAction::SelectUp => Some(-1),
+                KeyAction::MoveDown | KeyAction::SelectDown => Some(1),
                 _ => None,
             };
             if let Some(d) = delta {
                 self.move_content_cursor_by_lines(d);
+                self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
             let buf = self.content_pane.buffer.buf.clone();

@@ -310,6 +310,24 @@ impl Vim {
             return Action::Passthrough;
         }
 
+        // Shift+arrow / Shift+Home/End pass through so the keymap's
+        // shared shift-selection actions (`SelectLeft`, …) run —
+        // selection extension is the same operation whether vim is on
+        // or off, so it lives in one place.
+        if key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+        {
+            return Action::Passthrough;
+        }
+
         // Handle sub-states first.
         match self.sub {
             SubState::WaitingR => return self.handle_waiting_r(key, ctx),
