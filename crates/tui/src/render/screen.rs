@@ -17,7 +17,7 @@ use super::completions::{completion_reserved_rows, draw_completions, draw_menu};
 use super::context::PaintContext;
 use super::history::{
     ActiveAgent, ActiveExec, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block,
-    BlockHistory, BlockId, LayoutKey, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
+    BlockHistory, BlockId, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::paint::paint_line;
@@ -31,7 +31,7 @@ use super::working::WorkingState;
 use super::{
     cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, is_table_separator,
     reasoning_color, DialogPlacement, Frame, FramePrompt, RenderOut, StdioBackend, StyleState,
-    TerminalBackend, MAX_REDRAW_LINES, SPINNER_FRAMES,
+    TerminalBackend, SPINNER_FRAMES,
 };
 use crate::input::{InputSnapshot, InputState};
 use crate::keymap::hints;
@@ -2270,6 +2270,20 @@ impl Screen {
             scroll_offset,
             &ephemeral_lines,
         );
+
+        // Draw the history cursor (tmux-style) when in History focus.
+        if self.last_app_focus == crate::app::AppFocus::History && viewport_rows > 0 {
+            let cursor_row = viewport_rows.saturating_sub(1);
+            out.move_to(0, cursor_row);
+            out.push_style(StyleState {
+                fg: Some(Color::Black),
+                bg: Some(theme::accent()),
+                bold: true,
+                ..StyleState::default()
+            });
+            out.print("\u{258B}"); // ▋
+            out.pop_style();
+        }
 
         // Paint prompt stack at the bottom, leaving the gap row blank.
         let prompt_top = viewport_rows + gap_rows;
