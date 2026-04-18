@@ -990,6 +990,12 @@ impl App {
     fn handle_content_novim_key(&mut self, k: KeyEvent) -> EventOutcome {
         use crate::keymap::{lookup, KeyAction, KeyContext};
         use crossterm::event::KeyModifiers as M;
+        // Pull in the latest transcript text so cpos stays valid across
+        // streaming updates and so `buf` is populated before we read.
+        let w = render::term_width();
+        let rows = self.screen.full_transcript_text(w);
+        let viewport = self.viewport_rows_estimate();
+        self.content_pane.resync(&rows, viewport);
         let ctx = KeyContext {
             buf_empty: self.content_pane.buffer.buf.is_empty(),
             vim_non_insert: false,
@@ -1076,7 +1082,7 @@ impl App {
                 let w = render::term_width();
                 let rows = self.screen.full_transcript_text(w);
                 let viewport = self.viewport_rows_estimate();
-                self.content_pane.refocus(&rows, viewport);
+                self.content_pane.resync(&rows, viewport);
                 self.sync_transcript_pin();
                 self.screen.mark_dirty();
                 return EventOutcome::Redraw;
@@ -1131,18 +1137,23 @@ impl App {
         if self.app_focus != crate::app::AppFocus::Content {
             return None;
         }
-        let vim = self.content_pane.vim.as_ref()?;
-        let kind = match vim.mode() {
-            crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
-            crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
-            _ => return None,
-        };
         let rows = self.screen.full_transcript_text(width);
         if rows.is_empty() {
             return None;
         }
         let buf = rows.join("\n");
-        let (s, e) = vim.visual_range(&buf, self.content_pane.cpos)?;
+        let (s, e, kind) = if let Some(vim) = self.content_pane.vim.as_ref() {
+            let kind = match vim.mode() {
+                crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
+                crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
+                _ => return None,
+            };
+            let (s, e) = vim.visual_range(&buf, self.content_pane.cpos)?;
+            (s, e, kind)
+        } else {
+            let (s, e) = self.content_pane.selection.range(self.content_pane.cpos)?;
+            (s, e, render::ContentVisualKind::Char)
+        };
         let offset_to_line_col = |off: usize| -> (usize, usize) {
             let off = crate::text_utils::snap(&buf, off);
             let prefix = &buf[..off];
@@ -1318,6 +1329,8 @@ impl App {
                 let anchor = self.content_pane.cpos;
                 if let Some(vim) = self.content_pane.vim.as_mut() {
                     vim.begin_visual(crate::vim::ViMode::Visual, anchor);
+                } else {
+                    self.content_pane.selection.set(Some(anchor));
                 }
                 EventOutcome::Redraw
             }
@@ -1536,21 +1549,26 @@ impl App {
             let width = render::term_width();
             let rows = self.screen.full_transcript_text(width);
             let buf = rows.join("\n");
-            if let Some(vim) = self.content_pane.vim.as_ref() {
-                if let Some((s, e)) = vim.visual_range(&buf, self.content_pane.cpos) {
-                    let s = crate::text_utils::snap(&buf, s);
-                    let e = crate::text_utils::snap(&buf, e);
-                    if s < e {
-                        let selection = buf[s..e].to_string();
-                        let chars = selection.chars().count();
-                        let _ = crate::app::commands::copy_to_clipboard(&selection);
-                        copied_len = Some(chars);
-                    }
+            let range = if let Some(vim) = self.content_pane.vim.as_ref() {
+                vim.visual_range(&buf, self.content_pane.cpos)
+            } else {
+                self.content_pane.selection.range(self.content_pane.cpos)
+            };
+            if let Some((s, e)) = range {
+                let s = crate::text_utils::snap(&buf, s);
+                let e = crate::text_utils::snap(&buf, e);
+                if s < e {
+                    let selection = buf[s..e].to_string();
+                    let chars = selection.chars().count();
+                    let _ = crate::app::commands::copy_to_clipboard(&selection);
+                    copied_len = Some(chars);
                 }
             }
         }
         if let Some(vim) = self.content_pane.vim.as_mut() {
             vim.set_mode(crate::vim::ViMode::Normal);
+        } else {
+            self.content_pane.selection.clear();
         }
         if let Some(n) = copied_len {
             self.screen.notify(format!("copied {} chars", n));

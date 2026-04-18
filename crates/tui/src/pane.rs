@@ -123,6 +123,18 @@ impl ContentPane {
         Some((start, end))
     }
 
+    /// Public entry point for callers that set `cpos` directly (non-vim
+    /// keymap, click-to-position) and need the scroll/cursor display
+    /// state re-derived from it.
+    pub fn resync(&mut self, rows: &[String], viewport_rows: u16) {
+        if rows.is_empty() {
+            return;
+        }
+        let offsets = Self::line_start_offsets(rows);
+        self.buffer.buf = rows.join("\n");
+        self.sync_from_cpos(rows, &offsets, viewport_rows);
+    }
+
     /// Ensure the pane state is consistent with the current
     /// transcript. Called when focus switches to the content window:
     /// mounts the buffer, clamps cpos to the visible tail if it's
@@ -326,26 +338,46 @@ impl ContentPane {
             return;
         }
         let offsets = self.mount(rows);
-        let (code, count) = if delta > 0 {
-            (KeyCode::Char('j'), delta as usize)
-        } else {
-            (KeyCode::Char('k'), (-delta) as usize)
-        };
-        let key = KeyEvent {
-            code,
-            modifiers: crossterm::event::KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::empty(),
-        };
-        for _ in 0..count {
-            self.dispatch_vim_key(key);
-        }
-        // Readonly: a motion that slipped into Insert (via 'a', 'i', …)
-        // must not linger on the content pane.
-        if let Some(vim) = self.vim.as_mut() {
-            if vim.mode() == crate::vim::ViMode::Insert {
-                vim.set_mode(crate::vim::ViMode::Normal);
+        if self.vim.is_some() {
+            let (code, count) = if delta > 0 {
+                (KeyCode::Char('j'), delta as usize)
+            } else {
+                (KeyCode::Char('k'), (-delta) as usize)
+            };
+            let key = KeyEvent {
+                code,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::empty(),
+            };
+            for _ in 0..count {
+                self.dispatch_vim_key(key);
             }
+            if let Some(vim) = self.vim.as_mut() {
+                if vim.mode() == crate::vim::ViMode::Insert {
+                    vim.set_mode(crate::vim::ViMode::Normal);
+                }
+            }
+        } else {
+            // Vim disabled: step the cursor line-by-line, preserving
+            // the current display column as a stand-in for `curswant`.
+            use crate::text_utils::{byte_to_cell, cell_to_byte};
+            let total = rows.len();
+            let mut line_idx = match offsets.binary_search(&self.cpos) {
+                Ok(i) => i,
+                Err(i) => i.saturating_sub(1),
+            };
+            let target_col =
+                byte_to_cell(&rows[line_idx], self.cpos.saturating_sub(offsets[line_idx]));
+            let steps = delta.unsigned_abs();
+            for _ in 0..steps {
+                line_idx = if delta > 0 {
+                    (line_idx + 1).min(total - 1)
+                } else {
+                    line_idx.saturating_sub(1)
+                };
+            }
+            self.cpos = offsets[line_idx] + cell_to_byte(&rows[line_idx], target_col);
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
     }
