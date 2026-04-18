@@ -14,6 +14,7 @@ mod screen;
 mod scrollbar;
 mod selection;
 mod status;
+mod viewport;
 mod working;
 
 pub(crate) use region::{ScrollbarGeom, TranscriptHit};
