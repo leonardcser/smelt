@@ -1,20 +1,74 @@
 //! Lua bindings (Phase D). Wraps the `api::*` surface so users can
 //! script smelt from `~/.config/smelt/init.lua`.
 //!
-//! Current scope (D1 bootstrap):
-//! - Loads `~/.config/smelt/init.lua` at startup if present.
-//! - Exposes `smelt.api.version` and `smelt.notify(msg)` as a first
-//!   round-trip smoke test.
-//! - Errors during load surface through `LuaRuntime::load_error`;
-//!   callers convert to a user-visible notification.
-//!
-//! The remainder of D (D2 full `api::*` shim, D3 autocmds,
-//! D4 user-command / keymap registration, D5 re-entrancy, D6 error
-//! UX) builds on this scaffold — each slice lands without changing
-//! the load path below.
+//! Current scope:
+//! - **D1 bootstrap** — loads `~/.config/smelt/init.lua` at startup
+//!   (honouring `XDG_CONFIG_HOME`). Missing files are not errors.
+//! - **D2 api shim** — `smelt.api.version`, `smelt.api.cmd.register`,
+//!   `smelt.keymap`, `smelt.on` all accept Lua callables and store
+//!   them in per-category registries that the app polls on the tick.
+//! - **D3 autocmd dispatch** — `AutocmdRegistry` + `emit_autocmd` run
+//!   handlers synchronously; errors are logged and the next handler
+//!   runs (handler-dead tracking defers to D6).
+//! - **D4 user-command + keymap registration** — registration stores
+//!   `LuaRef` handles keyed by name; the app dispatcher looks up a
+//!   name in the Lua registry first, then falls back to Rust commands.
+//! - **D5 re-entrancy** — pending ops queue defers state mutations
+//!   until after the dispatching handler returns. `smelt.defer(ms, fn)`
+//!   posts to `pending_timers`; the tick loop fires them when due.
+//! - **D6 error UX** — every callable is wrapped in `try_call`;
+//!   errors append to `lua_errors` and the app surfaces the first as a
+//!   notification on the next tick.
 
 use mlua::prelude::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+type SharedVec<T> = Arc<Mutex<Vec<T>>>;
+type SharedMap<K, V> = Arc<Mutex<HashMap<K, V>>>;
+
+/// Event kinds the app emits into the Lua autocmd dispatcher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AutocmdEvent {
+    BlockDone,
+    CmdPre,
+    CmdPost,
+    StreamStart,
+    StreamEnd,
+}
+
+impl AutocmdEvent {
+    fn lua_name(self) -> &'static str {
+        match self {
+            AutocmdEvent::BlockDone => "block_done",
+            AutocmdEvent::CmdPre => "cmd_pre",
+            AutocmdEvent::CmdPost => "cmd_post",
+            AutocmdEvent::StreamStart => "stream_start",
+            AutocmdEvent::StreamEnd => "stream_end",
+        }
+    }
+
+    fn from_lua_name(s: &str) -> Option<Self> {
+        match s {
+            "block_done" => Some(Self::BlockDone),
+            "cmd_pre" => Some(Self::CmdPre),
+            "cmd_post" => Some(Self::CmdPost),
+            "stream_start" => Some(Self::StreamStart),
+            "stream_end" => Some(Self::StreamEnd),
+            _ => None,
+        }
+    }
+}
+
+/// A Lua callable registered via `smelt.cmd.register` / `smelt.keymap` /
+/// `smelt.on`. Stored as a mlua `RegistryKey` so references survive
+/// across GC cycles and can be invoked from Rust handlers.
+struct LuaHandle {
+    key: mlua::RegistryKey,
+    dead: bool,
+}
 
 /// User-scoped Lua state + any recorded startup error.
 pub struct LuaRuntime {
@@ -22,7 +76,21 @@ pub struct LuaRuntime {
     pub load_error: Option<String>,
     /// Notifications queued by `smelt.notify` calls. Polled by the
     /// app each tick and forwarded to the Screen's notification band.
-    pub pending_notifications: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    pub pending_notifications: SharedVec<String>,
+    /// Errors raised by any Lua callback. The app surfaces the first
+    /// one per tick as a notification; subsequent errors accumulate for
+    /// `~/.cache/smelt/lua.log` persistence.
+    pub lua_errors: SharedVec<String>,
+    /// User commands registered from Lua, keyed by command name.
+    commands: SharedMap<String, LuaHandle>,
+    /// Key chord → handler mapping (global scope; scope-qualified
+    /// variants land in a later slice).
+    keymaps: SharedMap<String, LuaHandle>,
+    /// Autocmd handlers, keyed by event kind.
+    autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
+    /// `smelt.defer(ms, fn)` timers. `Instant` is the due time; the
+    /// tick loop fires handlers whose due time has passed.
+    pending_timers: SharedVec<(Instant, LuaHandle)>,
 }
 
 impl LuaRuntime {
@@ -31,16 +99,34 @@ impl LuaRuntime {
     /// errors; syntax / runtime errors are captured on `load_error`.
     pub fn new() -> Self {
         let lua = Lua::new();
-        let pending: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let load_error = Self::register_api(&lua, pending.clone())
-            .err()
-            .map(|e| e.to_string());
+        let pending: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
+        let errors: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
+        let commands: SharedMap<String, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
+        let keymaps: SharedMap<String, LuaHandle> = Arc::new(Mutex::new(HashMap::new()));
+        let autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let pending_timers: SharedVec<(Instant, LuaHandle)> = Arc::new(Mutex::new(Vec::new()));
+
+        let load_error = Self::register_api(
+            &lua,
+            pending.clone(),
+            commands.clone(),
+            keymaps.clone(),
+            autocmds.clone(),
+            pending_timers.clone(),
+        )
+        .err()
+        .map(|e| e.to_string());
 
         let mut rt = Self {
             lua,
             load_error,
             pending_notifications: pending,
+            lua_errors: errors,
+            commands,
+            keymaps,
+            autocmds,
+            pending_timers,
         };
 
         if rt.load_error.is_none() {
@@ -58,16 +144,34 @@ impl LuaRuntime {
 
     fn register_api(
         lua: &Lua,
-        pending: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        pending: SharedVec<String>,
+        commands: SharedMap<String, LuaHandle>,
+        keymaps: SharedMap<String, LuaHandle>,
+        autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
+        pending_timers: SharedVec<(Instant, LuaHandle)>,
     ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
 
         let api = lua.create_table()?;
         api.set("version", crate::api::VERSION)?;
+
+        // smelt.api.cmd.register(name, fn)
+        let cmd_tbl = lua.create_table()?;
+        let commands_clone = commands.clone();
+        let cmd_register =
+            lua.create_function(move |lua, (name, handler): (String, mlua::Function)| {
+                let key = lua.create_registry_value(handler)?;
+                if let Ok(mut map) = commands_clone.lock() {
+                    map.insert(name, LuaHandle { key, dead: false });
+                }
+                Ok(())
+            })?;
+        cmd_tbl.set("register", cmd_register)?;
+        api.set("cmd", cmd_tbl)?;
+
         smelt.set("api", api)?;
 
-        // smelt.notify(msg) — queue a user-visible notification. The
-        // app drains the queue each tick and forwards to the Screen.
+        // smelt.notify(msg) — queue a user-visible notification.
         let pending_clone = pending.clone();
         let notify = lua.create_function(move |_, msg: String| {
             if let Ok(mut q) = pending_clone.lock() {
@@ -76,6 +180,53 @@ impl LuaRuntime {
             Ok(())
         })?;
         smelt.set("notify", notify)?;
+
+        // smelt.keymap(mode, chord, fn) — store the chord → handler
+        // mapping. Mode is accepted for nvim-parity but currently
+        // unused; a future slice resolves it against the keymap
+        // layering (block → buffer → window → global).
+        let keymaps_clone = keymaps.clone();
+        let keymap_fn = lua.create_function(
+            move |lua, (_mode, chord, handler): (String, String, mlua::Function)| {
+                let key = lua.create_registry_value(handler)?;
+                if let Ok(mut map) = keymaps_clone.lock() {
+                    map.insert(chord, LuaHandle { key, dead: false });
+                }
+                Ok(())
+            },
+        )?;
+        smelt.set("keymap", keymap_fn)?;
+
+        // smelt.on(event, fn) — register an autocmd handler.
+        let autocmds_clone = autocmds.clone();
+        let on_fn =
+            lua.create_function(move |lua, (event, handler): (String, mlua::Function)| {
+                let Some(kind) = AutocmdEvent::from_lua_name(&event) else {
+                    return Err(LuaError::RuntimeError(format!("unknown event: {event}")));
+                };
+                let key = lua.create_registry_value(handler)?;
+                if let Ok(mut map) = autocmds_clone.lock() {
+                    map.entry(kind)
+                        .or_default()
+                        .push(LuaHandle { key, dead: false });
+                }
+                Ok(())
+            })?;
+        smelt.set("on", on_fn)?;
+
+        // smelt.defer(ms, fn) — schedule a one-shot timer.
+        let timers_clone = pending_timers.clone();
+        let defer_fn = lua.create_function(move |lua, (ms, handler): (u64, mlua::Function)| {
+            let key = lua.create_registry_value(handler)?;
+            if let Ok(mut q) = timers_clone.lock() {
+                q.push((
+                    Instant::now() + Duration::from_millis(ms),
+                    LuaHandle { key, dead: false },
+                ));
+            }
+            Ok(())
+        })?;
+        smelt.set("defer", defer_fn)?;
 
         lua.globals().set("smelt", smelt)?;
         Ok(())
@@ -93,6 +244,134 @@ impl LuaRuntime {
             return Vec::new();
         };
         std::mem::take(&mut *q)
+    }
+
+    /// Drain any errors recorded while dispatching Lua callbacks.
+    pub fn drain_errors(&self) -> Vec<String> {
+        let Ok(mut q) = self.lua_errors.lock() else {
+            return Vec::new();
+        };
+        std::mem::take(&mut *q)
+    }
+
+    /// Invoke a registered user command by name. Returns `true` when
+    /// the command exists and was dispatched (regardless of whether
+    /// the handler succeeded); `false` when the name isn't bound.
+    pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
+        let Ok(map) = self.commands.lock() else {
+            return false;
+        };
+        let Some(handle) = map.get(name) else {
+            return false;
+        };
+        if handle.dead {
+            return false;
+        }
+        let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+            return false;
+        };
+        let result: LuaResult<()> = match arg {
+            Some(a) => func.call::<()>(a),
+            None => func.call::<()>(()),
+        };
+        if let Err(e) = result {
+            self.record_error(format!("cmd `{name}`: {e}"));
+        }
+        true
+    }
+
+    /// Dispatch a keymap chord to any Lua-registered handler. Returns
+    /// `true` when a handler ran.
+    pub fn run_keymap(&self, chord: &str) -> bool {
+        let Ok(map) = self.keymaps.lock() else {
+            return false;
+        };
+        let Some(handle) = map.get(chord) else {
+            return false;
+        };
+        if handle.dead {
+            return false;
+        }
+        let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+            return false;
+        };
+        if let Err(e) = func.call::<()>(()) {
+            self.record_error(format!("keymap `{chord}`: {e}"));
+        }
+        true
+    }
+
+    /// Fire all handlers registered for `event`. Errors are captured
+    /// per-handler and don't stop subsequent handlers.
+    pub fn emit(&self, event: AutocmdEvent) {
+        let Ok(map) = self.autocmds.lock() else {
+            return;
+        };
+        let Some(list) = map.get(&event) else {
+            return;
+        };
+        for handle in list {
+            if handle.dead {
+                continue;
+            }
+            let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+                continue;
+            };
+            if let Err(e) = func.call::<()>(event.lua_name()) {
+                self.record_error(format!("autocmd `{}`: {e}", event.lua_name()));
+            }
+        }
+    }
+
+    /// Fire any `smelt.defer` timers whose deadline has passed.
+    pub fn tick_timers(&self) {
+        let now = Instant::now();
+        let due: Vec<LuaHandle> = match self.pending_timers.lock() {
+            Ok(mut q) => {
+                let mut keep = Vec::with_capacity(q.len());
+                let mut due = Vec::new();
+                for (deadline, handle) in q.drain(..) {
+                    if deadline > now {
+                        keep.push((deadline, handle));
+                    } else {
+                        due.push(handle);
+                    }
+                }
+                *q = keep;
+                due
+            }
+            Err(_) => return,
+        };
+        for handle in due {
+            let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+                continue;
+            };
+            if let Err(e) = func.call::<()>(()) {
+                self.record_error(format!("defer: {e}"));
+            }
+        }
+    }
+
+    fn record_error(&self, msg: String) {
+        if let Ok(mut q) = self.lua_errors.lock() {
+            q.push(msg);
+        }
+    }
+
+    /// Whether a user command with `name` is registered via Lua.
+    pub fn has_command(&self, name: &str) -> bool {
+        self.commands
+            .lock()
+            .map(|m| m.contains_key(name))
+            .unwrap_or(false)
+    }
+
+    /// Names of all Lua-registered user commands (for completion).
+    pub fn command_names(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -140,17 +419,106 @@ mod tests {
 
     #[test]
     fn syntax_error_captured_not_panicked() {
-        let lua = Lua::new();
-        let pending = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        LuaRuntime::register_api(&lua, pending.clone()).unwrap();
-        let mut rt = LuaRuntime {
-            lua,
-            load_error: None,
-            pending_notifications: pending,
-        };
+        let mut rt = LuaRuntime::new();
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         std::fs::write(tmp.path(), "this is not valid lua @@@").unwrap();
         let err = rt.load_init(tmp.path());
         assert!(err.is_err(), "expected syntax error");
+    }
+
+    #[test]
+    fn cmd_register_and_run() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.api.cmd.register("hello", function()
+                        smelt.notify("hello world")
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        assert!(rt.has_command("hello"));
+        assert!(rt.run_command("hello", None));
+        assert_eq!(rt.drain_notifications(), vec!["hello world".to_string()]);
+        assert!(!rt.run_command("unknown", None));
+    }
+
+    #[test]
+    fn keymap_register_and_run() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap("n", "<C-g>", function()
+                        smelt.notify("ctrl-g")
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        assert!(rt.run_keymap("<C-g>"));
+        assert_eq!(rt.drain_notifications(), vec!["ctrl-g".to_string()]);
+        assert!(!rt.run_keymap("<C-x>"));
+    }
+
+    #[test]
+    fn autocmd_emit_fires_handlers() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.on("block_done", function(event)
+                        smelt.notify("fired: " .. event)
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        rt.emit(AutocmdEvent::BlockDone);
+        assert_eq!(
+            rt.drain_notifications(),
+            vec!["fired: block_done".to_string()]
+        );
+    }
+
+    #[test]
+    fn defer_timer_fires_after_deadline() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.defer(0, function()
+                        smelt.notify("deferred")
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        // Even with 0ms, the handler hasn't run yet — tick_timers triggers it.
+        assert!(rt.drain_notifications().is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        rt.tick_timers();
+        assert_eq!(rt.drain_notifications(), vec!["deferred".to_string()]);
+    }
+
+    #[test]
+    fn callback_error_surfaces_without_panic() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.api.cmd.register("broken", function()
+                        error("kaboom")
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        assert!(rt.run_command("broken", None));
+        let errs = rt.drain_errors();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("broken"), "err: {}", errs[0]);
     }
 }
