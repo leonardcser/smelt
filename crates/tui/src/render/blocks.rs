@@ -9,6 +9,7 @@ use super::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, strip_markdown_markers, BashHighlighter,
 };
+use super::history::ViewState;
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::{
     truncate_str, wrap_line, ActiveExec, ApprovalScope, Block, ConfirmChoice, LayoutContext,
@@ -47,7 +48,64 @@ pub(super) fn layout_block(
     let show_thinking = ctx.show_thinking;
     let mut col = SpanCollector::new(ctx.width);
     render_block(&mut col, block, state, width, show_thinking);
-    col.finish()
+    let mut display = col.finish();
+    apply_view_state(&mut display, ctx.view_state);
+    display
+}
+
+/// Truncate / collapse the laid-out block according to its view state.
+/// Runs post-layout so every block variant gets the same treatment.
+fn apply_view_state(display: &mut super::display::DisplayBlock, state: ViewState) {
+    use super::display::{ColorRole, ColorValue, DisplayLine, DisplaySpan, SpanStyle};
+    let total = display.lines.len();
+    let ellipsis_line = |text: String| -> DisplayLine {
+        DisplayLine {
+            spans: vec![DisplaySpan {
+                text,
+                style: SpanStyle {
+                    fg: Some(ColorValue::Role(ColorRole::Muted)),
+                    dim: true,
+                    ..SpanStyle::default()
+                },
+            }],
+            fill_bg: None,
+            fill_right_margin: 0,
+        }
+    };
+    match state {
+        ViewState::Expanded => {}
+        ViewState::Collapsed => {
+            if total > 1 {
+                let hidden = total - 1;
+                display.lines.truncate(1);
+                display
+                    .lines
+                    .push(ellipsis_line(format!("… {hidden} more lines")));
+            }
+        }
+        ViewState::TrimmedHead { keep } => {
+            let keep = keep as usize;
+            if total > keep {
+                let hidden = total - keep;
+                display.lines.truncate(keep);
+                display
+                    .lines
+                    .push(ellipsis_line(format!("… {hidden} more lines")));
+            }
+        }
+        ViewState::TrimmedTail { keep } => {
+            let keep = keep as usize;
+            if total > keep {
+                let hidden = total - keep;
+                let tail = display.lines.split_off(total - keep);
+                display.lines.clear();
+                display
+                    .lines
+                    .push(ellipsis_line(format!("… {hidden} more lines above")));
+                display.lines.extend(tail);
+            }
+        }
+    }
 }
 
 /// Animated trailing dots for streaming indicators.

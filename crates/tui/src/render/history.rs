@@ -536,8 +536,20 @@ impl BlockHistory {
     /// Rows the block at `i` would occupy under `key`. Lays the block out
     /// if no cached layout exists, so that the caller's subsequent render
     /// pass gets a cache hit.
-    pub(super) fn ensure_rows(&mut self, i: usize, key: LayoutKey) -> u16 {
+    /// Fill in per-block view state on a base layout key. Callers build
+    /// `(width, show_thinking, view_state=Expanded)` without needing to
+    /// know each block's individual view state; this substitutes the
+    /// actual per-block value so the cache lookup + layout pass agree.
+    pub(super) fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
+        LayoutKey {
+            view_state: self.view_state(id),
+            ..base
+        }
+    }
+
+    pub(super) fn ensure_rows(&mut self, i: usize, base: LayoutKey) -> u16 {
         let id = self.order[i];
+        let key = self.resolve_key(id, base);
         if let Some(rows) = self
             .artifacts
             .get(&id)
@@ -555,6 +567,7 @@ impl BlockHistory {
         let lctx = LayoutContext {
             width: key.width,
             show_thinking: key.show_thinking,
+            view_state: key.view_state,
         };
         let display = layout_block(block, tool_state, &lctx);
         let rows = display.rows();
@@ -642,6 +655,7 @@ impl BlockHistory {
             }
 
             let id = self.order[i];
+            let bkey = self.resolve_key(id, key);
             let block = &self.blocks[&id];
             let tool_state = if let Block::ToolCall { call_id, .. } = block {
                 self.tool_states.get(call_id)
@@ -650,7 +664,7 @@ impl BlockHistory {
             };
 
             let rows = if use_cache {
-                if let Some(cached) = self.artifacts.get(&id).and_then(|a| a.get(key)) {
+                if let Some(cached) = self.artifacts.get(&id).and_then(|a| a.get(bkey)) {
                     let _p = crate::perf::begin("history:cache_hit");
                     paint_block(out, cached, &pctx, head_skip_block as usize);
                     cached.rows().saturating_sub(head_skip_block)
@@ -659,12 +673,13 @@ impl BlockHistory {
                     let lctx = LayoutContext {
                         width: width as u16,
                         show_thinking,
+                        view_state: bkey.view_state,
                     };
                     let display = layout_block(block, tool_state, &lctx);
                     paint_block(out, &display, &pctx, head_skip_block as usize);
                     let rows = display.rows().saturating_sub(head_skip_block);
                     let artifact = self.artifacts.get_mut(&id).unwrap();
-                    artifact.insert(key, display);
+                    artifact.insert(bkey, display);
                     self.cache_dirty = true;
                     rows
                 }
@@ -673,6 +688,7 @@ impl BlockHistory {
                 let lctx = LayoutContext {
                     width: width as u16,
                     show_thinking,
+                    view_state: bkey.view_state,
                 };
                 let display = layout_block(block, tool_state, &lctx);
                 paint_block(out, &display, &pctx, head_skip_block as usize);
@@ -739,7 +755,8 @@ impl BlockHistory {
             }
             let _ = self.ensure_rows(i, key);
             let id = self.order[i];
-            if let Some(display) = self.artifacts.get(&id).and_then(|a| a.get(key)) {
+            let bkey = self.resolve_key(id, key);
+            if let Some(display) = self.artifacts.get(&id).and_then(|a| a.get(bkey)) {
                 for line in &display.lines {
                     out.push(collect_display(line));
                 }
@@ -805,7 +822,8 @@ impl BlockHistory {
                 out.push(String::new());
             }
             let id = self.order[i];
-            let display = self.artifacts.get(&id).and_then(|a| a.get(key));
+            let bkey = self.resolve_key(id, key);
+            let display = self.artifacts.get(&id).and_then(|a| a.get(bkey));
             let Some(display) = display else { continue };
             for line in &display.lines {
                 if remaining_skip > 0 {
@@ -902,7 +920,8 @@ impl BlockHistory {
                 painted += 1;
             }
             let id = self.order[i];
-            let display = self.artifacts.get(&id).and_then(|a| a.get(key));
+            let bkey = self.resolve_key(id, key);
+            let display = self.artifacts.get(&id).and_then(|a| a.get(bkey));
             let Some(display) = display else { continue };
             for line in &display.lines {
                 if remaining_skip > 0 {
