@@ -44,29 +44,6 @@ fn confirm_simple() {
 }
 
 #[test]
-fn confirm_with_scrollback() {
-    let mut h = TestHarness::new(80, 24, "confirm_with_scrollback");
-    for i in 0..8 {
-        h.push_and_render(Block::User {
-            text: format!("Msg {i}"),
-            image_labels: vec![],
-        });
-        h.push_and_render(Block::Text {
-            content: format!("Reply {i}"),
-        });
-    }
-    h.confirm_cycle("c1", "bash", "cmd", "output");
-
-    let mut expected: Vec<String> = Vec::new();
-    for i in 0..8 {
-        expected.push(format!("Msg {i}"));
-        expected.push(format!("Reply {i}"));
-    }
-    let refs: Vec<&str> = expected.iter().map(|s| s.as_str()).collect();
-    h.assert_contains_all(&refs);
-}
-
-#[test]
 fn confirm_back_to_back() {
     let mut h = TestHarness::new(80, 24, "confirm_back_to_back");
     h.push_and_render(Block::User {
@@ -78,25 +55,6 @@ fn confirm_back_to_back() {
         h.confirm_cycle(&id, "write", &format!("file_{i}.rs"), &format!("// {i}"));
     }
     h.assert_contains_all(&["Write files", "// 0", "// 1", "// 2"]);
-}
-
-#[test]
-fn no_double_gap_after_confirm() {
-    let mut h = TestHarness::new(80, 24, "no_double_gap_after_confirm");
-    h.push_and_render(Block::User {
-        text: "Edit".into(),
-        image_labels: vec![],
-    });
-    h.push_and_render(Block::Text {
-        content: "Sure.".into(),
-    });
-    h.confirm_cycle("c1", "write", "main.rs", "fn main() {}");
-    h.push_and_render(Block::Text {
-        content: "Done.".into(),
-    });
-
-    let text = h.full_text();
-    assert_no_double_gaps(&text, "no_double_gap_after_confirm");
 }
 
 #[test]
@@ -185,60 +143,6 @@ fn tool_confirm_transition_does_not_move_prompt_up() {
         bar_confirm >= bar_pending,
         "Prompt bar moved UP from row {bar_pending} to {bar_confirm} \
          when tool transitioned to Confirm.\n\
-         Screen:\n{}",
-        visible_rows(&h.parser, height),
-    );
-}
-
-/// Variant: model is streaming text, then starts a tool call.
-/// The streaming text gets committed to history and the tool overlay appears.
-/// The prompt bar must not jump up during this transition.
-#[test]
-fn tool_after_streaming_does_not_move_prompt_up() {
-    let height = 16;
-    let mut h = TestHarness::new(80, height, "tool_after_streaming_no_jitter");
-
-    // Fill terminal with conversation.
-    for i in 0..5 {
-        h.push_and_render(Block::User {
-            text: format!("Question {i}"),
-            image_labels: vec![],
-        });
-        h.push_and_render(Block::Text {
-            content: format!("Answer {i}"),
-        });
-    }
-
-    // User asks another question.
-    h.push_and_render(Block::User {
-        text: "Do something".into(),
-        image_labels: vec![],
-    });
-
-    // Model streams a response with multiple lines.
-    h.screen
-        .append_streaming_text("Sure, I'll run that command.\n");
-    h.draw_prompt();
-    let bar_streaming = find_bar_row(&h.parser, height);
-
-    // Model finishes text and starts a tool call — the streaming text
-    // gets committed to history and the tool overlay appears.
-    h.screen.flush_streaming_text();
-    h.screen.render_pending_blocks();
-    h.drain_sink();
-    h.screen.start_tool(
-        "t1".into(),
-        "bash".into(),
-        "ls -la".into(),
-        std::collections::HashMap::new(),
-    );
-    h.draw_prompt();
-    let bar_after_tool = find_bar_row(&h.parser, height);
-
-    assert!(
-        bar_after_tool >= bar_streaming,
-        "Prompt bar moved UP from row {bar_streaming} to {bar_after_tool} \
-         when streaming text was committed and tool overlay appeared.\n\
          Screen:\n{}",
         visible_rows(&h.parser, height),
     );
@@ -466,7 +370,7 @@ fn parallel_tools_all_visible_during_dialog() {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
         let (_redirtied, placement) =
             h.screen
-                .draw_frame(&mut frame, 80, None, Some(dialog_height));
+                .draw_viewport_dialog_frame(&mut frame, 80, dialog_height);
         if let Some(p) = placement {
             dialog.draw(&mut frame, p.row, 80, p.granted_rows);
         }
@@ -495,142 +399,6 @@ fn parallel_tools_all_visible_during_dialog() {
             "All tools should remain after dialog dismiss. Missing: {marker}\n{text_after}"
         );
     }
-}
-
-/// A full-screen confirm dialog (write_file with large content) should not
-/// leak the tool-call overlay into scrollback.  When the dialog fills the
-/// terminal the overlay is fully cropped, so nothing should be scrolled up.
-#[test]
-fn fullscreen_dialog_scrollback_integrity() {
-    let height = 16;
-    let mut h = TestHarness::new(80, height, "fullscreen_dialog_scrollback_integrity");
-
-    // Some conversation history.
-    h.push_and_render(Block::User {
-        text: "Write a poem".into(),
-        image_labels: vec![],
-    });
-    h.push_and_render(Block::Text {
-        content: "Sure, here it is.".into(),
-    });
-    h.draw_prompt();
-
-    // Start a write_file tool with enough content to fill the terminal.
-    let file_content = (1..=30)
-        .map(|i| format!("Line {i} of the poem"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut args = std::collections::HashMap::new();
-    args.insert(
-        "file_path".into(),
-        serde_json::Value::String("poem.txt".into()),
-    );
-    args.insert(
-        "content".into(),
-        serde_json::Value::String(file_content.clone()),
-    );
-    h.screen.start_tool(
-        "c1".into(),
-        "write_file".into(),
-        "poem.txt".into(),
-        args.clone(),
-    );
-    let _dialog = h.open_confirm_dialog_with_args("c1", "write_file", "poem.txt", args);
-
-    // Dismiss dialog.
-    h.screen.clear_dialog_area();
-    h.screen.set_dialog_open(false);
-    h.drain_sink();
-
-    // Finish tool.
-    h.screen.finish_tool(
-        "c1",
-        tui::render::ToolStatus::Ok,
-        Some(Box::new(tui::render::ToolOutput {
-            content: "File written.".into(),
-            is_error: false,
-            metadata: None,
-            render_cache: None,
-        })),
-        Some(std::time::Duration::from_millis(100)),
-    );
-    h.screen.flush_blocks();
-    h.drain_sink();
-    h.draw_prompt();
-
-    // Scrollback must match a fresh render of the same blocks.
-    h.assert_scrollback_integrity();
-}
-
-/// Focus change events (FocusGained/FocusLost) must not push a fullscreen
-/// confirm dialog into scrollback. The dialog is a temporary overlay —
-/// redrawing it because the prompt went dirty should never commit its
-/// contents to scrollback.
-#[test]
-fn fullscreen_dialog_focus_event_no_duplicate() {
-    let height = 16;
-    let mut h = TestHarness::new(80, height, "fullscreen_dialog_focus_event_no_duplicate");
-
-    h.push_and_render(Block::User {
-        text: "Write a poem".into(),
-        image_labels: vec![],
-    });
-    h.push_and_render(Block::Text {
-        content: "Sure, here it is.".into(),
-    });
-    h.draw_prompt();
-
-    let file_content = (1..=30)
-        .map(|i| format!("Line {i} of the poem"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut args = std::collections::HashMap::new();
-    args.insert(
-        "file_path".into(),
-        serde_json::Value::String("poem.txt".into()),
-    );
-    args.insert(
-        "content".into(),
-        serde_json::Value::String(file_content.clone()),
-    );
-    h.screen.start_tool(
-        "c1".into(),
-        "write_file".into(),
-        "poem.txt".into(),
-        args.clone(),
-    );
-    let mut dialog = h.open_confirm_dialog_with_args("c1", "write_file", "poem.txt", args);
-
-    // Simulate the event loop receiving several focus toggles while the
-    // dialog is open. Each focus change marks the prompt dirty and the
-    // next tick calls draw_frame(prompt=None) to redraw the dialog.
-    for _ in 0..3 {
-        h.screen.set_focused(false);
-        h.draw_dialog_tick(&mut dialog);
-        h.screen.set_focused(true);
-        h.draw_dialog_tick(&mut dialog);
-    }
-
-    // Dismiss dialog and finish the tool normally.
-    h.screen.clear_dialog_area();
-    h.screen.set_dialog_open(false);
-    h.drain_sink();
-    h.screen.finish_tool(
-        "c1",
-        tui::render::ToolStatus::Ok,
-        Some(Box::new(tui::render::ToolOutput {
-            content: "File written.".into(),
-            is_error: false,
-            metadata: None,
-            render_cache: None,
-        })),
-        Some(std::time::Duration::from_millis(100)),
-    );
-    h.screen.flush_blocks();
-    h.drain_sink();
-    h.draw_prompt();
-
-    h.assert_scrollback_integrity();
 }
 
 /// Focus toggles while a dialog is open must be byte-for-byte no-ops.

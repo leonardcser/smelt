@@ -14,7 +14,6 @@ use super::blocks::{
 };
 use super::cache::{PersistedLayoutCache, RenderCache};
 use super::completions::{completion_reserved_rows, draw_completions, draw_menu};
-use super::context::PaintContext;
 use super::history::{
     ActiveAgent, ActiveExec, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block,
     BlockHistory, BlockId, Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
@@ -39,7 +38,6 @@ pub enum ContentVisualKind {
     Line,
 }
 use super::layout_out::{LayoutSink, SpanCollector};
-use super::paint::paint_line;
 use super::prompt::PromptState;
 use super::selection::{
     build_char_kinds, build_display_spans, compute_visual_line_offsets, map_cursor,
@@ -218,12 +216,6 @@ impl Screen {
     pub fn transcript_width(&self) -> usize {
         let (w, _) = self.backend.size();
         (w as usize).saturating_sub(1).max(1)
-    }
-
-    fn cursor_y(&self) -> u16 {
-        self.prompt
-            .anchor_row
-            .unwrap_or_else(|| self.backend.cursor_y())
     }
 
     /// Expose the backend for dialogs that need output + size.
@@ -409,7 +401,6 @@ impl Screen {
             agent.slug = slug.map(str::to_string);
             agent.tool_calls = tool_calls.to_vec();
             if status != AgentBlockStatus::Running && agent.status == AgentBlockStatus::Running {
-                // Freeze the timer on completion.
                 agent.final_elapsed = Some(agent.start_time.elapsed());
             }
             agent.status = status;
@@ -433,8 +424,6 @@ impl Screen {
             .position(|a| a.agent_id == agent_id)
         {
             let mut agent = self.active_agents.remove(idx);
-            // If still marked Running, the tool returned successfully —
-            // the subagent's TurnComplete may not have been drained yet.
             if agent.status == AgentBlockStatus::Running {
                 agent.status = AgentBlockStatus::Done;
                 agent.final_elapsed = Some(agent.start_time.elapsed());
@@ -496,7 +485,7 @@ impl Screen {
         if out.row.is_none() {
             return;
         }
-        out.overlay_newline();
+        out.newline();
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
     }
 
@@ -751,9 +740,6 @@ impl Screen {
         // `draw_frame` dialog mode) — nothing was scrolled into
         // scrollback to duplicate, so don't suppress.
         let scrolled_by_dialog = screen_anchor == 0 && self.has_scrollback;
-        if scrolled_by_dialog && self.prompt.prev_dialog_gap > 0 {
-            self.history.suppress_leading_gap = true;
-        }
         self.defer_pending_render = true;
         // Only reset anchor/prev_rows when the dialog caused ScrollUp
         // (prompt was physically moved). For non-scrolled dialogs the
@@ -794,7 +780,6 @@ impl Screen {
     }
 
     pub fn begin_turn(&mut self) {
-        self.history.last_block_rows = 0;
         self.active_tools.clear();
     }
 
@@ -876,8 +861,6 @@ impl Screen {
             if ch == '\n' {
                 let line = std::mem::take(&mut at.current_line);
                 if line.trim().is_empty() && !at.paragraph.is_empty() {
-                    // Blank line — commit the paragraph.
-                    // Include the trailing newline so it renders as visual spacing.
                     at.paragraph.push('\n');
                     let para = std::mem::take(&mut at.paragraph);
                     self.history.push(Block::Thinking { content: para });
@@ -897,7 +880,6 @@ impl Screen {
     /// Flush remaining thinking content.
     pub fn flush_streaming_thinking(&mut self) {
         if let Some(mut at) = self.active_thinking.take() {
-            // Commit any remaining content (paragraph + current line).
             if !at.current_line.is_empty() {
                 if !at.paragraph.is_empty() {
                     at.paragraph.push('\n');
@@ -940,7 +922,6 @@ impl Screen {
     // ── Streaming text ─────────────────────────────────────────────────
 
     pub fn append_streaming_text(&mut self, delta: &str) {
-        // Text starting means thinking is done — commit remaining thinking.
         if self.active_thinking.is_some() {
             self.flush_streaming_thinking();
         }
@@ -955,7 +936,7 @@ impl Screen {
 
         for ch in delta.chars() {
             if ch == '\r' {
-                continue; // Strip \r (CRLF → LF)
+                continue;
             }
             if ch == '\n' {
                 let line = std::mem::take(&mut at.current_line);
@@ -967,18 +948,14 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Process a completed line of streaming text.
     fn process_text_line(history: &mut BlockHistory, at: &mut ActiveText, line: &str) {
         let trimmed = line.trim_start();
 
-        // ── Code fence detection ────────────────────────────────────────
         if trimmed.starts_with("```") {
             if at.in_code_block.is_some() {
-                // Closing fence — individual code lines were already committed.
                 at.in_code_block = None;
                 return;
             } else {
-                // Opening fence — commit pending text/table.
                 Self::commit_paragraph(history, at);
                 Self::commit_table(history, at);
                 let lang = trimmed.trim_start_matches('`').trim().to_string();
@@ -987,7 +964,6 @@ impl Screen {
             }
         }
 
-        // ── Inside a code block ─────────────────────────────────────────
         if let Some(ref lang) = at.in_code_block {
             history.push(Block::CodeLine {
                 content: line.to_string(),
@@ -996,7 +972,6 @@ impl Screen {
             return;
         }
 
-        // ── Table row — accumulate silently ────────────────────────────
         if trimmed.starts_with('|') {
             Self::commit_paragraph(history, at);
             if !is_table_separator(line) {
@@ -1006,10 +981,9 @@ impl Screen {
             return;
         }
 
-        // ── Blank line ───────────────────────────────────────────────────
         if line.trim().is_empty() {
             if !at.table_rows.is_empty() {
-                return; // Skip blank lines inside tables.
+                return;
             }
             if !at.paragraph.is_empty() {
                 Self::commit_paragraph(history, at);
@@ -1017,10 +991,8 @@ impl Screen {
             return;
         }
 
-        // ── Non-table line after table — commit the table ────────────────
         Self::commit_table(history, at);
 
-        // ── Regular text line ───────────────────────────────────────────
         if !at.paragraph.is_empty() {
             at.paragraph.push('\n');
         }
@@ -1045,15 +1017,11 @@ impl Screen {
         }
     }
 
-    /// Flush remaining streaming text.
     pub fn flush_streaming_text(&mut self) {
         self.flush_streaming_thinking();
         if let Some(mut at) = self.active_text.take() {
-            // If inside an unclosed code block, check whether current_line
-            // is the closing fence before committing it as a code line.
             if at.in_code_block.is_some() {
                 if at.current_line.trim_start().starts_with("```") {
-                    // Closing fence — just close the block, don't render it.
                     at.current_line.clear();
                 } else if !at.current_line.is_empty() {
                     let lang = at.in_code_block.as_ref().unwrap().clone();
@@ -1064,12 +1032,10 @@ impl Screen {
                 }
                 at.in_code_block = None;
             }
-            // If current_line is a table row, add it to the table.
             if !at.current_line.is_empty() && at.current_line.trim_start().starts_with('|') {
                 at.table_rows.push(std::mem::take(&mut at.current_line));
             }
             Self::commit_table(&mut self.history, &mut at);
-            // Commit remaining paragraph + current line.
             if !at.current_line.is_empty() {
                 if !at.paragraph.is_empty() {
                     at.paragraph.push('\n');
@@ -1203,7 +1169,6 @@ impl Screen {
 
     pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
         if let Some(tool) = self.active_tool_mut(call_id) {
-            // Reset timer when transitioning from confirm → pending (user approved)
             if tool.status == ToolStatus::Confirm && status == ToolStatus::Pending {
                 tool.start_time = Instant::now();
             }
@@ -1561,10 +1526,6 @@ impl Screen {
         self.render_pending_blocks();
     }
 
-    /// Convert all active tools to history blocks without rendering.
-    /// The blocks remain unflushed so that `draw_frame(None)` will render
-    /// them (along with any preceding reasoning blocks) before the dialog
-    /// paints on top.
     pub fn commit_active_tools(&mut self) {
         self.commit_active_tools_as(ToolStatus::Err);
     }
@@ -1686,12 +1647,6 @@ impl Screen {
     }
 
     /// Whether any content (blocks, active tool, active exec) exists above
-    /// the prompt.  Used to decide whether to emit a 1-line gap before the
-    /// prompt bar.
-    fn has_content(&self) -> bool {
-        !self.history.is_empty() || self.has_ephemeral()
-    }
-
     pub fn render_pending_blocks(&mut self) {
         // Under the flat-line viewport model, blocks are never flushed
         // to scrollback — the next frame repaints the transcript from
@@ -1726,9 +1681,6 @@ impl Screen {
         if w as usize != self.history.cache_width {
             self.history.invalidate_for_width(w as usize);
         }
-        let mut frame = Frame::begin(&*self.backend);
-        let _ = frame.queue(cursor::MoveTo(0, 0));
-        let _ = frame.queue(terminal::Clear(terminal::ClearType::All));
         self.prompt.drawn = false;
         self.prompt.dirty = true;
         self.prompt.prev_rows = 0;
@@ -1920,15 +1872,18 @@ impl Screen {
 
     pub fn draw_prompt(&mut self, state: &InputState, mode: protocol::Mode, width: usize) {
         let mut frame = Frame::begin(&*self.backend);
-        self.draw_frame(
+        self.draw_viewport_frame(
             &mut frame,
             width,
-            Some(FramePrompt {
+            FramePrompt {
                 state,
                 mode,
                 queued: &[],
                 prediction: None,
-            }),
+            },
+            0,
+            0,
+            0,
             None,
         );
     }
@@ -1959,8 +1914,6 @@ impl Screen {
         self.active_thinking.is_some()
             || self.active_text.is_some()
             || !self.active_tools.is_empty()
-            || !self.active_agents.is_empty()
-            || self.active_exec.is_some()
     }
 
     /// Write every ephemeral element into `out` with `newline()` for
@@ -1975,7 +1928,6 @@ impl Screen {
         // element rather than the last committed one.
         let last_committed: Option<&Block> = self.history.last_block();
         let mut prev_synth: Option<Block> = None;
-        let mut had_streaming = false;
 
         // ── Active thinking ─────────────────────────────────────────
         if let Some(ref at) = self.active_thinking {
@@ -1996,7 +1948,6 @@ impl Screen {
                     emit_newlines(out, gap);
                     render_block(out, &block, None, width, self.show_thinking);
                     prev_synth = Some(block);
-                    had_streaming = true;
                 }
             } else {
                 // Animated summary: aggregate committed Thinking blocks
@@ -2021,7 +1972,6 @@ impl Screen {
                     let (label, line_count) = thinking_summary(&combined);
                     emit_newlines(out, self.thinking_summary_gap());
                     render_thinking_summary(out, width, &label, line_count, true);
-                    had_streaming = true;
                 }
             }
         }
@@ -2087,7 +2037,6 @@ impl Screen {
                 emit_newlines(out, gap);
                 render_block(out, &block, None, width, self.show_thinking);
                 prev_synth = Some(block);
-                had_streaming = true;
             }
         }
 
@@ -2095,9 +2044,7 @@ impl Screen {
         let mut tool_count = 0usize;
         for tool in self.active_tools.iter() {
             let tool_gap = if tool_count == 0 {
-                if had_streaming {
-                    1
-                } else if let Some(p) = prev_synth.as_ref().or(last_committed) {
+                if let Some(p) = prev_synth.as_ref().or(last_committed) {
                     gap_between(&Element::Block(p), &Element::ActiveTool)
                 } else {
                     0
@@ -2156,315 +2103,6 @@ impl Screen {
             };
             emit_newlines(out, exec_gap);
             render_active_exec(out, exec, width);
-        }
-    }
-
-    /// Unified rendering entry point. Renders pending blocks + active
-    /// overlay, then either the prompt (`Some`) or nothing (`None` =
-    /// dialog covers it). `dialog_height` is the height of the active
-    /// dialog in dialog mode — used to reserve space so the overlay
-    /// tail-crops above it instead of fighting the dialog's own layout.
-    ///
-    /// The caller owns the `Frame` (sync lifecycle). This method only
-    /// queues draw commands into the provided output buffer.
-    ///
-    /// Returns `true` when content-only mode drew something (caller
-    /// should re-dirty any overlay dialog so it repaints on top).
-    pub fn draw_frame(
-        &mut self,
-        out: &mut RenderOut,
-        width: usize,
-        prompt: Option<FramePrompt>,
-        dialog_height: Option<u16>,
-    ) -> (bool, Option<DialogPlacement>) {
-        let _perf = crate::perf::begin("render:frame");
-
-        self.update_spinner();
-
-        let has_new_blocks = self.history.has_unflushed();
-        let is_dialog = prompt.is_none();
-        let has_ephemeral = self.has_ephemeral();
-
-        // Seed `term_width` before the dialog-only fast path below,
-        // which returns without reaching the main `init_cursor` call.
-        let (seed_term_w, seed_term_h) = self.size();
-        out.init_cursor(out.cursor_row, seed_term_w, seed_term_h);
-
-        // Dialog mode: only repaint the content region when new blocks
-        // land, the overlay has changed, or the dialog height changed
-        // (needs full layout recomputation).  But ALWAYS return a
-        // valid placement so the dialog itself can redraw (e.g. after
-        // the user navigated within it).
-        let dialog_height_changed =
-            is_dialog && dialog_height.unwrap_or(0) != self.prompt.prev_dialog_height;
-        if is_dialog
-            && self.prompt.drawn
-            && !has_new_blocks
-            && !dialog_height_changed
-            && !(has_ephemeral && self.prompt.dirty)
-        {
-            // Content hasn't changed — skip the expensive repaint but
-            // return the last placement so the dialog can still draw.
-            let placement = self.prompt.prev_dialog_row.map(|row| {
-                let mut dh = dialog_height.unwrap_or(0);
-                if self.constrain_dialog {
-                    let (_, th) = self.size();
-                    let half_h = th / 2;
-                    // Use the stored anchor and prev_rows (overlay+gap)
-                    // from the previous frame as approximation.
-                    let anchor = self.prompt.anchor_row.unwrap_or(0);
-                    let overhead = self.prompt.prev_rows + 2;
-                    let natural = th.saturating_sub(anchor + overhead);
-                    dh = dh.min(half_h.max(natural));
-                }
-                let max_avail = self.size().1.saturating_sub(2 + row);
-                DialogPlacement {
-                    row,
-                    granted_rows: dh.min(max_avail),
-                }
-            });
-            return (false, placement);
-        }
-        // Full mode: skip if nothing changed.
-        if !is_dialog && !has_new_blocks && !self.prompt.dirty {
-            return (false, None);
-        }
-
-        // ── Position cursor ─────────────────────────────────────────────
-        let (term_w, term_h) = self.size();
-        let explicit_anchor = self.prompt.anchor_row.take();
-        let draw_start_row = explicit_anchor.unwrap_or_else(|| self.cursor_y());
-
-        // Initialize cursor tracking for this frame.
-        out.init_cursor(draw_start_row, term_w, term_h);
-        // Reposition when the prompt was previously drawn (incremental
-        // update) OR when an explicit anchor was set (e.g. after
-        // redraw/clear/rewind where the cursor may not match the anchor).
-        if self.prompt.drawn || explicit_anchor.is_some() {
-            out.move_to(0, draw_start_row);
-        }
-        // NOTE: out.row stays None during history.render so blocks use
-        // scroll-mode newline (\r\n → scrollback), not overlay-mode
-        // newline (MoveTo).  Set it to Some only after blocks are done.
-
-        // ── Render blocks (scroll mode — commits to scrollback) ─────
-        let block_rows = self.history.render(out, width, self.show_thinking);
-
-        // `cursor_row` is ground truth after scroll-mode rendering.
-        let base_anchor = out.cursor_row;
-
-        // Switch to overlay positioning for the ephemeral content and
-        // dialog that follow.
-        if is_dialog {
-            out.row = Some(base_anchor);
-        }
-
-        // ── Lay out ephemeral overlay (measure only) ────────────────
-        let (overlay_flat, overlay_rows) = if has_ephemeral {
-            let mut col = SpanCollector::new(width as u16);
-            self.render_ephemeral_into(&mut col, width);
-            let flat = col.finish();
-            let rows = flat.lines.len() as u16;
-            (Some(flat), rows)
-        } else {
-            (None, 0)
-        };
-
-        // ── Measure total mutable region ────────────────────────────
-        // For constrained dialogs, cap the effective height to
-        // max(h/2, natural_space) so the dialog doesn't scroll the
-        // viewport more than half the terminal.  Unconstrained dialogs
-        // (confirm, question) use their full requested height.
-        let raw_dialog_height = dialog_height;
-        let unconstrained_prompt_gap: u16 = if self.has_content() { 1 } else { 0 };
-        let dialog_height = if is_dialog && self.constrain_dialog {
-            dialog_height.map(|dh| {
-                let half_h = term_h / 2;
-                let overhead = overlay_rows + unconstrained_prompt_gap + 2;
-                let natural = term_h.saturating_sub(base_anchor + overhead);
-                dh.min(half_h.max(natural))
-            })
-        } else {
-            dialog_height
-        };
-        // In dialog mode, the gap between content and dialog is only
-        // rendered when `dh < term_h - 1 - overlay_end` (see the
-        // `gap` computation below).  A fullscreen dialog (one whose
-        // requested height + status bar already exceeds the viewport)
-        // omits the gap.  The measurement must match, otherwise every
-        // redraw of a fullscreen dialog emits a spurious scroll_up(1)
-        // and leaks blank rows into scrollback — notably on focus
-        // change, which marks the prompt dirty and forces a re-render.
-        let prompt_gap: u16 = if is_dialog {
-            let dh = dialog_height.unwrap_or(0);
-            // Matches `gap` below with the worst-case overlay_end = 0.
-            if self.has_content() && dh + 1 < term_h {
-                1
-            } else {
-                0
-            }
-        } else {
-            unconstrained_prompt_gap
-        };
-
-        let prompt_height: u16 = if let Some(ref p) = prompt {
-            self.measure_prompt_height(p.state, width, p.queued, p.prediction)
-        } else {
-            // Reserve dialog + bottom gap + status bar.
-            let dh = dialog_height.unwrap_or(self.prompt.prev_prompt_ui_rows.max(1));
-            // Constrained dialogs leave room for the ephemeral overlay
-            // so it doesn't get tail-cropped.  Unconstrained dialogs
-            // (confirm, question) take priority over the overlay.
-            let cap = if self.constrain_dialog {
-                term_h.saturating_sub(overlay_rows)
-            } else {
-                term_h
-            };
-            (dh + 2).min(cap)
-        };
-        // Only count overlay rows that will actually be visible. When
-        // an unconstrained dialog fills the terminal, the overlay is
-        // fully cropped — including it in total_mutable would scroll
-        // extra blank lines into scrollback.
-        let viewport_for_overlay = term_h.saturating_sub(prompt_gap + prompt_height);
-        let effective_overlay = overlay_rows.min(viewport_for_overlay);
-        let total_mutable = effective_overlay + prompt_gap + prompt_height;
-
-        // ── ScrollUp if mutable region overflows viewport ────────
-        let _ = out.queue(cursor::MoveTo(0, base_anchor));
-        let available = term_h.saturating_sub(base_anchor);
-        let scroll_amount = total_mutable.saturating_sub(available);
-
-        // Clear upfront only when scrolling. Without scrolling, each
-        // painted line already clears its own trailing residue via
-        // newline, and the dialog/prompt cleans up below itself — so
-        // skipping the bulk clear avoids a visible blank→repaint flash
-        // on terminals with imperfect synchronized-update support.
-        let needs_scroll = scroll_amount > 0;
-        if needs_scroll {
-            let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-            out.scroll_up(scroll_amount);
-            self.has_scrollback = true;
-        }
-        let final_anchor = base_anchor.saturating_sub(scroll_amount);
-
-        // Switch to absolute positioning. From here on, everything
-        // uses MoveTo via `out.row` — position is always exact.
-        out.row = Some(final_anchor);
-        let _ = out.queue(cursor::MoveTo(0, final_anchor));
-
-        // ── Paint ephemeral overlay ─────────────────────────────────
-        let ephemeral_rows: u16 = if let Some(flat) = overlay_flat {
-            let theme = crate::theme::snapshot();
-            let pctx = PaintContext {
-                theme: &theme,
-                term_width: width as u16,
-            };
-            // Tail-crop: if overlay itself exceeds viewport above
-            // prompt, drop lines from the head.
-            let viewport_for_overlay = term_h.saturating_sub(prompt_gap + prompt_height);
-            let crop_head =
-                overlay_rows.saturating_sub(viewport_for_overlay.saturating_sub(final_anchor));
-            for line in &flat.lines[crop_head as usize..] {
-                paint_line(out, line, &pctx);
-            }
-            overlay_rows.saturating_sub(crop_head)
-        } else {
-            0
-        };
-
-        // ── Render prompt or dialog ─────────────────────────────────
-        if let Some(p) = prompt {
-            // Gap between content and prompt.
-            for _ in 0..prompt_gap {
-                out.overlay_newline();
-            }
-
-            // `out.row` is set, so all newline calls inside
-            // draw_prompt_sections use MoveTo — position is exact.
-            let prompt_start_row = out.row.unwrap();
-            let available_height = term_h.saturating_sub(prompt_start_row) as usize;
-            let new_rows = self.draw_prompt_sections(
-                out,
-                p.state,
-                p.mode,
-                width,
-                p.queued,
-                p.prediction,
-                available_height,
-            );
-
-            self.prompt.prev_rows = new_rows;
-            self.prompt.prev_prompt_ui_rows = new_rows;
-
-            self.prompt.anchor_row = Some(final_anchor);
-            self.prompt.prev_dialog_row = Some(final_anchor + ephemeral_rows + prompt_gap);
-            self.prompt.drawn = true;
-            self.prompt.dirty = false;
-            if scroll_amount > 0 {
-                self.content_start_row = Some(
-                    term_h.saturating_sub(ephemeral_rows + prompt_gap + new_rows + block_rows),
-                );
-            } else if self.content_start_row.is_none() {
-                self.content_start_row = Some(draw_start_row);
-            }
-
-            // When the upfront Clear::FromCursorDown was skipped
-            // (deferred_clear), erase stale rows that linger below the
-            // freshly painted content. SavePosition / RestorePosition
-            // preserve the input cursor that draw_prompt_sections placed.
-            if !needs_scroll {
-                let cleanup = prompt_start_row + new_rows;
-                if cleanup < term_h {
-                    let _ = out.queue(cursor::SavePosition);
-                    let _ = out.queue(cursor::MoveTo(0, cleanup));
-                    let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-                    let _ = out.queue(cursor::RestorePosition);
-                }
-            }
-
-            (false, None)
-        } else {
-            // ── Dialog mode ─────────────────────────────────────────
-            // Gap between chat content and dialog top — mirrors the
-            // prompt_gap above, but only when there IS content above
-            // AND the dialog doesn't fill the full available space
-            // (otherwise the gap wastes a valuable row).
-            let has_content_above = block_rows > 0 || ephemeral_rows > 0 || self.has_content();
-            let overlay_end = final_anchor + ephemeral_rows;
-            let dh = dialog_height.unwrap_or(0);
-            let max_no_gap = term_h.saturating_sub(1 + overlay_end);
-            let gap: u16 = if has_content_above && dh < max_no_gap {
-                out.overlay_newline();
-                1
-            } else {
-                0
-            };
-
-            let content_rows = block_rows + ephemeral_rows + gap;
-            let dialog_row = overlay_end + gap;
-            // Reserve 1 row for the status bar and 1 row for the gap
-            // between dialog and status bar (always present).
-            let max_available = term_h.saturating_sub(2 + dialog_row);
-            let granted_rows = dh.min(max_available);
-
-            self.prompt.anchor_row = Some(final_anchor);
-            self.prompt.prev_dialog_row = Some(dialog_row);
-            self.prompt.prev_dialog_height = raw_dialog_height.unwrap_or(0);
-            self.prompt.prev_dialog_gap = gap;
-            self.prompt.prev_rows = ephemeral_rows + gap;
-            self.prompt.drawn = true;
-            self.prompt.dirty = false;
-
-            let placement = if granted_rows > 0 {
-                Some(DialogPlacement {
-                    row: dialog_row,
-                    granted_rows,
-                })
-            } else {
-                None
-            };
-            (content_rows > 0, placement)
         }
     }
 
@@ -2664,6 +2302,165 @@ impl Screen {
         self.history.flushed = self.history.order.len();
 
         (clamped, clamped_cursor_line, clamped_cursor_col)
+    }
+
+    /// Alt-buffer dialog frame: paints transcript into the top region
+    /// and returns a `DialogPlacement` for where the caller should draw
+    /// the dialog. Reserves `dialog_height + 1 gap + 1 status` rows at
+    /// the bottom. No scrollback commits; full repaint every frame.
+    pub fn draw_viewport_dialog_frame(
+        &mut self,
+        out: &mut RenderOut,
+        width: usize,
+        dialog_height: u16,
+    ) -> (bool, Option<DialogPlacement>) {
+        let _perf = crate::perf::begin("render:viewport_dialog_frame");
+        self.update_spinner();
+
+        let raw_dialog_height = dialog_height;
+        let (term_w, term_h) = self.size();
+        out.init_cursor(0, term_w, term_h);
+
+        let has_new_blocks = self.history.has_unflushed();
+        let has_ephemeral = self.has_ephemeral();
+        let dialog_height_changed = dialog_height != self.prompt.prev_dialog_height;
+
+        // Fast path: nothing changed, return cached placement.
+        if self.prompt.drawn
+            && !has_new_blocks
+            && !dialog_height_changed
+            && !self.prompt.dirty
+            && !has_ephemeral
+        {
+            let placement = self.prompt.prev_dialog_row.map(|row| {
+                let max_avail = term_h.saturating_sub(2 + row);
+                DialogPlacement {
+                    row,
+                    granted_rows: dialog_height.min(max_avail),
+                }
+            });
+            return (false, placement);
+        }
+
+        // Constrain dialog height to at most max(h/2, remaining viewport).
+        let effective_dialog_height = if self.constrain_dialog {
+            let half_h = term_h / 2;
+            // Reserve 2 rows for status bar + gap.
+            let natural = term_h.saturating_sub(2);
+            dialog_height.min(half_h.max(natural))
+        } else {
+            dialog_height
+        };
+
+        out.row = Some(0);
+        out.move_to(0, 0);
+
+        let tw = (width.saturating_sub(1)).max(1);
+
+        // Reserve dialog + 1 gap (between dialog and status) + 1 status.
+        let reserved: u16 = effective_dialog_height.saturating_add(2);
+        let viewport_rows = term_h.saturating_sub(reserved);
+
+        // Build ephemeral tail.
+        let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if has_ephemeral {
+            let mut col = SpanCollector::new(tw as u16);
+            self.render_ephemeral_into(&mut col, tw);
+            col.finish().lines
+        } else {
+            Vec::new()
+        };
+
+        let total_transcript_rows = self
+            .history
+            .total_rows(tw, self.show_thinking)
+            .saturating_add(ephemeral_lines.len() as u16);
+
+        let clamped = self.history.paint_viewport(
+            out,
+            tw,
+            self.show_thinking,
+            0,
+            viewport_rows,
+            0,
+            &ephemeral_lines,
+        );
+
+        // Scrollbar on the rightmost column over the transcript region.
+        let scrollbar_col = (width as u16).saturating_sub(1);
+        let scrollbar_geom: Option<super::region::ScrollbarGeom> =
+            if (total_transcript_rows as usize) > viewport_rows as usize {
+                let max_scroll =
+                    (total_transcript_rows as usize).saturating_sub(viewport_rows as usize);
+                let inverted = max_scroll.saturating_sub(clamped as usize);
+                let scrollbar = super::scrollbar::Scrollbar::new(
+                    total_transcript_rows as usize,
+                    viewport_rows as usize,
+                    inverted,
+                );
+                super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
+                Some(super::region::ScrollbarGeom {
+                    col: scrollbar_col,
+                    top_row: 0,
+                    rows: viewport_rows,
+                    total_rows: total_transcript_rows,
+                })
+            } else {
+                None
+            };
+        self.last_transcript_region = Some(super::region::TranscriptRegion {
+            top_row: 0,
+            rows: viewport_rows,
+            content_width: tw as u16,
+            scrollbar: scrollbar_geom,
+            total_rows: total_transcript_rows,
+            scroll_offset: clamped,
+        });
+        self.last_viewport_text = self.history.viewport_text(
+            tw,
+            self.show_thinking,
+            viewport_rows,
+            clamped,
+            &ephemeral_lines,
+        );
+
+        // Clear the band below the transcript down to (but excluding)
+        // the status bar so stale prompt/dialog residue from prior
+        // frames can't leak through. Status bar is painted by the
+        // caller via `queue_status_line` at `term_h - 1`.
+        out.reset_style();
+        if viewport_rows < term_h {
+            out.move_to(0, viewport_rows);
+            for row in viewport_rows..term_h {
+                out.move_to(0, row);
+                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
+            }
+        }
+
+        let dialog_row = viewport_rows;
+        self.prompt.drawn = true;
+        self.prompt.dirty = false;
+        self.prompt.anchor_row = Some(0);
+        self.prompt.prev_dialog_row = Some(dialog_row);
+        self.prompt.prev_dialog_height = raw_dialog_height;
+        self.prompt.prev_dialog_gap = 0;
+        self.prompt.prev_rows = 0;
+        self.prompt.prev_prompt_ui_rows = 0;
+        self.content_start_row = Some(0);
+        self.has_scrollback = false;
+        self.history.flushed = self.history.order.len();
+
+        let max_avail = term_h.saturating_sub(2 + dialog_row);
+        let granted_rows = effective_dialog_height.min(max_avail);
+        let placement = if granted_rows > 0 {
+            Some(DialogPlacement {
+                row: dialog_row,
+                granted_rows,
+            })
+        } else {
+            None
+        };
+
+        (true, placement)
     }
 
     /// Measure prompt height without painting. Used by `draw_frame` to
@@ -3228,7 +3025,7 @@ fn render_notification(
     out.push_dim();
     out.print(&msg);
     out.pop_style();
-    out.overlay_newline();
+    out.newline();
     1
 }
 
@@ -3246,7 +3043,7 @@ fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usiz
     });
     out.print(&display);
     out.pop_style();
-    out.overlay_newline();
+    out.newline();
     1
 }
 
@@ -3297,7 +3094,7 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
                 out.push_bg(theme::user_bg());
                 out.print(&" ".repeat(fill));
                 out.pop_style();
-                out.overlay_newline();
+                out.newline();
                 rows += 1;
                 continue;
             }
@@ -3319,7 +3116,7 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
                 blocks::print_user_highlights(out, chunk, &[], is_command);
                 out.print(&" ".repeat(trailing));
                 out.pop_style();
-                out.overlay_newline();
+                out.newline();
                 rows += 1;
             }
         }
@@ -3357,7 +3154,7 @@ fn render_btw(
     let max_q = usable.saturating_sub(6); // " /btw " = 6 chars
     let q: String = btw.question.chars().take(max_q).collect();
     blocks::print_user_highlights(out, &q, &btw.image_labels, false);
-    out.overlay_newline();
+    out.newline();
     rows += 1;
 
     // Body: response or spinner.
@@ -3395,12 +3192,12 @@ fn render_btw(
 
             for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
                 out.print(line);
-                out.overlay_newline();
+                out.newline();
                 rows += 1;
             }
 
             // Blank line before hint.
-            out.overlay_newline();
+            out.newline();
             rows += 1;
 
             // Scroll hint or dismiss hint.
@@ -3416,7 +3213,7 @@ fn render_btw(
                 out.print("   esc: close");
             }
             out.pop_style();
-            out.overlay_newline();
+            out.newline();
             rows += 1;
         }
         None => {
@@ -3429,13 +3226,13 @@ fn render_btw(
             out.push_fg(theme::muted());
             out.print(&format!("   {} thinking", SPINNER_FRAMES[frame]));
             out.pop_style();
-            out.overlay_newline();
+            out.newline();
             rows += 1;
         }
     }
 
     // Blank separator line before the bar.
-    out.overlay_newline();
+    out.newline();
     rows += 1;
 
     rows
@@ -3466,15 +3263,18 @@ mod tests {
         screen.set_anchor_row(0);
         let input = crate::input::InputState::default();
         let mut out = RenderOut::buffer();
-        screen.draw_frame(
+        screen.draw_viewport_frame(
             &mut out,
             40,
-            Some(FramePrompt {
+            FramePrompt {
                 state: &input,
                 mode: protocol::Mode::Normal,
                 queued: &[],
                 prediction: None,
-            }),
+            },
+            0,
+            0,
+            0,
             None,
         );
         let rendered = String::from_utf8(out.into_bytes()).unwrap();

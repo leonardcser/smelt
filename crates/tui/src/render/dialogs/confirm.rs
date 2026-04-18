@@ -148,7 +148,7 @@ impl ConfirmPreview {
                     }
                     out.print(" ");
                     bh.print_line(out, line);
-                    out.overlay_newline();
+                    out.newline();
                     emitted += 1;
                 }
             }
@@ -173,7 +173,7 @@ impl ConfirmPreview {
                         break;
                     }
                     out.print(line);
-                    out.overlay_newline();
+                    out.newline();
                     emitted += 1;
                 }
             }
@@ -350,7 +350,7 @@ fn render_notebook_preview(
         out.push_fg(theme::muted());
         out.print(line);
         out.pop_style();
-        out.overlay_newline();
+        out.newline();
         emitted += 1;
     }
 
@@ -781,7 +781,7 @@ impl super::Dialog for ConfirmDialog {
                 theme::accent()
             };
             draw_bar(out, w, None, None, title_color);
-            out.overlay_newline();
+            out.newline();
             row += 1;
 
             // Title
@@ -814,7 +814,7 @@ impl super::Dialog for ConfirmDialog {
                 } else {
                     out.print(seg);
                 }
-                out.overlay_newline();
+                out.newline();
                 row += 1;
             }
 
@@ -827,7 +827,7 @@ impl super::Dialog for ConfirmDialog {
                     out.push_fg(theme::muted());
                     out.print(seg);
                     out.pop_style();
-                    out.overlay_newline();
+                    out.newline();
                     row += 1;
                 }
             }
@@ -839,7 +839,7 @@ impl super::Dialog for ConfirmDialog {
                     out.push_fg(theme::bar());
                     out.print(&separator);
                     out.pop_style();
-                    out.overlay_newline();
+                    out.newline();
                     row += 1;
                 }
                 self.preview
@@ -863,12 +863,12 @@ impl super::Dialog for ConfirmDialog {
                     out.print(&separator);
                     out.pop_style();
                 }
-                out.overlay_newline();
+                out.newline();
                 row += 1;
             }
 
             if !ly.has_preview {
-                out.overlay_newline();
+                out.newline();
                 row += 1;
             }
             // Action prompt
@@ -877,7 +877,7 @@ impl super::Dialog for ConfirmDialog {
             out.push_dim();
             out.print(prompt_text);
             out.pop_style();
-            out.overlay_newline();
+            out.newline();
             row += 1;
         }
 
@@ -920,7 +920,7 @@ impl super::Dialog for ConfirmDialog {
                     out.print(line);
                 }
                 if li < lines.len() - 1 {
-                    out.overlay_newline();
+                    out.newline();
                     row += 1;
                 }
             }
@@ -940,13 +940,13 @@ impl super::Dialog for ConfirmDialog {
                 row = new_row;
                 cursor_pos = cpos;
             } else {
-                out.overlay_newline();
+                out.newline();
                 row += 1;
             }
         }
 
         // footer: blank + hint (queue_dialog_gap provides the gap below)
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         let hint = if self.editing {
             hints::join(&[hints::SEND, hints::CANCEL])

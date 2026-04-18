@@ -301,7 +301,7 @@ impl super::Dialog for AgentsDialog {
                 };
 
                 draw_bar(out, w, None, None, crate::theme::AGENT);
-                out.overlay_newline();
+                out.newline();
 
                 // Header: agent name + slug
                 out.print(" ");
@@ -341,8 +341,8 @@ impl super::Dialog for AgentsDialog {
                         out.pop_style();
                     }
                 }
-                out.overlay_newline();
-                out.overlay_newline();
+                out.newline();
+                out.newline();
 
                 // Content
                 for line in lines.iter().skip(scroll).take(visible) {
@@ -351,14 +351,14 @@ impl super::Dialog for AgentsDialog {
                             out.push_dim();
                             out.print(&format!("  {text}"));
                             out.pop_style();
-                            out.overlay_newline();
+                            out.newline();
                         }
                         DetailLine::Text(text) => {
                             out.print(&format!("   {}", truncate_str(text, w.saturating_sub(4))));
-                            out.overlay_newline();
+                            out.newline();
                         }
                         DetailLine::Blank => {
-                            out.overlay_newline();
+                            out.newline();
                         }
                         DetailLine::ToolCall(entry) => {
                             out.print("  ");
@@ -374,13 +374,13 @@ impl super::Dialog for AgentsDialog {
                                     out.pop_style();
                                 }
                             }
-                            out.overlay_newline();
+                            out.newline();
                         }
                     }
                 }
 
                 // Hints
-                out.overlay_newline();
+                out.newline();
                 out.push_dim();
                 let can_scroll = total > max_vis;
                 if can_scroll {
@@ -422,18 +422,18 @@ impl super::Dialog for AgentsDialog {
                 };
 
                 draw_bar(out, w, None, None, crate::theme::AGENT);
-                out.overlay_newline();
+                out.newline();
 
                 out.push_dim();
                 out.print(" Agents");
                 out.pop_style();
-                out.overlay_newline();
+                out.newline();
 
                 if self.agents.is_empty() {
                     out.push_dim();
                     out.print("  No subagents running");
                     out.pop_style();
-                    out.overlay_newline();
+                    out.newline();
                 } else {
                     let name_w = self
                         .agents
@@ -489,11 +489,11 @@ impl super::Dialog for AgentsDialog {
                                 out.pop_style();
                             }
                         }
-                        out.overlay_newline();
+                        out.newline();
                     }
                 }
 
-                out.overlay_newline();
+                out.newline();
                 out.push_dim();
                 out.print(&hints::join(&[
                     "enter: view",

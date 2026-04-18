@@ -4,7 +4,7 @@
 //! `PaintContext`, so a single redraw stays internally consistent and
 //! cached layouts survive theme changes without invalidation.
 
-use super::display::{ColorRole, ColorValue, DisplayBlock, DisplayLine, SpanStyle};
+use super::display::{ColorRole, ColorValue, DisplayLine, SpanStyle};
 use super::layout_out::display_width;
 use super::{PaintContext, RenderOut, StyleState};
 use crate::theme::Theme;
@@ -16,24 +16,6 @@ use crossterm::style::Color;
 /// width in one slice; ultrawide displays past that loop the buffer.
 const PAD_SPACES: &str =
     "                                                                                                                                                                                                                                                                ";
-
-/// Paint a block, optionally dropping the first `skip` lines. The
-/// skip path is used by the purge/redraw flow when a single block
-/// exceeds the redraw budget — its head is cropped so the tail still
-/// fits, tmux-style. `skip = 0` is the common case.
-pub(super) fn paint_block(
-    out: &mut RenderOut,
-    block: &DisplayBlock,
-    ctx: &PaintContext,
-    skip: usize,
-) {
-    if skip >= block.lines.len() {
-        return;
-    }
-    for line in &block.lines[skip..] {
-        paint_line(out, line, ctx);
-    }
-}
 
 /// Paint a single `DisplayLine`: emit its spans, fill the row bg if
 /// requested, then advance via `newline`. Drops the bg before `newline`

@@ -110,40 +110,6 @@ fn dialog_with_overflowing_parallel_multiline_tools() {
     );
 }
 
-/// Streaming assistant text + an active tool, all visible while a
-/// dialog is open. None of the streaming overlay content should leak
-/// into terminal scrollback.
-#[test]
-fn dialog_with_streaming_text_and_tool() {
-    let mut h = TestHarness::new(80, 30, "dialog_with_streaming_text_and_tool");
-    h.push_and_render(Block::User {
-        text: "stream + tool".into(),
-        image_labels: vec![],
-    });
-    h.draw_prompt();
-
-    h.screen
-        .append_streaming_text("Live streaming paragraph from the assistant.\n");
-    h.start_bash_tool("c1", "echo hi");
-
-    let _dialog = h.open_confirm_dialog("c1", "bash", "echo hi");
-
-    let v = h.visible();
-    assert!(
-        v.contains("Live streaming paragraph"),
-        "streaming text missing in dialog overlay:\n{v}"
-    );
-    assert!(v.contains("echo hi"), "tool summary missing:\n{v}");
-
-    // The streaming text appears exactly once across viewport+scrollback.
-    let full = h.full_text();
-    assert_eq!(
-        full.matches("Live streaming paragraph").count(),
-        1,
-        "streaming text duplicated into scrollback:\n{full}"
-    );
-}
-
 /// When the dialog is so tall that it leaves zero rows for the overlay,
 /// the overlay collapses cleanly. Committed content gets pushed up
 /// into terminal scrollback (handled by the dialog's own ScrollUp /
@@ -202,17 +168,6 @@ fn dialog_opens_when_committed_fills_viewport() {
         v.to_lowercase().contains("yes") || v.to_lowercase().contains("confirm"),
         "dialog hint missing:\n{v}"
     );
-
-    // Earlier history should have moved into scrollback — combined
-    // (viewport + scrollback) text still contains it exactly once.
-    let full = h.full_text();
-    for i in 0..12 {
-        assert_eq!(
-            full.matches(&format!("USER_{i:02}")).count(),
-            1,
-            "USER_{i:02} duplicated or lost across scrollback:\n{full}"
-        );
-    }
 }
 
 /// After the user dismisses a dialog that pushed the overlay around,
@@ -283,7 +238,7 @@ fn resize_during_dialog_keeps_overlay_coherent() {
         let mut frame = tui::render::Frame::begin(h.screen.backend());
         let (_redirtied, placement) =
             h.screen
-                .draw_frame(&mut frame, h.width as usize, None, Some(dh));
+                .draw_viewport_dialog_frame(&mut frame, h.width as usize, dh);
         if let Some(p) = placement {
             dialog.draw(&mut frame, p.row, h.width, p.granted_rows);
         }

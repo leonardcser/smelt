@@ -370,7 +370,7 @@ impl super::Dialog for QuestionDialog {
         let mut row = bar_row;
 
         draw_bar(out, w, None, None, theme::accent());
-        out.overlay_newline();
+        out.newline();
         row += 1;
 
         if self.has_tabs {
@@ -402,7 +402,7 @@ impl super::Dialog for QuestionDialog {
                     out.pop_style();
                 }
             }
-            out.overlay_newline();
+            out.newline();
             row += 1;
         }
 
@@ -423,11 +423,11 @@ impl super::Dialog for QuestionDialog {
                 out.print(suffix);
                 out.pop_style();
             }
-            out.overlay_newline();
+            out.newline();
             row += 1;
         }
 
-        out.overlay_newline();
+        out.newline();
         row += 1;
 
         for (i, opt) in q.options.iter().enumerate() {
@@ -477,7 +477,7 @@ impl super::Dialog for QuestionDialog {
                     out.pop_style();
                 }
             }
-            out.overlay_newline();
+            out.newline();
             row += 1;
         }
 
@@ -524,12 +524,12 @@ impl super::Dialog for QuestionDialog {
             row = new_row;
             cursor_pos = cpos;
         } else {
-            out.overlay_newline();
+            out.newline();
         }
         let _ = row;
 
         // Footer
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         let hint = if editing {
             hints::join(&[hints::CANCEL, hints::CONFIRM])

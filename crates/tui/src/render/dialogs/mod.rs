@@ -582,7 +582,7 @@ pub(crate) fn render_inline_textarea(
         if editing && vi == vis_cursor.0 {
             cursor_pos = Some((text_col + vis_cursor.1 as u16, row));
         }
-        out.overlay_newline();
+        out.newline();
         row += 1;
     }
     (row, cursor_pos)

@@ -90,12 +90,12 @@ impl super::Dialog for RewindDialog {
         };
 
         draw_bar(out, w, None, None, theme::accent());
-        out.overlay_newline();
+        out.newline();
 
         out.push_dim();
         out.print(" Rewind to:");
         out.pop_style();
-        out.overlay_newline();
+        out.newline();
 
         let num_width = n.to_string().len();
         let range = self.list.visible_range(n);
@@ -122,10 +122,10 @@ impl super::Dialog for RewindDialog {
                 out.print(" ");
                 out.print(&truncated);
             }
-            out.overlay_newline();
+            out.newline();
         }
 
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         out.print(&hints::join(&[hints::SELECT, hints::CANCEL]));
         out.pop_style();

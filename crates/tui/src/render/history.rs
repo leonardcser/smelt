@@ -2,19 +2,60 @@
 //!
 //! Holds the content-addressed block store, layout cache, and all
 //! mutable sidecar state (tool output, exec output, in-flight agents
-//! etc.) that `Screen` tracks. The main rendering loop is in
-//! `BlockHistory::render`, called by `Screen::render_pending_blocks`
-//! and `Screen::redraw`.
+//! etc.) that `Screen` tracks. `BlockHistory::paint_viewport` is the
+//! only paint path; it repaints the whole transcript every frame.
 
 use super::blocks::{gap_between, layout_block, Element};
 use super::cache::ToolOutputRenderCache;
-use super::context::{LayoutContext, PaintContext};
+use super::context::LayoutContext;
 use super::display::DisplayBlock;
-use super::paint::paint_block;
 use super::RenderOut;
 use crossterm::QueueableCommand;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+
+pub struct ActiveExec {
+    pub command: String,
+    pub output: String,
+    pub start_time: Instant,
+    pub finished: bool,
+    pub exit_code: Option<i32>,
+}
+
+/// A blocking agent rendered in the dynamic section (like an active tool).
+pub struct ActiveAgent {
+    pub agent_id: String,
+    pub slug: Option<String>,
+    pub tool_calls: Vec<crate::app::AgentToolEntry>,
+    pub status: AgentBlockStatus,
+    pub start_time: Instant,
+    /// Frozen elapsed time once the agent finishes.
+    pub final_elapsed: Option<Duration>,
+}
+
+pub struct ActiveTool {
+    pub call_id: String,
+    pub name: String,
+    pub summary: String,
+    pub args: HashMap<String, serde_json::Value>,
+    pub status: ToolStatus,
+    pub output: Option<ToolOutputRef>,
+    pub user_message: Option<String>,
+    pub start_time: Instant,
+}
+
+impl ActiveTool {
+    pub(super) fn elapsed(&self) -> Option<Duration> {
+        if matches!(
+            self.name.as_str(),
+            "bash" | "web_fetch" | "read_process_output" | "stop_process" | "peek_agent"
+        ) {
+            Some(self.start_time.elapsed())
+        } else {
+            None
+        }
+    }
+}
 
 /// All data needed to show a confirm dialog. Flows unchanged from
 /// `EngineEvent::RequestPermission` through `SessionControl`, `DeferredDialog`,
@@ -69,49 +110,6 @@ impl ToolState {
             self.status,
             ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
         )
-    }
-}
-
-pub struct ActiveExec {
-    pub command: String,
-    pub output: String,
-    pub start_time: Instant,
-    pub finished: bool,
-    pub exit_code: Option<i32>,
-}
-
-/// A blocking agent rendered in the dynamic section (like an active tool).
-pub struct ActiveAgent {
-    pub agent_id: String,
-    pub slug: Option<String>,
-    pub tool_calls: Vec<crate::app::AgentToolEntry>,
-    pub status: AgentBlockStatus,
-    pub start_time: Instant,
-    /// Frozen elapsed time once the agent finishes.
-    pub final_elapsed: Option<Duration>,
-}
-
-pub struct ActiveTool {
-    pub call_id: String,
-    pub name: String,
-    pub summary: String,
-    pub args: HashMap<String, serde_json::Value>,
-    pub status: ToolStatus,
-    pub output: Option<ToolOutputRef>,
-    pub user_message: Option<String>,
-    pub start_time: Instant,
-}
-
-impl ActiveTool {
-    pub(super) fn elapsed(&self) -> Option<Duration> {
-        if matches!(
-            self.name.as_str(),
-            "bash" | "web_fetch" | "read_process_output" | "stop_process" | "peek_agent"
-        ) {
-            Some(self.start_time.elapsed())
-        } else {
-            None
-        }
     }
 }
 
@@ -374,14 +372,6 @@ pub(super) struct BlockHistory {
     /// When false, `save_session` skips writing the layout cache file.
     pub(super) cache_dirty: bool,
     pub(super) flushed: usize,
-    pub(super) last_block_rows: u16,
-    /// When true, the leading gap of the next unflushed block is suppressed.
-    /// Set after a dialog dismiss where ScrollUp pushed the gap into scrollback.
-    pub(super) suppress_leading_gap: bool,
-    /// Rows to skip from the top of the next-rendered first block.
-    /// Set by `redraw` when a single block exceeds the redraw budget;
-    /// consumed by the next `render` call and reset to 0 afterwards.
-    pub(super) pending_head_skip: u16,
 }
 
 impl BlockHistory {
@@ -398,9 +388,6 @@ impl BlockHistory {
             cache_width: 0,
             cache_dirty: false,
             flushed: 0,
-            last_block_rows: 0,
-            suppress_leading_gap: false,
-            pending_head_skip: 0,
         }
     }
 
@@ -564,7 +551,6 @@ impl BlockHistory {
         self.view_states.clear();
         self.statuses.clear();
         self.flushed = 0;
-        self.last_block_rows = 0;
         self.cache_dirty = true;
     }
 
@@ -589,25 +575,11 @@ impl BlockHistory {
         }
     }
 
-    /// True iff the block at `i` participates in the main paint path.
-    /// Streaming blocks are invisible to the transcript paint — the
-    /// ephemeral overlay owns their display until the stream closes
-    /// and their status flips to `Done`. Invariant: streaming blocks
-    /// only appear at the tail, so gap/adjacency math on live blocks
-    /// is unaffected.
-    pub(super) fn is_live(&self, i: usize) -> bool {
-        let id = self.order[i];
-        !matches!(self.status(id), Status::Streaming)
-    }
-
     /// Gap (in rows) before the block at `i`, based on adjacency rules.
-    /// Streaming blocks contribute no gap — they're invisible in the
-    /// main paint path, so callers that iterate over every index can
-    /// consume this directly without a per-site `is_live` check.
+    /// Streaming blocks participate in the main paint path like any other
+    /// block — alt-buffer repaints every frame, so "live" vs "committed"
+    /// is a style distinction, not a layout one.
     pub(super) fn block_gap(&self, i: usize) -> u16 {
-        if !self.is_live(i) {
-            return 0;
-        }
         if i > 0 {
             gap_between(
                 &Element::Block(self.block_at(i - 1)),
@@ -634,9 +606,6 @@ impl BlockHistory {
     }
 
     pub(super) fn ensure_rows(&mut self, i: usize, base: LayoutKey) -> u16 {
-        if !self.is_live(i) {
-            return 0;
-        }
         let id = self.order[i];
         let key = self.resolve_key(id, base);
         if let Some(rows) = self
@@ -699,103 +668,6 @@ impl BlockHistory {
             })
             .collect();
         self.tool_states.retain(|cid, _| live.contains(cid));
-    }
-
-    /// Render unflushed blocks. Returns total rows printed.
-    pub(super) fn render(&mut self, out: &mut RenderOut, width: usize, show_thinking: bool) -> u16 {
-        if !self.has_unflushed() {
-            return 0;
-        }
-        let _perf = crate::perf::begin("history:render");
-        let use_cache = out.row.is_none();
-
-        if use_cache && width != self.cache_width {
-            self.invalidate_for_width(width);
-        }
-
-        let theme = crate::theme::snapshot();
-        let pctx = PaintContext {
-            theme: &theme,
-            term_width: width as u16,
-        };
-        let key = LayoutKey {
-            view_state: super::history::ViewState::Expanded,
-            width: width as u16,
-            show_thinking,
-            content_hash: 0,
-        };
-
-        let mut total = 0u16;
-        let last_idx = self.order.len().saturating_sub(1);
-        let mut first = true;
-        // Consume any pending head-skip set by the redraw path. Skip
-        // the leading gap on the first block too, since we're starting
-        // mid-block visually.
-        let head_skip = std::mem::take(&mut self.pending_head_skip);
-        for i in self.flushed..self.order.len() {
-            if !self.is_live(i) {
-                continue;
-            }
-            let head_skip_block = if first { head_skip } else { 0 };
-            let gap = if first && (self.suppress_leading_gap || head_skip > 0) {
-                0
-            } else {
-                self.block_gap(i)
-            };
-            first = false;
-            for _ in 0..gap {
-                out.scroll_newline();
-            }
-
-            let id = self.order[i];
-            let bkey = self.resolve_key(id, key);
-            let block = &self.blocks[&id];
-            let tool_state = if let Block::ToolCall { call_id, .. } = block {
-                self.tool_states.get(call_id)
-            } else {
-                None
-            };
-
-            let rows = if use_cache {
-                if let Some(cached) = self.artifacts.get(&id).and_then(|a| a.get(bkey)) {
-                    let _p = crate::perf::begin("history:cache_hit");
-                    paint_block(out, cached, &pctx, head_skip_block as usize);
-                    cached.rows().saturating_sub(head_skip_block)
-                } else {
-                    let _p = crate::perf::begin("history:cache_miss");
-                    let lctx = LayoutContext {
-                        width: width as u16,
-                        show_thinking,
-                        view_state: bkey.view_state,
-                    };
-                    let display = layout_block(block, tool_state, &lctx);
-                    paint_block(out, &display, &pctx, head_skip_block as usize);
-                    let rows = display.rows().saturating_sub(head_skip_block);
-                    let artifact = self.artifacts.get_mut(&id).unwrap();
-                    artifact.insert(bkey, display);
-                    self.cache_dirty = true;
-                    rows
-                }
-            } else {
-                let _p = crate::perf::begin("history:overlay_render");
-                let lctx = LayoutContext {
-                    width: width as u16,
-                    show_thinking,
-                    view_state: bkey.view_state,
-                };
-                let display = layout_block(block, tool_state, &lctx);
-                paint_block(out, &display, &pctx, head_skip_block as usize);
-                display.rows().saturating_sub(head_skip_block)
-            };
-
-            total += gap + rows;
-            if i == last_idx {
-                self.last_block_rows = rows + gap;
-            }
-        }
-        self.suppress_leading_gap = false;
-        self.flushed = self.order.len();
-        total
     }
 
     /// Flat-line viewport painter. Lays out every block, then paints the
@@ -1025,7 +897,7 @@ impl BlockHistory {
             let _ = out.queue(crossterm::terminal::Clear(
                 crossterm::terminal::ClearType::CurrentLine,
             ));
-            out.overlay_newline();
+            out.newline();
             painted += 1;
         }
 
@@ -1043,7 +915,7 @@ impl BlockHistory {
                 let _ = out.queue(crossterm::terminal::Clear(
                     crossterm::terminal::ClearType::CurrentLine,
                 ));
-                out.overlay_newline();
+                out.newline();
                 painted += 1;
             }
             let id = self.order[i];
@@ -1084,7 +956,7 @@ impl BlockHistory {
             let _ = out.queue(crossterm::terminal::Clear(
                 crossterm::terminal::ClearType::CurrentLine,
             ));
-            out.overlay_newline();
+            out.newline();
             painted += 1;
         }
 
@@ -1128,17 +1000,10 @@ mod tests {
         });
 
         let mut out = RenderOut::buffer();
-        history.render(&mut out, 80, false);
+        history.paint_viewport(&mut out, 80, false, 0, 50, 0, &[]);
         let rendered = String::from_utf8(out.into_bytes()).unwrap();
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("thinking (2 lines)"));
-        // Gap row is either "\r\n\r\n" (new form, since scroll-mode
-        // `scroll_newline` drops the redundant Clear::UntilNewLine) or
-        // "\r\n\x1b[K\r\n" (old form), depending on history path.
-        assert!(
-            rendered.contains("\r\n\r\n") || rendered.contains("\r\n\u{1b}[K\r\n"),
-            "rendered: {rendered:?}"
-        );
     }
 
     #[test]
@@ -1151,13 +1016,13 @@ mod tests {
         });
 
         let mut sink = RenderOut::buffer();
-        history.render(&mut sink, 100, true);
+        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[]);
         history.flushed = 0;
-        history.render(&mut sink, 80, true);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
         history.flushed = 0;
-        history.render(&mut sink, 100, true);
+        history.paint_viewport(&mut sink, 100, true, 0, 50, 0, &[]);
         history.flushed = 0;
-        history.render(&mut sink, 80, true);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
 
         let content_hash = history.content_hash(id);
         let keys: Vec<LayoutKey> = history
@@ -1193,7 +1058,7 @@ mod tests {
         });
 
         let mut sink = RenderOut::buffer();
-        history.render(&mut sink, 80, true);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
         let h0 = history.content_hash(id);
         assert!(!history.artifacts.get(&id).unwrap().is_empty());
 
@@ -1212,7 +1077,7 @@ mod tests {
         );
 
         history.flushed = 0;
-        history.render(&mut sink, 80, true);
+        history.paint_viewport(&mut sink, 80, true, 0, 50, 0, &[]);
         let keys: Vec<u64> = history
             .artifacts
             .get(&id)
@@ -1225,10 +1090,10 @@ mod tests {
     }
 
     #[test]
-    fn streaming_blocks_consume_no_rows_or_gap() {
-        // A streaming block at the tail must be invisible to every
-        // paint path — the ephemeral overlay owns its display until
-        // the stream closes.
+    fn streaming_blocks_render_inline() {
+        // Streaming blocks participate in the main paint path like any
+        // other block — alt-buffer repaints every frame, and the "live"
+        // status is a style distinction, not a layout one.
         let mut history = BlockHistory::new();
         history.push(Block::Text {
             content: "hello".into(),
@@ -1238,20 +1103,19 @@ mod tests {
             content: "streaming content".into(),
         });
         history.set_status(streaming_id, Status::Streaming);
-        assert_eq!(
-            history.total_rows(80, false),
-            base_rows,
-            "streaming block must not affect total_rows"
+        assert!(
+            history.total_rows(80, false) > base_rows,
+            "streaming block must render inline",
         );
-        assert_eq!(history.block_gap(1), 0, "streaming block has no gap");
+        assert!(history.block_gap(1) > 0, "streaming block takes its gap");
         let key = LayoutKey {
             width: 80,
             show_thinking: false,
             view_state: ViewState::Expanded,
             content_hash: 0,
         };
-        assert_eq!(history.ensure_rows(1, key), 0);
-        // Flipping to Done un-hides it.
+        assert!(history.ensure_rows(1, key) > 0);
+        // Flipping to Done doesn't change rendering.
         history.set_status(streaming_id, Status::Done);
         assert!(history.total_rows(80, false) > base_rows);
     }

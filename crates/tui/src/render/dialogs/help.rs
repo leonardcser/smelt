@@ -121,13 +121,13 @@ impl super::Dialog for HelpDialog {
         self.list.scroll_offset = self.list.scroll_offset.min(max_scroll);
 
         draw_bar(out, w, None, None, theme::accent());
-        out.overlay_newline();
+        out.newline();
 
         out.push_dim();
         out.print(" help");
         out.pop_style();
-        out.overlay_newline();
-        out.overlay_newline();
+        out.newline();
+        out.newline();
 
         for &(label, detail) in content_lines
             .iter()
@@ -135,7 +135,7 @@ impl super::Dialog for HelpDialog {
             .take(max_visible)
         {
             if label.is_empty() && detail.is_empty() {
-                out.overlay_newline();
+                out.newline();
             } else {
                 out.print("  ");
                 out.push_fg(theme::muted());
@@ -146,11 +146,11 @@ impl super::Dialog for HelpDialog {
                 out.print(&format!("{padding}{detail}"));
                 out.pop_style();
                 let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-                out.overlay_newline();
+                out.newline();
             }
         }
 
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         out.print(&hints::join(&[
             hints::CLOSE,

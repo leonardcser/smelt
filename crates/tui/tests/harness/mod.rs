@@ -106,86 +106,6 @@ pub fn visible_content(parser: &vt100::Parser) -> String {
     lines[start..=end].join("\n")
 }
 
-fn fresh_render_bytes(
-    blocks: &[Block],
-    tool_states: &HashMap<String, ToolState>,
-    width: u16,
-    height: u16,
-) -> Vec<u8> {
-    let sink = Arc::new(Mutex::new(Vec::new()));
-    let size = Rc::new(Cell::new((width, height)));
-    let cursor = Rc::new(Cell::new(0));
-    let backend = TestBackend::new_with_state(size, cursor, sink.clone());
-    let mut screen = Screen::with_backend(Box::new(backend));
-    screen.set_anchor_row(0);
-
-    for block in blocks {
-        if let Block::ToolCall { call_id, .. } = block {
-            if let Some(state) = tool_states.get(call_id) {
-                screen.push_tool_call(block.clone(), state.clone());
-                continue;
-            }
-        }
-        screen.push(block.clone());
-    }
-    screen.render_pending_blocks();
-
-    let input = tui::input::InputState::default();
-    {
-        let mut frame = tui::render::Frame::begin(screen.backend());
-        screen.draw_frame(
-            &mut frame,
-            width as usize,
-            Some(tui::render::FramePrompt {
-                state: &input,
-                mode: protocol::Mode::Normal,
-                queued: &[],
-                prediction: None,
-            }),
-            None,
-        );
-    }
-
-    let bytes = sink.lock().unwrap().clone();
-    bytes
-}
-
-fn fresh_render(
-    blocks: &[Block],
-    tool_states: &HashMap<String, ToolState>,
-    width: u16,
-    height: u16,
-) -> String {
-    let bytes = fresh_render_bytes(blocks, tool_states, width, height);
-    let mut parser = vt100::Parser::new(height, width, 10_000);
-    parser.process(&bytes);
-    extract_full_content(&mut parser)
-}
-
-fn fresh_visible_render(
-    blocks: &[Block],
-    tool_states: &HashMap<String, ToolState>,
-    width: u16,
-    height: u16,
-) -> String {
-    let bytes = fresh_render_bytes(blocks, tool_states, width, height);
-    let mut parser = vt100::Parser::new(height, width, 10_000);
-    parser.process(&bytes);
-    visible_content(&parser)
-}
-
-fn build_diff(expected: &str, actual: &str) -> String {
-    use similar::TextDiff;
-    let diff = TextDiff::from_lines(expected, actual);
-    let mut out = String::new();
-    out.push_str("--- expected (fresh re-render)\n");
-    out.push_str("+++ actual (incremental)\n");
-    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
-        out.push_str(&format!("{hunk}"));
-    }
-    out
-}
-
 fn block_summary(block: &Block) -> String {
     match block {
         Block::User { text, .. } => format!("User({:?})", truncate(text, 40)),
@@ -323,66 +243,6 @@ impl TestHarness {
         self.render_pending();
     }
 
-    /// Assert the currently visible viewport matches a fresh render.
-    pub fn assert_visible_matches_fresh_render(&mut self) {
-        self.draw_prompt();
-        let incremental = visible_content(&self.parser);
-        let blocks = self.screen.blocks();
-        let tool_states = self.screen.tool_states_snapshot();
-        let fresh = fresh_visible_render(&blocks, &tool_states, self.width, self.height);
-        self.compare_and_panic("Visible render mismatch", incremental, fresh);
-    }
-
-    /// Assert incremental rendering matches a fresh re-render (viewport + scrollback).
-    pub fn assert_scrollback_integrity(&mut self) {
-        // Draw a prompt frame so both sides end in the same state.
-        let input = tui::input::InputState::default();
-        {
-            let mut frame = tui::render::Frame::begin(self.screen.backend());
-            self.screen.draw_frame(
-                &mut frame,
-                self.width as usize,
-                Some(tui::render::FramePrompt {
-                    state: &input,
-                    mode: self.mode,
-                    queued: &[],
-                    prediction: None,
-                }),
-                None,
-            );
-        }
-        self.drain_sink();
-
-        let incremental = extract_full_content(&mut self.parser);
-        let blocks = self.screen.blocks();
-        let tool_states = self.screen.tool_states_snapshot();
-        let fresh = fresh_render(&blocks, &tool_states, self.width, self.height);
-        self.compare_and_panic("Scrollback integrity failed", incremental, fresh);
-    }
-
-    fn compare_and_panic(&mut self, label: &str, incremental: String, fresh: String) {
-        self.assert_count += 1;
-        if incremental == fresh {
-            return;
-        }
-        let diff = build_diff(&fresh, &incremental);
-        let dump_dir = format!(
-            "target/test-frames/{}/assert_{:03}",
-            self.test_name, self.assert_count
-        );
-        let _ = std::fs::create_dir_all(&dump_dir);
-        let _ = std::fs::write(format!("{dump_dir}/expected.txt"), &fresh);
-        let _ = std::fs::write(format!("{dump_dir}/actual.txt"), &incremental);
-        let _ = std::fs::write(format!("{dump_dir}/diff.txt"), &diff);
-        let _ = std::fs::write(format!("{dump_dir}/actions.txt"), self.actions.join("\n"));
-        let preview: String = diff.lines().take(40).collect::<Vec<_>>().join("\n");
-        panic!(
-            "{label} at assertion #{}\nBlocks: {}, Frames: {dump_dir}/\n\n{preview}",
-            self.assert_count,
-            self.screen.block_count(),
-        );
-    }
-
     /// Start a bash tool with a summary string. Logs into `actions`.
     pub fn start_bash_tool(&mut self, call_id: &str, summary: &str) {
         self.actions
@@ -397,7 +257,6 @@ impl TestHarness {
 
     /// Draw a prompt frame and snapshot the current visible viewport.
     pub fn visible(&mut self) -> String {
-        self.draw_prompt();
         visible_content(&self.parser)
     }
 
@@ -439,9 +298,11 @@ impl TestHarness {
 
         {
             let mut frame = tui::render::Frame::begin(self.screen.backend());
-            let (_redirtied, placement) =
-                self.screen
-                    .draw_frame(&mut frame, self.width as usize, None, Some(dialog_height));
+            let (_redirtied, placement) = self.screen.draw_viewport_dialog_frame(
+                &mut frame,
+                self.width as usize,
+                dialog_height,
+            );
             if let Some(ref p) = placement {
                 dialog.draw(&mut frame, p.row, self.width, p.granted_rows);
                 self.screen.queue_dialog_gap(&mut frame);
@@ -487,9 +348,11 @@ impl TestHarness {
 
         {
             let mut frame = tui::render::Frame::begin(self.screen.backend());
-            let (_redirtied, placement) =
-                self.screen
-                    .draw_frame(&mut frame, self.width as usize, None, Some(dialog_height));
+            let (_redirtied, placement) = self.screen.draw_viewport_dialog_frame(
+                &mut frame,
+                self.width as usize,
+                dialog_height,
+            );
             if let Some(ref p) = placement {
                 dialog.draw(&mut frame, p.row, self.width, p.granted_rows);
                 self.screen.queue_dialog_gap(&mut frame);
@@ -512,7 +375,7 @@ impl TestHarness {
             let mut frame = tui::render::Frame::begin(self.screen.backend());
             let (redirtied, placement) =
                 self.screen
-                    .draw_frame(&mut frame, self.width as usize, None, Some(dh));
+                    .draw_viewport_dialog_frame(&mut frame, self.width as usize, dh);
             if redirtied {
                 dialog.mark_dirty();
             }
@@ -576,15 +439,18 @@ impl TestHarness {
         tui::api::buf::replace(&mut input, text.to_string(), Some(text.len()));
         {
             let mut frame = tui::render::Frame::begin(self.screen.backend());
-            self.screen.draw_frame(
+            self.screen.draw_viewport_frame(
                 &mut frame,
                 self.width as usize,
-                Some(tui::render::FramePrompt {
+                tui::render::FramePrompt {
                     state: &input,
                     mode: self.mode,
                     queued: &[],
                     prediction: None,
-                }),
+                },
+                0,
+                0,
+                0,
                 None,
             );
         }
@@ -597,55 +463,21 @@ impl TestHarness {
         let input = tui::input::InputState::default();
         {
             let mut frame = tui::render::Frame::begin(self.screen.backend());
-            self.screen.draw_frame(
+            self.screen.draw_viewport_frame(
                 &mut frame,
                 self.width as usize,
-                Some(tui::render::FramePrompt {
+                tui::render::FramePrompt {
                     state: &input,
                     mode: self.mode,
                     queued: &[],
                     prediction: None,
-                }),
+                },
+                0,
+                0,
+                0,
                 None,
             );
         }
-        self.drain_sink();
-    }
-
-    /// Stream text, flush it, and render.
-    pub fn stream_and_flush(&mut self, text: &str) {
-        self.actions.push(format!("stream_and_flush({text:?})"));
-        self.screen.append_streaming_text(text);
-        self.screen.flush_streaming_text();
-        self.screen.render_pending_blocks();
-        self.drain_sink();
-    }
-
-    /// Stream text line by line with a draw_prompt tick after each line.
-    pub fn stream_lines_with_ticks(&mut self, text: &str) {
-        self.actions
-            .push(format!("stream_lines_with_ticks({:?})", truncate(text, 40)));
-        for line in text.split_inclusive('\n') {
-            self.screen.append_streaming_text(line);
-            let input = tui::input::InputState::default();
-            {
-                let mut frame = tui::render::Frame::begin(self.screen.backend());
-                self.screen.draw_frame(
-                    &mut frame,
-                    self.width as usize,
-                    Some(tui::render::FramePrompt {
-                        state: &input,
-                        mode: self.mode,
-                        queued: &[],
-                        prediction: None,
-                    }),
-                    None,
-                );
-            }
-            self.drain_sink();
-        }
-        self.screen.flush_streaming_text();
-        self.screen.render_pending_blocks();
         self.drain_sink();
     }
 

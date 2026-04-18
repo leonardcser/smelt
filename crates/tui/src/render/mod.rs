@@ -493,28 +493,16 @@ impl RenderOut {
         self.print(&text.to_string());
     }
 
-    /// Queue a ScrollUp. Does not move the cursor — only shifts
-    /// content up, affecting the logical position of previously-drawn
-    /// content.
-    pub(super) fn scroll_up(&mut self, n: u16) {
-        let _ = self.queue(terminal::ScrollUp(n));
-    }
-
     // ── Newline helpers ─────────────────────────────────────────────
 
-    /// Advance to the next line, clearing trailing content on the
-    /// current line.  Works in both scroll and overlay mode:
+    /// Advance to the next line, clearing trailing residue on the
+    /// current line.
     ///
-    /// - **Scroll mode** (`row` is `None`): emits `\r\n` which commits
-    ///   the line to scrollback.  The cursor advances by 1 row, capped
-    ///   at the last terminal row (where the terminal scrolls instead).
-    /// - **Overlay mode** (`row` is `Some`): emits `MoveTo(0, row+1)`
-    ///   so the position stays exact without relying on the terminal's
-    ///   linefeed behaviour.
-    ///
-    /// When the caller knows which mode is active, prefer
-    /// [`scroll_newline`] or [`overlay_newline`] for compile-time
-    /// documentation and a debug-mode assertion.
+    /// - **Overlay mode** (`row` is `Some`): emits `MoveTo(0, row+1)` so
+    ///   position stays exact without relying on terminal linefeed behaviour.
+    ///   This is the only interactive path.
+    /// - **Scroll mode** (`row` is `None`): emits `\r\n`, retained for
+    ///   headless/test callers that write into a buffer without cursor state.
     pub fn newline(&mut self) {
         // Skip `Clear::UntilNewLine` when the row was painted to the full
         // terminal width. Issuing `CSI K` with the cursor sitting on the
@@ -537,24 +525,6 @@ impl RenderOut {
             }
         }
         self.line_cols = 0;
-    }
-
-    /// Newline in scroll mode — emits `\r\n` that commits to scrollback.
-    /// Panics in debug builds if `row` is `Some` (overlay mode).
-    pub fn scroll_newline(&mut self) {
-        debug_assert!(
-            self.row.is_none(),
-            "scroll_newline called in overlay mode (row={:?})",
-            self.row
-        );
-        self.newline();
-    }
-
-    /// Newline in overlay mode — emits `MoveTo` to the next row.
-    /// Panics in debug builds if `row` is `None` (scroll mode).
-    pub fn overlay_newline(&mut self) {
-        debug_assert!(self.row.is_some(), "overlay_newline called in scroll mode");
-        self.newline();
     }
 
     /// Diff to `target` and replace `current` without growing the

@@ -125,7 +125,6 @@ impl crate::window::Window for InputState {
 /// What the caller should do after `handle_event`.
 pub enum Action {
     Redraw,
-    PurgeRedraw,
     Submit { content: Content, display: String },
     SubmitEmpty,
     MenuResult(MenuResult),
@@ -563,7 +562,7 @@ impl InputState {
                 self.toggle_stash();
                 Action::Redraw
             }
-            KeyAction::PurgeRedraw => Action::PurgeRedraw,
+            KeyAction::Redraw => Action::Redraw,
 
             // ── Submit / newline ─────────────────────────────────────────
             KeyAction::Submit => {

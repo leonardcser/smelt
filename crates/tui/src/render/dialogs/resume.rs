@@ -239,7 +239,7 @@ impl super::Dialog for ResumeDialog {
         let now_ms = session::now_ms();
 
         draw_bar(out, w, None, None, theme::accent());
-        out.overlay_newline();
+        out.newline();
 
         out.push_dim();
         if self.workspace_only {
@@ -250,13 +250,13 @@ impl super::Dialog for ResumeDialog {
         out.pop_style();
         out.print(" ");
         out.print(&self.query);
-        out.overlay_newline();
+        out.newline();
 
         if self.filtered.is_empty() {
             out.push_dim();
             out.print("  No matches");
             out.pop_style();
-            out.overlay_newline();
+            out.newline();
         } else {
             let range = self.list.visible_range(self.filtered.len());
             for (i, entry) in self
@@ -303,11 +303,11 @@ impl super::Dialog for ResumeDialog {
                 } else {
                     out.print(&truncated);
                 }
-                out.overlay_newline();
+                out.newline();
             }
         }
 
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         let toggle = if self.workspace_only {
             "ctrl+w: all sessions"

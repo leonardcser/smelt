@@ -145,13 +145,13 @@ impl super::Dialog for PermissionsDialog {
         };
 
         draw_bar(out, w, None, None, theme::accent());
-        out.overlay_newline();
+        out.newline();
 
         if self.items.is_empty() {
             out.push_dim();
             out.print(" No permissions");
             out.pop_style();
-            out.overlay_newline();
+            out.newline();
         } else {
             let mut printed_workspace = false;
             for (i, item) in self.items.iter().enumerate() {
@@ -161,7 +161,7 @@ impl super::Dialog for PermissionsDialog {
                 if matches!(item, Item::Workspace(_, _)) && !printed_workspace {
                     printed_workspace = true;
                     if i > 0 {
-                        out.overlay_newline();
+                        out.newline();
                     }
                     print_header(out, " Workspace");
                 }
@@ -174,7 +174,7 @@ impl super::Dialog for PermissionsDialog {
             }
         }
 
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         let hint = if self.pending_d {
             hints::join(&[hints::DD_PENDING, hints::CLOSE])
@@ -191,7 +191,7 @@ fn print_header(out: &mut crate::render::RenderOut, label: &str) {
     out.push_dim();
     out.print(label);
     out.pop_style();
-    out.overlay_newline();
+    out.newline();
 }
 
 fn render_entry_row(
@@ -211,7 +211,7 @@ fn render_entry_row(
         out.print("  ");
         out.print(&label);
     }
-    out.overlay_newline();
+    out.newline();
 }
 
 fn build_items(

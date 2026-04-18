@@ -8,27 +8,7 @@ use crossterm::{
 };
 use std::time::{Duration, Instant};
 
-/// Coalesce-window for repeated `Action::PurgeRedraw` (Ctrl+L) presses.
-/// A second press inside this window is dropped — the first press has
-/// already done a full purge+repaint and the screen state hasn't had
-/// time to drift.
-const PURGE_REDRAW_DEBOUNCE: Duration = Duration::from_millis(10);
-
 impl App {
-    /// Run a Ctrl+L purge+redraw, suppressing repeats inside the
-    /// debounce window so a held key or rapid double-press only fires
-    /// the expensive full-screen repaint once.
-    pub(super) fn purge_redraw_debounced(&mut self) {
-        let now = Instant::now();
-        if let Some(last) = self.last_purge_redraw {
-            if now.duration_since(last) < PURGE_REDRAW_DEBOUNCE {
-                return;
-            }
-        }
-        self.last_purge_redraw = Some(now);
-        self.screen.redraw();
-    }
-
     fn apply_settings_result(&mut self, s: &crate::input::SettingsState) {
         self.set_settings(s.clone());
     }
@@ -91,7 +71,7 @@ impl App {
             {
                 // Ctrl+L: full redraw (same as outside a dialog).
                 if code == KeyCode::Char('l') && modifiers.contains(KeyModifiers::CONTROL) {
-                    self.purge_redraw_debounced();
+                    self.screen.redraw();
                     active_dialog.as_mut().unwrap().mark_dirty();
                     return false;
                 }
@@ -405,7 +385,7 @@ impl App {
                     Some(
                         KeyAction::ToggleMode
                         | KeyAction::CycleReasoning
-                        | KeyAction::PurgeRedraw
+                        | KeyAction::Redraw
                         | KeyAction::ToggleStash,
                     ) => {}
                     _ => {
@@ -612,9 +592,6 @@ impl App {
                 self.screen.notify_error(msg);
                 self.screen.mark_dirty();
             }
-            Action::PurgeRedraw => {
-                self.purge_redraw_debounced();
-            }
             Action::MenuResult(result) => return EventOutcome::MenuResult(result),
             Action::Noop | Action::Resize { .. } => {}
         }
@@ -656,10 +633,6 @@ impl App {
             Action::Redraw => {
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
-            }
-            Action::PurgeRedraw => {
-                self.purge_redraw_debounced();
-                EventOutcome::Noop
             }
             Action::NotifyError(msg) => {
                 self.screen.notify_error(msg);
@@ -775,7 +748,7 @@ impl App {
                             Some(
                                 KeyAction::ToggleMode
                                 | KeyAction::CycleReasoning
-                                | KeyAction::PurgeRedraw
+                                | KeyAction::Redraw
                                 | KeyAction::ToggleStash,
                             ) => return None,
                             _ => {
@@ -870,7 +843,8 @@ impl App {
         let w = render::term_width();
         self.screen.set_dialog_open(true);
         self.screen.set_constrain_dialog(constrain);
-        self.screen.draw_frame(out, w, None, Some(dialog_height))
+        self.screen
+            .draw_viewport_dialog_frame(out, w, dialog_height)
     }
 
     /// Build the status-bar position record for the focused window.

@@ -23,7 +23,7 @@ pub enum KeyAction {
     ToggleStash,
     OpenHelp,
     OpenHistorySearch,
-    PurgeRedraw,
+    Redraw,
     AcceptGhostText,
 
     // Submit
@@ -277,7 +277,7 @@ static BINDINGS: &[Binding] = &[
         when().not_vim_non_insert(),
         KeyAction::OpenHistorySearch,
     ),
-    bind(KeyCode::Char('l'), CTRL, when(), KeyAction::PurgeRedraw),
+    bind(KeyCode::Char('l'), CTRL, when(), KeyAction::Redraw),
     bind(
         KeyCode::Char('?'),
         NONE,

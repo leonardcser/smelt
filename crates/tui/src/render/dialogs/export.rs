@@ -99,12 +99,12 @@ impl super::Dialog for ExportDialog {
         };
 
         draw_bar(out, w, None, None, theme::accent());
-        out.overlay_newline();
+        out.newline();
 
         out.push_dim();
         out.print(" Export:");
         out.pop_style();
-        out.overlay_newline();
+        out.newline();
 
         for (i, (_, label, desc)) in OPTIONS.iter().enumerate() {
             let highlighted = i == self.list.selected;
@@ -128,10 +128,10 @@ impl super::Dialog for ExportDialog {
             } else {
                 out.print(label);
             }
-            out.overlay_newline();
+            out.newline();
         }
 
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         out.print(&hints::join(&[hints::SELECT, hints::CANCEL]));
         out.pop_style();

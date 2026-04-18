@@ -96,18 +96,18 @@ impl super::Dialog for PsDialog {
         let now = std::time::Instant::now();
 
         draw_bar(out, w, None, None, theme::accent());
-        out.overlay_newline();
+        out.newline();
 
         out.push_dim();
         out.print(" Background Processes");
         out.pop_style();
-        out.overlay_newline();
+        out.newline();
 
         if self.procs.is_empty() {
             out.push_dim();
             out.print("  No processes");
             out.pop_style();
-            out.overlay_newline();
+            out.newline();
         } else {
             let range = self.list.visible_range(self.procs.len());
             for (i, proc) in self
@@ -135,11 +135,11 @@ impl super::Dialog for PsDialog {
                 out.push_dim();
                 out.print(&format!("{time} {}", proc.id));
                 out.pop_style();
-                out.overlay_newline();
+                out.newline();
             }
         }
 
-        out.overlay_newline();
+        out.newline();
         out.push_dim();
         out.print(&hints::join(&[hints::CLOSE, hints::KILL_PROC]));
         out.pop_style();
