@@ -78,12 +78,6 @@ pub struct TranscriptWindow {
     /// `scroll_offset` directly, and the pin only reacts to content
     /// growing.
     pub pinned_last_total: Option<u16>,
-    /// True once the window has received focus at least once. On the
-    /// very first focus-in the cursor snaps to end-of-buffer (the
-    /// last char of the last content line) — a sensible default for
-    /// a fresh transcript view. Subsequent focus switches preserve
-    /// whatever cursor position the user last left behind.
-    pub ever_focused: bool,
 }
 
 impl TranscriptWindow {
@@ -98,7 +92,6 @@ impl TranscriptWindow {
             cursor_line: 0,
             cursor_col: 0,
             pinned_last_total: None,
-            ever_focused: false,
         }
     }
 
@@ -174,19 +167,9 @@ impl TranscriptWindow {
             self.cpos = 0;
             self.cursor_line = 0;
             self.cursor_col = 0;
-            self.ever_focused = true;
             return;
         }
         let offsets = self.mount(rows);
-        // First focus-in: place the cursor at end-of-buffer (last
-        // char of the last content line). Without this the cursor
-        // defaults to offset 0, which when the transcript is shorter
-        // than the viewport parks it at the visual bottom-of-window
-        // — on an empty row below the content.
-        if !self.ever_focused {
-            self.cpos = self.buffer.buf.len();
-            self.ever_focused = true;
-        }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         // Seed `curswant` from the current display column so the very
         // first `j`/`k` after focus preserves the column. Without this

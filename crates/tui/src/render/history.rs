@@ -906,6 +906,18 @@ impl BlockHistory {
             s
         };
 
+        // Mirror `paint_viewport`'s bottom-anchoring: short transcripts
+        // get leading blank rows so the last content line sits at the
+        // viewport bottom. Mouse hit-testing and vim motions index
+        // into this vector directly, so the row layout must match.
+        let leading_blanks = viewport_rows.saturating_sub(total);
+        for _ in 0..leading_blanks {
+            if out.len() as u16 >= viewport_rows {
+                break;
+            }
+            out.push(String::new());
+        }
+
         'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
             for _ in 0..*gap {
                 if remaining_skip > 0 {
@@ -998,6 +1010,24 @@ impl BlockHistory {
 
         let mut remaining_skip = skip as u32;
         let mut painted: u16 = 0;
+
+        // Bottom-anchor the transcript: when content is shorter than
+        // the viewport, emit leading blank rows so the last content
+        // row lands at the bottom of the viewport. `scroll_offset == 0`
+        // means "stuck to bottom" throughout the UI; cursor math and
+        // click/hit-testing both assume bottom-anchoring, so top-padding
+        // short transcripts keeps everything in lockstep.
+        let leading_blanks = viewport_rows.saturating_sub(total);
+        for _ in 0..leading_blanks {
+            if painted >= viewport_rows {
+                break;
+            }
+            let _ = out.queue(crossterm::terminal::Clear(
+                crossterm::terminal::ClearType::CurrentLine,
+            ));
+            out.overlay_newline();
+            painted += 1;
+        }
 
         'blocks: for (i, (gap, _rows)) in per_block.iter().enumerate() {
             // Gap lines (blank rows).

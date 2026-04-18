@@ -1312,12 +1312,18 @@ impl App {
     /// pin math. Reads the width from the renderer and measures the
     /// transcript against it.
     fn transcript_dims(&mut self) -> (u16, u16) {
-        if let Some(region) = self.screen.transcript_region() {
-            return (region.total_rows, region.rows);
-        }
+        // Always compute `total` fresh — reading `region.total_rows`
+        // from the previous paint would make the pin see a stale row
+        // count and miss the delta from streaming additions that
+        // landed *this* tick, causing the visible slice to shift up
+        // every frame while anchored.
         let w = render::term_width();
         let total = self.screen.full_transcript_text(w).len() as u16;
-        let viewport = self.viewport_rows_estimate();
+        let viewport = self
+            .screen
+            .transcript_region()
+            .map(|r| r.rows)
+            .unwrap_or_else(|| self.viewport_rows_estimate());
         (total, viewport)
     }
 
