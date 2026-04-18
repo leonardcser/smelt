@@ -5,5 +5,6 @@ Drop any of these files into `~/.config/smelt/init.lua` (or `dofile` them from y
 - **leader.lua** — vim-style `<Space>nn` / `<Space>ll` leader chords.
 - **block_summarizer.lua** — hooks the `block_done` autocmd to react when a transcript block finishes streaming.
 - **per_project.lua** — auto-load `$PWD/.smelt/init.lua` on top of the user config.
+- **double_compact.lua** — register a `/double_compact` user command that calls `smelt.api.cmd.run("/compact")` twice via the command queue.
 
-The Lua surface (`smelt.api.version`, `smelt.notify`, `smelt.api.cmd.register`, `smelt.keymap`, `smelt.on`, `smelt.defer`) is documented in `crates/tui/src/lua.rs`.
+The Lua surface (`smelt.api.version`, `smelt.notify`, `smelt.api.cmd.register`, `smelt.api.cmd.run`, `smelt.keymap`, `smelt.on`, `smelt.defer`) is documented in `crates/tui/src/lua.rs`.

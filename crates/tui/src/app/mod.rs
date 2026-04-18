@@ -666,6 +666,12 @@ impl App {
             for _id in self.screen.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
+            // Lua callbacks can queue command lines via
+            // `smelt.api.cmd.run`; dispatch them here so they don't
+            // nest inside the handler's borrow of `App`.
+            for line in self.lua.drain_pending_commands() {
+                let _ = crate::api::cmd::run(self, &line);
+            }
             for msg in self.lua.drain_notifications() {
                 self.screen.notify(msg);
             }

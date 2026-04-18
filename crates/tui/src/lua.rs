@@ -91,6 +91,11 @@ pub struct LuaRuntime {
     /// `smelt.defer(ms, fn)` timers. `Instant` is the due time; the
     /// tick loop fires handlers whose due time has passed.
     pending_timers: SharedVec<(Instant, LuaHandle)>,
+    /// Command lines queued by `smelt.api.cmd.run` from inside Lua
+    /// callbacks. Drained by the app loop and dispatched through
+    /// `commands::run_command` — the re-entrancy queue that lets
+    /// a Lua handler trigger a built-in without nesting borrows.
+    pub pending_commands: SharedVec<String>,
 }
 
 impl LuaRuntime {
@@ -106,6 +111,7 @@ impl LuaRuntime {
         let autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_timers: SharedVec<(Instant, LuaHandle)> = Arc::new(Mutex::new(Vec::new()));
+        let pending_commands: SharedVec<String> = Arc::new(Mutex::new(Vec::new()));
 
         let load_error = Self::register_api(
             &lua,
@@ -114,6 +120,7 @@ impl LuaRuntime {
             keymaps.clone(),
             autocmds.clone(),
             pending_timers.clone(),
+            pending_commands.clone(),
         )
         .err()
         .map(|e| e.to_string());
@@ -127,6 +134,7 @@ impl LuaRuntime {
             keymaps,
             autocmds,
             pending_timers,
+            pending_commands,
         };
 
         if rt.load_error.is_none() {
@@ -149,6 +157,7 @@ impl LuaRuntime {
         keymaps: SharedMap<String, LuaHandle>,
         autocmds: SharedMap<AutocmdEvent, Vec<LuaHandle>>,
         pending_timers: SharedVec<(Instant, LuaHandle)>,
+        pending_commands: SharedVec<String>,
     ) -> LuaResult<()> {
         let smelt = lua.create_table()?;
 
@@ -167,6 +176,19 @@ impl LuaRuntime {
                 Ok(())
             })?;
         cmd_tbl.set("register", cmd_register)?;
+
+        // smelt.api.cmd.run(line) — queue a command line for the app
+        // loop to dispatch. Running it inline would nest App borrows;
+        // the queue drains on the next tick.
+        let pending_commands_clone = pending_commands.clone();
+        let cmd_run = lua.create_function(move |_, line: String| {
+            if let Ok(mut q) = pending_commands_clone.lock() {
+                q.push(line);
+            }
+            Ok(())
+        })?;
+        cmd_tbl.set("run", cmd_run)?;
+
         api.set("cmd", cmd_tbl)?;
 
         smelt.set("api", api)?;
@@ -241,6 +263,16 @@ impl LuaRuntime {
     /// Drain any pending notifications queued from Lua callbacks.
     pub fn drain_notifications(&self) -> Vec<String> {
         let Ok(mut q) = self.pending_notifications.lock() else {
+            return Vec::new();
+        };
+        std::mem::take(&mut *q)
+    }
+
+    /// Drain command lines queued by `smelt.api.cmd.run`. The app loop
+    /// dispatches each line through `commands::run_command` after the
+    /// current handler returns, avoiding nested `&mut App` borrows.
+    pub fn drain_pending_commands(&self) -> Vec<String> {
+        let Ok(mut q) = self.pending_commands.lock() else {
             return Vec::new();
         };
         std::mem::take(&mut *q)
@@ -501,6 +533,18 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         rt.tick_timers();
         assert_eq!(rt.drain_notifications(), vec!["deferred".to_string()]);
+    }
+
+    #[test]
+    fn cmd_run_queues_for_dispatch() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(r#"smelt.api.cmd.run("/compact")"#)
+            .exec()
+            .expect("exec");
+        let queued = rt.drain_pending_commands();
+        assert_eq!(queued, vec!["/compact".to_string()]);
+        assert!(rt.drain_pending_commands().is_empty());
     }
 
     #[test]
