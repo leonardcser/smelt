@@ -233,6 +233,17 @@ impl Vim {
         self.reset_counts();
     }
 
+    /// Anchor visual selection at `cpos` and enter the requested visual
+    /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
+    /// selection originates at the click rather than the previous
+    /// cursor position.
+    pub fn begin_visual(&mut self, mode: ViMode, cpos: usize) {
+        self.mode = mode;
+        self.sub = SubState::Ready;
+        self.reset_counts();
+        self.visual_anchor = cpos;
+    }
+
     /// Process a key event. Reads and mutates `ctx` (buffer, cursor,
     /// attachments, kill ring, undo history) as needed.
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {

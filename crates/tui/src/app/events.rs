@@ -1113,8 +1113,13 @@ impl App {
                 // clears visual so nothing gets selected.
                 self.app_focus = crate::app::AppFocus::Content;
                 self.position_content_cursor_from_click(me.row, me.column);
+                // Anchor the visual selection at the click position, not
+                // wherever the cursor happened to be before — otherwise
+                // a click selects everything between the previous
+                // cursor and the click point.
+                let anchor = self.content_pane.buffer.cpos;
                 if let Some(vim) = self.content_pane.buffer.vim.as_mut() {
-                    vim.set_mode(crate::vim::ViMode::Visual);
+                    vim.begin_visual(crate::vim::ViMode::Visual, anchor);
                 }
                 EventOutcome::Redraw
             }
