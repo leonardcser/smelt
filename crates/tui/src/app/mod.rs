@@ -853,7 +853,6 @@ impl App {
                     // during bursts instead of a single batched frame.
                     if is_mouse {
                         self.render_frame(agent.is_some(), &mut active_dialog);
-                        last_frame = Instant::now();
                     }
 
                     // Drain buffered terminal events
@@ -867,7 +866,6 @@ impl App {
                             }
                             if is_mouse {
                                 self.render_frame(agent.is_some(), &mut active_dialog);
-                                last_frame = Instant::now();
                             }
                         }
                     }
