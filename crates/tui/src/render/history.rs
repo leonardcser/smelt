@@ -652,9 +652,10 @@ impl BlockHistory {
         top_row: u16,
         viewport_rows: u16,
         scroll_offset: u16,
+        extra_lines: &[super::display::DisplayLine],
     ) -> u16 {
         let _perf = crate::perf::begin("history:paint_viewport");
-        if viewport_rows == 0 || self.order.is_empty() {
+        if viewport_rows == 0 || (self.order.is_empty() && extra_lines.is_empty()) {
             return 0;
         }
         if width != self.cache_width {
@@ -673,6 +674,7 @@ impl BlockHistory {
             total += gap as u32 + rows as u32;
             per_block.push((gap, rows));
         }
+        total += extra_lines.len() as u32;
         let total = total.min(u16::MAX as u32) as u16;
 
         // Clamp scroll.
@@ -724,6 +726,19 @@ impl BlockHistory {
                 super::paint::paint_line(out, line, &pctx);
                 painted += 1;
             }
+        }
+
+        // Paint ephemeral tail after committed blocks.
+        for line in extra_lines {
+            if remaining_skip > 0 {
+                remaining_skip -= 1;
+                continue;
+            }
+            if painted >= viewport_rows {
+                break;
+            }
+            super::paint::paint_line(out, line, &pctx);
+            painted += 1;
         }
 
         scroll

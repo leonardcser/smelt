@@ -2293,7 +2293,16 @@ impl Screen {
             self.measure_prompt_height(prompt.state, width, prompt.queued, prompt.prediction);
         let viewport_rows = term_h.saturating_sub(prompt_height);
 
-        // Paint transcript slice into the viewport region.
+        // Build ephemeral tail (streaming overlays) as a flat DisplayBlock.
+        let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if self.has_ephemeral() {
+            let mut col = SpanCollector::new(width as u16);
+            self.render_ephemeral_into(&mut col, width);
+            col.finish().lines
+        } else {
+            Vec::new()
+        };
+
+        // Paint transcript slice (history + ephemeral tail) into the viewport.
         let clamped = self.history.paint_viewport(
             out,
             width,
@@ -2301,6 +2310,7 @@ impl Screen {
             0,
             viewport_rows,
             scroll_offset,
+            &ephemeral_lines,
         );
 
         // Paint prompt stack at the bottom.
