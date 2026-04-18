@@ -165,16 +165,20 @@ pub struct App {
     /// *from the bottom*. 0 = bottom-most visible row; when this would
     /// exceed the viewport, the caller scrolls instead.
     pub history_cursor_line: u16,
+    /// Cursor column within the history viewport (0-indexed).
+    pub history_cursor_col: u16,
 }
 
-/// Two-level focus on top of the existing vim modes.
+/// Which pane currently holds focus (nvim-style window split).
 ///
-/// * `Prompt` — prompt owns input; vim Insert/Normal/Visual live inside.
-/// * `History` — transcript is the target of motions; prompt is frozen.
+/// * `Prompt` — the bottom input pane owns focus; vim Insert/Normal/Visual
+///   live inside and regular typing goes there.
+/// * `Content` — the transcript pane owns focus; motions target it and
+///   the prompt is frozen until focus returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppFocus {
     Prompt,
-    History,
+    Content,
 }
 
 /// Retained subset of the confirm request for mode-toggle re-checks.
@@ -532,6 +536,7 @@ impl App {
             app_focus: AppFocus::Prompt,
             history_scroll_offset: 0,
             history_cursor_line: 0,
+            history_cursor_col: 0,
         }
     }
 

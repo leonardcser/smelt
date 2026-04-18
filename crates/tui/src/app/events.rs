@@ -312,7 +312,7 @@ impl App {
 
         // ── App NORMAL (History focus): intercept keys before anything else.
         // Dialogs/completers still take precedence — handled inside.
-        if self.app_focus == crate::app::AppFocus::History && !self.input.has_modal() {
+        if self.app_focus == crate::app::AppFocus::Content && !self.input.has_modal() {
             return self.handle_event_app_history(ev);
         }
 
@@ -351,7 +351,7 @@ impl App {
                     }
 
                     // Double-Esc from prompt NORMAL → app NORMAL (history focus).
-                    self.app_focus = crate::app::AppFocus::History;
+                    self.app_focus = crate::app::AppFocus::Content;
                     self.screen.mark_dirty();
                     return EventOutcome::Redraw;
                 }
@@ -890,7 +890,7 @@ impl App {
             (&[], self.input_prediction.as_deref())
         };
         let mut frame = render::Frame::begin(self.screen.backend());
-        let (clamped_scroll, clamped_cursor) = self.screen.draw_viewport_frame(
+        let (clamped_scroll, clamped_line, clamped_col) = self.screen.draw_viewport_frame(
             &mut frame,
             w,
             FramePrompt {
@@ -901,9 +901,11 @@ impl App {
             },
             self.history_scroll_offset,
             self.history_cursor_line,
+            self.history_cursor_col,
         );
         self.history_scroll_offset = clamped_scroll;
-        self.history_cursor_line = clamped_cursor;
+        self.history_cursor_line = clamped_line;
+        self.history_cursor_col = clamped_col;
     }
 
     // ── App NORMAL (History focus) key handler ──────────────────────────
@@ -981,6 +983,27 @@ impl App {
                 self.screen.mark_dirty();
                 EventOutcome::Redraw
             }
+            // Horizontal motion.
+            (KeyCode::Char('h'), M::NONE) | (KeyCode::Left, _) => {
+                self.history_cursor_col = self.history_cursor_col.saturating_sub(1);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('l'), M::NONE) | (KeyCode::Right, _) => {
+                self.history_cursor_col = self.history_cursor_col.saturating_add(1);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('0'), M::NONE) | (KeyCode::Home, _) => {
+                self.history_cursor_col = 0;
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
+            (KeyCode::Char('$'), _) | (KeyCode::End, _) => {
+                self.history_cursor_col = self.last_width.saturating_sub(1);
+                self.screen.mark_dirty();
+                EventOutcome::Redraw
+            }
             _ => EventOutcome::Noop,
         }
     }
@@ -1000,7 +1023,7 @@ impl App {
             MouseEventKind::ScrollUp => {
                 // Scrolling up enters history focus so motions stay consistent.
                 if self.app_focus == crate::app::AppFocus::Prompt {
-                    self.app_focus = crate::app::AppFocus::History;
+                    self.app_focus = crate::app::AppFocus::Content;
                 }
                 self.history_scroll_offset = self.history_scroll_offset.saturating_add(3);
                 self.screen.mark_dirty();
@@ -1010,7 +1033,7 @@ impl App {
                 self.history_scroll_offset = self.history_scroll_offset.saturating_sub(3);
                 // When the user scrolls back to the bottom, return focus to the prompt.
                 if self.history_scroll_offset == 0
-                    && self.app_focus == crate::app::AppFocus::History
+                    && self.app_focus == crate::app::AppFocus::Content
                 {
                     self.app_focus = crate::app::AppFocus::Prompt;
                 }

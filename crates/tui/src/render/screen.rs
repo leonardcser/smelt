@@ -534,7 +534,7 @@ impl Screen {
         // App focus pill (always shown; two-level mode on top of vim).
         let (focus_label, focus_fg) = match self.last_app_focus {
             crate::app::AppFocus::Prompt => ("PROMPT", Color::AnsiValue(74)),
-            crate::app::AppFocus::History => ("HISTORY", Color::AnsiValue(214)),
+            crate::app::AppFocus::Content => ("CONTENT", Color::AnsiValue(214)),
         };
         spans.push(StatusSpan {
             text: format!(" {focus_label} "),
@@ -2226,6 +2226,7 @@ impl Screen {
     ///
     /// Returns the clamped scroll offset (so the caller can normalize
     /// its `history_scroll_offset` back to a valid range).
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_viewport_frame(
         &mut self,
         out: &mut RenderOut,
@@ -2233,7 +2234,8 @@ impl Screen {
         prompt: FramePrompt<'_>,
         scroll_offset: u16,
         history_cursor_line: u16,
-    ) -> (u16, u16) {
+        history_cursor_col: u16,
+    ) -> (u16, u16, u16) {
         let _perf = crate::perf::begin("render:viewport_frame");
         self.update_spinner();
 
@@ -2272,24 +2274,25 @@ impl Screen {
             &ephemeral_lines,
         );
 
-        // Draw the history cursor (tmux-style) when in History focus.
-        let clamped_cursor =
-            if self.last_app_focus == crate::app::AppFocus::History && viewport_rows > 0 {
-                let max_cur = viewport_rows.saturating_sub(1);
-                let cur = history_cursor_line.min(max_cur);
-                let cursor_row = viewport_rows.saturating_sub(1 + cur);
-                out.move_to(0, cursor_row);
+        // When in History focus, paint a block cursor at (col, row) within
+        // the viewport. Clamped so the caller can sync state.
+        let (clamped_cursor_line, clamped_cursor_col) =
+            if self.last_app_focus == crate::app::AppFocus::Content && viewport_rows > 0 {
+                let max_line = viewport_rows.saturating_sub(1);
+                let line = history_cursor_line.min(max_line);
+                let max_col = (width as u16).saturating_sub(1);
+                let col = history_cursor_col.min(max_col);
+                let cursor_row = viewport_rows.saturating_sub(1 + line);
+                out.move_to(col, cursor_row);
                 out.push_style(StyleState {
-                    fg: Some(Color::Black),
-                    bg: Some(theme::accent()),
-                    bold: true,
+                    fg: Some(theme::accent()),
                     ..StyleState::default()
                 });
-                out.print("\u{258B}"); // ▋
+                out.print("\u{2588}"); // █
                 out.pop_style();
-                cur
+                (line, col)
             } else {
-                history_cursor_line
+                (history_cursor_line, history_cursor_col)
             };
 
         // Paint prompt stack at the bottom, leaving the gap row blank.
@@ -2318,7 +2321,7 @@ impl Screen {
         // Fully flushed — every frame re-renders everything.
         self.history.flushed = self.history.order.len();
 
-        (clamped, clamped_cursor)
+        (clamped, clamped_cursor_line, clamped_cursor_col)
     }
 
     /// Measure prompt height without painting. Used by `draw_frame` to
