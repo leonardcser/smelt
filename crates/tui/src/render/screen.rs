@@ -539,25 +539,7 @@ impl Screen {
             }
         }
 
-        // App focus pill (always shown; two-level mode on top of vim).
-        let (focus_label, focus_fg) = match self.last_app_focus {
-            crate::app::AppFocus::Prompt => ("PROMPT", Color::AnsiValue(74)),
-            crate::app::AppFocus::Content => ("CONTENT", Color::AnsiValue(214)),
-        };
-        spans.push(StatusSpan {
-            text: format!(" {focus_label} "),
-            style: StyleState {
-                fg: Some(focus_fg),
-                bg: Some(Color::AnsiValue(236)),
-                bold: true,
-                ..StyleState::default()
-            },
-            priority: 2,
-            group: false,
-            truncatable: false,
-        });
-
-        // Contextual pane info.
+        // Contextual pane info — cursor position / scroll when content focused.
         if self.last_app_focus == crate::app::AppFocus::Content {
             let text = if self.last_scroll_offset > 0 {
                 format!(
@@ -586,9 +568,16 @@ impl Screen {
             });
         }
 
-        // Vim mode — only relevant in the prompt pane.
-        if self.last_vim_enabled && self.last_app_focus == crate::app::AppFocus::Prompt {
-            let vim_label = vim_mode_label(self.last_vim_mode).unwrap_or("NORMAL");
+        // Vim mode — shown for both panes when vim is enabled. The
+        // content pane currently only has NORMAL; Visual support is
+        // planned.
+        if self.last_vim_enabled {
+            let effective_mode = if self.last_app_focus == crate::app::AppFocus::Content {
+                None
+            } else {
+                self.last_vim_mode
+            };
+            let vim_label = vim_mode_label(effective_mode).unwrap_or("NORMAL");
             let vim_fg = match self.last_vim_mode {
                 Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
                 Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
