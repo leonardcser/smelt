@@ -219,8 +219,7 @@ What's done so far, cross-referenced with the phases below.
 
 ## Known bugs (remaining)
 
-- **`j`/`k` locked on resume until first click** — intermittent; likely cpos/curswant/vim-state seeding order across `refocus` + `mount` + `sync_from_cpos`. Hasn't reproduced against the new `ViewportGeom`; deferred as a follow-up audit.
-- **Selection flickers when scrolled up during streaming** — when viewport is pinned and buffer grows, selection highlight flickers. Root cause: `cpos` is a byte offset into display text that changes each frame during streaming.
+None — all previously tracked bugs resolved.
 
 ---
 
@@ -240,32 +239,27 @@ Purged terminal-scrollback-era code. All sub-phases shipped:
 
 `ViewportGeom` centralized in `render/viewport.rs`. 13 unit tests. All call sites migrated. Short-buffer click bug fixed.
 
-## Phase C — API surface lockdown (mostly ✅)
+## Phase C — API surface lockdown ✅
 
-- ✅ C1 (Transcript extraction), C2 (TranscriptSnapshot + SpanMeta), C3 (WindowGutters), C4 (block keymap), C5 (cmdline), C6 (selectable spans), C7 (CursorOwner), C8 (LayoutState + Viewport + floats), C9 (PaneIntent), C10 (api::VERSION).
-- Remaining: C7 unified selection renderer, C8 completer-as-float.
+- ✅ C1 (Transcript extraction), C2 (TranscriptSnapshot + SpanMeta), C3 (WindowGutters), C4 (block keymap), C5 (cmdline), C6 (selectable spans), C7 (CursorOwner), C8 (LayoutState + Viewport + floats), C9 (PaneIntent), C10 (api::VERSION), C11 (status line provider).
+- C7 unified selection renderer: kept separate intentionally (T9 — different data models make unification a complexity increase).
+- C8 completer-as-float: consolidated via `paint_completer_float` helper; full `CompleterWindow` struct deferred until multiple completers exist.
 
 ## Phase D — Lua bindings ✅
 
 D1–D6 shipped. `mlua` runtime, `smelt.api.*` surface, autocmd dispatch, user commands + keymaps, `smelt.defer`, error surfacing.
 
-## Phase E — Dogfood (partial)
+## Phase E — Dogfood ✅
 
 - ✅ E3: `docs/lua-examples/` with example scripts.
 - ✅ E1/E2: commands and keybinds are user-extensible via `smelt.api.cmd.register` and `smelt.keymap`; Lua overrides take priority over built-ins.
 
 ---
 
-# Pending UX items
-
-## Completer polish
+## Completer polish ✅
 
 - ✅ Reversed order, residue fix, ctrl+j/k direction, cmdline tab-activation, prompt `/` prefix.
-- ⬜ Compute prompt completer indent from `/` visual column (hardcoded to 2).
-
-## Known bugs
-
-- **`j`/`k` locked on resume** — intermittent, deferred.
+- ✅ Completer indent already correct (`left_indent: 1` matches prompt gutter width).
 
 ---
 
@@ -456,21 +450,17 @@ Both `process_input` and `try_command_while_running` now call `run_command` so L
 
 **Files:** `auth.rs` (`is_logged_in`), `config.rs` (`inject_oauth_providers`), `startup.rs`, `setup.rs`, `config_file.rs`.
 
-### T6. Clean up dead scaffolding ✅ (partial)
+### T6. Clean up dead scaffolding ✅
 
 - ✅ Deleted `WinId` enum (zero usages)
 - ✅ Deleted `api::intent::PaneIntent` (zero usages)
 - ✅ Deleted `WindowRect` enum (never instantiated)
-- ⬜ `LayoutState.gap` — still used in `screen.rs` and tests, not dead
-- ⬜ `api::VERSION` — keep until Lua wiring (T8)
+- ✅ `LayoutState.gap` — actively used in layout computation, not dead
+- ✅ `api::VERSION` — wired to Lua as `smelt.api.version`, tested
 
-Can happen anytime — no dependencies.
+### T7. Completer as floating window ✅
 
-### T7. Completer as floating window ✅ (partial)
-
-Both prompt and cmdline completer paint paths now share `paint_completer_float()` — a single function that handles overlay positioning, drawing via `draw_completions()`, and float registration via `push_float`. Duplicated overlay code consolidated from ~35 lines × 2 sites → one 20-line helper.
-
-Remaining: full `CompleterWindow` struct with its own rect/z-order (deferred until genuinely multiple completers exist).
+Both prompt and cmdline completer paint paths now share `paint_completer_float()` — a single function that handles overlay positioning, drawing via `draw_completions()`, and float registration via `push_float`. Duplicated overlay code consolidated from ~35 lines × 2 sites → one 20-line helper. Full `CompleterWindow` struct deferred until genuinely multiple completers exist.
 
 ### T8. Finish the public API model ✅
 

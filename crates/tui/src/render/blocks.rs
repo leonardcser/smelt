@@ -16,6 +16,40 @@ use super::{
     ToolState, ToolStatus,
 };
 
+/// Preprocessed user message layout: tab-expanded, blank-trimmed lines
+/// with a computed `block_w` for multiline bubble rendering.
+pub(super) struct UserBlockGeometry {
+    pub lines: Vec<String>,
+    pub block_w: usize,
+}
+
+impl UserBlockGeometry {
+    pub fn new(text: &str, text_w: usize) -> Self {
+        let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
+        let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
+        let end = all_lines
+            .iter()
+            .rposition(|l| !l.is_empty())
+            .map_or(0, |i| i + 1);
+        let lines: Vec<String> = all_lines[start..end]
+            .iter()
+            .map(|l| l.trim_end().to_string())
+            .collect();
+        let wraps = lines.iter().any(|l| l.chars().count() > text_w);
+        let multiline = lines.len() > 1 || wraps;
+        let block_w = if multiline {
+            if wraps {
+                text_w + 1
+            } else {
+                lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 1
+            }
+        } else {
+            0
+        };
+        Self { lines, block_w }
+    }
+}
+
 /// Cap on the number of rows a single tool block contributes to the
 /// overlay or scrollback. Applied separately to:
 ///
@@ -255,44 +289,17 @@ pub(super) fn render_block<S: LayoutSink>(
     match block {
         Block::User { text, image_labels } => {
             let is_command = crate::completer::Completer::is_command(text.trim());
-            // Left padding lives in the gutter (gutter_bg paints it with
-            // user_bg); only the right trailing space is in the content area.
             let text_w = width.saturating_sub(1).max(1);
-            let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
-            let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
-            let end = all_lines
-                .iter()
-                .rposition(|l| !l.is_empty())
-                .map_or(0, |i| i + 1);
-            let logical_lines: Vec<String> = all_lines[start..end]
-                .iter()
-                .map(|l| l.trim_end().to_string())
-                .collect();
-            let wraps = logical_lines.iter().any(|l| l.chars().count() > text_w);
-            let multiline = logical_lines.len() > 1 || wraps;
-            let block_w = if multiline {
-                if wraps {
-                    text_w + 1
-                } else {
-                    logical_lines
-                        .iter()
-                        .map(|l| l.chars().count())
-                        .max()
-                        .unwrap_or(0)
-                        + 1
-                }
-            } else {
-                0
-            };
+            let geom = UserBlockGeometry::new(text, text_w);
             let user_bg = ColorValue::Role(ColorRole::UserBg);
             let mut rows = 0u16;
             let pad_meta = SpanMeta {
                 selectable: false,
                 copy_as: None,
             };
-            for logical_line in &logical_lines {
+            for logical_line in &geom.lines {
                 if logical_line.is_empty() {
-                    let fill = if block_w > 0 { block_w } else { 1 };
+                    let fill = if geom.block_w > 0 { geom.block_w } else { 1 };
                     out.set_bg(user_bg);
                     out.print_with_meta(&" ".repeat(fill), pad_meta.clone());
                     out.reset_style();
@@ -307,8 +314,8 @@ pub(super) fn render_block<S: LayoutSink>(
                 }
                 for chunk in &chunks {
                     let chunk_len = chunk.chars().count();
-                    let trailing = if block_w > 0 {
-                        block_w.saturating_sub(chunk_len)
+                    let trailing = if geom.block_w > 0 {
+                        geom.block_w.saturating_sub(chunk_len)
                     } else {
                         1
                     };
