@@ -1,4 +1,4 @@
-use super::{draw_soft_cursor, selection, RenderOut};
+use super::{draw_soft_cursor, layout_out::display_width, selection, RenderOut};
 use crate::completer::{Completer, CompletionItem};
 use crossterm::style::Color;
 
@@ -209,13 +209,13 @@ impl CmdlineState {
         let visible_width = w.saturating_sub(1);
         let display = selection::truncate_str(&self.buf, visible_width);
         out.print(&display);
-        let used = 1 + display.chars().count();
+        let used = 1 + display_width(&display);
         if used < w {
             out.print(&" ".repeat(w - used));
         }
         out.pop_style();
         out.pop_style();
-        let cursor_col = (1 + self.buf[..self.cursor].chars().count()) as u16;
+        let cursor_col = (1 + display_width(&self.buf[..self.cursor])) as u16;
         let under = self.buf[self.cursor..]
             .chars()
             .next()

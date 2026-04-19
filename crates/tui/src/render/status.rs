@@ -6,7 +6,7 @@
 //! `draw_bar`. Both collapse on narrow terminals by dropping the
 //! highest-priority (least-important) spans first.
 
-use super::{selection::truncate_str, RenderOut, StyleState};
+use super::{layout_out::display_width, selection::truncate_str, RenderOut, StyleState};
 use crossterm::{cursor, style::Color, terminal, QueueableCommand};
 
 /// A structured status item that Lua (or internal code) provides.
@@ -130,7 +130,7 @@ pub(crate) fn render_status_spans(
             if s.group && !first {
                 w += STATUS_SEP_LEN;
             }
-            w += s.text.chars().count();
+            w += display_width(&s.text);
             first = false;
         }
         w
@@ -152,7 +152,7 @@ pub(crate) fn render_status_spans(
             .rposition(|s| s.priority == max_pri && s.truncatable);
         if let Some(idx) = trunc_idx {
             let available =
-                width.saturating_sub(total_width(spans) - spans[idx].text.chars().count());
+                width.saturating_sub(total_width(spans) - display_width(&spans[idx].text));
             if available >= 2 {
                 spans[idx].text = truncate_str(&spans[idx].text, available);
                 continue;
@@ -180,7 +180,7 @@ pub(crate) fn render_status_spans(
                 out.push_style(span.style.clone());
                 out.print(&span.text);
                 out.pop_style();
-                col += span.text.chars().count();
+                col += display_width(&span.text);
             }
             col
         };
@@ -239,7 +239,7 @@ pub(crate) fn draw_bar(
                 let inner: usize = spans
                     .iter()
                     .filter(|s| s.priority < drop_above)
-                    .map(|s| s.text.chars().count())
+                    .map(|s| display_width(&s.text))
                     .sum();
                 if inner > 0 {
                     inner + 1
@@ -253,7 +253,7 @@ pub(crate) fn draw_bar(
                 let inner: usize = spans
                     .iter()
                     .filter(|s| s.priority < drop_above)
-                    .map(|s| s.text.chars().count())
+                    .map(|s| display_width(&s.text))
                     .sum();
                 if inner > 0 {
                     inner + 2
@@ -281,7 +281,7 @@ pub(crate) fn draw_bar(
     } else {
         left_filtered
             .iter()
-            .map(|s| s.text.chars().count())
+            .map(|s| display_width(&s.text))
             .sum::<usize>()
             + 1 // trailing space
     };
@@ -290,7 +290,7 @@ pub(crate) fn draw_bar(
     } else {
         right_filtered
             .iter()
-            .map(|s| s.text.chars().count())
+            .map(|s| display_width(&s.text))
             .sum::<usize>()
             + 2
     };
