@@ -1488,12 +1488,13 @@ impl App {
     /// keeps wheel behaviour consistent with the "buffer scroll is
     /// cursor motion" model used by keyboard navigation.
     pub(super) fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
-        if let Some((top, rows, _, _, _)) = self.screen.input_region() {
-            if row >= top && row < top + rows {
-                self.app_focus = crate::app::AppFocus::Prompt;
-                self.scroll_prompt_by_lines(delta);
-                return;
-            }
+        if matches!(
+            self.screen.layout.hit_test(row, 0),
+            render::HitRegion::Prompt
+        ) {
+            self.app_focus = crate::app::AppFocus::Prompt;
+            self.scroll_prompt_by_lines(delta);
+            return;
         }
         self.app_focus = crate::app::AppFocus::Content;
         self.move_content_cursor_by_lines(delta);
