@@ -141,14 +141,21 @@ pub(super) fn render_highlighted<S: LayoutSink>(
         let visual_rows = split_regions_into_rows(out, &regions, max_content);
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if total_rows >= skip && emitted < emit_limit {
-                out.print(indent);
+                let gutter_meta = super::display::SpanMeta {
+                    selectable: false,
+                    copy_as: None,
+                };
+                out.print_with_meta(indent, gutter_meta.clone());
                 if vi == 0 {
                     out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                    out.print_string(format!(" {:>w$}", i + 1, w = gutter_width));
+                    out.print_with_meta(
+                        &format!(" {:>w$}", i + 1, w = gutter_width),
+                        gutter_meta.clone(),
+                    );
                     out.reset_style();
-                    out.print("   ");
+                    out.print_with_meta("   ", gutter_meta);
                 } else {
-                    out.print(&blank_gutter);
+                    out.print_with_meta(&blank_gutter, gutter_meta);
                 }
                 print_split_regions(out, vrow, None);
                 out.newline();
@@ -618,9 +625,16 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
         }
         match line {
             CachedDiffLine::Ellipsis => {
-                out.print(indent);
+                let gutter_meta = super::display::SpanMeta {
+                    selectable: false,
+                    copy_as: None,
+                };
+                out.print_with_meta(indent, gutter_meta.clone());
                 out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                out.print_string(format!("{:>w$}", "...", w = 1 + gutter_width));
+                out.print_with_meta(
+                    &format!("{:>w$}", "...", w = 1 + gutter_width),
+                    gutter_meta,
+                );
                 out.reset_style();
                 out.newline();
             }
@@ -640,18 +654,25 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
                     ),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
+                let gutter_meta = super::display::SpanMeta {
+                    selectable: false,
+                    copy_as: None,
+                };
                 for (vi, vrow) in visual_rows.iter().enumerate() {
-                    out.print(indent);
+                    out.print_with_meta(indent, gutter_meta.clone());
                     if let Some((ch, color)) = sign {
                         let bgv = bg.unwrap();
                         out.set_bg(bgv);
                         if vi == 0 {
                             out.set_fg(color);
-                            out.print_string(format!(" {:>w$} ", lineno, w = gutter_width));
+                            out.print_with_meta(
+                                &format!(" {:>w$} ", lineno, w = gutter_width),
+                                gutter_meta.clone(),
+                            );
                             out.set_fg(color);
-                            out.print_string(format!("{} ", ch));
+                            out.print_with_meta(&format!("{} ", ch), gutter_meta.clone());
                         } else {
-                            out.print(&blank_gutter);
+                            out.print_with_meta(&blank_gutter, gutter_meta.clone());
                         }
                         let _content_cols = print_cached_spans(out, vrow, bg);
                         out.fill_line_bg(bgv, right_margin as u16);
@@ -659,11 +680,14 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
                     } else {
                         if vi == 0 {
                             out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                            out.print_string(format!(" {:>w$}", lineno, w = gutter_width));
+                            out.print_with_meta(
+                                &format!(" {:>w$}", lineno, w = gutter_width),
+                                gutter_meta.clone(),
+                            );
                             out.reset_style();
-                            out.print("   ");
+                            out.print_with_meta("   ", gutter_meta.clone());
                         } else {
-                            out.print(&blank_gutter);
+                            out.print_with_meta(&blank_gutter, gutter_meta.clone());
                         }
                         print_cached_spans(out, vrow, None);
                     }
