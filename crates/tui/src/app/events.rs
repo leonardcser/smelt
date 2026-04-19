@@ -2067,7 +2067,7 @@ impl App {
             | (KeyCode::Char('n'), M::CONTROL) => {
                 if self.screen.cmdline.completer.is_some() {
                     if let Some(ref mut comp) = self.screen.cmdline.completer {
-                        comp.move_down();
+                        comp.move_up();
                     }
                 } else {
                     let lua_cmds = self.lua.command_names();
@@ -2080,7 +2080,7 @@ impl App {
             | (KeyCode::Char('p'), M::CONTROL) => {
                 if self.screen.cmdline.completer.is_some() {
                     if let Some(ref mut comp) = self.screen.cmdline.completer {
-                        comp.move_up();
+                        comp.move_down();
                     }
                 } else {
                     let lua_cmds = self.lua.command_names();
