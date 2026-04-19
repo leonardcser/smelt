@@ -1920,10 +1920,18 @@ impl Screen {
         self.has_scrollback = false;
         self.transcript.history.flushed = self.transcript.history.order.len();
 
-        let placement = self.layout.dialog.as_ref().map(|d| DialogPlacement {
-            row: d.rect.top,
-            granted_rows: d.rect.height,
-        });
+        let placement = if let Some(d) = &self.layout.dialog {
+            let rect = d.rect;
+            let p = DialogPlacement {
+                row: rect.top,
+                granted_rows: rect.height,
+            };
+            self.layout
+                .push_float(rect, 10, super::layout::HitRegion::Dialog);
+            Some(p)
+        } else {
+            None
+        };
 
         (true, placement)
     }
