@@ -4,7 +4,7 @@ use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::display::{ColorRole, ColorValue, DisplayBlock, NamedColor, SpanStyle};
+use super::display::{ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle};
 use super::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, strip_markdown_markers, BashHighlighter,
@@ -309,11 +309,15 @@ pub(super) fn render_block<S: LayoutSink>(
             };
             let user_bg = ColorValue::Role(ColorRole::UserBg);
             let mut rows = 0u16;
+            let pad_meta = SpanMeta {
+                selectable: false,
+                copy_as: None,
+            };
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
                     let fill = if block_w > 0 { block_w } else { 2 };
                     out.set_bg(user_bg);
-                    out.print_string(" ".repeat(fill));
+                    out.print_with_meta(&" ".repeat(fill), pad_meta.clone());
                     out.reset_style();
                     out.newline();
                     rows += 1;
@@ -331,10 +335,10 @@ pub(super) fn render_block<S: LayoutSink>(
                         1
                     };
                     out.set_bg(user_bg);
-                    out.print(" ");
+                    out.print_with_meta(" ", pad_meta.clone());
                     out.set_bold();
                     print_user_highlights(out, chunk, image_labels, is_command);
-                    out.print_string(" ".repeat(trailing));
+                    out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
                     out.reset_style();
                     out.newline();
                     rows += 1;
