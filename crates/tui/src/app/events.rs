@@ -1343,18 +1343,9 @@ impl App {
     /// pin math. Reads the width from the renderer and measures the
     /// transcript against it.
     fn transcript_dims(&mut self) -> (u16, u16) {
-        // Always compute `total` fresh — reading `region.total_rows`
-        // from the previous paint would make the pin see a stale row
-        // count and miss the delta from streaming additions that
-        // landed *this* tick, causing the visible slice to shift up
-        // every frame while anchored.
         let w = render::term_width();
         let total = self.screen.full_transcript_text(w).len() as u16;
-        let viewport = self
-            .screen
-            .transcript_viewport()
-            .map(|r| r.rows)
-            .unwrap_or_else(|| self.viewport_rows_estimate());
+        let viewport = self.viewport_rows_estimate();
         (total, viewport)
     }
 
@@ -1529,27 +1520,13 @@ impl App {
         self.move_content_cursor_by_lines(delta);
     }
 
-    /// Move the prompt cursor by `delta` logical lines. Uses `Up`/`Down`
-    /// keys — NOT `j`/`k` — because the prompt may be in vim insert
-    /// mode (or vim disabled), where literal `j`/`k` would be typed
-    /// into the buffer. Arrow keys are interpreted as cursor motion in
-    /// every prompt mode.
     fn scroll_prompt_by_lines(&mut self, delta: isize) {
-        let (code, count) = if delta >= 0 {
-            (KeyCode::Down, delta as usize)
-        } else {
-            (KeyCode::Up, (-delta) as usize)
-        };
-        let k = KeyEvent {
-            code,
-            modifiers: KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::empty(),
-        };
-        for _ in 0..count {
-            self.input.handle_event(Event::Key(k), None);
+        let buf = &self.input.buffer.buf;
+        let new_pos = self.input.cursor.move_vertical(buf, self.input.cpos, delta);
+        if new_pos != self.input.cpos {
+            self.input.cpos = new_pos;
+            self.screen.mark_dirty();
         }
-        self.screen.mark_dirty();
     }
 
     /// Translate a click inside the prompt input region into a char
@@ -1833,11 +1810,7 @@ impl App {
                 // and drifts off-screen as the viewport moves.
                 let w = render::term_width();
                 let rows = self.screen.full_transcript_text(w);
-                let viewport = self
-                    .screen
-                    .transcript_viewport()
-                    .map(|r| r.rows)
-                    .unwrap_or_else(|| self.viewport_rows_estimate());
+                let viewport = self.viewport_rows_estimate();
                 self.transcript_window
                     .reanchor_to_visible_row(&rows, viewport);
             }

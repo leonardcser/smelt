@@ -927,13 +927,6 @@ impl Screen {
         };
     }
 
-    /// Number of rows the prompt pane occupied in the last draw. Used by
-    /// mouse hit-testing to route clicks to the right pane.
-    pub fn prev_prompt_rows(&self) -> u16 {
-        self.prompt.prev_rows
-    }
-
-    /// Screen region `(top_row, rows, scroll_offset, gutter, usable_width)`
     pub(crate) fn transcript_viewport(&self) -> Option<super::region::Viewport> {
         self.last_transcript_viewport
     }
