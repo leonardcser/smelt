@@ -415,11 +415,94 @@ Dependency is one-way: parser writes into `BlockHistory`, never reads the snapsh
 - `render/transcript.rs` — stripped to block store + snapshot cache (~600 lines removed)
 - `render/screen.rs` — routes streaming calls through `self.parser.method(&mut self.transcript.history)`, `clear()` resets parser, `truncate_to()` clears parser tools/agents
 
-## R3 — Remaining Phase C/D/E items (flat list)
+## Remaining work — ordered by dependency
+
+### T1. Unify transcript width/gutter authority ⬜
+
+**Problem:** `Screen::transcript_gutters` and `TranscriptWindow::gutters` are duplicated, never synced (`set_transcript_gutters` has zero callers). `full_transcript_text(width)` and `full_transcript_nav_text(width)` accept a `width` argument they immediately discard (`let _ = width`). Everything funnels through `self.transcript_width()` internally.
+
+**Solution:** Screen owns gutters, TranscriptWindow drops them. The one `TranscriptWindow::gutters.pad_left` read in `position_content_cursor_from_hit` switches to `screen.transcript_gutters.pad_left`. Kill the dead `width` parameters. When we later add dynamic gutters (line numbers), they mutate `Screen::transcript_gutters` and everything updates automatically.
+
+**Files:** `window.rs` (remove `gutters` field), `screen.rs` (remove `set_transcript_gutters`, remove dead `width` params), `events.rs` (read gutters from screen).
+
+### T2. Top-relative scroll for transcript ⬜
+
+**Problem:** Transcript uses bottom-relative `scroll_offset` (0 = newest at bottom). Prompt uses top-relative. `ViewportGeom` converts internally via `skip_from_top()`. `api::win::scroll` comment says "positive = newer" but does the opposite for bottom-relative. Scrollbar paint inverts bottom→top, drag handler inverts back.
+
+**Solution:** Convert transcript to top-relative `scroll_top`. `scroll_top = 0` = top of transcript visible. "Stuck to bottom" = `scroll_top == max_scroll`. `ViewportGeom` drops `skip_from_top()` — `scroll_top` IS the skip. Paint, drag, and `api::win` all agree without conversion. `apply_pin` holds `scroll_top` constant (content grows below). Prompt already works this way.
+
+**Files:** `window.rs` (TranscriptWindow scroll fields), `viewport.rs` (simplify to top-relative), `screen.rs` (paint path), `events.rs` (scroll/drag handlers), `api.rs` (win::scroll semantics become honest).
+
+**Prerequisite:** T1 (width/gutters settled first).
+
+### T3. Route all command execution through `run_command` ⬜
+
+**Problem:** `process_input` (idle prompt submit) and `try_command_while_running` (running prompt submit) call `handle_command` directly — bypassing Lua overrides, `CmdPre`/`CmdPost` autocmds, and notification drain. A user registering `/quit` in `init.lua` gets their override via `:quit` but not via the prompt.
+
+**Solution:** Replace `self.handle_command(trimmed)` with `commands::run_command(self, trimmed)` at both sites. Both already take `&mut App` and handle the full `CommandAction` enum. Leave startup `/resume` bypass as-is (intentional — Lua isn't ready at startup).
+
+**Files:** `events.rs` (`process_input`), `commands.rs` (`try_command_while_running`).
+
+### T4. Transcript cursor in snapshot coordinates ⬜
+
+**Problem:** `TranscriptWindow::Buffer` is rebuilt (`rows.join("\n")`) on every key dispatch. `cpos` is a byte offset into this ephemeral string. Yank does `buf.find(&raw)` to recover the byte range for `copy_nav_range` — fails on duplicate text, misses `copy_as` substitutions on miss, can't handle soft-wrap correctly. `cpos` can land mid-codepoint between dispatches during streaming.
+
+**Solution:** Cursor = `(row, col)` in nav-row space. Kill `cpos` as byte offset. Vim operates on `(row, col)` directly (most vim implementations do this). `Buffer.buf` stops being rebuilt — vim reads nav-rows as a slice of lines. Yank returns `(start_row, start_col, end_row, end_col)` → `copy_nav_range` directly. No `find`, no stale-offset hazard, no mid-codepoint risk.
+
+**Changes to vim interface:** `VimContext` currently takes `&mut String` (the buffer) + `&mut usize` (cpos). Replace with a line-addressed model: vim gets `&[&str]` (lines) + `&mut (usize, usize)` (row, col). Motions (`w`, `b`, `e`, `j`, `k`, `0`, `$`, `gg`, `G`, etc.) already think in line/col internally — the byte-offset conversion at the boundary is the part that goes away.
+
+**Files:** `window.rs` (cursor model), `vim/mod.rs` + `vim/motion.rs` (VimContext interface), `cursor.rs` (WindowCursor), `events.rs` (yank path, key dispatch), `screen.rs` (status position).
+
+**Prerequisite:** T2 (scroll semantics settled so cursor + scroll agree).
+
+### T5. YAML → Lua config migration ⬜
+
+**Problem:** Config is YAML (`config.yaml`) but the plan wants nvim-style Lua config. Currently both exist independently — `init.lua` for keymaps/commands/autocmds, `config.yaml` for providers/settings/theme. The CLI `smelt auth` writes providers directly into YAML.
+
+**Design:**
+- `init.lua` becomes the single user config file for behavior: settings, theme, keymaps, commands.
+- Providers move to a separate data file (`providers.yaml`) — CLI tools need to write them without parsing Lua, and providers are data (credentials + endpoints) not behavior.
+- New Lua API: `smelt.settings({vim_mode = true, ...})`, `smelt.theme({accent = "blue"})`, `smelt.set_default_model("gpt-4o")`.
+- Loading order: providers file → `init.lua` → CLI `--set` overrides.
+- **TODO (discuss):** `smelt auth` currently mutates the entire config YAML. With the split, it writes only to the providers file — needs a migration path for existing users.
+
+**Files:** `config.rs`, `lua.rs`, `engine/config_file.rs`, `setup.rs`.
+
+### T6. Clean up dead scaffolding ⬜
+
+- Delete `WinId` (zero usages, `AppFocus` is the real thing)
+- Delete `api::intent::PaneIntent` (zero usages, never wired into dispatch)
+- Delete `WindowRect` enum (never instantiated, `FloatEntry` is the real thing)
+- Delete `LayoutState.gap` field (hardcoded 0, never read)
+- Remove `api::VERSION` or wire it into Lua properly (currently dead)
+
+Can happen anytime — no dependencies.
+
+### T7. Completer as floating window ⬜
+
+**Problem:** Prompt completer lives on `InputState`, cmdline completer on `CmdlineState`, both paint via special-case overlay code in `screen.rs`. The float system (`LayoutState::push_float` / `FloatEntry`) exists but isn't used for completers.
+
+**Solution:** Single `CompleterWindow` floating relative to the cursor anchor of whichever buffer triggered it. `LayoutState` positions it. Paint goes through normal float-layer draw. Both prompt and cmdline feed the same completer — `CompleterKind` already handles differentiation.
+
+**Prerequisite:** T1 (gutters unified so completer knows where content starts).
+
+### T8. Finish the public API model ⬜
+
+**Problem:** `api.rs` takes `&mut InputState` / `&dyn Window` / `&mut Screen` — not handle-based. Lua shim reads from snapshot `LuaContext`, not through `api.rs`.
+
+**Solution (after T2–T4):**
+- `api::win::*` becomes honest (T2 makes scroll semantics real)
+- `api::cmd::run` becomes the single door (T3)
+- Lua shim calls through `api::*` instead of `LuaContext` snapshots where possible
+- Handle-based (`WinId` / `BufId`) model deferred until genuinely multiple windows/buffers exist
+
+### T9. Unified selection renderer ⬜
+
+Prompt and transcript each have their own selection paint path. Unify into one function that takes a `Window` + buffer content + selection range and paints highlighted cells.
+
+### Remaining Phase C/D/E items
 
 - ⬜ C5: cmdline tab completion
-- ⬜ C7: unified selection renderer (prompt + transcript share one selection paint path)
-- ⬜ C8: completer as a true floating window (positioned relative to cursor anchor)
 - ⬜ C11: status line provider-driven content (`api::status::set_provider`)
 - ⬜ D7: Lua statusline providers (`smelt.statusline(fn)`)
 - ⬜ E1: port slash commands to Lua (requires more API surface for dialog/state transitions)
@@ -427,11 +510,17 @@ Dependency is one-way: parser writes into `BlockHistory`, never reads the snapsh
 
 ---
 
-# Recommended sequencing
+# Dependency graph
 
-1. **R1 (raw-copy)** — self-contained, high user-impact, no dependencies.
-2. **R2 (StreamParser extraction)** — cleanup, makes Transcript testable, prepares for any future streaming changes.
-3. **R3 items** — independent of each other, pick based on user demand.
+```
+T1 (gutters)  ──→  T2 (top-relative scroll)  ──→  T3 (cmd unification)
+     │                                                    │
+     └──→ T7 (completer-as-float)                        ▼
+                                                   T4 (snapshot cursor)
+T6 (dead code) ← anytime                                 │
+T5 (YAML→Lua) ← independent                              ▼
+                                                   T8 (public API)  →  T9 (selection)
+```
 
 ## Explicit non-goals
 

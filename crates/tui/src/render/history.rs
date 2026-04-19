@@ -740,7 +740,7 @@ impl BlockHistory {
         show_thinking: bool,
         top_row: u16,
         viewport_rows: u16,
-        scroll_offset: u16,
+        scroll_top: u16,
         extra_lines: &[super::display::DisplayLine],
         pad_left: u16,
         viewport_lines_out: &mut Vec<super::display::DisplayLine>,
@@ -770,7 +770,7 @@ impl BlockHistory {
         total += extra_lines.len() as u32;
         let total = total.min(u16::MAX as u32) as u16;
 
-        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_top);
         let scroll = geom.clamped_scroll();
         let skip = geom.skip_from_top();
 
