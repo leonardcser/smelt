@@ -75,50 +75,11 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
-/// Per-region dirty flags (nvim `w_redr_type` inspired). Each flag
-/// controls whether `draw_viewport_frame` repaints that region. When
-/// a completer opens/closes, both `overlay` and `transcript` are
-/// dirtied so the rows underneath are restored.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DirtyRegions {
-    pub transcript: bool,
-    pub prompt: bool,
-    pub status: bool,
-    pub overlay: bool,
-}
-
-impl DirtyRegions {
-    fn all() -> Self {
-        Self {
-            transcript: true,
-            prompt: true,
-            status: true,
-            overlay: true,
-        }
-    }
-
-    fn none() -> Self {
-        Self {
-            transcript: false,
-            prompt: false,
-            status: false,
-            overlay: false,
-        }
-    }
-
-    fn any(&self) -> bool {
-        self.transcript || self.prompt || self.status || self.overlay
-    }
-
-    fn clear(&mut self) {
-        *self = Self::none();
-    }
-}
 
 pub struct Screen {
     pub(crate) transcript: Transcript,
     prompt: PromptState,
-    dirty: DirtyRegions,
+    dirty: bool,
     working: WorkingState,
     context_tokens: Option<u32>,
     context_window: Option<u32>,
@@ -219,7 +180,7 @@ impl Screen {
         Self {
             transcript: Transcript::new(),
             prompt: PromptState::new(),
-            dirty: DirtyRegions::all(),
+            dirty: true,
             working: WorkingState::new(),
             context_tokens: None,
             context_window: None,
@@ -300,7 +261,7 @@ impl Screen {
         // cleanup (`queue_dialog_gap`) clears the screen below the
         // dialog's anchor row, flashing the dialog off and on.
         if !self.dialog_open {
-            self.dirty.prompt = true;
+            self.dirty = true;
         }
     }
 
@@ -330,7 +291,7 @@ impl Screen {
             scroll_offset: 0,
             wrap_width: 0,
         });
-        self.dirty.prompt = true;
+        self.dirty = true;
     }
 
     pub fn set_btw_response(&mut self, content: String) {
@@ -339,14 +300,14 @@ impl Screen {
             btw.wrapped.clear();
             btw.scroll_offset = 0;
             btw.wrap_width = 0;
-            self.dirty.prompt = true;
+            self.dirty = true;
         }
     }
 
     pub fn dismiss_btw(&mut self) {
         if self.btw.is_some() {
             self.btw = None;
-            self.dirty.prompt = true;
+            self.dirty = true;
         }
     }
 
@@ -372,7 +333,7 @@ impl Screen {
             btw.scroll_offset = (btw.scroll_offset + delta as usize).min(max);
         }
         if btw.scroll_offset != old {
-            self.dirty.prompt = true;
+            self.dirty = true;
             true
         } else {
             false
@@ -384,7 +345,7 @@ impl Screen {
             message,
             is_error: false,
         });
-        self.dirty.prompt = true;
+        self.dirty = true;
     }
 
     pub fn notify_error(&mut self, message: String) {
@@ -392,13 +353,13 @@ impl Screen {
             message,
             is_error: true,
         });
-        self.dirty.prompt = true;
+        self.dirty = true;
     }
 
     pub fn dismiss_notification(&mut self) {
         if self.notification.is_some() {
             self.notification = None;
-            self.dirty.prompt = true;
+            self.dirty = true;
         }
     }
 
@@ -413,27 +374,26 @@ impl Screen {
         self.show_cost = s.show_cost;
         self.show_slug = s.show_slug;
         self.show_thinking = s.show_thinking;
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn set_running_procs(&mut self, count: usize) {
         if count != self.running_procs {
             self.running_procs = count;
-            self.dirty.status = true;
+            self.dirty = true;
         }
     }
 
     pub fn set_agent_count(&mut self, count: usize) {
         if count != self.running_agents {
             self.running_agents = count;
-            self.dirty.status = true;
+            self.dirty = true;
         }
     }
 
     pub fn start_active_agent(&mut self, agent_id: String) {
         self.transcript.start_active_agent(agent_id);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn update_active_agent(
@@ -445,8 +405,7 @@ impl Screen {
     ) {
         self.transcript
             .update_active_agent(agent_id, slug, tool_calls, status);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn cancel_active_agents(&mut self) {
@@ -455,14 +414,12 @@ impl Screen {
 
     pub fn finish_active_agent(&mut self, agent_id: &str) {
         self.transcript.finish_active_agent(agent_id);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn finish_all_active_agents(&mut self) {
         self.transcript.finish_all_active_agents();
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     /// Row where a dialog should start rendering (lines up with the prompt bar).
@@ -754,7 +711,7 @@ impl Screen {
             self.prompt.prev_rows = 0;
         }
         self.prompt.drawn = false;
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
         self.prompt.prev_dialog_row = None;
     }
 
@@ -789,26 +746,22 @@ impl Screen {
 
     pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
         self.transcript.push_tool_call(block, state);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn push(&mut self, block: Block) {
         self.transcript.push(block);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn append_streaming_thinking(&mut self, delta: &str) {
         self.transcript.append_streaming_thinking(delta);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn flush_streaming_thinking(&mut self) {
         self.transcript.flush_streaming_thinking();
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     /// Gap before a thinking summary overlay, skipping over hidden thinking blocks.
@@ -837,14 +790,12 @@ impl Screen {
 
     pub fn append_streaming_text(&mut self, delta: &str) {
         self.transcript.append_streaming_text(delta);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn flush_streaming_text(&mut self) {
         self.transcript.flush_streaming_text();
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn start_tool(
@@ -855,32 +806,27 @@ impl Screen {
         args: HashMap<String, serde_json::Value>,
     ) {
         self.transcript.start_tool(call_id, name, summary, args);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn start_exec(&mut self, command: String) {
         self.transcript.start_exec(command);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn append_exec_output(&mut self, chunk: &str) {
         self.transcript.append_exec_output(chunk);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn finish_exec(&mut self, exit_code: Option<i32>) {
         self.transcript.finish_exec(exit_code);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn finalize_exec(&mut self) {
         self.transcript.finalize_exec();
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn has_active_exec(&self) -> bool {
@@ -889,20 +835,17 @@ impl Screen {
 
     pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
         self.transcript.append_active_output(call_id, chunk);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
         self.transcript.set_active_status(call_id, status);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_active_user_message(&mut self, call_id: &str, msg: String) {
         self.transcript.set_active_user_message(call_id, msg);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn finish_tool(
@@ -914,23 +857,22 @@ impl Screen {
     ) {
         self.transcript
             .finish_tool(call_id, status, output, engine_elapsed);
-        self.dirty.transcript = true;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_context_tokens(&mut self, tokens: u32) {
         self.context_tokens = Some(tokens);
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_context_window(&mut self, window: u32) {
         self.context_window = Some(window);
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn clear_context_tokens(&mut self) {
         self.context_tokens = None;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn context_tokens(&self) -> Option<u32> {
@@ -939,12 +881,12 @@ impl Screen {
 
     pub fn set_session_cost(&mut self, usd: f64) {
         self.session_cost_usd = usd;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_model_label(&mut self, label: String) {
         self.model_label = Some(label);
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_task_label(&mut self, label: String) {
@@ -953,23 +895,23 @@ impl Screen {
         } else {
             self.task_label = Some(label);
         }
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn clear_task_label(&mut self) {
         self.task_label = None;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_reasoning_effort(&mut self, effort: protocol::ReasoningEffort) {
         self.reasoning_effort = effort;
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_app_focus(&mut self, focus: crate::app::AppFocus) {
         if self.last_app_focus != focus {
             self.last_app_focus = focus;
-            self.dirty = DirtyRegions::all();
+            self.dirty = true;
         }
     }
 
@@ -1000,7 +942,7 @@ impl Screen {
     /// scrollbar click/drag to jump the input viewport.
     pub(crate) fn set_input_scroll(&mut self, offset: usize) {
         self.prompt.input_scroll = offset;
-        self.dirty.prompt = true;
+        self.dirty = true;
     }
 
     /// Plain-text rendering of the last-painted viewport rows (top to
@@ -1141,12 +1083,12 @@ impl Screen {
 
     pub fn set_throbber(&mut self, state: Throbber) {
         self.working.set_throbber(state);
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn record_tokens_per_sec(&mut self, tps: f64) {
         self.working.record_tokens_per_sec(tps);
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn turn_meta(&self) -> Option<protocol::TurnMeta> {
@@ -1155,17 +1097,17 @@ impl Screen {
 
     pub fn restore_from_turn_meta(&mut self, meta: &protocol::TurnMeta) {
         self.working.restore_from_turn_meta(meta);
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn clear_throbber(&mut self) {
         self.working.clear();
-        self.dirty.status = true;
+        self.dirty = true;
     }
 
     pub fn set_pending_dialog(&mut self, pending: bool) {
         self.pending_dialog = pending;
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn set_dialog_open(&mut self, open: bool) {
@@ -1176,7 +1118,7 @@ impl Screen {
         // Spinner pause/resume is handled by the caller based on
         // whether the dialog blocks the agent — non-blocking dialogs
         // keep the spinner animating.
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn set_constrain_dialog(&mut self, constrain: bool) {
@@ -1195,24 +1137,7 @@ impl Screen {
     }
 
     pub fn mark_dirty(&mut self) {
-        self.dirty = DirtyRegions::all();
-    }
-
-    pub fn mark_transcript_dirty(&mut self) {
-        self.dirty.transcript = true;
-    }
-
-    pub fn mark_prompt_dirty(&mut self) {
-        self.dirty.prompt = true;
-    }
-
-    pub fn mark_status_dirty(&mut self) {
-        self.dirty.status = true;
-    }
-
-    pub fn mark_overlay_dirty(&mut self) {
-        self.dirty.overlay = true;
-        self.dirty.transcript = true;
+        self.dirty = true;
     }
 
     /// Override the vim mode shown in the status bar. Called by the
@@ -1229,7 +1154,7 @@ impl Screen {
     pub fn set_status_position(&mut self, p: Option<StatusPosition>) {
         if self.last_status_position != p {
             self.last_status_position = p;
-            self.dirty.status = true;
+            self.dirty = true;
         }
     }
 
@@ -1237,12 +1162,12 @@ impl Screen {
         if self.last_vim_enabled != enabled || self.last_vim_mode != mode {
             self.last_vim_enabled = enabled;
             self.last_vim_mode = mode;
-            self.dirty.status = true;
+            self.dirty = true;
         }
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.dirty.any() || self.transcript.history.has_unflushed()
+        self.dirty || self.transcript.history.has_unflushed()
     }
 
     /// Center the input viewport on the cursor (vim `zz`).
@@ -1251,7 +1176,7 @@ impl Screen {
         // sentinel value. We set input_scroll to usize::MAX so the
         // scroll logic knows to center instead of preserving position.
         self.prompt.input_scroll = usize::MAX;
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn finish_turn(&mut self) {
@@ -1262,12 +1187,12 @@ impl Screen {
 
     pub fn finalize_active_tools(&mut self) {
         self.transcript.finalize_active_tools();
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn finalize_active_tools_as(&mut self, status: ToolStatus) {
         self.transcript.finalize_active_tools_as(status);
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
@@ -1280,7 +1205,7 @@ impl Screen {
 
     pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
         self.transcript.set_block_view_state(id, state);
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn block_status(&self, id: BlockId) -> Status {
@@ -1302,18 +1227,18 @@ impl Screen {
     pub fn set_transcript_gutters(&mut self, gutters: crate::window::WindowGutters) {
         if self.transcript_gutters != gutters {
             self.transcript_gutters = gutters;
-            self.dirty = DirtyRegions::all();
+            self.dirty = true;
         }
     }
 
     pub fn rewrite_block(&mut self, id: BlockId, block: Block) {
         self.transcript.rewrite_block(id, block);
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     pub fn push_streaming(&mut self, block: Block) -> BlockId {
         let id = self.transcript.push_streaming(block);
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
         id
     }
 
@@ -1328,7 +1253,7 @@ impl Screen {
     ) -> bool {
         let result = self.transcript.update_tool_state(call_id, mutator);
         if result {
-            self.dirty = DirtyRegions::all();
+            self.dirty = true;
         }
         result
     }
@@ -1347,7 +1272,7 @@ impl Screen {
             self.defer_pending_render = false;
             return;
         }
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
     }
 
     /// Mark the prompt as needing a full redraw.  Does NOT perform any
@@ -1358,7 +1283,7 @@ impl Screen {
     pub fn erase_prompt(&mut self) {
         if self.prompt.drawn {
             self.prompt.drawn = false;
-            self.dirty = DirtyRegions::all();
+            self.dirty = true;
         }
     }
 
@@ -1373,7 +1298,7 @@ impl Screen {
             self.transcript.history.invalidate_for_width(w as usize);
         }
         self.prompt.drawn = false;
-        self.dirty = DirtyRegions::all();
+        self.dirty = true;
         self.prompt.prev_rows = 0;
     }
 
@@ -1570,7 +1495,7 @@ impl Screen {
             let frame = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
             if frame != self.working.last_spinner_frame {
                 self.working.last_spinner_frame = frame;
-                self.dirty.status = true;
+                self.dirty = true;
             }
         }
         // Refresh live elapsed on any streaming agent blocks so their
@@ -1582,9 +1507,9 @@ impl Screen {
     pub fn needs_draw(&self, is_dialog: bool) -> bool {
         let has_new_blocks = self.transcript.history.has_unflushed();
         if is_dialog {
-            has_new_blocks || (self.has_ephemeral() && self.dirty.any())
+            has_new_blocks || (self.has_ephemeral() && self.dirty)
         } else {
-            has_new_blocks || self.dirty.any()
+            has_new_blocks || self.dirty
         }
     }
 
@@ -1891,7 +1816,7 @@ impl Screen {
 
         self.paint_prompt_region(out, width, &prompt, viewport_rows, gap_rows, prompt_height);
 
-        self.dirty.clear();
+        self.dirty = false;
         self.content_start_row = Some(0);
         self.has_scrollback = false;
 
@@ -1923,7 +1848,7 @@ impl Screen {
         if self.prompt.drawn
             && !has_new_blocks
             && !dialog_height_changed
-            && !self.dirty.any()
+            && !self.dirty
             && !has_ephemeral
         {
             let placement = self.prompt.prev_dialog_row.map(|row| {
@@ -1960,7 +1885,7 @@ impl Screen {
 
         let dialog_row = viewport_rows;
         self.prompt.drawn = true;
-        self.dirty.clear();
+        self.dirty = false;
         self.prompt.anchor_row = Some(0);
         self.prompt.prev_dialog_row = Some(dialog_row);
         self.prompt.prev_dialog_height = raw_dialog_height;
