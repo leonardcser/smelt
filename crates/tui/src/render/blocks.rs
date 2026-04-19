@@ -1599,7 +1599,7 @@ pub(super) fn print_user_highlights<S: LayoutSink>(
 ) {
     let accent_role = ColorValue::Role(ColorRole::Accent);
 
-    // Slash commands: accent the entire text, same as the prompt.
+    // Commands: accent the entire text, same as the prompt.
     if is_command {
         out.push_fg(accent_role);
         out.print(text);

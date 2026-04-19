@@ -1,7 +1,7 @@
 //! Completion dropdown and menu (stats/cost) painters.
 //!
 //! Drives the list that appears under the prompt when the user is
-//! typing a slash command, path, or navigating a picker (theme, color,
+//! typing a command, path, or navigating a picker (theme, color,
 //! settings). Also handles `/stats` and `/cost` side-by-side views.
 
 use super::{term_width, RenderOut};

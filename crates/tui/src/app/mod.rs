@@ -1086,7 +1086,7 @@ impl App {
             return;
         }
 
-        // Slash commands require interactive mode.
+        // Commands require interactive mode.
         if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
             eprintln!("\"{}\" requires interactive mode", trimmed);
             std::process::exit(1);
