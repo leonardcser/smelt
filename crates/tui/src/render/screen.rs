@@ -2091,7 +2091,8 @@ impl Screen {
 
         let mut queued_rows = 0u16;
         for msg in queued {
-            for line in queued_logical_lines(msg) {
+            let geom = blocks::UserBlockGeometry::new(msg, text_w);
+            for line in &geom.lines {
                 let chars = line.chars().count();
                 queued_rows += if chars == 0 {
                     1
@@ -2627,49 +2628,20 @@ fn render_stash(out: &mut RenderOut, stash: &Option<InputSnapshot>, usable: usiz
     1
 }
 
-/// Mirror Block::User's line preprocessing for a queued message:
-/// expand tabs, strip leading/trailing blank lines, trim trailing
-/// whitespace on each remaining line.
-fn queued_logical_lines(msg: &str) -> Vec<String> {
-    let all_lines: Vec<String> = msg.lines().map(|l| l.replace('\t', "    ")).collect();
-    let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
-    let end = all_lines
-        .iter()
-        .rposition(|l| !l.is_empty())
-        .map_or(0, |i| i + 1);
-    all_lines[start..end]
-        .iter()
-        .map(|l| l.trim_end().to_string())
-        .collect()
-}
-
 fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
-    // Mirrors Block::User rendering (blocks.rs) with a 1-char indent.
     let indent = 1usize;
     let text_w = usable.saturating_sub(indent + 1).max(1);
     let mut rows = 0u16;
     for msg in queued {
         let is_command = crate::completer::Completer::is_command(msg.trim());
-        let logical_lines = queued_logical_lines(msg);
-        let wraps = logical_lines.iter().any(|l| l.chars().count() > text_w);
-        let multiline = logical_lines.len() > 1 || wraps;
-        let block_w = if multiline {
-            if wraps {
-                text_w + 1
-            } else {
-                logical_lines
-                    .iter()
-                    .map(|l| l.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    + 1
-            }
-        } else {
-            0
-        };
-        for line in &logical_lines {
+        let geom = blocks::UserBlockGeometry::new(msg, text_w);
+        for line in &geom.lines {
             if line.is_empty() {
-                let fill = if block_w > 0 { block_w + 1 } else { 2 };
+                let fill = if geom.block_w > 0 {
+                    geom.block_w + 1
+                } else {
+                    2
+                };
                 out.print(&" ".repeat(indent));
                 out.push_bg(theme::user_bg());
                 out.print(&" ".repeat(fill));
@@ -2681,8 +2653,8 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
             let chunks = wrap_line(line, text_w);
             for chunk in &chunks {
                 let chunk_len = chunk.chars().count();
-                let trailing = if block_w > 0 {
-                    block_w.saturating_sub(chunk_len)
+                let trailing = if geom.block_w > 0 {
+                    geom.block_w.saturating_sub(chunk_len)
                 } else {
                     1
                 };
