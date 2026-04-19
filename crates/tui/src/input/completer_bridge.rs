@@ -188,7 +188,7 @@ impl InputState {
                 if comp.results.len() <= 1 && !is_picker {
                     return None;
                 }
-                comp.move_up();
+                comp.move_down();
                 self.live_preview_picker();
                 Some(Action::Redraw)
             }
@@ -205,7 +205,7 @@ impl InputState {
                 if comp.results.len() <= 1 && !is_picker {
                     return None;
                 }
-                comp.move_down();
+                comp.move_up();
                 self.live_preview_picker();
                 Some(Action::Redraw)
             }
