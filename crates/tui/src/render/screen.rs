@@ -9,7 +9,7 @@
 
 use super::blocks;
 use super::blocks::{
-    collect_trailing_thinking, gap_between, render_block, render_thinking_summary, render_tool,
+    collect_trailing_thinking, gap_between, render_block, render_thinking_summary,
     thinking_summary, Element,
 };
 use super::cache::{PersistedLayoutCache, RenderCache};
@@ -1222,15 +1222,26 @@ impl Screen {
         summary: String,
         args: HashMap<String, serde_json::Value>,
     ) {
+        let start_time = Instant::now();
+        let block = Block::ToolCall {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            summary,
+            args,
+        };
+        let state = ToolState {
+            status: ToolStatus::Pending,
+            elapsed: None,
+            output: None,
+            user_message: None,
+        };
+        let block_id = self.history.push_with_state(block, call_id.clone(), state);
+        self.history.set_status(block_id, Status::Streaming);
         self.active_tools.push(ActiveTool {
             call_id,
             name,
-            summary,
-            args,
-            status: ToolStatus::Pending,
-            output: None,
-            user_message: None,
-            start_time: Instant::now(),
+            block_id,
+            start_time,
         });
         self.prompt.dirty = true;
     }
@@ -1297,79 +1308,64 @@ impl Screen {
         self.stream_exec_id.is_some()
     }
 
-    /// Index of an active tool by call_id. Empty call_id (e.g.
-    /// ask_user_question) falls back to the last active tool.
-    fn active_tool_index(&self, call_id: &str) -> Option<usize> {
-        if call_id.is_empty() {
-            self.active_tools.len().checked_sub(1)
-        } else {
-            self.active_tools.iter().position(|t| t.call_id == call_id)
+    /// Resolve a call_id (or fall back to the last active tool for
+    /// empty-id streams like `ask_user_question`) into the canonical id
+    /// used on the history `tool_states` map.
+    fn resolve_active_call_id(&self, call_id: &str) -> Option<String> {
+        if !call_id.is_empty() {
+            return Some(call_id.to_string());
         }
-    }
-
-    fn active_tool_mut(&mut self, call_id: &str) -> Option<&mut ActiveTool> {
-        let idx = self.active_tool_index(call_id)?;
-        Some(&mut self.active_tools[idx])
+        self.active_tools
+            .last()
+            .map(|t| t.call_id.clone())
+            .or_else(|| self.last_tool_call_id())
     }
 
     pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
-        if let Some(tool) = self.active_tool_mut(call_id) {
-            match tool.output {
-                Some(ref mut out) => {
-                    if !out.content.is_empty() {
-                        out.content.push('\n');
-                    }
-                    out.content.push_str(chunk);
+        let Some(cid) = self.resolve_active_call_id(call_id) else {
+            return;
+        };
+        let chunk = chunk.to_string();
+        self.update_tool_state(&cid, move |state| match state.output {
+            Some(ref mut out) => {
+                if !out.content.is_empty() {
+                    out.content.push('\n');
                 }
-                None => {
-                    tool.output = Some(Box::new(ToolOutput {
-                        content: chunk.to_string(),
-                        is_error: false,
-                        metadata: None,
-                        render_cache: None,
-                    }));
-                }
+                out.content.push_str(&chunk);
             }
-            self.prompt.dirty = true;
-        } else if let Some(cid) = self.last_tool_call_id() {
-            self.update_tool_state(&cid, |state| match state.output {
-                Some(ref mut out) => {
-                    if !out.content.is_empty() {
-                        out.content.push('\n');
-                    }
-                    out.content.push_str(chunk);
-                }
-                None => {
-                    state.output = Some(Box::new(ToolOutput {
-                        content: chunk.to_string(),
-                        is_error: false,
-                        metadata: None,
-                        render_cache: None,
-                    }));
-                }
-            });
-        }
+            None => {
+                state.output = Some(Box::new(ToolOutput {
+                    content: chunk,
+                    is_error: false,
+                    metadata: None,
+                    render_cache: None,
+                }));
+            }
+        });
     }
 
     pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
-        if let Some(tool) = self.active_tool_mut(call_id) {
-            if tool.status == ToolStatus::Confirm && status == ToolStatus::Pending {
-                tool.start_time = Instant::now();
+        let Some(cid) = self.resolve_active_call_id(call_id) else {
+            return;
+        };
+        // Confirm → Pending transition re-starts the elapsed clock on
+        // the active handle so the displayed duration counts from when
+        // the user approved rather than from the original request.
+        if let Some(active) = self.active_tools.iter_mut().find(|t| t.call_id == cid) {
+            if matches!(self.history.tool_states.get(&cid).map(|s| s.status), Some(ToolStatus::Confirm))
+                && status == ToolStatus::Pending
+            {
+                active.start_time = Instant::now();
             }
-            tool.status = status;
-            self.prompt.dirty = true;
-        } else if let Some(cid) = self.last_tool_call_id() {
-            self.update_tool_state(&cid, |state| state.status = status);
         }
+        self.update_tool_state(&cid, |state| state.status = status);
     }
 
     pub fn set_active_user_message(&mut self, call_id: &str, msg: String) {
-        if let Some(tool) = self.active_tool_mut(call_id) {
-            tool.user_message = Some(msg);
-            self.prompt.dirty = true;
-        } else if let Some(cid) = self.last_tool_call_id() {
-            self.update_tool_state(&cid, |state| state.user_message = Some(msg));
-        }
+        let Some(cid) = self.resolve_active_call_id(call_id) else {
+            return;
+        };
+        self.update_tool_state(&cid, |state| state.user_message = Some(msg));
     }
 
     pub fn finish_tool(
@@ -1379,40 +1375,31 @@ impl Screen {
         output: Option<ToolOutputRef>,
         engine_elapsed: Option<Duration>,
     ) {
-        if let Some(idx) = self.active_tool_index(call_id) {
-            let tool = self.active_tools.remove(idx);
-            let elapsed = if status == ToolStatus::Denied {
-                None
-            } else {
-                engine_elapsed.or_else(|| tool.elapsed())
-            };
-            let cid = if call_id.is_empty() {
-                tool.call_id.clone()
-            } else {
-                call_id.to_string()
-            };
-            let state = ToolState {
-                status,
-                elapsed,
-                output,
-                user_message: tool.user_message,
-            };
-            self.history.push_with_state(
-                Block::ToolCall {
-                    call_id: cid.clone(),
-                    name: tool.name,
-                    summary: tool.summary,
-                    args: tool.args,
-                },
-                cid,
-                state,
-            );
-            self.prompt.dirty = true;
-        } else if let Some(cid) = self.last_tool_call_id() {
-            self.update_tool_state(&cid, |state| {
-                state.status = status;
-                state.output = output;
-            });
+        let Some(cid) = self.resolve_active_call_id(call_id) else {
+            return;
+        };
+        // Pull the active handle so we can freeze its elapsed and flip
+        // its underlying block to `Done`.
+        let active_idx = self.active_tools.iter().position(|t| t.call_id == cid);
+        let elapsed = if status == ToolStatus::Denied {
+            None
+        } else if let Some(idx) = active_idx {
+            let tool = &self.active_tools[idx];
+            engine_elapsed.or_else(|| tool.elapsed())
+        } else {
+            engine_elapsed
+        };
+        self.update_tool_state(&cid, |state| {
+            state.status = status;
+            if let Some(out) = output {
+                state.output = Some(out);
+            }
+            state.elapsed = elapsed;
+        });
+        if let Some(idx) = active_idx {
+            let block_id = self.active_tools[idx].block_id;
+            self.active_tools.remove(idx);
+            self.history.set_status(block_id, Status::Done);
         }
     }
 
@@ -1716,28 +1703,19 @@ impl Screen {
 
     pub fn commit_active_tools_as(&mut self, status: ToolStatus) {
         self.finish_all_active_agents();
-        for tool in self.active_tools.drain(..) {
+        let tools: Vec<ActiveTool> = self.active_tools.drain(..).collect();
+        for tool in tools {
             let elapsed = if status == ToolStatus::Denied {
                 None
             } else {
                 tool.elapsed()
             };
-            let state = ToolState {
-                status,
-                elapsed,
-                output: tool.output,
-                user_message: tool.user_message,
-            };
-            self.history.push_with_state(
-                Block::ToolCall {
-                    call_id: tool.call_id.clone(),
-                    name: tool.name,
-                    summary: tool.summary,
-                    args: tool.args,
-                },
-                tool.call_id,
-                state,
-            );
+            self.history.set_status(tool.block_id, Status::Done);
+            let cid = tool.call_id.clone();
+            self.update_tool_state(&cid, |state| {
+                state.status = status;
+                state.elapsed = elapsed;
+            });
         }
     }
 
@@ -2204,34 +2182,6 @@ impl Screen {
                 render_block(out, &block, None, width, self.show_thinking);
                 prev_synth = Some(block);
             }
-        }
-
-        // ── Active tools ───────────────────────────────────────────
-        let mut tool_count = 0usize;
-        for tool in self.active_tools.iter() {
-            let tool_gap = if tool_count == 0 {
-                if let Some(p) = prev_synth.as_ref().or(last_committed) {
-                    gap_between(&Element::Block(p), &Element::ActiveTool)
-                } else {
-                    0
-                }
-            } else {
-                gap_between(&Element::ActiveTool, &Element::ActiveTool)
-            };
-            emit_newlines(out, tool_gap);
-            render_tool(
-                out,
-                &tool.call_id,
-                &tool.name,
-                &tool.summary,
-                &tool.args,
-                tool.status,
-                Some(tool.start_time.elapsed()),
-                tool.output.as_deref(),
-                tool.user_message.as_deref(),
-                width,
-            );
-            tool_count += 1;
         }
 
     }

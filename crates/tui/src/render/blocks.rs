@@ -198,7 +198,6 @@ pub(super) fn render_thinking_summary<S: LayoutSink>(
 /// Element types for spacing calculation.
 pub(super) enum Element<'a> {
     Block(&'a Block),
-    ActiveTool,
 }
 
 /// Number of blank lines to insert between two adjacent elements.
@@ -227,9 +226,7 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
         (Element::Block(Block::Exec { .. }), _) => 1,
         (_, Element::Block(Block::Exec { .. })) => 1,
         (Element::Block(Block::ToolCall { .. }), Element::Block(Block::ToolCall { .. })) => 1,
-        (Element::Block(Block::ToolCall { .. }), Element::ActiveTool) => 1,
         (Element::Block(Block::Text { .. }), Element::Block(Block::ToolCall { .. })) => 1,
-        (Element::Block(Block::Text { .. }), Element::ActiveTool) => 1,
         (Element::Block(Block::Thinking { .. }), Element::Block(Block::Thinking { .. })) => 0,
         (_, Element::Block(Block::Thinking { .. })) => 1,
         (Element::Block(Block::Thinking { .. }), _) => 1,
@@ -253,7 +250,6 @@ pub(super) fn gap_between(above: &Element, below: &Element) -> u16 {
                 1
             }
         }
-        (Element::ActiveTool, Element::ActiveTool) => 1,
         _ => 0,
     }
 }
@@ -1604,6 +1600,15 @@ mod tests {
         }
     }
 
+    fn empty_tool_call() -> Block {
+        Block::ToolCall {
+            call_id: String::new(),
+            name: String::new(),
+            summary: String::new(),
+            args: HashMap::new(),
+        }
+    }
+
     fn tool_call() -> Block {
         Block::ToolCall {
             call_id: "call-1".into(),
@@ -1636,7 +1641,7 @@ mod tests {
     fn tool_gap_for(blocks: &[Block]) -> u16 {
         blocks
             .last()
-            .map(|b| gap_between(&Element::Block(b), &Element::ActiveTool))
+            .map(|b| gap_between(&Element::Block(b), &Element::Block(&empty_tool_call())))
             .unwrap_or(0)
     }
 
@@ -1835,7 +1840,7 @@ mod tests {
         let rows = block_rows(&text(""));
         assert_eq!(rows, 0, "empty text renders 0 rows");
 
-        let gap = gap_between(&Element::Block(&text("")), &Element::ActiveTool);
+        let gap = gap_between(&Element::Block(&text("")), &Element::Block(&empty_tool_call()));
         assert_eq!(gap, 1, "gap is still 1 for empty text block");
 
         // This means: User(1 row) + gap(1) + Text(0 rows) + gap(1) = tool at offset 3
@@ -1849,7 +1854,7 @@ mod tests {
         let blocks_no_empty = vec![user("hello")];
         let c = render_all_at_once(&blocks_no_empty);
         // User→ActiveTool gap:
-        let gap_user_tool = gap_between(&Element::Block(&user("hello")), &Element::ActiveTool);
+        let gap_user_tool = gap_between(&Element::Block(&user("hello")), &Element::Block(&empty_tool_call()));
         assert_eq!(gap_user_tool, 1, "User→ActiveTool = 1");
 
         // With empty text:  total = user_rows + 1(User→Text gap=0, Text→Text=0? no, User→Text)

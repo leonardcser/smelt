@@ -26,14 +26,14 @@ pub struct ActiveAgent {
     pub final_elapsed: Option<Duration>,
 }
 
+/// In-flight tool call — a thin handle to a streaming `Block::ToolCall`.
+/// The full state (status, output, user_message, elapsed) lives in
+/// `tool_states` keyed by `call_id`; rewrites go through
+/// `Screen::update_tool_state` which invalidates the layout cache.
 pub struct ActiveTool {
     pub call_id: String,
     pub name: String,
-    pub summary: String,
-    pub args: HashMap<String, serde_json::Value>,
-    pub status: ToolStatus,
-    pub output: Option<ToolOutputRef>,
-    pub user_message: Option<String>,
+    pub block_id: BlockId,
     pub start_time: Instant,
 }
 
