@@ -350,7 +350,7 @@ impl App {
         }
 
         // Delegate to the unified handler.
-        match self.handle_command(input) {
+        match run_command(self, input) {
             CommandAction::Quit => Some(EventOutcome::Quit),
             CommandAction::CancelAndClear => Some(EventOutcome::CancelAndClear),
             CommandAction::OpenDialog(dlg) => Some(EventOutcome::OpenDialog(dlg)),

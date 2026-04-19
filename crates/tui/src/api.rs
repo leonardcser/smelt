@@ -170,22 +170,3 @@ pub mod win {
     }
 }
 
-/// Mouse / wheel semantic intents. Event translators build one of
-/// these instead of synthesizing keyboard events; handlers read the
-/// intent and call the matching `api::win::*` primitive.
-pub mod intent {
-    /// What the dispatcher wants a window to do with an input event.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum PaneIntent {
-        /// Scroll by `delta` rows (positive = down).
-        Scroll { delta: i32 },
-        /// Move the cursor to `(row, col)` within the window's content rect.
-        MoveCursor { row: u16, col: u16 },
-        /// Begin a selection anchor at `(row, col)`.
-        BeginSelection { row: u16, col: u16 },
-        /// Extend the active selection to `(row, col)`.
-        ExtendSelection { row: u16, col: u16 },
-        /// Yank the active selection to the system clipboard.
-        YankSelection,
-    }
-}
