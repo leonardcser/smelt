@@ -358,9 +358,14 @@ pub(super) fn render_block<S: LayoutSink>(
                 if segments.len() > 1 {
                     out.mark_wrapped();
                 }
+                let gutter_meta = SpanMeta {
+                    selectable: false,
+                    copy_as: None,
+                };
                 for seg in &segments {
                     out.set_dim_italic();
-                    out.print_string(format!("│ {}", seg));
+                    out.print_with_meta("│ ", gutter_meta.clone());
+                    out.print(seg);
                     out.reset_style();
                     out.newline();
                     rows += 1;
