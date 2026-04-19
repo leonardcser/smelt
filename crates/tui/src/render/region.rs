@@ -58,7 +58,7 @@ pub(crate) struct Viewport {
     pub rows: u16,
     pub content_width: u16,
     pub total_rows: u16,
-    pub scroll_offset: u16,
+    pub scroll_top: u16,
     pub scrollbar: Option<ScrollbarGeom>,
 }
 
@@ -148,7 +148,7 @@ mod tests {
             rows: 10,
             content_width: 78,
             total_rows: 50,
-            scroll_offset: 0,
+            scroll_top: 0,
             scrollbar: Some(ScrollbarGeom {
                 col: 79,
                 top_row: 5,

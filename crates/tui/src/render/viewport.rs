@@ -1,10 +1,10 @@
 //! Viewport geometry: the single source of truth for
-//! `(viewport_rows, total, scroll_offset) ↔ (row_on_screen, line_in_buffer)`.
+//! `(viewport_rows, total, scroll_top) ↔ (row_on_screen, line_in_buffer)`.
 //!
-//! Alt-buffer convention: `scroll_offset` measures rows from the bottom of
-//! the content. `0` = stuck to the bottom (newest content at the last row).
-//! Increasing `scroll_offset` moves the viewport upward through older
-//! content; `max_scroll()` clamps to the top.
+//! Top-relative convention: `scroll_top` is the index of the first
+//! visible content line. `0` = first line of content at the top of the
+//! viewport. `max_scroll()` = last page of content visible (stuck to
+//! bottom / newest).
 //!
 //! When `total < viewport_rows`, content top-anchors: the first content
 //! line is at screen row 0, with trailing blank rows below.
@@ -13,26 +13,27 @@
 pub struct ViewportGeom {
     pub total: u16,
     pub viewport_rows: u16,
-    pub scroll_offset: u16,
+    pub scroll_top: u16,
 }
 
 impl ViewportGeom {
-    pub fn new(total: u16, viewport_rows: u16, scroll_offset: u16) -> Self {
+    pub fn new(total: u16, viewport_rows: u16, scroll_top: u16) -> Self {
         Self {
             total,
             viewport_rows,
-            scroll_offset,
+            scroll_top,
         }
     }
 
     /// Maximum scroll offset — any larger value clamps to this.
+    /// `scroll_top == max_scroll()` means stuck to the bottom.
     pub fn max_scroll(&self) -> u16 {
         self.total.saturating_sub(self.viewport_rows)
     }
 
-    /// Normalized scroll offset.
+    /// Normalized scroll position (clamped to `[0, max_scroll]`).
     pub fn clamped_scroll(&self) -> u16 {
-        self.scroll_offset.min(self.max_scroll())
+        self.scroll_top.min(self.max_scroll())
     }
 
     /// Trailing blank rows below the content when it's shorter
@@ -42,10 +43,10 @@ impl ViewportGeom {
     }
 
     /// Lines to skip from the top of the flattened transcript before
-    /// painting the viewport slice.
+    /// painting the viewport slice. With top-relative scroll this is
+    /// just the clamped scroll position.
     pub fn skip_from_top(&self) -> u16 {
-        let max = self.max_scroll();
-        max.saturating_sub(self.clamped_scroll())
+        self.clamped_scroll()
     }
 
     /// Number of content rows visible in the viewport.
@@ -78,21 +79,22 @@ impl ViewportGeom {
 
     /// `true` when the viewport is snapped to the newest content.
     pub fn stuck_to_bottom(&self) -> bool {
-        self.clamped_scroll() == 0
+        self.clamped_scroll() >= self.max_scroll()
     }
 
     /// Apply a `delta` growth in total lines while preserving the user's
     /// visual pin (their top-row stays on the same content line).
     ///
-    /// Pin semantics: if `stuck_to_bottom()` was `true`, stays stuck.
-    /// Otherwise, grows `scroll_offset` so the same line-range remains
-    /// onscreen even as the transcript gets taller below.
+    /// Pin semantics: if `stuck_to_bottom()` was `true`, grows
+    /// `scroll_top` to stay stuck. Otherwise, holds `scroll_top`
+    /// constant so the same content stays onscreen.
     pub fn apply_growth(&mut self, delta: u16) {
-        if !self.stuck_to_bottom() {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta);
-        }
+        let was_stuck = self.stuck_to_bottom();
         self.total = self.total.saturating_add(delta);
-        self.scroll_offset = self.clamped_scroll();
+        if was_stuck {
+            self.scroll_top = self.max_scroll();
+        }
+        self.scroll_top = self.clamped_scroll();
     }
 }
 
@@ -125,7 +127,8 @@ mod tests {
 
     #[test]
     fn overflow_scrollable_bottom() {
-        let g = ViewportGeom::new(20, 10, 0);
+        // scroll_top = max_scroll = 10 → stuck to bottom
+        let g = ViewportGeom::new(20, 10, 10);
         assert!(g.stuck_to_bottom());
         assert_eq!(g.skip_from_top(), 10);
         assert_eq!(g.row_of_line(10), Some(0));
@@ -149,27 +152,31 @@ mod tests {
     fn scroll_clamps_to_max() {
         let g = ViewportGeom::new(20, 10, 999);
         assert_eq!(g.clamped_scroll(), 10);
-        assert_eq!(g.skip_from_top(), 0);
-        assert_eq!(g.line_of_row(0), Some(0));
-        assert_eq!(g.line_of_row(9), Some(9));
+        assert_eq!(g.skip_from_top(), 10);
+        assert_eq!(g.line_of_row(0), Some(10));
+        assert_eq!(g.line_of_row(9), Some(19));
     }
 
     #[test]
     fn apply_growth_preserves_pin() {
+        // Scrolled to line 5 (not stuck). Growth adds 3 rows below.
+        // scroll_top stays at 5 — same content visible.
         let mut g = ViewportGeom::new(20, 10, 5);
         g.apply_growth(3);
         assert_eq!(g.total, 23);
-        assert_eq!(g.scroll_offset, 8);
+        assert_eq!(g.scroll_top, 5);
         assert_eq!(g.skip_from_top(), 5);
     }
 
     #[test]
     fn apply_growth_stuck_stays_stuck() {
-        let mut g = ViewportGeom::new(20, 10, 0);
+        // Stuck to bottom (scroll_top = max_scroll = 10).
+        let mut g = ViewportGeom::new(20, 10, 10);
+        assert!(g.stuck_to_bottom());
         g.apply_growth(5);
         assert!(g.stuck_to_bottom());
         assert_eq!(g.total, 25);
-        assert_eq!(g.scroll_offset, 0);
+        assert_eq!(g.scroll_top, 15); // new max_scroll
     }
 
     #[test]
@@ -221,18 +228,18 @@ mod tests {
     #[test]
     fn apply_growth_clamps_to_new_max() {
         let mut g = ViewportGeom::new(10, 10, 0);
+        assert!(g.stuck_to_bottom());
         g.apply_growth(100);
         assert_eq!(g.total, 110);
         assert!(g.stuck_to_bottom());
+        assert_eq!(g.scroll_top, 100);
     }
 
     #[test]
     fn trailing_blank_click_returns_none() {
         let g = ViewportGeom::new(3, 10, 0);
-        // Content lines 0..=2 are on rows 0..=2.
         assert_eq!(g.line_of_row(0), Some(0));
         assert_eq!(g.line_of_row(2), Some(2));
-        // Rows 3..=9 are trailing blanks.
         for row in 3..10 {
             assert_eq!(g.line_of_row(row), None, "row {row} should be blank");
         }
@@ -244,5 +251,15 @@ mod tests {
         assert_eq!(g.trailing_blanks(), 0);
         let _ = g.line_of_row(0);
         let _ = g.row_of_line(0);
+    }
+
+    #[test]
+    fn scrolled_to_top() {
+        let g = ViewportGeom::new(20, 10, 0);
+        assert!(!g.stuck_to_bottom());
+        assert_eq!(g.skip_from_top(), 0);
+        assert_eq!(g.row_of_line(0), Some(0));
+        assert_eq!(g.row_of_line(9), Some(9));
+        assert_eq!(g.row_of_line(10), None);
     }
 }

@@ -49,12 +49,12 @@ pub struct TranscriptSnapshot {
 impl TranscriptSnapshot {
     /// Viewport-slice the snapshot into visible rows, matching
     /// `paint_viewport`'s top-anchoring and skip logic.
-    pub fn viewport_rows(&self, viewport_rows: u16, scroll_offset: u16) -> Vec<String> {
+    pub fn viewport_rows(&self, viewport_rows: u16, scroll_top: u16) -> Vec<String> {
         if viewport_rows == 0 {
             return Vec::new();
         }
         let total = self.rows.len().min(u16::MAX as usize) as u16;
-        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_top);
         let skip = geom.skip_from_top() as usize;
 
         let mut out = Vec::with_capacity(viewport_rows as usize);
@@ -76,10 +76,10 @@ impl TranscriptSnapshot {
         &self,
         viewport_row: u16,
         viewport_rows: u16,
-        scroll_offset: u16,
+        scroll_top: u16,
     ) -> Option<BlockId> {
         let total = self.rows.len().min(u16::MAX as usize) as u16;
-        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_offset);
+        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_top);
         let skip = geom.skip_from_top();
         let abs_row = viewport_row as usize + skip as usize;
         self.block_of_row.get(abs_row).copied().flatten()

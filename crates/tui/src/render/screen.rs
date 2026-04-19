@@ -1686,7 +1686,7 @@ impl Screen {
         out: &mut RenderOut,
         width: usize,
         viewport_rows: u16,
-        scroll_offset: u16,
+        scroll_top: u16,
     ) -> u16 {
         let gutters = self.transcript_gutters;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
@@ -1712,7 +1712,7 @@ impl Screen {
             self.show_thinking,
             0,
             viewport_rows,
-            scroll_offset,
+            scroll_top,
             &ephemeral_lines,
             gutters.pad_left,
             &mut self.last_viewport_lines,
@@ -1725,12 +1725,10 @@ impl Screen {
         let geom =
             super::viewport::ViewportGeom::new(total_transcript_rows, viewport_rows, clamped);
         let scrollbar_geom: Option<super::region::ScrollbarGeom> = if geom.max_scroll() > 0 {
-            let max_scroll = geom.max_scroll() as usize;
-            let inverted = max_scroll.saturating_sub(clamped as usize);
             let scrollbar = super::scrollbar::Scrollbar::new(
                 total_transcript_rows as usize,
                 viewport_rows as usize,
-                inverted,
+                clamped as usize,
             );
             super::scrollbar::paint_column(out, scrollbar_col, 0, viewport_rows, &scrollbar);
             Some(super::region::ScrollbarGeom {
@@ -1748,7 +1746,7 @@ impl Screen {
             rows: viewport_rows,
             content_width: tw as u16,
             total_rows: total_transcript_rows,
-            scroll_offset: clamped,
+            scroll_top: clamped,
             scrollbar: scrollbar_geom,
         });
 
@@ -1907,7 +1905,7 @@ impl Screen {
         out: &mut RenderOut,
         width: usize,
         prompt: FramePrompt<'_>,
-        scroll_offset: u16,
+        scroll_top: u16,
         history_cursor_line: u16,
         history_cursor_col: u16,
         visual_range: Option<ContentVisualRange>,
@@ -1935,7 +1933,7 @@ impl Screen {
         out.row = Some(0);
         out.move_to(0, 0);
 
-        let clamped = self.paint_transcript(out, width, viewport_rows, scroll_offset);
+        let clamped = self.paint_transcript(out, width, viewport_rows, scroll_top);
 
         let (clamped_cursor_line, clamped_cursor_col) = self.paint_transcript_cursor(
             out,
@@ -2373,7 +2371,7 @@ impl Screen {
             rows: painted_input_rows,
             content_width: usable as u16,
             total_rows: total_content_rows as u16,
-            scroll_offset: scroll_offset as u16,
+            scroll_top: scroll_offset as u16,
             scrollbar: input_scrollbar,
         });
         for (li, (line, kinds)) in visual_lines

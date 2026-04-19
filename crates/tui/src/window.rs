@@ -69,9 +69,8 @@ pub trait Window {
     fn set_cursor(&mut self, pos: usize);
     fn selection(&self) -> Option<(usize, usize)>;
     fn clear_selection(&mut self);
-    /// Top-of-viewport offset in rows. Interpretation is window-role
-    /// dependent (prompt = top-relative; transcript = bottom-relative
-    /// until Stage 7 lands the unified top-relative model).
+    /// Top-of-viewport offset in rows (top-relative: 0 = first line
+    /// visible, `max_scroll` = stuck to bottom).
     fn scroll_top(&self) -> u16;
     fn set_scroll_top(&mut self, row: u16);
 }
@@ -96,21 +95,17 @@ pub struct TranscriptWindow {
     /// Per-window kill ring — yanking from the transcript copies
     /// here; `handle_key` lifts it to the system clipboard.
     pub kill_ring: crate::input::KillRing,
-    /// Rows scrolled away from the bottom of the transcript. 0 = the
-    /// most recent row is visible at the bottom of the viewport.
-    pub scroll_offset: u16,
-    /// Cursor row relative to the viewport bottom (0 = bottom-most
-    /// row, `viewport_rows - 1` = top row).
+    /// Top-relative scroll: index of the first visible content line.
+    /// `0` = top of transcript visible. `max_scroll` = stuck to bottom.
+    pub scroll_top: u16,
+    /// Cursor row relative to the viewport top (0 = top-most visible
+    /// row).
     pub cursor_line: u16,
     /// Cursor column (visual char index within the line).
     pub cursor_col: u16,
-    /// When `Some`, the viewport is in "pinned" mode: new content
-    /// arriving at the bottom pushes into scrollback instead of
-    /// shifting the visible rows. Each frame the delta (positive or
-    /// negative) in total rows is applied to `scroll_offset`, so the
-    /// same content stays onscreen even when streaming markdown
-    /// changes shape (e.g. `**bold` rendered → width change →
-    /// row-count fluctuation).
+    /// When `Some`, the viewport is pinned: `scroll_top` is held
+    /// constant while new content grows below. Each frame, the delta
+    /// in total rows is tracked so we know when content shrinks too.
     pub pinned_last_total: Option<u16>,
 }
 
@@ -122,7 +117,7 @@ impl TranscriptWindow {
             vim: None,
             cursor: crate::cursor::WindowCursor::new(),
             kill_ring: crate::input::KillRing::new(),
-            scroll_offset: 0,
+            scroll_top: 0,
             cursor_line: 0,
             cursor_col: 0,
             pinned_last_total: None,
@@ -148,12 +143,8 @@ impl TranscriptWindow {
     }
 
     /// Absolute row index (from top) of the cursor in the transcript.
-    pub fn cursor_abs_row(&self, total_rows: usize) -> usize {
-        if total_rows == 0 {
-            return 0;
-        }
-        let from_bottom = self.cursor_line as usize + self.scroll_offset as usize;
-        (total_rows - 1).saturating_sub(from_bottom)
+    pub fn cursor_abs_row(&self, _total_rows: usize) -> usize {
+        self.scroll_top as usize + self.cursor_line as usize
     }
 
     /// Current selection range (vim visual takes priority over
@@ -238,12 +229,10 @@ impl TranscriptWindow {
         let offsets = Self::line_start_offsets(rows);
         self.buffer.buf = rows.join("\n");
         let total = rows.len() as u16;
-        let geom = crate::render::ViewportGeom::new(total, viewport_rows, self.scroll_offset);
-        let scroll = geom.clamped_scroll();
-        self.scroll_offset = scroll;
+        let geom = crate::render::ViewportGeom::new(total, viewport_rows, self.scroll_top);
+        self.scroll_top = geom.clamped_scroll();
         let cursor_line = self.cursor_line.min(viewport_rows.saturating_sub(1));
-        let line_from_bottom = scroll.saturating_add(cursor_line);
-        let target_line = (total.saturating_sub(1).saturating_sub(line_from_bottom)) as usize;
+        let target_line = (self.scroll_top + cursor_line) as usize;
         let target_line = target_line.min(rows.len() - 1);
         let line = &rows[target_line];
         let want = self.cursor.curswant().unwrap_or(self.cursor_col as usize);
@@ -253,35 +242,27 @@ impl TranscriptWindow {
         self.cursor_line = cursor_line;
     }
 
-    /// Enter pin mode. Call this when starting a selection / visual
-    /// drag. `total_rows` is the transcript row count right now. From
-    /// this frame on, `apply_pin` will detect any growth and push it
-    /// into `scroll_offset` so the visible rows don't shift. The
-    /// user can still scroll freely with wheel / j / k — their scroll
-    /// changes `scroll_offset` directly, and pin just adds any new
-    /// growth on top of that.
+    /// Enter pin mode. `scroll_top` is held constant while new
+    /// content arrives below.
     pub fn pin(&mut self, total_rows: u16, _viewport_rows: u16) {
         self.pinned_last_total = Some(total_rows);
     }
 
-    /// Release pin mode. The next frame resumes normal scroll behavior
-    /// (stuck-to-bottom if `scroll_offset == 0`).
+    /// Release pin mode.
     pub fn unpin(&mut self) {
         self.pinned_last_total = None;
     }
 
-    /// Apply the pin to `scroll_offset`: any growth in `total_rows`
-    /// since the last frame is added to `scroll_offset` so the user's
-    /// view stays stable. User-initiated scroll (wheel / motion) is
-    /// preserved — we only add deltas, never snap.
-    pub fn apply_pin(&mut self, total_rows: u16, _viewport_rows: u16) {
-        let Some(last) = self.pinned_last_total else {
+    /// Apply the pin: with top-relative scroll, pinning means holding
+    /// `scroll_top` constant (the same content stays visible as new
+    /// rows grow below). When content *shrinks*, clamp `scroll_top`
+    /// to the new max so we don't point past the end.
+    pub fn apply_pin(&mut self, total_rows: u16, viewport_rows: u16) {
+        if self.pinned_last_total.is_none() {
             return;
-        };
-        let delta = total_rows as i32 - last as i32;
-        if delta != 0 {
-            self.scroll_offset = (self.scroll_offset as i32 + delta).max(0) as u16;
         }
+        let max = total_rows.saturating_sub(viewport_rows);
+        self.scroll_top = self.scroll_top.min(max);
         self.pinned_last_total = Some(total_rows);
     }
 
@@ -302,21 +283,20 @@ impl TranscriptWindow {
     }
 
     /// Absolute byte offset inside the joined transcript for the cell
-    /// currently shown as the cursor (uses `cursor_line` +
-    /// `scroll_offset` + `cursor_col`).
+    /// currently shown as the cursor (uses `scroll_top` + `cursor_line`
+    /// + `cursor_col`).
     fn visible_cpos(&self, rows: &[String], offsets: &[usize]) -> usize {
         let total = rows.len();
         if total == 0 {
             return 0;
         }
-        let from_bottom = self.cursor_line as usize + self.scroll_offset as usize;
-        let line_idx = (total - 1).saturating_sub(from_bottom).min(total - 1);
+        let line_idx = (self.scroll_top as usize + self.cursor_line as usize).min(total - 1);
         offsets[line_idx] + cell_to_byte(&rows[line_idx], self.cursor_col as usize)
     }
 
     /// Reconcile pane state from the underlying buffer's `cpos`. Given
     /// the transcript rows + viewport height, this repositions
-    /// `cursor_line`, `cursor_col`, and `scroll_offset` so the cursor
+    /// `cursor_line`, `cursor_col`, and `scroll_top` so the cursor
     /// stays onscreen.
     fn sync_from_cpos(&mut self, rows: &[String], offsets: &[usize], viewport_rows: u16) {
         let total = rows.len();
@@ -329,21 +309,19 @@ impl TranscriptWindow {
             Ok(i) => i,
             Err(i) => i.saturating_sub(1),
         };
-        // Cursor column must be in terminal cells, not bytes — multibyte
-        // glyphs like `⏺` or `─` are 3 bytes but only 1 cell.
         let line = &rows[line_idx];
         let byte_col = self.cpos.saturating_sub(offsets[line_idx]);
         self.cursor_col = byte_to_cell(line, byte_col) as u16;
-        let line_from_bottom = ((total - 1).saturating_sub(line_idx)) as u16;
-        let top_lfb = self
-            .scroll_offset
+        let line_idx = line_idx as u16;
+        let viewport_bottom = self
+            .scroll_top
             .saturating_add(viewport_rows.saturating_sub(1));
-        if line_from_bottom > top_lfb {
-            self.scroll_offset = line_from_bottom.saturating_sub(viewport_rows.saturating_sub(1));
-        } else if line_from_bottom < self.scroll_offset {
-            self.scroll_offset = line_from_bottom;
+        if line_idx > viewport_bottom {
+            self.scroll_top = line_idx.saturating_sub(viewport_rows.saturating_sub(1));
+        } else if line_idx < self.scroll_top {
+            self.scroll_top = line_idx;
         }
-        self.cursor_line = line_from_bottom.saturating_sub(self.scroll_offset);
+        self.cursor_line = line_idx.saturating_sub(self.scroll_top);
     }
 
     /// Sync the underlying buffer's `buf` + `cpos` from the current
@@ -531,20 +509,11 @@ impl Window for TranscriptWindow {
         }
     }
     fn scroll_top(&self) -> u16 {
-        self.scroll_offset
+        self.scroll_top
     }
     fn set_scroll_top(&mut self, row: u16) {
-        self.scroll_offset = row;
+        self.scroll_top = row;
     }
-}
-
-/// Identifier for which pane currently holds focus. `AppFocus` in
-/// `app/mod.rs` mirrors these values — both will be unified once the
-/// prompt side migrates to a `PromptWindow` wrapper.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WinId {
-    Prompt,
-    Content,
 }
 
 #[cfg(test)]
@@ -556,53 +525,54 @@ mod tests {
     }
 
     #[test]
-    fn apply_pin_handles_growth() {
+    fn apply_pin_holds_scroll_top_on_growth() {
         let mut tw = make_tw();
-        tw.scroll_offset = 5;
+        tw.scroll_top = 5;
         tw.pin(100, 20);
         tw.apply_pin(103, 20);
-        assert_eq!(tw.scroll_offset, 8);
+        // scroll_top stays at 5 — new content grows below
+        assert_eq!(tw.scroll_top, 5);
         assert_eq!(tw.pinned_last_total, Some(103));
     }
 
     #[test]
-    fn apply_pin_handles_shrinkage() {
+    fn apply_pin_clamps_on_shrinkage() {
         let mut tw = make_tw();
-        tw.scroll_offset = 5;
+        tw.scroll_top = 85; // near max for total=100, viewport=20 → max=80
         tw.pin(100, 20);
-        tw.apply_pin(97, 20);
-        assert_eq!(tw.scroll_offset, 2);
+        tw.apply_pin(97, 20); // new max = 77
+        assert_eq!(tw.scroll_top, 77);
         assert_eq!(tw.pinned_last_total, Some(97));
     }
 
     #[test]
     fn apply_pin_clamps_to_zero() {
         let mut tw = make_tw();
-        tw.scroll_offset = 2;
+        tw.scroll_top = 2;
         tw.pin(100, 20);
-        tw.apply_pin(95, 20);
-        assert_eq!(tw.scroll_offset, 0);
+        tw.apply_pin(15, 20); // new max = 0 (total < viewport)
+        assert_eq!(tw.scroll_top, 0);
     }
 
     #[test]
     fn apply_pin_noop_when_unpinned() {
         let mut tw = make_tw();
-        tw.scroll_offset = 5;
+        tw.scroll_top = 5;
         tw.apply_pin(200, 20);
-        assert_eq!(tw.scroll_offset, 5);
+        assert_eq!(tw.scroll_top, 5);
     }
 
     #[test]
-    fn apply_pin_consecutive_deltas() {
+    fn apply_pin_consecutive_growth_and_shrinkage() {
         let mut tw = make_tw();
-        tw.scroll_offset = 10;
+        tw.scroll_top = 10;
         tw.pin(100, 20);
-        tw.apply_pin(105, 20); // +5
-        assert_eq!(tw.scroll_offset, 15);
-        tw.apply_pin(102, 20); // -3
-        assert_eq!(tw.scroll_offset, 12);
-        tw.apply_pin(102, 20); // 0
-        assert_eq!(tw.scroll_offset, 12);
+        tw.apply_pin(105, 20); // growth → scroll_top stays
+        assert_eq!(tw.scroll_top, 10);
+        tw.apply_pin(102, 20); // shrinkage, max=82 → still fine
+        assert_eq!(tw.scroll_top, 10);
+        tw.apply_pin(25, 20); // shrinkage, max=5 → clamp
+        assert_eq!(tw.scroll_top, 5);
     }
 
     #[test]
@@ -612,8 +582,8 @@ mod tests {
         assert!(tw.is_pinned());
         tw.unpin();
         assert!(!tw.is_pinned());
-        tw.scroll_offset = 5;
+        tw.scroll_top = 5;
         tw.apply_pin(200, 20);
-        assert_eq!(tw.scroll_offset, 5);
+        assert_eq!(tw.scroll_top, 5);
     }
 }

@@ -161,10 +161,8 @@ pub mod win {
         win.set_scroll_top(row);
     }
 
-    /// Scroll the window by `delta` rows (positive = scroll down =
-    /// reveal newer content; negative = scroll up = older content).
-    /// The canonical semantic intent for wheel handlers — avoids
-    /// synthesizing `KeyCode::Down/Up` chords.
+    /// Scroll the window by `delta` rows (positive = down toward
+    /// newer content; negative = up toward older content).
     pub fn scroll(win: &mut dyn Window, delta: i32) {
         let cur = win.scroll_top() as i32;
         let next = (cur + delta).max(0) as u16;

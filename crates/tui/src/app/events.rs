@@ -1015,12 +1015,12 @@ impl App {
                 queued,
                 prediction,
             },
-            self.transcript_window.scroll_offset,
+            self.transcript_window.scroll_top,
             self.transcript_window.cursor_line,
             self.transcript_window.cursor_col,
             visual,
         );
-        self.transcript_window.scroll_offset = clamped_scroll;
+        self.transcript_window.scroll_top = clamped_scroll;
         self.transcript_window.cursor_line = clamped_line;
         self.transcript_window.cursor_col = clamped_col;
     }
@@ -1310,7 +1310,7 @@ impl App {
         // painter can walk `last_viewport_text` directly.
         let viewport = self.viewport_rows_estimate();
         let total = rows.len().min(u16::MAX as usize) as u16;
-        let scroll = self.transcript_window.scroll_offset;
+        let scroll = self.transcript_window.scroll_top;
         let geom = render::ViewportGeom::new(total, viewport, scroll);
         let view_top = geom.skip_from_top() as usize;
         let to_view = |abs: usize| abs.saturating_sub(view_top);
@@ -1343,13 +1343,14 @@ impl App {
             self.transcript_window.vim.as_ref().map(|v| v.mode()),
             Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
         );
-        let cursor_off_bottom =
-            self.transcript_window.scroll_offset > 0 || self.transcript_window.cursor_line > 0;
+        let (total, viewport) = self.transcript_dims();
+        let max_scroll = total.saturating_sub(viewport);
+        let cursor_off_bottom = self.transcript_window.scroll_top < max_scroll
+            || self.transcript_window.cursor_line + 1 < viewport;
         let want_pin =
             has_selection || in_vim_visual || self.mouse_drag_active || cursor_off_bottom;
         if want_pin {
             if !self.transcript_window.is_pinned() {
-                let (total, viewport) = self.transcript_dims();
                 self.transcript_window.pin(total, viewport);
             }
         } else {
@@ -1466,7 +1467,7 @@ impl App {
                             self.position_prompt_cursor_from_click(
                                 row,
                                 col,
-                                vp.scroll_offset as usize,
+                                vp.scroll_top as usize,
                                 vp.content_width,
                             );
                         }
@@ -1669,7 +1670,7 @@ impl App {
                         self.position_prompt_cursor_from_click(
                             r,
                             c,
-                            vp.scroll_offset as usize,
+                            vp.scroll_top as usize,
                             vp.content_width,
                         );
                         return;
@@ -1832,9 +1833,7 @@ impl App {
         let from_top = bar.scroll_from_top_for_thumb(thumb_top);
         match target {
             crate::app::AppFocus::Content => {
-                // Transcript stores bottom-relative scroll; invert.
-                let offset = bar.max_scroll().saturating_sub(from_top);
-                self.transcript_window.scroll_offset = offset;
+                self.transcript_window.scroll_top = from_top;
                 // Reanchor the cursor to the same screen row and
                 // recompute the column against whichever transcript
                 // line is now under it (via `curswant`). Without this
@@ -1883,7 +1882,7 @@ impl App {
         let viewport_rows = region.rows;
         let total = rows.len().min(u16::MAX as usize) as u16;
         let geom =
-            render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_offset);
+            render::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_top);
         let line_idx = geom.line_of_row(rel_row).unwrap_or(total.saturating_sub(1)) as usize;
         let line_idx = line_idx.min(rows.len() - 1);
         // Snap to nearest selectable cell, then convert to nav col.
