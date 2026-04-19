@@ -321,7 +321,16 @@ impl App {
         // to the built-in keymap dispatcher.
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
-                if self.lua.run_keymap(&chord) {
+                let w = render::term_width();
+                let transcript_text = self.screen.full_transcript_text(w).join("\n");
+                let prompt_text = self.input.buffer.buf.clone();
+                self.lua.set_context(crate::lua::LuaContext {
+                    transcript_text: Some(transcript_text),
+                    prompt_text: Some(prompt_text),
+                });
+                let handled = self.lua.run_keymap(&chord);
+                self.lua.clear_context();
+                if handled {
                     for msg in self.lua.drain_notifications() {
                         self.screen.notify(msg);
                     }
