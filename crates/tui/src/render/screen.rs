@@ -1554,13 +1554,15 @@ impl Screen {
             Vec::new()
         };
 
-        // Compute total transcript rows so we can render the shared
-        // scrollbar at column 0 over the viewport.
-        let total_transcript_rows = self
+        // Compute total transcript rows for scrollbar + viewport geometry.
+        // The snapshot is cached; accessing it here ensures layout is warm
+        // before paint_viewport runs.
+        let snapshot_total = self
             .transcript
-            .history
-            .total_rows(tw, self.show_thinking)
-            .saturating_add(ephemeral_lines.len() as u16);
+            .snapshot(tw as u16, self.show_thinking)
+            .rows
+            .len() as u16;
+        let total_transcript_rows = snapshot_total.saturating_add(ephemeral_lines.len() as u16);
 
         // Paint transcript slice (history + ephemeral tail) into the
         // viewport. We always repaint — keeping the viewport visually
@@ -1774,11 +1776,12 @@ impl Screen {
             Vec::new()
         };
 
-        let total_transcript_rows = self
+        let snapshot_total = self
             .transcript
-            .history
-            .total_rows(tw, self.show_thinking)
-            .saturating_add(ephemeral_lines.len() as u16);
+            .snapshot(tw as u16, self.show_thinking)
+            .rows
+            .len() as u16;
+        let total_transcript_rows = snapshot_total.saturating_add(ephemeral_lines.len() as u16);
 
         let clamped = self.transcript.history.paint_viewport(
             out,
