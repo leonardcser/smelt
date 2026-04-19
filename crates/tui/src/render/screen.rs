@@ -17,6 +17,37 @@ use super::history::{
 };
 use super::transcript::Transcript;
 
+#[allow(clippy::too_many_arguments)]
+fn paint_completer_float(
+    out: &mut super::RenderOut,
+    layout: &mut super::layout::LayoutState,
+    completer: Option<&crate::completer::Completer>,
+    actual_rows: usize,
+    anchor_row: u16,
+    z: u8,
+    vim_enabled: bool,
+    style: &super::completions::CompletionStyle<'_>,
+) {
+    if actual_rows == 0 {
+        return;
+    }
+    let avail = actual_rows.min(anchor_row as usize);
+    if avail == 0 {
+        return;
+    }
+    let overlay_top = anchor_row.saturating_sub(avail as u16);
+    out.move_to(0, overlay_top);
+    out.row = Some(overlay_top);
+    let drawn = draw_completions(out, completer, avail, vim_enabled, style);
+    if drawn > 0 {
+        layout.push_float(
+            super::layout::Rect::new(overlay_top, 0, layout.term_width, drawn as u16),
+            z,
+            super::layout::HitRegion::Completer,
+        );
+    }
+}
+
 /// Visual selection in the content pane, captured from vim state.
 /// Line indices are 0-based from the top of the full transcript; cols
 /// count chars on that line.
@@ -1854,39 +1885,21 @@ impl Screen {
 
         if self.cmdline.active {
             let actual = completion_actual_rows(self.cmdline.completer.as_ref());
-            if actual > 0 {
-                let status_row = self.layout.prompt.bottom().saturating_sub(1);
-                let max_overlay = status_row as usize;
-                let comp_rows_avail = actual.min(max_overlay);
-                if comp_rows_avail > 0 {
-                    let overlay_top = status_row.saturating_sub(comp_rows_avail as u16);
-                    out.move_to(0, overlay_top);
-                    out.row = Some(overlay_top);
-                    let cmdline_style = super::completions::CompletionStyle {
-                        prefix: Some(""),
-                        left_indent: 1,
-                    };
-                    let drawn = draw_completions(
-                        out,
-                        self.cmdline.completer.as_ref(),
-                        comp_rows_avail,
-                        false,
-                        &cmdline_style,
-                    );
-                    if drawn > 0 {
-                        self.layout.push_float(
-                            super::layout::Rect::new(
-                                overlay_top,
-                                0,
-                                self.layout.term_width,
-                                drawn as u16,
-                            ),
-                            2,
-                            super::layout::HitRegion::Completer,
-                        );
-                    }
-                }
-            }
+            let anchor = self.layout.prompt.bottom().saturating_sub(1);
+            let style = super::completions::CompletionStyle {
+                prefix: Some(""),
+                left_indent: 1,
+            };
+            paint_completer_float(
+                out,
+                &mut self.layout,
+                self.cmdline.completer.as_ref(),
+                actual,
+                anchor,
+                2,
+                false,
+                &style,
+            );
         }
 
         self.prompt.drawn = true;
@@ -2489,47 +2502,43 @@ impl Screen {
         out.newline();
         self.render_status_line(out);
 
-        // Floating completer overlay: painted above the prompt, over the
-        // transcript rows. Uses actual row count (not budget) so the
-        // overlay anchors flush against the prompt, growing upward.
-        let menu_rows = state.menu_rows();
-        let actual = if menu_rows > 0 {
-            menu_rows
-        } else {
-            completion_actual_rows(state.completer.as_ref())
-        };
-        if actual > 0 {
-            let prompt_top = self.layout.prompt.top;
-            let max_overlay = prompt_top as usize;
-            let comp_rows_avail = actual.min(max_overlay);
-            if comp_rows_avail > 0 {
-                let overlay_top = prompt_top.saturating_sub(comp_rows_avail as u16);
-                out.move_to(0, overlay_top);
-                out.row = Some(overlay_top);
-                let drawn = if let Some(ref ms) = state.menu {
-                    draw_menu(out, ms, comp_rows_avail)
-                } else {
-                    draw_completions(
-                        out,
-                        state.completer.as_ref(),
-                        comp_rows_avail,
-                        state.vim_enabled(),
-                        &Default::default(),
-                    )
-                };
-                if drawn > 0 {
-                    self.layout.push_float(
-                        super::layout::Rect::new(
-                            overlay_top,
-                            0,
-                            self.layout.term_width,
-                            drawn as u16,
-                        ),
-                        1,
-                        super::layout::HitRegion::Completer,
-                    );
+        // Floating overlay above the prompt (completer or menu).
+        let anchor = self.layout.prompt.top;
+        if let Some(ref ms) = state.menu {
+            let actual = state.menu_rows();
+            if actual > 0 {
+                let avail = actual.min(anchor as usize);
+                if avail > 0 {
+                    let overlay_top = anchor.saturating_sub(avail as u16);
+                    out.move_to(0, overlay_top);
+                    out.row = Some(overlay_top);
+                    let drawn = draw_menu(out, ms, avail);
+                    if drawn > 0 {
+                        self.layout.push_float(
+                            super::layout::Rect::new(
+                                overlay_top,
+                                0,
+                                self.layout.term_width,
+                                drawn as u16,
+                            ),
+                            1,
+                            super::layout::HitRegion::Completer,
+                        );
+                    }
                 }
             }
+        } else {
+            let actual = completion_actual_rows(state.completer.as_ref());
+            paint_completer_float(
+                out,
+                &mut self.layout,
+                state.completer.as_ref(),
+                actual,
+                anchor,
+                1,
+                state.vim_enabled(),
+                &Default::default(),
+            );
         }
 
         (notification_rows as usize
