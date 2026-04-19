@@ -26,7 +26,7 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
     } else {
         line.to_string()
     };
-    // Lua-registered user commands take precedence over built-ins so
+    // Lua-registered commands take precedence over built-ins so
     // users can override `/help`, `/export`, etc. from init.lua.
     let name_arg = normalized.trim_start_matches('/');
     let (name, arg) = match name_arg.find(char::is_whitespace) {

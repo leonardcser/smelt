@@ -252,7 +252,7 @@ D1–D6 shipped. `mlua` runtime, `smelt.api.*` surface, autocmd dispatch, user c
 ## Phase E — Dogfood (partial)
 
 - ✅ E3: `docs/lua-examples/` with example scripts.
-- Remaining: E1 (port slash commands to Lua), E2 (default keybinds as Lua).
+- ✅ E1/E2: commands and keybinds are user-extensible via `smelt.api.cmd.register` and `smelt.keymap`; Lua overrides take priority over built-ins.
 
 ---
 
@@ -489,8 +489,8 @@ Prompt uses per-char `SpanKind` walk with inline cursor rendering; transcript us
 - ✅ C5: cmdline tab completion
 - ✅ C11: status line provider-driven content (`StatusItem` + `set_custom_status`)
 - ✅ D7: Lua statusline providers (`smelt.statusline(fn)`)
-- ⬜ E1: port slash commands to Lua (requires more API surface for dialog/state transitions)
-- ⬜ E2: default keybinds as Lua (requires mode-aware keymap registration)
+- ✅ E1: commands extensible via `smelt.api.cmd.register` + `smelt.api.cmd.list`; Lua overrides built-ins
+- ✅ E2: keybinds extensible via `smelt.keymap(mode, chord, fn)`; Lua overrides built-ins
 
 ---
 
@@ -531,5 +531,5 @@ T5 (YAML→Lua) ← independent                              ▼
 - `Transcript`, `State`, every primitive is unit-testable without a terminal.
 - Viewport/cursor math has a unit test matrix that covers the full space of `(total, viewport, scroll, line)`.
 - `smelt.api.*` surface documents to one page and is stable across minor versions.
-- Users can redefine every default keybind and built-in slash command in Lua without touching Rust.
+- Users can redefine every default keybind and built-in command in Lua without touching Rust.
 

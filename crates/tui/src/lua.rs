@@ -142,7 +142,7 @@ pub struct LuaRuntime {
     /// one per tick as a notification; subsequent errors accumulate for
     /// `~/.cache/smelt/lua.log` persistence.
     pub lua_errors: SharedVec<String>,
-    /// User commands registered from Lua, keyed by command name.
+    /// Commands registered from Lua, keyed by command name.
     commands: SharedMap<String, LuaHandle>,
     /// Key chord → handler mapping, keyed by `(mode, chord)`.
     /// An empty mode string `""` matches any mode.
@@ -309,6 +309,21 @@ impl LuaRuntime {
         })?;
         cmd_tbl.set("run", cmd_run)?;
 
+        // smelt.api.cmd.list() — return names of Lua-registered commands.
+        let commands_list = commands.clone();
+        let cmd_list = lua.create_function(move |lua, ()| {
+            let names: Vec<String> = commands_list
+                .lock()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            let table = lua.create_table()?;
+            for (i, name) in names.iter().enumerate() {
+                table.set(i + 1, name.as_str())?;
+            }
+            Ok(table)
+        })?;
+        cmd_tbl.set("list", cmd_list)?;
+
         api.set("cmd", cmd_tbl)?;
 
         smelt.set("api", api)?;
@@ -436,9 +451,9 @@ impl LuaRuntime {
         std::mem::take(&mut *q)
     }
 
-    /// Invoke a registered user command by name. Returns `true` when
-    /// the command exists and was dispatched (regardless of whether
-    /// the handler succeeded); `false` when the name isn't bound.
+    /// Invoke a registered command by name. Returns `true` when the
+    /// command exists and was dispatched (regardless of whether the
+    /// handler succeeded); `false` when the name isn't bound.
     pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
         let Ok(map) = self.commands.lock() else {
             return false;
@@ -593,7 +608,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Whether a user command with `name` is registered via Lua.
+    /// Whether a command with `name` is registered via Lua.
     pub fn has_command(&self, name: &str) -> bool {
         self.commands
             .lock()
@@ -601,7 +616,7 @@ impl LuaRuntime {
             .unwrap_or(false)
     }
 
-    /// Names of all Lua-registered user commands (for completion).
+    /// Names of all Lua-registered commands (for completion).
     pub fn command_names(&self) -> Vec<String> {
         self.commands
             .lock()
