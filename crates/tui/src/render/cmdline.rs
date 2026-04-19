@@ -14,8 +14,8 @@ pub struct CmdlineState {
 }
 
 pub(crate) struct CompletionState {
-    matches: Vec<String>,
-    index: usize,
+    pub(crate) matches: Vec<String>,
+    pub(crate) index: usize,
 }
 
 impl CmdlineState {

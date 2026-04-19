@@ -1756,6 +1756,57 @@ impl Screen {
             prompt_height as usize,
         );
 
+        // Cmdline completer overlay: when the `:` cmdline has an active
+        // completion, paint the dropdown above the status/cmdline row.
+        if self.cmdline.active {
+            if let Some(ref cs) = self.cmdline.completion {
+                let num_matches = cs.matches.len();
+                if num_matches > 0 {
+                    let status_row = self.layout.prompt.bottom().saturating_sub(1);
+                    let max_visible = 8.min(num_matches).min(status_row as usize);
+                    if max_visible > 0 {
+                        let overlay_top = status_row.saturating_sub(max_visible as u16);
+                        out.move_to(0, overlay_top);
+                        out.row = Some(overlay_top);
+                        let start = cs.index.saturating_sub(max_visible / 2);
+                        let start = if start + max_visible > num_matches {
+                            num_matches.saturating_sub(max_visible)
+                        } else {
+                            start
+                        };
+                        for (i, m) in cs.matches[start..start + max_visible].iter().enumerate() {
+                            let is_selected = start + i == cs.index;
+                            out.push_style(StyleState {
+                                bg: Some(Color::AnsiValue(if is_selected { 236 } else { 233 })),
+                                fg: if is_selected {
+                                    Some(theme::accent())
+                                } else {
+                                    None
+                                },
+                                ..StyleState::default()
+                            });
+                            out.print(&format!("  {}", m));
+                            let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
+                            out.pop_style();
+                            if i + 1 < max_visible {
+                                out.newline();
+                            }
+                        }
+                        self.layout.push_float(
+                            super::layout::Rect::new(
+                                overlay_top,
+                                0,
+                                self.layout.term_width,
+                                max_visible as u16,
+                            ),
+                            2,
+                            super::layout::HitRegion::Completer,
+                        );
+                    }
+                }
+            }
+        }
+
         // State so other paths don't think they need to repaint.
         self.prompt.drawn = true;
         self.prompt.dirty = false;
@@ -1995,15 +2046,6 @@ impl Screen {
             visual_lines.len() as u16
         };
 
-        // Completions / status.
-        let menu_rows = state.menu_rows();
-        let comp_rows: u16 = if menu_rows > 0 {
-            menu_rows as u16
-        } else {
-            completion_reserved_rows(state.completer.as_ref()) as u16
-        };
-        let status_rows: u16 = if comp_rows == 0 { 1 } else { 0 };
-
         notification
             + queued_rows
             + stash
@@ -2011,8 +2053,7 @@ impl Screen {
             + 1 // top bar
             + input_rows
             + 1 // bottom bar
-            + status_rows
-            + comp_rows
+            + 1 // status line (always present)
     }
 
     /// Render the prompt section. `out.row` MUST be set (overlay mode)
@@ -2168,40 +2209,16 @@ impl Screen {
         let is_exec = matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = state.buf == "!";
         let total_content_rows = visual_lines.len();
-        let menu_rows = state.menu_rows();
-        let comp_total = if menu_rows > 0 {
-            menu_rows
-        } else {
-            completion_reserved_rows(state.completer.as_ref())
-        };
-        let mut comp_rows = comp_total;
-
-        // Reserve space for the status line (always shown when no completions/menus).
-        let status_line_reserve: usize = if comp_total == 0 { 1 } else { 0 };
 
         // 2 = top bar (above input) + bottom bar (below input).
         const PROMPT_BARS: usize = 2;
-        let fixed_base = notification_rows as usize
+        let fixed = notification_rows as usize
             + stash_rows as usize
             + queued_rows
             + btw_visual
             + PROMPT_BARS
-            + status_line_reserve;
-        let mut fixed = fixed_base + comp_rows;
-        let mut max_content_rows = height.saturating_sub(fixed);
-        if max_content_rows == 0 {
-            let available_for_comp = height.saturating_sub(fixed_base + 1);
-            if available_for_comp == 0 {
-                comp_rows = 0;
-            } else {
-                comp_rows = comp_rows.min(available_for_comp);
-            }
-            fixed = fixed_base + comp_rows;
-            max_content_rows = height.saturating_sub(fixed);
-            if max_content_rows == 0 {
-                max_content_rows = 1;
-            }
-        }
+            + 1; // status line (always present)
+        let max_content_rows = height.saturating_sub(fixed).max(1);
 
         let content_rows = total_content_rows.min(max_content_rows);
         let scroll_offset = if total_content_rows > content_rows {
@@ -2421,54 +2438,60 @@ impl Screen {
 
         draw_bar(out, width, None, None, bar_color);
 
-        // Status line below the prompt:
-        // pill(spinner+slug) mode vim_mode · status time · speed · procs · agents
-        let status_line_rows = if comp_rows == 0 {
-            out.newline();
-            self.render_status_line(out);
-            1
-        } else {
-            0
-        };
+        // Status line — always drawn as the last prompt row.
+        out.newline();
+        self.render_status_line(out);
 
-        if comp_rows > 0 {
-            out.newline();
-        }
-        let comp_start_row = out.cursor_row;
-        let comp_rows = if let Some(ref ms) = state.menu {
-            draw_menu(out, ms, comp_rows)
+        // Floating completer overlay: painted above the prompt, over the
+        // transcript rows. Uses move_to to overwrite already-rendered
+        // transcript content so the prompt itself doesn't shift.
+        let menu_rows = state.menu_rows();
+        let comp_budget = if menu_rows > 0 {
+            menu_rows
         } else {
-            draw_completions(
-                out,
-                state.completer.as_ref(),
-                comp_rows,
-                state.vim_enabled(),
-            )
+            completion_reserved_rows(state.completer.as_ref())
         };
-        if comp_rows > 0 {
-            self.layout.push_float(
-                super::layout::Rect::new(
-                    comp_start_row,
-                    0,
-                    self.layout.term_width,
-                    comp_rows as u16,
-                ),
-                1,
-                super::layout::HitRegion::Completer,
-            );
+        if comp_budget > 0 {
+            let prompt_top = self.layout.prompt.top;
+            let max_overlay = prompt_top as usize;
+            let comp_rows_avail = comp_budget.min(max_overlay);
+            if comp_rows_avail > 0 {
+                let overlay_top = prompt_top.saturating_sub(comp_rows_avail as u16);
+                out.move_to(0, overlay_top);
+                out.row = Some(overlay_top);
+                let drawn = if let Some(ref ms) = state.menu {
+                    draw_menu(out, ms, comp_rows_avail)
+                } else {
+                    draw_completions(
+                        out,
+                        state.completer.as_ref(),
+                        comp_rows_avail,
+                        state.vim_enabled(),
+                    )
+                };
+                if drawn > 0 {
+                    self.layout.push_float(
+                        super::layout::Rect::new(
+                            overlay_top,
+                            0,
+                            self.layout.term_width,
+                            drawn as u16,
+                        ),
+                        1,
+                        super::layout::HitRegion::Completer,
+                    );
+                }
+            }
         }
 
-        // Mirror of `fixed_base`'s structure: extras, top bar, input
-        // content, bottom bar, status line / completions.
         (notification_rows as usize
             + stash_rows as usize
             + queued_rows
             + btw_visual
-            + 1 // top bar (above input)
+            + 1 // top bar
             + content_rows
-            + 1 // bottom bar (below input)
-            + status_line_rows
-            + comp_rows) as u16
+            + 1 // bottom bar
+            + 1) as u16 // status line
     }
 }
 
