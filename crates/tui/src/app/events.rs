@@ -1269,9 +1269,7 @@ impl App {
     /// gap, so multi-line prompts (and completion menus) don't cause
     /// the scroll math to overshoot.
     fn viewport_rows_estimate(&self) -> u16 {
-        let prompt_rows = self.screen.prev_prompt_rows().max(1);
-        let gap: u16 = 1;
-        self.last_height.saturating_sub(prompt_rows + gap).max(1)
+        self.screen.layout.viewport_rows().max(1)
     }
 
     /// Single source of truth for whether the transcript viewport

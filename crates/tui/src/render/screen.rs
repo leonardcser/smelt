@@ -117,6 +117,8 @@ pub struct Screen {
     /// by mouse hit-testing and scroll math. `None` before the first
     /// viewport frame.
     last_transcript_region: Option<super::region::TranscriptRegion>,
+    /// Centralized layout state computed at the start of each frame.
+    pub(crate) layout: super::layout::LayoutState,
     /// Ephemeral btw side-question state, rendered above the prompt.
     btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
@@ -193,6 +195,13 @@ impl Screen {
                 scrollbar: Some(crate::window::GutterSide::Right),
             },
             last_transcript_region: None,
+            layout: super::layout::LayoutState::compute(&super::layout::LayoutInput {
+                term_width: 80,
+                term_height: 24,
+                prompt_height: 3,
+                dialog_height: None,
+                constrain_dialog: false,
+            }),
             btw: None,
             notification: None,
             task_label: None,
@@ -1521,25 +1530,21 @@ impl Screen {
         let (term_w, term_h) = self.size();
         out.init_cursor(0, term_w, term_h);
 
-        // Position at top. We deliberately do NOT Clear::All here — the
-        // whole screen is repainted row-by-row (each `newline` clears to
-        // end of line) and any unused rows are blanked explicitly. Clearing
-        // the whole screen every frame causes hard flicker on terminals
-        // without DEC synchronized-update support.
         out.row = Some(0);
         out.move_to(0, 0);
 
-        // Measure prompt so we know how many rows to reserve at the bottom.
-        // The prompt pane is capped at half the terminal height — anything
-        // taller becomes scrollable inside its own viewport (same vim-style
-        // viewport logic as a long multi-line input already uses).
         let natural_prompt_height =
             self.measure_prompt_height(prompt.state, width, prompt.queued, prompt.prediction);
-        let max_prompt_height = (term_h / 2).max(3);
-        let prompt_height = natural_prompt_height.min(max_prompt_height);
-        // One-row gap between transcript and prompt.
-        let gap_rows: u16 = 1;
-        let viewport_rows = term_h.saturating_sub(prompt_height + gap_rows);
+        self.layout = super::layout::LayoutState::compute(&super::layout::LayoutInput {
+            term_width: term_w,
+            term_height: term_h,
+            prompt_height: natural_prompt_height,
+            dialog_height: None,
+            constrain_dialog: false,
+        });
+        let viewport_rows = self.layout.viewport_rows();
+        let prompt_height = self.layout.prompt.height;
+        let gap_rows = self.layout.gap;
 
         // Reserve gutter columns (padding + scrollbar track) so the bar
         // never overpaints transcript content. Layout width must match
@@ -1751,25 +1756,20 @@ impl Screen {
             return (false, placement);
         }
 
-        // Constrain dialog height to at most max(h/2, remaining viewport).
-        let effective_dialog_height = if self.constrain_dialog {
-            let half_h = term_h / 2;
-            // Reserve 2 rows for status bar + gap.
-            let natural = term_h.saturating_sub(2);
-            dialog_height.min(half_h.max(natural))
-        } else {
-            dialog_height
-        };
+        self.layout = super::layout::LayoutState::compute(&super::layout::LayoutInput {
+            term_width: term_w,
+            term_height: term_h,
+            prompt_height: 0,
+            dialog_height: Some(dialog_height),
+            constrain_dialog: self.constrain_dialog,
+        });
+        let viewport_rows = self.layout.viewport_rows();
 
         out.row = Some(0);
         out.move_to(0, 0);
 
         let gutters = self.transcript_gutters;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
-
-        // Reserve dialog + 1 gap (between dialog and status) + 1 status.
-        let reserved: u16 = effective_dialog_height.saturating_add(2);
-        let viewport_rows = term_h.saturating_sub(reserved);
 
         // Build ephemeral tail.
         let ephemeral_lines: Vec<crate::render::display::DisplayLine> = if has_ephemeral {
@@ -1873,16 +1873,10 @@ impl Screen {
         self.has_scrollback = false;
         self.transcript.history.flushed = self.transcript.history.order.len();
 
-        let max_avail = term_h.saturating_sub(2 + dialog_row);
-        let granted_rows = effective_dialog_height.min(max_avail);
-        let placement = if granted_rows > 0 {
-            Some(DialogPlacement {
-                row: dialog_row,
-                granted_rows,
-            })
-        } else {
-            None
-        };
+        let placement = self.layout.dialog.as_ref().map(|d| DialogPlacement {
+            row: d.rect.top,
+            granted_rows: d.rect.height,
+        });
 
         (true, placement)
     }

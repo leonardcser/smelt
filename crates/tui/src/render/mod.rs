@@ -6,6 +6,7 @@ mod dialogs;
 mod display;
 mod highlight;
 mod history;
+pub(crate) mod layout;
 mod layout_out;
 mod paint;
 mod prompt;
@@ -18,6 +19,7 @@ pub(crate) mod transcript;
 mod viewport;
 mod working;
 
+pub(crate) use layout::{DialogLayout, HitRegion, LayoutInput, LayoutState, Rect};
 pub(crate) use region::{ScrollbarGeom, TranscriptHit};
 pub use screen::{BtwBlock, ContentVisualKind, ContentVisualRange, Notification, Screen};
 pub use transcript::TranscriptSnapshot;
