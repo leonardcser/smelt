@@ -371,20 +371,32 @@ impl Screen {
         }
     }
 
-    /// Start tracking a blocking agent in the dynamic section.
+    /// Start tracking a blocking agent. Pushes a streaming `Block::Agent`
+    /// so the agent's live state flows through the single paint path and
+    /// holds a `BlockId` handle for follow-up rewrites.
     pub fn start_active_agent(&mut self, agent_id: String) {
-        self.active_agents.push(ActiveAgent {
-            agent_id,
+        let start_time = Instant::now();
+        let block = Block::Agent {
+            agent_id: agent_id.clone(),
             slug: None,
+            blocking: true,
             tool_calls: Vec::new(),
             status: AgentBlockStatus::Running,
-            start_time: Instant::now(),
+            elapsed: Some(Duration::from_secs(0)),
+        };
+        let block_id = self.history.push(block);
+        self.history.set_status(block_id, Status::Streaming);
+        self.active_agents.push(ActiveAgent {
+            agent_id,
+            block_id,
+            start_time,
             final_elapsed: None,
         });
         self.prompt.dirty = true;
     }
 
-    /// Update a specific active blocking agent's state.
+    /// Update a specific active agent's state by rewriting its streaming
+    /// block.
     pub fn update_active_agent(
         &mut self,
         agent_id: &str,
@@ -392,77 +404,159 @@ impl Screen {
         tool_calls: &[crate::app::AgentToolEntry],
         status: AgentBlockStatus,
     ) {
-        if let Some(agent) = self
+        let (block_id, elapsed) = {
+            let Some(active) = self
+                .active_agents
+                .iter_mut()
+                .find(|a| a.agent_id == agent_id)
+            else {
+                return;
+            };
+            if status != AgentBlockStatus::Running && active.final_elapsed.is_none() {
+                active.final_elapsed = Some(active.start_time.elapsed());
+            }
+            let elapsed = active
+                .final_elapsed
+                .unwrap_or_else(|| active.start_time.elapsed());
+            (active.block_id, elapsed)
+        };
+        self.history.rewrite(
+            block_id,
+            Block::Agent {
+                agent_id: agent_id.to_string(),
+                slug: slug.map(str::to_string),
+                blocking: true,
+                tool_calls: tool_calls.to_vec(),
+                status,
+                elapsed: Some(elapsed),
+            },
+        );
+        self.prompt.dirty = true;
+    }
+
+    /// Mark all active agents as cancelled/error (freezing elapsed).
+    pub fn cancel_active_agents(&mut self) {
+        let updates: Vec<(BlockId, String, Duration, Vec<crate::app::AgentToolEntry>, Option<String>)> = self
             .active_agents
             .iter_mut()
-            .find(|a| a.agent_id == agent_id)
-        {
-            agent.slug = slug.map(str::to_string);
-            agent.tool_calls = tool_calls.to_vec();
-            if status != AgentBlockStatus::Running && agent.status == AgentBlockStatus::Running {
-                agent.final_elapsed = Some(agent.start_time.elapsed());
-            }
-            agent.status = status;
-            self.prompt.dirty = true;
+            .map(|a| {
+                if a.final_elapsed.is_none() {
+                    a.final_elapsed = Some(a.start_time.elapsed());
+                }
+                let elapsed = a.final_elapsed.unwrap_or_else(|| a.start_time.elapsed());
+                let (slug, tool_calls) = match self.history.blocks.get(&a.block_id) {
+                    Some(Block::Agent {
+                        slug, tool_calls, ..
+                    }) => (slug.clone(), tool_calls.clone()),
+                    _ => (None, Vec::new()),
+                };
+                (a.block_id, a.agent_id.clone(), elapsed, tool_calls, slug)
+            })
+            .collect();
+        for (block_id, agent_id, elapsed, tool_calls, slug) in updates {
+            self.history.rewrite(
+                block_id,
+                Block::Agent {
+                    agent_id,
+                    slug,
+                    blocking: true,
+                    tool_calls,
+                    status: AgentBlockStatus::Error,
+                    elapsed: Some(elapsed),
+                },
+            );
         }
     }
 
-    /// Mark all active agents as cancelled/error (before flush commits them).
-    pub fn cancel_active_agents(&mut self) {
-        for agent in &mut self.active_agents {
-            agent.status = AgentBlockStatus::Error;
-            agent.final_elapsed = Some(agent.start_time.elapsed());
-        }
-    }
-
-    /// Commit a specific active agent to history and remove it from the live set.
+    /// Finish a specific active agent: freeze elapsed, flip to `Done`, and
+    /// remove it from the active set.
     pub fn finish_active_agent(&mut self, agent_id: &str) {
-        if let Some(idx) = self
+        let Some(idx) = self
             .active_agents
             .iter()
             .position(|a| a.agent_id == agent_id)
-        {
-            let mut agent = self.active_agents.remove(idx);
-            if agent.status == AgentBlockStatus::Running {
-                agent.status = AgentBlockStatus::Done;
-                agent.final_elapsed = Some(agent.start_time.elapsed());
+        else {
+            return;
+        };
+        let mut active = self.active_agents.remove(idx);
+        if active.final_elapsed.is_none() {
+            active.final_elapsed = Some(active.start_time.elapsed());
+        }
+        let elapsed = active
+            .final_elapsed
+            .unwrap_or_else(|| active.start_time.elapsed());
+        let (slug, tool_calls, status) = match self.history.blocks.get(&active.block_id) {
+            Some(Block::Agent {
+                slug,
+                tool_calls,
+                status,
+                ..
+            }) => {
+                let next = if *status == AgentBlockStatus::Running {
+                    AgentBlockStatus::Done
+                } else {
+                    *status
+                };
+                (slug.clone(), tool_calls.clone(), next)
             }
-            let elapsed = agent
-                .final_elapsed
-                .unwrap_or_else(|| agent.start_time.elapsed());
-            self.history.push(Block::Agent {
-                agent_id: agent.agent_id,
-                slug: agent.slug,
+            _ => (None, Vec::new(), AgentBlockStatus::Done),
+        };
+        self.history.rewrite(
+            active.block_id,
+            Block::Agent {
+                agent_id: active.agent_id,
+                slug,
                 blocking: true,
-                tool_calls: agent.tool_calls,
-                status: agent.status,
+                tool_calls,
+                status,
                 elapsed: Some(elapsed),
-            });
-            self.prompt.dirty = true;
+            },
+        );
+        self.history.set_status(active.block_id, Status::Done);
+        self.prompt.dirty = true;
+    }
+
+    /// Finish every active agent (turn-end / cancel path).
+    pub fn finish_all_active_agents(&mut self) {
+        let ids: Vec<String> = self.active_agents.iter().map(|a| a.agent_id.clone()).collect();
+        for id in ids {
+            self.finish_active_agent(&id);
         }
     }
 
-    /// Commit all active agents to history and clear the live set.
-    pub fn finish_all_active_agents(&mut self) {
-        let agents: Vec<ActiveAgent> = self.active_agents.drain(..).collect();
-        for mut agent in agents {
-            if agent.status == AgentBlockStatus::Running {
-                agent.status = AgentBlockStatus::Done;
-                agent.final_elapsed = Some(agent.start_time.elapsed());
-            }
-            let elapsed = agent
-                .final_elapsed
-                .unwrap_or_else(|| agent.start_time.elapsed());
-            self.history.push(Block::Agent {
-                agent_id: agent.agent_id,
-                slug: agent.slug,
-                blocking: true,
-                tool_calls: agent.tool_calls,
-                status: agent.status,
-                elapsed: Some(elapsed),
-            });
+    /// Refresh live elapsed on streaming agents. Called from the spinner
+    /// tick so the visible duration ticks up even without an explicit
+    /// `update_active_agent` from the engine.
+    fn tick_active_agents(&mut self) {
+        let ticks: Vec<(BlockId, Duration)> = self
+            .active_agents
+            .iter()
+            .filter(|a| a.final_elapsed.is_none())
+            .map(|a| (a.block_id, a.start_time.elapsed()))
+            .collect();
+        for (block_id, elapsed) in ticks {
+            let Some(Block::Agent {
+                agent_id,
+                slug,
+                tool_calls,
+                status,
+                ..
+            }) = self.history.blocks.get(&block_id).cloned()
+            else {
+                continue;
+            };
+            self.history.rewrite(
+                block_id,
+                Block::Agent {
+                    agent_id,
+                    slug,
+                    blocking: true,
+                    tool_calls,
+                    status,
+                    elapsed: Some(elapsed),
+                },
+            );
         }
-        self.prompt.dirty = true;
     }
 
     /// Row where a dialog should start rendering (lines up with the prompt bar).
@@ -1993,6 +2087,9 @@ impl Screen {
                 self.prompt.dirty = true;
             }
         }
+        // Refresh live elapsed on any streaming agent blocks so their
+        // duration ticks up without needing an explicit engine event.
+        self.tick_active_agents();
     }
 
     /// Returns true when there is content or prompt work to render.
@@ -2137,29 +2234,6 @@ impl Screen {
             tool_count += 1;
         }
 
-        // ── Active blocking agents ─────────────────────────────────
-        for (i, agent) in self.active_agents.iter().enumerate() {
-            let agent_gap = if i > 0 || tool_count > 0 {
-                1
-            } else if let Some(p) = prev_synth.as_ref().or(last_committed) {
-                gap_between(&Element::Block(p), &Element::ActiveTool)
-            } else {
-                0
-            };
-            emit_newlines(out, agent_gap);
-            let elapsed = agent
-                .final_elapsed
-                .unwrap_or_else(|| agent.start_time.elapsed());
-            let agent_block = Block::Agent {
-                agent_id: agent.agent_id.clone(),
-                slug: agent.slug.clone(),
-                blocking: true,
-                tool_calls: agent.tool_calls.clone(),
-                status: agent.status,
-                elapsed: Some(elapsed),
-            };
-            render_block(out, &agent_block, None, width, self.show_thinking);
-        }
     }
 
     /// Flat-line viewport draw path.

@@ -14,14 +14,15 @@ use crossterm::QueueableCommand;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-/// A blocking agent rendered in the dynamic section (like an active tool).
+/// In-flight blocking agent — a thin handle to a streaming `Block::Agent`.
+/// The full state (slug, tool_calls, status, elapsed) lives in the block
+/// itself and is refreshed via `rewrite` as engine events arrive.
 pub struct ActiveAgent {
     pub agent_id: String,
-    pub slug: Option<String>,
-    pub tool_calls: Vec<crate::app::AgentToolEntry>,
-    pub status: AgentBlockStatus,
+    pub block_id: BlockId,
     pub start_time: Instant,
-    /// Frozen elapsed time once the agent finishes.
+    /// Frozen elapsed time once the agent finishes; while `None`, live
+    /// elapsed ticks are rewritten into the block on each spinner frame.
     pub final_elapsed: Option<Duration>,
 }
 
