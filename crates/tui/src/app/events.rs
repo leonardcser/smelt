@@ -1205,7 +1205,7 @@ impl App {
             };
             if let Some(new_cpos) = mv {
                 self.transcript_window.cpos = new_cpos;
-        
+
                 let rows = self.screen.full_transcript_nav_text();
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window.resync(&rows, viewport);
@@ -1225,7 +1225,6 @@ impl App {
     /// vertical motion shares one code path (with `curswant`) across
     /// mouse wheel, Ctrl-U/D, arrows and j/k.
     fn move_content_cursor_by_lines(&mut self, delta: isize) {
-
         let rows = self.screen.full_transcript_nav_text();
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
@@ -1238,16 +1237,15 @@ impl App {
     /// state back onto our scroll + cursor. Returns `true` when vim
     /// consumed the key (caller should return `Redraw`).
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
-
         let rows = self.screen.full_transcript_nav_text();
         let viewport = self.viewport_rows_estimate();
         match self.transcript_window.handle_key(k, &rows, viewport) {
             None => false,
             Some(yanked) => {
                 if let Some(raw) = yanked {
-                    let buf = rows.join("\n");
-                    let copy = if let Some(start) = buf.find(&raw) {
-                        self.copy_nav_range(start, start + raw.len())
+                    let copy = if let Some((s, e)) = self.transcript_window.kill_ring.source_range()
+                    {
+                        self.copy_nav_range(s, e)
                     } else {
                         raw
                     };
@@ -1385,7 +1383,6 @@ impl App {
     }
 
     fn transcript_dims(&mut self) -> (u16, u16) {
-
         let total = self.screen.full_transcript_text().len() as u16;
         let viewport = self.viewport_rows_estimate();
         (total, viewport)
@@ -1757,7 +1754,6 @@ impl App {
     /// though vim Visual selects the char under the cursor by default.
     fn copy_content_selection_and_clear(&mut self, dragged: bool) {
         if dragged {
-
             let rows = self.screen.full_transcript_nav_text();
             let buf = rows.join("\n");
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
@@ -1840,7 +1836,7 @@ impl App {
                 // the cursor would appear frozen — its stored
                 // `cursor_line` is measured relative to the old scroll
                 // and drifts off-screen as the viewport moves.
-        
+
                 let rows = self.screen.full_transcript_nav_text();
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window
@@ -1868,7 +1864,6 @@ impl App {
     /// all match what the user is actually looking at. `rel_row` and
     /// `col` are already clamped against the region by the caller.
     fn position_content_cursor_from_hit(&mut self, rel_row: u16, col: u16) {
-
         let rows = self.screen.full_transcript_nav_text();
         if rows.is_empty() {
             self.screen.mark_dirty();
@@ -1946,7 +1941,6 @@ impl App {
     /// resumed session has stale/zero state and the first key press
     /// is a no-op until the user triggers a click-to-position.
     fn refocus_content(&mut self) {
-
         let rows = self.screen.full_transcript_nav_text();
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.refocus(&rows, viewport);

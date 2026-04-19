@@ -93,7 +93,7 @@ impl VimContext<'_> {
     /// Copy `buf[start..end]` into the kill ring with the given linewise flag.
     fn yank_range(&mut self, start: usize, end: usize, linewise: bool) {
         let text = self.buf[start..end].to_string();
-        self.kill_ring.set_with_linewise(text, linewise);
+        self.kill_ring.set_with_source(text, linewise, start, end);
     }
 
     fn register(&self) -> &str {
