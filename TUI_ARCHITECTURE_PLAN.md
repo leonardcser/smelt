@@ -437,9 +437,9 @@ Both `process_input` and `try_command_while_running` now call `run_command` so L
 
 **T4a. Fix yank path** ✅ — `KillRing.source_range` tracks the byte range vim yanked from. `handle_content_vim_key` reads `source_range()` instead of `buf.find(&raw)`. Eliminates the duplicate-text yank bug.
 
-**T4b. Derive cpos from (row, col)** ⬜ — Make `(scroll_top + cursor_line, cursor_col)` the canonical cursor position. Compute `cpos` on-demand at the start of each interaction via `visible_cpos()`. Eliminates stale-offset and mid-codepoint hazards.
+**T4b. Derive cpos from (row, col)** ✅ — Status bar uses `cursor_abs_row`/`cursor_col` directly (no byte offset). Visual range, copy, and block focus all use `compute_cpos()` from fresh rows instead of persisted `cpos`. Eliminates stale-offset and mid-codepoint hazards.
 
-**T4c. Selection anchor in (row, col) space** ⬜ — Switch `WindowCursor.anchor` from byte offset to `(row, col)` so selection survives transcript mutations during streaming without byte-offset staleness.
+**T4c. Selection anchor in (row, col) space** ⬜ (deferred) — Switch `WindowCursor.anchor` from byte offset to `(row, col)` so selection survives transcript mutations during streaming. Low priority — the existing selection flicker during streaming is a known bug.
 
 **Files:** `kill_ring.rs`, `vim/mod.rs`, `window.rs`, `cursor.rs`, `events.rs`, `screen.rs`.
 
@@ -466,13 +466,11 @@ Both `process_input` and `try_command_while_running` now call `run_command` so L
 
 Can happen anytime — no dependencies.
 
-### T7. Completer as floating window ⬜
+### T7. Completer as floating window ✅ (partial)
 
-**Problem:** Prompt completer lives on `InputState`, cmdline completer on `CmdlineState`, both paint via special-case overlay code in `screen.rs`. The float system (`LayoutState::push_float` / `FloatEntry`) exists but isn't used for completers.
+Both prompt and cmdline completer paint paths now share `paint_completer_float()` — a single function that handles overlay positioning, drawing via `draw_completions()`, and float registration via `push_float`. Duplicated overlay code consolidated from ~35 lines × 2 sites → one 20-line helper.
 
-**Solution:** Single `CompleterWindow` floating relative to the cursor anchor of whichever buffer triggered it. `LayoutState` positions it. Paint goes through normal float-layer draw. Both prompt and cmdline feed the same completer — `CompleterKind` already handles differentiation.
-
-**Prerequisite:** T1 (gutters unified so completer knows where content starts).
+Remaining: full `CompleterWindow` struct with its own rect/z-order (deferred until genuinely multiple completers exist).
 
 ### T8. Finish the public API model ⬜
 
