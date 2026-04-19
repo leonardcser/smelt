@@ -186,6 +186,20 @@ impl CmdlineState {
         self.completer = Some(comp);
     }
 
+    /// Apply the currently selected completion to the buffer. Called
+    /// on Tab/Shift-Tab so the user sees the completed text inline.
+    pub fn apply_selected_completion(&mut self) {
+        let Some(ref comp) = self.completer else {
+            return;
+        };
+        let Some(item) = comp.selected_item() else {
+            return;
+        };
+        let label = item.label.clone();
+        self.buf = label;
+        self.cursor = self.buf.len();
+    }
+
     pub fn render(&self, out: &mut RenderOut, width: u16, row: u16) {
         let w = width as usize;
         let bg = Color::AnsiValue(233);

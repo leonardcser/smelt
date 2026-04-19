@@ -1142,9 +1142,7 @@ impl App {
                 | KeyAction::MoveWordBackward => {
                     self.transcript_window.selection_anchor = None;
                 }
-                _ if extending
-                    && self.transcript_window.selection_anchor.is_none() =>
-                {
+                _ if extending && self.transcript_window.selection_anchor.is_none() => {
                     let row = self.transcript_window.cursor_abs_row(0);
                     let col = self.transcript_window.cursor_col as usize;
                     self.transcript_window.selection_anchor = Some((row, col));
@@ -2066,6 +2064,7 @@ impl App {
                     let lua_cmds = self.lua.command_names();
                     self.screen.cmdline.update_completer(&lua_cmds);
                 }
+                self.screen.cmdline.apply_selected_completion();
                 self.screen.mark_dirty();
             }
             (KeyCode::BackTab, _)
@@ -2079,6 +2078,7 @@ impl App {
                     let lua_cmds = self.lua.command_names();
                     self.screen.cmdline.update_completer(&lua_cmds);
                 }
+                self.screen.cmdline.apply_selected_completion();
                 self.screen.mark_dirty();
             }
             (KeyCode::Backspace, _) => {
