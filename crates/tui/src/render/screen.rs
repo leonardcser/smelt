@@ -14,9 +14,10 @@ use super::blocks::{
 use super::cache::{PersistedLayoutCache, RenderCache};
 use super::completions::{completion_reserved_rows, draw_completions, draw_menu};
 use super::history::{
-    ActiveAgent, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block, BlockHistory,
-    BlockId, Status, Throbber, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    AgentBlockStatus, Block, BlockId, Status, Throbber, ToolOutputRef, ToolState, ToolStatus,
+    ViewState,
 };
+use super::transcript::Transcript;
 
 /// Visual selection in the content pane, captured from vim state.
 /// Line indices are 0-based from the top of the full transcript; cols
@@ -46,9 +47,9 @@ use super::status::{
 };
 use super::working::WorkingState;
 use super::{
-    cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, is_table_separator,
-    reasoning_color, DialogPlacement, Frame, FramePrompt, RenderOut, StdioBackend, StyleState,
-    TerminalBackend, SPINNER_FRAMES,
+    cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, reasoning_color,
+    DialogPlacement, Frame, FramePrompt, RenderOut, StdioBackend, StyleState, TerminalBackend,
+    SPINNER_FRAMES,
 };
 use crate::input::{InputSnapshot, InputState};
 use crate::keymap::hints;
@@ -60,15 +61,10 @@ use crossterm::{
 };
 use std::collections::HashMap;
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub struct Screen {
-    history: BlockHistory,
-    active_thinking: Option<ActiveThinking>,
-    active_text: Option<ActiveText>,
-    stream_exec_id: Option<BlockId>,
-    active_tools: Vec<ActiveTool>,
-    active_agents: Vec<ActiveAgent>,
+    pub(crate) transcript: Transcript,
     prompt: PromptState,
     working: WorkingState,
     context_tokens: Option<u32>,
@@ -81,11 +77,8 @@ pub struct Screen {
     /// Terminal row where block content starts (top of conversation).
     /// Set once when the first block is rendered; reset on purge/clear.
     content_start_row: Option<u16>,
-    /// Skip the next `render_pending_blocks` call.  Set by
-    /// `clear_dialog_area` so that `finish_turn` → `flush_blocks` doesn't
-    /// render blocks in scroll mode right after a dialog is dismissed (which
-    /// causes scrollback pollution on some terminals).  The blocks are
-    /// rendered by the next `draw_frame` instead.
+    /// Skip the next `mark_blocks_dirty` call so the next `draw_frame`
+    /// picks up the blocks instead of a stale mid-dialog repaint.
     defer_pending_render: bool,
     /// A permission dialog is waiting for the user to stop typing.
     pending_dialog: bool,
@@ -167,12 +160,7 @@ impl Screen {
 
     pub fn with_backend(backend: Box<dyn TerminalBackend>) -> Self {
         Self {
-            history: BlockHistory::new(),
-            active_thinking: None,
-            active_text: None,
-            stream_exec_id: None,
-            active_tools: Vec::new(),
-            active_agents: Vec::new(),
+            transcript: Transcript::new(),
             prompt: PromptState::new(),
             working: WorkingState::new(),
             context_tokens: None,
@@ -250,24 +238,16 @@ impl Screen {
         self.prompt.anchor_row = Some(row);
     }
 
-    /// Number of committed blocks in history.
     pub fn block_count(&self) -> usize {
-        self.history.len()
+        self.transcript.block_count()
     }
 
-    /// Cloned snapshot of all blocks in history, in order.
     pub fn blocks(&self) -> Vec<Block> {
-        self.history
-            .order
-            .iter()
-            .map(|id| self.history.blocks[id].clone())
-            .collect()
+        self.transcript.blocks()
     }
 
-    /// Cloned snapshot of every committed tool's `ToolState`. Pairs with
-    /// `blocks()` to fully reconstruct history (used by the test harness).
     pub fn tool_states_snapshot(&self) -> HashMap<String, ToolState> {
-        self.history.tool_states.clone()
+        self.transcript.tool_states_snapshot()
     }
 
     pub fn set_btw(&mut self, question: String, image_labels: Vec<String>) {
@@ -379,32 +359,11 @@ impl Screen {
         }
     }
 
-    /// Start tracking a blocking agent. Pushes a streaming `Block::Agent`
-    /// so the agent's live state flows through the single paint path and
-    /// holds a `BlockId` handle for follow-up rewrites.
     pub fn start_active_agent(&mut self, agent_id: String) {
-        let start_time = Instant::now();
-        let block = Block::Agent {
-            agent_id: agent_id.clone(),
-            slug: None,
-            blocking: true,
-            tool_calls: Vec::new(),
-            status: AgentBlockStatus::Running,
-            elapsed: Some(Duration::from_secs(0)),
-        };
-        let block_id = self.history.push(block);
-        self.history.set_status(block_id, Status::Streaming);
-        self.active_agents.push(ActiveAgent {
-            agent_id,
-            block_id,
-            start_time,
-            final_elapsed: None,
-        });
+        self.transcript.start_active_agent(agent_id);
         self.prompt.dirty = true;
     }
 
-    /// Update a specific active agent's state by rewriting its streaming
-    /// block.
     pub fn update_active_agent(
         &mut self,
         agent_id: &str,
@@ -412,159 +371,23 @@ impl Screen {
         tool_calls: &[crate::app::AgentToolEntry],
         status: AgentBlockStatus,
     ) {
-        let (block_id, elapsed) = {
-            let Some(active) = self
-                .active_agents
-                .iter_mut()
-                .find(|a| a.agent_id == agent_id)
-            else {
-                return;
-            };
-            if status != AgentBlockStatus::Running && active.final_elapsed.is_none() {
-                active.final_elapsed = Some(active.start_time.elapsed());
-            }
-            let elapsed = active
-                .final_elapsed
-                .unwrap_or_else(|| active.start_time.elapsed());
-            (active.block_id, elapsed)
-        };
-        self.history.rewrite(
-            block_id,
-            Block::Agent {
-                agent_id: agent_id.to_string(),
-                slug: slug.map(str::to_string),
-                blocking: true,
-                tool_calls: tool_calls.to_vec(),
-                status,
-                elapsed: Some(elapsed),
-            },
-        );
+        self.transcript
+            .update_active_agent(agent_id, slug, tool_calls, status);
         self.prompt.dirty = true;
     }
 
-    /// Mark all active agents as cancelled/error (freezing elapsed).
     pub fn cancel_active_agents(&mut self) {
-        let updates: Vec<(BlockId, String, Duration, Vec<crate::app::AgentToolEntry>, Option<String>)> = self
-            .active_agents
-            .iter_mut()
-            .map(|a| {
-                if a.final_elapsed.is_none() {
-                    a.final_elapsed = Some(a.start_time.elapsed());
-                }
-                let elapsed = a.final_elapsed.unwrap_or_else(|| a.start_time.elapsed());
-                let (slug, tool_calls) = match self.history.blocks.get(&a.block_id) {
-                    Some(Block::Agent {
-                        slug, tool_calls, ..
-                    }) => (slug.clone(), tool_calls.clone()),
-                    _ => (None, Vec::new()),
-                };
-                (a.block_id, a.agent_id.clone(), elapsed, tool_calls, slug)
-            })
-            .collect();
-        for (block_id, agent_id, elapsed, tool_calls, slug) in updates {
-            self.history.rewrite(
-                block_id,
-                Block::Agent {
-                    agent_id,
-                    slug,
-                    blocking: true,
-                    tool_calls,
-                    status: AgentBlockStatus::Error,
-                    elapsed: Some(elapsed),
-                },
-            );
-        }
+        self.transcript.cancel_active_agents();
     }
 
-    /// Finish a specific active agent: freeze elapsed, flip to `Done`, and
-    /// remove it from the active set.
     pub fn finish_active_agent(&mut self, agent_id: &str) {
-        let Some(idx) = self
-            .active_agents
-            .iter()
-            .position(|a| a.agent_id == agent_id)
-        else {
-            return;
-        };
-        let mut active = self.active_agents.remove(idx);
-        if active.final_elapsed.is_none() {
-            active.final_elapsed = Some(active.start_time.elapsed());
-        }
-        let elapsed = active
-            .final_elapsed
-            .unwrap_or_else(|| active.start_time.elapsed());
-        let (slug, tool_calls, status) = match self.history.blocks.get(&active.block_id) {
-            Some(Block::Agent {
-                slug,
-                tool_calls,
-                status,
-                ..
-            }) => {
-                let next = if *status == AgentBlockStatus::Running {
-                    AgentBlockStatus::Done
-                } else {
-                    *status
-                };
-                (slug.clone(), tool_calls.clone(), next)
-            }
-            _ => (None, Vec::new(), AgentBlockStatus::Done),
-        };
-        self.history.rewrite(
-            active.block_id,
-            Block::Agent {
-                agent_id: active.agent_id,
-                slug,
-                blocking: true,
-                tool_calls,
-                status,
-                elapsed: Some(elapsed),
-            },
-        );
-        self.history.set_status(active.block_id, Status::Done);
+        self.transcript.finish_active_agent(agent_id);
         self.prompt.dirty = true;
     }
 
-    /// Finish every active agent (turn-end / cancel path).
     pub fn finish_all_active_agents(&mut self) {
-        let ids: Vec<String> = self.active_agents.iter().map(|a| a.agent_id.clone()).collect();
-        for id in ids {
-            self.finish_active_agent(&id);
-        }
-    }
-
-    /// Refresh live elapsed on streaming agents. Called from the spinner
-    /// tick so the visible duration ticks up even without an explicit
-    /// `update_active_agent` from the engine.
-    fn tick_active_agents(&mut self) {
-        let ticks: Vec<(BlockId, Duration)> = self
-            .active_agents
-            .iter()
-            .filter(|a| a.final_elapsed.is_none())
-            .map(|a| (a.block_id, a.start_time.elapsed()))
-            .collect();
-        for (block_id, elapsed) in ticks {
-            let Some(Block::Agent {
-                agent_id,
-                slug,
-                tool_calls,
-                status,
-                ..
-            }) = self.history.blocks.get(&block_id).cloned()
-            else {
-                continue;
-            };
-            self.history.rewrite(
-                block_id,
-                Block::Agent {
-                    agent_id,
-                    slug,
-                    blocking: true,
-                    tool_calls,
-                    status,
-                    elapsed: Some(elapsed),
-                },
-            );
-        }
+        self.transcript.finish_all_active_agents();
+        self.prompt.dirty = true;
     }
 
     /// Row where a dialog should start rendering (lines up with the prompt bar).
@@ -881,165 +704,38 @@ impl Screen {
     }
 
     pub fn begin_turn(&mut self) {
-        self.active_tools.clear();
+        self.transcript.begin_turn();
     }
 
-    /// Push a `Block::ToolCall` along with its `ToolState`. Use this on
-    /// the resume path where the protocol message already carries a
-    /// finished tool result.
     pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
-        debug_assert!(matches!(block, Block::ToolCall { .. }));
-        let call_id = match &block {
-            Block::ToolCall { call_id, .. } => call_id.clone(),
-            _ => return,
-        };
-        self.history.push_with_state(block, call_id, state);
+        self.transcript.push_tool_call(block, state);
         self.prompt.dirty = true;
     }
 
     pub fn push(&mut self, block: Block) {
-        let block = match block {
-            Block::Text { content } => {
-                let t = content.trim();
-                if t.is_empty() {
-                    return;
-                }
-                Block::Text {
-                    content: t.to_string(),
-                }
-            }
-            Block::AgentMessage {
-                from_id,
-                from_slug,
-                content,
-            } => {
-                let t = content.trim();
-                if t.is_empty() {
-                    return;
-                }
-                Block::AgentMessage {
-                    from_id,
-                    from_slug,
-                    content: t.to_string(),
-                }
-            }
-            Block::Thinking { content } => {
-                let t = content.trim();
-                if t.is_empty() {
-                    return;
-                }
-                Block::Thinking {
-                    content: t.to_string(),
-                }
-            }
-            Block::Compacted { summary } => {
-                let t = summary.trim();
-                if t.is_empty() {
-                    return;
-                }
-                Block::Compacted {
-                    summary: t.to_string(),
-                }
-            }
-            other => other,
-        };
-        self.history.push(block);
+        self.transcript.push(block);
         self.prompt.dirty = true;
     }
-
-    // ── Streaming thinking ────────────────────────────────────────────
 
     pub fn append_streaming_thinking(&mut self, delta: &str) {
-        let at = self.active_thinking.get_or_insert_with(|| ActiveThinking {
-            current_line: String::new(),
-            paragraph: String::new(),
-            streaming_id: None,
-        });
-
-        for ch in delta.chars() {
-            if ch == '\r' {
-                continue;
-            }
-            if ch == '\n' {
-                let line = std::mem::take(&mut at.current_line);
-                if line.trim().is_empty() && !at.paragraph.is_empty() {
-                    at.paragraph.push('\n');
-                    let para = std::mem::take(&mut at.paragraph);
-                    if let Some(id) = at.streaming_id.take() {
-                        self.history.rewrite(id, Block::Thinking { content: para });
-                        self.history.set_status(id, Status::Done);
-                    } else {
-                        self.history.push(Block::Thinking { content: para });
-                    }
-                } else {
-                    if !at.paragraph.is_empty() {
-                        at.paragraph.push('\n');
-                    }
-                    at.paragraph.push_str(&line);
-                }
-            } else {
-                at.current_line.push(ch);
-            }
-        }
-        // Reflect the buffered paragraph (including the in-progress line)
-        // as a streaming block so it flows through `paint_viewport`.
-        let preview = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
-            (true, true) => None,
-            (true, false) => Some(at.current_line.clone()),
-            (false, true) => Some(at.paragraph.clone()),
-            (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
-        };
-        if let Some(content) = preview.filter(|t| !t.trim().is_empty()) {
-            let block = Block::Thinking { content };
-            if let Some(id) = at.streaming_id {
-                self.history.rewrite(id, block);
-            } else {
-                let id = self.history.push(block);
-                self.history.set_status(id, Status::Streaming);
-                at.streaming_id = Some(id);
-            }
-        }
+        self.transcript.append_streaming_thinking(delta);
         self.prompt.dirty = true;
     }
 
-    /// Flush remaining thinking content.
     pub fn flush_streaming_thinking(&mut self) {
-        if let Some(mut at) = self.active_thinking.take() {
-            if !at.current_line.is_empty() {
-                if !at.paragraph.is_empty() {
-                    at.paragraph.push('\n');
-                }
-                at.paragraph.push_str(&at.current_line);
-            }
-            let trimmed = at.paragraph.trim().to_string();
-            if let Some(id) = at.streaming_id {
-                if trimmed.is_empty() {
-                    self.history.rewrite(
-                        id,
-                        Block::Thinking {
-                            content: String::new(),
-                        },
-                    );
-                } else {
-                    self.history
-                        .rewrite(id, Block::Thinking { content: trimmed });
-                }
-                self.history.set_status(id, Status::Done);
-            } else if !trimmed.is_empty() {
-                self.history.push(Block::Thinking { content: trimmed });
-            }
-            self.prompt.dirty = true;
-        }
+        self.transcript.flush_streaming_thinking();
+        self.prompt.dirty = true;
     }
 
     /// Gap before a thinking summary overlay, skipping over hidden thinking blocks.
     fn thinking_summary_gap(&self) -> u16 {
         if let Some(last) = self
+            .transcript
             .history
             .order
             .iter()
             .rev()
-            .filter_map(|id| self.history.blocks.get(id))
+            .filter_map(|id| self.transcript.history.blocks.get(id))
             .find(|b| !matches!(b, Block::Thinking { .. }))
         {
             gap_between(
@@ -1048,256 +744,21 @@ impl Screen {
                     content: String::new(),
                 }),
             )
-        } else if self.history.is_empty() {
+        } else if self.transcript.history.is_empty() {
             0
         } else {
             1
         }
     }
 
-    // ── Streaming text ─────────────────────────────────────────────────
-
     pub fn append_streaming_text(&mut self, delta: &str) {
-        if self.active_thinking.is_some() {
-            self.flush_streaming_thinking();
-        }
-
-        let at = self.active_text.get_or_insert_with(|| ActiveText {
-            current_line: String::new(),
-            paragraph: String::new(),
-            in_code_block: None,
-            table_rows: Vec::new(),
-            table_data_rows: 0,
-            streaming_id: None,
-            table_streaming_id: None,
-            code_line_streaming_id: None,
-        });
-
-        for ch in delta.chars() {
-            if ch == '\r' {
-                continue;
-            }
-            if ch == '\n' {
-                let line = std::mem::take(&mut at.current_line);
-                Self::process_text_line(&mut self.history, at, &line);
-            } else {
-                at.current_line.push(ch);
-            }
-        }
-        // Reflect the in-flight paragraph / table / code-line as a
-        // streaming block so everything flows through `paint_viewport`
-        // uniformly — no bespoke overlay rendering.
-        Self::sync_streaming_text(&mut self.history, at);
+        self.transcript.append_streaming_text(delta);
         self.prompt.dirty = true;
     }
 
-    fn sync_streaming_text(history: &mut BlockHistory, at: &mut ActiveText) {
-        // In-code-block partial line → streaming Block::CodeLine.
-        if let Some(ref lang) = at.in_code_block {
-            if !at.current_line.is_empty() {
-                let block = Block::CodeLine {
-                    content: at.current_line.clone(),
-                    lang: lang.clone(),
-                };
-                if let Some(id) = at.code_line_streaming_id {
-                    history.rewrite(id, block);
-                } else {
-                    let id = history.push(block);
-                    history.set_status(id, Status::Streaming);
-                    at.code_line_streaming_id = Some(id);
-                }
-            }
-            return;
-        }
-        // In-flight table — rows accumulated in `table_rows`, plus the
-        // current partial row if it starts with `|`.
-        let in_table =
-            !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
-        if in_table {
-            let mut content = String::new();
-            for row in &at.table_rows {
-                if !content.is_empty() {
-                    content.push('\n');
-                }
-                content.push_str(row);
-            }
-            if at.current_line.trim_start().starts_with('|') {
-                if !content.is_empty() {
-                    content.push('\n');
-                }
-                content.push_str(&at.current_line);
-            }
-            if content.is_empty() {
-                return;
-            }
-            let block = Block::Text { content };
-            if let Some(id) = at.table_streaming_id {
-                history.rewrite(id, block);
-            } else {
-                let id = history.push(block);
-                history.set_status(id, Status::Streaming);
-                at.table_streaming_id = Some(id);
-            }
-            return;
-        }
-        // Plain paragraph fall-through.
-        let preview = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
-            (true, true) => None,
-            (true, false) => Some(at.current_line.clone()),
-            (false, true) => Some(at.paragraph.clone()),
-            (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
-        };
-        let Some(content) = preview.filter(|t| !t.trim().is_empty()) else {
-            return;
-        };
-        let block = Block::Text { content };
-        if let Some(id) = at.streaming_id {
-            history.rewrite(id, block);
-        } else {
-            let id = history.push(block);
-            history.set_status(id, Status::Streaming);
-            at.streaming_id = Some(id);
-        }
-    }
-
-    fn process_text_line(history: &mut BlockHistory, at: &mut ActiveText, line: &str) {
-        let trimmed = line.trim_start();
-
-        if trimmed.starts_with("```") {
-            if at.in_code_block.is_some() {
-                // Close out any in-flight code-line streaming block.
-                if let Some(id) = at.code_line_streaming_id.take() {
-                    history.set_status(id, Status::Done);
-                }
-                at.in_code_block = None;
-                return;
-            } else {
-                Self::commit_paragraph(history, at);
-                Self::commit_table(history, at);
-                let lang = trimmed.trim_start_matches('`').trim().to_string();
-                at.in_code_block = Some(lang);
-                return;
-            }
-        }
-
-        if let Some(ref lang) = at.in_code_block {
-            // Finalize the streaming partial code line (if any) with
-            // the full line content, then start fresh for the next line.
-            let block = Block::CodeLine {
-                content: line.to_string(),
-                lang: lang.clone(),
-            };
-            if let Some(id) = at.code_line_streaming_id.take() {
-                history.rewrite(id, block);
-                history.set_status(id, Status::Done);
-            } else {
-                history.push(block);
-            }
-            return;
-        }
-
-        if trimmed.starts_with('|') {
-            Self::commit_paragraph(history, at);
-            if !is_table_separator(line) {
-                at.table_data_rows += 1;
-            }
-            at.table_rows.push(line.to_string());
-            return;
-        }
-
-        if line.trim().is_empty() {
-            if !at.table_rows.is_empty() {
-                return;
-            }
-            if !at.paragraph.is_empty() {
-                Self::commit_paragraph(history, at);
-            }
-            return;
-        }
-
-        Self::commit_table(history, at);
-
-        if !at.paragraph.is_empty() {
-            at.paragraph.push('\n');
-        }
-        at.paragraph.push_str(line);
-    }
-
-    fn commit_table(history: &mut BlockHistory, at: &mut ActiveText) {
-        if !at.table_rows.is_empty() {
-            let content = std::mem::take(&mut at.table_rows).join("\n");
-            if let Some(id) = at.table_streaming_id.take() {
-                history.rewrite(id, Block::Text { content });
-                history.set_status(id, Status::Done);
-            } else {
-                history.push(Block::Text { content });
-            }
-            at.table_data_rows = 0;
-        } else if let Some(id) = at.table_streaming_id.take() {
-            // Empty table — clean up the streaming block.
-            history.set_status(id, Status::Done);
-        }
-    }
-
-    fn commit_paragraph(history: &mut BlockHistory, at: &mut ActiveText) {
-        let para = std::mem::take(&mut at.paragraph);
-        let trimmed = para.trim().to_string();
-        if let Some(id) = at.streaming_id.take() {
-            if trimmed.is_empty() {
-                history.rewrite(
-                    id,
-                    Block::Text {
-                        content: String::new(),
-                    },
-                );
-            } else {
-                history.rewrite(id, Block::Text { content: trimmed });
-            }
-            history.set_status(id, Status::Done);
-        } else if !trimmed.is_empty() {
-            history.push(Block::Text { content: trimmed });
-        }
-    }
-
     pub fn flush_streaming_text(&mut self) {
-        self.flush_streaming_thinking();
-        if let Some(mut at) = self.active_text.take() {
-            if at.in_code_block.is_some() {
-                if at.current_line.trim_start().starts_with("```") {
-                    at.current_line.clear();
-                    if let Some(id) = at.code_line_streaming_id.take() {
-                        self.history.set_status(id, Status::Done);
-                    }
-                } else if !at.current_line.is_empty() {
-                    let lang = at.in_code_block.as_ref().unwrap().clone();
-                    let block = Block::CodeLine {
-                        content: std::mem::take(&mut at.current_line),
-                        lang,
-                    };
-                    if let Some(id) = at.code_line_streaming_id.take() {
-                        self.history.rewrite(id, block);
-                        self.history.set_status(id, Status::Done);
-                    } else {
-                        self.history.push(block);
-                    }
-                } else if let Some(id) = at.code_line_streaming_id.take() {
-                    self.history.set_status(id, Status::Done);
-                }
-                at.in_code_block = None;
-            }
-            if !at.current_line.is_empty() && at.current_line.trim_start().starts_with('|') {
-                at.table_rows.push(std::mem::take(&mut at.current_line));
-            }
-            Self::commit_table(&mut self.history, &mut at);
-            if !at.current_line.is_empty() {
-                if !at.paragraph.is_empty() {
-                    at.paragraph.push('\n');
-                }
-                at.paragraph.push_str(&at.current_line);
-            }
-            Self::commit_paragraph(&mut self.history, &mut at);
-            self.prompt.dirty = true;
-        }
+        self.transcript.flush_streaming_text();
+        self.prompt.dirty = true;
     }
 
     pub fn start_tool(
@@ -1307,150 +768,47 @@ impl Screen {
         summary: String,
         args: HashMap<String, serde_json::Value>,
     ) {
-        let start_time = Instant::now();
-        let block = Block::ToolCall {
-            call_id: call_id.clone(),
-            name: name.clone(),
-            summary,
-            args,
-        };
-        let state = ToolState {
-            status: ToolStatus::Pending,
-            elapsed: None,
-            output: None,
-            user_message: None,
-        };
-        let block_id = self.history.push_with_state(block, call_id.clone(), state);
-        self.history.set_status(block_id, Status::Streaming);
-        self.active_tools.push(ActiveTool {
-            call_id,
-            name,
-            block_id,
-            start_time,
-        });
+        self.transcript.start_tool(call_id, name, summary, args);
         self.prompt.dirty = true;
     }
 
     pub fn start_exec(&mut self, command: String) {
-        let id = self.history.push(Block::Exec {
-            command,
-            output: String::new(),
-        });
-        self.history.set_status(id, Status::Streaming);
-        self.stream_exec_id = Some(id);
+        self.transcript.start_exec(command);
         self.prompt.dirty = true;
     }
 
     pub fn append_exec_output(&mut self, chunk: &str) {
-        let Some(id) = self.stream_exec_id else {
-            return;
-        };
-        let Some(Block::Exec { command, output }) = self.history.blocks.get(&id).cloned() else {
-            return;
-        };
-        let mut new_output = output;
-        if !new_output.is_empty() && !new_output.ends_with('\n') {
-            new_output.push('\n');
-        }
-        new_output.push_str(chunk);
-        self.history.rewrite(
-            id,
-            Block::Exec {
-                command,
-                output: new_output,
-            },
-        );
+        self.transcript.append_exec_output(chunk);
         self.prompt.dirty = true;
     }
 
-    pub fn finish_exec(&mut self, _exit_code: Option<i32>) {
-        // exit_code is currently not persisted on Block::Exec; placeholder
-        // for future use if the block grows a status field.
+    pub fn finish_exec(&mut self, exit_code: Option<i32>) {
+        self.transcript.finish_exec(exit_code);
         self.prompt.dirty = true;
     }
 
-    /// Commit the active exec to block history.
-    pub fn commit_exec(&mut self) {
-        let Some(id) = self.stream_exec_id.take() else {
-            return;
-        };
-        if let Some(Block::Exec { command, output }) = self.history.blocks.get(&id).cloned() {
-            let mut trimmed = output;
-            trimmed.truncate(trimmed.trim_end().len());
-            self.history.rewrite(
-                id,
-                Block::Exec {
-                    command,
-                    output: trimmed,
-                },
-            );
-        }
-        self.history.set_status(id, Status::Done);
+    pub fn finalize_exec(&mut self) {
+        self.transcript.finalize_exec();
         self.prompt.dirty = true;
     }
 
     pub fn has_active_exec(&self) -> bool {
-        self.stream_exec_id.is_some()
-    }
-
-    /// Resolve a call_id (or fall back to the last active tool for
-    /// empty-id streams like `ask_user_question`) into the canonical id
-    /// used on the history `tool_states` map.
-    fn resolve_active_call_id(&self, call_id: &str) -> Option<String> {
-        if !call_id.is_empty() {
-            return Some(call_id.to_string());
-        }
-        self.active_tools
-            .last()
-            .map(|t| t.call_id.clone())
-            .or_else(|| self.last_tool_call_id())
+        self.transcript.has_active_exec()
     }
 
     pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
-        let Some(cid) = self.resolve_active_call_id(call_id) else {
-            return;
-        };
-        let chunk = chunk.to_string();
-        self.update_tool_state(&cid, move |state| match state.output {
-            Some(ref mut out) => {
-                if !out.content.is_empty() {
-                    out.content.push('\n');
-                }
-                out.content.push_str(&chunk);
-            }
-            None => {
-                state.output = Some(Box::new(ToolOutput {
-                    content: chunk,
-                    is_error: false,
-                    metadata: None,
-                    render_cache: None,
-                }));
-            }
-        });
+        self.transcript.append_active_output(call_id, chunk);
+        self.prompt.dirty = true;
     }
 
     pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
-        let Some(cid) = self.resolve_active_call_id(call_id) else {
-            return;
-        };
-        // Confirm → Pending transition re-starts the elapsed clock on
-        // the active handle so the displayed duration counts from when
-        // the user approved rather than from the original request.
-        if let Some(active) = self.active_tools.iter_mut().find(|t| t.call_id == cid) {
-            if matches!(self.history.tool_states.get(&cid).map(|s| s.status), Some(ToolStatus::Confirm))
-                && status == ToolStatus::Pending
-            {
-                active.start_time = Instant::now();
-            }
-        }
-        self.update_tool_state(&cid, |state| state.status = status);
+        self.transcript.set_active_status(call_id, status);
+        self.prompt.dirty = true;
     }
 
     pub fn set_active_user_message(&mut self, call_id: &str, msg: String) {
-        let Some(cid) = self.resolve_active_call_id(call_id) else {
-            return;
-        };
-        self.update_tool_state(&cid, |state| state.user_message = Some(msg));
+        self.transcript.set_active_user_message(call_id, msg);
+        self.prompt.dirty = true;
     }
 
     pub fn finish_tool(
@@ -1460,32 +818,9 @@ impl Screen {
         output: Option<ToolOutputRef>,
         engine_elapsed: Option<Duration>,
     ) {
-        let Some(cid) = self.resolve_active_call_id(call_id) else {
-            return;
-        };
-        // Pull the active handle so we can freeze its elapsed and flip
-        // its underlying block to `Done`.
-        let active_idx = self.active_tools.iter().position(|t| t.call_id == cid);
-        let elapsed = if status == ToolStatus::Denied {
-            None
-        } else if let Some(idx) = active_idx {
-            let tool = &self.active_tools[idx];
-            engine_elapsed.or_else(|| tool.elapsed())
-        } else {
-            engine_elapsed
-        };
-        self.update_tool_state(&cid, |state| {
-            state.status = status;
-            if let Some(out) = output {
-                state.output = Some(out);
-            }
-            state.elapsed = elapsed;
-        });
-        if let Some(idx) = active_idx {
-            let block_id = self.active_tools[idx].block_id;
-            self.active_tools.remove(idx);
-            self.history.set_status(block_id, Status::Done);
-        }
+        self.transcript
+            .finish_tool(call_id, status, output, engine_elapsed);
+        self.prompt.dirty = true;
     }
 
     pub fn set_context_tokens(&mut self, tokens: u32) {
@@ -1661,7 +996,7 @@ impl Screen {
         // positioning and paint math stay in lockstep.
         let _ = width;
         let tw = self.transcript_width();
-        let mut rows = self.history.full_text(tw, self.show_thinking);
+        let mut rows = self.transcript.history.full_text(tw, self.show_thinking);
         if self.has_ephemeral() {
             let mut col = SpanCollector::new(tw as u16);
             self.render_ephemeral_into(&mut col, tw);
@@ -1766,7 +1101,7 @@ impl Screen {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.prompt.dirty || self.history.has_unflushed()
+        self.prompt.dirty || self.transcript.history.has_unflushed()
     }
 
     /// Center the input viewport on the cursor (vim `zz`).
@@ -1778,78 +1113,45 @@ impl Screen {
         self.prompt.dirty = true;
     }
 
-    /// Convert active tools to history blocks and render any pending blocks.
-    pub fn flush_blocks(&mut self) {
-        let _perf = crate::perf::begin("render:flush_blocks");
-        self.commit_active_tools();
-        self.render_pending_blocks();
+    pub fn finish_turn(&mut self) {
+        let _perf = crate::perf::begin("render:finish_turn");
+        self.transcript.finalize_active_tools();
+        self.mark_blocks_dirty();
     }
 
-    pub fn commit_active_tools(&mut self) {
-        self.commit_active_tools_as(ToolStatus::Err);
-    }
-
-    pub fn commit_active_tools_as(&mut self, status: ToolStatus) {
-        self.finish_all_active_agents();
-        let tools: Vec<ActiveTool> = self.active_tools.drain(..).collect();
-        for tool in tools {
-            let elapsed = if status == ToolStatus::Denied {
-                None
-            } else {
-                tool.elapsed()
-            };
-            self.history.set_status(tool.block_id, Status::Done);
-            let cid = tool.call_id.clone();
-            self.update_tool_state(&cid, |state| {
-                state.status = status;
-                state.elapsed = elapsed;
-            });
-        }
-    }
-
-    /// `call_id` of the most recent committed `Block::ToolCall`, if any.
-    fn last_tool_call_id(&self) -> Option<String> {
-        self.history
-            .order
-            .iter()
-            .rev()
-            .find_map(|id| match self.history.blocks.get(id) {
-                Some(Block::ToolCall { call_id, .. }) => Some(call_id.clone()),
-                _ => None,
-            })
-    }
-
-    /// Read-only view of a committed tool's mutable state.
-    pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
-        self.history.tool_states.get(call_id)
-    }
-
-    /// Per-block view state — default `Expanded` when none set.
-    pub fn block_view_state(&self, id: BlockId) -> ViewState {
-        self.history.view_state(id)
-    }
-
-    /// Set the view state for a block. Invalidates its layout cache.
-    pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
-        self.history.set_view_state(id, state);
+    pub fn finalize_active_tools(&mut self) {
+        self.transcript.finalize_active_tools();
         self.prompt.dirty = true;
     }
 
-    /// Per-block lifecycle status — default `Done` when none set.
+    pub fn finalize_active_tools_as(&mut self, status: ToolStatus) {
+        self.transcript.finalize_active_tools_as(status);
+        self.prompt.dirty = true;
+    }
+
+    pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
+        self.transcript.tool_state(call_id)
+    }
+
+    pub fn block_view_state(&self, id: BlockId) -> ViewState {
+        self.transcript.block_view_state(id)
+    }
+
+    pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
+        self.transcript.set_block_view_state(id, state);
+        self.prompt.dirty = true;
+    }
+
     pub fn block_status(&self, id: BlockId) -> Status {
-        self.history.status(id)
+        self.transcript.block_status(id)
     }
 
-    /// Set the lifecycle status for a block.
     pub fn set_block_status(&mut self, id: BlockId, status: Status) {
-        self.history.set_status(id, status);
+        self.transcript.set_block_status(id, status);
     }
 
-    /// Drain block ids that just transitioned `Streaming` → `Done`. The
-    /// app loop forwards these to the Lua runtime as `block_done`
-    /// autocmds.
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
-        self.history.drain_finished_blocks()
+        self.transcript.drain_finished_blocks()
     }
 
     /// Push the transcript window's gutter reservation into the paint
@@ -1863,59 +1165,39 @@ impl Screen {
         }
     }
 
-    /// Replace a block's content in place. Preserves its `BlockId` so
-    /// long-lived handles (streaming writers) stay valid across
-    /// mutations; the layout cache auto-invalidates via the updated
-    /// content hash in `LayoutKey`.
     pub fn rewrite_block(&mut self, id: BlockId, block: Block) {
-        self.history.rewrite(id, block);
+        self.transcript.rewrite_block(id, block);
         self.prompt.dirty = true;
     }
 
-    /// Push `block` into the transcript and mark it as `Streaming`.
-    /// Returns the fresh `BlockId` so the caller can keep it as a
-    /// handle for follow-up `rewrite_block` calls until the stream
-    /// closes and flips to `Status::Done`.
     pub fn push_streaming(&mut self, block: Block) -> BlockId {
-        let id = self.history.push(block);
-        self.history.set_status(id, Status::Streaming);
+        let id = self.transcript.push_streaming(block);
         self.prompt.dirty = true;
         id
     }
 
-    /// `BlockId`s of blocks currently in the `Streaming` state, in
-    /// insertion order. Empty when no stream is live.
     pub fn streaming_block_ids(&self) -> Vec<BlockId> {
-        self.history.streaming_block_ids().collect()
+        self.transcript.streaming_block_ids()
     }
 
-    /// Mutate a committed tool's state and invalidate its layout cache so
-    /// the next paint reflects the change. Returns true if `call_id` was
-    /// found in history.
     pub fn update_tool_state(
         &mut self,
         call_id: &str,
         mutator: impl FnOnce(&mut ToolState),
     ) -> bool {
-        let Some(state) = self.history.tool_states.get_mut(call_id) else {
-            return false;
-        };
-        mutator(state);
-        if let Some(id) = self.history.tool_block_id(call_id) {
-            self.history.invalidate_block_layout(id);
+        let result = self.transcript.update_tool_state(call_id, mutator);
+        if result {
+            self.prompt.dirty = true;
         }
-        self.prompt.dirty = true;
-        true
+        result
     }
 
-    /// Insert or replace tool state for a call_id without touching blocks.
-    /// Used by resume to attach state to freshly reconstructed blocks.
     pub fn set_tool_state(&mut self, call_id: String, state: ToolState) {
-        self.history.tool_states.insert(call_id, state);
+        self.transcript.set_tool_state(call_id, state);
     }
 
     /// Whether any content (blocks, active tool, active exec) exists above
-    pub fn render_pending_blocks(&mut self) {
+    pub fn mark_blocks_dirty(&mut self) {
         // Under the flat-line viewport model, blocks are never flushed
         // to scrollback — the next frame repaints the transcript from
         // scratch. Just mark the screen dirty so the tick loop picks
@@ -1946,8 +1228,8 @@ impl Screen {
     pub fn redraw(&mut self) {
         let _perf = crate::perf::begin("redraw");
         let (w, _) = self.size();
-        if w as usize != self.history.cache_width {
-            self.history.invalidate_for_width(w as usize);
+        if w as usize != self.transcript.history.cache_width {
+            self.transcript.history.invalidate_for_width(w as usize);
         }
         self.prompt.drawn = false;
         self.prompt.dirty = true;
@@ -1955,11 +1237,8 @@ impl Screen {
     }
 
     pub fn clear(&mut self) {
-        self.history.clear();
-        self.active_thinking = None;
-        self.active_text = None;
-        self.active_tools.clear();
-        self.active_agents.clear();
+        self.transcript.history.clear();
+        self.transcript.clear_active_state();
         self.prompt = PromptState::new();
         self.prompt.anchor_row = Some(0);
         self.working.clear();
@@ -1975,7 +1254,7 @@ impl Screen {
     }
 
     pub fn has_history(&self) -> bool {
-        !self.history.is_empty()
+        self.transcript.has_history()
     }
 
     /// Snapshot the per-tool intermediate representations stored on
@@ -1985,9 +1264,9 @@ impl Screen {
     /// Returns `None` if no IR has been built yet.
     pub fn export_render_cache(&self) -> Option<RenderCache> {
         let mut cache = RenderCache::new(String::new());
-        for id in &self.history.order {
-            if let Some(Block::ToolCall { call_id, .. }) = self.history.blocks.get(id) {
-                if let Some(state) = self.history.tool_states.get(call_id) {
+        for id in &self.transcript.history.order {
+            if let Some(Block::ToolCall { call_id, .. }) = self.transcript.history.blocks.get(id) {
+                if let Some(state) = self.transcript.history.tool_states.get(call_id) {
                     if let Some(out) = state.output.as_deref() {
                         if let Some(ir) = &out.render_cache {
                             cache.insert_tool_output(call_id.clone(), ir.clone());
@@ -2007,26 +1286,27 @@ impl Screen {
     /// `export_layout_cache`. Used by `save_session` to skip writing the
     /// cache file when nothing would change on disk.
     pub fn layout_cache_dirty(&self) -> bool {
-        self.history.cache_dirty
+        self.transcript.history.cache_dirty
     }
 
     /// Export a content-addressed snapshot of every cached block artifact
     /// that is safe to persist. Tool blocks whose `ToolState` is not yet
     /// terminal are skipped — their layout captures transient state.
     pub fn export_layout_cache(&mut self) -> Option<PersistedLayoutCache> {
-        if self.history.is_empty() {
+        if self.transcript.history.is_empty() {
             return None;
         }
         let mut cache = PersistedLayoutCache::new(crate::theme::is_light());
         // Walk `order`, re-keying artifacts by content hash so another
         // session (with different monotonic `BlockId`s) can install the
         // same cache.
-        for id in &self.history.order {
-            let Some(block) = self.history.blocks.get(id) else {
+        for id in &self.transcript.history.order {
+            let Some(block) = self.transcript.history.blocks.get(id) else {
                 continue;
             };
             let persist = match block {
                 Block::ToolCall { call_id, .. } => self
+                    .transcript
                     .history
                     .tool_states
                     .get(call_id)
@@ -2037,17 +1317,17 @@ impl Screen {
             if !persist {
                 continue;
             }
-            let hash = self.history.content_hash(*id);
+            let hash = self.transcript.history.content_hash(*id);
             if cache.blocks.contains_key(&hash) {
                 continue;
             }
-            if let Some(artifact) = self.history.artifacts.get(id) {
+            if let Some(artifact) = self.transcript.history.artifacts.get(id) {
                 if !artifact.is_empty() {
                     cache.blocks.insert(hash, artifact.clone());
                 }
             }
         }
-        self.history.cache_dirty = false;
+        self.transcript.history.cache_dirty = false;
         if cache.blocks.is_empty() {
             return None;
         }
@@ -2071,19 +1351,20 @@ impl Screen {
         // current history all reuse the same cached artifact via the
         // shared `content_hash` field in `LayoutKey`.
         let mut by_hash: HashMap<u64, BlockId> = HashMap::new();
-        for id in &self.history.order {
-            let hash = self.history.content_hash(*id);
+        for id in &self.transcript.history.order {
+            let hash = self.transcript.history.content_hash(*id);
             by_hash.entry(hash).or_insert(*id);
         }
         for (hash, mut artifact) in cache.blocks {
             let Some(id) = by_hash.get(&hash).copied() else {
                 continue;
             };
-            let Some(block) = self.history.blocks.get(&id) else {
+            let Some(block) = self.transcript.history.blocks.get(&id) else {
                 continue;
             };
             let allow = match block {
                 Block::ToolCall { call_id, .. } => self
+                    .transcript
                     .history
                     .tool_states
                     .get(call_id)
@@ -2100,7 +1381,8 @@ impl Screen {
             if artifact.is_empty() {
                 continue;
             }
-            self.history
+            self.transcript
+                .history
                 .artifacts
                 .entry(id)
                 .and_modify(|a| {
@@ -2110,30 +1392,16 @@ impl Screen {
                 })
                 .or_insert(artifact);
         }
-        self.history.cache_width = nw as usize;
-        self.history.cache_dirty = false;
+        self.transcript.history.cache_width = nw as usize;
+        self.transcript.history.cache_dirty = false;
     }
 
-    /// Returns (block_index, full_text) for each User block. The index is
-    /// the position in the ordered history and is the value expected by
-    /// `truncate_to`.
     pub fn user_turns(&self) -> Vec<(usize, String)> {
-        self.history
-            .order
-            .iter()
-            .enumerate()
-            .filter_map(|(i, id)| match self.history.blocks.get(id) {
-                Some(Block::User { text, .. }) => Some((i, text.clone())),
-                _ => None,
-            })
-            .collect()
+        self.transcript.user_turns()
     }
 
-    /// Truncate blocks so that only blocks before `block_idx` remain.
     pub fn truncate_to(&mut self, block_idx: usize) {
-        self.history.truncate(block_idx);
-        self.active_tools.clear();
-        self.active_agents.clear();
+        self.transcript.truncate_to(block_idx);
         self.redraw();
     }
 
@@ -2166,12 +1434,12 @@ impl Screen {
         }
         // Refresh live elapsed on any streaming agent blocks so their
         // duration ticks up without needing an explicit engine event.
-        self.tick_active_agents();
+        self.transcript.tick_active_agents();
     }
 
     /// Returns true when there is content or prompt work to render.
     pub fn needs_draw(&self, is_dialog: bool) -> bool {
-        let has_new_blocks = self.history.has_unflushed();
+        let has_new_blocks = self.transcript.history.has_unflushed();
         if is_dialog {
             has_new_blocks || (self.has_ephemeral() && self.prompt.dirty)
         } else {
@@ -2186,21 +1454,25 @@ impl Screen {
     /// remains as an overlay because it's a synthesized summary, not a
     /// stream.
     fn has_ephemeral(&self) -> bool {
-        self.active_thinking.is_some() && !self.show_thinking
+        self.transcript.active_thinking.is_some() && !self.show_thinking
     }
 
     /// Paint the animated thinking-summary above the prompt when
     /// thinking is hidden. Every other live element renders as a
     /// streaming block in the main transcript.
     fn render_ephemeral_into<S: LayoutSink>(&self, out: &mut S, width: usize) {
-        let Some(ref at) = self.active_thinking else {
+        let Some(ref at) = self.transcript.active_thinking else {
             return;
         };
         if self.show_thinking {
             return;
         }
         let mut combined = collect_trailing_thinking(
-            self.history.order.iter().map(|id| &self.history.blocks[id]),
+            self.transcript
+                .history
+                .order
+                .iter()
+                .map(|id| &self.transcript.history.blocks[id]),
         );
         if !at.paragraph.is_empty() {
             if !combined.is_empty() {
@@ -2287,6 +1559,7 @@ impl Screen {
         // Compute total transcript rows so we can render the shared
         // scrollbar at column 0 over the viewport.
         let total_transcript_rows = self
+            .transcript
             .history
             .total_rows(tw, self.show_thinking)
             .saturating_add(ephemeral_lines.len() as u16);
@@ -2295,7 +1568,7 @@ impl Screen {
         // viewport. We always repaint — keeping the viewport visually
         // stable during selection is handled by the caller pinning
         // `scroll_offset`, not by skipping the paint.
-        let clamped = self.history.paint_viewport(
+        let clamped = self.transcript.history.paint_viewport(
             out,
             tw,
             self.show_thinking,
@@ -2342,7 +1615,7 @@ impl Screen {
             scroll_offset: clamped,
         });
         // Record plain text for the content pane's motion handlers.
-        self.last_viewport_text = self.history.viewport_text(
+        self.last_viewport_text = self.transcript.history.viewport_text(
             tw,
             self.show_thinking,
             viewport_rows,
@@ -2420,7 +1693,7 @@ impl Screen {
         self.content_start_row = Some(0);
         self.has_scrollback = false;
         // Fully flushed — every frame re-renders everything.
-        self.history.flushed = self.history.order.len();
+        self.transcript.history.flushed = self.transcript.history.order.len();
 
         (clamped, clamped_cursor_line, clamped_cursor_col)
     }
@@ -2442,7 +1715,7 @@ impl Screen {
         let (term_w, term_h) = self.size();
         out.init_cursor(0, term_w, term_h);
 
-        let has_new_blocks = self.history.has_unflushed();
+        let has_new_blocks = self.transcript.history.has_unflushed();
         let has_ephemeral = self.has_ephemeral();
         let dialog_height_changed = dialog_height != self.prompt.prev_dialog_height;
 
@@ -2493,11 +1766,12 @@ impl Screen {
         };
 
         let total_transcript_rows = self
+            .transcript
             .history
             .total_rows(tw, self.show_thinking)
             .saturating_add(ephemeral_lines.len() as u16);
 
-        let clamped = self.history.paint_viewport(
+        let clamped = self.transcript.history.paint_viewport(
             out,
             tw,
             self.show_thinking,
@@ -2541,7 +1815,7 @@ impl Screen {
             total_rows: total_transcript_rows,
             scroll_offset: clamped,
         });
-        self.last_viewport_text = self.history.viewport_text(
+        self.last_viewport_text = self.transcript.history.viewport_text(
             tw,
             self.show_thinking,
             viewport_rows,
@@ -2573,7 +1847,7 @@ impl Screen {
         self.prompt.prev_prompt_ui_rows = 0;
         self.content_start_row = Some(0);
         self.has_scrollback = false;
-        self.history.flushed = self.history.order.len();
+        self.transcript.history.flushed = self.transcript.history.order.len();
 
         let max_avail = term_h.saturating_sub(2 + dialog_row);
         let granted_rows = effective_dialog_height.min(max_avail);

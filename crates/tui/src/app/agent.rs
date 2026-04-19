@@ -282,7 +282,7 @@ impl App {
         // Commit active tools to block history but don't render yet —
         // the next draw_frame renders blocks + prompt atomically in one
         // synchronized update, avoiding a flash where the prompt disappears.
-        self.screen.commit_active_tools();
+        self.screen.finalize_active_tools();
         if cancelled {
             self.screen.set_throbber(render::Throbber::Interrupted);
             // If a title/slug generation was in-flight, discard it so stale
@@ -1083,7 +1083,7 @@ impl App {
                         if let Some(tokens) = self.session.context_tokens {
                             self.screen.set_context_tokens(tokens);
                         }
-                        self.screen.flush_blocks();
+                        self.screen.finish_turn();
                     }
                 }
             }

@@ -14,6 +14,7 @@ mod screen;
 mod scrollbar;
 mod selection;
 mod status;
+pub(crate) mod transcript;
 mod viewport;
 mod working;
 

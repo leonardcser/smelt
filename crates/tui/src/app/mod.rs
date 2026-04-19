@@ -599,7 +599,7 @@ impl App {
             if let Some(ref slug) = self.session.slug {
                 self.screen.set_task_label(slug.clone());
             }
-            self.screen.flush_blocks();
+            self.screen.finish_turn();
         }
         self.screen
             .draw_prompt(&self.input, self.mode, render::term_width());
@@ -971,7 +971,7 @@ impl App {
                         }
                         commands::ExecEvent::Done(code) => {
                             self.screen.finish_exec(code);
-                            self.screen.commit_exec();
+                            self.screen.finalize_exec();
                             self.exec_rx = None;
                             self.exec_kill = None;
                         }
@@ -1572,7 +1572,7 @@ impl App {
         active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) {
         if dialog.blocks_agent() {
-            self.screen.render_pending_blocks();
+            self.screen.mark_blocks_dirty();
             self.screen.pause_spinner();
         }
         self.screen.erase_prompt();

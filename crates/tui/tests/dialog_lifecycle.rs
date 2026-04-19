@@ -344,7 +344,7 @@ fn parallel_tools_all_visible_during_dialog() {
     // c2 needs confirmation — the other two are still pending.
     h.screen
         .set_active_status("c2", tui::render::ToolStatus::Confirm);
-    h.screen.render_pending_blocks();
+    h.screen.mark_blocks_dirty();
     h.drain_sink();
 
     // Open confirm dialog for c2.
@@ -361,7 +361,7 @@ fn parallel_tools_all_visible_during_dialog() {
     let mut dialog = tui::render::ConfirmDialog::new(&req, false);
     dialog.set_term_size(80, height);
 
-    h.screen.render_pending_blocks();
+    h.screen.mark_blocks_dirty();
     h.screen.erase_prompt();
     let dialog_height = dialog.height();
     h.screen.set_dialog_open(true);

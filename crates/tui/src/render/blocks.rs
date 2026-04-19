@@ -277,15 +277,11 @@ pub(super) fn render_block<S: LayoutSink>(
     match block {
         Block::User { text, image_labels } => {
             let is_command = crate::completer::Completer::is_command(text.trim());
-            // Each rendered row is: " " (1-char prefix) + content + trailing padding.
-            // `text_w` is the max content chars per row so the total never reaches
-            // the terminal width (which would cause an implicit wrap).
-            // Window-level `pad_left` now paints the leading gutter cell;
-            // the User block only needs to reserve a trailing cell inside
-            // the content rect for its styled background bar.
-            let text_w = width.saturating_sub(1).max(1);
+            // Each row: " " (1-char inner pad) + content + trailing pad.
+            // The block gets pad_left=0 at paint time so bg starts at col 0;
+            // the inner " " gives visual breathing room inside the bg bar.
+            let text_w = width.saturating_sub(2).max(1);
             let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
-            // Strip leading/trailing blank lines but preserve internal structure.
             let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
             let end = all_lines
                 .iter()
@@ -297,18 +293,16 @@ pub(super) fn render_block<S: LayoutSink>(
                 .collect();
             let wraps = logical_lines.iter().any(|l| l.chars().count() > text_w);
             let multiline = logical_lines.len() > 1 || wraps;
-            // For multi-line messages, pad all rows to the same width.
-            // If any line wraps, that means the longest line is text_w.
             let block_w = if multiline {
                 if wraps {
-                    text_w + 1
+                    text_w + 2
                 } else {
                     logical_lines
                         .iter()
                         .map(|l| l.chars().count())
                         .max()
                         .unwrap_or(0)
-                        + 1
+                        + 2
                 }
             } else {
                 0
@@ -317,7 +311,7 @@ pub(super) fn render_block<S: LayoutSink>(
             let mut rows = 0u16;
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
-                    let fill = if block_w > 0 { block_w } else { 1 };
+                    let fill = if block_w > 0 { block_w } else { 2 };
                     out.set_bg(user_bg);
                     out.print_string(" ".repeat(fill));
                     out.reset_style();
@@ -332,11 +326,12 @@ pub(super) fn render_block<S: LayoutSink>(
                 for chunk in &chunks {
                     let chunk_len = chunk.chars().count();
                     let trailing = if block_w > 0 {
-                        block_w.saturating_sub(chunk_len)
+                        block_w.saturating_sub(1 + chunk_len)
                     } else {
                         1
                     };
                     out.set_bg(user_bg);
+                    out.print(" ");
                     out.set_bold();
                     print_user_highlights(out, chunk, image_labels, is_command);
                     out.print_string(" ".repeat(trailing));
@@ -891,14 +886,14 @@ fn print_tool_output<S: LayoutSink>(
                     let prefix = &line[..pos];
                     if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
                         let title = &line[pos + 2..];
-                        print_dim(out, &format!("   {title}"));
+                        print_dim(out, &format!("  {title}"));
                         out.newline();
                         count += 1;
                     }
                 }
             }
             if count == 0 {
-                print_dim(out, "   No results found");
+                print_dim(out, "  No results found");
                 out.newline();
                 return 1;
             }
@@ -925,7 +920,7 @@ fn print_tool_output<S: LayoutSink>(
         "list_agents" | "message_agent" | "stop_agent" | "spawn_agent" if !is_error => {
             let mut rows = 0u16;
             for line in content.lines() {
-                print_dim(out, &format!("   {line}"));
+                print_dim(out, &format!("  {line}"));
                 out.newline();
                 rows += 1;
             }
@@ -942,7 +937,7 @@ fn print_dim<S: LayoutSink>(out: &mut S, text: &str) {
 }
 
 fn print_dim_count<S: LayoutSink>(out: &mut S, count: usize, singular: &str, plural: &str) -> u16 {
-    print_dim(out, &format!("   {}", pluralize(count, singular, plural)));
+    print_dim(out, &format!("  {}", pluralize(count, singular, plural)));
     out.newline();
     1
 }
@@ -990,7 +985,7 @@ fn render_notebook_output<S: LayoutSink>(out: &mut S, output: &ToolOutput, width
     };
 
     let mut rows = 0u16;
-    print_dim(out, &format!("   {}", data.title()));
+    print_dim(out, &format!("  {}", data.title()));
     out.newline();
     rows += 1;
 
@@ -1034,7 +1029,7 @@ fn render_notebook_output<S: LayoutSink>(out: &mut S, output: &ToolOutput, width
 }
 
 fn render_question_output<S: LayoutSink>(out: &mut S, content: &str, width: usize) -> u16 {
-    let max_cols = width.saturating_sub(4);
+    let max_cols = width.saturating_sub(3);
     let mut rows = 0u16;
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
         for (question, answer) in &map {
@@ -1053,7 +1048,7 @@ fn render_question_output<S: LayoutSink>(out: &mut S, content: &str, width: usiz
                 out.mark_wrapped();
             }
             for seg in &segs {
-                print_dim(out, &format!("   {}", seg));
+                print_dim(out, &format!("  {}", seg));
                 out.newline();
                 rows += 1;
             }
@@ -1064,7 +1059,7 @@ fn render_question_output<S: LayoutSink>(out: &mut S, content: &str, width: usiz
             out.mark_wrapped();
         }
         for seg in &segs {
-            print_dim(out, &format!("   {}", seg));
+            print_dim(out, &format!("  {}", seg));
             out.newline();
             rows += 1;
         }
@@ -1668,13 +1663,7 @@ mod tests {
         (total, tg, total + tg)
     }
 
-    /// Simulate the "split" render path: blocks are flushed in one pass
-    /// (render_pending_blocks), then the dialog frame renders the active
-    /// tool separately. anchor_row = start + block_rows.
-    /// In draw_frame(None), block_rows = 0 (all flushed), tool_gap is
-    /// computed from last block. Returns (block_rows, tool_gap, total_before_tool).
     fn render_split(blocks: &[Block]) -> (u16, u16, u16) {
-        // Phase 1: render_pending_blocks
         let mut out = SpanCollector::new(W as u16);
         let mut block_rows_total = 0u16;
         for i in 0..blocks.len() {
@@ -1841,7 +1830,10 @@ mod tests {
         let rows = block_rows(&text(""));
         assert_eq!(rows, 0, "empty text renders 0 rows");
 
-        let gap = gap_between(&Element::Block(&text("")), &Element::Block(&empty_tool_call()));
+        let gap = gap_between(
+            &Element::Block(&text("")),
+            &Element::Block(&empty_tool_call()),
+        );
         assert_eq!(gap, 1, "gap is still 1 for empty text block");
 
         // This means: User(1 row) + gap(1) + Text(0 rows) + gap(1) = tool at offset 3
@@ -1855,7 +1847,10 @@ mod tests {
         let blocks_no_empty = vec![user("hello")];
         let c = render_all_at_once(&blocks_no_empty);
         // User→ActiveTool gap:
-        let gap_user_tool = gap_between(&Element::Block(&user("hello")), &Element::Block(&empty_tool_call()));
+        let gap_user_tool = gap_between(
+            &Element::Block(&user("hello")),
+            &Element::Block(&empty_tool_call()),
+        );
         assert_eq!(gap_user_tool, 1, "User→ActiveTool = 1");
 
         // With empty text:  total = user_rows + 1(User→Text gap=0, Text→Text=0? no, User→Text)

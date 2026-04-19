@@ -223,7 +223,7 @@ impl TestHarness {
 
     pub fn render_pending(&mut self) {
         self.actions.push("render_pending".into());
-        self.screen.render_pending_blocks();
+        self.screen.mark_blocks_dirty();
         self.drain_sink();
     }
 
@@ -290,7 +290,7 @@ impl TestHarness {
         dialog.set_term_size(self.width, self.height);
 
         self.screen.set_active_status(call_id, ToolStatus::Confirm);
-        self.screen.render_pending_blocks();
+        self.screen.mark_blocks_dirty();
         self.screen.erase_prompt();
         self.screen.set_dialog_open(true);
         self.screen.set_constrain_dialog(dialog.constrain_height());
@@ -340,7 +340,7 @@ impl TestHarness {
         dialog.set_term_size(self.width, self.height);
 
         self.screen.set_active_status(call_id, ToolStatus::Confirm);
-        self.screen.render_pending_blocks();
+        self.screen.mark_blocks_dirty();
         self.screen.erase_prompt();
         self.screen.set_dialog_open(true);
         self.screen.set_constrain_dialog(dialog.constrain_height());
@@ -422,10 +422,10 @@ impl TestHarness {
             })),
             Some(Duration::from_millis(100)),
         );
-        self.screen.flush_blocks();
+        self.screen.finish_turn();
         self.drain_sink();
 
-        // flush_blocks may be deferred after dialog dismiss; a tick
+        // finish_turn may be deferred after dialog dismiss; a tick
         // (draw_frame with prompt) picks up the deferred render — this
         // mirrors the real event loop which calls tick() after every event.
         self.draw_prompt();
