@@ -1084,6 +1084,7 @@ impl App {
                             self.screen.set_context_tokens(tokens);
                         }
                         self.screen.finish_turn();
+                        self.transcript_window.scroll_top = u16::MAX;
                     }
                 }
             }
