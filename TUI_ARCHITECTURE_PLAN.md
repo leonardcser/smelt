@@ -217,471 +217,162 @@ What's done so far, cross-referenced with the phases below.
 - **Curswant seeded on click** (both prompt and transcript), and on `refocus`.
 - **Stage 3 command bus scaffold**: `api::cmd::run` is the single entry point; `Outcome = CommandAction` is the stable result shape. Registry lookup still matches legacy `App::handle_command` — migration is mechanical.
 
-## Known bugs to fix during Phase B
+## Known bugs (remaining)
 
-- **`j`/`k` locked on resume until first click** — intermittent; likely cpos/curswant/vim-state seeding split across `refocus` + `mount` + `sync_from_cpos`.
-- **Click hit-test offset inverted on short buffers** — `position_content_cursor_from_hit` doesn't account for the bottom-anchor leading blanks added in `paint_viewport`. Clicking top of viewport maps to wrong line.
-
-Both fall out of Phase B's `ViewportGeom` centralization.
-
-## Known bugs to fix during Phase C (selection / copy)
-
-- ✅ **Multi-line selection skips empty lines in transcript** — fixed: `paint_visual_range` draws virtual-space highlight on empty interior/line-mode lines (nvim behavior).
-- ✅ **User message block cursor offset by 1 char** — fixed via two complementary approaches: (1) mouse clicks snap past non-selectable cells via `snap_col_to_selectable`, block padding marked non-selectable; (2) `DisplayLine.gutter_bg` lets User blocks use uniform `pad_left` while painting the gutter column with user-bg color, eliminating the `pad_left=0` special case that caused cursor offset.
-- ✅ **"copied N chars" notification removed** — was noisy; yanking/copying is now silent.
-- ✅ **Vim yank copies decoration** — fixed: `handle_content_vim_key` pipes yanked text through `copy_byte_range` to strip non-selectable decoration.
-- **Copy should extract raw markdown, not rendered output** — selection copy currently copies the rendered display text; should copy the underlying source markdown for assistant blocks. Requires source-text mapping from display cells back to block content.
-- **Selection flickers when scrolled up during streaming** — when the viewport is pinned/locked and the buffer grows, the selection highlight flickers as the viewport updates. Root cause: `cpos` is a byte offset into display text that changes each frame during streaming.
-- **Click-drag doesn't show VISUAL in status bar for prompt** — dragging in the transcript toggles vim Visual mode (status bar shows "VISUAL"), but dragging in the prompt uses shift-anchor selection and doesn't change the status bar. Should be consistent (C7).
+- **`j`/`k` locked on resume until first click** — intermittent; likely cpos/curswant/vim-state seeding order across `refocus` + `mount` + `sync_from_cpos`. Hasn't reproduced against the new `ViewportGeom`; deferred as a follow-up audit.
+- **Selection flickers when scrolled up during streaming** — when viewport is pinned and buffer grows, selection highlight flickers. Root cause: `cpos` is a byte offset into display text that changes each frame during streaming.
 
 ---
 
-# Phased plan
+# Completed phases (summary)
 
-Five phases. Each is shippable. Each phase lists what it **deletes** alongside what it adds.
+## Phase A — Paradigm cleanup ✅
 
-## Phase A — Paradigm cleanup: purge terminal-scrollback-era code
+Purged terminal-scrollback-era code. All sub-phases shipped:
+- **A1**: All streams flow through streaming blocks (`push` + `rewrite` + `set_status(Done)`). The `active_*` fields on `Transcript` are **stream parsers** (accumulate chars, detect paragraph/code-block/table boundaries, call `history.rewrite()`), not a dual-storage overlay. `render_ephemeral_into` is the thinking-summary widget (a synthesized cross-block aggregate, intentionally kept as an overlay). `has_ephemeral` gates on `active_thinking && !show_thinking`.
+- **A2**: `PurgeRedraw` debounce deleted.
+- **A3**: commit/flush vocabulary purged. `paint_viewport` is the only block painter.
+- **A4**: Obsolete scrollback tests deleted.
+- **A5**: `draw_frame` deleted. `draw_viewport_frame` is the only normal-mode entry.
+- **A6**: Dirty tracking simplified to `dirty: bool` (always full repaint). Paint split: `paint_transcript` / `paint_transcript_cursor` / `paint_prompt_region`. Stale overlay fix: `paint_viewport` always blank-fills.
 
-The scrollback-commit rendering model is dead. Alt-buffer repaints every frame; there is no terminal-side scrollback that can drift. Every abstraction that defended the old invariants is dead weight and has to go before anything else. This phase deletes, it doesn't add.
+## Phase B — Viewport geometry ✅
 
-**Status**
-- ✅ **A2** (PurgeRedraw): fully shipped.
-- ✅ **A3** (commit/flush/scroll-mode vocabulary): `BlockHistory::render`, `flushed`-counter gating, `last_block_rows`, `suppress_leading_gap`, `pending_head_skip`, `scroll_up`, scroll-mode `newline` branch — all deleted. `paint_viewport` is the only block painter.
-- ✅ **A4** (obsolete tests): shipped.
-- ✅ **A5**: `draw_frame` fully deleted. `tick_dialog` → `draw_viewport_dialog_frame` (alt-buffer, reserves `dialog_height + 1 gap + 1 status` at the bottom of the viewport). `draw_prompt` + the one unit-test caller route through `draw_viewport_frame`.
-- ✅ **A6** (A6.1–A6.4): Simplified to a single `dirty: bool` on `Screen` (always full repaint when dirty). The original `DirtyRegions` per-region model was over-engineered — partial repaints added complexity without meaningful perf benefit under alt-buffer. ~60 call sites migrated from `PromptDrawState::dirty` to `self.dirty = true`. `needs_draw` checks `has_new_blocks || self.dirty`. A6.4 paint split shipped: `draw_viewport_frame` delegates to `paint_transcript` / `paint_transcript_cursor` / `paint_prompt_region`. `draw_viewport_dialog_frame` shares `paint_transcript` — no more duplicated scrollbar/ephemeral/viewport-text logic. Stale completer overlay fix: `paint_viewport` no longer returns early when transcript is empty — blank-fill loop always runs to clear leftover content from previous frames.
-- ✅ **A1**: every stream now flows through streaming blocks via `push` + `rewrite` + `set_status(Done)`. `active_exec` + `active_thinking` + `active_text` (including the table and in-code-line cases) + `active_tools` + `active_agents` all ship as `Block::Exec` / `Block::Thinking` / `Block::Text` / `Block::CodeLine` / `Block::ToolCall` / `Block::Agent` in history. `Element::ActiveTool` and `render_tool`'s overlay callers are deleted; `render_ephemeral_into` is now just the aggregate thinking-summary widget (kept intentionally — it's a summary, not a stream). `has_ephemeral` gates solely on `active_thinking && !show_thinking`.
+`ViewportGeom` centralized in `render/viewport.rs`. 13 unit tests. All call sites migrated. Short-buffer click bug fixed.
 
-### A1 — Atomic `active_*` → `Streaming` blocks cutover
+## Phase C — API surface lockdown (mostly ✅)
 
-Do all five `active_*` migrations in **one** coherent patch, not per-variant dual-write.
+- ✅ C1 (Transcript extraction), C2 (TranscriptSnapshot + SpanMeta), C3 (WindowGutters), C4 (block keymap), C5 (cmdline), C6 (selectable spans), C7 (CursorOwner), C8 (LayoutState + Viewport + floats), C9 (PaneIntent), C10 (api::VERSION).
+- Remaining: C5 tab completion, C7 unified selection renderer, C8 completer-as-float.
 
-- Remove `active_text`, `active_thinking`, `active_tools`, `active_exec`, `active_agents` from `Screen`.
-- At stream start: `api::block::push_streaming(block)` → hold the returned `BlockId`.
-- On chunks: `api::block::rewrite(id, new_block)` or `api::block::append_text(id, chunk)`.
-- On commit: `api::block::set_status(id, Done)`.
-- Delete `Screen::render_ephemeral_into`.
-- Delete `extra_lines` parameter from `paint_viewport`, `viewport_text`, `total_rows`.
-- Delete `has_ephemeral()`.
-- `Transcript::streaming_ids()` replaces all `self.active_*.is_some() / iter()` readers.
-- `is_live()` stops skipping Streaming blocks in paint — Streaming = normal-painted, just with a "live" style flag.
+## Phase D — Lua bindings ✅
 
-**Deletes**: `active_*` fields, `render_ephemeral_into`, `has_ephemeral`, `extra_lines`, "live = overlay, committed = history" mental model, dual-storage for one logical stream.
+D1–D6 shipped. `mlua` runtime, `smelt.api.*` surface, autocmd dispatch, user commands + keymaps, `smelt.defer`, error surfacing.
 
-### A2 — Remove `Ctrl+L` purge/redraw debounce
+## Phase E — Dogfood (partial)
 
-- `Action::PurgeRedraw`, `App::purge_redraw_debounced`, `App::last_purge_redraw`, `PURGE_REDRAW_DEBOUNCE` all go.
-- `Screen::redraw`'s `Clear::All` goes.
-- Ctrl+L handler collapses to `screen.mark_dirty()`.
-
-**Deletes**: ~100 lines of anti-tearing gymnastics that the alt buffer makes irrelevant.
-
-### A3 — Drop "commit" vocabulary + scrollback newlining
-
-- Rename / inline `commit_exec`, `commit_active_tools`, `flush`, `flushed` counter, `last_block_rows`.
-- `scroll_newline` vs `overlay_newline` bifurcation in `RenderOut` — overlay is the only path that ships; scrollback newline retained only for headless fallback under `cfg(test)` or a flag.
-- `RenderOut::row: Option<u16>` "overlay vs scroll mode" branch collapses — always overlay in interactive mode.
-- `pending_head_skip`, `suppress_leading_gap`, `BlockHistory::has_unflushed` — all artifacts of partial-commit rendering. Delete.
-
-**Deletes**: `BlockHistory::flushed`, `last_block_rows`, `pending_head_skip`, `suppress_leading_gap`, scroll-mode `RenderOut` branches, `commit_*` naming.
-
-### A4 — Delete obsolete tests
-
-- Scrollback-integrity "no duplicate row" suite: invariants meaningless under alt-buffer.
-- Overlay-edge-cases committed-history resize tests: assertion shape is wrong for the model.
-- Any test that asserts "line X appears exactly once in the combined paint stream."
-- 9 already removed; audit for more.
-
-**Deletes**: tests defending dead invariants.
-
-### A5 — Clean up `draw_frame` vs `draw_viewport_frame`
-
-- `draw_viewport_frame` becomes the only normal-mode entry. `draw_frame` retained only under `#[cfg(test)]` + headless-capture.
-- One `if is_dialog` branch collapses.
-
-**Deletes**: normal-mode dual-paint path, ~200 lines.
-
-### A6 — Dirty tracking simplification + paint split
-
-Replace the misleading `PromptDrawState::dirty` with a clean `dirty: bool` on `Screen`. Alt-buffer repaints are cheap (full frame every draw); per-region partial repaints add complexity without meaningful benefit.
-
-**Shipped:**
-
-1. ✅ **A6.1 — Single `dirty: bool` on `Screen`**: replaces `PromptDrawState::dirty`. All ~60 call sites migrated. `needs_draw` checks `has_new_blocks || self.dirty`. `mark_dirty()` sets `self.dirty = true`.
-
-2. ✅ **A6.2 — Stale overlay fix**: `paint_viewport` no longer early-returns when transcript is empty — the blank-fill loop always runs, clearing leftover content (completer overlay residue) from previous frames.
-
-3. ✅ **A6.3 — Split `draw_viewport_frame` into composable paint functions**: `paint_transcript` (history + ephemeral + scrollbar + viewport text capture), `paint_transcript_cursor` (block cursor + visual selection), and `paint_prompt_region` (prompt sections + cmdline overlay). `draw_viewport_dialog_frame` shares `paint_transcript` — eliminates ~75 lines of duplicated scrollbar/ephemeral/viewport-text code.
-
-**Deletes**: `PromptDrawState::dirty`; `DirtyRegions` (never shipped — simplified to single bool before landing); duplicated transcript paint in dialog frame path.
-
-**Phase A done when**: `Screen` has no `active_*`, no `render_ephemeral_into`, no `extra_lines`, no `PurgeRedraw`, no "flush" counter, no scroll-mode newlining in normal paint. Every block renders through one path; every stream mutates blocks in place. Dirty tracking is a single `dirty: bool` with always-full-repaint semantics.
+- ✅ E3: `docs/lua-examples/` with example scripts.
+- Remaining: E1 (port slash commands to Lua), E2 (default keybinds as Lua).
 
 ---
 
-## Pending UX tasks (from completer/cmdline unification work)
+# Pending UX items
 
-These are concrete UX improvements identified during the completer overlay + cmdline work. They don't belong to a specific architecture phase — they're polish items that can be done independently.
+## Completer polish
 
-### Completer behavior: two distinct UIs
+- ✅ Reversed order, residue fix, ctrl+j/k direction, cmdline tab-activation, prompt `/` prefix.
+- ⬜ Compute prompt completer indent from `/` visual column (hardcoded to 2).
 
-The cmdline (`:`) and prompt (`/`) completers share the same `Completer` engine but have **distinct presentation and activation rules**, mirroring how nvim's cmdline completion differs from insert-mode completion.
+## Known bugs
 
-**Cmdline completer (`:` in status bar):**
-- Activated on **Tab** press (not auto-shown on every keystroke).
-- Results have **no prefix** — items are bare command names.
-- Left indent **aligns after the `:`** in the status bar (column 1).
-- Renders as a floating overlay above the status bar.
-- Nvim-style: cmdline completion is opt-in via Tab.
+- **`j`/`k` locked on resume** — intermittent, deferred.
+- **Selection flicker during streaming** — `cpos` byte offset shifts each frame.
 
-**Prompt completer (`/` in prompt buffer):**
-- Activated **immediately** when `/` is typed at position 0 (auto-shown, no Tab required).
-- Results are **prefixed with `/`** — items render as `/quit`, `/compact`, etc.
-- Left indent **aligns with the `/`** character's position in the prompt buffer.
-- Renders as a floating overlay above the prompt.
-- This is a UI shortcut in the prompt — the canonical command surface is `:`.
+---
 
-Both completers render above their anchor (reversed order, nearest item at bottom). Both share `draw_completions` but with different `CompleterKind` settings controlling prefix and indent.
+# Remaining work
+
+## R1 — Raw-copy pipeline
+
+**Problem:** Copying from the transcript yields the rendered display — `─` instead of `---`, no `**bold**` markers, soft-wrapped lines get `\n` injected, heading `#` prefixes stripped, blockquote `>` stripped, etc. Copy should produce the raw source markdown.
+
+**Architecture:** Leverage the existing `SpanMeta.copy_as` mechanism. During block rendering in `blocks.rs`, every span that transforms source text annotates `copy_as` with the original source fragment. The copy path (`copy_range` in `transcript.rs`) already walks cells and emits `copy_as` when present — no new data structures or coordinate systems needed.
+
+**What transforms need `copy_as` annotation:**
+
+| Render transform | Display | `copy_as` value |
+|---|---|---|
+| Horizontal rule `---` | `───` | `"---"` (first cell), `""` (remaining `─` cells) |
+| Bold `**word**` | `word` (bold) | `"**"` on first/last cell of bold run, or prepend/append to `copy_as` |
+| Italic `*word*` | `word` (italic) | `"*"` on first/last cell |
+| Inline code `` `code` `` | `code` (styled) | `` "`" `` on first/last cell |
+| Heading `# Title` | `Title` (bold+color) | `"# "` on first cell |
+| Blockquote `> text` | `text` (dim italic, `│` gutter) | `"> "` on first cell of content |
+| List prefix `- ` | `- ` (dim) | no change (already copies as-is) |
+| Soft-wrap newline | visual `\n` | `""` (suppress — not in source) |
+| Code fence `` ``` `` | (not rendered as text) | emit `"```lang\n"` / `"```\n"` markers |
+| Table separator `\|---\|` | rendered border | original `\|---\|` text |
 
 **Implementation plan:**
-1. ✅ `draw_completions` accepts `CompletionStyle { prefix, left_indent }`. Cmdline passes `prefix: Some(""), left_indent: 1`. Prompt uses default (`prefix: None` → falls through to kind-based `/`, `left_indent: 2`).
-2. ✅ `"/"` prefix restored for `CompleterKind::Command` in the default (prompt) path. Cmdline overrides to `""`.
-3. ✅ Cmdline completer is Tab-activated: `open_cmdline` no longer auto-shows; Tab opens the completer on first press, navigates on subsequent presses. Text edits only update if completer is already open.
-4. ⬜ Compute prompt completer indent from the `/` character's visual column in the prompt layout (currently hardcoded to 2).
 
-### Other pending items
+1. **Soft-wrap suppression**: In `wrap_line` / `render_markdown_inner`, when a logical line wraps into multiple visual rows, the continuation rows' first cell gets `copy_as` that suppresses the visual newline. Concretely: after `out.newline()` for a soft-wrap, mark the *join point* so `copy_range` doesn't insert `\n` between visual rows that belong to the same logical line. Approach: add a `soft_wrapped: bool` flag on `DisplayLine` — when true, `copy_range` doesn't emit `\n` before this row.
 
-- ✅ **Reverse completer results order** — nearest items at bottom. Done in `draw_completions`.
-- ✅ **Fix completer overlay residue on dismiss** — addressed by A6: `paint_viewport` always blank-fills unpainted viewport rows (no early return on empty transcript).
-- ✅ **Fix completer ctrl+j/k direction** — swapped `move_up`/`move_down` for Up/Down and Ctrl+J/K/N/P since completer now renders above the input (nearest item at bottom).
-- ⬜ **Copy raw markdown instead of rendered output** — selection copy should extract source markdown for assistant blocks. Requires source-text mapping from display cells back to block content.
-- ⬜ **Selection flicker during streaming** — when viewport is pinned and buffer grows, selection highlight flickers. Root cause: `cpos` is a byte offset into display text that changes each frame.
-- ✅ **Window-level gutters** (task #26) — `WindowGutters { pad_left, pad_right, scrollbar }` is the single source of truth. `content_width()` subtracts reservations. All paint paths, cursor math, and hit-testing use it. `gutter_bg` on `DisplayLine` lets blocks bleed background into the gutter column without the `pad_left=0` special case.
+2. **Inline markdown markers**: In `print_inline_styled` (`blocks.rs`), when parsing `**bold**`, `*italic*`, `` `code` ``, annotate the first rendered cell with `copy_as: Some("**X")` (where X is the original first char) and last cell with `copy_as: Some("X**")`. Or simpler: emit invisible marker spans (`selectable: true, copy_as: Some("**")`) with zero display width — but that requires width-zero span support. Simpler: prepend/append markers to the `copy_as` of boundary cells.
 
----
+3. **Heading prefix**: In `print_styled_line`, when stripping `# ` for rendering, set `copy_as: Some("# X")` on the first rendered cell (where X is the original first char).
 
-## Phase B — Centralize viewport/cursor/scroll geometry
+4. **Horizontal rule**: In `render_horizontal_rule`, set `copy_as: Some("---\n")` on the first `─` cell and `copy_as: Some("")` on the rest.
 
-**Status**
-- ✅ **B1**: `render/viewport.rs` ships `ViewportGeom` with `max_scroll` / `clamped_scroll` / `skip_from_top` / `leading_blanks` / `row_of_line` / `line_of_row` / `stuck_to_bottom` / `apply_growth`.
-- ✅ **B2**: 13 unit tests — boundary matrix plus a parametric `matrix_row_line_roundtrip` that exhaustively validates `row_of_line ∘ line_of_row = id` across every (total, scroll) combination the plan calls out.
-- ✅ **B3**: `BlockHistory::paint_viewport`, `BlockHistory::viewport_text`, `Screen::draw_viewport_frame` (scrollbar + cursor sites), `Screen::draw_viewport_dialog_frame`, `TranscriptWindow::reanchor_to_visible_row`, `App::content_visual_range`, and `App::position_content_cursor_from_hit` all read from `ViewportGeom`. Remaining bottom-relative cursor_line math is now a pure row-index convention — not viewport geometry — and stays on the window.
-- ⚠️ **B4**: short-buffer click-offset bug fixed — `position_content_cursor_from_hit` now snaps leading-blank clicks to the first content line (regression test in `viewport::leading_blank_click_snaps_to_first_line`). The j/k-locked-on-resume bug is intermittent and hasn't been reproduced against the new geom; deferred as a follow-up audit.
+5. **Blockquote**: In `print_styled_line`, when stripping `> ` for rendering, set `copy_as: Some("> X")` on the first cell.
 
----
+6. **Code fences**: `Block::CodeLine` renders individual lines without the opening/closing `` ``` `` fences (those are consumed by the parser). For raw copy, the first `CodeLine` in a sequence should emit `copy_as` that prepends `` ```lang\n `` and the last should append `` \n``` ``. This requires the block renderer to know fence boundaries — either via `SpanMeta` annotation during `render_code_block`, or by having `copy_range` detect `CodeLine` block boundaries via `block_of_row`.
 
-## Phase C — API surface lockdown
+7. **`DisplayLine.soft_wrapped: bool`**: Add this flag so `copy_range` knows not to insert `\n` between continuation rows of the same logical line. Set by `render_markdown_inner` / `wrap_line` when a logical source line breaks into multiple visual rows.
 
-**Status**
-- ✅ **C6 shape**: `DisplaySpan` carries `SpanMeta { selectable, copy_as }`. Every span construction defaults to `selectable: true, copy_as: None`; gutters and decorations can flip them off without the copy path having to re-parse layout structure.
-- ✅ **C9** (core): `api::intent::PaneIntent` (Scroll / MoveCursor / BeginSelection / ExtendSelection / YankSelection) ships as the wheel-and-mouse semantic intent. `scroll_prompt_by_lines` uses direct `cursor.move_vertical` instead of synthetic `KeyEvent` construction — no more looping `handle_event(Key(Up/Down))` for mouse-wheel scroll.
-- ✅ **C10**: `api::VERSION = "1"` — public API generation marker for user scripts to branch on.
-- ✅ **C3 shape**: `WindowGutters { pad_left, pad_right, scrollbar: Option<GutterSide> }` ships as a type; `content_width(window_width)` subtracts reservations.
-- ✅ **C1**: `Transcript` extracted to `render/transcript.rs` — owns `BlockHistory` + all `active_*` streaming state. `Screen` delegates through thin forwarding calls. Scrollback-era vocabulary renamed: `commit_active_tools` → `finalize_active_tools`, `flush_blocks` → `finish_turn`, `render_pending_blocks` → `mark_blocks_dirty`, `commit_exec` → `finalize_exec`.
-- ✅ **C2** (core + copy + logical mapping): `TranscriptSnapshot` with `rows`, `row_cells` (per-cell `SnapshotCell { ch, SpanMeta }`), `block_of_row`, `row_of_block` cached on `Transcript` via generation counter. `copy_range(start_row, start_col, end_row, end_col)` respects `SpanMeta.selectable` / `copy_as`. `copy_byte_range` converts vim byte offsets to row/col and routes through `copy_range`. `snap_to_selectable` finds nearest selectable cell. `viewport_block_at` provides O(1) viewport-row→block lookup. `copy_content_selection_and_clear` wired to use `copy_byte_range` instead of raw `buf[s..e]`. `logical_rows()` / `display_to_logical()` / `logical_to_display()` provide bidirectional mapping between display and content-only text. Mouse clicks snap past non-selectable cells via `snap_col_to_selectable`. Vim yank uses `copy_byte_range` to strip decoration from yanked text.
-- ✅ **C3 wire-up**: `WindowGutters` wired into `TranscriptWindow` + `Screen`. `paint_viewport` takes `pad_left` and applies it uniformly via `paint_line(…, pad_left)` — all blocks get the window's `pad_left`. `Block::User` uses `DisplayLine.gutter_bg` to bleed its background into the gutter column while keeping uniform padding. Scrollbar column derived from `gutters.scrollbar` side. Content width uses `gutters.content_width(width)`. Block renderers stripped of legacy 1-space indent (moved to window gutter).
-- ✅ **C4** (core): `dispatch_block_key` wired before vim/novim dispatch in `handle_event_app_history`. `focused_block_id` derives block from cursor position via snapshot's `block_of_row`. ToolCall blocks bind `e` to toggle expand/collapse. Remaining: add more block-scoped bindings (re-run, yank output), generalize to non-ToolCall blocks.
-- ✅ **C5** (cmdline): nvim-style `:` command line renders inside the status bar row. `CmdlineState` in `render/cmdline.rs` owns buffer + cursor + editing + rendering + history. `:` opens from any window in normal mode (gated on not in insert mode). Enter executes through `run_command` (`:` normalizes to `/`). Esc/Ctrl-C dismisses. Up/Down recall previous commands. Ctrl-W deletes word backward. Ctrl-U clears line. Persistent history survives across open/close cycles. Remaining: tab completion, completer + dialogs as floating windows (defers to `WindowRect::Float` in C8).
-- ✅ **C7** (cursor ownership): `CursorOwner` enum (`Prompt | Transcript | Cmdline | Dialog | None`) set once per frame via `refresh_cursor_owner`. All cursor draw sites check `cursor_owner` instead of independently testing focus + mode flags. Scrollbar now unified via `Viewport` (C8). Remaining: unified selection renderer.
-- ✅ **C8** (core + float wiring): `LayoutState` with `Rect`, `LayoutInput`, `HitRegion` in `render/layout.rs`. `compute()` produces docked transcript + prompt rects and optional `DialogLayout`. Computed per frame, stored on `Screen.layout`. Mouse dispatch uses `layout.hit_test()`. `Viewport` replaces `TranscriptRegion` + `InputRegion` — both transcript and prompt record a `Viewport` after paint; mouse click/drag/scrollbar all route through `Viewport::hit()`. `LayoutState` is lean (just rects); scrollbar state lives on the buffer's `Viewport`. `WindowRect::Float` and `FloatEntry` scaffolded; `push_float` registers z-ordered float rects; `hit_test` walks floats (highest z first) before docked regions. `HitRegion::Completer` added; completer registered as float after draw so `hit_test` routes clicks correctly. Dialogs registered as float (z=10) via `push_float` in `draw_viewport_dialog_frame` for unified hit-testing. Remaining: make completer a true floating window positioned relative to the cursor anchor.
+**Key insight:** The `copy_as` mechanism already handles the cell-level substitution. The only new primitive needed is `soft_wrapped` on `DisplayLine` for newline suppression. Everything else is annotation work in the renderers.
 
----
+**Deletes:** The "copy raw markdown" item from the pending list. The current `copy_range` / `copy_byte_range` pipeline stays — it just gets richer annotations to work with.
 
-## Phase D — Lua bindings (mlua)
+**Files touched:**
+- `render/display.rs` — add `soft_wrapped: bool` to `DisplayLine`
+- `render/blocks.rs` — annotate `copy_as` in `print_inline_styled`, `print_styled_line`, `render_horizontal_rule`, `render_code_block`, `render_markdown_inner`
+- `render/transcript.rs` — `copy_range` checks `soft_wrapped` to suppress inter-row `\n`
+- `render/layout_out.rs` — propagate `soft_wrapped` flag through `SpanCollector`
 
-**Status — all six sub-phases shipped as scaffolding.**
+## R2 — Extract StreamParser from Transcript
 
-- ✅ **D1**: `mlua` 0.11 with the `lua54` + `vendored` features. `crate::lua::LuaRuntime::new()` constructs the runtime, registers the `smelt` global, and loads `$XDG_CONFIG_HOME/smelt/init.lua` (or `~/.config/smelt/init.lua`). Missing configs are not errors; load errors surface via `load_error`.
-- ✅ **D2**: `smelt.api.version`, `smelt.api.cmd.register`, `smelt.api.cmd.run`, `smelt.notify`, `smelt.clipboard`, `smelt.keymap`, `smelt.on`, `smelt.defer`, `smelt.api.transcript.text`, `smelt.api.buf.text` live in `register_api`. `LuaContext` populated before command dispatch provides transcript/prompt text to Lua callbacks.
-- ✅ **D3**: `AutocmdEvent::{BlockDone, CmdPre, CmdPost, StreamStart, StreamEnd}` + `LuaRuntime::emit(event)` iterate handlers; errors are captured per-handler and don't stop the dispatch.
-- ✅ **D4**: `run_command`, `run_keymap`, `has_command`, `command_names` let the Rust dispatcher check for Lua bindings before falling back to built-in handlers.
-- ✅ **D5**: `smelt.defer(ms, fn)` posts to `pending_timers`; `LuaRuntime::tick_timers` fires due handlers on each app tick. Pending-ops queue is the same `pending_notifications` / `lua_errors` channel.
-- ✅ **D6**: every call path is wrapped so Lua errors land in `lua_errors`; the app drains them via `drain_errors` and surfaces the first as a notification. `load_error` captures `init.lua` syntax failures.
-- ✅ **Wire-up into `App`**: `App::lua` is a directly-owned `LuaRuntime`. `run_command` emits `cmd_pre`, routes through the Lua registry if a name is bound, falls through to the built-in `handle_command`, then emits `cmd_post` and drains notifications/errors. `start_agent` / `finish_turn` emit `stream_start` / `stream_end`. The app loop pumps `tick_timers`, drains newly finished blocks (→ `block_done` autocmd), and surfaces pending notifications + errors every iteration.
+**Problem:** `Transcript` mixes two concerns: (1) domain state (block store + snapshot cache) and (2) stream parsing (`active_thinking`, `active_text`, `active_tools`, `active_agents`, `stream_exec_id`). The `active_*` fields are character-level parser state machines that accumulate deltas, detect paragraph/code-block/table boundaries, and drive `history.rewrite()`. They're not dual storage — they're input adapters.
 
-## Phase E — Dogfood
-
-- ✅ **E3**: `docs/lua-examples/` ships `leader.lua`, `block_summarizer.lua`, `per_project.lua`, `double_compact.lua`, `copy_transcript.lua`, and a README explaining the surface. `copy_transcript.lua` exercises the new `smelt.api.transcript.text()` + `smelt.clipboard()` API.
-- ⬜ **E1**: porting the `/rewind`, `/export`, `/help`, `/model`, `/compact` handlers to ship as `smelt.api.cmd.register` in a default init.lua. Requires more API surface — most commands need dialog-opening or internal state transitions that aren't yet exposed to Lua. `copy_transcript` is the first Lua-only command exercising the data-access + clipboard path.
-- ⬜ **E2**: default keymap-config-as-Lua likewise depends on more API surface (mode-aware keymap registration, cursor movement primitives).
-
-Four cursor/scroll bugs this session all had the same shape: the mapping `(viewport_rows, total, scroll_offset) ↔ (row_on_screen, line_in_buffer)` was reinvented at each call site. Centralize.
-
-### B1 — New `render/viewport.rs` module
+**Approach:** Extract the parser state into `StreamParser` (or `StreamAccumulator`). `Transcript` becomes a pure block-store + snapshot. `StreamParser` takes a `&mut Transcript` (or `&mut BlockHistory`) when it needs to push/rewrite blocks.
 
 ```rust
-pub struct ViewportGeom {
-    pub total:          u16,                       // rows in the flattened buffer
-    pub viewport_rows:  u16,                       // visible rows
-    pub scroll_offset:  u16,                       // rows from the bottom (alt-buffer convention)
-    pub leading_blanks: u16,                       // viewport.saturating_sub(total), for bottom-anchoring
+struct StreamParser {
+    thinking: Option<ActiveThinking>,
+    text: Option<ActiveText>,
+    exec_id: Option<BlockId>,
+    tools: Vec<ActiveTool>,
+    agents: Vec<ActiveAgent>,
 }
 
-impl ViewportGeom {
-    pub fn max_scroll(&self) -> u16;
-    pub fn clamped_scroll(&self) -> u16;
-    pub fn skip_from_top(&self) -> u16;            // lines to skip before painting
-    pub fn row_of_line(&self, line_idx: u16) -> Option<u16>;   // None if offscreen
-    pub fn line_of_row(&self, row: u16) -> Option<u16>;        // None if in leading blank
-    pub fn cursor_row(&self, cursor_line: u16) -> u16;         // bottom-anchored
-    pub fn apply_growth(&mut self, delta: u16);                // pin math
-    pub fn stuck_to_bottom(&self) -> bool;
-}
-```
-
-- Every paint path + every hit-test + every cursor placement consumes this.
-- No more open-coded `viewport_rows.saturating_sub(1 + line)` or `total.saturating_sub(viewport).saturating_sub(scroll)`.
-- `apply_growth` replaces the `pinned_last_total` delta dance.
-
-### B2 — Unit tests lock down the invariants
-
-Matrix: total ∈ {0, 1, viewport-1, viewport, viewport+1, 2·viewport}, scroll ∈ {0, 1, max-1, max, max+1}, line ∈ {0, total-1, total}. Every cell of the matrix has an expected `row_of_line` / `line_of_row` / `cursor_row`.
-
-### B3 — Migrate call sites
-
-- `TranscriptWindow::sync_from_cpos` / `visible_cpos` / `mount` / `reanchor_to_visible_row` — read from `ViewportGeom`.
-- `BlockHistory::paint_viewport` / `viewport_text` — consume the geom's `leading_blanks` + `skip_from_top`.
-- `events.rs::position_content_cursor_from_hit` — `geom.line_of_row(rel_row)` instead of `skip + rel_row`.
-- `app/events.rs::sync_transcript_pin` / `apply_pin` — `geom.apply_growth(delta)`.
-
-### B4 — Fix the two known cursor bugs as a side effect
-
-- **j/k locked on resume**: trace through `refocus` → `mount` → `sync_from_cpos` with geom in place. Curswant + cpos seed order becomes one call into the geom.
-- **Click offset inverted on short buffers**: `line_of_row(row)` accounts for `leading_blanks` automatically.
-
-**Deletes**: open-coded viewport math in 6+ call sites; `pinned_last_total` as a magic number; the implicit "bottom-relative" convention (becomes an explicit type).
-
-**Phase B done when**: `grep "viewport_rows.saturating_sub" crates/tui/src` returns nothing outside `viewport.rs`. Both known cursor bugs fixed by unit test.
-
----
-
-## Phase C — API surface lockdown
-
-With paradigm cleanup done and geometry stable, the remaining surface is what Lua will bind to. Make it clean and final *before* shipping Lua.
-
-### C1 — Extract `Transcript` from `Screen`
-
-- `Transcript` owns `BlockStore` + `Vec<BlockId>` + the transcript `BufId` + a `TranscriptSnapshot` cache.
-- `Screen` becomes pure UI chrome: prompt paint, status bar, dialog layout, frame composition.
-- `Transcript` is unit-testable without `Screen` — snapshot tests, view_state tests, streaming tests all run in microseconds with no TTY harness.
-- Engine event handlers call `api::block::*` / `api::transcript::*` instead of `self.screen.append_text` etc.
-
-**Deletes**: `Screen` as domain owner; direct `self.screen.active_*` was already gone in Phase A; now `self.screen.push_text` goes too.
-
-### C2 — `TranscriptSnapshot` + top-relative coords + `SpanMeta`
-
-```rust
-struct SpanMeta {
-    selectable: bool,
-    copy_as:    Option<String>,                    // None = emit char; Some("") = skip; Some(s) = substitute
-    action:     Option<BlockAction>,               // clickable cell
-}
-
-struct DisplayCell { ch: char, style: Style, meta: SpanMeta }
-struct DisplayRow  { cells: Vec<DisplayCell>, logical_line: u32 }
-
-struct TranscriptSnapshot {
-    width:            u16,
-    rows:             Vec<DisplayRow>,
-    logical:          String,
-    cell_to_logical:  Vec<Vec<Option<usize>>>,
-    logical_to_cell:  Vec<(u16, u16)>,
-    block_of_row:     Vec<BlockId>,
-    row_of_block:     HashMap<BlockId, Range<u16>>,
+impl StreamParser {
+    fn append_thinking(&mut self, history: &mut BlockHistory, delta: &str);
+    fn flush_thinking(&mut self, history: &mut BlockHistory);
+    fn append_text(&mut self, history: &mut BlockHistory, delta: &str);
+    fn flush_text(&mut self, history: &mut BlockHistory);
+    fn start_tool(&mut self, history: &mut BlockHistory, ...);
+    fn finish_tool(&mut self, history: &mut BlockHistory, ...);
+    // etc.
 }
 ```
 
-- `Transcript::snapshot(width)` — cached, invalidated on width or block mutation.
-- `TranscriptWindow` navigates snapshot `(row, col)` coords; vim line-motions use `logical` via the mapping.
-- Top-relative: `scroll_top_row: u16` (top of viewport is this snapshot row). "Stuck to bottom" is `scroll_top_row == snapshot.rows.len() - viewport_rows`.
-- `snapshot.copy_range(sel_start, sel_end) -> String` is the single copy primitive.
-- `snapshot.snap_to_selectable((row, col))` for cursor placement.
-- `snapshot.block_of_row[row]` for O(1) "which block owns this row" — mouse dispatch reads this directly.
+**Benefits:**
+- `Transcript` becomes unit-testable as a pure data structure
+- `StreamParser` is unit-testable in isolation (feed it deltas, assert block outputs)
+- Clear ownership: parser is transient input state, transcript is persistent domain state
+- `Screen` can own both side-by-side: `transcript: Transcript`, `parser: StreamParser`
 
-**Deletes**: `full_transcript_text`, `viewport_text`, `last_viewport_text`, `rows.join("\n")` inside `TranscriptWindow::mount`, bottom-relative `scroll_offset` (becomes derived), all three coord conversions, viewport-relative visual-selection remap in `events.rs`.
+**Files touched:**
+- New: `render/stream_parser.rs`
+- Modified: `render/transcript.rs` (remove `active_*` fields, keep block-store + snapshot)
+- Modified: `render/screen.rs` (add `parser: StreamParser`, update forwarding calls)
 
-### C3 — Window-level gutters (task #26)
+## R3 — Remaining Phase C/D/E items (flat list)
 
-- `WindowGutters { pad_left, pad_right, scrollbar: Option<Side> }` on every `Window`.
-- `content_rect(window) = window.rect - gutters`.
-- Cursor / selection / click-hit-test / snapshot rendering all in content-rect coords.
-- Gutter painting is the renderer's job; buffer code never thinks about gutters.
-- Scrollbar column fits inside `pad_right` (or `pad_left` if scrollbar = Left).
-- Future `numbercol_width`, `signcol_width`, `foldcol_width` slot in without call-site changes.
-
-### C4 — Keymap layering (block → buffer → window → global)
-
-- Each buffer, window, and block has its own `Keymap`. Lookup in order.
-- Transcript buffer ships with vim motions at buffer scope (`h/j/k/l`, `v`, `y`, `gg`, `G`). Prompt buffer ships with editor bindings.
-- Transcript window ships with scroll bindings (`Ctrl-U/D/F/B/Y/E`) at window scope.
-- Focused block can override keys (e.g. tool block binds `e` to expand, `r` to re-run).
-- `Ctrl-W` window navigation, `Ctrl-L` redraw, `Ctrl-C` interrupt at global scope.
-
-**Deletes**: hardcoded `if window is content then route through vim` branches; `KeyAction::Cmd` vs `Action::Motion` divergence at dispatch (both through one chain).
-
-### C5 — Completer + dialogs as floating windows
-
-- `Completer` keeps its fuzzy engine, renders into a floating window. Two mount sites (above prompt, over status).
-- Floats don't shift dock rects — overlay only.
-- Dialogs become floating windows with `modal = true`; dispatcher routes to top modal first.
-- `api::ui::open_floating(spec)` / `open_completer(spec, anchor)` are the entry points.
-
-**Deletes**: `Dialog` trait as a distinct concept; per-completer render code; "dialog intercepts events" special case.
-
-### C6 — Selectable regions + unwrap-on-copy
-
-- Left/right viewport padding → `selectable: false, copy_as: Some("")`.
-- Soft-wrap continuation: shared `logical_line`, no `\n` between on copy.
-- Hard newlines: different `logical_line`, `\n` on copy.
-- Diff gutter `+/-/ `, quote bar `│`, tool-call indent, line-number column → `selectable: false` with appropriate `copy_as`.
-- `snapshot.copy_range()` walks cells emitting `copy_as` or `ch` or nothing.
-
-**Deletes**: bare `copy_to_clipboard(&buf[s..e])` in `copy_content_selection_and_clear`; selection-range translation through `rows.join("\n")`.
-
-### C7 — Unified selection / cursor / scrollbar renderers
-
-- One `Selection` view on a window (vim visual if present, else shift anchor).
-- `render::cursor(&dyn Window, &Snapshot, &LayoutState)` and `render::scrollbar(&dyn Window, &LayoutState)` — shared.
-- `api::win::extend_selection_to(pos)` replaces the `extend_content_selection_to` / `extend_prompt_selection_to` split.
-
-**Deletes**: duplicated selection priority; per-window scrollbar paint; separate `draw_soft_cursor` call sites.
-
-### C8 — Layout primitive (`LayoutState` + `Viewport` + `WindowRect`)
-
-- `LayoutState` owns rects only — no scrollbar state. `Viewport` in `region.rs` is the buffer-level primitive: each scrollable buffer records `Viewport { top_row, rows, content_width, total_rows, scroll_offset, scrollbar }` after paint. `Viewport::hit()` classifies mouse events into `ViewportHit::{Content, Scrollbar}`. Any future scrollable region (dialog body, file preview) adds one more `Viewport` — no layout changes needed.
-- `WindowRect::{Dock(Region), Float { rect, z, anchor }}` for floating windows (remaining).
-- Compositor produces `LayoutState` per frame from rects + dock priorities.
-- Mouse handlers read `LayoutState` (z-ordered hit-test walks floats first).
-
-**Deletes**: `TranscriptRegion`, `InputRegion`, `TranscriptHit` (replaced by `Viewport` + `ViewportHit`); `Screen::input_region()` tuple method; `Screen::input_scrollbar()` method.
-
-### C9 — Semantic intents for mouse/wheel
-
-- `PaneIntent::{Scroll, MoveCursor, BeginSelection, ExtendSelection, YankSelection}`.
-- Wheel handlers call `api::win::scroll` directly; no synthetic `KeyCode::Char('j')`.
-
-**Deletes**: `Buffer::press_n`; `scroll_prompt_by_lines`'s synthetic-key loop.
-
-### C10 — Freeze + document `api::*`
-
-- Freeze public signatures. Every `pub fn` in `api::` gets a doc comment that will render as user-facing docs.
-- `smelt.api.version = "1"` constant. Future breaking changes bump it; Lua can branch.
-- One-page API reference generated from doc comments.
-
-### C11 — Status line as a docked region with provider-driven content
-
-- Keep the status line exactly **one row high**. It is a dedicated docked layout region, not a fake editable buffer window.
-- Add `api::status::{set_provider, clear_provider, invalidate, default_items}`.
-- Introduce `StatusContext` (mode, focus, task slug, working state, tokens/cost, cursor position, scroll pct, terminal width, etc.) and `StatusItem { text, priority, align, truncatable, style/tag }`.
-- Rust owns the responsive fitter: width measurement, priority-based dropping, truncation, and left/right packing remain in the existing status renderer path.
-- Lua providers return structured items or override/filter the default items; they do **not** draw terminal cells directly.
-- Cmdline keeps reusing the same row when active; status provider output is suspended while cmdline owns the status region.
-- Positioning is layout-level (`top` or `bottom` dock), not per-span absolute drawing.
-
-**Deletes**: hardcoded status assembly inside `Screen` as the only source of truth; the assumption that Lua customization requires raw drawing or a buffer-backed status window.
-
-**Phase C done when**: `Transcript` is unit-testable without `Screen`; `State` is unit-testable without a terminal; no coord-system conversion; every mutation goes through `api::*`; one selection rule, one cursor renderer, one scrollbar renderer; one-page API doc exists; the status line is a one-row docked region with provider-driven structured items and Rust-owned responsive fitting.
+- ⬜ C5: cmdline tab completion
+- ⬜ C7: unified selection renderer (prompt + transcript share one selection paint path)
+- ⬜ C8: completer as a true floating window (positioned relative to cursor anchor)
+- ⬜ C11: status line provider-driven content (`api::status::set_provider`)
+- ⬜ D7: Lua statusline providers (`smelt.statusline(fn)`)
+- ⬜ E1: port slash commands to Lua (requires more API surface for dialog/state transitions)
+- ⬜ E2: default keybinds as Lua (requires mode-aware keymap registration)
 
 ---
 
-## Phase D — Lua bindings (mlua)
+# Recommended sequencing
 
-`api::*` is stable. Wire it to Lua.
-
-### D1 — mlua bootstrap
-
-- Add `mlua` crate (Lua 5.4; feature `send` if multi-thread, `vendored` for hermetic build).
-- `LuaRuntime` lives on `State`. Loads `~/.config/smelt/init.lua` at startup.
-- Errors in `init.lua` surface as a notification + deferred dialog; app keeps running with default config.
-- Lua sandbox: no `io.*`, no `os.execute`, no `package.loadlib` (configurable — default locked down).
-
-### D2 — Shim `api::*` as Lua tables
-
-One file (`lua/bindings.rs`), one `register_fn!` call per Rust `pub fn`. Mechanical.
-
-```lua
--- ~/.config/smelt/init.lua example
-smelt.keymap("n", "<C-g>", function()
-  smelt.api.win.set_cursor(0, 0)                   -- gg equivalent
-end)
-
-smelt.cmd.register("double_compact", function(args)
-  smelt.api.cmd.run("compact")
-  smelt.api.cmd.run("compact")
-end)
-
-smelt.on("block_change", function(ev)
-  if ev.field == "status" and ev.status == "Done" then
-    smelt.notify("block " .. ev.block .. " finished")
-  end
-end)
-```
-
-### D3 — Autocmd dispatch
-
-- `AutocmdRegistry { events: HashMap<EventKind, Vec<(AutocmdId, LuaRef)>> }`.
-- Emission points in Rust (`api::autocmd::emit(event, payload)`) at every `*_change` / `*_enter` / `*_leave` / `stream_start` / `stream_end` / `key` / `cmd_pre` / `cmd_post`.
-- Dispatch is synchronous; Lua errors caught, logged, next handler runs.
-- Event table documented (see list above).
-
-### D4 — User-command + keymap registration from Lua
-
-- `smelt.cmd.register(name, fn)` → calls `api::cmd::register` with a Rust-side adapter that calls `lua.call(ref, args)`.
-- `smelt.keymap(mode, chord, fn_or_cmd)` → calls `api::keymap::set_global` (or `set_buffer` / `set_window` with scope arg).
-- Handlers live as `LuaRef`; dropped when user re-sources config or calls `unregister`.
-
-### D5 — Re-entrancy + event loop integration
-
-- Lua callbacks run on the main thread, synchronously with the dispatching event.
-- Mutations inside callbacks (e.g. `api::buf::insert` from `on("key", ...)`) are queued as pending ops, applied after the dispatching handler returns — prevents mid-event state corruption.
-- No async in v1. Scheduled callbacks use a simple `smelt.defer(ms, fn)` that posts to the tick loop.
-
-### D6 — Lua error surfacing UX
-
-- `init.lua` syntax errors → startup notification + dialog with the traceback. App runs with default config.
-- Runtime errors in callbacks → logged to `~/.cache/smelt/lua.log` + notification. Handler is marked dead so it doesn't spam on repeat.
-- `:lua <expr>` command for live evaluation (debug helper).
-
-### D7 — Lua statusline providers
-
-- `smelt.statusline(fn)` registers a provider for the one-row docked status region.
-- `fn(ctx)` receives a stable `StatusContext` snapshot and returns structured `StatusItem`s (or `{ left = {...}, right = {...} }`).
-- Providers can hide, reorder, replace, or augment the default status content, but width fitting still happens in Rust using item priority + truncation flags.
-- Providers are called on invalidation points (mode/focus/cursor/scroll/block/resize/session changes), not as unrestricted raw per-cell drawing hooks every frame.
-- A failing provider falls back to the default status items and surfaces an error notification.
-
-**Deletes**: the assumption that Lua status customization needs direct terminal drawing primitives.
-
-**Phase D done when**: `init.lua` can register user commands, bind keys, subscribe to events, drive mutations through the API, and provide structured statusline content. Errors don't crash.
-
----
-
-## Phase E — Dogfood
-
-Validate the API by porting existing features *through* it.
-
-### E1 — Move slash commands to Lua
-
-- `/rewind`, `/export`, `/help`, `/model`, `/compact` etc. register via `smelt.cmd.register` in a shipped `init.lua` that defaults to the current behavior.
-- Users can override by redefining in their own config.
-- Exposes gaps: any command that can't be expressed through `api::*` is a Phase C bug report.
-
-### E2 — Built-in keybinds become Lua
-
-- Default keymap config shipped as Lua. Users can rebind or disable without touching Rust.
-- Block keymaps (tool expand/collapse/re-run) via `smelt.api.block.set_keymap`.
-
-### E3 — Example plugins
-
-- Ship one or two example plugins under `docs/lua-examples/`:
-  - Vim-style custom leader keymap
-  - Block summarizer (collapse long tool output by default)
-  - Per-project config (load `smelt.lua` from `$PWD/.smelt/` if present)
-  - Custom statusline examples (minimal, verbose, per-project)
-
-**Phase E done when**: any existing user-visible feature is reimplementable as pure Lua. Gaps surfaced here close Phase C.
-
----
+1. **R1 (raw-copy)** — self-contained, high user-impact, no dependencies.
+2. **R2 (StreamParser extraction)** — cleanup, makes Transcript testable, prepares for any future streaming changes.
+3. **R3 items** — independent of each other, pick based on user demand.
 
 ## Explicit non-goals
 
@@ -710,13 +401,3 @@ Validate the API by porting existing features *through* it.
 - `smelt.api.*` surface documents to one page and is stable across minor versions.
 - Users can redefine every default keybind and built-in slash command in Lua without touching Rust.
 
-## Recommended sequencing
-
-**A → B → C → D → E.** Two checkpoints make sense as release candidates:
-
-- **After Phase B**: paradigm clean, math stable. Code is much smaller and correct-by-construction. Materially better system on its own even if Lua never lands.
-- **After Phase C**: API stable, documented. First private alpha of `api::*` possible here for out-of-process bindings.
-- **After Phase D**: Lua ships.
-- **After Phase E**: Lua ecosystem opens.
-
-Phases are not strictly blocking — e.g. some Phase C items (gutters, completer-as-float) can start while Phase B's geom module is being tested. Anything that doesn't touch the viewport/cursor math can parallelize freely.
