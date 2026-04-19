@@ -600,9 +600,15 @@ impl App {
                 self.screen.set_task_label(slug.clone());
             }
             self.screen.finish_turn();
+            self.transcript_window.scroll_top = u16::MAX;
         }
-        self.screen
-            .draw_prompt(&self.input, self.mode, render::term_width());
+        let clamped = self.screen.draw_prompt(
+            &self.input,
+            self.mode,
+            render::term_width(),
+            self.transcript_window.scroll_top,
+        );
+        self.transcript_window.scroll_top = clamped;
 
         if let Some(message) = self.startup_auth_error.take() {
             self.screen.notify_error(message);

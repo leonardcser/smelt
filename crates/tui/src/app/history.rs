@@ -545,6 +545,7 @@ impl App {
         self.screen.clear_context_tokens();
         self.save_session();
         self.screen.set_throbber(render::Throbber::Done);
+        self.transcript_window.scroll_top = u16::MAX;
     }
 
     pub(super) fn maybe_auto_compact(&mut self) {

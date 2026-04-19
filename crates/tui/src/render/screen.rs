@@ -1649,9 +1649,15 @@ impl Screen {
         self.redraw();
     }
 
-    pub fn draw_prompt(&mut self, state: &InputState, mode: protocol::Mode, width: usize) {
+    pub fn draw_prompt(
+        &mut self,
+        state: &InputState,
+        mode: protocol::Mode,
+        width: usize,
+        scroll_top: u16,
+    ) -> u16 {
         let mut frame = Frame::begin(&*self.backend);
-        self.draw_viewport_frame(
+        let (clamped, _, _) = self.draw_viewport_frame(
             &mut frame,
             width,
             FramePrompt {
@@ -1660,11 +1666,12 @@ impl Screen {
                 queued: &[],
                 prediction: None,
             },
-            0,
+            scroll_top,
             0,
             0,
             None,
         );
+        clamped
     }
 
     /// Update spinner animation state. Call before rendering.
@@ -1843,7 +1850,7 @@ impl Screen {
                 .unwrap_or(viewport_rows);
             let max_line = visible.saturating_sub(1);
             let line = history_cursor_line.min(max_line);
-            let cursor_row = visible.saturating_sub(1 + line);
+            let cursor_row = line;
             // cursor_col is a nav column (selectable chars only);
             // convert to display column using the viewport's DisplayLine.
             let display_col = self

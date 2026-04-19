@@ -607,6 +607,66 @@ mod tests {
         assert_eq!(tw.scroll_top, 5);
     }
 
+    fn sample_rows(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("line {i}")).collect()
+    }
+
+    #[test]
+    fn scroll_by_lines_j_moves_cursor_down() {
+        let mut tw = make_tw();
+        tw.set_vim_enabled(true);
+        let rows = sample_rows(30);
+        let viewport = 10;
+        tw.refocus(&rows, viewport);
+        assert_eq!(tw.cursor_line, 0);
+        assert_eq!(tw.scroll_top, 0);
+        tw.scroll_by_lines(1, &rows, viewport);
+        assert_eq!(tw.cursor_line, 1);
+        assert_eq!(tw.scroll_top, 0);
+    }
+
+    #[test]
+    fn scroll_by_lines_k_moves_cursor_up() {
+        let mut tw = make_tw();
+        tw.set_vim_enabled(true);
+        let rows = sample_rows(30);
+        let viewport = 10;
+        tw.scroll_top = 20;
+        tw.cursor_line = 5;
+        tw.refocus(&rows, viewport);
+        let prev_line = tw.cursor_line;
+        tw.scroll_by_lines(-1, &rows, viewport);
+        assert!(tw.cursor_line < prev_line || tw.scroll_top < 20);
+    }
+
+    #[test]
+    fn refocus_on_empty_transcript_resets_cursor() {
+        let mut tw = make_tw();
+        tw.cursor_line = 5;
+        tw.cursor_col = 3;
+        tw.refocus(&[], 20);
+        assert_eq!(tw.cursor_line, 0);
+        assert_eq!(tw.cursor_col, 0);
+    }
+
+    #[test]
+    fn jump_to_last_line_scrolls_to_bottom() {
+        let mut tw = make_tw();
+        let rows = sample_rows(50);
+        let viewport = 10;
+        tw.jump_to_line_col(&rows, 49, 0, viewport);
+        assert_eq!(tw.scroll_top, 40);
+        assert_eq!(tw.cursor_line, 9);
+    }
+
+    #[test]
+    fn cursor_abs_row_top_relative() {
+        let mut tw = make_tw();
+        tw.scroll_top = 10;
+        tw.cursor_line = 5;
+        assert_eq!(tw.cursor_abs_row(100), 15);
+    }
+
     #[test]
     fn unpin_stops_tracking() {
         let mut tw = make_tw();
