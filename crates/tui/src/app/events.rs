@@ -298,6 +298,22 @@ impl App {
         if let Event::Mouse(me) = *ev {
             return Some(self.handle_mouse(me));
         }
+        // Lua-registered keymaps get first crack at key events, matching
+        // nvim's `vim.keymap.set` priority. Unbound chords fall through
+        // to the built-in keymap dispatcher.
+        if let Event::Key(k) = *ev {
+            if let Some(chord) = crate::lua::chord_string(k) {
+                if self.lua.run_keymap(&chord) {
+                    for msg in self.lua.drain_notifications() {
+                        self.screen.notify(msg);
+                    }
+                    for err in self.lua.drain_errors() {
+                        self.screen.notify_error(err);
+                    }
+                    return Some(EventOutcome::Noop);
+                }
+            }
+        }
         if let Some(outcome) = self.handle_pane_chord(ev, t) {
             return Some(outcome);
         }

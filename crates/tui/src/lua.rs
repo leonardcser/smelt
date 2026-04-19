@@ -39,6 +39,54 @@ pub enum AutocmdEvent {
     StreamEnd,
 }
 
+/// Format a `crossterm::KeyEvent` into an nvim-style chord string
+/// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc). Unrecognized
+/// chords return `None` so the dispatcher falls through to the normal
+/// handlers. This is the lookup key for `smelt.keymap(_, chord, fn)`.
+pub fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
+    use crossterm::event::{KeyCode, KeyModifiers as M};
+    let mods = key.modifiers;
+    let has_ctrl = mods.contains(M::CONTROL);
+    let has_alt = mods.contains(M::ALT);
+    let has_shift = mods.contains(M::SHIFT);
+    let base = match key.code {
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => "Tab".to_string(),
+        KeyCode::Enter => "CR".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Backspace => "BS".to_string(),
+        KeyCode::Delete => "Del".to_string(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
+        KeyCode::F(n) => format!("F{n}"),
+        KeyCode::Insert => "Insert".to_string(),
+        _ => return None,
+    };
+    let is_named = !matches!(key.code, KeyCode::Char(_));
+    if !has_ctrl && !has_alt && (!has_shift || matches!(key.code, KeyCode::Char(_))) && !is_named {
+        // Plain printable char — no angle-bracket wrap.
+        return Some(base);
+    }
+    let mut prefix = String::new();
+    if has_ctrl {
+        prefix.push_str("C-");
+    }
+    if has_alt {
+        prefix.push_str("M-");
+    }
+    if has_shift && is_named {
+        prefix.push_str("S-");
+    }
+    Some(format!("<{prefix}{base}>"))
+}
+
 impl AutocmdEvent {
     fn lua_name(self) -> &'static str {
         match self {
@@ -545,6 +593,26 @@ mod tests {
         let queued = rt.drain_pending_commands();
         assert_eq!(queued, vec!["/compact".to_string()]);
         assert!(rt.drain_pending_commands().is_empty());
+    }
+
+    #[test]
+    fn chord_string_formats_nvim_style() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as M};
+        let ev = |code, mods| KeyEvent::new(code, mods);
+        assert_eq!(chord_string(ev(KeyCode::Char('j'), M::NONE)).as_deref(), Some("j"));
+        assert_eq!(
+            chord_string(ev(KeyCode::Char('g'), M::CONTROL)).as_deref(),
+            Some("<C-g>")
+        );
+        assert_eq!(
+            chord_string(ev(KeyCode::Tab, M::SHIFT)).as_deref(),
+            Some("<S-Tab>")
+        );
+        assert_eq!(chord_string(ev(KeyCode::Esc, M::NONE)).as_deref(), Some("<Esc>"));
+        assert_eq!(
+            chord_string(ev(KeyCode::Char('x'), M::ALT)).as_deref(),
+            Some("<M-x>")
+        );
     }
 
     #[test]
