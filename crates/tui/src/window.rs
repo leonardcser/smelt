@@ -271,6 +271,15 @@ impl TranscriptWindow {
         self.pinned_last_total.is_some()
     }
 
+    /// Compute the byte offset into the joined nav buffer from the
+    /// current `(scroll_top + cursor_line, cursor_col)` position.
+    /// Use this instead of reading `cpos` directly when the buffer
+    /// may have changed since the last `mount()`.
+    pub fn compute_cpos(&self, rows: &[String]) -> usize {
+        let offsets = Self::line_start_offsets(rows);
+        self.visible_cpos(rows, &offsets)
+    }
+
     /// Per-line byte offsets into the joined transcript buffer.
     fn line_start_offsets(rows: &[String]) -> Vec<usize> {
         let mut v = Vec::with_capacity(rows.len());

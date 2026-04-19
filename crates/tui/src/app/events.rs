@@ -921,46 +921,44 @@ impl App {
     /// with the actual cursor position regardless of which code path
     /// moved it (key, motion, mouse click, scroll).
     fn compute_status_position(&mut self) -> Option<render::StatusPosition> {
-        use crate::text_utils::byte_to_cell;
-        let (buf_ref, cpos) = match self.app_focus {
-            crate::app::AppFocus::Prompt => (
-                std::borrow::Cow::Borrowed(&self.input.buf[..]),
-                self.input.cpos,
-            ),
+        match self.app_focus {
+            crate::app::AppFocus::Prompt => {
+                use crate::text_utils::byte_to_cell;
+                let buf = &self.input.buf;
+                let cpos = self.input.cpos.min(buf.len());
+                let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
+                let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let col_cells = byte_to_cell(&buf[line_start..], cpos - line_start);
+                let total_lines = buf.bytes().filter(|&b| b == b'\n').count() + 1;
+                let pct = if total_lines <= 1 {
+                    100
+                } else {
+                    ((line_idx as u64 * 100) / (total_lines.saturating_sub(1) as u64)) as u8
+                };
+                Some(render::StatusPosition {
+                    line: (line_idx as u32) + 1,
+                    col: col_cells as u32 + 1,
+                    scroll_pct: pct.min(100),
+                })
+            }
             crate::app::AppFocus::Content => {
-                let rows = self.screen.full_transcript_nav_text();
-                if rows.is_empty() {
+                let total_lines = self.screen.full_transcript_nav_text().len();
+                if total_lines == 0 {
                     return None;
                 }
-                (
-                    std::borrow::Cow::Owned(rows.join("\n")),
-                    self.transcript_window.cpos,
-                )
+                let line_idx = self.transcript_window.cursor_abs_row(total_lines);
+                let pct = if total_lines <= 1 {
+                    100
+                } else {
+                    ((line_idx as u64 * 100) / (total_lines.saturating_sub(1) as u64)) as u8
+                };
+                Some(render::StatusPosition {
+                    line: (line_idx as u32) + 1,
+                    col: self.transcript_window.cursor_col as u32 + 1,
+                    scroll_pct: pct.min(100),
+                })
             }
-        };
-        let buf: &str = buf_ref.as_ref();
-        // Clamp + snap down to the nearest char boundary. `cpos` is
-        // normally a boundary, but when the transcript mutates between
-        // when `cpos` was last set and this read (e.g. streaming adds
-        // multibyte glyphs), the stale offset may land mid-codepoint.
-        let mut cpos = cpos.min(buf.len());
-        while cpos > 0 && !buf.is_char_boundary(cpos) {
-            cpos -= 1;
         }
-        let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
-        let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let col_cells = byte_to_cell(&buf[line_start..], cpos - line_start);
-        let total_lines = buf.bytes().filter(|&b| b == b'\n').count() + 1;
-        let pct = if total_lines <= 1 {
-            100
-        } else {
-            ((line_idx as u64 * 100) / (total_lines.saturating_sub(1) as u64)) as u8
-        };
-        Some(render::StatusPosition {
-            line: (line_idx as u32) + 1,
-            col: col_cells as u32 + 1,
-            scroll_pct: pct.min(100),
-        })
     }
 
     /// Render a full-mode frame (content + prompt) in its own sync frame.
@@ -1269,19 +1267,17 @@ impl App {
             return None;
         }
         let buf = rows.join("\n");
+        let cpos = self.transcript_window.compute_cpos(&rows);
         let (s, e, kind) = if let Some(vim) = self.transcript_window.vim.as_ref() {
             let kind = match vim.mode() {
                 crate::vim::ViMode::Visual => render::ContentVisualKind::Char,
                 crate::vim::ViMode::VisualLine => render::ContentVisualKind::Line,
                 _ => return None,
             };
-            let (s, e) = vim.visual_range(&buf, self.transcript_window.cpos)?;
+            let (s, e) = vim.visual_range(&buf, cpos)?;
             (s, e, kind)
         } else {
-            let (s, e) = self
-                .transcript_window
-                .cursor
-                .range(self.transcript_window.cpos)?;
+            let (s, e) = self.transcript_window.cursor.range(cpos)?;
             (s, e, render::ContentVisualKind::Char)
         };
         // Byte offsets in nav text → (line, nav_col).
@@ -1756,12 +1752,11 @@ impl App {
         if dragged {
             let rows = self.screen.full_transcript_nav_text();
             let buf = rows.join("\n");
+            let cpos = self.transcript_window.compute_cpos(&rows);
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
-                vim.visual_range(&buf, self.transcript_window.cpos)
+                vim.visual_range(&buf, cpos)
             } else {
-                self.transcript_window
-                    .cursor
-                    .range(self.transcript_window.cpos)
+                self.transcript_window.cursor.range(cpos)
             };
             if let Some((s, e)) = range {
                 let s = crate::text_utils::snap(&buf, s);
@@ -1970,18 +1965,7 @@ impl App {
         if snap.rows.is_empty() {
             return None;
         }
-        let nav = snap.nav_rows();
-        let mut acc = 0usize;
-        let mut row = 0usize;
-        for (i, r) in nav.iter().enumerate() {
-            let next = acc + r.len() + 1;
-            if self.transcript_window.cpos < next {
-                row = i;
-                break;
-            }
-            acc = next;
-            row = i;
-        }
+        let row = self.transcript_window.cursor_abs_row(snap.rows.len());
         snap.block_of_row.get(row).copied().flatten()
     }
 
