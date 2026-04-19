@@ -23,6 +23,10 @@ pub struct KillRing {
     /// Needed for vim paste (`p`/`P`) to insert on a new line rather than
     /// inline.
     linewise: bool,
+    /// Byte range in the *source* buffer the last kill was captured from.
+    /// Used by the transcript yank path to map back to nav-row coordinates
+    /// without the fragile `buf.find(&yanked_text)` search.
+    source_range: Option<(usize, usize)>,
 }
 
 impl Default for KillRing {
@@ -39,6 +43,7 @@ impl KillRing {
             last_yank: None,
             pop_idx: 0,
             linewise: false,
+            source_range: None,
         }
     }
 
@@ -56,6 +61,7 @@ impl KillRing {
         self.current = text;
         self.last_yank = None;
         self.linewise = false;
+        self.source_range = None;
     }
 
     /// Yank the current kill into `buf` at `cpos`. Returns new cpos.
@@ -92,6 +98,7 @@ impl KillRing {
     /// Take the current kill text (for dialog sync).
     pub fn take(&mut self) -> String {
         self.linewise = false;
+        self.source_range = None;
         std::mem::take(&mut self.current)
     }
 
@@ -100,6 +107,7 @@ impl KillRing {
     pub fn set(&mut self, text: String) {
         self.current = text;
         self.linewise = false;
+        self.source_range = None;
     }
 
     /// Set the current kill text along with an explicit linewise flag (used
@@ -109,11 +117,22 @@ impl KillRing {
         self.linewise = linewise;
     }
 
+    /// Set the current kill text with linewise flag and source byte range.
+    pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
+        self.current = text;
+        self.linewise = linewise;
+        self.source_range = Some((start, end));
+    }
+
     pub fn current(&self) -> &str {
         &self.current
     }
 
     pub fn is_linewise(&self) -> bool {
         self.linewise
+    }
+
+    pub fn source_range(&self) -> Option<(usize, usize)> {
+        self.source_range
     }
 }

@@ -417,43 +417,31 @@ Dependency is one-way: parser writes into `BlockHistory`, never reads the snapsh
 
 ## Remaining work — ordered by dependency
 
-### T1. Unify transcript width/gutter authority ⬜
+### T1. Unify transcript width/gutter authority ✅
 
-**Problem:** `Screen::transcript_gutters` and `TranscriptWindow::gutters` are duplicated, never synced (`set_transcript_gutters` has zero callers). `full_transcript_text(width)` and `full_transcript_nav_text(width)` accept a `width` argument they immediately discard (`let _ = width`). Everything funnels through `self.transcript_width()` internally.
+Screen owns gutters, TranscriptWindow drops them. Dead `width` parameters removed from `full_transcript_text` / `full_transcript_nav_text`. `set_transcript_gutters` deleted (zero callers).
 
-**Solution:** Screen owns gutters, TranscriptWindow drops them. The one `TranscriptWindow::gutters.pad_left` read in `position_content_cursor_from_hit` switches to `screen.transcript_gutters.pad_left`. Kill the dead `width` parameters. When we later add dynamic gutters (line numbers), they mutate `Screen::transcript_gutters` and everything updates automatically.
+### T2. Top-relative scroll for transcript ✅
 
-**Files:** `window.rs` (remove `gutters` field), `screen.rs` (remove `set_transcript_gutters`, remove dead `width` params), `events.rs` (read gutters from screen).
+Transcript converted from bottom-relative `scroll_offset` to top-relative `scroll_top`. `ViewportGeom` simplified — `skip_from_top()` is identity. Scrollbar inversion removed. Pin holds `scroll_top` constant. 9 files touched, all tests pass.
 
-### T2. Top-relative scroll for transcript ⬜
+### T3. Route all command execution through `run_command` ✅
 
-**Problem:** Transcript uses bottom-relative `scroll_offset` (0 = newest at bottom). Prompt uses top-relative. `ViewportGeom` converts internally via `skip_from_top()`. `api::win::scroll` comment says "positive = newer" but does the opposite for bottom-relative. Scrollbar paint inverts bottom→top, drag handler inverts back.
+Both `process_input` and `try_command_while_running` now call `run_command` so Lua overrides and autocmds fire consistently.
 
-**Solution:** Convert transcript to top-relative `scroll_top`. `scroll_top = 0` = top of transcript visible. "Stuck to bottom" = `scroll_top == max_scroll`. `ViewportGeom` drops `skip_from_top()` — `scroll_top` IS the skip. Paint, drag, and `api::win` all agree without conversion. `apply_pin` holds `scroll_top` constant (content grows below). Prompt already works this way.
+### T4. Transcript cursor in snapshot coordinates 🔧
 
-**Files:** `window.rs` (TranscriptWindow scroll fields), `viewport.rs` (simplify to top-relative), `screen.rs` (paint path), `events.rs` (scroll/drag handlers), `api.rs` (win::scroll semantics become honest).
+**Problem:** `cpos` (byte offset into ephemeral joined nav buffer) is fragile: yank uses `buf.find(&raw)` which fails on duplicate text, `cpos` can land mid-codepoint during streaming, and the buffer is rebuilt on every key dispatch.
 
-**Prerequisite:** T1 (width/gutters settled first).
+**Solution (incremental):**
 
-### T3. Route all command execution through `run_command` ⬜
+**T4a. Fix yank path** ✅ — `KillRing.source_range` tracks the byte range vim yanked from. `handle_content_vim_key` reads `source_range()` instead of `buf.find(&raw)`. Eliminates the duplicate-text yank bug.
 
-**Problem:** `process_input` (idle prompt submit) and `try_command_while_running` (running prompt submit) call `handle_command` directly — bypassing Lua overrides, `CmdPre`/`CmdPost` autocmds, and notification drain. A user registering `/quit` in `init.lua` gets their override via `:quit` but not via the prompt.
+**T4b. Derive cpos from (row, col)** ⬜ — Make `(scroll_top + cursor_line, cursor_col)` the canonical cursor position. Compute `cpos` on-demand at the start of each interaction via `visible_cpos()`. Eliminates stale-offset and mid-codepoint hazards.
 
-**Solution:** Replace `self.handle_command(trimmed)` with `commands::run_command(self, trimmed)` at both sites. Both already take `&mut App` and handle the full `CommandAction` enum. Leave startup `/resume` bypass as-is (intentional — Lua isn't ready at startup).
+**T4c. Selection anchor in (row, col) space** ⬜ — Switch `WindowCursor.anchor` from byte offset to `(row, col)` so selection survives transcript mutations during streaming without byte-offset staleness.
 
-**Files:** `events.rs` (`process_input`), `commands.rs` (`try_command_while_running`).
-
-### T4. Transcript cursor in snapshot coordinates ⬜
-
-**Problem:** `TranscriptWindow::Buffer` is rebuilt (`rows.join("\n")`) on every key dispatch. `cpos` is a byte offset into this ephemeral string. Yank does `buf.find(&raw)` to recover the byte range for `copy_nav_range` — fails on duplicate text, misses `copy_as` substitutions on miss, can't handle soft-wrap correctly. `cpos` can land mid-codepoint between dispatches during streaming.
-
-**Solution:** Cursor = `(row, col)` in nav-row space. Kill `cpos` as byte offset. Vim operates on `(row, col)` directly (most vim implementations do this). `Buffer.buf` stops being rebuilt — vim reads nav-rows as a slice of lines. Yank returns `(start_row, start_col, end_row, end_col)` → `copy_nav_range` directly. No `find`, no stale-offset hazard, no mid-codepoint risk.
-
-**Changes to vim interface:** `VimContext` currently takes `&mut String` (the buffer) + `&mut usize` (cpos). Replace with a line-addressed model: vim gets `&[&str]` (lines) + `&mut (usize, usize)` (row, col). Motions (`w`, `b`, `e`, `j`, `k`, `0`, `$`, `gg`, `G`, etc.) already think in line/col internally — the byte-offset conversion at the boundary is the part that goes away.
-
-**Files:** `window.rs` (cursor model), `vim/mod.rs` + `vim/motion.rs` (VimContext interface), `cursor.rs` (WindowCursor), `events.rs` (yank path, key dispatch), `screen.rs` (status position).
-
-**Prerequisite:** T2 (scroll semantics settled so cursor + scroll agree).
+**Files:** `kill_ring.rs`, `vim/mod.rs`, `window.rs`, `cursor.rs`, `events.rs`, `screen.rs`.
 
 ### T5. YAML → Lua config migration ⬜
 
@@ -468,13 +456,13 @@ Dependency is one-way: parser writes into `BlockHistory`, never reads the snapsh
 
 **Files:** `config.rs`, `lua.rs`, `engine/config_file.rs`, `setup.rs`.
 
-### T6. Clean up dead scaffolding ⬜
+### T6. Clean up dead scaffolding ✅ (partial)
 
-- Delete `WinId` (zero usages, `AppFocus` is the real thing)
-- Delete `api::intent::PaneIntent` (zero usages, never wired into dispatch)
-- Delete `WindowRect` enum (never instantiated, `FloatEntry` is the real thing)
-- Delete `LayoutState.gap` field (hardcoded 0, never read)
-- Remove `api::VERSION` or wire it into Lua properly (currently dead)
+- ✅ Deleted `WinId` enum (zero usages)
+- ✅ Deleted `api::intent::PaneIntent` (zero usages)
+- ✅ Deleted `WindowRect` enum (never instantiated)
+- ⬜ `LayoutState.gap` — still used in `screen.rs` and tests, not dead
+- ⬜ `api::VERSION` — keep until Lua wiring (T8)
 
 Can happen anytime — no dependencies.
 
