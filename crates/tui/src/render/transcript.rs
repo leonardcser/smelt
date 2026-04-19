@@ -290,6 +290,9 @@ impl TranscriptSnapshot {
     /// adjusted `(row, col)` or `None` if the row has no selectable cells.
     pub fn snap_to_selectable(&self, row: usize, col: usize) -> Option<(usize, usize)> {
         let cells = self.row_cells.get(row)?;
+        if cells.is_empty() {
+            return None;
+        }
         if cells.get(col).is_some_and(|c| c.meta.selectable) {
             return Some((row, col));
         }
@@ -300,7 +303,7 @@ impl TranscriptSnapshot {
             }
         }
         // Search backward
-        for c in (0..col).rev() {
+        for c in (0..col.min(cells.len())).rev() {
             if cells[c].meta.selectable {
                 return Some((row, c));
             }
