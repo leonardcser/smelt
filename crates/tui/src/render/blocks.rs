@@ -278,7 +278,9 @@ pub(super) fn render_block<S: LayoutSink>(
     match block {
         Block::User { text, image_labels } => {
             let is_command = crate::completer::Completer::is_command(text.trim());
-            let text_w = width.saturating_sub(2).max(1);
+            // Left padding lives in the gutter (gutter_bg paints it with
+            // user_bg); only the right trailing space is in the content area.
+            let text_w = width.saturating_sub(1).max(1);
             let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
             let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
             let end = all_lines
@@ -293,14 +295,14 @@ pub(super) fn render_block<S: LayoutSink>(
             let multiline = logical_lines.len() > 1 || wraps;
             let block_w = if multiline {
                 if wraps {
-                    text_w + 2
+                    text_w + 1
                 } else {
                     logical_lines
                         .iter()
                         .map(|l| l.chars().count())
                         .max()
                         .unwrap_or(0)
-                        + 2
+                        + 1
                 }
             } else {
                 0
@@ -313,7 +315,7 @@ pub(super) fn render_block<S: LayoutSink>(
             };
             for logical_line in &logical_lines {
                 if logical_line.is_empty() {
-                    let fill = if block_w > 0 { block_w } else { 2 };
+                    let fill = if block_w > 0 { block_w } else { 1 };
                     out.set_bg(user_bg);
                     out.print_with_meta(&" ".repeat(fill), pad_meta.clone());
                     out.reset_style();
@@ -329,12 +331,11 @@ pub(super) fn render_block<S: LayoutSink>(
                 for chunk in &chunks {
                     let chunk_len = chunk.chars().count();
                     let trailing = if block_w > 0 {
-                        block_w.saturating_sub(1 + chunk_len)
+                        block_w.saturating_sub(chunk_len)
                     } else {
                         1
                     };
                     out.set_bg(user_bg);
-                    out.print_with_meta(" ", pad_meta.clone());
                     out.set_bold();
                     print_user_highlights(out, chunk, image_labels, is_command);
                     out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
