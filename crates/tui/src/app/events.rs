@@ -1032,6 +1032,12 @@ impl App {
         {
             return self.handle_content_novim_key(k);
         }
+        // Block-scoped bindings: the focused block gets first crack at
+        // the key before buffer/window keymaps (nvim-style layering).
+        if let Some(outcome) = self.dispatch_block_key(k) {
+            return outcome;
+        }
+
         if self.transcript_window.vim_enabled() {
             if self.handle_content_vim_key(k) {
                 return EventOutcome::Redraw;
@@ -1918,6 +1924,62 @@ impl App {
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.refocus(&rows, viewport);
         self.screen.mark_dirty();
+    }
+
+    /// Determine which block the content cursor is currently on, if any.
+    /// Derives the absolute row from `cpos` (byte offset in the joined
+    /// transcript text), then looks up the snapshot's `block_of_row`.
+    fn focused_block_id(&mut self) -> Option<render::BlockId> {
+        let tw = self.screen.transcript_width() as u16;
+        let snap = self
+            .screen
+            .transcript
+            .snapshot(tw, self.screen.show_thinking());
+        if snap.rows.is_empty() {
+            return None;
+        }
+        let mut acc = 0usize;
+        let mut row = 0usize;
+        for (i, r) in snap.rows.iter().enumerate() {
+            let next = acc + r.len() + 1;
+            if self.transcript_window.cpos < next {
+                row = i;
+                break;
+            }
+            acc = next;
+            row = i;
+        }
+        snap.block_of_row.get(row).copied().flatten()
+    }
+
+    /// Try to handle a key as a block-scoped binding. Returns `Some` if
+    /// the key was consumed, `None` to fall through to buffer/window
+    /// keymaps.
+    fn dispatch_block_key(&mut self, k: KeyEvent) -> Option<EventOutcome> {
+        use crossterm::event::KeyModifiers as M;
+        if k.modifiers != M::NONE {
+            return None;
+        }
+        let block_id = self.focused_block_id()?;
+        let is_tool = matches!(
+            self.screen.transcript.block(block_id),
+            Some(render::Block::ToolCall { .. })
+        );
+        if !is_tool {
+            return None;
+        }
+        match k.code {
+            KeyCode::Char('e') => {
+                let vs = self.screen.block_view_state(block_id);
+                let next = match vs {
+                    render::ViewState::Expanded => render::ViewState::Collapsed,
+                    _ => render::ViewState::Expanded,
+                };
+                self.screen.set_block_view_state(block_id, next);
+                Some(EventOutcome::Redraw)
+            }
+            _ => None,
+        }
     }
 }
 

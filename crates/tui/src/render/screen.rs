@@ -213,6 +213,10 @@ impl Screen {
         (w as usize).saturating_sub(1).max(1)
     }
 
+    pub fn show_thinking(&self) -> bool {
+        self.show_thinking
+    }
+
     /// Expose the backend for dialogs that need output + size.
     pub fn backend(&self) -> &dyn TerminalBackend {
         &*self.backend

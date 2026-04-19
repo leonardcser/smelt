@@ -192,6 +192,10 @@ impl Transcript {
         self.history.tool_states.clone()
     }
 
+    pub fn block(&self, id: BlockId) -> Option<&Block> {
+        self.history.blocks.get(&id)
+    }
+
     pub fn has_history(&self) -> bool {
         !self.history.is_empty()
     }
