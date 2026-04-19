@@ -1,3 +1,12 @@
+/// Where a window is placed: docked into a region of the main layout,
+/// or floating above it.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub enum WindowRect {
+    Dock(HitRegion),
+    Float { rect: Rect, z: u8 },
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rect {
     pub top: u16,
@@ -38,6 +47,15 @@ pub struct LayoutState {
     pub gap: u16,
     pub prompt: Rect,
     pub dialog: Option<DialogLayout>,
+    pub floats: Vec<FloatEntry>,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct FloatEntry {
+    pub rect: Rect,
+    pub z: u8,
+    pub region: HitRegion,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +106,7 @@ impl LayoutState {
             gap,
             prompt,
             dialog: None,
+            floats: Vec::new(),
         }
     }
 
@@ -129,7 +148,14 @@ impl LayoutState {
             gap: 0,
             prompt: Rect::default(),
             dialog: dialog_layout,
+            floats: Vec::new(),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn push_float(&mut self, rect: Rect, z: u8, region: HitRegion) {
+        self.floats.push(FloatEntry { rect, z, region });
+        self.floats.sort_by_key(|f| f.z);
     }
 
     pub fn viewport_rows(&self) -> u16 {
@@ -142,6 +168,11 @@ impl LayoutState {
     }
 
     pub fn hit_test(&self, row: u16, col: u16) -> HitRegion {
+        for f in self.floats.iter().rev() {
+            if f.rect.contains(row, col) {
+                return f.region;
+            }
+        }
         if let Some(ref d) = self.dialog {
             if row == d.status_row {
                 return HitRegion::Status;
@@ -269,5 +300,20 @@ mod tests {
         assert_eq!(layout.hit_test(0, 0), HitRegion::Transcript);
         assert_eq!(layout.hit_test(d.rect.top, 0), HitRegion::Dialog);
         assert_eq!(layout.hit_test(d.status_row, 0), HitRegion::Status);
+    }
+
+    #[test]
+    fn float_takes_precedence_over_docked() {
+        let mut layout = LayoutState::compute(&LayoutInput {
+            term_width: 80,
+            term_height: 40,
+            prompt_height: 5,
+            dialog_height: None,
+            constrain_dialog: false,
+        });
+        assert_eq!(layout.hit_test(10, 20), HitRegion::Transcript);
+        layout.push_float(Rect::new(5, 10, 30, 10), 1, HitRegion::Dialog);
+        assert_eq!(layout.hit_test(10, 20), HitRegion::Dialog);
+        assert_eq!(layout.hit_test(10, 5), HitRegion::Transcript);
     }
 }
