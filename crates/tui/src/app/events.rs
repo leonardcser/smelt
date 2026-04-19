@@ -1849,8 +1849,11 @@ impl App {
         // place the cursor at the *top* of it, not the last line.
         let line_idx = geom.line_of_row(rel_row).unwrap_or(0) as usize;
         let line_idx = line_idx.min(rows.len() - 1);
+        let col = self
+            .screen
+            .snap_col_to_selectable(line_idx, col as usize);
         self.transcript_window
-            .jump_to_line_col(&rows, line_idx, col as usize, viewport_rows);
+            .jump_to_line_col(&rows, line_idx, col, viewport_rows);
         self.screen.mark_dirty();
     }
 

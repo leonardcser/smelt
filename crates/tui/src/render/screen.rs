@@ -1057,6 +1057,16 @@ impl Screen {
         rows
     }
 
+    /// Snap a transcript `(row, col)` to the nearest selectable cell.
+    /// Returns the adjusted column, or the original if no snap needed.
+    pub fn snap_col_to_selectable(&mut self, abs_row: usize, col: usize) -> usize {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        snap.snap_to_selectable(abs_row, col)
+            .map(|(_, c)| c)
+            .unwrap_or(col)
+    }
+
     pub fn working_throbber(&self) -> Option<Throbber> {
         self.working.throbber
     }
