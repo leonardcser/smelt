@@ -2060,6 +2060,13 @@ impl App {
                 self.screen.cmdline.move_end();
                 self.screen.mark_dirty();
             }
+            (KeyCode::Char('w'), M::CONTROL) => {
+                self.screen.cmdline.delete_word_back();
+                if self.screen.cmdline.buf.is_empty() {
+                    self.screen.cmdline.close();
+                }
+                self.screen.mark_dirty();
+            }
             (KeyCode::Char('u'), M::CONTROL) => {
                 self.screen.cmdline.buf.clear();
                 self.screen.cmdline.cursor = 0;

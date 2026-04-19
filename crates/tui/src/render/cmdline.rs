@@ -86,6 +86,21 @@ impl CmdlineState {
         }
     }
 
+    pub fn delete_word_back(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let before = &self.buf[..self.cursor];
+        let end = before.len();
+        let trimmed = before.trim_end();
+        let start = trimmed
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|i| i + trimmed[i..].chars().next().unwrap().len_utf8())
+            .unwrap_or(0);
+        self.buf.drain(start..end);
+        self.cursor = start;
+    }
+
     pub fn move_start(&mut self) {
         self.cursor = 0;
     }
