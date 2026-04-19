@@ -1438,7 +1438,9 @@ impl App {
 
                 if matches!(
                     self.screen.layout.hit_test(me.row, me.column),
-                    render::HitRegion::Prompt | render::HitRegion::Status
+                    render::HitRegion::Prompt
+                        | render::HitRegion::Status
+                        | render::HitRegion::Completer
                 ) {
                     if self.app_focus != crate::app::AppFocus::Prompt {
                         self.app_focus = crate::app::AppFocus::Prompt;
