@@ -72,6 +72,8 @@ fn apply_view_state(display: &mut super::display::DisplayBlock, state: ViewState
             gutter_bg: None,
             fill_bg: None,
             fill_right_margin: 0,
+            soft_wrapped: false,
+            source_text: None,
         }
     };
     match state {
@@ -1175,7 +1177,12 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
             if segments.len() > 1 {
                 out.mark_wrapped();
             }
-            for seg in &segments {
+            for (si, seg) in segments.iter().enumerate() {
+                if si == 0 {
+                    out.set_source_text(lines[i]);
+                } else {
+                    out.mark_soft_wrap_continuation();
+                }
                 if let Some(b) = bctx {
                     b.print_left(out);
                     let cols = print_styled_line(out, seg, dim);
@@ -1215,12 +1222,25 @@ fn print_styled_line<S: LayoutSink>(out: &mut S, text: &str, dim: bool) -> usize
 
     if trimmed.starts_with('>') {
         let content = trimmed.strip_prefix('>').unwrap().trim_start();
+        let prefix = &trimmed[..trimmed.len() - content.len()];
         out.push_style(SpanStyle {
             dim: true,
             italic: true,
             ..Default::default()
         });
-        out.print(content);
+        if let Some(first_ch) = content.chars().next() {
+            let rest = &content[first_ch.len_utf8()..];
+            out.print_with_meta(
+                &first_ch.to_string(),
+                super::display::SpanMeta {
+                    selectable: true,
+                    copy_as: Some(format!("{prefix}{first_ch}")),
+                },
+            );
+            if !rest.is_empty() {
+                out.print(rest);
+            }
+        }
         out.pop_style();
         return content.chars().count();
     }
@@ -1334,9 +1354,14 @@ fn render_horizontal_rule<S: LayoutSink>(
         out.print(indent);
     }
 
-    // Always apply dim attribute (same as list markers)
     out.push_dim();
-    out.print(&hr);
+    out.print_with_meta(
+        &hr,
+        super::display::SpanMeta {
+            selectable: true,
+            copy_as: Some("---".into()),
+        },
+    );
     out.pop_style();
 
     if let Some(b) = bctx {

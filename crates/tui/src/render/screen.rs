@@ -75,7 +75,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
-
 pub struct Screen {
     pub(crate) transcript: Transcript,
     prompt: PromptState,

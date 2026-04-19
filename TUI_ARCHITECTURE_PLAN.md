@@ -272,52 +272,38 @@ D1–D6 shipped. `mlua` runtime, `smelt.api.*` surface, autocmd dispatch, user c
 
 # Remaining work
 
-## R1 — Raw-copy pipeline
+## R1 — Raw-copy pipeline ✅
 
 **Problem:** Copying from the transcript yields the rendered display — `─` instead of `---`, no `**bold**` markers, soft-wrapped lines get `\n` injected, heading `#` prefixes stripped, blockquote `>` stripped, etc. Copy should produce the raw source markdown.
 
-**Architecture:** Leverage the existing `SpanMeta.copy_as` mechanism. During block rendering in `blocks.rs`, every span that transforms source text annotates `copy_as` with the original source fragment. The copy path (`copy_range` in `transcript.rs`) already walks cells and emits `copy_as` when present — no new data structures or coordinate systems needed.
+**Architecture (Option B — source text per display row):** Each `DisplayLine` carries an optional `source_text: String` — the raw source line it was rendered from. During `render_markdown_inner`, the first visual row of each source line stores the full source line; soft-wrap continuations leave it `None`. The `TranscriptSnapshot` propagates `source_text` per row. `copy_range` uses source text for fully-selected rows (emitting raw markdown) and falls back to cell-based `SpanMeta.copy_as` for partially-selected rows.
 
-**What transforms need `copy_as` annotation:**
+**Two complementary mechanisms:**
 
-| Render transform | Display | `copy_as` value |
+| Mechanism | Scope | Used when |
 |---|---|---|
-| Horizontal rule `---` | `───` | `"---"` (first cell), `""` (remaining `─` cells) |
-| Bold `**word**` | `word` (bold) | `"**"` on first/last cell of bold run, or prepend/append to `copy_as` |
-| Italic `*word*` | `word` (italic) | `"*"` on first/last cell |
-| Inline code `` `code` `` | `code` (styled) | `` "`" `` on first/last cell |
-| Heading `# Title` | `Title` (bold+color) | `"# "` on first cell |
-| Blockquote `> text` | `text` (dim italic, `│` gutter) | `"> "` on first cell of content |
-| List prefix `- ` | `- ` (dim) | no change (already copies as-is) |
-| Soft-wrap newline | visual `\n` | `""` (suppress — not in source) |
-| Code fence `` ``` `` | (not rendered as text) | emit `"```lang\n"` / `"```\n"` markers |
-| Table separator `\|---\|` | rendered border | original `\|---\|` text |
+| `DisplayLine.source_text` | Full source line | Full-row selection — emits raw markdown (bold markers, heading `#`, blockquote `>`, etc.) |
+| `SpanMeta.copy_as` | Per-cell substitution | Partial-row selection — restores `>` prefix on blockquotes, `---` on HR cells |
 
-**Implementation plan:**
+**What's implemented:**
 
-1. **Soft-wrap suppression**: In `wrap_line` / `render_markdown_inner`, when a logical line wraps into multiple visual rows, the continuation rows' first cell gets `copy_as` that suppresses the visual newline. Concretely: after `out.newline()` for a soft-wrap, mark the *join point* so `copy_range` doesn't insert `\n` between visual rows that belong to the same logical line. Approach: add a `soft_wrapped: bool` flag on `DisplayLine` — when true, `copy_range` doesn't emit `\n` before this row.
-
-2. **Inline markdown markers**: In `print_inline_styled` (`blocks.rs`), when parsing `**bold**`, `*italic*`, `` `code` ``, annotate the first rendered cell with `copy_as: Some("**X")` (where X is the original first char) and last cell with `copy_as: Some("X**")`. Or simpler: emit invisible marker spans (`selectable: true, copy_as: Some("**")`) with zero display width — but that requires width-zero span support. Simpler: prepend/append markers to the `copy_as` of boundary cells.
-
-3. **Heading prefix**: In `print_styled_line`, when stripping `# ` for rendering, set `copy_as: Some("# X")` on the first rendered cell (where X is the original first char).
-
-4. **Horizontal rule**: In `render_horizontal_rule`, set `copy_as: Some("---\n")` on the first `─` cell and `copy_as: Some("")` on the rest.
-
-5. **Blockquote**: In `print_styled_line`, when stripping `> ` for rendering, set `copy_as: Some("> X")` on the first cell.
-
-6. **Code fences**: `Block::CodeLine` renders individual lines without the opening/closing `` ``` `` fences (those are consumed by the parser). For raw copy, the first `CodeLine` in a sequence should emit `copy_as` that prepends `` ```lang\n `` and the last should append `` \n``` ``. This requires the block renderer to know fence boundaries — either via `SpanMeta` annotation during `render_code_block`, or by having `copy_range` detect `CodeLine` block boundaries via `block_of_row`.
-
-7. **`DisplayLine.soft_wrapped: bool`**: Add this flag so `copy_range` knows not to insert `\n` between continuation rows of the same logical line. Set by `render_markdown_inner` / `wrap_line` when a logical source line breaks into multiple visual rows.
-
-**Key insight:** The `copy_as` mechanism already handles the cell-level substitution. The only new primitive needed is `soft_wrapped` on `DisplayLine` for newline suppression. Everything else is annotation work in the renderers.
-
-**Deletes:** The "copy raw markdown" item from the pending list. The current `copy_range` / `copy_byte_range` pipeline stays — it just gets richer annotations to work with.
+- `DisplayLine.source_text: Option<String>` — set by `render_markdown_inner` on the first segment of each source line
+- `DisplayLine.soft_wrapped: bool` — set on continuation segments after word-wrap
+- `LayoutSink::set_source_text()` / `mark_soft_wrap_continuation()` — trait methods + SpanCollector impl
+- `TranscriptSnapshot.source_text: Vec<Option<String>>` — propagated from display lines during snapshot build
+- `TranscriptSnapshot.soft_wrapped: Vec<bool>` — propagated similarly
+- `copy_range` logic:
+  - Full row + has source_text → emit source_text (raw markdown)
+  - Full row + soft_wrapped → skip (source already emitted by first segment)
+  - Partial row → cell-based copy with SpanMeta.copy_as fallback
+- Cell-level `copy_as` annotations: HR (`---`), blockquote (`> ` prefix)
+- Tests: `copy_range_uses_source_text_for_full_rows`, `copy_range_partial_row_ignores_source_text`, `copy_range_soft_wrapped_rows_coalesce`
 
 **Files touched:**
-- `render/display.rs` — add `soft_wrapped: bool` to `DisplayLine`
-- `render/blocks.rs` — annotate `copy_as` in `print_inline_styled`, `print_styled_line`, `render_horizontal_rule`, `render_code_block`, `render_markdown_inner`
-- `render/transcript.rs` — `copy_range` checks `soft_wrapped` to suppress inter-row `\n`
-- `render/layout_out.rs` — propagate `soft_wrapped` flag through `SpanCollector`
+- `render/display.rs` — `source_text` + `soft_wrapped` on `DisplayLine`
+- `render/layout_out.rs` — `set_source_text` + `mark_soft_wrap_continuation` on `LayoutSink` + `SpanCollector`
+- `render/blocks.rs` — `set_source_text(lines[i])` in `render_markdown_inner`, `copy_as` on HR + blockquote, `mark_soft_wrap_continuation` on wrap segments
+- `render/transcript.rs` — `source_text` + `soft_wrapped` on snapshot, `copy_range` source-text dispatch
 
 ## R2 — Extract StreamParser from Transcript
 
