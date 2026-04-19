@@ -1,12 +1,3 @@
-/// Where a window is placed: docked into a region of the main layout,
-/// or floating above it.
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
-pub enum WindowRect {
-    Dock(HitRegion),
-    Float { rect: Rect, z: u8 },
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rect {
     pub top: u16,

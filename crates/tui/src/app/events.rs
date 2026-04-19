@@ -865,7 +865,7 @@ impl App {
 
         // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();
-        match self.handle_command(trimmed) {
+        match super::commands::run_command(self, trimmed) {
             CommandAction::Quit => return InputOutcome::Quit,
             CommandAction::CancelAndClear => {
                 return InputOutcome::CancelAndClear;
