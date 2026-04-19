@@ -401,7 +401,17 @@ impl App {
                         }
                         return EventOutcome::Noop;
                     }
-                    return EventOutcome::Noop;
+
+                    let turns = self.screen.user_turns();
+                    if turns.is_empty() {
+                        return EventOutcome::Noop;
+                    }
+                    self.screen.erase_prompt();
+                    let restore_vim_insert = restore_mode == Some(vim::ViMode::Insert);
+                    return EventOutcome::OpenDialog(Box::new(render::RewindDialog::new(
+                        turns,
+                        restore_vim_insert,
+                    )));
                 }
                 // Single Esc in normal mode — start timer.
                 t.last_esc = Some(Instant::now());
@@ -1333,8 +1343,8 @@ impl App {
             self.transcript_window.vim.as_ref().map(|v| v.mode()),
             Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
         );
-        let cursor_off_bottom = self.transcript_window.scroll_offset > 0
-            || self.transcript_window.cursor_line > 0;
+        let cursor_off_bottom =
+            self.transcript_window.scroll_offset > 0 || self.transcript_window.cursor_line > 0;
         let want_pin =
             has_selection || in_vim_visual || self.mouse_drag_active || cursor_off_bottom;
         if want_pin {
@@ -1924,9 +1934,7 @@ impl App {
             crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
             crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
         };
-        if target == crate::app::AppFocus::Content
-            && !self.screen.has_transcript_content()
-        {
+        if target == crate::app::AppFocus::Content && !self.screen.has_transcript_content() {
             return;
         }
         self.app_focus = target;

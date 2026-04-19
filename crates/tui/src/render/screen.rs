@@ -8,9 +8,7 @@
 //! overlay, and the prompt (or dialog placement) atomically.
 
 use super::blocks;
-use super::blocks::{
-    gap_between, render_thinking_summary, thinking_summary, Element,
-};
+use super::blocks::{gap_between, render_thinking_summary, thinking_summary, Element};
 use super::cache::{PersistedLayoutCache, RenderCache};
 use super::completions::{completion_actual_rows, draw_completions, draw_menu};
 use super::history::{
@@ -48,6 +46,7 @@ pub(super) enum CursorOwner {
     Dialog,
     None,
 }
+use super::display::DisplayLine;
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::prompt::PromptState;
 use super::selection::{
@@ -63,7 +62,6 @@ use super::{
     DialogPlacement, Frame, FramePrompt, RenderOut, StdioBackend, StyleState, TerminalBackend,
     SPINNER_FRAMES,
 };
-use super::display::DisplayLine;
 use crate::input::{InputSnapshot, InputState};
 use crate::keymap::hints;
 use crate::theme;
@@ -1078,10 +1076,8 @@ impl Screen {
                     let clip_start = sel_start.saturating_sub(col);
                     let clip_end = sel_end.min(span_end) - col;
                     out.move_to((col + clip_start) as u16 + pad, line_idx as u16);
-                    let byte_start =
-                        crate::text_utils::cell_to_byte(&span.text, clip_start);
-                    let byte_end =
-                        crate::text_utils::cell_to_byte(&span.text, clip_end);
+                    let byte_start = crate::text_utils::cell_to_byte(&span.text, clip_start);
+                    let byte_end = crate::text_utils::cell_to_byte(&span.text, clip_end);
                     let sub = &span.text[byte_start..byte_end];
                     let style = StyleState {
                         fg: span

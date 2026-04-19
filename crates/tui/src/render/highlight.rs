@@ -647,9 +647,7 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
                         out.set_bg(bgv);
                         if vi == 0 {
                             out.set_fg(color);
-                            out.print_gutter(
-                                &format!(" {:>w$} ", lineno, w = gutter_width),
-                            );
+                            out.print_gutter(&format!(" {:>w$} ", lineno, w = gutter_width));
                             out.set_fg(color);
                             out.print_gutter(&format!("{} ", ch));
                         } else {
@@ -661,9 +659,7 @@ pub(super) fn print_cached_inline_diff<S: LayoutSink>(
                     } else {
                         if vi == 0 {
                             out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
-                            out.print_gutter(
-                                &format!(" {:>w$}", lineno, w = gutter_width),
-                            );
+                            out.print_gutter(&format!(" {:>w$}", lineno, w = gutter_width));
                             out.reset_style();
                             out.print_gutter("   ");
                         } else {
@@ -1503,7 +1499,10 @@ pub(crate) struct InlineSpan {
 pub(crate) fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
     let chars: Vec<char> = text.chars().collect();
     let nodes = parse_inline(&chars, 0, chars.len());
-    let base = InlineStyle { dim, ..Default::default() };
+    let base = InlineStyle {
+        dim,
+        ..Default::default()
+    };
     let mut out = Vec::new();
     flatten_nodes_into(&nodes, &base, &mut out);
     out
@@ -1513,30 +1512,61 @@ fn flatten_nodes_into(nodes: &[InlineNode], style: &InlineStyle, out: &mut Vec<I
     for node in nodes {
         match node {
             InlineNode::Text(s) if !s.is_empty() => {
-                out.push(InlineSpan { text: s.clone(), style: style.clone() });
+                out.push(InlineSpan {
+                    text: s.clone(),
+                    style: style.clone(),
+                });
             }
             InlineNode::Text(_) => {}
             InlineNode::Code(s) => {
                 out.push(InlineSpan {
                     text: s.clone(),
-                    style: InlineStyle { code: true, ..*style },
+                    style: InlineStyle {
+                        code: true,
+                        ..*style
+                    },
                 });
             }
             InlineNode::Bold(ch) => {
-                flatten_nodes_into(ch, &InlineStyle { bold: true, ..*style }, out);
+                flatten_nodes_into(
+                    ch,
+                    &InlineStyle {
+                        bold: true,
+                        ..*style
+                    },
+                    out,
+                );
             }
             InlineNode::Italic(ch) => {
-                flatten_nodes_into(ch, &InlineStyle { italic: true, ..*style }, out);
+                flatten_nodes_into(
+                    ch,
+                    &InlineStyle {
+                        italic: true,
+                        ..*style
+                    },
+                    out,
+                );
             }
             InlineNode::BoldItalic(ch) => {
                 flatten_nodes_into(
                     ch,
-                    &InlineStyle { bold: true, italic: true, ..*style },
+                    &InlineStyle {
+                        bold: true,
+                        italic: true,
+                        ..*style
+                    },
                     out,
                 );
             }
             InlineNode::Strike(ch) => {
-                flatten_nodes_into(ch, &InlineStyle { crossedout: true, ..*style }, out);
+                flatten_nodes_into(
+                    ch,
+                    &InlineStyle {
+                        crossedout: true,
+                        ..*style
+                    },
+                    out,
+                );
             }
         }
     }
@@ -1601,7 +1631,10 @@ fn append_text_to_row(row: &mut Vec<InlineSpan>, text: &str, style: &InlineStyle
             return;
         }
     }
-    row.push(InlineSpan { text: text.to_string(), style: style.clone() });
+    row.push(InlineSpan {
+        text: text.to_string(),
+        style: style.clone(),
+    });
 }
 
 fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) {
@@ -1611,7 +1644,10 @@ fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) 
             return;
         }
     }
-    row.push(InlineSpan { text: ch.to_string(), style: style.clone() });
+    row.push(InlineSpan {
+        text: ch.to_string(),
+        style: style.clone(),
+    });
 }
 
 pub(crate) fn emit_inline_spans<S: LayoutSink>(out: &mut S, spans: &[InlineSpan]) {
@@ -1637,7 +1673,10 @@ pub(crate) fn emit_inline_spans<S: LayoutSink>(out: &mut S, spans: &[InlineSpan]
 }
 
 pub(crate) fn inline_spans_width(spans: &[InlineSpan]) -> usize {
-    spans.iter().map(|s| UnicodeWidthStr::width(s.text.as_str())).sum()
+    spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.text.as_str()))
+        .sum()
 }
 
 #[cfg(test)]
