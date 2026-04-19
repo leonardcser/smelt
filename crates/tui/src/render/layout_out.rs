@@ -46,6 +46,15 @@ pub(crate) trait LayoutSink {
     /// padding will be filled with this color instead of blank spaces.
     fn set_gutter_bg(&mut self, _bg: ColorValue) {}
 
+    /// Mark the current line as a soft-wrap continuation of the previous
+    /// logical line. `copy_range` suppresses `\n` before these rows.
+    fn mark_soft_wrap_continuation(&mut self) {}
+
+    /// Set the raw source text for the current line. Used by
+    /// `render_markdown_inner` so `copy_range` can emit raw markdown
+    /// instead of display text for fully-selected rows.
+    fn set_source_text(&mut self, _text: &str) {}
+
     /// Number of visible columns printed on the current row since the
     /// last `newline()`. Used by helpers that need to compute padding
     /// against the row width.
@@ -258,6 +267,14 @@ impl LayoutSink for SpanCollector {
 
     fn set_gutter_bg(&mut self, bg: ColorValue) {
         self.cur_line.gutter_bg = Some(bg);
+    }
+
+    fn mark_soft_wrap_continuation(&mut self) {
+        self.cur_line.soft_wrapped = true;
+    }
+
+    fn set_source_text(&mut self, text: &str) {
+        self.cur_line.source_text = Some(text.to_string());
     }
 
     fn cur_line_cols(&self) -> u16 {

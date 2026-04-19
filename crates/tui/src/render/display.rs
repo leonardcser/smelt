@@ -26,15 +26,15 @@ pub struct DisplayBlock {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DisplayLine {
     pub spans: Vec<DisplaySpan>,
-    /// Optional bg color that extends from end-of-spans to
-    /// `term_width - right_margin` at paint time. Used by diff and code
-    /// rows to fill the row with a background color.
     /// Optional bg color for the left gutter column(s). When set,
     /// `paint_line` fills the gutter with this color instead of blank
     /// spaces. Used by User blocks whose background bleeds into the
     /// gutter while content stays in content-rect coords.
     #[serde(default)]
     pub gutter_bg: Option<ColorValue>,
+    /// Optional bg color that extends from end-of-spans to
+    /// `term_width - right_margin` at paint time. Used by diff and code
+    /// rows to fill the row with a background color.
     #[serde(default)]
     pub fill_bg: Option<ColorValue>,
     /// Width (in display columns) reserved on the right side when
@@ -42,6 +42,17 @@ pub struct DisplayLine {
     /// short of the terminal edge.
     #[serde(default)]
     pub fill_right_margin: u16,
+    /// True when this visual row is a continuation of the previous row's
+    /// logical line (soft-wrapped). `copy_range` suppresses `\n` before
+    /// soft-wrapped rows so copied text matches the source.
+    #[serde(default)]
+    pub soft_wrapped: bool,
+    /// Raw source line this display row was rendered from. Set by
+    /// `render_markdown_inner` on the first segment of each source line.
+    /// Soft-wrap continuations leave this `None`. `copy_range` emits
+    /// this instead of display text for fully-selected rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

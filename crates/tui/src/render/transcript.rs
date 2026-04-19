@@ -4,6 +4,7 @@
 //! state (thinking / text / tools / agents / exec). `Screen` holds a
 //! `Transcript` and delegates all content mutations through it.
 
+use super::display::SpanMeta;
 use super::history::{
     ActiveAgent, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block, BlockHistory,
     BlockId, LayoutKey, Status, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
@@ -33,6 +34,14 @@ pub struct TranscriptSnapshot {
     /// vec has one `SnapshotCell` per display column. Used by
     /// `copy_range` to respect `SpanMeta.selectable` / `copy_as`.
     pub row_cells: Vec<Vec<SnapshotCell>>,
+    /// True when this row is a soft-wrap continuation of the previous
+    /// logical line. `copy_range` suppresses `\n` before these rows.
+    pub soft_wrapped: Vec<bool>,
+    /// Raw source text for each row. `Some(line)` on the first display
+    /// row of a source line; `None` on soft-wrap continuations and rows
+    /// without source annotation. `copy_range` uses this for
+    /// fully-selected rows instead of cell-based reconstruction.
+    pub source_text: Vec<Option<String>>,
     /// For each row, the `BlockId` that produced it (`None` for gap rows).
     pub block_of_row: Vec<Option<BlockId>>,
     /// Row range `[start..end)` for each block, in insertion order.
@@ -211,15 +220,32 @@ impl TranscriptSnapshot {
                 Some(c) => c,
                 None => continue,
             };
-            if r > start_row {
+            let is_soft = self.soft_wrapped.get(r).copied().unwrap_or(false);
+            if r > start_row && !is_soft {
                 out.push('\n');
             }
-            let c_start = if r == start_row { start_col } else { 0 };
-            let c_end = if r == end_row {
+
+            let is_first = r == start_row;
+            let is_last = r == end_row;
+            let c_start = if is_first { start_col } else { 0 };
+            let c_end = if is_last {
                 end_col.min(cells.len())
             } else {
                 cells.len()
             };
+            let full_row = c_start == 0 && c_end == cells.len();
+
+            if full_row && is_soft {
+                continue;
+            }
+
+            if full_row {
+                if let Some(src) = self.source_text.get(r).and_then(|s| s.as_deref()) {
+                    out.push_str(src);
+                    continue;
+                }
+            }
+
             for cell in &cells[c_start..c_end] {
                 if !cell.meta.selectable {
                     continue;
@@ -359,6 +385,8 @@ impl Transcript {
 
         let mut rows: Vec<String> = Vec::new();
         let mut row_cells: Vec<Vec<SnapshotCell>> = Vec::new();
+        let mut soft_wrapped: Vec<bool> = Vec::new();
+        let mut source_text: Vec<Option<String>> = Vec::new();
         let mut block_of_row: Vec<Option<BlockId>> = Vec::new();
         let mut row_of_block: HashMap<BlockId, Range<u16>> = HashMap::new();
 
@@ -367,6 +395,8 @@ impl Transcript {
             for _ in 0..gap {
                 rows.push(String::new());
                 row_cells.push(Vec::new());
+                soft_wrapped.push(false);
+                source_text.push(None);
                 block_of_row.push(None);
             }
             let _ = self.history.ensure_rows(i, base_key);
@@ -378,16 +408,31 @@ impl Transcript {
                     let mut text = String::new();
                     let mut cells = Vec::new();
                     for span in &line.spans {
+                        let has_copy_as = span.meta.copy_as.is_some();
+                        let mut first = true;
                         for ch in span.text.chars() {
                             text.push(ch);
-                            cells.push(SnapshotCell {
-                                ch,
-                                meta: span.meta.clone(),
-                            });
+                            if has_copy_as && !first {
+                                cells.push(SnapshotCell {
+                                    ch,
+                                    meta: SpanMeta {
+                                        selectable: span.meta.selectable,
+                                        copy_as: Some(String::new()),
+                                    },
+                                });
+                            } else {
+                                cells.push(SnapshotCell {
+                                    ch,
+                                    meta: span.meta.clone(),
+                                });
+                            }
+                            first = false;
                         }
                     }
                     rows.push(text);
                     row_cells.push(cells);
+                    soft_wrapped.push(line.soft_wrapped);
+                    source_text.push(line.source_text.clone());
                     block_of_row.push(Some(id));
                 }
             }
@@ -402,6 +447,8 @@ impl Transcript {
             show_thinking,
             rows,
             row_cells,
+            soft_wrapped,
+            source_text,
             block_of_row,
             row_of_block,
             generation: self.history.generation(),
@@ -1328,11 +1375,14 @@ mod tests {
             .iter()
             .map(|cells| cells.iter().map(|c| c.ch).collect())
             .collect();
+        let len = rows.len();
         TranscriptSnapshot {
             width: 80,
             show_thinking: false,
             rows,
             row_cells,
+            soft_wrapped: vec![false; len],
+            source_text: vec![None; len],
             block_of_row: Vec::new(),
             row_of_block: HashMap::new(),
             generation: 0,
@@ -1403,5 +1453,40 @@ mod tests {
     fn snap_to_selectable_none() {
         let snap = make_snapshot(vec![vec![non_selectable('│'), non_selectable(' ')]]);
         assert_eq!(snap.snap_to_selectable(0, 0), None);
+    }
+
+    #[test]
+    fn copy_range_uses_source_text_for_full_rows() {
+        let mut snap = make_snapshot(vec![
+            vec![cell('T'), cell('i'), cell('t'), cell('l'), cell('e')],
+            vec![cell('h'), cell('e'), cell('l'), cell('l'), cell('o')],
+        ]);
+        snap.source_text[0] = Some("# Title".into());
+        assert_eq!(snap.copy_range(0, 0, 0, 5), "# Title");
+        assert_eq!(snap.copy_range(0, 0, 1, 5), "# Title\nhello");
+    }
+
+    #[test]
+    fn copy_range_partial_row_ignores_source_text() {
+        let mut snap = make_snapshot(vec![vec![
+            cell('T'),
+            cell('i'),
+            cell('t'),
+            cell('l'),
+            cell('e'),
+        ]]);
+        snap.source_text[0] = Some("# Title".into());
+        assert_eq!(snap.copy_range(0, 1, 0, 4), "itl");
+    }
+
+    #[test]
+    fn copy_range_soft_wrapped_rows_coalesce() {
+        let mut snap = make_snapshot(vec![
+            vec![cell('h'), cell('e'), cell('l'), cell('l'), cell('o')],
+            vec![cell('w'), cell('o'), cell('r'), cell('l'), cell('d')],
+        ]);
+        snap.source_text[0] = Some("hello world".into());
+        snap.soft_wrapped[1] = true;
+        assert_eq!(snap.copy_range(0, 0, 1, 5), "hello world");
     }
 }
