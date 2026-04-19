@@ -60,6 +60,14 @@ pub(crate) trait LayoutSink {
     /// Pop back to the previously-pushed style.
     fn pop_style(&mut self);
 
+    /// Print text with explicit `SpanMeta`. Block renderers use this
+    /// for padding and decorations that should not be selectable or
+    /// should have custom copy behavior.
+    fn print_with_meta(&mut self, text: &str, meta: crate::render::display::SpanMeta) {
+        let _ = meta;
+        self.print(text);
+    }
+
     // ── Default helpers ──────────────────────────────────────────────
 
     fn print_string(&mut self, s: String) {
@@ -188,7 +196,7 @@ impl LayoutSink for SpanCollector {
         let w = display_width(text) as u16;
         self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
         if let Some(last) = self.cur_line.spans.last_mut() {
-            if last.style == self.cur_style {
+            if last.style == self.cur_style && last.meta == Default::default() {
                 last.text.push_str(text);
                 return;
             }
@@ -197,6 +205,25 @@ impl LayoutSink for SpanCollector {
             text: text.to_string(),
             style: self.cur_style.clone(),
             meta: Default::default(),
+        });
+    }
+
+    fn print_with_meta(&mut self, text: &str, meta: crate::render::display::SpanMeta) {
+        if text.is_empty() {
+            return;
+        }
+        let w = display_width(text) as u16;
+        self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
+        if let Some(last) = self.cur_line.spans.last_mut() {
+            if last.style == self.cur_style && last.meta == meta {
+                last.text.push_str(text);
+                return;
+            }
+        }
+        self.cur_line.spans.push(DisplaySpan {
+            text: text.to_string(),
+            style: self.cur_style.clone(),
+            meta,
         });
     }
 
