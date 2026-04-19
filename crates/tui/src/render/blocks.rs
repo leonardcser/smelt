@@ -511,12 +511,16 @@ fn render_agent_block<S: LayoutSink>(
 
     if let Some(d) = elapsed {
         if d.as_secs_f64() >= 0.1 {
+            let meta = SpanMeta {
+                selectable: false,
+                copy_as: None,
+            };
             out.push_style(SpanStyle {
                 fg: Some(ColorValue::Role(ColorRole::Muted)),
                 dim: true,
                 ..Default::default()
             });
-            out.print_string(format!("  {}", format_duration(d.as_secs())));
+            out.print_with_meta(&format!("  {}", format_duration(d.as_secs())), meta);
             out.pop_style();
         }
     }
@@ -548,8 +552,12 @@ fn render_agent_block<S: LayoutSink>(
         out.print_string(format!(" {summary}"));
 
         if let Some(ref ts) = time_str {
+            let meta = SpanMeta {
+                selectable: false,
+                copy_as: None,
+            };
             out.push_dim();
-            out.print(ts);
+            out.print_with_meta(ts, meta);
             out.pop_style();
         }
 
@@ -751,12 +759,16 @@ fn print_tool_line<S: LayoutSink>(
     if name == "bash" {
         let raw_lines: Vec<&str> = summary.lines().collect();
         let mut wrapped: Vec<String> = Vec::new();
+        let mut is_soft_wrap = Vec::new();
         for line in &raw_lines {
             let segs = wrap_line(line, ly.max_summary.max(1));
             if segs.len() > 1 {
                 out.mark_wrapped();
             }
-            wrapped.extend(segs);
+            for (si, seg) in segs.into_iter().enumerate() {
+                is_soft_wrap.push(si > 0);
+                wrapped.push(seg);
+            }
         }
         let total = wrapped.len();
         let show = total.min(MAX_TOOL_BLOCK_ROWS);
@@ -766,15 +778,16 @@ fn print_tool_line<S: LayoutSink>(
         for (idx, seg) in wrapped[..show].iter().enumerate() {
             if idx > 0 {
                 out.print_gutter(&" ".repeat(ly.prefix_len));
+                if is_soft_wrap[idx] {
+                    out.mark_soft_wrap_continuation();
+                }
+            }
+            if idx == 0 {
+                out.set_source_text(summary);
             }
             bh.print_line(out, seg);
             if idx == 0 {
-                if !time_str.is_empty() {
-                    print_dim(out, &time_str);
-                }
-                if !timeout_str.is_empty() {
-                    print_dim(out, &timeout_str);
-                }
+                print_dim_non_selectable(out, &time_str, &timeout_str);
             }
             out.newline();
             line_num += 1;
@@ -800,12 +813,7 @@ fn print_tool_line<S: LayoutSink>(
     } else {
         out.print(&truncated);
     }
-    if !time_str.is_empty() {
-        print_dim(out, &time_str);
-    }
-    if !timeout_str.is_empty() {
-        print_dim(out, &timeout_str);
-    }
+    print_dim_non_selectable(out, &time_str, &timeout_str);
     out.newline();
     1
 }
@@ -917,6 +925,23 @@ fn print_dim<S: LayoutSink>(out: &mut S, text: &str) {
     out.push_dim();
     out.print(text);
     out.pop_style();
+}
+
+fn print_dim_non_selectable<S: LayoutSink>(out: &mut S, time_str: &str, timeout_str: &str) {
+    let meta = SpanMeta {
+        selectable: false,
+        copy_as: None,
+    };
+    if !time_str.is_empty() {
+        out.push_dim();
+        out.print_with_meta(time_str, meta.clone());
+        out.pop_style();
+    }
+    if !timeout_str.is_empty() {
+        out.push_dim();
+        out.print_with_meta(timeout_str, meta);
+        out.pop_style();
+    }
 }
 
 fn print_dim_count<S: LayoutSink>(out: &mut S, count: usize, singular: &str, plural: &str) -> u16 {
@@ -1169,8 +1194,8 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
                 rows += segments.len() as u16;
             } else {
                 use super::highlight::{
-                    emit_inline_spans, inline_spans_width, parse_inline_spans,
-                    wrap_inline_spans, InlineSpan, InlineStyle,
+                    emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans,
+                    InlineSpan, InlineStyle,
                 };
                 let leading_ws = &lines[i][..lines[i].len() - trimmed.len()];
                 let (prefix, body) = split_list_prefix(trimmed);
@@ -1178,13 +1203,19 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
                 if !leading_ws.is_empty() {
                     line_spans.push(InlineSpan {
                         text: leading_ws.to_string(),
-                        style: InlineStyle { dim, ..Default::default() },
+                        style: InlineStyle {
+                            dim,
+                            ..Default::default()
+                        },
                     });
                 }
                 if !prefix.is_empty() {
                     line_spans.push(InlineSpan {
                         text: prefix.to_string(),
-                        style: InlineStyle { dim: true, ..Default::default() },
+                        style: InlineStyle {
+                            dim: true,
+                            ..Default::default()
+                        },
                     });
                 }
                 line_spans.extend(parse_inline_spans(body, dim));
@@ -2077,5 +2108,150 @@ mod tests {
         assert!(!is_horizontal_rule("-*-*-*"), "mixed characters");
         assert!(!is_horizontal_rule("---a"), "contains other chars");
         assert!(!is_horizontal_rule("123"), "numbers");
+    }
+
+    #[test]
+    fn thinking_summary_extracts_bold_title() {
+        let (label, lines) =
+            thinking_summary("**Analyzing the bug**\nLet me check...\n\nMore notes");
+        assert_eq!(label, "Analyzing the bug");
+        assert_eq!(lines, 3);
+    }
+
+    #[test]
+    fn thinking_summary_falls_back_to_default() {
+        let (label, lines) = thinking_summary("Let me think about this.\nLine two.");
+        assert_eq!(label, "thinking");
+        assert_eq!(lines, 2);
+    }
+
+    #[test]
+    fn thinking_summary_skips_blank_lines() {
+        let (_, lines) = thinking_summary("\n\nfirst\n\nsecond\n\n");
+        assert_eq!(lines, 2);
+    }
+
+    #[test]
+    fn thinking_summary_empty() {
+        let (label, lines) = thinking_summary("");
+        assert_eq!(label, "thinking");
+        assert_eq!(lines, 0);
+    }
+
+    #[test]
+    fn thinking_summary_bold_must_have_content() {
+        // "****" is 4 chars — the `len() > 4` check rejects empty bold
+        let (label, _) = thinking_summary("****");
+        assert_eq!(label, "thinking");
+    }
+
+    #[test]
+    fn bash_tool_layout_sets_source_text_and_soft_wrap() {
+        // A bash command that wraps at width 30 should produce:
+        // - Row 0: source_text = full command, soft_wrapped = false
+        // - Row 1+: source_text = None, soft_wrapped = true
+        let block = Block::ToolCall {
+            call_id: "c1".into(),
+            name: "bash".into(),
+            summary: "echo hello && echo world && echo done".into(),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: Some(std::time::Duration::from_secs(1)),
+            output: None,
+            user_message: None,
+        };
+        let ctx = LayoutContext {
+            width: 30,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block(&block, Some(&state), &ctx);
+
+        assert!(
+            display.lines.len() >= 2,
+            "command should wrap at width 30, got {} lines",
+            display.lines.len()
+        );
+        assert_eq!(
+            display.lines[0].source_text.as_deref(),
+            Some("echo hello && echo world && echo done"),
+        );
+        assert!(!display.lines[0].soft_wrapped);
+        for line in &display.lines[1..] {
+            assert!(
+                line.source_text.is_none(),
+                "continuation rows should not have source_text"
+            );
+            assert!(
+                line.soft_wrapped,
+                "continuation rows should be soft_wrapped"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_tool_multiline_command_only_wraps_mark_soft() {
+        // A multi-line command (real newlines) should NOT mark line 2
+        // as soft-wrapped — only segments within a wrapped line should.
+        let block = Block::ToolCall {
+            call_id: "c2".into(),
+            name: "bash".into(),
+            summary: "echo one\necho two".into(),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: None,
+            user_message: None,
+        };
+        let ctx = LayoutContext {
+            width: 80,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block(&block, Some(&state), &ctx);
+
+        assert!(display.lines.len() >= 2);
+        assert!(!display.lines[0].soft_wrapped);
+        assert!(
+            !display.lines[1].soft_wrapped,
+            "second real line should NOT be soft-wrapped"
+        );
+    }
+
+    #[test]
+    fn bash_tool_time_suffix_is_non_selectable() {
+        let block = Block::ToolCall {
+            call_id: "c3".into(),
+            name: "bash".into(),
+            summary: "ls".into(),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: Some(std::time::Duration::from_secs(3)),
+            output: None,
+            user_message: None,
+        };
+        let ctx = LayoutContext {
+            width: 80,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block(&block, Some(&state), &ctx);
+        let first_line = &display.lines[0];
+
+        // The time suffix "  3s" should be in a non-selectable span
+        let has_non_selectable_time = first_line
+            .spans
+            .iter()
+            .any(|span| !span.meta.selectable && span.text.contains("3s"));
+        assert!(
+            has_non_selectable_time,
+            "elapsed time should be in a non-selectable span"
+        );
     }
 }

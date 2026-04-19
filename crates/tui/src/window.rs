@@ -554,3 +554,74 @@ pub enum WinId {
     Prompt,
     Content,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tw() -> TranscriptWindow {
+        TranscriptWindow::new()
+    }
+
+    #[test]
+    fn apply_pin_handles_growth() {
+        let mut tw = make_tw();
+        tw.scroll_offset = 5;
+        tw.pin(100, 20);
+        tw.apply_pin(103, 20);
+        assert_eq!(tw.scroll_offset, 8);
+        assert_eq!(tw.pinned_last_total, Some(103));
+    }
+
+    #[test]
+    fn apply_pin_handles_shrinkage() {
+        let mut tw = make_tw();
+        tw.scroll_offset = 5;
+        tw.pin(100, 20);
+        tw.apply_pin(97, 20);
+        assert_eq!(tw.scroll_offset, 2);
+        assert_eq!(tw.pinned_last_total, Some(97));
+    }
+
+    #[test]
+    fn apply_pin_clamps_to_zero() {
+        let mut tw = make_tw();
+        tw.scroll_offset = 2;
+        tw.pin(100, 20);
+        tw.apply_pin(95, 20);
+        assert_eq!(tw.scroll_offset, 0);
+    }
+
+    #[test]
+    fn apply_pin_noop_when_unpinned() {
+        let mut tw = make_tw();
+        tw.scroll_offset = 5;
+        tw.apply_pin(200, 20);
+        assert_eq!(tw.scroll_offset, 5);
+    }
+
+    #[test]
+    fn apply_pin_consecutive_deltas() {
+        let mut tw = make_tw();
+        tw.scroll_offset = 10;
+        tw.pin(100, 20);
+        tw.apply_pin(105, 20); // +5
+        assert_eq!(tw.scroll_offset, 15);
+        tw.apply_pin(102, 20); // -3
+        assert_eq!(tw.scroll_offset, 12);
+        tw.apply_pin(102, 20); // 0
+        assert_eq!(tw.scroll_offset, 12);
+    }
+
+    #[test]
+    fn unpin_stops_tracking() {
+        let mut tw = make_tw();
+        tw.pin(100, 20);
+        assert!(tw.is_pinned());
+        tw.unpin();
+        assert!(!tw.is_pinned());
+        tw.scroll_offset = 5;
+        tw.apply_pin(200, 20);
+        assert_eq!(tw.scroll_offset, 5);
+    }
+}

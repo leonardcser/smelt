@@ -28,10 +28,11 @@ impl Scrollbar {
         }
         let thumb_size = (visible_rows * visible_rows / total_rows).max(1);
         let max_scroll = total_rows - visible_rows;
-        let thumb_pos = scroll_offset
-            .saturating_mul(visible_rows.saturating_sub(thumb_size))
+        let max_thumb = visible_rows.saturating_sub(thumb_size);
+        let thumb_pos = (scroll_offset * max_thumb + max_scroll / 2)
             .checked_div(max_scroll)
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(max_thumb);
         Self {
             thumb_start: thumb_pos,
             thumb_end: thumb_pos + thumb_size,

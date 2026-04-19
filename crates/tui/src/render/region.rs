@@ -166,4 +166,58 @@ mod tests {
             Some(ViewportHit::Scrollbar { row: 0 })
         ));
     }
+
+    #[test]
+    fn scrollbar_render_click_roundtrip() {
+        // For every scroll position, the rendered thumb position
+        // should click back to the same (or adjacent) scroll offset.
+        for &(rows, total) in &[(10u16, 40u16), (20, 100), (5, 50), (30, 31)] {
+            let b = bar(rows, total);
+            let max_scroll = b.max_scroll();
+            if max_scroll == 0 {
+                continue;
+            }
+            for scroll_from_top in 0..=max_scroll {
+                let sb = super::super::scrollbar::Scrollbar::new(
+                    total as usize,
+                    rows as usize,
+                    scroll_from_top as usize,
+                );
+                // Find the thumb_start by probing is_thumb
+                let mut thumb_top = None;
+                for i in 0..rows as usize {
+                    if sb.is_thumb(i) {
+                        thumb_top = Some(i as u16);
+                        break;
+                    }
+                }
+                let Some(thumb_top) = thumb_top else {
+                    continue;
+                };
+                let click_scroll = b.scroll_from_top_for_thumb(thumb_top);
+                // Multiple scroll values map to the same thumb pixel,
+                // so clicking may not return the exact same value.
+                // But rendering the clicked value must produce the
+                // same thumb position (idempotent).
+                let sb2 = super::super::scrollbar::Scrollbar::new(
+                    total as usize,
+                    rows as usize,
+                    click_scroll as usize,
+                );
+                let mut thumb_top2 = None;
+                for i in 0..rows as usize {
+                    if sb2.is_thumb(i) {
+                        thumb_top2 = Some(i as u16);
+                        break;
+                    }
+                }
+                assert_eq!(
+                    thumb_top,
+                    thumb_top2.unwrap_or(0),
+                    "roundtrip failed: rows={rows} total={total} scroll={scroll_from_top} \
+                     thumb={thumb_top} click_scroll={click_scroll} thumb2={thumb_top2:?}"
+                );
+            }
+        }
+    }
 }

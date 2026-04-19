@@ -266,11 +266,100 @@ D1–D6 shipped. `mlua` runtime, `smelt.api.*` surface, autocmd dispatch, user c
 ## Known bugs
 
 - **`j`/`k` locked on resume** — intermittent, deferred.
-- **Selection flicker during streaming** — `cpos` byte offset shifts each frame.
+
+---
+
+# Completed work (recent)
+
+## Viewport top-anchoring ✅
+
+Content starts at row 0 with trailing blanks below (was bottom-anchored with leading blanks). `ViewportGeom`, `paint_viewport`, `TranscriptSnapshot`, and cursor math all updated. `leading_blanks()` → `trailing_blanks()`, `visible_content_rows()` added.
+
+## Pin fix — signed delta ✅
+
+`apply_pin` now uses signed arithmetic (`i32`) to handle both content growth AND shrinkage. When streaming markdown changes shape (e.g., `**bold` → rendered `bold` changes wrapping), total row count fluctuates. The old `saturating_sub` only handled growth; scroll_offset now adjusts both ways.
+
+## Logical nav buffer (Approach B) ✅
+
+Vim motions operate on a content-only buffer — non-selectable gutter chars (`│ `, padding, line numbers) are stripped. The cursor inherently stays on selectable content without post-motion snapping.
+
+**Architecture:**
+- `TranscriptSnapshot::nav_rows()` — selectable display chars only (no `copy_as` substitutions)
+- `nav_col_to_display_col()` / `display_col_to_nav_col()` — per-row column mapping between nav and display coordinate systems
+- `nav_byte_to_row_col()` / `copy_nav_byte_range()` — byte-level mapping + copy with `copy_as` applied
+- `Screen::full_transcript_nav_text()` — committed nav rows + ephemeral selectable chars
+- All navigation callers switched: `handle_content_novim_key`, `move_content_cursor_by_lines`, `handle_content_vim_key`, `content_visual_range`, `compute_status_position`, `position_content_cursor_from_hit`, `copy_content_selection_and_clear`, `refocus_content`, scrollbar reanchor
+- Cursor rendering maps nav col → display col via `last_viewport_lines` span metadata
+- Selection painting maps nav cols → display cols in `ContentVisualRange`
+- Click handling maps display col → nav col via `display_col_to_nav_col`
+- Copy operations go through `copy_nav_byte_range` which applies `copy_as` substitutions
+
+**Coordinate system boundaries:**
+| Boundary | Mapping |
+|---|---|
+| Cursor rendering | nav col → display col (via DisplayLine spans) |
+| Selection painting | nav cols → display cols (via snapshot) |
+| Click-to-position | display col → nav col (via snapshot) |
+| Copy/yank | nav byte range → display (row, col) → `copy_range` |
+
+## Selection highlight respects selectability ✅
+
+`paint_visual_range` now skips non-selectable spans — their original appearance is preserved. Each selectable span gets its own `move_to` so the highlight jumps over non-selectable gaps (gutters, padding, borders keep their normal look within multi-line or visual-line selections).
+
+## Thinking block streaming fixes ✅
+
+- Suppressed committed thinking block during streaming (ephemeral overlay handles it)
+- Fixed gap suppression for 0-row blocks
+- Fixed thinking summary padding: `" │ "` → `"│ "` (removed leading space)
+- Fixed content doubling in `render_ephemeral_into`
 
 ---
 
 # Remaining work
+
+## R0 — Tool block copy refinements ✅
+
+- ✅ **Soft-wrapped bash commands copy without injected newlines.** `print_tool_line` sets `source_text(summary)` on the first line and marks wrap-continuation segments via `mark_soft_wrap_continuation()`. Copy yields the original unwrapped command.
+- ✅ **Execution time is non-selectable.** `print_dim_non_selectable()` helper prints time/timeout strings with `selectable: false` on tool call headers, non-bash tool lines, agent block headers, and agent sub-tool entries.
+- ✅ **`copy_range` tracks `source_text_emitted`.** Soft-wrapped continuation rows are only skipped when `source_text` was actually used on the parent row. Previously, any fully-covered soft-wrapped row was unconditionally skipped — this caused partial selections (e.g., starting mid-row after a selectable prefix like `⏺ bash `) to silently lose continuation row content.
+- ✅ **`is_soft_wrap` flag corrected in `print_tool_line`.** Was using `first_wrap_seg` (first segment of wrapped line) inverted as `!first_wrap_seg[idx]` — incorrectly marked real newlines in multi-line commands as soft-wrap continuations. Fixed to track `si > 0` directly.
+- ✅ **`all_selectable_covered` replaces `full_row`.** `copy_range` now checks whether all selectable cells fall within the selection range, not just `c_start == 0 && c_end == cells.len()`. This lets `source_text` work correctly when non-selectable gutters sit outside the nav-mapped selection range.
+
+## Behavioral test coverage ✅
+
+Targeted tests for critical behaviors — each test documents a contract that must survive refactoring.
+
+**`window.rs` — pin signed delta (6 tests):**
+- `apply_pin` handles growth, shrinkage, clamps to zero, consecutive mixed deltas, noop when unpinned, unpin stops tracking
+
+**`transcript.rs` — copy pipeline + nav buffer (7 tests):**
+- Soft-wrapped rows without `source_text` still emit content (not silently dropped)
+- `all_selectable_covered` with mixed selectable/non-selectable cells + trailing time suffix
+- 3-row soft-wrap with `source_text` correctly coalesces
+- `source_text_emitted` resets across logical line boundaries
+- Partial nav selection (skipping selectable prefix) preserves continuation rows
+- Full nav selection uses `source_text` and skips continuations
+- `nav_col ↔ display_col` roundtrip with interleaved non-selectable gaps
+
+**`blocks.rs` — thinking summary + tool layout (8 tests):**
+- `thinking_summary`: bold title extraction, fallback to "thinking", blank line skipping, empty content, reject empty bold `****`
+- `layout_block` for bash tool: `source_text` set on first line, `soft_wrapped` on continuation lines
+- Multi-line bash command (real newlines): second line is NOT marked `soft_wrapped`
+- Elapsed time suffix rendered in a non-selectable span
+
+## Scrollbar click/thumb alignment fix ✅
+
+**Problem:** Scrollbar rendering and click-to-scroll used asymmetric integer rounding — rendering truncated (`scroll * max_thumb / max_scroll`) while click rounded (`thumb * max_scroll + max_thumb/2) / max_thumb`). This caused the thumb to jump when clicked in the middle of the bar.
+
+**Fix:** Added matching `+ max_scroll / 2` rounding to the thumb position formula in `Scrollbar::new`. Both directions now use the same rounding, so render → click → re-render is idempotent for every scroll position.
+
+**Files:** `render/scrollbar.rs` (formula fix), `render/region.rs` (exhaustive roundtrip test across multiple viewport sizes).
+
+## Double-Esc rewind dialog restored ✅
+
+**Problem:** The double-Esc rewind dialog was lost during worktree branch refactoring. A premature `return EventOutcome::Noop` in `handle_esc_key` prevented the rewind path from executing.
+
+**Fix:** Restored the missing logic in `app/events.rs`: after the compaction cancel check returns, the handler now calls `user_turns()`, erases the prompt, and opens `RewindDialog`. If vim was in insert mode before the first Esc, `restore_vim_insert` is set so the dialog restores insert mode on cancel.
 
 ## R1 — Raw-copy pipeline ✅
 

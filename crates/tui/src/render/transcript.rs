@@ -303,6 +303,7 @@ impl TranscriptSnapshot {
     ) -> String {
         let mut out = String::new();
         let end_row = end_row.min(self.row_cells.len().saturating_sub(1));
+        let mut source_text_emitted = false;
         for r in start_row..=end_row {
             let cells = match self.row_cells.get(r) {
                 Some(c) => c,
@@ -311,6 +312,7 @@ impl TranscriptSnapshot {
             let is_soft = self.soft_wrapped.get(r).copied().unwrap_or(false);
             if r > start_row && !is_soft {
                 out.push('\n');
+                source_text_emitted = false;
             }
 
             let is_first = r == start_row;
@@ -321,15 +323,19 @@ impl TranscriptSnapshot {
             } else {
                 cells.len()
             };
-            let full_row = c_start == 0 && c_end == cells.len();
+            let all_selectable_covered = cells
+                .iter()
+                .enumerate()
+                .all(|(i, c)| !c.meta.selectable || (i >= c_start && i < c_end));
 
-            if full_row && is_soft {
+            if all_selectable_covered && is_soft && source_text_emitted {
                 continue;
             }
 
-            if full_row {
+            if all_selectable_covered {
                 if let Some(src) = self.source_text.get(r).and_then(|s| s.as_deref()) {
                     out.push_str(src);
+                    source_text_emitted = true;
                     continue;
                 }
             }
@@ -860,11 +866,7 @@ mod tests {
 
     #[test]
     fn nav_rows_ignores_copy_as() {
-        let snap = make_snapshot(vec![vec![
-            copy_as('+', ""),
-            copy_as(' ', ""),
-            cell('a'),
-        ]]);
+        let snap = make_snapshot(vec![vec![copy_as('+', ""), copy_as(' ', ""), cell('a')]]);
         let nav = snap.nav_rows();
         assert_eq!(nav, vec!["+ a"]);
     }
@@ -922,5 +924,171 @@ mod tests {
         assert_eq!(snap.copy_nav_byte_range(0, 4), "ad");
         // Only the last two selectable chars
         assert_eq!(snap.copy_nav_byte_range(2, 4), "ad");
+    }
+
+    #[test]
+    fn copy_nav_byte_range_bash_soft_wrap_with_prefix() {
+        // Bash tool call: selectable prefix "⏺ bash " + command text +
+        // non-selectable time suffix, soft-wrapped across two rows.
+        // source_text on row 0 = full unwrapped command.
+        let mut snap = make_snapshot(vec![
+            vec![
+                cell('\u{23fa}'),
+                cell(' '),
+                cell('b'),
+                cell('a'),
+                cell('s'),
+                cell('h'),
+                cell(' '),
+                cell('g'),
+                cell('i'),
+                cell('t'),
+                cell(' '),
+                cell('s'),
+                cell('t'),
+                cell('a'),
+                cell('t'),
+                cell('u'),
+                cell('s'),
+                non_selectable(' '),
+                non_selectable(' '),
+                non_selectable('3'),
+                non_selectable('s'),
+            ],
+            vec![
+                non_selectable(' '),
+                non_selectable(' '),
+                non_selectable(' '),
+                non_selectable(' '),
+                non_selectable(' '),
+                non_selectable(' '),
+                non_selectable(' '),
+                cell('-'),
+                cell('-'),
+                cell('s'),
+                cell('h'),
+                cell('o'),
+                cell('r'),
+                cell('t'),
+            ],
+        ]);
+        snap.source_text[0] = Some("git status --short".into());
+        snap.soft_wrapped[1] = true;
+
+        let nav = snap.nav_rows();
+        let full = nav.join("\n");
+
+        // Partial first row — source_text NOT used, continuations
+        // must still emit cell-by-cell.
+        let cmd_start = "\u{23fa} bash ".len();
+        assert_eq!(
+            snap.copy_nav_byte_range(cmd_start, full.len()),
+            "git status--short"
+        );
+
+        // Full first row — source_text IS used, continuations skipped.
+        assert_eq!(
+            snap.copy_nav_byte_range(0, full.len()),
+            "git status --short"
+        );
+    }
+
+    #[test]
+    fn copy_range_soft_wrap_without_source_text_emits_all_rows() {
+        // Soft-wrapped rows whose parent has NO source_text must
+        // still be emitted (not silently dropped).
+        let mut snap = make_snapshot(vec![
+            vec![cell('a'), cell('b'), cell('c')],
+            vec![cell('d'), cell('e'), cell('f')],
+        ]);
+        snap.soft_wrapped[1] = true;
+        // No source_text on row 0 — cell-by-cell for both rows.
+        assert_eq!(snap.copy_range(0, 0, 1, 3), "abcdef");
+    }
+
+    #[test]
+    fn copy_range_mixed_selectable_non_selectable_all_covered() {
+        // When non-selectable cells sit outside the selection range,
+        // all_selectable_covered should still be true.
+        let mut snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+            cell('h'),
+            cell('i'),
+            non_selectable(' '),
+            non_selectable('3'),
+            non_selectable('s'),
+        ]]);
+        snap.source_text[0] = Some("hello".into());
+        // copy_range(0,2,0,7): c_start=2 covers all selectable cells
+        assert_eq!(snap.copy_range(0, 2, 0, 7), "hello");
+    }
+
+    #[test]
+    fn copy_range_three_row_soft_wrap_with_source_text() {
+        // 3-row soft-wrapped block: source_text on row 0, rows 1-2
+        // are continuations that should be skipped when source_text
+        // is used.
+        let mut snap = make_snapshot(vec![
+            vec![cell('a'), cell('b')],
+            vec![cell('c'), cell('d')],
+            vec![cell('e'), cell('f')],
+        ]);
+        snap.source_text[0] = Some("ab cd ef".into());
+        snap.soft_wrapped[1] = true;
+        snap.soft_wrapped[2] = true;
+        assert_eq!(snap.copy_range(0, 0, 2, 2), "ab cd ef");
+    }
+
+    #[test]
+    fn copy_range_source_text_resets_across_logical_lines() {
+        // Two logical lines: row 0 has source_text + soft-wrapped
+        // continuation row 1; row 2 is a separate line.
+        let mut snap = make_snapshot(vec![
+            vec![cell('a'), cell('b')],
+            vec![cell('c'), cell('d')],
+            vec![cell('x'), cell('y')],
+        ]);
+        snap.source_text[0] = Some("ab cd".into());
+        snap.soft_wrapped[1] = true;
+        // Row 2 is NOT soft-wrapped — it's a new logical line.
+        assert_eq!(snap.copy_range(0, 0, 2, 2), "ab cd\nxy");
+    }
+
+    #[test]
+    fn nav_col_to_display_col_past_end() {
+        let snap = make_snapshot(vec![vec![non_selectable('│'), cell('a'), cell('b')]]);
+        // nav_col 2 = past last selectable → returns cells.len()
+        assert_eq!(snap.nav_col_to_display_col(0, 2), 3);
+    }
+
+    #[test]
+    fn display_col_to_nav_col_at_end() {
+        let snap = make_snapshot(vec![vec![non_selectable('│'), cell('a'), cell('b')]]);
+        // display_col past the end → total selectable count
+        assert_eq!(snap.display_col_to_nav_col(0, 3), 2);
+        assert_eq!(snap.display_col_to_nav_col(0, 99), 2);
+    }
+
+    #[test]
+    fn nav_col_display_col_roundtrip() {
+        let snap = make_snapshot(vec![vec![
+            non_selectable('│'),
+            non_selectable(' '),
+            cell('a'),
+            non_selectable(' '),
+            cell('b'),
+            cell('c'),
+            non_selectable('│'),
+        ]]);
+        // nav_col 0 → 'a' at display 2 → back to nav 0
+        assert_eq!(snap.nav_col_to_display_col(0, 0), 2);
+        assert_eq!(snap.display_col_to_nav_col(0, 2), 0);
+        // nav_col 1 → 'b' at display 4 → back to nav 1
+        assert_eq!(snap.nav_col_to_display_col(0, 1), 4);
+        assert_eq!(snap.display_col_to_nav_col(0, 4), 1);
+        // nav_col 2 → 'c' at display 5 → back to nav 2
+        assert_eq!(snap.nav_col_to_display_col(0, 2), 5);
+        assert_eq!(snap.display_col_to_nav_col(0, 5), 2);
     }
 }
