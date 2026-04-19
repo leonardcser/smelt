@@ -94,6 +94,106 @@ impl TranscriptSnapshot {
         self.rows.len().min(u16::MAX as usize) as u16
     }
 
+    /// Logical (content-only) text for each row. Non-selectable cells
+    /// are stripped; `copy_as` substitutions are applied. This is what
+    /// vim motions should navigate — the cursor operates on content,
+    /// not on decorative padding.
+    pub fn logical_rows(&self) -> Vec<String> {
+        self.row_cells
+            .iter()
+            .map(|cells| {
+                let mut s = String::new();
+                for cell in cells {
+                    if !cell.meta.selectable {
+                        continue;
+                    }
+                    match &cell.meta.copy_as {
+                        Some(sub) => s.push_str(sub),
+                        None => s.push(cell.ch),
+                    }
+                }
+                s
+            })
+            .collect()
+    }
+
+    /// Map a display `(row, col)` position to a byte offset in the
+    /// logical (content-only) text produced by `logical_rows().join("\n")`.
+    /// Returns `None` for non-selectable cells.
+    pub fn display_to_logical(&self, row: usize, col: usize) -> Option<usize> {
+        let mut byte_offset = 0usize;
+        for (r, cells) in self.row_cells.iter().enumerate() {
+            if r > 0 {
+                byte_offset += 1; // \n separator
+            }
+            if r == row {
+                let mut logical_col = 0usize;
+                for (c, cell) in cells.iter().enumerate() {
+                    if !cell.meta.selectable {
+                        if c == col {
+                            return None;
+                        }
+                        continue;
+                    }
+                    if c == col {
+                        return Some(byte_offset + logical_col);
+                    }
+                    let ch_len = match &cell.meta.copy_as {
+                        Some(sub) => sub.len(),
+                        None => cell.ch.len_utf8(),
+                    };
+                    logical_col += ch_len;
+                }
+                return Some(byte_offset + logical_col);
+            }
+            // Accumulate this row's logical length
+            for cell in cells {
+                if !cell.meta.selectable {
+                    continue;
+                }
+                let ch_len = match &cell.meta.copy_as {
+                    Some(sub) => sub.len(),
+                    None => cell.ch.len_utf8(),
+                };
+                byte_offset += ch_len;
+            }
+        }
+        Some(byte_offset)
+    }
+
+    /// Map a byte offset in the logical text back to a display
+    /// `(row, col)` position. Inverse of `display_to_logical`.
+    pub fn logical_to_display(&self, byte: usize) -> (usize, usize) {
+        let mut remaining = byte;
+        for (r, cells) in self.row_cells.iter().enumerate() {
+            if r > 0 {
+                if remaining == 0 {
+                    return (r, 0);
+                }
+                remaining = remaining.saturating_sub(1); // \n
+            }
+            for (c, cell) in cells.iter().enumerate() {
+                if !cell.meta.selectable {
+                    continue;
+                }
+                let ch_len = match &cell.meta.copy_as {
+                    Some(sub) => sub.len(),
+                    None => cell.ch.len_utf8(),
+                };
+                if remaining < ch_len {
+                    return (r, c);
+                }
+                remaining -= ch_len;
+            }
+            if remaining == 0 {
+                return (r, cells.len());
+            }
+        }
+        let last_row = self.row_cells.len().saturating_sub(1);
+        let last_col = self.row_cells.last().map(|c| c.len()).unwrap_or(0);
+        (last_row, last_col)
+    }
+
     /// Extract copy text from a rectangular range of display cells,
     /// respecting `SpanMeta`. Non-selectable cells are skipped;
     /// `copy_as` substitutions are applied; rows are joined with `\n`.
