@@ -2391,6 +2391,7 @@ impl Screen {
         if comp_rows > 0 {
             out.newline();
         }
+        let comp_start_row = out.cursor_row;
         let comp_rows = if let Some(ref ms) = state.menu {
             draw_menu(out, ms, comp_rows)
         } else {
@@ -2401,6 +2402,18 @@ impl Screen {
                 state.vim_enabled(),
             )
         };
+        if comp_rows > 0 {
+            self.layout.push_float(
+                super::layout::Rect::new(
+                    comp_start_row,
+                    0,
+                    self.layout.term_width,
+                    comp_rows as u16,
+                ),
+                1,
+                super::layout::HitRegion::Completer,
+            );
+        }
 
         // Mirror of `fixed_base`'s structure: extras, top bar, input
         // content, bottom bar, status line / completions.

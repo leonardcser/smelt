@@ -197,6 +197,7 @@ pub enum HitRegion {
     Transcript,
     Prompt,
     Dialog,
+    Completer,
     Status,
     Outside,
 }
