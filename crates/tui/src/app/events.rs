@@ -1732,7 +1732,12 @@ impl App {
                 let s = crate::text_utils::snap(&buf, s);
                 let e = crate::text_utils::snap(&buf, e);
                 if s < e {
-                    let selection = buf[s..e].to_string();
+                    let tw = self.screen.transcript_width() as u16;
+                    let snap = self
+                        .screen
+                        .transcript
+                        .snapshot(tw, self.screen.show_thinking());
+                    let selection = snap.copy_byte_range(s, e);
                     let chars = selection.chars().count();
                     let _ = crate::app::commands::copy_to_clipboard(&selection);
                     copied_len = Some(chars);

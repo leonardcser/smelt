@@ -133,6 +133,40 @@ impl TranscriptSnapshot {
         out
     }
 
+    /// Convert a byte offset in the `rows.join("\n")` text into a
+    /// `(row, col_chars)` position. `col_chars` is a character index,
+    /// matching `row_cells` indexing.
+    pub fn byte_to_row_col(&self, byte: usize) -> (usize, usize) {
+        let mut acc = 0usize;
+        for (r, row) in self.rows.iter().enumerate() {
+            let row_end = acc + row.len();
+            if byte <= row_end {
+                let col = row[..byte.saturating_sub(acc)]
+                    .chars()
+                    .count();
+                return (r, col);
+            }
+            acc = row_end + 1; // +1 for the `\n` join separator
+        }
+        let last_row = self.rows.len().saturating_sub(1);
+        let last_col = self
+            .rows
+            .last()
+            .map(|r| r.chars().count())
+            .unwrap_or(0);
+        (last_row, last_col)
+    }
+
+    /// Copy text from a byte range in the joined row text, respecting
+    /// `SpanMeta`. This is the primary copy primitive — selection ranges
+    /// expressed as byte offsets (from vim visual or cursor anchor) are
+    /// converted to `(row, col)` and routed through `copy_range`.
+    pub fn copy_byte_range(&self, start: usize, end: usize) -> String {
+        let (sr, sc) = self.byte_to_row_col(start);
+        let (er, ec) = self.byte_to_row_col(end);
+        self.copy_range(sr, sc, er, ec)
+    }
+
     /// Snap a `(row, col)` position to the nearest selectable cell,
     /// searching forward then backward on the same row. Returns the
     /// adjusted `(row, col)` or `None` if the row has no selectable cells.
