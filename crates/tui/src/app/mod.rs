@@ -1625,7 +1625,7 @@ impl App {
             let dialog_height = d.height();
             let constrain = d.constrain_height();
             let mut frame = render::Frame::begin(self.screen.backend());
-            let (redirtied, placement) = self.tick_dialog(&mut frame, dialog_height, constrain);
+            let (redirtied, placement) = self.render_dialog(&mut frame, dialog_height, constrain);
             if redirtied {
                 d.mark_dirty();
             }
@@ -1636,7 +1636,7 @@ impl App {
             self.screen.queue_dialog_gap(&mut frame);
             self.screen.queue_status_line(&mut frame);
         } else {
-            self.tick_prompt_compositor(agent_running);
+            self.render_normal(agent_running);
         }
     }
 
