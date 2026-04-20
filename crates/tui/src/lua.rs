@@ -322,7 +322,9 @@ impl LuaRuntime {
         };
 
         if rt.load_error.is_none() {
-            rt.load_builtin_plugins();
+            if let Err(e) = register_embedded_searcher(&rt.lua) {
+                rt.load_error = Some(format!("embedded searcher: {e}"));
+            }
         }
 
         if rt.load_error.is_none() {
@@ -336,13 +338,6 @@ impl LuaRuntime {
         }
 
         rt
-    }
-
-    fn load_builtin_plugins(&mut self) {
-        const PLAN_MODE: &str = include_str!("plugins/plan_mode.lua");
-        if let Err(e) = self.lua.load(PLAN_MODE).set_name("plan_mode.lua").exec() {
-            self.load_error = Some(format!("built-in plan_mode.lua: {e}"));
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1141,6 +1136,40 @@ impl Default for LuaRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Modules embedded in the binary, available via `require("smelt.plugins.X")`.
+const EMBEDDED_MODULES: &[(&str, &str)] = &[(
+    "smelt.plugins.plan_mode",
+    include_str!("../../../runtime/lua/smelt/plugins/plan_mode.lua"),
+)];
+
+/// Register a custom Lua package searcher that resolves `require("smelt.…")`
+/// from modules embedded in the binary. Falls back to the default searchers
+/// for anything not in `EMBEDDED_MODULES`, so user files on disk win when
+/// they shadow an embedded module (the user searcher runs first).
+fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
+    let searcher = lua.create_function(|lua, module: String| {
+        for &(name, source) in EMBEDDED_MODULES {
+            if name == module {
+                let loader = lua
+                    .load(source)
+                    .set_name(name)
+                    .into_function()?;
+                return Ok(mlua::Value::Function(loader));
+            }
+        }
+        Ok(mlua::Value::String(
+            lua.create_string(format!("\n\tno embedded module '{module}'"))?,
+        ))
+    })?;
+
+    let package: mlua::Table = lua.globals().get("package")?;
+    let searchers: mlua::Table = package.get("searchers")?;
+    let len = searchers.raw_len();
+    // Insert at the end — filesystem searchers run first, so user overrides win.
+    searchers.raw_set(len + 1, searcher)?;
+    Ok(())
 }
 
 fn init_lua_path() -> Option<PathBuf> {
