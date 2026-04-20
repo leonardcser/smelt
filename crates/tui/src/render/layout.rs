@@ -1,33 +1,4 @@
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Rect {
-    pub top: u16,
-    pub left: u16,
-    pub width: u16,
-    pub height: u16,
-}
-
-impl Rect {
-    pub fn new(top: u16, left: u16, width: u16, height: u16) -> Self {
-        Self {
-            top,
-            left,
-            width,
-            height,
-        }
-    }
-
-    pub fn bottom(&self) -> u16 {
-        self.top + self.height
-    }
-
-    pub fn right(&self) -> u16 {
-        self.left + self.width
-    }
-
-    pub fn contains(&self, row: u16, col: u16) -> bool {
-        row >= self.top && row < self.bottom() && col >= self.left && col < self.right()
-    }
-}
+pub use ui::Rect;
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -84,17 +55,36 @@ impl LayoutState {
     fn compute_normal(term_width: u16, term_height: u16, prompt_height: u16) -> Self {
         let max_prompt = (term_height / 2).max(3);
         let prompt_height = prompt_height.min(max_prompt);
-        let gap: u16 = 1;
-        let viewport_rows = term_height.saturating_sub(prompt_height + gap);
 
-        let transcript = Rect::new(0, 0, term_width, viewport_rows);
-        let prompt = Rect::new(viewport_rows + gap, 0, term_width, prompt_height);
+        let tree = ui::LayoutTree::Split {
+            direction: ui::layout::Direction::Vertical,
+            children: vec![
+                ui::LayoutTree::Leaf {
+                    name: "transcript".into(),
+                    constraint: ui::Constraint::Fill,
+                },
+                ui::LayoutTree::Leaf {
+                    name: "gap".into(),
+                    constraint: ui::Constraint::Fixed(1),
+                },
+                ui::LayoutTree::Leaf {
+                    name: "prompt".into(),
+                    constraint: ui::Constraint::Fixed(prompt_height),
+                },
+            ],
+        };
+
+        let area = Rect::new(0, 0, term_width, term_height);
+        let regions = ui::layout::resolve_layout(&tree, area);
+
+        let transcript = regions.get("transcript").copied().unwrap_or_default();
+        let prompt = regions.get("prompt").copied().unwrap_or_default();
 
         LayoutState {
             term_width,
             term_height,
             transcript,
-            gap,
+            gap: 1,
             prompt,
             dialog: None,
             floats: Vec::new(),

@@ -189,6 +189,7 @@ pub struct App {
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub pending_float_ops: Vec<FloatOp>,
+    pub ui: ui::Ui,
 }
 
 pub enum FloatOp {
@@ -594,6 +595,25 @@ impl App {
             agent_prompt_config: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             pending_float_ops: Vec::new(),
+            ui: {
+                let (w, h) = terminal::size().unwrap_or((80, 24));
+                let mut ui = ui::Ui::new();
+                ui.set_terminal_size(w, h);
+                ui.set_layout(ui::LayoutTree::Split {
+                    direction: ui::layout::Direction::Vertical,
+                    children: vec![
+                        ui::LayoutTree::Leaf {
+                            name: "transcript".into(),
+                            constraint: ui::Constraint::Fill,
+                        },
+                        ui::LayoutTree::Leaf {
+                            name: "prompt".into(),
+                            constraint: ui::Constraint::Pct(25),
+                        },
+                    ],
+                });
+                ui
+            },
         }
     }
 
