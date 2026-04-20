@@ -1,10 +1,12 @@
-# TUI Architecture Refactor Plan
+# TUI Architecture & Lua Plugin Platform
 
 ## Goal
 
-Reshape the TUI into a familiar editor-style architecture modeled on neovim — **buffers** (content + cursor + selection + buffer-local keymaps) inside **windows** (viewports with window-local keymaps and a layout rect), every interaction routed through a stable **public API** (`smelt::api::{buf, win, block, cmd, transcript, keymap, ui, status}`) — and expose that API to user configuration via **Lua bindings** (`mlua` + `~/.config/smelt/init.lua`). The status line is a dedicated **one-row docked UI region** driven by structured status items, not a fake editable buffer window.
+Two-part refactor:
 
-The original code fought three problems at once: the content pane navigated a rendered projection instead of a model, coordinate systems / layout / freeze logic each lived in multiple places, and there was no shared vocabulary for "do this thing to that buffer/window." The nvim-style model + Lua FFI dissolves all three and yields an extensible platform.
+1. **Editor-style TUI architecture** (complete) — reshape the terminal interface into a neovim-modeled architecture with **buffers**, **windows**, a stable **public API** (`smelt::api::*`), and **Lua bindings** (`mlua` + `~/.config/smelt/init.lua`). Alt-buffer rendering, top-relative coordinates, viewport pin, snapshot-based navigation, structured status bar.
+
+2. **Full Lua plugin platform** (in progress) — expand the API surface so that every behavior the app performs is expressible through `smelt.api.*`. Lua plugins can define modes (custom system prompt + tool filter + custom tools), register tools, control the engine, and render custom UI. The Rust core becomes three things: terminal renderer, engine client, and Lua host. Features like plan mode become bundled Lua plugins rather than hardcoded Rust.
 
 ## Why nvim vocabulary
 
@@ -17,6 +19,9 @@ The original code fought three problems at once: the content pane navigated a re
 
 ## Guiding decisions
 
+- **Lua-first.** If a feature is behavior (modes, commands, workflows), it belongs in Lua. If it's plumbing (rendering, networking, storage, event loop), it belongs in Rust. When in doubt, Lua. The test: "could a user have written this as a plugin?" If yes, it should *be* a plugin — bundled by default, but a plugin.
+- **One API, dogfooded.** Internal Rust code and Lua plugins use the same `smelt::api.*` surface. If the API can't express what a feature needs, the API is incomplete — fix the API, don't bypass it. This keeps the API honest and complete.
+- **Full introspection.** Lua can read everything: system prompt, active tools, token usage, settings, transcript blocks, buffer text, window state. No hidden state that only Rust can see.
 - Nvim-style names throughout: `Buffer`, `Window`, `TranscriptWindow`, `PromptWindow`, `curswant`, `cursor`, `api::buf::*`, `api::win::*`.
 - Every state mutation goes through `smelt::api`. No direct `input.buf = …`, no direct `screen.active_* = …`. The API is the only door — Lua sees exactly what internal code sees.
 - `BufId` / `WinId` / `BlockId` are stable opaque handles; Lua holds them by value. Mutation does not invalidate handles.
@@ -484,42 +489,227 @@ Prompt uses per-char `SpanKind` walk with inline cursor rendering; transcript us
 
 ---
 
-# Dependency graph
+# Part 2 — Lua Plugin Platform
+
+## Architecture
 
 ```
-T1 (gutters)  ──→  T2 (top-relative scroll)  ──→  T3 (cmd unification)
-     │                                                    │
-     └──→ T7 (completer-as-float)                        ▼
-                                                   T4 (snapshot cursor)
-T6 (dead code) ← anytime                                 │
-T5 (YAML→Lua) ← independent                              ▼
-                                                   T8 (public API)  →  T9 (selection)
+┌──────────────────────────────────────┐
+│           Lua plugins                │
+│  (plan mode, /btw, auto-research,   │
+│   custom modes, bundled + user)     │
+└──────────────┬───────────────────────┘
+               │ smelt.api.*
+┌──────────────▼───────────────────────┐
+│           Public API layer           │
+│  buf, win, transcript, engine, ui,  │
+│  cmd, session, tools, opts, events  │
+└──────────────┬───────────────────────┘
+               │ same functions
+┌──────────────▼───────────────────────┐
+│         Rust core (owns state)       │
+│  rendering, networking, storage,    │
+│  terminal I/O, event loop           │
+└──────────────────────────────────────┘
 ```
 
-## Explicit non-goals
+State lives in Rust. Lua talks through the API. Internal Rust code also routes through the API. The API *is* the product.
+
+**Snapshot/queue pattern** (solves Rust re-entrancy):
+- Before calling a Lua handler, snapshot readable state into `ApiContext`
+- Lua reads from the snapshot (no borrow conflict)
+- Lua queues mutations (set system prompt, register tool, etc.)
+- Handler returns → app drains the mutation queue and applies changes
+- Already implemented for `pending_commands` and `pending_notifications`; generalize to all mutations
+
+## Full API surface
+
+### Reads (snapshot — no borrow issues)
+
+```
+smelt.api.buf.text()                    -- prompt buffer text (existing)
+smelt.api.win.focus()                   -- focused window name (existing)
+smelt.api.win.mode()                    -- vim mode (existing)
+smelt.api.transcript.text()             -- full transcript as text (existing)
+smelt.api.transcript.blocks()           -- block metadata list
+smelt.api.engine.system_prompt()        -- current effective system prompt
+smelt.api.engine.active_tools()         -- list of enabled tool names
+smelt.api.engine.usage()                -- token counts, cost, TPS
+smelt.api.engine.model()                -- current model name
+smelt.api.opts.get(key)                 -- read a setting
+smelt.api.session.id()                  -- current session ID
+```
+
+### Mutations (queued — applied after handler returns)
+
+```
+smelt.api.engine.set_system_prompt(text)        -- replace/prepend system prompt
+smelt.api.engine.set_tools({allow?, deny?})      -- filter available tool set
+smelt.api.engine.register_tool(name, schema, fn) -- register custom LLM-callable tool
+smelt.api.engine.set_param(key, value)           -- thinking level, temperature, etc.
+smelt.api.engine.set_model(name)                 -- switch model
+smelt.api.opts.set(key, value)                   -- toggle settings
+smelt.api.ui.notify(msg)                         -- notification (existing)
+smelt.api.ui.notify_error(msg)                   -- error notification (existing)
+smelt.api.ui.dialog(spec)                        -- open a dialog (select, confirm, input)
+smelt.api.session.fork()                         -- fork current session
+smelt.api.session.compact(instructions?)         -- trigger compaction
+smelt.api.cmd.run(name)                          -- run a command (existing)
+smelt.api.cmd.register(name, fn)                 -- register command (existing)
+```
+
+### Events (Lua subscribes, Rust fires)
+
+```
+smelt.on("before_agent_start", fn)  -- after user submits, before LLM call
+                                    -- can modify system prompt, tool set
+smelt.on("tool_call", fn)           -- before tool executes; can block/mutate args
+smelt.on("tool_result", fn)         -- after tool executes; can modify result
+smelt.on("turn_start", fn)          -- each LLM response begins
+smelt.on("turn_end", fn)            -- each LLM response + tool calls complete
+smelt.on("input", fn)              -- raw user input before submission; can transform
+smelt.on("block_done", fn)          -- block finishes streaming (existing)
+smelt.on("stream_start", fn)        -- streaming begins (existing)
+smelt.on("stream_end", fn)          -- streaming ends (existing)
+smelt.on("cmd_pre", fn)             -- before command handler (existing)
+smelt.on("cmd_post", fn)            -- after command handler (existing)
+smelt.on("mode_change", fn)         -- agent mode or vim mode changes
+smelt.on("session_start", fn)       -- session created/loaded/resumed
+smelt.on("session_shutdown", fn)    -- graceful shutdown
+```
+
+## Phases
+
+### L1. Design the full API surface
+
+Write the complete `smelt.api.*` spec (above is the starting point). Finalize naming, argument shapes, return types. Decide which reads go into the snapshot vs. which are live queries. This is the contract — everything gets designed before code.
+
+### L2. Generalize the snapshot/queue pattern
+
+Replace the ad-hoc `pending_commands` / `pending_notifications` / `set_context` / `clear_context` with a unified `ApiContext` that:
+- Carries all readable state as a snapshot
+- Collects all mutations in a typed queue
+- Drains and applies mutations after the handler returns
+
+Internal Rust code starts routing through `api::*` where it doesn't already.
+
+### L3. Implement the engine APIs
+
+- `engine.system_prompt()` / `engine.set_system_prompt()`
+- `engine.active_tools()` / `engine.set_tools()`
+- `engine.register_tool(name, schema, handler)`
+- `engine.usage()` — token counts, cost
+- `engine.model()` / `engine.set_model()`
+- `engine.set_param(key, value)` — thinking level, temperature
+
+Wire through `ApiContext` → Lua bindings.
+
+### L4. Implement the event system
+
+- `before_agent_start` — the key hook for mode control (modify system prompt + tools before LLM call)
+- `tool_call` — intercept/block/mutate tool arguments
+- `tool_result` — modify tool results
+- `turn_start` / `turn_end`
+- `input` — transform user input before submission
+- `mode_change`, `session_start`, `session_shutdown`
+
+### L5. Port plan mode to Lua
+
+First real plugin. Plan mode becomes a Lua script that:
+- Hooks `before_agent_start` to set a read-only system prompt
+- Calls `engine.set_tools({deny: [write, edit, bash]})` to restrict to read-only tools
+- Registers `exit_plan_mode` as a custom tool via `engine.register_tool()`
+- Registers the mode switch via `smelt.api.cmd.register("plan", ...)`
+
+Delete the Rust plan mode code. Ship as a bundled plugin in `lua/plugins/plan_mode.lua` (loaded by default).
+
+### L6. Port `/btw` to Lua
+
+Similar to plan mode — a lightweight mode that:
+- Sets a custom system prompt ("answer briefly, don't use tools")
+- Disables all tools via `engine.set_tools({allow: []})`
+- Doesn't persist to conversation history
+
+Exercises the same APIs as plan mode but with different constraints.
+
+### L7. Build auto-research mode as a Lua plugin
+
+Stress-test for the full API. A new mode where:
+- Custom system prompt instructs the agent to optimize a metric via experiments
+- Custom tools registered for experiment tracking (log result, read experiment history)
+- Experiment state persisted to a file in the working directory
+- (Future: custom UI panel / window split for experiment dashboard)
+
+This is the proof that the plugin platform supports real, complex features.
+
+### L8. Evaluate and port existing features to bundled Lua plugins
+
+With L5–L7 complete, evaluate which existing Rust features are better expressed as Lua plugins. Candidates will emerge from dogfooding — features that are self-contained behaviors rather than core plumbing. Each ported feature ships as a bundled plugin (loaded by default, user can override or disable).
+
+This phase is deliberately open-ended — decisions made based on what we learn from L5–L7.
+
+### L9. Documentation and polish
+
+- Full API reference (`docs/lua-api.md`)
+- Plugin authoring guide
+- Update README with Lua plugin capabilities
+- Update/archive this plan document
+- Clean up Lua examples to reflect the new API surface
+- Dogfood for a week, fix what's awkward, rename what's unclear
+
+## Dependency graph
+
+```
+L1 (API design)  ──→  L2 (snapshot/queue)  ──→  L3 (engine APIs)
+                                                      │
+                                                      ▼
+                                                L4 (events)
+                                                      │
+                                                      ▼
+                                                L5 (plan mode → Lua)
+                                                      │
+                                                      ▼
+                                                L6 (/btw → Lua)
+                                                      │
+                                                      ▼
+                                                L7 (auto-research)
+                                                      │
+                                                      ▼
+                                                L8 (evaluate + port)
+                                                      │
+                                                      ▼
+                                                L9 (docs + polish)
+```
+
+---
+
+# Non-goals
 
 - **Flattening `BlockHistory` into plain text.** Structure is load-bearing.
 - **Unifying prompt and transcript under one monolithic window type.** Shared trait + per-role structs.
-- **One big-bang rewrite.** Each phase ships.
-- **Plugin loader / manifest / sandboxing beyond mlua's defaults.** Lua scripts live in `~/.config/smelt/`; no registry.
-- **Async Lua.** v1 is sync-only; coroutines possible later.
-- **Deleting `draw_frame` entirely.** Headless mode still needs scrollback output.
+- **Async Lua (v1).** Sync-only; coroutine-based async deferred until a plugin genuinely needs it.
 - **Forcing structural symmetry between windows.**
-- **Making the status line pretend to be a normal editable/selectable buffer window just to fit the editor model.** It is a docked UI region with its own structured content model.
-- **Moving freeze into the model.** Freeze is "don't repaint"; model is always current.
+- **Making the status line a normal buffer window.** Docked UI region with structured content model.
+- **Plugin registry / package manager.** Lua scripts live in `~/.config/smelt/`; bundled plugins ship in the binary. No npm, no manifest.
+- **Matching Pi's TypeScript extension model.** Different language, different constraints. Neovim-style API growth, not Pi-style full surface on day one.
 
 ## Success criteria
 
-- Adding a new window type is: implement `Window`, register keymaps via `api::win::set_keymap`. No changes to `State`, `Screen`, or dispatch core.
-- Adding a new completer use-case: build a `CompleterSpec`, call `api::ui::open_completer`. No new render code.
+### Part 1 (TUI architecture — complete)
+
+- Adding a new window type: implement `Window`, register keymaps. No changes to `State`, `Screen`, or dispatch core.
 - Adding a new command: `api::cmd::register(name, handler)` — reachable from keybinds, `:cmd`, and Lua.
-- Adding a non-selectable UI element (gutter, decoration, line number): `selectable: false` on the span. Nothing else changes.
-- Adding a Lua hook into any existing feature: one `smelt.on(event, fn)` call. No Rust changes.
-- Users can redefine the status line in Lua with structured items while Rust continues to own width fitting, priority dropping, and truncation.
-- No function converts between bottom-relative and top-relative coordinates.
+- Adding a non-selectable UI element: `selectable: false` on the span. Nothing else changes.
+- No bottom-relative coordinate conversions.
 - No mutation bypasses `api::*`.
-- `Transcript`, `State`, every primitive is unit-testable without a terminal.
-- Viewport/cursor math has a unit test matrix that covers the full space of `(total, viewport, scroll, line)`.
-- `smelt.api.*` surface documents to one page and is stable across minor versions.
-- Users can redefine every default keybind and built-in command in Lua without touching Rust.
+- Viewport/cursor math has unit tests covering the full space.
+
+### Part 2 (Lua plugin platform)
+
+- Plan mode is a Lua plugin, not Rust code. Deleting the plugin file removes the feature cleanly.
+- A new mode (like auto-research) is: a Lua file that hooks `before_agent_start`, sets a system prompt, filters tools, optionally registers custom tools. No Rust changes.
+- `smelt.api.*` is the only interface — internal Rust and Lua plugins see the same surface.
+- Custom tools registered from Lua are indistinguishable from built-in tools to the LLM.
+- Users can redefine every default keybind, built-in command, and bundled mode from `init.lua`.
+- The Rust core has no knowledge of plan mode, `/btw`, or any other mode — modes are purely a Lua concept.
 
