@@ -873,7 +873,7 @@ impl App {
     /// Returns `(redirtied, placement)` — the bool indicates whether
     /// content was drawn (caller should re-dirty the dialog), and the
     /// placement carries the row budget for the dialog.
-    pub(super) fn tick_dialog(
+    pub(super) fn render_dialog(
         &mut self,
         out: &mut render::RenderOut,
         dialog_height: u16,
@@ -935,7 +935,7 @@ impl App {
     }
 
     /// Render a full-mode frame using the compositor pipeline.
-    pub(super) fn tick_prompt_compositor(&mut self, agent_running: bool) {
+    pub(super) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
         self.screen.update_spinner();
         if !self.screen.needs_draw(false) {

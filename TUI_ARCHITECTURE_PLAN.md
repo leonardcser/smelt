@@ -182,9 +182,20 @@ Each frame: resolve layout → draw components → diff grids → emit SGR.
 
 ### Buffer (content model)
 
-Lines + highlights + marks + virtual text. Buffers are the data model —
-windows read buffers and write cells to the grid. Buffers are updated at
-event time (keystrokes, engine events, streaming), not at render time.
+Lines + highlights + marks + virtual text + per-line decoration. Buffers
+are the data model — windows read buffers and write cells to the grid.
+Buffers are updated at event time (keystrokes, engine events, streaming),
+not at render time.
+
+Both editable and read-only buffers use the same type. The transcript is
+a read-only buffer (`modifiable: false`) — it has the same keybindings
+as a normal buffer (normal, visual, visual line, yank, scroll) except
+insert mode. The prompt is an editable buffer.
+
+Per-line decoration (`LineDecoration`) supports gutter backgrounds, fill
+backgrounds, and soft-wrap markers. This is optional metadata — most
+buffers don't use it, but the transcript and diff previews do. Highlight
+spans carry optional `SpanMeta` for selection/copy behavior.
 
 ### Window
 
@@ -194,6 +205,14 @@ buffers in response to events; windows pull from buffers when rendering.
 
 This is the Neovim model adapted for Rust: events mutate buffers, buffers
 mark their windows dirty, the compositor renders dirty windows.
+
+### Naming conventions
+
+Components implement `draw()` — the compositor calls `draw()` on each.
+No per-component-type render methods (`render_dialog`, `render_prompt`).
+App has one `render()` entry point that calls `compositor.render()`.
+Temporary internal helpers during migration are prefixed with the
+surface they handle but will be deleted once all surfaces are components.
 
 ### FloatDialog
 
@@ -391,34 +410,41 @@ redraws automatically on the next frame.
 
 ### Transition from current state
 
-The current code has a transitional `tick_prompt_compositor` function
-that extracts data from `Screen`, pushes it into dumb view components,
+The current code has a transitional `render_normal` function that
+extracts data from `Screen`, pushes it into dumb view components,
 then calls `compositor.render_with()`. This needs to be replaced:
 
-**Step 1: Clean up current state** — fix dead code, remove
+**Step 1: Clean up current state** ✅ — fix dead code, remove
 `#[allow(dead_code)]`, get everything compiling clean. Rename
-`tick_prompt_compositor` → `render` as a short-term cleanup.
+`tick_*` methods to `render_*`.
 
-**Step 2: Transcript buffer** — create a `ui::Buffer`-backed transcript.
-Move `collect_transcript_data` logic so the buffer is updated when
-engine events arrive (new blocks, streaming text), not at render time.
-`TranscriptWindow` reads from this buffer in `draw()`. App no longer
-extracts + pushes transcript lines each frame.
+**Step 2: Enrich `ui::Buffer` with line decoration** — add
+`LineDecoration` (gutter_bg, fill_bg, fill_right_margin, soft_wrapped)
+and `SpanMeta` (selectable, copy_as) to the buffer model. This makes
+Buffer rich enough for both the transcript (read-only, decorated) and
+the prompt (editable, plain). Update `BufferView` to render decorations.
 
-**Step 3: Prompt buffer** — move input state into a `ui::Buffer`.
+**Step 3: Transcript buffer** — create a `ui::Buffer`-backed transcript.
+The block rendering pipeline (`layout_block` → `DisplayBlock`) writes
+into the buffer via `buf.set_lines()` + `buf.add_highlight()` +
+`buf.set_line_decoration()` at event time (when blocks arrive, when
+streaming appends). `TranscriptWindow` reads from this buffer in
+`draw()`. App no longer extracts + pushes transcript lines each frame.
+
+**Step 4: Prompt buffer** — move input state into a `ui::Buffer`.
 `PromptWindow` reads from it in `draw()`. Keystrokes update the buffer
 directly. The prompt chrome (notification bar, queued messages, bar info)
 becomes virtual text or additional buffer content set at event time.
 
-**Step 4: Status bar event-driven** — status bar segments are updated
+**Step 5: Status bar event-driven** — status bar segments are updated
 when the underlying data changes (mode switch, new tokens, cost update),
 not recomputed every frame.
 
-**Step 5: Hollow out Screen** — as each piece moves into buffers,
+**Step 6: Hollow out Screen** — as each piece moves into buffers,
 `Screen` shrinks. Data that was in Screen moves to the buffer it
 belongs to. Screen's draw methods are deleted as windows take over.
 
-**Step 6: Migrate dialogs** — each of the 10 Dialog implementations
+**Step 7: Migrate dialogs** — each of the 10 Dialog implementations
 becomes a `FloatDialog` configuration added as a compositor layer.
 Migration order (simplest first):
 1. HelpDialog → FloatDialog with keybindings in buffer, no footer
@@ -434,7 +460,7 @@ Migration order (simplest first):
 
 Also migrate: BtwBlock, Notifications, Completions → float layers.
 
-**Step 7: Delete legacy rendering** —
+**Step 8: Delete legacy rendering** —
 - `Dialog` trait, `DialogResult`, `ListState`, `TextArea`
 - `Frame`, `RenderOut`, `StyleState` (SGR/style stack machinery)
 - `paint_line` (replaced by `paint_line_to_grid`)
@@ -442,11 +468,11 @@ Also migrate: BtwBlock, Notifications, Completions → float layers.
 - `active_dialog`, `open_dialog`, `finalize_dialog_close`
 - All individual dialog structs in `render/dialogs/`
 - `prompt_data.rs`, `status_data.rs` (transitional compute modules)
-- `tick_dialog`, any remaining `tick_*` methods
+- `render_dialog`, `render_normal` (transitional dispatch methods)
 
 ### Current progress
 
-Transitional scaffolding built (to be replaced by buffer/window model):
+Step 1 complete. Transitional scaffolding in place:
 - `paint_line_to_grid` — pure function, converts DisplayLine → grid cells ✅
 - `TranscriptView` — component that paints pushed DisplayLines ✅
   (needs to become a window reading from a buffer)
@@ -457,6 +483,10 @@ Transitional scaffolding built (to be replaced by buffer/window model):
 - `status_data.rs` — computes status segments from Screen state ✅
   (transitional — will be replaced by event-driven updates)
 - Compositor wired into App, non-dialog frames render via grid diff ✅
+- All `#[allow(dead_code)]` removed, dead items cleaned up ✅
+- `tick_*` methods renamed to `render_*` ✅
+
+Next: Step 2 — enrich `ui::Buffer` with `LineDecoration` and `SpanMeta`.
 
 ## Phase 7: Event dispatch
 
