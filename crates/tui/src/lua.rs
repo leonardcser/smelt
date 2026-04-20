@@ -30,13 +30,26 @@ type SharedVec<T> = Arc<Mutex<Vec<T>>>;
 type SharedMap<K, V> = Arc<Mutex<HashMap<K, V>>>;
 
 /// Event kinds the app emits into the Lua autocmd dispatcher.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// "Simple" events carry no data — handlers receive the event name as
+/// a string argument.  "Data" events carry a Lua table with structured
+/// fields — handlers receive `(event_name, data_table)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AutocmdEvent {
+    // ── simple (no payload) ─────────────────────────────────────────
     BlockDone,
     CmdPre,
     CmdPost,
-    StreamStart,
-    StreamEnd,
+    SessionStart,
+    Shutdown,
+    // ── data-carrying ───────────────────────────────────────────────
+    TurnStart,
+    TurnEnd,
+    ModeChange,
+    ModelChange,
+    ToolStart,
+    ToolEnd,
+    InputSubmit,
 }
 
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
@@ -88,13 +101,20 @@ pub fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
 }
 
 impl AutocmdEvent {
-    fn lua_name(self) -> &'static str {
+    pub fn lua_name(&self) -> &'static str {
         match self {
-            AutocmdEvent::BlockDone => "block_done",
-            AutocmdEvent::CmdPre => "cmd_pre",
-            AutocmdEvent::CmdPost => "cmd_post",
-            AutocmdEvent::StreamStart => "stream_start",
-            AutocmdEvent::StreamEnd => "stream_end",
+            Self::BlockDone => "block_done",
+            Self::CmdPre => "cmd_pre",
+            Self::CmdPost => "cmd_post",
+            Self::SessionStart => "session_start",
+            Self::Shutdown => "shutdown",
+            Self::TurnStart => "turn_start",
+            Self::TurnEnd => "turn_end",
+            Self::ModeChange => "mode_change",
+            Self::ModelChange => "model_change",
+            Self::ToolStart => "tool_start",
+            Self::ToolEnd => "tool_end",
+            Self::InputSubmit => "input_submit",
         }
     }
 
@@ -103,8 +123,18 @@ impl AutocmdEvent {
             "block_done" => Some(Self::BlockDone),
             "cmd_pre" => Some(Self::CmdPre),
             "cmd_post" => Some(Self::CmdPost),
-            "stream_start" => Some(Self::StreamStart),
-            "stream_end" => Some(Self::StreamEnd),
+            "session_start" => Some(Self::SessionStart),
+            "shutdown" => Some(Self::Shutdown),
+            "turn_start" => Some(Self::TurnStart),
+            "turn_end" => Some(Self::TurnEnd),
+            "mode_change" => Some(Self::ModeChange),
+            "model_change" => Some(Self::ModelChange),
+            "tool_start" => Some(Self::ToolStart),
+            "tool_end" => Some(Self::ToolEnd),
+            "input_submit" => Some(Self::InputSubmit),
+            // Legacy aliases
+            "stream_start" => Some(Self::TurnStart),
+            "stream_end" => Some(Self::TurnEnd),
             _ => None,
         }
     }
@@ -124,6 +154,25 @@ pub enum PendingOp {
     Notify(String),
     NotifyError(String),
     RunCommand(String),
+    SetMode(String),
+    SetModel(String),
+    SetReasoningEffort(String),
+    Cancel,
+    Compact(Option<String>),
+    Submit(String),
+}
+
+/// Snapshot of engine-level state (model, mode, cost, tokens).
+/// Populated by `snapshot_engine_context` in the app loop.
+#[derive(Clone, Default)]
+pub struct EngineSnapshot {
+    pub model: String,
+    pub mode: String,
+    pub reasoning_effort: String,
+    pub is_busy: bool,
+    pub session_cost: f64,
+    pub context_tokens: Option<u32>,
+    pub context_window: Option<u32>,
 }
 
 /// Shared state between Lua closures and the app loop.
@@ -139,11 +188,13 @@ pub enum PendingOp {
 /// `lua_errors`.
 #[derive(Default)]
 pub struct LuaOps {
-    // ── reads (snapshot) ────────────────────────────────────────────
+    // ── reads (snapshot) — UI state ─────────────────────────────────
     pub transcript_text: Option<String>,
     pub prompt_text: Option<String>,
     pub focused_window: Option<String>,
     pub vim_mode: Option<String>,
+    // ── reads (snapshot) — engine state ─────────────────────────────
+    pub engine: EngineSnapshot,
     // ── writes (queued mutations) ───────────────────────────────────
     pub ops: Vec<PendingOp>,
 }
@@ -345,6 +396,75 @@ impl LuaRuntime {
 
         api.set("cmd", cmd_tbl)?;
 
+        // smelt.api.engine.*
+        let engine_tbl = lua.create_table()?;
+
+        // Helper: create a read-only engine accessor that locks ops and
+        // extracts a field from the EngineSnapshot.
+        macro_rules! engine_read {
+            ($lua:expr, $ops:expr, $field:ident) => {{
+                let o = $ops.clone();
+                $lua.create_function(move |_, ()| {
+                    let o = o
+                        .lock()
+                        .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+                    Ok(o.engine.$field.clone())
+                })?
+            }};
+        }
+
+        macro_rules! engine_op {
+            ($lua:expr, $ops:expr, $variant:ident, $ty:ty) => {{
+                let o = $ops.clone();
+                $lua.create_function(move |_, val: $ty| {
+                    if let Ok(mut o) = o.lock() {
+                        o.ops.push(PendingOp::$variant(val));
+                    }
+                    Ok(())
+                })?
+            }};
+        }
+
+        engine_tbl.set("model", engine_read!(lua, ops, model))?;
+        engine_tbl.set("mode", engine_read!(lua, ops, mode))?;
+        engine_tbl.set("reasoning_effort", engine_read!(lua, ops, reasoning_effort))?;
+        engine_tbl.set("is_busy", engine_read!(lua, ops, is_busy))?;
+        engine_tbl.set("cost", engine_read!(lua, ops, session_cost))?;
+        engine_tbl.set("context_tokens", engine_read!(lua, ops, context_tokens))?;
+        engine_tbl.set("context_window", engine_read!(lua, ops, context_window))?;
+
+        engine_tbl.set("set_model", engine_op!(lua, ops, SetModel, String))?;
+        engine_tbl.set("set_mode", engine_op!(lua, ops, SetMode, String))?;
+        engine_tbl.set(
+            "set_reasoning_effort",
+            engine_op!(lua, ops, SetReasoningEffort, String),
+        )?;
+        engine_tbl.set("submit", engine_op!(lua, ops, Submit, String))?;
+
+        let ops_clone = ops.clone();
+        engine_tbl.set(
+            "cancel",
+            lua.create_function(move |_, ()| {
+                if let Ok(mut o) = ops_clone.lock() {
+                    o.ops.push(PendingOp::Cancel);
+                }
+                Ok(())
+            })?,
+        )?;
+
+        let ops_clone = ops.clone();
+        engine_tbl.set(
+            "compact",
+            lua.create_function(move |_, instructions: Option<String>| {
+                if let Ok(mut o) = ops_clone.lock() {
+                    o.ops.push(PendingOp::Compact(instructions));
+                }
+                Ok(())
+            })?,
+        )?;
+
+        api.set("engine", engine_tbl)?;
+
         smelt.set("api", api)?;
 
         // smelt.notify(msg)
@@ -441,6 +561,14 @@ impl LuaRuntime {
         }
     }
 
+    /// Populate the engine snapshot fields. Called once at startup and
+    /// whenever the engine state changes (mode, model, cost, tokens).
+    pub fn set_engine_context(&self, snap: EngineSnapshot) {
+        if let Ok(mut o) = self.ops.lock() {
+            o.engine = snap;
+        }
+    }
+
     /// Clear the snapshot fields after dispatching.
     pub fn clear_context(&self) {
         if let Ok(mut o) = self.ops.lock() {
@@ -520,26 +648,53 @@ impl LuaRuntime {
         true
     }
 
-    /// Fire all handlers registered for `event`. Errors are captured
-    /// per-handler and don't stop subsequent handlers.
+    /// Fire all handlers registered for `event` (simple — no data payload).
+    /// Handlers receive `(event_name)`.
     pub fn emit(&self, event: AutocmdEvent) {
-        let funcs: Vec<mlua::Function> = {
-            let Ok(map) = self.autocmds.lock() else {
-                return;
-            };
-            let Some(list) = map.get(&event) else {
-                return;
-            };
-            list.iter()
-                .filter(|h| !h.dead)
-                .filter_map(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
-                .collect()
-        };
+        let funcs = self.collect_handlers(&event);
         for func in funcs {
             if let Err(e) = func.call::<()>(event.lua_name()) {
                 self.record_error(format!("autocmd `{}`: {e}", event.lua_name()));
             }
         }
+    }
+
+    /// Fire all handlers for `event` with a data table.
+    /// Handlers receive `(event_name, data_table)`.
+    /// `build_data` is called once to construct the table (only if handlers exist).
+    pub fn emit_data<F>(&self, event: AutocmdEvent, build_data: F)
+    where
+        F: FnOnce(&Lua) -> LuaResult<mlua::Table>,
+    {
+        let funcs = self.collect_handlers(&event);
+        if funcs.is_empty() {
+            return;
+        }
+        let data = match build_data(&self.lua) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("autocmd `{}` data: {e}", event.lua_name()));
+                return;
+            }
+        };
+        for func in funcs {
+            if let Err(e) = func.call::<()>((event.lua_name(), data.clone())) {
+                self.record_error(format!("autocmd `{}`: {e}", event.lua_name()));
+            }
+        }
+    }
+
+    fn collect_handlers(&self, event: &AutocmdEvent) -> Vec<mlua::Function> {
+        let Ok(map) = self.autocmds.lock() else {
+            return Vec::new();
+        };
+        let Some(list) = map.get(event) else {
+            return Vec::new();
+        };
+        list.iter()
+            .filter(|h| !h.dead)
+            .filter_map(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
+            .collect()
     }
 
     /// Fire any `smelt.defer` timers whose deadline has passed.
@@ -638,6 +793,36 @@ impl LuaRuntime {
 fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::style::Color> {
     let val: u8 = table.get(key).ok()?;
     Some(crossterm::style::Color::AnsiValue(val))
+}
+
+/// Convert a `serde_json::Value` to a `mlua::Value`.
+pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
+    match v {
+        serde_json::Value::Null => Ok(mlua::Value::Nil),
+        serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(mlua::Value::Integer(i))
+            } else {
+                Ok(mlua::Value::Number(n.as_f64().unwrap_or(0.0)))
+            }
+        }
+        serde_json::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
+        serde_json::Value::Array(arr) => {
+            let t = lua.create_table()?;
+            for (i, elem) in arr.iter().enumerate() {
+                t.set(i + 1, json_to_lua(lua, elem)?)?;
+            }
+            Ok(mlua::Value::Table(t))
+        }
+        serde_json::Value::Object(map) => {
+            let t = lua.create_table()?;
+            for (k, val) in map {
+                t.set(k.as_str(), json_to_lua(lua, val)?)?;
+            }
+            Ok(mlua::Value::Table(t))
+        }
+    }
 }
 
 impl Default for LuaRuntime {
@@ -903,5 +1088,207 @@ mod tests {
             .eval()
             .expect("eval");
         assert_eq!(text, "prompt content");
+    }
+
+    #[test]
+    fn engine_model_reads_snapshot() {
+        let rt = LuaRuntime::new();
+        rt.set_engine_context(EngineSnapshot {
+            model: "claude-opus-4".into(),
+            ..Default::default()
+        });
+        let model: String = rt
+            .lua
+            .load("return smelt.api.engine.model()")
+            .eval()
+            .expect("eval");
+        assert_eq!(model, "claude-opus-4");
+    }
+
+    #[test]
+    fn engine_mode_reads_snapshot() {
+        let rt = LuaRuntime::new();
+        rt.set_engine_context(EngineSnapshot {
+            mode: "plan".into(),
+            ..Default::default()
+        });
+        let mode: String = rt
+            .lua
+            .load("return smelt.api.engine.mode()")
+            .eval()
+            .expect("eval");
+        assert_eq!(mode, "plan");
+    }
+
+    #[test]
+    fn engine_is_busy_reads_snapshot() {
+        let rt = LuaRuntime::new();
+        rt.set_engine_context(EngineSnapshot {
+            is_busy: true,
+            ..Default::default()
+        });
+        let busy: bool = rt
+            .lua
+            .load("return smelt.api.engine.is_busy()")
+            .eval()
+            .expect("eval");
+        assert!(busy);
+    }
+
+    #[test]
+    fn engine_cost_reads_snapshot() {
+        let rt = LuaRuntime::new();
+        rt.set_engine_context(EngineSnapshot {
+            session_cost: 1.23,
+            ..Default::default()
+        });
+        let cost: f64 = rt
+            .lua
+            .load("return smelt.api.engine.cost()")
+            .eval()
+            .expect("eval");
+        assert!((cost - 1.23).abs() < 0.001);
+    }
+
+    #[test]
+    fn engine_context_tokens_reads_snapshot() {
+        let rt = LuaRuntime::new();
+        rt.set_engine_context(EngineSnapshot {
+            context_tokens: Some(5000),
+            context_window: Some(128000),
+            ..Default::default()
+        });
+        let tokens: u32 = rt
+            .lua
+            .load("return smelt.api.engine.context_tokens()")
+            .eval()
+            .expect("eval");
+        assert_eq!(tokens, 5000);
+        let window: u32 = rt
+            .lua
+            .load("return smelt.api.engine.context_window()")
+            .eval()
+            .expect("eval");
+        assert_eq!(window, 128000);
+    }
+
+    #[test]
+    fn engine_set_mode_queues_op() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(r#"smelt.api.engine.set_mode("plan")"#)
+            .exec()
+            .expect("exec");
+        let ops = rt.drain_ops();
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], PendingOp::SetMode(m) if m == "plan"));
+    }
+
+    #[test]
+    fn engine_set_model_queues_op() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(r#"smelt.api.engine.set_model("gpt-4o")"#)
+            .exec()
+            .expect("exec");
+        let ops = rt.drain_ops();
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], PendingOp::SetModel(m) if m == "gpt-4o"));
+    }
+
+    #[test]
+    fn engine_cancel_queues_op() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load("smelt.api.engine.cancel()")
+            .exec()
+            .expect("exec");
+        let ops = rt.drain_ops();
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], PendingOp::Cancel));
+    }
+
+    #[test]
+    fn engine_submit_queues_op() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(r#"smelt.api.engine.submit("hello")"#)
+            .exec()
+            .expect("exec");
+        let ops = rt.drain_ops();
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], PendingOp::Submit(t) if t == "hello"));
+    }
+
+    #[test]
+    fn engine_compact_queues_op() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(r#"smelt.api.engine.compact("keep tests")"#)
+            .exec()
+            .expect("exec");
+        let ops = rt.drain_ops();
+        assert_eq!(ops.len(), 1);
+        assert!(matches!(&ops[0], PendingOp::Compact(Some(s)) if s == "keep tests"));
+    }
+
+    #[test]
+    fn emit_data_passes_table_to_handler() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.on("mode_change", function(event, data)
+                        smelt.notify(event .. ":" .. data.from .. "->" .. data.to)
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        rt.emit_data(AutocmdEvent::ModeChange, |lua| {
+            let t = lua.create_table()?;
+            t.set("from", "normal")?;
+            t.set("to", "plan")?;
+            Ok(t)
+        });
+        assert_eq!(
+            drain_notifications(&rt),
+            vec!["mode_change:normal->plan".to_string()]
+        );
+    }
+
+    #[test]
+    fn legacy_stream_start_maps_to_turn_start() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.on("stream_start", function(event)
+                        smelt.notify("got: " .. event)
+                    end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        rt.emit(AutocmdEvent::TurnStart);
+        assert_eq!(
+            drain_notifications(&rt),
+            vec!["got: turn_start".to_string()]
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_reads_snapshot() {
+        let rt = LuaRuntime::new();
+        rt.set_engine_context(EngineSnapshot {
+            reasoning_effort: "high".into(),
+            ..Default::default()
+        });
+        let effort: String = rt
+            .lua
+            .load("return smelt.api.engine.reasoning_effort()")
+            .eval()
+            .expect("eval");
+        assert_eq!(effort, "high");
     }
 }

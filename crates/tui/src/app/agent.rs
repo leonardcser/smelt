@@ -66,8 +66,9 @@ impl App {
         self.screen.set_throbber(render::Throbber::Working);
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
-        // Notify Lua autocmd subscribers that a new stream is starting.
-        self.lua.emit(crate::lua::AutocmdEvent::StreamStart);
+        self.snapshot_engine_context(true);
+        self.lua.emit(crate::lua::AutocmdEvent::TurnStart);
+        self.apply_lua_ops();
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -274,8 +275,15 @@ impl App {
             self.engine.send(UiCommand::Cancel);
             self.kill_blocking_agents();
         }
-        // Fire the `stream_end` autocmd for any Lua subscribers.
-        self.lua.emit(crate::lua::AutocmdEvent::StreamEnd);
+        self.snapshot_engine_context(false);
+        let was_cancelled = cancelled;
+        self.lua
+            .emit_data(crate::lua::AutocmdEvent::TurnEnd, |lua| {
+                let t = lua.create_table()?;
+                t.set("cancelled", was_cancelled)?;
+                Ok(t)
+            });
+        self.apply_lua_ops();
         // Flush any in-flight streaming content before committing tools.
         self.screen.flush_streaming_thinking();
         self.screen.flush_streaming_text();
@@ -440,17 +448,30 @@ impl App {
                 args,
                 summary,
             } => {
-                // Flush any remaining streaming content before tools render.
                 self.screen.flush_streaming_thinking();
                 self.screen.flush_streaming_text();
                 if tool_name != "spawn_agent" {
                     self.screen.start_tool(
                         call_id.clone(),
                         tool_name.clone(),
-                        summary,
+                        summary.clone(),
                         args.clone(),
                     );
                 }
+                let tool_name_for_lua = tool_name.clone();
+                let args_for_lua = args.clone();
+                self.lua
+                    .emit_data(crate::lua::AutocmdEvent::ToolStart, |lua| {
+                        let t = lua.create_table()?;
+                        t.set("tool", tool_name_for_lua)?;
+                        let args_tbl = lua.create_table()?;
+                        for (k, v) in &args_for_lua {
+                            args_tbl.set(k.as_str(), crate::lua::json_to_lua(lua, v)?)?;
+                        }
+                        t.set("args", args_tbl)?;
+                        Ok(t)
+                    });
+                self.apply_lua_ops();
                 pending.push(PendingTool {
                     call_id,
                     name: tool_name,
@@ -463,10 +484,11 @@ impl App {
                 result,
                 elapsed_ms,
             } => {
+                let mut finished_tool_name: Option<String> = None;
+                let mut finished_is_error = false;
                 if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
                     let removed = pending.remove(idx);
                     if removed.name == "spawn_agent" {
-                        // Extract agent_id from result and kill if blocking.
                         let agent_id = result
                             .content
                             .strip_prefix("agent ")
@@ -503,6 +525,8 @@ impl App {
                             self.sync_agent_snapshots();
                         }
                     } else {
+                        finished_tool_name = Some(removed.name.clone());
+                        finished_is_error = result.is_error;
                         let status = if result.is_error {
                             ToolStatus::Err
                         } else {
@@ -524,6 +548,19 @@ impl App {
                         let elapsed = elapsed_ms.map(Duration::from_millis);
                         self.screen.finish_tool(&call_id, status, output, elapsed);
                     }
+                }
+                if let Some(tool_name) = finished_tool_name {
+                    let is_err = finished_is_error;
+                    let elapsed = elapsed_ms;
+                    self.lua
+                        .emit_data(crate::lua::AutocmdEvent::ToolEnd, |lua| {
+                            let t = lua.create_table()?;
+                            t.set("tool", tool_name)?;
+                            t.set("is_error", is_err)?;
+                            t.set("elapsed_ms", elapsed)?;
+                            Ok(t)
+                        });
+                    self.apply_lua_ops();
                 }
                 self.screen
                     .set_running_procs(self.engine.processes.running_count());
