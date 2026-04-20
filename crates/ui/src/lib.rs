@@ -1,4 +1,6 @@
 pub mod buffer;
+pub mod component;
+pub mod compositor;
 pub mod cursor;
 pub mod edit_buffer;
 pub mod float_render;
@@ -18,6 +20,8 @@ mod id;
 pub type AttachmentId = u64;
 
 pub use buffer::{BufType, Buffer, Span, SpanStyle};
+pub use component::{Component, DrawContext, KeyResult};
+pub use compositor::Compositor;
 pub use cursor::Cursor;
 pub use edit_buffer::EditBuffer;
 pub use flush::flush_diff;
@@ -245,7 +249,10 @@ fn resolve_float_rect(fc: &FloatConfig, term_w: u16, term_h: u16) -> Rect {
         Anchor::NW => (anchor_row + fc.row, anchor_col + fc.col),
         Anchor::NE => (anchor_row + fc.row, anchor_col + fc.col - w as i32),
         Anchor::SW => (anchor_row + fc.row - h as i32, anchor_col + fc.col),
-        Anchor::SE => (anchor_row + fc.row - h as i32, anchor_col + fc.col - w as i32),
+        Anchor::SE => (
+            anchor_row + fc.row - h as i32,
+            anchor_col + fc.col - w as i32,
+        ),
     };
 
     let top = top.max(0) as u16;
@@ -289,18 +296,19 @@ mod tests {
     fn float_centered() {
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui.win_open_float(
-            buf,
-            FloatConfig {
-                anchor: Anchor::NW,
-                row: 4,
-                col: 10,
-                width: Constraint::Fixed(60),
-                height: Constraint::Fixed(16),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let win = ui
+            .win_open_float(
+                buf,
+                FloatConfig {
+                    anchor: Anchor::NW,
+                    row: 4,
+                    col: 10,
+                    width: Constraint::Fixed(60),
+                    height: Constraint::Fixed(16),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let rect = ui.resolve_float(win).unwrap();
         assert_eq!(rect, Rect::new(4, 10, 60, 16));
     }
@@ -309,18 +317,19 @@ mod tests {
     fn float_se_anchor() {
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui.win_open_float(
-            buf,
-            FloatConfig {
-                anchor: Anchor::SE,
-                row: 24,
-                col: 80,
-                width: Constraint::Fixed(40),
-                height: Constraint::Fixed(10),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let win = ui
+            .win_open_float(
+                buf,
+                FloatConfig {
+                    anchor: Anchor::SE,
+                    row: 24,
+                    col: 80,
+                    width: Constraint::Fixed(40),
+                    height: Constraint::Fixed(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let rect = ui.resolve_float(win).unwrap();
         assert_eq!(rect, Rect::new(14, 40, 40, 10));
     }
@@ -329,18 +338,19 @@ mod tests {
     fn float_clamped_to_terminal() {
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui.win_open_float(
-            buf,
-            FloatConfig {
-                anchor: Anchor::NW,
-                row: 20,
-                col: 70,
-                width: Constraint::Fixed(30),
-                height: Constraint::Fixed(10),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let win = ui
+            .win_open_float(
+                buf,
+                FloatConfig {
+                    anchor: Anchor::NW,
+                    row: 20,
+                    col: 70,
+                    width: Constraint::Fixed(30),
+                    height: Constraint::Fixed(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let rect = ui.resolve_float(win).unwrap();
         // Width clamped: 80 - 70 = 10
         assert_eq!(rect.width, 10);
