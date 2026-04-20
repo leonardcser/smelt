@@ -1,33 +1,33 @@
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rect {
-    pub row: u16,
-    pub col: u16,
+    pub top: u16,
+    pub left: u16,
     pub width: u16,
     pub height: u16,
 }
 
 impl Rect {
-    pub fn new(row: u16, col: u16, width: u16, height: u16) -> Self {
+    pub fn new(top: u16, left: u16, width: u16, height: u16) -> Self {
         Self {
-            row,
-            col,
+            top,
+            left,
             width,
             height,
         }
     }
 
     pub fn bottom(&self) -> u16 {
-        self.row + self.height
+        self.top + self.height
     }
 
     pub fn right(&self) -> u16 {
-        self.col + self.width
+        self.left + self.width
     }
 
     pub fn contains(&self, row: u16, col: u16) -> bool {
-        row >= self.row && row < self.bottom() && col >= self.col && col < self.right()
+        row >= self.top && row < self.bottom() && col >= self.left && col < self.right()
     }
 
     pub fn area(&self) -> u32 {
@@ -112,9 +112,9 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<String, Rect>) 
             let mut offset = 0u16;
             for (child, &size) in children.iter().zip(sizes.iter()) {
                 let child_area = match direction {
-                    Direction::Vertical => Rect::new(area.row + offset, area.col, area.width, size),
+                    Direction::Vertical => Rect::new(area.top + offset, area.left, area.width, size),
                     Direction::Horizontal => {
-                        Rect::new(area.row, area.col + offset, size, area.height)
+                        Rect::new(area.top, area.left + offset, size, area.height)
                     }
                 };
                 resolve_node(child, child_area, out);

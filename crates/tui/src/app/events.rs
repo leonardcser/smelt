@@ -750,6 +750,7 @@ impl App {
         let width_changed = w != self.last_width;
         self.last_width = w;
         self.last_height = h;
+        self.ui.set_terminal_size(w, h);
         if width_changed {
             self.screen.redraw();
         } else {
