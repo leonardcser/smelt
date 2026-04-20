@@ -506,7 +506,13 @@ impl App {
         let old = self.mode;
         self.mode = mode;
         state::set_mode(self.mode);
-        self.engine.send(UiCommand::SetMode { mode: self.mode });
+        let system_prompt = self.rebuild_system_prompt();
+        let plugin_tools = self.lua.plugin_tool_defs(self.mode);
+        self.engine.send(UiCommand::SetMode {
+            mode: self.mode,
+            system_prompt: Some(system_prompt),
+            plugin_tools: Some(plugin_tools),
+        });
         self.screen.mark_dirty();
         if old != mode {
             let from = old.as_str().to_string();

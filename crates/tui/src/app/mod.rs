@@ -179,6 +179,15 @@ pub struct App {
     /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
     /// user-registered commands / keymaps / autocmds.
     pub lua: crate::lua::LuaRuntime,
+    /// Extra instructions from AGENTS.md / config, injected into the system
+    /// prompt as a section. Set during app initialization.
+    pub extra_instructions: Option<String>,
+    /// Pre-rendered skills prompt section. Set during app initialization.
+    pub skill_section: Option<String>,
+    /// Multi-agent prompt config (agent identity, parent, siblings).
+    pub agent_prompt_config: Option<engine::AgentPromptConfig>,
+    /// Prompt sections built from app state. Rebuilt on mode changes.
+    pub prompt_sections: crate::prompt_sections::PromptSections,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -393,7 +402,7 @@ static NEXT_CHILD_REQUEST_ID: std::sync::atomic::AtomicU64 =
 
 /// A permission dialog deferred because the user was actively typing.
 enum DeferredDialog {
-    Confirm(ConfirmRequest),
+    Confirm(Box<ConfirmRequest>),
     AskQuestion {
         args: HashMap<String, serde_json::Value>,
         request_id: u64,
@@ -404,7 +413,7 @@ enum DeferredDialog {
 
 pub enum SessionControl {
     Continue,
-    NeedsConfirm(ConfirmRequest),
+    NeedsConfirm(Box<ConfirmRequest>),
     NeedsAskQuestion {
         args: HashMap<String, serde_json::Value>,
         request_id: u64,
@@ -559,7 +568,26 @@ impl App {
             drag_autoscroll_since: None,
             drag_on_scrollbar: None,
             lua: crate::lua::LuaRuntime::new(),
+            extra_instructions: None,
+            skill_section: None,
+            agent_prompt_config: None,
+            prompt_sections: crate::prompt_sections::PromptSections::default(),
         }
+    }
+
+    /// Rebuild prompt sections from current app state (mode, instructions, etc.)
+    /// and return the assembled system prompt string.
+    pub fn rebuild_system_prompt(&mut self) -> String {
+        let cwd = std::path::Path::new(&self.cwd);
+        self.prompt_sections = crate::prompt_sections::build_defaults(
+            cwd,
+            self.mode,
+            true, // TUI is always interactive
+            self.agent_prompt_config.as_ref(),
+            self.skill_section.as_deref(),
+            self.extra_instructions.as_deref(),
+        );
+        self.prompt_sections.assemble()
     }
 
     pub fn settings_state(&self) -> crate::input::SettingsState {
@@ -785,7 +813,7 @@ impl App {
                     NEXT_CHILD_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.child_permission_replies.insert(request_id, reply_tx);
 
-                let ctrl = SessionControl::NeedsConfirm(ConfirmRequest {
+                let ctrl = SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
                     call_id: format!("child-perm-{request_id}"),
                     tool_name,
                     desc: confirm_message,
@@ -794,7 +822,8 @@ impl App {
                     outside_dir: None,
                     summary,
                     request_id,
-                });
+                    plugin_confirm: None,
+                }));
                 let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
                 let action = self.dispatch_control(
                     ctrl,
@@ -1096,6 +1125,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
             permission_overrides: None,
+            system_prompt: None,
+            plugin_tools: vec![],
         });
 
         // In text mode, buffer assistant text and only print to stdout at the end.
@@ -1416,6 +1447,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
             permission_overrides: None,
+            system_prompt: None,
+            plugin_tools: vec![],
         });
 
         let mut pending_query_tx: Option<tokio::sync::oneshot::Sender<String>> = None;

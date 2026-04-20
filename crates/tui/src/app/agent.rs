@@ -70,6 +70,9 @@ impl App {
         self.lua.emit(crate::lua::AutocmdEvent::TurnStart);
         self.apply_lua_ops();
 
+        let system_prompt = self.rebuild_system_prompt();
+        let plugin_tools = self.lua.plugin_tool_defs(self.mode);
+
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
@@ -86,6 +89,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides: None,
             permission_overrides: None,
+            system_prompt: Some(system_prompt),
+            plugin_tools,
         });
 
         TurnState {
@@ -250,6 +255,8 @@ impl App {
             session_dir: crate::session::dir_for(&self.session),
             model_config_overrides,
             permission_overrides,
+            system_prompt: None,
+            plugin_tools: vec![],
         });
 
         TurnState {
@@ -575,7 +582,7 @@ impl App {
                 confirm_message,
                 approval_patterns,
                 summary,
-            } => SessionControl::NeedsConfirm(ConfirmRequest {
+            } => SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
                 call_id,
                 tool_name,
                 desc: confirm_message,
@@ -584,7 +591,8 @@ impl App {
                 outside_dir: None,
                 summary,
                 request_id,
-            }),
+                plugin_confirm: None,
+            })),
             EngineEvent::RequestAnswer { request_id, args } => {
                 SessionControl::NeedsAskQuestion { args, request_id }
             }
@@ -682,7 +690,48 @@ impl App {
                 });
                 SessionControl::Continue
             }
+            EngineEvent::ExecutePluginTool {
+                request_id,
+                call_id,
+                tool_name,
+                args,
+            } => {
+                if let Some(meta) = self.lua.get_confirm_meta(&tool_name) {
+                    SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
+                        call_id,
+                        desc: meta.display_name.clone(),
+                        tool_name,
+                        args,
+                        approval_patterns: vec![],
+                        outside_dir: None,
+                        summary: None,
+                        request_id,
+                        plugin_confirm: Some(meta),
+                    }))
+                } else {
+                    self.handle_plugin_tool(request_id, call_id, tool_name, args);
+                    SessionControl::Continue
+                }
+            }
         }
+    }
+
+    /// Execute a plugin-defined tool by calling the Lua handler registered for
+    /// it. If no handler is found, returns an error result to the engine.
+    fn handle_plugin_tool(
+        &mut self,
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        let (content, is_error) = self.lua.execute_plugin_tool(&tool_name, &args);
+        self.engine.send(protocol::UiCommand::PluginToolResult {
+            request_id,
+            call_id,
+            content,
+            is_error,
+        });
     }
 
     /// Handle engine events that arrive when no agent turn is active.
@@ -1067,19 +1116,43 @@ impl App {
                 tool_name,
                 request_id,
             } => {
-                let call_id = self
-                    .confirm_context
-                    .as_ref()
-                    .map(|c| c.call_id.clone())
-                    .unwrap_or_default();
-                self.confirm_context = None;
-                let should_cancel = self.resolve_confirm(
-                    (choice, message),
-                    &call_id,
-                    request_id,
-                    &tool_name,
-                    agent,
-                );
+                let ctx = self.confirm_context.take();
+                let call_id = ctx.as_ref().map(|c| c.call_id.clone()).unwrap_or_default();
+
+                let should_cancel = match &choice {
+                    ConfirmChoice::PluginApprove(option_index) => {
+                        let args = ctx.as_ref().map(|c| c.args.clone()).unwrap_or_default();
+                        let (content, is_error) = self.lua.execute_plugin_tool(&tool_name, &args);
+                        self.engine.send(protocol::UiCommand::PluginToolResult {
+                            request_id,
+                            call_id: call_id.clone(),
+                            content,
+                            is_error,
+                        });
+                        self.lua.invoke_confirm_callback(&tool_name, *option_index);
+                        self.apply_lua_ops();
+                        self.screen.set_active_status(&call_id, ToolStatus::Pending);
+                        false
+                    }
+                    ConfirmChoice::PluginDeny => {
+                        self.engine.send(protocol::UiCommand::PluginToolResult {
+                            request_id,
+                            call_id: call_id.clone(),
+                            content: message.clone().unwrap_or_else(|| "denied by user".into()),
+                            is_error: true,
+                        });
+                        self.screen
+                            .finish_tool(&call_id, ToolStatus::Denied, None, None);
+                        false
+                    }
+                    _ => self.resolve_confirm(
+                        (choice, message),
+                        &call_id,
+                        request_id,
+                        &tool_name,
+                        agent,
+                    ),
+                };
                 if should_cancel && agent.is_some() {
                     self.finish_turn(true);
                     *agent = None;
@@ -1226,7 +1299,8 @@ impl App {
                 pats.first().map(|s| s.as_str()).unwrap_or("pattern")
             }
             ConfirmChoice::AlwaysDir(dir, _) => dir.as_str(),
-            ConfirmChoice::No => "denied",
+            ConfirmChoice::No | ConfirmChoice::PluginDeny => "denied",
+            ConfirmChoice::PluginApprove(_) => "approved",
         };
         if let Some(ref msg) = message {
             self.screen
@@ -1300,21 +1374,20 @@ impl App {
                 self.send_permission_decision(request_id, true, message);
                 false
             }
+            ConfirmChoice::PluginApprove(_) | ConfirmChoice::PluginDeny => {
+                unreachable!("plugin confirm handled in handle_dialog_result")
+            }
             ConfirmChoice::No => {
                 let has_message = message.is_some();
                 self.send_permission_decision(request_id, false, message);
                 self.screen
                     .finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
-                    // Deny with feedback — let the agent continue with the message.
-                    // Clear pending so the engine's ToolFinished event doesn't
-                    // overwrite the Denied status.
                     if let Some(ref mut ag) = agent {
                         ag.pending.retain(|p| p.call_id != call_id);
                     }
                     false
                 } else {
-                    // Deny without message — stop the agent.
                     engine::log::entry(
                         engine::log::Level::Info,
                         "agent_stop",
