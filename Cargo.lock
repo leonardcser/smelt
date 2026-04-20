@@ -2794,6 +2794,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "two-face",
+ "ui",
  "unicode-width",
  "vt100",
 ]

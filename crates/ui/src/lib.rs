@@ -1,17 +1,30 @@
 pub mod buffer;
 pub mod cursor;
+pub mod edit_buffer;
+pub mod kill_ring;
 pub mod layout;
 pub mod style;
+pub mod text;
+pub mod undo;
+pub mod vim;
 pub mod window;
+pub mod window_cursor;
 
 mod id;
 
+pub type AttachmentId = u64;
+
 pub use buffer::{BufType, Buffer};
 pub use cursor::Cursor;
+pub use edit_buffer::EditBuffer;
 pub use id::{BufId, WinId};
+pub use kill_ring::KillRing;
 pub use layout::{Anchor, Border, Constraint, FloatRelative, Gutters, LayoutTree, Rect};
 pub use style::{HlAttrs, HlGroup};
+pub use undo::{UndoEntry, UndoHistory};
+pub use vim::{ViMode, Vim};
 pub use window::{FloatConfig, SplitConfig, WinConfig, Window};
+pub use window_cursor::WindowCursor;
 
 use std::collections::HashMap;
 
