@@ -463,7 +463,7 @@ Also migrate: BtwBlock, Notifications, Completions → float layers.
 **Step 8: Delete legacy rendering** —
 - `Dialog` trait, `DialogResult`, `ListState`, `TextArea`
 - `Frame`, `RenderOut`, `StyleState` (SGR/style stack machinery)
-- `paint_line` (replaced by `paint_line_to_grid`)
+- `paint_line` (legacy SGR paint path)
 - `Screen::draw_viewport_frame`, `draw_viewport_dialog_frame`
 - `active_dialog`, `open_dialog`, `finalize_dialog_close`
 - All individual dialog structs in `render/dialogs/`
@@ -472,10 +472,17 @@ Also migrate: BtwBlock, Notifications, Completions → float layers.
 
 ### Current progress
 
-Step 1 complete. Transitional scaffolding in place:
-- `paint_line_to_grid` — pure function, converts DisplayLine → grid cells ✅
-- `TranscriptView` — component that paints pushed DisplayLines ✅
-  (needs to become a window reading from a buffer)
+Steps 1–3 complete:
+- Step 1: Dead code cleanup, `tick_*` → `render_*` rename ✅
+- Step 2: `ui::Buffer` enriched with `LineDecoration` and `SpanMeta` ✅
+  BufferView renders gutter_bg, fill_bg, and decoration metadata.
+- Step 3: Transcript buffer ✅ — `TranscriptProjection` projects
+  blocks into a `ui::Buffer` (generation-gated). `TranscriptView`
+  reads from the buffer via `BufferView.sync_from_buffer()`.
+  Deleted: `collect_viewport`, `collect_transcript_data`,
+  `paint_grid.rs`. `last_viewport_lines` still populated from
+  projection for selection/cursor compat (to be removed when
+  selection reads from buffer highlights directly).
 - `PromptView` — component that paints pushed PromptRows ✅
   (needs to become a window reading from a buffer)
 - `prompt_data.rs` — computes prompt data from Screen state ✅
@@ -483,10 +490,9 @@ Step 1 complete. Transitional scaffolding in place:
 - `status_data.rs` — computes status segments from Screen state ✅
   (transitional — will be replaced by event-driven updates)
 - Compositor wired into App, non-dialog frames render via grid diff ✅
-- All `#[allow(dead_code)]` removed, dead items cleaned up ✅
-- `tick_*` methods renamed to `render_*` ✅
+- `BufId` and `Buffer::new` made public for cross-crate buffer creation ✅
 
-Next: Step 2 — enrich `ui::Buffer` with `LineDecoration` and `SpanMeta`.
+Next: Step 4 — prompt buffer.
 
 ## Phase 7: Event dispatch
 
