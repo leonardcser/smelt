@@ -435,6 +435,7 @@ impl App {
         let Some(resolved) = self.available_models.iter().find(|m| m.key == key).cloned() else {
             return;
         };
+        let old = self.model.clone();
         self.model = resolved.model_name.clone();
         self.api_base = resolved.api_base.clone();
         self.api_key_env = resolved.api_key_env.clone();
@@ -449,6 +450,17 @@ impl App {
             api_key,
             provider_type: self.provider_type.clone(),
         });
+        if old != self.model {
+            let from = old;
+            let to = self.model.clone();
+            self.lua
+                .emit_data(crate::lua::AutocmdEvent::ModelChange, |lua| {
+                    let t = lua.create_table()?;
+                    t.set("from", from)?;
+                    t.set("to", to)?;
+                    Ok(t)
+                });
+        }
     }
 
     pub(super) fn start_btw(
@@ -491,10 +503,22 @@ impl App {
     /// Set the agent mode, persist it, and notify the engine. Marks the
     /// screen dirty so the mode indicator refreshes.
     pub(super) fn set_mode(&mut self, mode: Mode) {
+        let old = self.mode;
         self.mode = mode;
         state::set_mode(self.mode);
         self.engine.send(UiCommand::SetMode { mode: self.mode });
         self.screen.mark_dirty();
+        if old != mode {
+            let from = old.as_str().to_string();
+            let to = mode.as_str().to_string();
+            self.lua
+                .emit_data(crate::lua::AutocmdEvent::ModeChange, |lua| {
+                    let t = lua.create_table()?;
+                    t.set("from", from)?;
+                    t.set("to", to)?;
+                    Ok(t)
+                });
+        }
     }
 
     pub(super) fn toggle_mode(&mut self) {

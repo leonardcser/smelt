@@ -595,34 +595,19 @@ smelt.on("session_shutdown", fn)    -- graceful shutdown
 
 The API surface above is the starting point. It is intentionally incomplete — the real design happens during implementation. As each phase (L2–L9) builds against the API, update the draft to reflect what actually works. The API section in this document should always match the current intended shape, not the original sketch.
 
-### L2. Generalize the snapshot/queue pattern
+### L2. Generalize the snapshot/queue pattern ✅
 
-Replace the ad-hoc `pending_commands` / `pending_notifications` / `set_context` / `clear_context` with a unified `ApiContext` that:
-- Carries all readable state as a snapshot
-- Collects all mutations in a typed queue
-- Drains and applies mutations after the handler returns
+Unified `PendingOp` enum + `LuaOps` struct replaces 4 separate queues (`pending_commands`, `pending_notifications`, `lua_errors`, `LuaContext`). Single `Arc<Mutex<LuaOps>>` carries both snapshot reads and mutation queue. `snapshot_lua_context()` + `apply_lua_ops()` are the two call-site entry points. Deadlock bugs fixed (release mutex before calling Lua handlers).
 
-Internal Rust code starts routing through `api::*` where it doesn't already.
+### L3. Implement the engine APIs ✅
 
-### L3. Implement the engine APIs
+`smelt.api.engine.*` namespace exposes reads via `EngineSnapshot` (model, mode, reasoning_effort, is_busy, cost, context_tokens, context_window) and mutations via `PendingOp` variants (SetMode, SetModel, SetReasoningEffort, Cancel, Compact, Submit). Macros (`engine_read!`, `engine_op!`) eliminate boilerplate. `json_to_lua` helper safely converts `serde_json::Value` to Lua tables.
 
-- `engine.system_prompt()` / `engine.set_system_prompt()`
-- `engine.active_tools()` / `engine.set_tools()`
-- `engine.register_tool(name, schema, handler)`
-- `engine.usage()` — token counts, cost
-- `engine.model()` / `engine.set_model()`
-- `engine.set_param(key, value)` — thinking level, temperature
+### L4. Implement the event system ✅
 
-Wire through `ApiContext` → Lua bindings.
+Replaced `StreamStart`/`StreamEnd` with richer lifecycle events. `AutocmdEvent` now has 12 variants: simple events (`BlockDone`, `CmdPre`, `CmdPost`, `SessionStart`, `Shutdown`) and data-carrying events (`TurnStart`, `TurnEnd`, `ModeChange`, `ModelChange`, `ToolStart`, `ToolEnd`, `InputSubmit`). Data events use `emit_data(event, |lua| { ... })` — handlers receive `(event_name, data_table)`. Legacy `stream_start`/`stream_end` names still register as `TurnStart`/`TurnEnd` aliases.
 
-### L4. Implement the event system
-
-- `before_agent_start` — the key hook for mode control (modify system prompt + tools before LLM call)
-- `tool_call` — intercept/block/mutate tool arguments
-- `tool_result` — modify tool results
-- `turn_start` / `turn_end`
-- `input` — transform user input before submission
-- `mode_change`, `session_start`, `session_shutdown`
+System prompt and tool manipulation APIs (`engine.set_system_prompt()`, `engine.set_tools()`, `engine.register_tool()`) are deferred to L5 — they require intercepting the `StartTurn` flow, which is better designed alongside the plan mode port that exercises them.
 
 ### L5. Port plan mode to Lua
 

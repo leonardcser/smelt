@@ -884,7 +884,16 @@ impl App {
             return InputOutcome::Continue;
         }
 
-        // Regular user message → start agent
+        // Fire InputSubmit event so Lua plugins can observe/log.
+        let input_text = trimmed.to_string();
+        self.lua
+            .emit_data(crate::lua::AutocmdEvent::InputSubmit, |lua| {
+                let t = lua.create_table()?;
+                t.set("text", input_text)?;
+                Ok(t)
+            });
+        self.apply_lua_ops();
+
         InputOutcome::StartAgent
     }
 
@@ -1369,11 +1378,25 @@ impl App {
             Some(focused_window.to_string()),
             vim_mode.clone(),
         );
+        self.snapshot_engine_context(false);
         (vim_mode, focused_window.to_string())
     }
 
+    /// Populate engine-related Lua snapshot fields.
+    pub(super) fn snapshot_engine_context(&self, is_busy: bool) {
+        self.lua.set_engine_context(crate::lua::EngineSnapshot {
+            model: self.model.clone(),
+            mode: self.mode.as_str().to_string(),
+            reasoning_effort: self.reasoning_effort.label().to_string(),
+            is_busy,
+            session_cost: self.session_cost_usd,
+            context_tokens: self.screen.context_tokens(),
+            context_window: self.context_window,
+        });
+    }
+
     /// Drain and apply all pending Lua ops (notifications, errors,
-    /// commands). Call after any Lua handler dispatch.
+    /// commands, engine mutations). Call after any Lua handler dispatch.
     pub(super) fn apply_lua_ops(&mut self) {
         for op in self.lua.drain_ops() {
             match op {
@@ -1381,6 +1404,38 @@ impl App {
                 crate::lua::PendingOp::NotifyError(msg) => self.screen.notify_error(msg),
                 crate::lua::PendingOp::RunCommand(line) => {
                     let _ = crate::api::cmd::run(self, &line);
+                }
+                crate::lua::PendingOp::SetMode(mode_str) => {
+                    if let Some(mode) = Mode::parse(&mode_str) {
+                        self.set_mode(mode);
+                    } else {
+                        self.screen
+                            .notify_error(format!("unknown mode: {mode_str}"));
+                    }
+                }
+                crate::lua::PendingOp::SetModel(model) => {
+                    self.apply_model(&model);
+                }
+                crate::lua::PendingOp::SetReasoningEffort(effort_str) => {
+                    if let Some(effort) = ReasoningEffort::parse(&effort_str) {
+                        self.set_reasoning_effort(effort);
+                    } else {
+                        self.screen
+                            .notify_error(format!("unknown reasoning effort: {effort_str}"));
+                    }
+                }
+                crate::lua::PendingOp::Cancel => {
+                    self.engine.send(UiCommand::Cancel);
+                }
+                crate::lua::PendingOp::Compact(instructions) => {
+                    if self.history.is_empty() {
+                        self.screen.notify_error("nothing to compact".into());
+                    } else {
+                        self.compact_history(instructions);
+                    }
+                }
+                crate::lua::PendingOp::Submit(text) => {
+                    self.queued_messages.push(text);
                 }
             }
         }

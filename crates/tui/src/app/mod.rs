@@ -618,6 +618,8 @@ impl App {
         if let Some(err) = self.lua.load_error.take() {
             self.screen.notify_error(format!("lua init: {err}"));
         }
+        self.snapshot_engine_context(false);
+        self.lua.emit(crate::lua::AutocmdEvent::SessionStart);
         self.apply_lua_ops();
 
         let mut term_events = EventStream::new();
@@ -663,6 +665,7 @@ impl App {
 
         'main: loop {
             // ── Lua timer + notification pump ────────────────────────────
+            self.snapshot_engine_context(agent.is_some());
             self.lua.tick_timers();
             self.screen.set_custom_status(self.lua.tick_statusline());
             for _id in self.screen.drain_finished_blocks() {
@@ -1016,6 +1019,7 @@ impl App {
         if agent.is_some() {
             self.finish_turn(true);
         }
+        self.lua.emit(crate::lua::AutocmdEvent::Shutdown);
         self.save_session();
 
         // If no messages were ever sent, preserve the final prompt/tab bar on exit.
