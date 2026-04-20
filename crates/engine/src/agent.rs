@@ -1,7 +1,7 @@
 use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialContextInjection};
 use crate::log;
 use crate::permissions::{Decision, Permissions, RuntimeApprovals};
-use crate::provider::{self, ChatOptions, Provider, ProviderError, ToolDefinition};
+use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
 use crate::tools::{self, ToolContext, ToolRegistry, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
 use protocol::{
@@ -63,7 +63,7 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, session_dir, model_config_overrides, permission_overrides } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, session_dir, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, plugin_tools } => {
 
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -112,16 +112,18 @@ pub async fn engine_task(
                             None
                         };
                         let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
-                        let system_prompt = config.system_prompt_override.clone().unwrap_or_else(|| {
-                            crate::build_system_prompt_full(
-                                mode,
-                                &config.cwd,
-                                config.instructions.as_deref(),
-                                agent_config.as_ref(),
-                                skill_section,
-                                config.interactive,
-                            )
-                        });
+                        let system_prompt = tui_system_prompt
+                            .or_else(|| config.system_prompt_override.clone())
+                            .unwrap_or_else(|| {
+                                crate::build_system_prompt_full(
+                                    mode,
+                                    &config.cwd,
+                                    config.instructions.as_deref(),
+                                    agent_config.as_ref(),
+                                    skill_section,
+                                    config.interactive,
+                                )
+                            });
                         let mut turn = Turn {
                             provider,
                             registry: &registry,
@@ -141,6 +143,7 @@ pub async fn engine_task(
                             model,
                             system_prompt,
                             agent_config,
+                            plugin_tools,
                             session_id,
                             session_dir,
                             started_at: Instant::now(),
@@ -501,6 +504,8 @@ struct ToolExecutionPlan<'a> {
     ready: Vec<usize>,
     pending_perms: Vec<(usize, u64)>,
     sequential: Vec<usize>,
+    /// Plugin tools awaiting execution by the TUI (request_id, call_id, start).
+    pending_plugins: Vec<(u64, String, Instant)>,
 }
 
 /// Encapsulates the state of a single agent turn.
@@ -524,6 +529,7 @@ struct Turn<'a> {
     model: String,
     system_prompt: String,
     agent_config: Option<crate::AgentPromptConfig>,
+    plugin_tools: Vec<protocol::PluginToolDef>,
     session_id: String,
     session_dir: PathBuf,
     started_at: Instant,
@@ -777,9 +783,25 @@ impl<'a> Turn<'a> {
                 self.emit_messages_snapshot();
                 true
             }
-            UiCommand::SetMode { mode } => {
+            UiCommand::SetMode {
+                mode,
+                system_prompt,
+                plugin_tools,
+            } => {
                 self.mode = mode;
-                self.regenerate_system_prompt();
+                if let Some(prompt) = system_prompt {
+                    self.system_prompt = prompt;
+                    if let Some(first) = self.messages.first_mut() {
+                        if matches!(first.role, Role::System) {
+                            *first = Message::system(&self.system_prompt);
+                        }
+                    }
+                } else {
+                    self.regenerate_system_prompt();
+                }
+                if let Some(tools) = plugin_tools {
+                    self.plugin_tools = tools;
+                }
                 true
             }
             UiCommand::SetReasoningEffort { effort } => {
@@ -846,8 +868,22 @@ impl<'a> Turn<'a> {
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
-                self.registry
-                    .definitions(self.permissions, self.mode, self.config.interactive)
+                let mut defs =
+                    self.registry
+                        .definitions(self.permissions, self.mode, self.config.interactive);
+                for pt in &self.plugin_tools {
+                    if let Some(ref modes) = pt.modes {
+                        if !modes.contains(&self.mode) {
+                            continue;
+                        }
+                    }
+                    defs.push(ToolDefinition::new(FunctionSchema {
+                        name: pt.name.clone(),
+                        description: pt.description.clone(),
+                        parameters: pt.parameters.clone(),
+                    }));
+                }
+                defs
             } else {
                 Vec::new()
             };
@@ -996,13 +1032,17 @@ impl<'a> Turn<'a> {
             let mut plan = self.classify_tools(&tool_calls);
             let mut completed: Vec<Option<ToolResult>> =
                 (0..plan.slots.len()).map(|_| None).collect();
-            let (cancelled, deferred) = self.execute_concurrent(&mut plan, &mut completed).await;
+            let (cancelled, deferred, plugin_results) =
+                self.execute_concurrent(&mut plan, &mut completed).await;
             if !cancelled {
                 self.run_sequential(&plan, &mut completed).await;
             } else {
                 self.mark_unfinished_cancelled(&plan, &completed);
             }
             self.collect_results(&plan, completed);
+            for (call_id, content, is_error) in plugin_results {
+                self.push_message(Message::tool(call_id, content, is_error));
+            }
             for cmd in deferred {
                 self.handle_turn_cmd(cmd);
             }
@@ -1022,6 +1062,7 @@ impl<'a> Turn<'a> {
             ready: Vec::new(),
             pending_perms: Vec::new(),
             sequential: Vec::new(),
+            pending_plugins: Vec::new(),
         };
 
         for tc in tool_calls {
@@ -1045,6 +1086,22 @@ impl<'a> Turn<'a> {
             let tool = match self.registry.get(&tc.function.name) {
                 Some(t) => t,
                 None => {
+                    if self
+                        .plugin_tools
+                        .iter()
+                        .any(|pt| pt.name == tc.function.name)
+                    {
+                        let request_id = next_request_id();
+                        self.emit(EngineEvent::ExecutePluginTool {
+                            request_id,
+                            call_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            args: args.clone(),
+                        });
+                        plan.pending_plugins
+                            .push((request_id, tc.id.clone(), tool_start));
+                        continue;
+                    }
                     self.push_tool_result(
                         &tc.id,
                         &format!("unknown tool: {}", tc.function.name),
@@ -1147,12 +1204,12 @@ impl<'a> Turn<'a> {
     /// steering / mode / model commands are collected into `deferred` and
     /// replayed after results are committed to history.
     ///
-    /// Returns `(cancelled, deferred_commands)`.
+    /// Returns `(cancelled, deferred_commands, plugin_results)`.
     async fn execute_concurrent<'b>(
         &mut self,
         plan: &mut ToolExecutionPlan<'b>,
         completed: &mut [Option<ToolResult>],
-    ) -> (bool, Vec<UiCommand>) {
+    ) -> (bool, Vec<UiCommand>, Vec<(String, String, bool)>) {
         use futures_util::stream::StreamExt;
 
         type TaggedFut<'x> =
@@ -1186,10 +1243,12 @@ impl<'a> Turn<'a> {
             futs.push(Box::pin(async move { (i, fut.await) }));
         }
 
-        let mut outstanding = plan.ready.len() + plan.pending_perms.len();
+        let mut outstanding =
+            plan.ready.len() + plan.pending_perms.len() + plan.pending_plugins.len();
         let cancel = &self.cancel;
         let cmd_rx = &mut self.cmd_rx;
         let mut deferred: Vec<UiCommand> = Vec::new();
+        let mut plugin_results: Vec<(String, String, bool)> = Vec::new();
 
         let cancelled = loop {
             if outstanding == 0 {
@@ -1234,6 +1293,27 @@ impl<'a> Turn<'a> {
                             }
                         }
                     }
+                    UiCommand::PluginToolResult { request_id, call_id, content, is_error } => {
+                        if let Some(pos) = plan
+                            .pending_plugins
+                            .iter()
+                            .position(|(rid, _, _)| *rid == request_id)
+                        {
+                            let (_, _, start) = plan.pending_plugins.swap_remove(pos);
+                            let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+                            let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                call_id: call_id.clone(),
+                                result: ToolOutcome {
+                                    content: content.clone(),
+                                    is_error,
+                                    metadata: None,
+                                },
+                                elapsed_ms,
+                            });
+                            plugin_results.push((call_id, content, is_error));
+                            outstanding -= 1;
+                        }
+                    }
                     UiCommand::AgentMessage { .. }
                     | UiCommand::Steer { .. }
                     | UiCommand::Unsteer { .. }
@@ -1245,7 +1325,7 @@ impl<'a> Turn<'a> {
             }
         };
 
-        (cancelled, deferred)
+        (cancelled, deferred, plugin_results)
     }
 
     /// When the turn was cancelled mid-flight, emit a cancelled-result
@@ -1419,7 +1499,11 @@ impl<'a> Turn<'a> {
                             self.cancel.cancel();
                             cancel_received = true;
                         }
-                        UiCommand::SetMode { mode } => self.mode = mode,
+                        UiCommand::SetMode { mode, system_prompt, plugin_tools } => {
+                            self.mode = mode;
+                            if let Some(p) = system_prompt { self.system_prompt = p; }
+                            if let Some(t) = plugin_tools { self.plugin_tools = t; }
+                        }
                         UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
@@ -1469,9 +1553,20 @@ impl<'a> Turn<'a> {
                     request_id: id,
                     answer,
                 }) if id == request_id => return answer,
-                Some(UiCommand::SetMode { mode }) => {
+                Some(UiCommand::SetMode {
+                    mode,
+                    system_prompt,
+                    plugin_tools,
+                }) => {
                     self.mode = mode;
-                    self.regenerate_system_prompt();
+                    if let Some(p) = system_prompt {
+                        self.system_prompt = p;
+                    } else {
+                        self.regenerate_system_prompt();
+                    }
+                    if let Some(t) = plugin_tools {
+                        self.plugin_tools = t;
+                    }
                 }
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
                 Some(UiCommand::SetModel {
