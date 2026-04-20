@@ -285,6 +285,7 @@ impl TestHarness {
             outside_dir: None,
             summary: Some(summary.into()),
             request_id: 1,
+            plugin_confirm: None,
         };
         let mut dialog = ConfirmDialog::new(&req, false);
         dialog.set_term_size(self.width, self.height);
@@ -335,6 +336,7 @@ impl TestHarness {
             outside_dir: None,
             summary: Some(summary.into()),
             request_id: 1,
+            plugin_confirm: None,
         };
         let mut dialog = ConfirmDialog::new(&req, false);
         dialog.set_term_size(self.width, self.height);

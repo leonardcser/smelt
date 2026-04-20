@@ -713,7 +713,10 @@ fn render_confirm_result<S: LayoutSink>(
                 };
                 print_dim(out, &format!("always{suffix} (dir: {dir})"));
             }
-            ConfirmChoice::No => {
+            ConfirmChoice::PluginApprove(_) => {
+                print_dim(out, "approved");
+            }
+            ConfirmChoice::No | ConfirmChoice::PluginDeny => {
                 out.push_fg(theme::ERROR.into());
                 out.print("denied");
                 out.pop_style();

@@ -33,12 +33,28 @@ enum ConfirmPreview {
         /// The full command — first line is rendered in the title, rest here.
         full_command: String,
     },
-    /// Plan summary rendered as markdown for exit_plan_mode.
-    PlanContent { summary: String },
+    /// Plugin tool preview — a field value rendered as markdown.
+    PluginMarkdown { content: String },
 }
 
 impl ConfirmPreview {
-    fn from_tool(tool_name: &str, desc: &str, args: &HashMap<String, serde_json::Value>) -> Self {
+    fn from_tool(
+        tool_name: &str,
+        desc: &str,
+        args: &HashMap<String, serde_json::Value>,
+        plugin_confirm: Option<&crate::render::PluginConfirmMeta>,
+    ) -> Self {
+        if let Some(meta) = plugin_confirm {
+            if let Some(ref field) = meta.preview_field {
+                let content = args
+                    .get(field.as_str())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return ConfirmPreview::PluginMarkdown { content };
+            }
+            return ConfirmPreview::None;
+        }
         match tool_name {
             "edit_file" => {
                 let old = args
@@ -75,14 +91,6 @@ impl ConfirmPreview {
             "bash" if desc.lines().count() > 1 => ConfirmPreview::BashBody {
                 full_command: desc.to_string(),
             },
-            "exit_plan_mode" => {
-                let summary = args
-                    .get("plan_summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                ConfirmPreview::PlanContent { summary }
-            }
             _ => ConfirmPreview::None,
         }
     }
@@ -94,10 +102,10 @@ impl ConfirmPreview {
             ConfirmPreview::Notebook(data) => notebook_preview_rows(data),
             ConfirmPreview::FileContent { content, .. } => content.lines().count() as u16,
             ConfirmPreview::BashBody { full_command } => (full_command.lines().count() - 1) as u16,
-            ConfirmPreview::PlanContent { summary } => {
+            ConfirmPreview::PluginMarkdown { content } => {
                 let mut buf = RenderOut::buffer();
                 crate::render::blocks::render_markdown_inner(
-                    &mut buf, summary, width, " ", false, None,
+                    &mut buf, content, width, " ", false, None,
                 );
                 let _ = buf.flush();
                 let bytes = buf.into_bytes();
@@ -152,10 +160,10 @@ impl ConfirmPreview {
                     emitted += 1;
                 }
             }
-            ConfirmPreview::PlanContent { summary } => {
+            ConfirmPreview::PluginMarkdown { content } => {
                 let mut buf = RenderOut::buffer();
                 crate::render::blocks::render_markdown_inner(
-                    &mut buf, summary, width, " ", false, None,
+                    &mut buf, content, width, " ", false, None,
                 );
                 let _ = buf.flush();
                 let bytes: Vec<u8> = buf.into_bytes();
@@ -406,24 +414,41 @@ pub struct ConfirmDialog {
     vim_enabled: bool,
     /// Cached terminal size, updated each draw().
     term_size: (u16, u16),
+    /// Plugin-specific accent color for the title bar.
+    accent_color: Option<crossterm::style::Color>,
+    /// Plugin-specific action prompt (e.g. "Implement?" instead of "Allow?").
+    action_label: String,
 }
 
 impl ConfirmDialog {
     pub fn new(req: &crate::render::ConfirmRequest, vim_enabled: bool) -> Self {
-        let is_plan = req.tool_name == "exit_plan_mode";
-        let mut options: Vec<(String, ConfirmChoice)> = if is_plan {
-            vec![
-                ("yes, and auto-apply".into(), ConfirmChoice::YesAutoApply),
-                ("yes".into(), ConfirmChoice::Yes),
-                ("no".into(), ConfirmChoice::No),
-            ]
-        } else {
-            vec![
-                ("yes".into(), ConfirmChoice::Yes),
-                ("no".into(), ConfirmChoice::No),
-            ]
-        };
-        if !is_plan {
+        let is_plugin = req.plugin_confirm.is_some();
+
+        let (mut options, display_name): (Vec<(String, ConfirmChoice)>, String) =
+            if let Some(ref meta) = req.plugin_confirm {
+                let opts = meta
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, o)| {
+                        let choice = if o.approves {
+                            ConfirmChoice::PluginApprove(i)
+                        } else {
+                            ConfirmChoice::PluginDeny
+                        };
+                        (o.label.clone(), choice)
+                    })
+                    .collect();
+                (opts, meta.display_name.clone())
+            } else {
+                let opts = vec![
+                    ("yes".into(), ConfirmChoice::Yes),
+                    ("no".into(), ConfirmChoice::No),
+                ];
+                (opts, req.tool_name.clone())
+            };
+
+        if !is_plugin {
             use crate::render::ApprovalScope::{Session, Workspace};
 
             let cwd_label = std::env::current_dir()
@@ -479,13 +504,22 @@ impl ConfirmDialog {
             }
         }
 
-        let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
+        let preview = ConfirmPreview::from_tool(
+            &req.tool_name,
+            &req.desc,
+            &req.args,
+            req.plugin_confirm.as_ref(),
+        );
 
-        let display_name = if is_plan { "plan" } else { &req.tool_name };
+        let action_label = req
+            .plugin_confirm
+            .as_ref()
+            .map(|m| format!(" {}", m.action_label))
+            .unwrap_or_else(|| " Allow?".to_string());
 
         Self {
             tool_name: req.tool_name.clone(),
-            display_name: display_name.to_string(),
+            display_name,
             desc: req.desc.clone(),
             summary: req.summary.clone(),
             preview,
@@ -500,6 +534,8 @@ impl ConfirmDialog {
             request_id: req.request_id,
             vim_enabled,
             term_size: terminal::size().unwrap_or((80, 24)),
+            accent_color: req.plugin_confirm.as_ref().and_then(|m| m.accent_color),
+            action_label,
         }
     }
 }
@@ -774,12 +810,7 @@ impl super::Dialog for ConfirmDialog {
         } else {
             row = bar_row;
 
-            let is_plan = matches!(self.preview, ConfirmPreview::PlanContent { .. });
-            let title_color = if is_plan {
-                theme::PLAN
-            } else {
-                theme::accent()
-            };
+            let title_color = self.accent_color.unwrap_or_else(theme::accent);
             draw_bar(out, w, None, None, title_color);
             out.newline();
             row += 1;
@@ -872,8 +903,7 @@ impl super::Dialog for ConfirmDialog {
                 row += 1;
             }
             // Action prompt
-            let is_plan = matches!(self.preview, ConfirmPreview::PlanContent { .. });
-            let prompt_text = if is_plan { " Implement?" } else { " Allow?" };
+            let prompt_text = &self.action_label;
             out.push_dim();
             out.print(prompt_text);
             out.pop_style();
