@@ -1,12 +1,20 @@
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, LineDecoration, SpanMeta};
 use crate::component::{Component, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};
 use crate::layout::{Border, Rect};
 use crossterm::event::{KeyCode, KeyModifiers};
 
+pub struct HighlightSpan {
+    pub col_start: u16,
+    pub col_end: u16,
+    pub style: Style,
+    pub meta: SpanMeta,
+}
+
 pub struct BufferView {
     lines: Vec<String>,
-    highlights: Vec<Vec<(u16, u16, Style)>>,
+    highlights: Vec<Vec<HighlightSpan>>,
+    decorations: Vec<LineDecoration>,
     scroll_offset: usize,
     border: Border,
     title: Option<String>,
@@ -18,6 +26,7 @@ impl BufferView {
         Self {
             lines: Vec::new(),
             highlights: Vec::new(),
+            decorations: Vec::new(),
             scroll_offset: 0,
             border: Border::None,
             title: None,
@@ -43,6 +52,7 @@ impl BufferView {
     pub fn set_lines(&mut self, lines: Vec<String>) {
         self.lines = lines;
         self.highlights.clear();
+        self.decorations.clear();
     }
 
     pub fn set_scroll(&mut self, offset: usize) {
@@ -75,30 +85,38 @@ impl BufferView {
             if spans.is_empty() {
                 self.highlights.push(Vec::new());
             } else {
-                let converted: Vec<(u16, u16, Style)> = spans
+                let converted: Vec<HighlightSpan> = spans
                     .iter()
-                    .map(|s| {
-                        let style = Style {
+                    .map(|s| HighlightSpan {
+                        col_start: s.col_start,
+                        col_end: s.col_end,
+                        style: Style {
                             fg: s.style.fg,
                             bg: s.style.bg,
                             bold: s.style.bold,
                             dim: s.style.dim,
                             italic: s.style.italic,
                             ..Style::default()
-                        };
-                        (s.col_start, s.col_end, style)
+                        },
+                        meta: s.meta.clone(),
                     })
                     .collect();
                 self.highlights.push(converted);
             }
         }
+        self.decorations = buf.decorations().to_vec();
     }
 
     pub fn add_highlight(&mut self, line: usize, col_start: u16, col_end: u16, style: Style) {
         while self.highlights.len() <= line {
             self.highlights.push(Vec::new());
         }
-        self.highlights[line].push((col_start, col_end, style));
+        self.highlights[line].push(HighlightSpan {
+            col_start,
+            col_end,
+            style,
+            meta: SpanMeta::default(),
+        });
     }
 
     pub fn content_height(&self, area_height: u16) -> u16 {
@@ -152,7 +170,7 @@ impl BufferView {
         grid.set(w - 1, h_total - 1, br, style);
     }
 
-    fn draw_content(&self, grid: &mut GridSlice<'_>) {
+    fn draw_content(&self, grid: &mut GridSlice<'_>, ctx: &DrawContext) {
         let has_border = self.border != Border::None;
         let (offset_x, offset_y, content_w, content_h) = if has_border {
             (
@@ -171,41 +189,65 @@ impl BufferView {
                 break;
             }
             let line = &self.lines[line_idx];
+            let decoration = self.decorations.get(line_idx);
             let spans = self
                 .highlights
                 .get(line_idx)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
 
+            let bg_override = decoration.and_then(|d| d.gutter_bg);
+            let chars: Vec<char> = line.chars().collect();
+            let mut col = 0u16;
+
             if spans.is_empty() {
-                for (col, ch) in line.chars().enumerate() {
-                    let col = col as u16;
+                let style = match bg_override {
+                    Some(bg) => Style::bg(bg),
+                    None => Style::default(),
+                };
+                for &ch in &chars {
                     if col >= content_w {
                         break;
                     }
-                    grid.set(offset_x + col, offset_y + row, ch, Style::default());
+                    grid.set(offset_x + col, offset_y + row, ch, style);
+                    col += 1;
                 }
             } else {
-                let chars: Vec<char> = line.chars().collect();
-                let mut col = 0u16;
                 while col < content_w && (col as usize) < chars.len() {
-                    let active = spans
-                        .iter()
-                        .find(|(start, end, _)| col >= *start && col < *end);
-                    if let Some((_, end, style)) = active {
-                        let end = (*end).min(content_w).min(chars.len() as u16);
+                    let active = spans.iter().find(|s| col >= s.col_start && col < s.col_end);
+                    if let Some(span) = active {
+                        let style = match bg_override {
+                            Some(bg) => Style {
+                                bg: Some(bg),
+                                ..span.style
+                            },
+                            None => span.style,
+                        };
+                        let end = span.col_end.min(content_w).min(chars.len() as u16);
                         for c in col..end {
-                            grid.set(offset_x + c, offset_y + row, chars[c as usize], *style);
+                            grid.set(offset_x + c, offset_y + row, chars[c as usize], style);
                         }
                         col = end;
                     } else {
-                        grid.set(
-                            offset_x + col,
-                            offset_y + row,
-                            chars[col as usize],
-                            Style::default(),
-                        );
+                        let style = match bg_override {
+                            Some(bg) => Style::bg(bg),
+                            None => Style::default(),
+                        };
+                        grid.set(offset_x + col, offset_y + row, chars[col as usize], style);
                         col += 1;
+                    }
+                }
+            }
+
+            if let Some(dec) = decoration {
+                if let Some(fill_bg) = dec.fill_bg {
+                    let fill_style = Style::bg(fill_bg);
+                    let fill_end = ctx
+                        .terminal_width
+                        .saturating_sub(dec.fill_right_margin)
+                        .saturating_sub(offset_x);
+                    for c in col..fill_end.min(content_w) {
+                        grid.set(offset_x + c, offset_y + row, ' ', fill_style);
                     }
                 }
             }
@@ -220,9 +262,9 @@ impl Default for BufferView {
 }
 
 impl Component for BufferView {
-    fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, _ctx: &DrawContext) {
+    fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext) {
         self.draw_border(grid);
-        self.draw_content(grid);
+        self.draw_content(grid, ctx);
     }
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
@@ -329,6 +371,90 @@ mod tests {
         assert_eq!(grid.cell(0, 0).style.fg, Some(Color::Red));
         assert_eq!(grid.cell(4, 0).style.fg, Some(Color::Red));
         assert_eq!(grid.cell(5, 0).style.fg, None);
+    }
+
+    #[test]
+    fn renders_fill_bg_decoration() {
+        let mut view = make_view(vec!["hi"]);
+        view.decorations.push(LineDecoration {
+            fill_bg: Some(Color::Blue),
+            ..LineDecoration::default()
+        });
+        let mut grid = Grid::new(10, 1);
+        let ctx = DrawContext {
+            terminal_width: 10,
+            terminal_height: 1,
+            focused: false,
+        };
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        view.draw(Rect::new(0, 0, 10, 1), &mut slice, &ctx);
+        assert_eq!(grid.cell(0, 0).symbol, 'h');
+        assert_eq!(grid.cell(2, 0).symbol, ' ');
+        assert_eq!(grid.cell(2, 0).style.bg, Some(Color::Blue));
+        assert_eq!(grid.cell(9, 0).style.bg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn renders_gutter_bg_decoration() {
+        let mut view = make_view(vec!["ab"]);
+        view.decorations.push(LineDecoration {
+            gutter_bg: Some(Color::Yellow),
+            ..LineDecoration::default()
+        });
+        let mut grid = Grid::new(10, 1);
+        let ctx = DrawContext {
+            terminal_width: 10,
+            terminal_height: 1,
+            focused: false,
+        };
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        view.draw(Rect::new(0, 0, 10, 1), &mut slice, &ctx);
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(0, 0).style.bg, Some(Color::Yellow));
+        assert_eq!(grid.cell(1, 0).style.bg, Some(Color::Yellow));
+        assert_eq!(grid.cell(2, 0).style.bg, None);
+    }
+
+    #[test]
+    fn sync_from_buffer_copies_decorations() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["line".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                fill_bg: Some(Color::Red),
+                ..LineDecoration::default()
+            },
+        );
+
+        let mut view = BufferView::new();
+        view.sync_from_buffer(&buf);
+        assert_eq!(view.decorations.len(), 1);
+        assert_eq!(view.decorations[0].fill_bg, Some(Color::Red));
+    }
+
+    #[test]
+    fn sync_from_buffer_copies_span_meta() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["test".into()]);
+        buf.add_highlight_with_meta(
+            0,
+            0,
+            4,
+            crate::buffer::SpanStyle::fg(Color::Red),
+            SpanMeta {
+                selectable: true,
+                copy_as: Some("copied".into()),
+            },
+        );
+
+        let mut view = BufferView::new();
+        view.sync_from_buffer(&buf);
+        assert!(view.highlights[0][0].meta.selectable);
+        assert_eq!(
+            view.highlights[0][0].meta.copy_as.as_deref(),
+            Some("copied")
+        );
     }
 
     #[test]

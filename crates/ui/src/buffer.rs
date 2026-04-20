@@ -6,6 +6,31 @@ pub struct Span {
     pub col_start: u16,
     pub col_end: u16,
     pub style: SpanStyle,
+    pub meta: SpanMeta,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpanMeta {
+    pub selectable: bool,
+    pub copy_as: Option<String>,
+}
+
+impl SpanMeta {
+    pub fn selectable() -> Self {
+        Self {
+            selectable: true,
+            copy_as: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LineDecoration {
+    pub gutter_bg: Option<Color>,
+    pub fill_bg: Option<Color>,
+    pub fill_right_margin: u16,
+    pub soft_wrapped: bool,
+    pub source_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -87,6 +112,7 @@ pub struct Buffer {
     pub(crate) id: BufId,
     lines: Vec<String>,
     highlights: Vec<Vec<Span>>,
+    decorations: Vec<LineDecoration>,
     modifiable: bool,
     buftype: BufType,
     virtual_text: Vec<VirtualText>,
@@ -100,6 +126,7 @@ impl Buffer {
             id,
             lines: vec![String::new()],
             highlights: vec![Vec::new()],
+            decorations: vec![LineDecoration::default()],
             modifiable: opts.modifiable,
             buftype: opts.buftype,
             virtual_text: Vec::new(),
@@ -138,9 +165,16 @@ impl Buffer {
         let hl_end = end.min(self.highlights.len());
         let hl_start = start.min(hl_end);
         self.highlights.splice(hl_start..hl_end, empty_spans);
+        let dec_end = end.min(self.decorations.len());
+        let dec_start = start.min(dec_end);
+        self.decorations.splice(
+            dec_start..dec_end,
+            std::iter::repeat_with(LineDecoration::default).take(new_count),
+        );
         if self.lines.is_empty() {
             self.lines.push(String::new());
             self.highlights = vec![Vec::new()];
+            self.decorations = vec![LineDecoration::default()];
         }
         self.changedtick += 1;
     }
@@ -156,6 +190,7 @@ impl Buffer {
             lines
         };
         self.highlights = vec![Vec::new(); count];
+        self.decorations = vec![LineDecoration::default(); count];
         self.changedtick += 1;
     }
 
@@ -165,6 +200,7 @@ impl Buffer {
         }
         self.lines.push(line);
         self.highlights.push(Vec::new());
+        self.decorations.push(LineDecoration::default());
         self.changedtick += 1;
     }
 
@@ -227,6 +263,17 @@ impl Buffer {
     }
 
     pub fn add_highlight(&mut self, line: usize, col_start: u16, col_end: u16, style: SpanStyle) {
+        self.add_highlight_with_meta(line, col_start, col_end, style, SpanMeta::default());
+    }
+
+    pub fn add_highlight_with_meta(
+        &mut self,
+        line: usize,
+        col_start: u16,
+        col_end: u16,
+        style: SpanStyle,
+        meta: SpanMeta,
+    ) {
         if line >= self.highlights.len() {
             self.highlights.resize_with(line + 1, Vec::new);
         }
@@ -234,6 +281,7 @@ impl Buffer {
             col_start,
             col_end,
             style,
+            meta,
         });
     }
 
@@ -246,6 +294,29 @@ impl Buffer {
 
     pub fn highlights_at(&self, line: usize) -> &[Span] {
         self.highlights.get(line).map_or(&[], |v| v.as_slice())
+    }
+
+    pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
+        if line >= self.decorations.len() {
+            self.decorations
+                .resize_with(line + 1, LineDecoration::default);
+        }
+        self.decorations[line] = decoration;
+    }
+
+    pub fn decoration_at(&self, line: usize) -> &LineDecoration {
+        static DEFAULT: LineDecoration = LineDecoration {
+            gutter_bg: None,
+            fill_bg: None,
+            fill_right_margin: 0,
+            soft_wrapped: false,
+            source_text: None,
+        };
+        self.decorations.get(line).unwrap_or(&DEFAULT)
+    }
+
+    pub fn decorations(&self) -> &[LineDecoration] {
+        &self.decorations
     }
 }
 
