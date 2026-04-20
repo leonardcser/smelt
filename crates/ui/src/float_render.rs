@@ -14,11 +14,7 @@ pub struct FloatFrame {
     pub scroll_offset: usize,
 }
 
-pub fn render_float<W: Write>(
-    w: &mut W,
-    buf: &Buffer,
-    frame: &FloatFrame,
-) -> std::io::Result<()> {
+pub fn render_float<W: Write>(w: &mut W, buf: &Buffer, frame: &FloatFrame) -> std::io::Result<()> {
     let r = frame.rect;
     if r.width < 3 || r.height < 2 {
         return Ok(());

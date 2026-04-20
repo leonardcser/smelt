@@ -84,7 +84,8 @@ impl Grid {
     pub fn resize(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
-        self.cells.resize(width as usize * height as usize, Cell::default());
+        self.cells
+            .resize(width as usize * height as usize, Cell::default());
         self.clear_all();
     }
 
@@ -147,19 +148,16 @@ impl Grid {
     }
 
     pub fn diff<'a>(&'a self, prev: &'a Grid) -> impl Iterator<Item = CellUpdate<'a>> {
-        self.cells
-            .iter()
-            .enumerate()
-            .filter_map(move |(i, cell)| {
-                let prev_cell = prev.cells.get(i)?;
-                if cell != prev_cell {
-                    let x = (i % self.width as usize) as u16;
-                    let y = (i / self.width as usize) as u16;
-                    Some(CellUpdate { x, y, cell })
-                } else {
-                    None
-                }
-            })
+        self.cells.iter().enumerate().filter_map(move |(i, cell)| {
+            let prev_cell = prev.cells.get(i)?;
+            if cell != prev_cell {
+                let x = (i % self.width as usize) as u16;
+                let y = (i / self.width as usize) as u16;
+                Some(CellUpdate { x, y, cell })
+            } else {
+                None
+            }
+        })
     }
 
     pub fn swap_with(&mut self, other: &mut Grid) {
@@ -199,7 +197,8 @@ impl<'a> GridSlice<'a> {
 
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
         if x < self.area.width && y < self.area.height {
-            self.grid.set(self.area.left + x, self.area.top + y, symbol, style);
+            self.grid
+                .set(self.area.left + x, self.area.top + y, symbol, style);
         }
     }
 

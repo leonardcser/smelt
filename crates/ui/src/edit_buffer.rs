@@ -11,8 +11,8 @@
 //! Readonly is a property of the buffer (e.g. the transcript buffer
 //! is readonly); the owning window checks it before applying edits.
 
-use crate::AttachmentId;
 use crate::undo::UndoHistory;
+use crate::AttachmentId;
 
 /// Pure-content edit buffer. The owning window provides cursor / vim /
 /// selection state when operating on it.
