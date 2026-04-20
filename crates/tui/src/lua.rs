@@ -196,6 +196,8 @@ pub struct EngineSnapshot {
     pub session_cost: f64,
     pub context_tokens: Option<u32>,
     pub context_window: Option<u32>,
+    pub session_dir: String,
+    pub session_id: String,
 }
 
 /// Shared state between Lua closures and the app loop.
@@ -320,6 +322,10 @@ impl LuaRuntime {
         };
 
         if rt.load_error.is_none() {
+            rt.load_builtin_plugins();
+        }
+
+        if rt.load_error.is_none() {
             if let Some(path) = init_lua_path() {
                 if path.exists() {
                     if let Err(e) = rt.load_init(&path) {
@@ -330,6 +336,13 @@ impl LuaRuntime {
         }
 
         rt
+    }
+
+    fn load_builtin_plugins(&mut self) {
+        const PLAN_MODE: &str = include_str!("plugins/plan_mode.lua");
+        if let Err(e) = self.lua.load(PLAN_MODE).set_name("plan_mode.lua").exec() {
+            self.load_error = Some(format!("built-in plan_mode.lua: {e}"));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -469,6 +482,8 @@ impl LuaRuntime {
         engine_tbl.set("cost", engine_read!(lua, ops, session_cost))?;
         engine_tbl.set("context_tokens", engine_read!(lua, ops, context_tokens))?;
         engine_tbl.set("context_window", engine_read!(lua, ops, context_window))?;
+        engine_tbl.set("session_dir", engine_read!(lua, ops, session_dir))?;
+        engine_tbl.set("session_id", engine_read!(lua, ops, session_id))?;
 
         engine_tbl.set("set_model", engine_op!(lua, ops, SetModel, String))?;
         engine_tbl.set("set_mode", engine_op!(lua, ops, SetMode, String))?;

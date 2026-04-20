@@ -3,7 +3,7 @@ pub(crate) mod background;
 mod bash;
 mod bash_background;
 mod edit_file;
-mod exit_plan_mode;
+
 mod file_state;
 mod glob;
 mod grep;
@@ -58,7 +58,7 @@ pub use background::{ProcessInfo, ProcessRegistry};
 pub use bash::BashTool;
 pub use bash_background::{format_read_result, ReadProcessOutputTool, StopProcessTool};
 pub use edit_file::EditFileTool;
-pub use exit_plan_mode::ExitPlanModeTool;
+
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use notebook::{NotebookEditTool, NotebookRenderData};
@@ -525,7 +525,6 @@ pub fn build_tools(
     r.register(Box::new(BashTool));
     r.register(Box::new(GlobTool));
     r.register(Box::new(GrepTool));
-    r.register(Box::new(ExitPlanModeTool));
     r.register(Box::new(AskUserQuestionTool));
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(WebSearchTool));

@@ -1293,7 +1293,7 @@ impl App {
         agent: &mut Option<TurnState>,
     ) -> bool {
         let label = match &choice {
-            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => "approved",
+            ConfirmChoice::Yes => "approved",
             ConfirmChoice::Always(_) => "always",
             ConfirmChoice::AlwaysPatterns(ref pats, _) => {
                 pats.first().map(|s| s.as_str()).unwrap_or("pattern")
@@ -1307,12 +1307,9 @@ impl App {
                 .set_active_user_message(call_id, format!("{label}: {msg}"));
         }
         match choice {
-            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
+            ConfirmChoice::Yes => {
                 self.screen.set_active_status(call_id, ToolStatus::Pending);
                 self.send_permission_decision(request_id, true, message);
-                if matches!(choice, ConfirmChoice::YesAutoApply) {
-                    self.set_mode(Mode::Apply);
-                }
                 false
             }
             ConfirmChoice::Always(scope) => {
