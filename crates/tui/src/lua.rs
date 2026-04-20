@@ -455,17 +455,20 @@ impl LuaRuntime {
     /// command exists and was dispatched (regardless of whether the
     /// handler succeeded); `false` when the name isn't bound.
     pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
-        let Ok(map) = self.commands.lock() else {
-            return false;
-        };
-        let Some(handle) = map.get(name) else {
-            return false;
-        };
-        if handle.dead {
-            return false;
-        }
-        let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-            return false;
+        let func = {
+            let Ok(map) = self.commands.lock() else {
+                return false;
+            };
+            let Some(handle) = map.get(name) else {
+                return false;
+            };
+            if handle.dead {
+                return false;
+            }
+            let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+                return false;
+            };
+            f
         };
         let result: LuaResult<()> = match arg {
             Some(a) => func.call::<()>(a),
@@ -482,27 +485,29 @@ impl LuaRuntime {
     /// when vim mode is disabled. A handler registered with mode `""` matches
     /// any mode; `"n"` matches Normal, `"i"` Insert, `"v"` Visual.
     pub fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> bool {
-        let Ok(map) = self.keymaps.lock() else {
-            return false;
-        };
-        // Try mode-specific match first, then wildcard ""
-        let mode_char = current_mode.map(|m| match m {
-            "Normal" => "n",
-            "Insert" => "i",
-            "Visual" => "v",
-            _ => "n",
-        });
-        let handle = mode_char
-            .and_then(|mc| map.get(&(mc.to_string(), chord.to_string())))
-            .or_else(|| map.get(&(String::new(), chord.to_string())));
-        let Some(handle) = handle else {
-            return false;
-        };
-        if handle.dead {
-            return false;
-        }
-        let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-            return false;
+        let func = {
+            let Ok(map) = self.keymaps.lock() else {
+                return false;
+            };
+            let mode_char = current_mode.map(|m| match m {
+                "Normal" => "n",
+                "Insert" => "i",
+                "Visual" => "v",
+                _ => "n",
+            });
+            let handle = mode_char
+                .and_then(|mc| map.get(&(mc.to_string(), chord.to_string())))
+                .or_else(|| map.get(&(String::new(), chord.to_string())));
+            let Some(handle) = handle else {
+                return false;
+            };
+            if handle.dead {
+                return false;
+            }
+            let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+                return false;
+            };
+            f
         };
         if let Err(e) = func.call::<()>(()) {
             self.record_error(format!("keymap `{chord}`: {e}"));
@@ -513,19 +518,19 @@ impl LuaRuntime {
     /// Fire all handlers registered for `event`. Errors are captured
     /// per-handler and don't stop subsequent handlers.
     pub fn emit(&self, event: AutocmdEvent) {
-        let Ok(map) = self.autocmds.lock() else {
-            return;
-        };
-        let Some(list) = map.get(&event) else {
-            return;
-        };
-        for handle in list {
-            if handle.dead {
-                continue;
-            }
-            let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-                continue;
+        let funcs: Vec<mlua::Function> = {
+            let Ok(map) = self.autocmds.lock() else {
+                return;
             };
+            let Some(list) = map.get(&event) else {
+                return;
+            };
+            list.iter()
+                .filter(|h| !h.dead)
+                .filter_map(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
+                .collect()
+        };
+        for func in funcs {
             if let Err(e) = func.call::<()>(event.lua_name()) {
                 self.record_error(format!("autocmd `{}`: {e}", event.lua_name()));
             }
