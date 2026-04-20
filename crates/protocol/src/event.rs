@@ -7,6 +7,18 @@ use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMe
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A tool defined by a Lua plugin. Sent from TUI to engine so the engine
+/// can include it in LLM tool definitions and proxy execution back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    /// When set, the tool is only available in these modes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub modes: Option<Vec<Mode>>,
+}
+
 /// Events emitted by the engine. The UI consumes these to update its display.
 ///
 /// Most variants are fire-and-forget. The exceptions are `RequestPermission`
@@ -133,6 +145,14 @@ pub enum EngineEvent {
         from_slug: String,
         message: String,
     },
+
+    /// Engine needs the TUI to execute a plugin-defined tool.
+    ExecutePluginTool {
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+    },
 }
 
 /// Commands sent from the UI to the engine.
@@ -158,9 +178,19 @@ pub enum UiCommand {
         /// Per-turn model parameter overrides (from custom commands).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         model_config_overrides: Option<ModelConfigOverrides>,
-        /// Per-turn permission overrides (from custom commands).
+        /// Per-turn permission overrides (from custom commands or Lua plugins).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         permission_overrides: Option<PermissionOverrides>,
+        /// Full system prompt assembled by the TUI (from prompt sections).
+        /// When present the engine uses this verbatim instead of rendering
+        /// its built-in template.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        system_prompt: Option<String>,
+        /// Plugin-defined tools registered by Lua plugins. The engine
+        /// includes these in the LLM tool definitions and proxies execution
+        /// back to the TUI via `ExecutePluginTool`.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        plugin_tools: Vec<PluginToolDef>,
     },
 
     /// Inject a message mid-turn (steering / type-ahead).
@@ -183,7 +213,15 @@ pub enum UiCommand {
     },
 
     /// Change the active mode while the engine is running.
-    SetMode { mode: Mode },
+    SetMode {
+        mode: Mode,
+        /// Updated system prompt for the new mode (if managed by TUI).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        system_prompt: Option<String>,
+        /// Updated plugin tools for the new mode.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        plugin_tools: Option<Vec<PluginToolDef>>,
+    },
 
     /// Change reasoning effort while the engine is running.
     SetReasoningEffort { effort: ReasoningEffort },
@@ -220,6 +258,14 @@ pub enum UiCommand {
     PredictInput {
         history: Vec<Message>,
         generation: u64,
+    },
+
+    /// Result of a plugin tool execution (response to `ExecutePluginTool`).
+    PluginToolResult {
+        request_id: u64,
+        call_id: String,
+        content: String,
+        is_error: bool,
     },
 
     /// Cancel the current turn.
