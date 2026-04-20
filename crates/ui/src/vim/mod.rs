@@ -3,12 +3,12 @@ mod text_objects;
 
 pub(crate) use motions::{move_down, move_down_col, move_up, move_up_col};
 
-use crate::AttachmentId;
 use crate::kill_ring::KillRing;
 use crate::text::{
     char_class, line_end, line_start, word_backward_pos, word_forward_pos, CharClass,
 };
 use crate::undo::{UndoEntry, UndoHistory};
+use crate::AttachmentId;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motions::{
     advance_chars, clamp_normal, current_line_content_range, current_line_range, find_char,

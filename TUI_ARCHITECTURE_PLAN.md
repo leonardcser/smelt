@@ -5,8 +5,7 @@
 Build a **retained-mode TUI rendering framework** (`crates/ui/`) inspired by
 Neovim's architecture but designed for Rust's ownership model. The framework
 provides a cell grid, compositor, and component system where every visible
-surface — transcript, prompt, dialogs, notifications, completions, status bar —
-is a component that draws into a grid region.
+surface is a window or component that draws into a grid region.
 
 Three-layer architecture:
 
@@ -23,31 +22,95 @@ crate is a thin app shell that wires `ui` primitives to smelt-specific logic
 and handles terminal I/O. Both internal Rust code and Lua plugins talk through
 the same `ui` API.
 
+## Design principles
+
+### Everything is a window (except the status bar)
+
+Every interactive surface in the UI is a **window** backed by a **buffer**:
+
+- **Transcript** — split window, readonly buffer, block content projected in
+- **Prompt** — split window, editable buffer with vim motions
+- **All dialogs** — float windows (help, confirm, resume, rewind, etc.)
+- **BtwBlock** — float window (not a custom overlay)
+- **Notifications** — ephemeral float window with auto-dismiss
+- **Completions** — float window anchored to cursor position
+- **Lua floats** — float windows created by plugins
+
+The **status bar** is the only non-window surface — it's a single-row
+component with no buffer, no scroll, no cursor. Making it a window would
+force an abstraction that doesn't fit.
+
+### One float dialog pattern
+
+All dialogs follow the same visual structure:
+
+```
+┌─ Title ────────────────────┐
+│                             │  ← scrollable content (BufferView)
+│                             │
+│  1. Option A                │  ← optional footer (ListSelect)
+│  2. Option B                │
+│                  [hints]    │
+└─────────────────────────────┘
+```
+
+Each dialog is a **configuration** of a single `FloatDialog` component, not
+a separate implementation. The differences between dialogs are:
+
+| Dialog      | Content                        | Footer              |
+|-------------|--------------------------------|----------------------|
+| Help        | Key binding table              | None (scroll only)   |
+| Export      | 2 options                      | ListSelect           |
+| Rewind      | Numbered turns                 | ListSelect           |
+| Resume      | Filtered session list          | ListSelect + search  |
+| Permissions | Section headers + entries      | ListSelect + delete  |
+| Ps          | Process list                   | ListSelect + kill    |
+| Agents list | Agent rows                     | ListSelect + detail  |
+| Agent detail| Prompt + tool calls            | Scroll only          |
+| Float (Lua) | Lines from Lua                 | Optional ListSelect  |
+| Confirm     | Preview (diff/code/plan)       | ListSelect + textarea|
+| Question    | Question text + options        | ListSelect + textarea|
+
+### Shared rendering for diffs and code
+
+Code diffs, syntax-highlighted files, and notebook previews render into
+**buffers with highlights**. The same rendering code produces content for
+both transcript blocks and confirm dialog previews. This means:
+
+- Diffs in the transcript use the same code as diffs in confirm dialogs
+- A confirm dialog's preview is an interactive buffer you can scroll through
+- Lua plugins can create buffers with highlighted content using the same API
+
+### Simplify question dialogs
+
+The current question dialog has a complex tab system with `active_tab`,
+`visited`, `answered`, `multi_toggles`, `other_areas`, `editing_other`.
+Replace with a sequential wizard-style flow: one question per float,
+advance to next on answer. Same visual pattern as every other dialog.
+
+### Agent detail as separate float
+
+The agents dialog currently has a two-mode design (list → detail with mode
+switch). Replace with two separate floats: selecting an agent in the list
+closes it and opens a detail float. Simpler state, no mode switching.
+
 ## Why not ratatui
 
 We evaluated ratatui and decided against it:
 
 - **Immediate mode vs retained.** Ratatui rebuilds the entire UI every frame.
-  We want retained mode — components persist state, mark dirty, and only
-  redraw when something changes.
-- **No windows.** Ratatui has no concept of persistent viewports with cursor,
-  scroll, and focus. We need first-class windows.
-- **No z-order.** Ratatui composites by render order only. We need explicit
-  float layering with z-index.
-- **Abstraction clash.** Ratatui's `Buffer` is a cell grid (render target).
-  Our `Buffer` is a content model (lines + highlights + marks). Same name,
-  fundamentally different concepts.
-- **We already have RenderOut.** Our `StyleState` + SGR diff engine is more
-  sophisticated than ratatui's cell-level diffing.
+  We want retained mode with dirty tracking.
+- **No windows.** No concept of persistent viewports with cursor, scroll, focus.
+- **No z-order.** Composites by render order only.
+- **Abstraction clash.** Ratatui's `Buffer` = cell grid. Our `Buffer` = content model.
 
-What we take from ratatui: the cell grid concept as an intermediate rendering
-surface between components and the terminal. That's ~200 lines.
+What we take: the cell grid concept as an intermediate rendering surface.
 
 ## Why a separate crate
 
 - **Forces clean boundaries.** Can't import `protocol::Message` in `crates/ui/`.
 - **Testable in isolation.** Unit-test grid, layout, components without an engine.
-- **Reusable.** The framework is a general TUI toolkit — not smelt-specific.
+- **Reusable.** General TUI toolkit — not smelt-specific.
 - **Makes the API surface explicit.** The `pub` items in `ui` *are* the API.
 
 ---
@@ -56,120 +119,51 @@ surface between components and the terminal. That's ~200 lines.
 
 ### Cell Grid
 
-The **rendering primitive**. A 2D array of `Cell { symbol, style }` that sits
-between components and the terminal. Components never emit escape sequences —
-they write cells to a grid region.
-
-```rust
-pub struct Cell {
-    pub symbol: char,
-    pub style: Style,
-}
-
-pub struct Grid {
-    cells: Vec<Cell>,
-    width: u16,
-    height: u16,
-}
-
-pub struct GridSlice<'a> {
-    grid: &'a mut Grid,
-    area: Rect,
-}
-```
-
-`GridSlice` is the Rust ownership adaptation: a borrowed rectangular view into
-the main grid. Only one component writes to any region at a time.
+2D array of `Cell { symbol, style }` between components and the terminal.
+Components never emit escape sequences — they write cells to a grid region.
+`GridSlice` is the Rust ownership adaptation: a borrowed rectangular view.
 
 ### Component
 
-The **rendering unit**. Each UI surface implements `Component`:
-
-```rust
-pub trait Component {
-    fn draw(&self, area: Rect, grid: &mut GridSlice, ctx: &DrawContext);
-    fn handle_key(&mut self, key: KeyEvent) -> KeyResult;
-    fn handle_mouse(&mut self, event: MouseEvent) -> bool { false }
-    fn cursor(&self) -> Option<CursorPosition> { None }
-    fn is_dirty(&self) -> bool;
-    fn mark_dirty(&mut self);
-    fn mark_clean(&mut self);
-}
-```
-
-Components are **retained** — they own their state, persist across frames, and
-only redraw when dirty. The framework tracks dirty flags and skips clean
-components.
+Retained rendering unit. Each UI surface implements `Component`:
+- `draw()` — writes cells into its grid slice
+- `handle_key()` — returns Consumed, Ignored, or Action(string)
+- `is_dirty()` / `mark_dirty()` / `mark_clean()` — dirty tracking
+- `cursor()` — cursor position if focused
 
 ### Compositor
 
-Manages the component tree, orchestrates rendering, and diffs frames:
-
-```rust
-pub struct Compositor {
-    grid: Grid,
-    prev_grid: Grid,
-    layers: Vec<Layer>,      // split components, then floats by z-order
-}
-```
-
-Each frame:
-1. Resolve layout → assign `Rect` to each component
-2. For each dirty component: `component.draw(rect, &mut grid_slice, ctx)`
-3. Diff `grid` vs `prev_grid` → emit only changed cells
-4. Swap grids
-
-The compositor replaces the current `RenderOut` direct-write pattern. All
-terminal output flows through: component → grid → diff → terminal.
+Manages the component tree, orchestrates rendering, diffs frames.
+Each frame: resolve layout → draw dirty components → diff grids → emit SGR.
 
 ### Buffer (content model)
 
-Unchanged from current design. Lines + highlights + marks + virtual text.
-Buffers are the **data model** — they hold content. Components read buffers
-and write cells to the grid.
+Lines + highlights + marks + virtual text. Buffers are the data model —
+components read buffers and write cells to the grid.
 
 ### Window
 
-Viewport into a buffer. Owns cursor, scroll, visual state. A window IS a
-component — it implements `Component` by rendering its buffer content into
-the grid.
+Viewport into a buffer with cursor, scroll, visual state. Windows are
+components that render their buffer content into the grid.
 
-```rust
-pub struct Window {
-    id: WinId,
-    buf: BufId,
-    config: WinConfig,
-    cursor: Cursor,
-    scroll: Scroll,
-    dirty: bool,
-    // ... vim, kill_ring, focusable
-}
+### FloatDialog
 
-impl Component for Window {
-    fn draw(&self, area: Rect, grid: &mut GridSlice, ctx: &DrawContext) {
-        // Render buffer lines + highlights + virtual text + border
-    }
-}
-```
+Reusable component that composes BufferView + optional ListSelect + optional
+TextInput. All dialogs are configurations of this component. Handles:
+- Border + title chrome
+- Scrollable content area (buffer view)
+- Optional selectable footer (list select)
+- Optional inline text input
+- Common keys: scroll, dismiss (Esc), confirm (Enter)
 
 ### Layout
 
-Region tree that positions split windows. Floats layer on top. Unchanged
-from current design but now feeds into the compositor.
+Region tree that positions split windows. Floats layer on top via z-index.
 
 ### Event dispatch
 
-Input events route through the focus chain:
-
-```
-Key event
-  → focused component (window/dialog/etc.)
-  → parent component
-  → global keymap
-  → fallback
-```
-
-Mouse events hit-test the layout tree to find the target component.
+Focus chain: focused component → parent → global keymap → fallback.
+Mouse events hit-test the layout tree.
 
 ---
 
@@ -225,27 +219,30 @@ ui.handle_mouse(event) -> bool
 
 ## Mapping existing concepts
 
-| Current (tui crate)         | New (ui crate)                              |
-|-----------------------------|---------------------------------------------|
-| `Screen`                    | `Compositor` + `Grid`                       |
-| `RenderOut` / `Frame`       | `Grid` + diff engine in `Compositor`        |
-| `Dialog` trait              | `Component` trait (float window)            |
-| `FloatDialog`               | Float window component                      |
-| `ConfirmDialog`             | Confirm component (float window)            |
-| `HelpDialog`                | Help component (float window)               |
-| `InputState`                | Prompt window component                     |
-| `TranscriptWindow`          | Transcript window component                 |
-| `BtwBlock`                  | Float window (Lua plugin)                   |
-| `Notification`              | Ephemeral float component                   |
-| `Completer`                 | Float component anchored to cursor          |
-| `CmdlineState`              | Status bar component                        |
-| `LayoutState`               | `Layout` tree + compositor                  |
-| `StyleState`                | `Style` on cells + diff engine              |
-| `DisplayBlock` / paint      | Buffer content + highlights → grid cells    |
-| `BlockHistory`              | Managed by tui, projected into transcript   |
-| `Vim`                       | `Vim` (already in ui crate)                 |
-| `WindowCursor`              | `Cursor` (already in ui crate)              |
-| `KillRing`                  | `KillRing` (already in ui crate)            |
+| Current (tui crate)           | New (ui crate)                                |
+|-------------------------------|-----------------------------------------------|
+| `Screen`                      | `Compositor` + `Grid`                         |
+| `RenderOut` / `Frame`         | `Grid` + diff engine in `Compositor`          |
+| `Dialog` trait (9 impls)      | `FloatDialog` component (one impl, N configs) |
+| `FloatDialog` (Lua)           | `FloatDialog` component                       |
+| `ConfirmDialog` (985 lines)   | `FloatDialog` with preview buffer + ListSelect|
+| `HelpDialog`                  | `FloatDialog` with keybindings buffer         |
+| `QuestionDialog` (tabs)       | Sequential `FloatDialog` per question         |
+| `AgentsDialog` (2-mode)       | List `FloatDialog` + Detail `FloatDialog`     |
+| `BtwBlock` (custom overlay)   | `FloatDialog` with question content           |
+| `Notification`                | Ephemeral float window                        |
+| `Completer` (custom popup)    | Float window anchored to cursor               |
+| `InputState`                  | Prompt split window                           |
+| `TranscriptWindow`            | Transcript split window                       |
+| `CmdlineState` / status line  | `StatusBar` component                         |
+| `LayoutState`                 | `Layout` tree + compositor                    |
+| `StyleState`                  | `Style` on cells + diff engine                |
+| `DisplayBlock` / paint        | Buffer content + highlights → grid cells      |
+| `ListState` (shared helper)   | `ListSelect` component                        |
+| `TextArea` (shared helper)    | `TextInput` component                         |
+| `BlockHistory`                | Managed by tui, projected into transcript buf |
+| `ConfirmPreview` (5 variants) | Diff/code rendered into buffer with highlights|
+| `Vim`                         | `Vim` (already in ui crate)                   |
 
 ## What stays in `tui`
 
@@ -257,10 +254,11 @@ ui.handle_mouse(event) -> bool
 - Permission system
 - Commands (slash commands are app-level, not framework-level)
 - Terminal setup/teardown (raw mode, alternate screen, etc.)
+- Dialog-specific logic (what content to show, what actions mean)
 
-The `tui` crate calls `ui.render(&mut writer)` each frame. The rendering
-pipeline (Block → lines) stays in `tui` but writes output into ui buffers.
-Components in ui handle the rest.
+The `tui` crate calls `ui.render(&mut writer)` each frame. The block
+rendering pipeline writes output into ui buffers. Dialog opening creates
+a `FloatDialog` with appropriate content and footer configuration.
 
 ---
 
@@ -271,165 +269,133 @@ functionality.
 
 ## Phase 0–2: Foundation (DONE)
 
-Core types, text primitives, and layout engine are implemented:
-
-- `crates/ui/` crate with `BufId`, `WinId`, `Buffer`, `Window`, `Ui` struct
-- Text primitives moved: `EditBuffer`, `Vim`, `KillRing`, `Cursor`, `Undo`
-- Layout engine: `LayoutTree`, constraint solver, `Rect`, float resolution
+Core types, text primitives, layout engine:
+- `crates/ui/` with `BufId`, `WinId`, `Buffer`, `Window`, `Ui`
+- Text primitives: `EditBuffer`, `Vim`, `KillRing`, `Cursor`, `Undo`
+- Layout: `LayoutTree`, constraint solver, float resolution
 - Buffer highlights: `Span`, `SpanStyle`, per-line styled content
-- Float renderer: `render_float()` with border + styled content
-- `tui` depends on `ui`, re-exports moved types
 
-## Phase 3: Cell Grid + Style
+## Phase 3–4: Grid + Components (DONE)
 
-**Goal:** Build the cell grid — the intermediate rendering surface between
-components and the terminal.
+Cell grid, compositor, and primitive components:
+- `Grid`, `Cell`, `Style`, `GridSlice` — cell-level rendering surface
+- `flush_diff()` — SGR emission from grid diffs
+- `Component` trait — retained-mode contract
+- `Compositor` — manages layers, orchestrates render, focus routing
+- `BufferView` — renders buffer content with highlights and borders
+- `ListSelect` — selectable list with indicators and navigation
+- `TextInput` — single-line text editor with cursor
+- `StatusBar` — left/right segmented status line
 
-- Define `Cell` struct: `symbol: char`, `style: Style`
-- Define `Style` struct: fg, bg, bold, dim, italic, underline, crossedout
-  (maps to our existing `SpanStyle` but for cells, not spans)
-- Define `Grid` struct: `Vec<Cell>`, width, height
-- `Grid::new(w, h)` — fill with empty cells
-- `Grid::cell(x, y) -> &Cell`, `Grid::cell_mut(x, y) -> &mut Cell`
-- `Grid::set(x, y, symbol, style)` — write a single cell
-- `Grid::print(x, y, text, style)` — write a string starting at (x, y),
-  handling multi-width characters
-- `Grid::fill(rect, symbol, style)` — fill a rectangular region
-- `Grid::clear(rect)` — reset region to empty cells
-- `GridSlice` — borrowed rectangular view for safe sub-region writes
-- `Grid::slice_mut(rect) -> GridSlice` — borrow a sub-region
-- `GridSlice` implements the same write methods as `Grid`, offset to its area
-- Diff engine: `Grid::diff(prev) -> impl Iterator<Item = CellUpdate>`
-  where `CellUpdate { x, y, cell }` — yields only changed cells
-- SGR emission: convert `CellUpdate` stream to crossterm commands,
-  minimizing attribute changes (reuse existing `StyleState` diff logic from
-  `RenderOut::emit_diff`)
-- Unit tests: write cells, diff grids, verify minimal update set
+## Phase 5: FloatDialog component
 
-## Phase 4: Component trait + Compositor
+**Goal:** Build the unified float dialog that replaces all 9 Dialog impls.
 
-**Goal:** Define the component contract and the compositor that orchestrates
-rendering through the grid.
+- `FloatDialog` composes: border/title chrome + `BufferView` (content) +
+  optional `ListSelect` (footer) + optional `TextInput` (inline input)
+- `FloatDialogConfig`: title, border style, content scroll, footer items,
+  accent color, hint text, max_height constraint
+- `FloatDialog` implements `Component`:
+  - `draw()`: border → content area → footer → hints
+  - `handle_key()`: routes to footer ListSelect or content scroll
+  - Returns `KeyResult::Action("select:N")`, `Action("dismiss")`,
+    `Action("submit:text")` etc.
+- Content is a `BufferView` — dialog callers write styled lines into it
+- Footer is an optional `ListSelect` — callers set items
+- Inline input is an optional `TextInput` — for confirm message, search
+- Unit tests: render float dialog, verify grid output, test key routing
 
-- Define `Component` trait:
-  - `draw(&self, area: Rect, grid: &mut GridSlice, ctx: &DrawContext)`
-  - `handle_key(&mut self, key: KeyEvent) -> KeyResult`
-  - `is_dirty(&self) -> bool`
-  - `mark_dirty(&mut self)` / `mark_clean(&mut self)`
-  - `cursor(&self) -> Option<(u16, u16)>` — cursor position if focused
-- Define `DrawContext`: terminal size, focused component id, theme
-- Define `KeyResult`: `Consumed`, `Ignored`, `Action(String)`
-- Define `Compositor` struct:
-  - Owns `Grid` (current frame) + `Grid` (previous frame)
-  - Manages ordered list of components with their assigned `Rect`
-  - `render<W: Write>(w) -> io::Result<()>`:
-    1. Resolve layout → assign rects
-    2. For each dirty component: draw into grid slice
-    3. Diff grids → emit SGR sequences
-    4. Swap current/prev grids
-    5. Mark all components clean
-  - `handle_key(key) -> KeyResult` — route to focused component
-  - `resize(w, h)` — resize grids, mark all dirty
-- Window implements `Component`:
-  - `draw()` renders buffer lines + highlights + border into grid slice
-  - `handle_key()` delegates to vim/keymap
-  - Dirty when buffer `changedtick` changes or scroll/cursor moves
-- Unit tests: compositor with mock components, verify grid output
+## Phase 6: Migrate dialogs to FloatDialog
 
-## Phase 5: Wire compositor into tui render loop
+**Goal:** Kill the `Dialog` trait. Each dialog becomes a FloatDialog config.
 
-**Goal:** Replace the current `RenderOut` direct-write path with the grid-based
-compositor. The existing rendering still works — this is the bridge.
+Migration order (simplest first):
+1. **HelpDialog** → FloatDialog with keybindings in buffer, no footer
+2. **ExportDialog** → FloatDialog with 2-item ListSelect footer
+3. **RewindDialog** → FloatDialog with turn list in ListSelect
+4. **FloatDialog (Lua)** → FloatDialog with Lua content + optional footer
+5. **PermissionsDialog** → FloatDialog with section content + ListSelect
+6. **PsDialog** → FloatDialog with process list + ListSelect
+7. **ResumeDialog** → FloatDialog with session list + search TextInput
+8. **AgentsDialog** → Two FloatDialogs (list + detail)
+9. **QuestionDialog** → Sequential FloatDialogs (one per question)
+10. **ConfirmDialog** → FloatDialog with preview buffer + ListSelect + TextInput
 
-- Add `Compositor` to `Ui` struct (or as a peer managed by `App`)
-- Create a `LegacyBridge` component that wraps the current `Screen` rendering:
-  - `draw()` calls the existing block paint pipeline but writes to grid
-    instead of `RenderOut`
-  - This lets the old rendering work through the new grid path
-- `App::render_frame()` calls `ui.render(&mut writer)` which:
-  1. Runs the compositor (layout → draw → diff → emit)
-  2. Wraps output in synchronized update envelope
-- Remove direct `RenderOut` usage from the main render path
-- The `LegacyBridge` is temporary scaffolding — it gets deleted as individual
-  components migrate in later phases
-- Verify: all existing functionality works through the grid path
+For confirm dialog specifically:
+- `ConfirmPreview` variants (Diff, Notebook, FileContent, BashBody, Plan)
+  all render into a buffer with highlights using shared rendering code
+- The preview buffer is scrollable and interactive
+- Same diff rendering code used in transcript blocks
 
-## Phase 6: Migrate dialogs to components
+Also migrate non-dialog surfaces:
+- **BtwBlock** → FloatDialog with question content
+- **Notifications** → Ephemeral float (auto-dismiss timer)
+- **Completions** → Float window anchored to cursor
 
-**Goal:** Kill the `Dialog` trait. Every dialog becomes a `Component` rendered
-as a float window through the compositor.
+Delete after all migrations:
+- `Dialog` trait, `DialogResult`, `ListState`, `TextArea`
+- `active_dialog`, `open_dialog`, `finalize_dialog_close`
+- `FloatOp`, `pending_float_ops`, `drain_float_ops`
+- All individual dialog structs in `render/dialogs/`
 
-- Build `DialogComponent` — a generic component for modal float windows:
-  - Draws bordered float with title, scrollable content, optional footer
-  - Handles common keys: scroll (up/down/page), dismiss (Esc), confirm (Enter)
-  - Configurable via `DialogConfig`: title, border style, footer items, accent
-- Migrate one dialog at a time (simplest first):
-  - `HelpDialog` → `HelpComponent` (static content, scroll, dismiss)
-  - `ExportDialog` → `ExportComponent` (list selection)
-  - `FloatDialog` → Lua float becomes a generic `DialogComponent`
-  - `ConfirmDialog` → `ConfirmComponent` (most complex: preview + selection)
-  - Remaining: Resume, Rewind, Permissions, Ps, Agents, Question
-- For each migration:
-  - Create a component with a buffer + float window
-  - Content goes into the buffer (styled with highlights)
-  - Component draws buffer content into its grid slice
-  - Key handling returns `KeyResult::Action("dismiss")` etc.
-  - Delete the old `Dialog` impl
-- Delete: `Dialog` trait, `DialogResult`, `ListState` (shared dialog helpers),
-  `active_dialog`, `open_dialog`, `finalize_dialog_close`, `FloatOp`,
-  `pending_float_ops`, `drain_float_ops`
+## Phase 7: Wire compositor into tui render loop
 
-## Phase 7: Migrate prompt and transcript
+**Goal:** Replace `RenderOut` direct-write path with grid compositor.
 
-**Goal:** The two main panes become proper components.
+- Add `Compositor` to `App` (or `Ui`)
+- Create `LegacyBridge` component wrapping current `Screen` rendering:
+  - `draw()` calls existing block paint pipeline but writes to grid
+  - Temporary scaffolding — deleted when transcript/prompt migrate
+- `App::render_frame()` → `compositor.render(&mut writer)`
+- Synchronized update envelope around compositor output
+- Remove direct `RenderOut` usage from main render path
 
-- **Transcript component:**
-  - Wraps the existing block rendering pipeline
-  - `draw()` renders blocks → styled lines → grid cells
-  - Scroll, selection, copy through the component
-  - Block cache stays in `tui`, but output flows through grid
-- **Prompt component:**
-  - Text input with vim motions, undo, kill ring
-  - `draw()` renders edit buffer content + cursor + ghost text → grid cells
-  - Key handling: insert mode input, vim motions, completion trigger
-- **Status bar component:**
-  - Single-row component at bottom
-  - Renders mode indicator, spinner, metrics, notifications
-- Delete: `InputState`, `TranscriptWindow`, `Screen` struct, old layout code
-- `tui` creates these components at startup and registers them with the compositor
+## Phase 8: Migrate prompt and transcript
 
-## Phase 8: Event dispatch
+**Goal:** The two main panes become proper windows.
 
-**Goal:** Input routing through the component tree is framework-level.
+- **Transcript window:**
+  - Split window with readonly buffer
+  - Block rendering pipeline projects content into buffer
+  - Scroll, selection, copy through the window
+  - Block cache stays in `tui`, output flows through buffer → grid
+- **Prompt window:**
+  - Split window with editable buffer
+  - Vim motions, undo, kill ring through the window
+  - Ghost text via virtual text on the buffer
+- **Status bar:**
+  - `StatusBar` component at bottom (not a window)
+  - Mode indicator, spinner, metrics, notifications
+- Delete: `InputState`, `TranscriptWindow`, `Screen`, `LegacyBridge`
 
-- Compositor manages focus stack (ordered by z-index for floats)
-- `handle_key()` walks focus chain: focused component → parent → global
-- `handle_mouse()` hit-tests layout tree → route to target component
+## Phase 9: Event dispatch
+
+**Goal:** Input routing through component tree is framework-level.
+
+- Compositor manages focus stack (z-index ordered for floats)
+- `handle_key()` walks: focused → parent → global keymap
+- `handle_mouse()` hit-tests layout → route to target
 - Keymap system: buffer-local, window-local, global scopes
-- `tui` registers its keymaps via the ui API
-- Vim integration: vim state on windows, key handling is framework-level
+- Vim integration: vim state on windows, framework-level handling
 
-## Phase 9: Lua bindings rewrite
+## Phase 10: Lua bindings rewrite
 
-**Goal:** Lua talks to `ui` directly. `smelt.api.buf.*` / `win.*` maps 1:1.
+**Goal:** Lua talks to `ui` directly. `smelt.api.buf/win` maps 1:1.
 
 - Rewrite `lua.rs` buf/win sections to call ui API
-- Lua can create buffers, open float windows, set content, add highlights
-- Lua components: a Lua plugin can register a component that draws via
-  buffer content (Lua writes lines + highlights, Rust renders grid cells)
+- Lua creates buffers, opens float windows, sets content, adds highlights
 - Remove `PendingOp::OpenFloat` / `UpdateFloat` / `CloseFloat`
 - Port `btw.lua`, `predict.lua`, `plan_mode.lua` to clean API
 
-## Phase 10: Cleanup and polish
+## Phase 11: Cleanup and polish
 
-**Goal:** Delete everything the new framework replaces.
+**Goal:** Delete everything the framework replaces.
 
-- Delete: old `Screen` code, `RenderOut` direct usage, `LegacyBridge`
-- Delete: `DisplayBlock` / `SpanCollector` / `paint_line` (replaced by grid)
+- Delete: old `Screen`, `RenderOut` direct usage
+- Delete: `DisplayBlock` / `SpanCollector` / `paint_line`
 - Audit `pub` items in `ui` — hide internals
 - Documentation: `docs/lua-api.md`, plugin authoring guide
-- README update
-- Full test suite pass
+- README update, full test suite pass
 
 ---
 
@@ -439,38 +405,37 @@ as a float window through the compositor.
 Phase 0–2 (DONE: types, text primitives, layout)
     │
     ▼
-Phase 3 (cell grid + style)
+Phase 3–4 (DONE: grid, components, compositor, primitives)
     │
     ▼
-Phase 4 (component trait + compositor)
+Phase 5 (FloatDialog component)
     │
     ▼
-Phase 5 (wire into tui render loop)
+Phase 6 (migrate all dialogs + btw + notifications + completions)
     │
-    ├──────────────────┐
-    ▼                  ▼
-Phase 6 (dialogs)   Phase 7 (prompt + transcript)
-    │                  │
-    └────────┬─────────┘
-             ▼
-Phase 8 (event dispatch)
-             │
-             ▼
-Phase 9 (Lua bindings)
-             │
-             ▼
-Phase 10 (cleanup)
+    ▼
+Phase 7 (wire compositor into tui render loop)
+    │
+    ▼
+Phase 8 (migrate prompt + transcript)
+    │
+    ▼
+Phase 9 (event dispatch)
+    │
+    ▼
+Phase 10 (Lua bindings)
+    │
+    ▼
+Phase 11 (cleanup)
 ```
-
-Phases 6 and 7 can proceed in parallel once Phase 5 is done.
 
 ---
 
 # Non-goals
 
-- **Using ratatui.** We build our own — the abstraction mismatch is too large.
+- **Using ratatui.** Abstraction mismatch too large.
 - **Plugin registry / package manager.** Lua scripts in `~/.config/smelt/`.
-- **Remote UI protocol (v1).** Local terminal only. API accommodates future RPC.
+- **Remote UI protocol (v1).** Local terminal only.
 - **Async Lua.** Sync-only; snapshot/queue pattern avoids borrow issues.
 - **Full nvim compatibility.** We borrow the model, not the exact API.
 - **Immediate mode.** We are retained mode with dirty tracking.
@@ -483,16 +448,12 @@ All prior phases (A–E, T1–T9, L1–L5.5) are complete. See git history.
 
 Key outcomes:
 - Alt-buffer rendering, top-relative coordinates, viewport pin
-- `Window` trait, `Buffer`, `WindowCursor`, `Vim` state machine
 - Block rendering pipeline with layout caching
-- `TranscriptSnapshot` with nav buffer, selection, copy pipeline
 - Lua runtime with `smelt.api.*` surface, autocmds, user commands, keymaps
 - `EngineSnapshot` / `PendingOp` snapshot/queue pattern
-- `FloatDialog` (interim — replaced by Phase 6)
 
-Phase 0–2 (ui crate foundation):
-- `crates/ui/` with `BufId`, `WinId`, `Buffer`, `Window`, `Ui`
-- Text primitives: `EditBuffer`, `Vim`, `KillRing`, `Cursor`, `Undo`
-- Layout: `LayoutTree`, constraint solver, float resolution
-- Buffer highlights: `Span`, `SpanStyle`, per-line styled content
-- Float renderer: `render_float()` (temporary — replaced by grid compositor)
+Phase 0–4 (ui crate):
+- `crates/ui/` with core types, text primitives, layout engine
+- Cell grid + style + SGR flush engine
+- Component trait + Compositor (retained-mode rendering)
+- BufferView, ListSelect, TextInput, StatusBar components

@@ -112,7 +112,9 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<String, Rect>) 
             let mut offset = 0u16;
             for (child, &size) in children.iter().zip(sizes.iter()) {
                 let child_area = match direction {
-                    Direction::Vertical => Rect::new(area.top + offset, area.left, area.width, size),
+                    Direction::Vertical => {
+                        Rect::new(area.top + offset, area.left, area.width, size)
+                    }
                     Direction::Horizontal => {
                         Rect::new(area.top, area.left + offset, size, area.height)
                     }
