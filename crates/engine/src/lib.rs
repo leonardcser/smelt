@@ -9,7 +9,7 @@ pub mod log;
 pub mod mcp;
 pub mod paths;
 pub mod permissions;
-pub mod plan;
+
 pub mod pricing;
 pub mod provider;
 pub mod redact;
@@ -57,7 +57,6 @@ pub struct PromptContext<'a> {
     pub cwd: &'a std::path::Path,
     pub interactive: bool,
     pub write_access: bool,
-    pub plan_mode: bool,
     pub multi_agent: Option<&'a AgentPromptConfig>,
     pub skills_section: Option<&'a str>,
     pub extra_instructions: Option<&'a str>,
@@ -85,7 +84,6 @@ pub fn build_system_prompt_full(
         cwd,
         interactive,
         write_access: matches!(mode, protocol::Mode::Apply | protocol::Mode::Yolo),
-        plan_mode: matches!(mode, protocol::Mode::Plan),
         multi_agent: agent_config,
         skills_section: skill_section,
         extra_instructions,
@@ -117,7 +115,6 @@ pub fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
             cwd => ctx.cwd.display().to_string(),
             interactive => ctx.interactive,
             write_access => ctx.write_access,
-            plan_mode => ctx.plan_mode,
             multi_agent => ctx.multi_agent.is_some(),
             is_child => is_child,
             agent_id => agent_id,

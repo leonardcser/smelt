@@ -1384,6 +1384,7 @@ impl App {
 
     /// Populate engine-related Lua snapshot fields.
     pub(super) fn snapshot_engine_context(&self, is_busy: bool) {
+        let session_dir = crate::session::dir_for(&self.session);
         self.lua.set_engine_context(crate::lua::EngineSnapshot {
             model: self.model.clone(),
             mode: self.mode.as_str().to_string(),
@@ -1392,6 +1393,8 @@ impl App {
             session_cost: self.session_cost_usd,
             context_tokens: self.screen.context_tokens(),
             context_window: self.context_window,
+            session_dir: session_dir.display().to_string(),
+            session_id: self.session.id.clone(),
         });
     }
 

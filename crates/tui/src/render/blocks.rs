@@ -686,7 +686,7 @@ fn render_confirm_result<S: LayoutSink>(
         rows += 1;
         out.print_gutter("  ");
         match c {
-            ConfirmChoice::Yes | ConfirmChoice::YesAutoApply => {
+            ConfirmChoice::Yes => {
                 print_dim(out, "approved");
             }
             ConfirmChoice::Always(scope) => {

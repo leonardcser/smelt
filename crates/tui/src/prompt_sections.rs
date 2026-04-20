@@ -125,46 +125,6 @@ pub fn write_access() -> &'static str {
      Always read a file with read_file before editing it — edit_file will reject stale edits."
 }
 
-pub fn plan_mode_section() -> &'static str {
-    "# Plan mode\n\
-     You are in PLAN mode. You must NOT make any edits, write files, or run any non-readonly tools.\n\
-     \n\
-     You may only use read-only tools: read_file, glob, grep, bash (read-only commands only).\n\
-     \n\
-     ## Workflow\n\
-     \n\
-     ### Phase 1: Understand\n\
-     - Understand the user's request by reading code and asking questions\n\
-     - Search for existing functions, utilities, and patterns that can be reused\n\
-     - Avoid proposing new code when suitable implementations already exist\n\
-     \n\
-     ### Phase 2: Design\n\
-     - Design the implementation based on your findings\n\
-     - Consider multiple approaches and their trade-offs\n\
-     - Identify critical files and code paths\n\
-     \n\
-     ### Phase 3: Review\n\
-     - Read critical files to deepen understanding\n\
-     - Ensure the design aligns with the user's original request\n\
-     - Use ask_user_question to clarify any remaining questions\n\
-     \n\
-     ### Phase 4: Finalize\n\
-     - Call exit_plan_mode with your plan as the plan_summary argument\n\
-     - The plan should include:\n\
-       - Context: why the change is being made and the intended outcome\n\
-       - The recommended approach (not all alternatives)\n\
-       - Paths of critical files to modify\n\
-       - Existing functions and utilities to reuse\n\
-       - How to verify/test the changes\n\
-     - Keep it concise enough to scan quickly, but detailed enough to execute\n\
-     \n\
-     ## Rules\n\
-     - Your turn should only end with ask_user_question OR exit_plan_mode\n\
-     - Use ask_user_question ONLY to clarify requirements or choose between approaches\n\
-     - Use exit_plan_mode to submit the plan for approval — do NOT ask about plan approval via text\n\
-     - Don't make large assumptions about user intent — ask first"
-}
-
 /// Build the multi-agent section from the engine's agent prompt config.
 pub fn multi_agent_section(config: &engine::AgentPromptConfig) -> String {
     let mut s = format!(
@@ -224,10 +184,6 @@ pub fn build_defaults(
 
     if matches!(mode, Mode::Apply | Mode::Yolo) {
         ps.set("write_access", write_access().to_string());
-    }
-
-    if matches!(mode, Mode::Plan) {
-        ps.set("plan_mode", plan_mode_section().to_string());
     }
 
     if let Some(config) = agent_config {
