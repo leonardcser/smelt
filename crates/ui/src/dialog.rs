@@ -274,7 +274,10 @@ impl Dialog {
     /// Downcast the widget in `panel_idx` to a concrete widget type
     /// `T`. Returns `None` if the panel is buffer-backed or the widget
     /// is not of type `T`.
-    pub fn panel_widget_mut<T: PanelWidget + 'static>(&mut self, panel_idx: usize) -> Option<&mut T> {
+    pub fn panel_widget_mut<T: PanelWidget + 'static>(
+        &mut self,
+        panel_idx: usize,
+    ) -> Option<&mut T> {
         let panel = self.panels.get_mut(panel_idx)?;
         let DialogPanelContent::Widget(widget) = &mut panel.content else {
             return None;
@@ -404,7 +407,9 @@ impl Dialog {
             let viewport_rows = rect.height;
             match &mut panel.content {
                 DialogPanelContent::Buffer { view, win, .. } => {
-                    let scroll_top = win.scroll_top.min(total_lines.saturating_sub(viewport_rows));
+                    let scroll_top = win
+                        .scroll_top
+                        .min(total_lines.saturating_sub(viewport_rows));
                     win.scroll_top = scroll_top;
                     let scrollbar = ScrollbarState::new(
                         rect.left + rect.width.saturating_sub(1),

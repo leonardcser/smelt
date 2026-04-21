@@ -129,7 +129,9 @@ impl ConfirmPreview {
     /// Emit the preview into `buf` via `SpanCollector` → `Buffer`
     /// projection. Uses the same LayoutSink-based renderers as the
     /// legacy `render` path, but captures styled spans into `buf`
-    /// instead of ANSI bytes on stdout.
+    /// instead of ANSI bytes on stdout. Wired up by the upcoming
+    /// Confirm dialog migration (step 11 of the plan).
+    #[allow(dead_code)]
     pub(crate) fn render_into_buffer(
         &self,
         buf: &mut ui::buffer::Buffer,

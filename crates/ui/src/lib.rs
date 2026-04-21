@@ -38,7 +38,6 @@ pub use dialog::{
     Dialog, DialogConfig, PanelContent, PanelHeight, PanelKind, PanelSpec, PanelWidget,
     SeparatorStyle,
 };
-pub use option_list::{OptionItem, OptionList};
 pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
 pub use flush::flush_diff;
@@ -47,6 +46,7 @@ pub use id::{BufId, WinId};
 pub use kill_ring::KillRing;
 pub use layout::{Anchor, Border, Constraint, FloatRelative, Gutters, LayoutTree, Placement, Rect};
 pub use list_select::{ListItem, ListSelect};
+pub use option_list::{OptionItem, OptionList};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
 pub use text_input::TextInput;

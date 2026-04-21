@@ -20,6 +20,10 @@
 //!   errors append to `lua_errors` and the app surfaces the first as a
 //!   notification on the next tick.
 
+mod task;
+
+pub use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
+
 use mlua::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -300,6 +304,7 @@ pub(crate) struct LuaShared {
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
     pub(crate) history: Mutex<Arc<Vec<protocol::Message>>>,
+    pub(crate) tasks: Mutex<LuaTaskRuntime>,
 }
 
 impl Default for LuaShared {
@@ -316,6 +321,7 @@ impl Default for LuaShared {
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             history: Mutex::new(Arc::new(Vec::new())),
+            tasks: Mutex::new(LuaTaskRuntime::new()),
         }
     }
 }
@@ -371,6 +377,11 @@ impl LuaRuntime {
     /// errors; syntax / runtime errors are captured on `load_error`.
     pub fn new() -> Self {
         let lua = Lua::new();
+        // `Arc<LuaShared>` is single-threaded in practice (all Lua
+        // callbacks fire on the TUI thread). The task runtime holds
+        // `mlua::Thread` which is !Send, so the Arc is flagged by
+        // clippy. Allow explicitly — we never clone across threads.
+        #[allow(clippy::arc_with_non_send_sync)]
         let shared = Arc::new(LuaShared::default());
 
         let load_error = Self::register_api(&lua, &shared)
@@ -1016,7 +1027,29 @@ impl LuaRuntime {
             )?;
         }
 
+        {
+            let s = shared.clone();
+            smelt.set(
+                "task",
+                lua.create_function(move |lua, handler: mlua::Function| {
+                    if let Ok(mut rt) = s.tasks.lock() {
+                        rt.spawn(lua, handler, TaskCompletion::FireAndForget)?;
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+
         lua.globals().set("smelt", smelt)?;
+
+        // Install the yielding primitives as Lua wrappers around
+        // `coroutine.yield`. Each checks `coroutine.isyieldable()` so
+        // calls from a non-task context raise a clear error instead of
+        // yielding into the void.
+        lua.load(TASK_YIELD_PRIMITIVES)
+            .set_name("smelt/task_primitives")
+            .exec()?;
+
         Ok(())
     }
 
@@ -1210,6 +1243,26 @@ impl LuaRuntime {
             .filter(|h| !h.dead)
             .filter_map(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
             .collect()
+    }
+
+    /// Drive the LuaTask runtime: resume any tasks whose waits have
+    /// been satisfied (sleep elapsed, dialog resolved, …), park any
+    /// new yields, and return the outputs for the app to act on.
+    /// Errors are recorded via `NotifyError` directly; callers only
+    /// need to handle `OpenDialog` and `ToolComplete` variants.
+    pub fn drive_tasks(&self) -> Vec<TaskDriveOutput> {
+        let Ok(mut rt) = self.shared.tasks.lock() else {
+            return Vec::new();
+        };
+        let outs = rt.drive(&self.lua, Instant::now());
+        let mut forward = Vec::with_capacity(outs.len());
+        for out in outs {
+            match out {
+                TaskDriveOutput::Error(msg) => self.record_error(msg),
+                other => forward.push(other),
+            }
+        }
+        forward
     }
 
     /// Fire any `smelt.defer` timers whose deadline has passed.
@@ -1496,6 +1549,19 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
         _ => serde_json::Value::Null,
     }
 }
+
+/// Lua source injected at bootstrap to install the task-yielding
+/// primitives. Each checks `coroutine.isyieldable()` so calls from
+/// outside a task raise a clear error rather than failing later.
+const TASK_YIELD_PRIMITIVES: &str = r#"
+smelt.api = smelt.api or {}
+function smelt.api.sleep(ms)
+  if not coroutine.isyieldable() then
+    error("smelt.api.sleep: call from inside smelt.task(fn) or tool.execute", 2)
+  end
+  return coroutine.yield({__yield = "sleep", ms = ms})
+end
+"#;
 
 impl Default for LuaRuntime {
     fn default() -> Self {
