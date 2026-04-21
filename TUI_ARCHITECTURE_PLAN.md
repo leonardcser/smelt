@@ -644,7 +644,18 @@ Steps 1–4 complete:
   all btw methods from Screen, btw rendering from `prompt_data.rs`
   and `draw_prompt_sections`, btw field from `PromptInput`.
 
-Next: Step 6b — merge Compositor into Ui (single window system).
+- Step 6b: Merge Compositor into Ui ✅ — `Ui` owns the compositor.
+  `win_open_float()` creates both window AND FloatDialog layer.
+  `win_close()` removes both. tui never touches compositor directly.
+- Step 6c: Wire Lua ops to Ui ✅ — PendingOps are `BufCreate`,
+  `BufSetLines`, `WinOpenFloat`, `WinClose`, `WinUpdate`. Deleted
+  `FloatOp`, `drain_float_ops`, `pending_float_ops`.
+- Step 6d: Action dispatch ✅ — compositor float keys route through
+  `handle_float_action()`. `dismiss` → Lua callback + close.
+  `select:N` → Lua callback. Deleted legacy `render::FloatDialog`,
+  `FloatSelect`, `FloatDismiss`.
+
+Next: Step 6e — rewrite btw.lua as pure Lua plugin.
 
 ## Phase 7: Event dispatch
 

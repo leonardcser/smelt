@@ -1,8 +1,9 @@
 -- Built-in /btw (side question) plugin.
 --
--- Registers the `/btw` command. Sends the question to the engine via
--- `engine.ask()` with task="btw" and displays the response in the btw
--- overlay.
+-- Registers the `/btw` command. Opens a float window, sends the question
+-- to the engine via `engine.ask()`, and streams the response into the
+-- float's buffer. Uses only generic buf/win primitives — zero
+-- btw-specific Rust code.
 
 local SYSTEM = "You are a helpful assistant. The user is asking a quick side question "
   .. "while working on something else. Answer concisely and directly. "
@@ -15,7 +16,16 @@ smelt.api.cmd.register("btw", function(args)
     return
   end
 
-  -- Build messages from history for context.
+  local buf = smelt.api.buf.create()
+  smelt.api.buf.set_lines(buf, { "thinking…" })
+
+  smelt.api.win.open_float(buf, {
+    title = question,
+    on_dismiss = function()
+      smelt.api.win.close(buf)
+    end,
+  })
+
   local history = smelt.api.engine.history()
   local messages = {}
   for _, msg in ipairs(history) do
@@ -23,14 +33,16 @@ smelt.api.cmd.register("btw", function(args)
   end
   table.insert(messages, { role = "user", content = question })
 
-  smelt.api.ui.open_btw({ question = question })
-
   smelt.api.engine.ask({
     system = SYSTEM,
     messages = messages,
     task = "btw",
     on_response = function(content)
-      smelt.api.ui.set_btw_response(content)
+      local lines = {}
+      for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+        table.insert(lines, line)
+      end
+      smelt.api.buf.set_lines(buf, lines)
     end,
   })
 end)
