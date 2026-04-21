@@ -121,6 +121,10 @@ pub struct FloatConfig {
     pub border: Border,
     pub title: Option<String>,
     pub zindex: u16,
+    /// Whether `<C-w>` window cycling and programmatic focus can land
+    /// here. `false` for popups (completer, notification) that should
+    /// never steal cursor. Modeled on Neovim's `WinConfig.focusable`.
+    pub focusable: bool,
 }
 
 impl Default for FloatConfig {
@@ -133,6 +137,7 @@ impl Default for FloatConfig {
             border: Border::Single,
             title: None,
             zindex: 50,
+            focusable: true,
         }
     }
 }
