@@ -95,6 +95,12 @@ pub struct LuaTaskRuntime {
     tasks: Vec<LuaTask>,
     next_task_id: AtomicU64,
     next_dialog_id: AtomicU64,
+    /// Outputs that an in-line `drive` produced but whose caller
+    /// doesn't route them itself — e.g. `execute_plugin_tool` runs
+    /// one drive inline and consumes only its own `ToolComplete`;
+    /// any `OpenDialog` or stray outputs get parked here for the
+    /// next app-level `drive_tasks` to handle.
+    deferred: Vec<TaskDriveOutput>,
 }
 
 impl LuaTaskRuntime {
@@ -103,7 +109,14 @@ impl LuaTaskRuntime {
             tasks: Vec::new(),
             next_task_id: AtomicU64::new(1),
             next_dialog_id: AtomicU64::new(1),
+            deferred: Vec::new(),
         }
+    }
+
+    /// Queue outputs produced by an inline drive whose caller didn't
+    /// consume them. Drained into the next `drive` return.
+    pub fn defer_output(&mut self, output: TaskDriveOutput) {
+        self.deferred.push(output);
     }
 
     /// Spawn a task from a Lua function. The task runs on the next
@@ -145,9 +158,10 @@ impl LuaTaskRuntime {
 
     /// Drive all ready tasks once. Each ready task is resumed; if it
     /// yields, it's parked on a new wait; if it returns, its
-    /// completion is reported.
+    /// completion is reported. Any outputs deferred from a previous
+    /// inline drive are flushed first, in order.
     pub fn drive(&mut self, lua: &Lua, now: Instant) -> Vec<TaskDriveOutput> {
-        let mut outputs = Vec::new();
+        let mut outputs = std::mem::take(&mut self.deferred);
         let mut i = 0;
         while i < self.tasks.len() {
             let ready = match &self.tasks[i].wait {

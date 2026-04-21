@@ -1293,6 +1293,23 @@ impl LuaRuntime {
             .collect()
     }
 
+    /// Satisfy a `smelt.api.dialog.open` wait: hand the result
+    /// table back to the parked task so it resumes on the next
+    /// `drive_tasks` call. Returns `true` if a matching task was
+    /// found. Called by the app when a Lua-driven dialog resolves.
+    pub fn resolve_dialog(&self, dialog_id: u64, value: mlua::Value) -> bool {
+        let Ok(mut rt) = self.shared.tasks.lock() else {
+            return false;
+        };
+        rt.resolve_dialog(dialog_id, value)
+    }
+
+    /// Access the underlying Lua state so callers can build result
+    /// tables (e.g. for `resolve_dialog`).
+    pub fn lua(&self) -> &Lua {
+        &self.lua
+    }
+
     /// Drive the LuaTask runtime: resume any tasks whose waits have
     /// been satisfied (sleep elapsed, dialog resolved, …), park any
     /// new yields, and return the outputs for the app to act on.
@@ -1561,16 +1578,19 @@ impl LuaRuntime {
         }
     }
 
-    /// Forward a non-terminal task output (OpenDialog, a stray
-    /// ToolComplete) into the app's consumption path. Step (iv) wires
-    /// OpenDialog; for now log a debug warning.
+    /// Forward a non-terminal task output produced by an inline
+    /// drive (inside `execute_plugin_tool`) onto the runtime's
+    /// deferred queue so the next app-level `drive_tasks` sees it
+    /// and routes appropriately (e.g. opens the dialog).
     fn queue_task_output(&self, out: TaskDriveOutput) {
         match out {
             TaskDriveOutput::OpenDialog { .. } => {
-                self.record_error("dialog.open from plugin tool: not wired until step iv".into());
+                if let Ok(mut rt) = self.shared.tasks.lock() {
+                    rt.defer_output(out);
+                }
             }
             TaskDriveOutput::ToolComplete { .. } => {
-                // Unmatched completion — orphaned task. Swallow.
+                // Orphaned completion (unmatched id) — swallow.
             }
             TaskDriveOutput::Error(msg) => self.record_error(msg),
         }
@@ -1822,11 +1842,28 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
 /// outside a task raise a clear error rather than failing later.
 const TASK_YIELD_PRIMITIVES: &str = r#"
 smelt.api = smelt.api or {}
+smelt.api.dialog = smelt.api.dialog or {}
+
 function smelt.api.sleep(ms)
   if not coroutine.isyieldable() then
     error("smelt.api.sleep: call from inside smelt.task(fn) or tool.execute", 2)
   end
   return coroutine.yield({__yield = "sleep", ms = ms})
+end
+
+-- Open a dialog and wait for the user's answer. Blocks the task
+-- coroutine. Returns a table:
+--   { action = "<option.action> | 'dismiss'",
+--     option_index = <1-based int | nil>,
+--     inputs       = { [name] = "<text>", … } }
+function smelt.api.dialog.open(opts)
+  if not coroutine.isyieldable() then
+    error("smelt.api.dialog.open: call from inside smelt.task(fn) or tool.execute", 2)
+  end
+  if type(opts) ~= "table" then
+    error("smelt.api.dialog.open: expected table of options", 2)
+  end
+  return coroutine.yield({__yield = "dialog", opts = opts})
 end
 "#;
 
@@ -2022,6 +2059,69 @@ mod tests {
             .eval()
             .expect("eval");
         assert_eq!(version, crate::api::VERSION);
+    }
+
+    #[test]
+    fn dialog_open_yield_parks_task_and_resume_delivers_result() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.api.tools.register({
+                  name = "confirm_then_return",
+                  description = "",
+                  parameters = { type = "object", properties = {} },
+                  execute = function()
+                    local r = smelt.api.dialog.open({
+                      panels = {
+                        { kind = "content", text = "please confirm" },
+                        { kind = "options", items = {
+                          { label = "yes", action = "approve" },
+                          { label = "no",  action = "deny"    },
+                        }},
+                      },
+                    })
+                    return r.action
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let args = std::collections::HashMap::new();
+        assert!(matches!(
+            rt.execute_plugin_tool("confirm_then_return", &args, 1, "c"),
+            ToolExecResult::Pending
+        ));
+        // Drive picks up the deferred OpenDialog from the inline execute.
+        let outs = rt.drive_tasks();
+        let (task_dialog_id, _opts_key) = outs
+            .iter()
+            .find_map(|o| match o {
+                TaskDriveOutput::OpenDialog { dialog_id, .. } => Some((*dialog_id, 0u8)),
+                _ => None,
+            })
+            .expect("expected OpenDialog yield");
+        // Now resolve the dialog as if the user chose "approve".
+        let result = rt
+            .lua
+            .load(r#"return { action = "approve", option_index = 1, inputs = {} }"#)
+            .eval::<mlua::Value>()
+            .unwrap();
+        assert!(rt.resolve_dialog(task_dialog_id, result));
+        // Next drive resumes the task; it should complete with "approve".
+        let outs = rt.drive_tasks();
+        assert!(outs.iter().any(|o| matches!(
+            o,
+            TaskDriveOutput::ToolComplete { content, is_error: false, .. } if content == "approve"
+        )));
+    }
+
+    #[test]
+    fn dialog_open_outside_task_errors() {
+        let rt = LuaRuntime::new();
+        let res: LuaResult<()> = rt.lua.load("smelt.api.dialog.open({panels = {}})").exec();
+        assert!(res.is_err());
     }
 
     #[test]

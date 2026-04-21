@@ -1,4 +1,4 @@
-mod blocks;
+pub(crate) mod blocks;
 mod cache;
 pub(crate) mod cmdline;
 mod completions;
