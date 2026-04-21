@@ -8,6 +8,7 @@
 //! then put it back if the dialog is still open.
 
 pub mod agents;
+pub mod confirm;
 pub mod export;
 pub mod help;
 pub mod lua_dialog;

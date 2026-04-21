@@ -267,6 +267,18 @@ impl Dialog {
         self.focused
     }
 
+    /// Set focus to `panel_idx`. No-op if the index is out of range or
+    /// the panel is not focusable.
+    pub fn focus_panel(&mut self, panel_idx: usize) {
+        if self
+            .panels
+            .get(panel_idx)
+            .is_some_and(|p| p.focusable)
+        {
+            self.focused = panel_idx;
+        }
+    }
+
     pub fn config_mut(&mut self) -> &mut DialogConfig {
         &mut self.config
     }
@@ -639,6 +651,32 @@ impl Dialog {
         } else {
             win.cursor_line = (new - scroll) as u16;
         }
+    }
+
+    /// Scroll the buffer-backed panel at `panel_idx` by `delta` rows.
+    /// No-op for widget-backed panels or invalid indices. Used by
+    /// `DialogState` implementations to scroll a non-focused content
+    /// panel (e.g. Confirm forwards PageUp/PageDown to its preview
+    /// while focus stays on the options widget).
+    pub fn scroll_panel(&mut self, panel_idx: usize, delta: isize) {
+        let Some(panel) = self.panels.get_mut(panel_idx) else {
+            return;
+        };
+        let total = panel.line_count as isize;
+        let rows = panel.rect.height as isize;
+        let max_scroll = (total - rows).max(0);
+        let Some(win) = panel.win_mut() else { return };
+        let new = (win.scroll_top as isize + delta).clamp(0, max_scroll);
+        win.scroll_top = new as u16;
+    }
+
+    /// Height of `panel_idx`'s rect from the last layout pass. Callers
+    /// use this to compute a half-page scroll delta.
+    pub fn panel_rect_height(&self, panel_idx: usize) -> u16 {
+        self.panels
+            .get(panel_idx)
+            .map(|p| p.rect.height)
+            .unwrap_or(0)
     }
 
     /// Move the List selection to an absolute index. Out-of-range
