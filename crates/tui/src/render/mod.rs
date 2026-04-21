@@ -47,9 +47,8 @@ pub(crate) use status::{draw_bar, BarSpan};
 
 pub use dialogs::{
     parse_questions, AgentSnapshot, AgentsDialog, ConfirmDialog, Dialog, DialogResult,
-    ExportDialog, ExportTarget, FloatDialog, HelpDialog, PermissionEntry, PermissionsDialog,
-    PsDialog, Question, QuestionDialog, QuestionOption, ResumeDialog, RewindDialog,
-    SharedSnapshots,
+    ExportDialog, ExportTarget, HelpDialog, PermissionEntry, PermissionsDialog, PsDialog, Question,
+    QuestionDialog, QuestionOption, ResumeDialog, RewindDialog, SharedSnapshots,
 };
 
 /// Layout placement computed by `draw_frame` for the active dialog.
