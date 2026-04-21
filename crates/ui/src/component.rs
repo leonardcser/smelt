@@ -15,10 +15,16 @@ pub struct DrawContext {
     pub focused: bool,
 }
 
-pub trait Component {
+pub trait Component: 'static {
     fn draw(&self, area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext);
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult;
     fn cursor(&self) -> Option<(u16, u16)> {
         None
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        panic!("as_any not implemented")
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        panic!("as_any_mut not implemented")
     }
 }

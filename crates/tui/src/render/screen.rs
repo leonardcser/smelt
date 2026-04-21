@@ -109,7 +109,6 @@ use super::{
     SPINNER_FRAMES,
 };
 use crate::input::{InputSnapshot, InputState};
-use crate::keymap::hints;
 use crate::theme;
 
 /// Map a navigation column (char index among selectable cells) to
@@ -195,8 +194,6 @@ pub struct Screen {
     pub(crate) layout: super::layout::LayoutState,
     /// Buffer-backed transcript projection — blocks projected at event time.
     pub(crate) transcript_projection: TranscriptProjection,
-    /// Ephemeral btw side-question state, rendered above the prompt.
-    btw: Option<BtwBlock>,
     /// Ephemeral notification shown above the prompt, dismissed on any key.
     notification: Option<Notification>,
     /// Short task label (slug) shown on the status bar after the throbber.
@@ -221,16 +218,6 @@ pub struct Screen {
 pub struct Notification {
     pub message: String,
     pub is_error: bool,
-}
-
-/// State for an in-flight `/btw` side question.
-pub struct BtwBlock {
-    pub question: String,
-    pub image_labels: Vec<String>,
-    pub response: Option<String>,
-    pub(crate) wrapped: Vec<String>,
-    pub(crate) scroll_offset: usize,
-    pub(crate) wrap_width: usize,
 }
 
 impl Default for Screen {
@@ -295,7 +282,6 @@ impl Screen {
                     buftype: ui::buffer::BufType::Nofile,
                 },
             )),
-            btw: None,
             notification: None,
             task_label: None,
             custom_status_items: None,
@@ -361,64 +347,6 @@ impl Screen {
 
     pub fn tool_states_snapshot(&self) -> HashMap<String, ToolState> {
         self.transcript.tool_states_snapshot()
-    }
-
-    pub fn set_btw(&mut self, question: String, image_labels: Vec<String>) {
-        self.btw = Some(BtwBlock {
-            question,
-            image_labels,
-            response: None,
-            wrapped: Vec::new(),
-            scroll_offset: 0,
-            wrap_width: 0,
-        });
-        self.dirty = true;
-    }
-
-    pub fn set_btw_response(&mut self, content: String) {
-        if let Some(ref mut btw) = self.btw {
-            btw.response = Some(content);
-            btw.wrapped.clear();
-            btw.scroll_offset = 0;
-            btw.wrap_width = 0;
-            self.dirty = true;
-        }
-    }
-
-    pub fn dismiss_btw(&mut self) {
-        if self.btw.is_some() {
-            self.btw = None;
-            self.dirty = true;
-        }
-    }
-
-    pub fn has_btw(&self) -> bool {
-        self.btw.is_some()
-    }
-
-    /// Scroll the btw block. Returns true if state changed.
-    pub fn btw_scroll(&mut self, delta: isize) -> bool {
-        let term_h = self.size().1 as usize;
-        let Some(ref mut btw) = self.btw else {
-            return false;
-        };
-        if btw.wrapped.is_empty() {
-            return false;
-        }
-        let max_lines = btw_max_body_rows(term_h);
-        let max = btw.wrapped.len().saturating_sub(max_lines);
-        let old = btw.scroll_offset;
-        if delta < 0 {
-            btw.scroll_offset = btw.scroll_offset.saturating_sub((-delta) as usize);
-        } else {
-            btw.scroll_offset = (btw.scroll_offset + delta as usize).min(max);
-        }
-        if btw.scroll_offset != old {
-            self.dirty = true;
-            true
-        } else {
-            false
-        }
     }
 
     pub fn notify(&mut self, message: String) {
@@ -1047,10 +975,6 @@ impl Screen {
 
     pub(crate) fn notification(&self) -> Option<&Notification> {
         self.notification.as_ref()
-    }
-
-    pub(crate) fn btw_mut(&mut self) -> Option<&mut BtwBlock> {
-        self.btw.as_mut()
     }
 
     pub(crate) fn prompt_input_scroll(&self) -> usize {
@@ -2382,21 +2306,6 @@ impl Screen {
             }
         }
 
-        let btw_rows: u16 = if let Some(ref btw) = self.btw {
-            let term_h = self.size().1 as usize;
-            let max_lines = btw_max_body_rows(term_h).max(1);
-            let body = match btw.response {
-                Some(_) => {
-                    let visible = btw.wrapped.len().min(max_lines) as u16;
-                    visible + 2 // body lines + blank + hint
-                }
-                None => 1, // spinner
-            };
-            1 + body + 1 // header + body + separator
-        } else {
-            0
-        };
-
         // Input rows.
         let show_prediction = prediction.is_some() && state.buf.is_empty();
         let input_rows: u16 = if show_prediction {
@@ -2409,7 +2318,6 @@ impl Screen {
         notification
             + queued_rows
             + stash
-            + btw_rows
             + 1 // top bar
             + input_rows
             + 1 // bottom bar
@@ -2446,13 +2354,6 @@ impl Screen {
         let queued_visual = render_queued(out, queued, usable);
         let queued_rows = queued_visual as usize;
         let stash_rows = render_stash(out, &state.stash, usable);
-        let term_h = self.size().1 as usize;
-        let btw_visual = if let Some(ref mut btw) = self.btw {
-            let max_btw = btw_max_body_rows(term_h);
-            render_btw(out, btw, usable, max_btw, state.vim_enabled()) as usize
-        } else {
-            0
-        };
         let bar_color = theme::bar();
 
         // Build all bar spans with priorities. draw_bar drops highest
@@ -2572,12 +2473,8 @@ impl Screen {
 
         // 2 = top bar (above input) + bottom bar (below input).
         const PROMPT_BARS: usize = 2;
-        let fixed = notification_rows as usize
-            + stash_rows as usize
-            + queued_rows
-            + btw_visual
-            + PROMPT_BARS
-            + 1; // status line (always present)
+        let fixed =
+            notification_rows as usize + stash_rows as usize + queued_rows + PROMPT_BARS + 1; // status line (always present)
         let max_content_rows = height.saturating_sub(fixed).max(1);
 
         let content_rows = total_content_rows.min(max_content_rows);
@@ -2844,7 +2741,7 @@ impl Screen {
         (notification_rows as usize
             + stash_rows as usize
             + queued_rows
-            + btw_visual
+
             + 1 // top bar
             + content_rows
             + 1 // bottom bar
@@ -2953,120 +2850,6 @@ fn render_queued(out: &mut RenderOut, queued: &[String], usable: usize) -> u16 {
             }
         }
     }
-    rows
-}
-
-/// Chrome rows the BTW block reserves around its body content (header
-/// row + bar row + input rows etc., before the body fills the rest).
-const BTW_CHROME_ROWS: usize = 4;
-
-/// Maximum body lines the BTW block displays at the given terminal
-/// height. Capped at half the terminal so the BTW never dominates the
-/// screen, with `BTW_CHROME_ROWS` taken out for header/input chrome.
-fn btw_max_body_rows(term_h: usize) -> usize {
-    (term_h / 2).saturating_sub(BTW_CHROME_ROWS).max(1)
-}
-
-fn render_btw(
-    out: &mut RenderOut,
-    btw: &mut BtwBlock,
-    usable: usize,
-    max_content_lines: usize,
-    vim_enabled: bool,
-) -> u16 {
-    let max_lines = max_content_lines.max(1);
-    let mut rows = 0u16;
-
-    // Header: "/btw" in accent, question with @path and image highlighting.
-    out.print(" ");
-    out.push_fg(theme::accent());
-    out.print("/btw");
-    out.pop_style();
-    out.print(" ");
-    let max_q = usable.saturating_sub(6); // " /btw " = 6 chars
-    let q: String = btw.question.chars().take(max_q).collect();
-    blocks::print_user_highlights(out, &q, &btw.image_labels, false);
-    out.newline();
-    rows += 1;
-
-    // Body: response or spinner.
-    match btw.response {
-        Some(ref text) => {
-            let render_w = usable;
-
-            // Rebuild rendered line cache on width change or first render.
-            if btw.wrapped.is_empty() || btw.wrap_width != render_w {
-                btw.wrapped.clear();
-                let mut buf = RenderOut::buffer();
-                blocks::render_markdown_inner(&mut buf, text, render_w, "   ", false, None);
-                let _ = std::io::Write::flush(&mut buf);
-                let bytes = buf.into_bytes();
-                let rendered = String::from_utf8_lossy(&bytes);
-                for line in rendered.split("\r\n") {
-                    btw.wrapped.push(line.to_string());
-                }
-                // Remove trailing empty from split.
-                if btw.wrapped.last().is_some_and(|l| l.is_empty()) {
-                    btw.wrapped.pop();
-                }
-                if btw.wrapped.is_empty() {
-                    btw.wrapped.push(String::new());
-                }
-                btw.wrap_width = render_w;
-                // Clamp scroll.
-                let max = btw.wrapped.len().saturating_sub(max_lines);
-                btw.scroll_offset = btw.scroll_offset.min(max);
-            }
-
-            let total = btw.wrapped.len();
-            let visible = total.min(max_lines);
-            let can_scroll = total > max_lines;
-
-            for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
-                out.print(line);
-                out.newline();
-                rows += 1;
-            }
-
-            // Blank line before hint.
-            out.newline();
-            rows += 1;
-
-            // Scroll hint or dismiss hint.
-            out.push_fg(theme::muted());
-            if can_scroll {
-                let end = (btw.scroll_offset + visible).min(total);
-                out.print(&format!(
-                    "   [{end}/{total}]  {}  {}  esc: close",
-                    hints::nav(vim_enabled),
-                    hints::scroll(vim_enabled),
-                ));
-            } else {
-                out.print("   esc: close");
-            }
-            out.pop_style();
-            out.newline();
-            rows += 1;
-        }
-        None => {
-            let frame = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                / 150) as usize
-                % SPINNER_FRAMES.len();
-            out.push_fg(theme::muted());
-            out.print(&format!("   {} thinking", SPINNER_FRAMES[frame]));
-            out.pop_style();
-            out.newline();
-            rows += 1;
-        }
-    }
-
-    // Blank separator line before the bar.
-    out.newline();
-    rows += 1;
-
     rows
 }
 

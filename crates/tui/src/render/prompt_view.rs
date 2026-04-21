@@ -16,17 +16,6 @@ pub(crate) struct PromptRow {
 }
 
 impl PromptRow {
-    pub fn plain(text: impl Into<String>) -> Self {
-        Self {
-            segments: vec![StyledSegment {
-                text: text.into(),
-                style: Style::default(),
-            }],
-            fill: None,
-            scrollbar: None,
-        }
-    }
-
     pub fn styled(segments: Vec<StyledSegment>) -> Self {
         Self {
             segments,
@@ -142,10 +131,17 @@ mod tests {
     use crossterm::style::Color;
     use ui::grid::Grid;
 
+    fn plain(text: &str) -> PromptRow {
+        PromptRow::styled(vec![StyledSegment {
+            text: text.to_string(),
+            style: Style::default(),
+        }])
+    }
+
     #[test]
     fn renders_plain_rows() {
         let mut view = PromptView::new();
-        view.set_rows(vec![PromptRow::plain("hello"), PromptRow::plain("world")]);
+        view.set_rows(vec![plain("hello"), plain("world")]);
 
         let mut grid = Grid::new(20, 5);
         let ctx = DrawContext {
@@ -175,7 +171,7 @@ mod tests {
             ..Style::default()
         };
         let mut view = PromptView::new();
-        view.set_rows(vec![PromptRow::plain("abc")]);
+        view.set_rows(vec![plain("abc")]);
         view.set_cursor(Some((1, 0)), Some((cursor_style, 'b')));
 
         let mut grid = Grid::new(10, 1);

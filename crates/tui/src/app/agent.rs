@@ -591,7 +591,7 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::BtwResponse { content } => {
-                self.screen.set_btw_response(content);
+                let _ = content;
                 SessionControl::Continue
             }
             EngineEvent::InputPrediction { text, generation } => {
@@ -737,7 +737,7 @@ impl App {
                 self.handle_title_generated(title, slug);
             }
             EngineEvent::BtwResponse { content } => {
-                self.screen.set_btw_response(content);
+                let _ = content;
             }
             EngineEvent::InputPrediction { text, generation }
                 if generation == self.predict_generation =>
