@@ -73,7 +73,7 @@ impl App {
                 if entries.is_empty() {
                     self.screen.notify_error("no saved sessions".into());
                 } else {
-                    self.open_resume_float(entries);
+                    super::dialogs::resume::open(self, entries);
                 }
                 CommandAction::Continue
             }
@@ -84,7 +84,7 @@ impl App {
                 } else {
                     let restore_vim_insert =
                         self.input.vim_enabled() && self.input.vim_in_insert_mode();
-                    self.open_rewind_float(turns, restore_vim_insert);
+                    super::dialogs::rewind::open(self, turns, restore_vim_insert);
                 }
                 CommandAction::Continue
             }
@@ -100,7 +100,7 @@ impl App {
                 if self.history.is_empty() {
                     self.screen.notify_error("nothing to export".into());
                 } else {
-                    self.open_export_float();
+                    super::dialogs::export::open(self);
                 }
                 CommandAction::Continue
             }
@@ -122,7 +122,7 @@ impl App {
                 if self.engine.processes.list().is_empty() {
                     self.screen.notify_error("no background processes".into());
                 } else {
-                    self.open_ps_float();
+                    super::dialogs::ps::open(self);
                 }
                 CommandAction::Continue
             }
@@ -132,7 +132,7 @@ impl App {
                 if session_entries.is_empty() && workspace_rules.is_empty() {
                     self.screen.notify_error("no permissions".into());
                 } else {
-                    self.open_permissions_float();
+                    super::dialogs::permissions::open(self);
                 }
                 CommandAction::Continue
             }
