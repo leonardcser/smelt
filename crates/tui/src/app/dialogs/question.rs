@@ -252,7 +252,7 @@ impl<'a, 'b> RowPainter<'a, 'b> {
     }
 }
 
-impl PanelWidget for QuestionWidget {
+impl Component for QuestionWidget {
     fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
         self.width = area.width;
         self.recompute_other_layout();
@@ -587,15 +587,17 @@ impl PanelWidget for QuestionWidget {
         })
     }
 
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl PanelWidget for QuestionWidget {
     fn content_rows(&self) -> usize {
         let q = &self.questions[self.active_tab];
         let tab_rows = if self.has_tabs { 1 } else { 0 };
         let q_rows = q.question.lines().count().max(1);
         let opt_rows = q.options.len() + 1;
         1 + tab_rows + 1 + q_rows + 1 + opt_rows + 1 + 1
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }

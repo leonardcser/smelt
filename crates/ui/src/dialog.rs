@@ -58,31 +58,19 @@ pub enum SeparatorStyle {
 /// Widgets let dialogs embed composite components (multi-line editors,
 /// multi-select lists with "Other" fields, tab bars, previews) that go
 /// beyond what a raw buffer-backed panel can express.
-pub trait PanelWidget: Send {
-    /// Called once per frame before `draw`, with the widget's resolved
-    /// draw rect. Use this to cache viewport-dependent state
-    /// (scrolling, layout) so `draw` / `cursor` can remain `&self`.
-    /// Default: no-op.
-    fn prepare(&mut self, area: Rect, ctx: &DrawContext) {
-        let _ = (area, ctx);
-    }
-    fn draw(&self, area: Rect, slice: &mut GridSlice<'_>, ctx: &DrawContext);
-    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
-        let _ = (code, mods);
-        KeyResult::Ignored
-    }
-    /// Cursor position relative to the widget's draw area (same
-    /// convention as `Component::cursor`). The dialog translates this
-    /// to dialog-relative coords for the compositor.
-    fn cursor(&self) -> Option<CursorInfo> {
-        None
-    }
+///
+/// A `PanelWidget` is a `Component` (rendering, key handling, cursor,
+/// prepare, downcast) plus panel-specific helpers (`content_rows` for
+/// `PanelHeight::Fit`, `tick` for live-refresh). Widgets should be
+/// `Send` so they can move between threads during event dispatch.
+pub trait PanelWidget: Component + Send {
     /// Rows the widget would like to occupy. Used for `PanelHeight::Fit`.
     fn content_rows(&self) -> usize {
         0
     }
+    /// Called once per event-loop tick on the focused float. Default
+    /// no-op.
     fn tick(&mut self) {}
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// What a panel renders: a buffer in `Ui::bufs`, or a self-contained
