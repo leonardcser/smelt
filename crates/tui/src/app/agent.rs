@@ -1145,9 +1145,6 @@ impl App {
                     *agent = None;
                 }
             }
-            render::DialogResult::AgentsClosed => {
-                self.refresh_agent_counts();
-            }
             render::DialogResult::Dismissed => {}
         }
     }

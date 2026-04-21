@@ -1108,13 +1108,24 @@ future work doesn't re-introduce them:
 - Ctrl+C is a built-in dismiss key, matching the legacy UX.
 
 **Step 9.5 — Migrate the final three dialogs onto the unified model.**
-Order: Confirm (heaviest — exercises Content preview with syntax
-highlights, List options, Input message, multi-panel chrome),
-Question (sequential Dialog per question — kill the tab /
-`visited` / `answered` / `multi_toggles` state machine), Agents
-(two separate Dialogs — list, then detail; no mode switch). Each
-lands as a single file under `tui/src/dialogs/` using the model
-from 9.4.
+Order: Agents (two separate Dialogs — list, then detail; no mode
+switch; simplest because non-blocking and already uses a list +
+free-form detail view), Question (sequential Dialog per question —
+kill the tab / `visited` / `answered` / `multi_toggles` state
+machine), Confirm (heaviest — exercises Content preview with
+syntax highlights, List options, Input message, multi-panel
+chrome, plugin tool options, Always/AlwaysPatterns/AlwaysDir
+keybinds, deferred-while-typing behavior). Each lands as a single
+file under `tui/src/app/dialogs/` using the model from 9.4.
+
+Prep already done (2026-04-21): the six legacy dialog impls
+(Export/Help/Permissions/Ps/Resume/Rewind) under
+`render/dialogs/*.rs` have been deleted, their `DialogResult`
+variants removed, and their dead arms pruned from
+`handle_dialog_result`. `PermissionEntry` moved to
+`render::history` alongside `ApprovalScope`. The only dialogs
+still on the legacy `render::Dialog` trait are Confirm, Question,
+and Agents.
 
 **Step 9.6 — Migrate overlays to Dialogs.** Completer (one List
 panel, `AnchorCursor`), cmdline (one Input panel, docked bottom),

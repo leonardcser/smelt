@@ -7,6 +7,7 @@
 //! we take the state out of the map, call its method with `&mut App`,
 //! then put it back if the dialog is still open.
 
+pub mod agents;
 pub mod export;
 pub mod help;
 pub mod permissions;
@@ -45,4 +46,10 @@ pub trait DialogState {
     /// Called when the default handler produces `Action("dismiss")`.
     /// The dialog is closed by the caller immediately after.
     fn on_dismiss(&mut self, _app: &mut App, _win: ui::WinId) {}
+
+    /// Called once per event-loop tick on the focused float. Use for
+    /// dialogs that need to refresh their buffers from live external
+    /// state (subagent snapshots, process registry, etc.). Default:
+    /// no-op.
+    fn tick(&mut self, _app: &mut App, _win: ui::WinId) {}
 }

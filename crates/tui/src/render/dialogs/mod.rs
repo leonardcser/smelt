@@ -1,15 +1,30 @@
-mod agents;
 mod confirm;
 mod question;
 
-pub use agents::{AgentSnapshot, AgentsDialog, SharedSnapshots};
 pub use confirm::ConfirmDialog;
 pub use question::{parse_questions, Question, QuestionDialog, QuestionOption};
 
-use crossterm::event::{KeyCode, KeyModifiers};
-use crossterm::{cursor, terminal, QueueableCommand};
+use crate::app::AgentToolEntry;
+use std::sync::{Arc, Mutex};
 
-use super::{draw_soft_cursor, truncate_str, wrap_line, ConfirmChoice, RenderOut};
+/// Snapshot of a tracked agent's state, published by the main loop
+/// and consumed by the agents dialog.
+#[derive(Clone)]
+pub struct AgentSnapshot {
+    pub agent_id: String,
+    pub prompt: Arc<String>,
+    pub tool_calls: Vec<AgentToolEntry>,
+    pub context_tokens: Option<u32>,
+    pub cost_usd: f64,
+}
+
+/// Shared, live-updating list of agent snapshots.
+pub type SharedSnapshots = Arc<Mutex<Vec<AgentSnapshot>>>;
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::{cursor, QueueableCommand};
+
+use super::{draw_soft_cursor, wrap_line, ConfirmChoice, RenderOut};
 
 pub enum DialogResult {
     Dismissed,
@@ -23,7 +38,6 @@ pub enum DialogResult {
         answer: Option<String>,
         request_id: u64,
     },
-    AgentsClosed,
 }
 
 pub trait Dialog {
@@ -54,148 +68,6 @@ pub trait Dialog {
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-}
-
-pub(crate) struct ListState {
-    pub selected: usize,
-    pub scroll_offset: usize,
-    pub max_visible: usize,
-    pub dirty: bool,
-}
-
-impl ListState {
-    pub fn new(item_count: usize) -> Self {
-        Self {
-            selected: 0,
-            scroll_offset: 0,
-            max_visible: item_count,
-            dirty: true,
-        }
-    }
-
-    /// Report the dialog's total desired height.  `chrome` is the
-    /// number of non-item rows the dialog will render (bar, header,
-    /// hints, etc.) — computed by the caller, not stored.  The layout
-    /// engine caps this to the actually available space.
-    pub fn height(&self, item_count: usize, chrome: u16) -> u16 {
-        (item_count as u16).saturating_add(chrome)
-    }
-
-    pub fn set_items(&mut self, count: usize) {
-        self.max_visible = count;
-        if count == 0 {
-            self.selected = 0;
-            self.scroll_offset = 0;
-        } else {
-            self.selected = self.selected.min(count - 1);
-            self.scroll_offset = self
-                .scroll_offset
-                .min(count.saturating_sub(self.max_visible));
-        }
-        self.dirty = true;
-    }
-
-    pub fn handle_resize(&mut self) {
-        self.dirty = true;
-    }
-
-    pub fn select_prev(&mut self, item_count: usize) {
-        if item_count == 0 || self.selected == 0 {
-            return;
-        }
-        self.selected -= 1;
-        if self.selected < self.scroll_offset {
-            self.scroll_offset = self.selected;
-        }
-        self.dirty = true;
-    }
-
-    pub fn select_next(&mut self, item_count: usize) {
-        if item_count == 0 || self.selected + 1 >= item_count {
-            return;
-        }
-        self.selected += 1;
-        if self.selected >= self.scroll_offset + self.max_visible {
-            self.scroll_offset = self.selected + 1 - self.max_visible;
-        }
-        self.dirty = true;
-    }
-
-    pub fn page_up(&mut self) {
-        let half = self.max_visible / 2;
-        self.selected = self.selected.saturating_sub(half.max(1));
-        if self.selected < self.scroll_offset {
-            self.scroll_offset = self.selected;
-        }
-        self.dirty = true;
-    }
-
-    pub fn page_down(&mut self, item_count: usize) {
-        let half = self.max_visible / 2;
-        self.selected = (self.selected + half.max(1)).min(item_count.saturating_sub(1));
-        if self.selected >= self.scroll_offset + self.max_visible {
-            self.scroll_offset = self.selected + 1 - self.max_visible;
-        }
-        self.dirty = true;
-    }
-
-    /// Handle the four navigation arrows (Up/Down/PageUp/PageDown) uniformly.
-    /// Returns `true` if the action was consumed, `false` otherwise so callers
-    /// can fall through to dialog-specific handling (Dismiss, Confirm, Edit).
-    pub fn handle_nav(&mut self, action: crate::keymap::NavAction, item_count: usize) -> bool {
-        use crate::keymap::NavAction;
-        match action {
-            NavAction::Up => self.select_prev(item_count),
-            NavAction::Down => self.select_next(item_count),
-            NavAction::PageUp => self.page_up(),
-            NavAction::PageDown => self.page_down(item_count),
-            _ => return false,
-        }
-        true
-    }
-
-    /// Begin drawing the dialog.  `chrome` is the number of non-item
-    /// rows the caller will render (bar, header, blanks, hints).
-    /// `max_visible` is recomputed from `granted_rows - chrome`.
-    pub fn begin_draw(
-        &mut self,
-        out: &mut RenderOut,
-        start_row: u16,
-        item_count: usize,
-        width: u16,
-        granted_rows: u16,
-        chrome: u16,
-    ) -> Option<usize> {
-        if !self.dirty {
-            return None;
-        }
-        self.dirty = false;
-
-        begin_dialog_draw(out, start_row);
-        self.max_visible = (granted_rows as usize)
-            .saturating_sub(chrome as usize)
-            .min(item_count);
-        if item_count == 0 {
-            self.selected = 0;
-            self.scroll_offset = 0;
-        } else {
-            self.selected = self.selected.min(item_count - 1);
-            self.scroll_offset = self
-                .scroll_offset
-                .min(item_count.saturating_sub(self.max_visible));
-            // Ensure the selected item stays visible after recalculation.
-            if self.max_visible > 0 && self.selected >= self.scroll_offset + self.max_visible {
-                self.scroll_offset = self.selected + 1 - self.max_visible;
-            }
-        }
-
-        Some(width as usize)
-    }
-
-    pub fn visible_range(&self, item_count: usize) -> std::ops::Range<usize> {
-        let end = (self.scroll_offset + self.max_visible).min(item_count);
-        self.scroll_offset..end
-    }
 }
 
 pub(crate) struct TextArea {
@@ -570,10 +442,6 @@ pub(crate) fn begin_dialog_draw(out: &mut RenderOut, start_row: u16) {
     out.reset_style();
     let _ = out.queue(cursor::MoveTo(0, start_row));
     out.row = Some(start_row);
-}
-
-pub(crate) fn end_dialog_draw(out: &mut RenderOut) {
-    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
 }
 
 pub(crate) fn finish_dialog_frame(

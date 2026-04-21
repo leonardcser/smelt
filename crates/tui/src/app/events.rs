@@ -1804,6 +1804,21 @@ impl App {
         }
     }
 
+    /// Drive per-tick refresh for the focused builtin float (e.g.
+    /// agents dialog syncing live subagent snapshots into its buffer).
+    pub(super) fn tick_focused_float(&mut self) {
+        let Some(win_id) = self.ui.focused_float() else {
+            return;
+        };
+        let Some(mut state) = self.float_states.remove(&win_id) else {
+            return;
+        };
+        state.tick(self, win_id);
+        if self.ui.dialog_mut(win_id).is_some() {
+            self.float_states.insert(win_id, state);
+        }
+    }
+
     /// Intercept a key for the focused builtin float. Returns
     /// `Some(result)` to short-circuit the default dialog handling.
     /// Uses a take/put-back pattern so the state method can borrow

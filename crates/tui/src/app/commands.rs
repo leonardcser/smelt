@@ -109,14 +109,10 @@ impl App {
                 let children = engine::registry::children_of(my_pid);
                 if children.is_empty() {
                     self.screen.notify_error("no subagents running".into());
-                    CommandAction::Continue
                 } else {
-                    CommandAction::OpenDialog(Box::new(render::AgentsDialog::new(
-                        my_pid,
-                        self.agent_snapshots.clone(),
-                        self.input.vim_enabled(),
-                    )))
+                    super::dialogs::agents::open(self);
                 }
+                CommandAction::Continue
             }
             "/ps" => {
                 if self.engine.processes.list().is_empty() {

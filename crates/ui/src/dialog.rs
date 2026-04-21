@@ -534,6 +534,35 @@ impl Dialog {
         }
     }
 
+    /// Move the List selection to an absolute index. Out-of-range
+    /// values clamp to the last valid row.
+    pub fn set_selected_index(&mut self, idx: usize) {
+        let Some(panel) = self.panels.get_mut(self.focused) else {
+            return;
+        };
+        if !matches!(panel.kind, PanelKind::List { .. }) {
+            return;
+        }
+        let total = panel.line_count;
+        if total == 0 {
+            return;
+        }
+        let clamped = idx.min(total - 1) as u16;
+        let rows = panel.rect.height;
+        if rows == 0 {
+            panel.win.scroll_top = clamped;
+            panel.win.cursor_line = 0;
+            return;
+        }
+        if clamped < rows {
+            panel.win.scroll_top = 0;
+            panel.win.cursor_line = clamped;
+        } else {
+            panel.win.scroll_top = clamped + 1 - rows;
+            panel.win.cursor_line = rows - 1;
+        }
+    }
+
     pub fn selected_index(&self) -> Option<usize> {
         let panel = self.panels.get(self.focused)?;
         if !matches!(panel.kind, PanelKind::List { .. }) {

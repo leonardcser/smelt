@@ -763,6 +763,7 @@ impl App {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
             self.apply_lua_ops();
+            self.tick_focused_float();
 
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {
