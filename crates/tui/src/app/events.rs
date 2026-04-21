@@ -1866,34 +1866,52 @@ impl App {
         use crate::keymap::hints;
 
         let total = turns.len() + 1;
-        let mut items: Vec<ui::ListItem> = turns
+        let mut lines: Vec<String> = turns
             .iter()
             .enumerate()
             .map(|(i, (_, label))| {
                 let line = label.lines().next().unwrap_or("");
-                ui::ListItem::plain(format!("{}. {line}", i + 1))
+                format!("{}. {line}", i + 1)
             })
             .collect();
-        items.push(ui::ListItem::plain(format!("{}. (current)", total)));
+        lines.push(format!("{}. (current)", total));
 
-        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+        let title_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
             buftype: ui::buffer::BufType::Scratch,
-            ..Default::default()
+            modifiable: false,
         });
+        if let Some(buf) = self.ui.buf_mut(title_buf) {
+            buf.set_all_lines(vec!["rewind".into(), String::new()]);
+            buf.add_highlight(0, 0, 6, ui::buffer::SpanStyle::dim());
+        }
+
+        let list_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        if let Some(buf) = self.ui.buf_mut(list_buf) {
+            buf.set_all_lines(lines);
+        }
 
         let hint_text = hints::join(&[hints::SELECT, hints::CANCEL]);
         let footer_h = (total as u16).min(10);
+        let dialog_config = self.builtin_dialog_config(Some(hint_text), vec![]);
 
-        let win_id = self.ui.win_open_float(
-            buf_id,
+        let win_id = self.ui.dialog_open(
             ui::FloatConfig {
-                title: Some("rewind".into()),
-                border: ui::Border::Rounded,
+                title: None,
+                border: ui::Border::None,
                 placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Fixed(
                     footer_h + 4,
                 )),
                 ..Default::default()
             },
+            dialog_config,
+            vec![
+                ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit)
+                    .with_selection_fill(crate::theme::selection_bg()),
+            ],
         );
 
         if let Some(win_id) = win_id {
@@ -1904,70 +1922,52 @@ impl App {
                     restore_vim_insert,
                 },
             );
-            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                dialog.set_footer_items(items);
-                let cfg = dialog.config_mut();
-                cfg.accent_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.border_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.background_style = ui::grid::Style {
-                    bg: Some(crate::theme::bar()),
-                    ..Default::default()
-                };
-                cfg.hint_left = Some(hint_text);
-                cfg.footer_height = Some(footer_h);
-            }
         }
     }
 
     pub(super) fn open_export_float(&mut self) {
         use crate::keymap::hints;
 
-        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+        let title_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
             buftype: ui::buffer::BufType::Scratch,
-            ..Default::default()
+            modifiable: false,
         });
+        if let Some(buf) = self.ui.buf_mut(title_buf) {
+            buf.set_all_lines(vec!["export".into(), String::new()]);
+            buf.add_highlight(0, 0, 6, ui::buffer::SpanStyle::dim());
+        }
+
+        let list_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        if let Some(buf) = self.ui.buf_mut(list_buf) {
+            buf.set_all_lines(vec![
+                "1. Copy to clipboard".into(),
+                "2. Write to file".into(),
+            ]);
+        }
 
         let hint_text = hints::join(&[hints::SELECT, hints::CANCEL]);
+        let dialog_config = self.builtin_dialog_config(Some(hint_text), vec![]);
 
-        let win_id = self.ui.win_open_float(
-            buf_id,
+        let win_id = self.ui.dialog_open(
             ui::FloatConfig {
-                title: Some("export".into()),
-                border: ui::Border::Rounded,
+                title: None,
+                border: ui::Border::None,
                 placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Fixed(8)),
                 ..Default::default()
             },
+            dialog_config,
+            vec![
+                ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit)
+                    .with_selection_fill(crate::theme::selection_bg()),
+            ],
         );
 
         if let Some(win_id) = win_id {
             self.float_tags.insert(win_id, BuiltinFloat::Export);
-            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                dialog.set_footer_items(vec![
-                    ui::ListItem::plain("Copy to clipboard"),
-                    ui::ListItem::plain("Write to file"),
-                ]);
-                let cfg = dialog.config_mut();
-                cfg.accent_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.border_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.background_style = ui::grid::Style {
-                    bg: Some(crate::theme::bar()),
-                    ..Default::default()
-                };
-                cfg.hint_left = Some(hint_text);
-                cfg.footer_height = Some(2);
-            }
         }
     }
 
@@ -2077,35 +2077,47 @@ impl App {
         let vim_enabled = self.input.vim_enabled();
 
         let items = build_permission_items(&session_entries, &workspace_rules);
-        let labels = permission_labels(&session_entries, &workspace_rules, &items);
-
-        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
-            buftype: ui::buffer::BufType::Scratch,
-            ..Default::default()
-        });
-        if let Some(buf) = self.ui.buf_mut(buf_id) {
-            buf.set_all_lines(labels.clone());
-        }
-
-        let footer_items: Vec<ui::ListItem> = items
+        let list_lines: Vec<String> = items
             .iter()
-            .map(|item| {
-                let label = format_permission_label(&session_entries, &workspace_rules, item);
-                ui::ListItem::plain(label)
-            })
+            .map(|item| format_permission_label(&session_entries, &workspace_rules, item))
             .collect();
 
-        let hint_text = hints::join(&[hints::dd_delete(vim_enabled), hints::CLOSE]);
-        let footer_h = (footer_items.len() as u16).min(15);
+        let title_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        if let Some(buf) = self.ui.buf_mut(title_buf) {
+            buf.set_all_lines(vec!["permissions".into(), String::new()]);
+            buf.add_highlight(0, 0, 11, ui::buffer::SpanStyle::dim());
+        }
 
-        let win_id = self.ui.win_open_float(
-            buf_id,
+        let list_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        if let Some(buf) = self.ui.buf_mut(list_buf) {
+            buf.set_all_lines(list_lines);
+        }
+
+        let hint_text = hints::join(&[hints::dd_delete(vim_enabled), hints::CLOSE]);
+        let dialog_config = self.builtin_dialog_config(
+            Some(hint_text),
+            vec![(KeyCode::Char('q'), KeyModifiers::NONE)],
+        );
+
+        let win_id = self.ui.dialog_open(
             ui::FloatConfig {
-                title: Some("permissions".into()),
-                border: ui::Border::Rounded,
+                title: None,
+                border: ui::Border::None,
                 placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
                 ..Default::default()
             },
+            dialog_config,
+            vec![
+                ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill)
+                    .with_selection_fill(crate::theme::selection_bg()),
+            ],
         );
 
         if let Some(win_id) = win_id {
@@ -2116,27 +2128,9 @@ impl App {
                     workspace_rules,
                     items,
                     pending_d: false,
+                    list_buf,
                 },
             );
-            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                dialog.set_footer_items(footer_items);
-                let cfg = dialog.config_mut();
-                cfg.accent_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.border_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.background_style = ui::grid::Style {
-                    bg: Some(crate::theme::bar()),
-                    ..Default::default()
-                };
-                cfg.hint_left = Some(hint_text);
-                cfg.footer_height = Some(footer_h);
-                cfg.dismiss_keys = vec![(KeyCode::Char('q'), KeyModifiers::NONE)];
-            }
         }
     }
 
@@ -2149,30 +2143,50 @@ impl App {
         let registry = self.engine.processes.clone();
         let procs = registry.list();
 
-        let footer_items: Vec<ui::ListItem> = procs
+        let list_lines: Vec<String> = procs
             .iter()
             .map(|p| {
                 let time = crate::utils::format_duration(p.started_at.elapsed().as_secs());
-                ui::ListItem::plain(format!("{} — {time} {}", p.command, p.id))
+                format!("{} — {time} {}", p.command, p.id)
             })
             .collect();
 
-        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+        let title_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
             buftype: ui::buffer::BufType::Scratch,
-            ..Default::default()
+            modifiable: false,
         });
+        if let Some(buf) = self.ui.buf_mut(title_buf) {
+            buf.set_all_lines(vec!["processes".into(), String::new()]);
+            buf.add_highlight(0, 0, 9, ui::buffer::SpanStyle::dim());
+        }
+
+        let list_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        if let Some(buf) = self.ui.buf_mut(list_buf) {
+            buf.set_all_lines(list_lines);
+        }
 
         let hint_text = hints::join(&[hints::CLOSE, hints::KILL_PROC]);
-        let footer_h = (footer_items.len() as u16).min(15);
+        let dialog_config = self.builtin_dialog_config(
+            Some(hint_text),
+            vec![(KeyCode::Char('q'), KeyModifiers::NONE)],
+        );
 
-        let win_id = self.ui.win_open_float(
-            buf_id,
+        let win_id = self.ui.dialog_open(
             ui::FloatConfig {
-                title: Some("processes".into()),
-                border: ui::Border::Rounded,
+                title: None,
+                border: ui::Border::None,
                 placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(50)),
                 ..Default::default()
             },
+            dialog_config,
+            vec![
+                ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill)
+                    .with_selection_fill(crate::theme::selection_bg()),
+            ],
         );
 
         if let Some(win_id) = win_id {
@@ -2181,27 +2195,9 @@ impl App {
                 BuiltinFloat::Ps {
                     registry,
                     killed: Vec::new(),
+                    list_buf,
                 },
             );
-            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                dialog.set_footer_items(footer_items);
-                let cfg = dialog.config_mut();
-                cfg.accent_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.border_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.background_style = ui::grid::Style {
-                    bg: Some(crate::theme::bar()),
-                    ..Default::default()
-                };
-                cfg.hint_left = Some(hint_text);
-                cfg.footer_height = Some(footer_h);
-                cfg.dismiss_keys = vec![(KeyCode::Char('q'), KeyModifiers::NONE)];
-            }
         }
     }
 
@@ -2217,18 +2213,24 @@ impl App {
         let filtered =
             filter_resume_entries(&entries, &title_haystacks, "", true, &current_cwd, None);
 
-        let footer_items: Vec<ui::ListItem> = filtered
-            .iter()
-            .filter_map(|&i| entries.get(i))
-            .map(|e| ui::ListItem::plain(resume_title(e)))
-            .collect();
+        let list_lines: Vec<String> = resume_list_lines(&entries, &filtered);
 
-        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+        let title_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
             buftype: ui::buffer::BufType::Scratch,
-            ..Default::default()
+            modifiable: false,
         });
-        if let Some(buf) = self.ui.buf_mut(buf_id) {
-            buf.set_all_lines(vec!["".into()]);
+        if let Some(buf) = self.ui.buf_mut(title_buf) {
+            let title = "resume (workspace)";
+            buf.set_all_lines(vec![title.into(), String::new()]);
+            buf.add_highlight(0, 0, title.len() as u16, ui::buffer::SpanStyle::dim());
+        }
+
+        let list_buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            modifiable: false,
+        });
+        if let Some(buf) = self.ui.buf_mut(list_buf) {
+            buf.set_all_lines(list_lines);
         }
 
         let toggle = "ctrl+w: this workspace";
@@ -2238,16 +2240,21 @@ impl App {
             hints::CANCEL,
             toggle,
         ]);
-        let footer_h = (footer_items.len() as u16).min(15);
+        let dialog_config = self.builtin_dialog_config(Some(hint_text), vec![]);
 
-        let win_id = self.ui.win_open_float(
-            buf_id,
+        let win_id = self.ui.dialog_open(
             ui::FloatConfig {
-                title: Some("resume (workspace)".into()),
-                border: ui::Border::Rounded,
+                title: None,
+                border: ui::Border::None,
                 placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
                 ..Default::default()
             },
+            dialog_config,
+            vec![
+                ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
+                ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill)
+                    .with_selection_fill(crate::theme::selection_bg()),
+            ],
         );
 
         if let Some(win_id) = win_id {
@@ -2262,26 +2269,10 @@ impl App {
                     filtered,
                     pending_d: false,
                     content_cache: None,
+                    list_buf,
+                    title_buf,
                 },
             );
-            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                dialog.set_footer_items(footer_items);
-                let cfg = dialog.config_mut();
-                cfg.accent_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.border_style = ui::grid::Style {
-                    fg: Some(crate::theme::accent()),
-                    ..Default::default()
-                };
-                cfg.background_style = ui::grid::Style {
-                    bg: Some(crate::theme::bar()),
-                    ..Default::default()
-                };
-                cfg.hint_left = Some(hint_text);
-                cfg.footer_height = Some(footer_h);
-            }
         }
     }
 
@@ -2301,24 +2292,20 @@ impl App {
                 ref mut workspace_rules,
                 ref mut items,
                 ref mut pending_d,
+                list_buf,
             } => {
+                let list_buf = *list_buf;
                 if *pending_d {
                     *pending_d = false;
                     if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
-                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                            if let Some(idx) = dialog.selected() {
-                                delete_permission_item(
-                                    session_entries,
-                                    workspace_rules,
-                                    items,
-                                    idx,
-                                );
-                                let footer_items = permission_footer_items(
-                                    session_entries,
-                                    workspace_rules,
-                                    items,
-                                );
-                                dialog.set_footer_items(footer_items);
+                        if let Some(idx) =
+                            self.ui.dialog_mut(win_id).and_then(|d| d.selected_index())
+                        {
+                            delete_permission_item(session_entries, workspace_rules, items, idx);
+                            let list_lines =
+                                permission_list_lines(session_entries, workspace_rules, items);
+                            if let Some(buf) = self.ui.buf_mut(list_buf) {
+                                buf.set_all_lines(list_lines);
                             }
                         }
                         return Some(ui::KeyResult::Consumed);
@@ -2329,12 +2316,12 @@ impl App {
                     return Some(ui::KeyResult::Consumed);
                 }
                 if code == KeyCode::Backspace {
-                    if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                        if let Some(idx) = dialog.selected() {
-                            delete_permission_item(session_entries, workspace_rules, items, idx);
-                            let footer_items =
-                                permission_footer_items(session_entries, workspace_rules, items);
-                            dialog.set_footer_items(footer_items);
+                    if let Some(idx) = self.ui.dialog_mut(win_id).and_then(|d| d.selected_index()) {
+                        delete_permission_item(session_entries, workspace_rules, items, idx);
+                        let list_lines =
+                            permission_list_lines(session_entries, workspace_rules, items);
+                        if let Some(buf) = self.ui.buf_mut(list_buf) {
+                            buf.set_all_lines(list_lines);
                         }
                     }
                     return Some(ui::KeyResult::Consumed);
@@ -2345,35 +2332,35 @@ impl App {
             BuiltinFloat::Ps {
                 ref registry,
                 ref mut killed,
+                list_buf,
             } => {
+                let list_buf = *list_buf;
                 if code == KeyCode::Backspace {
-                    if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                        if let Some(idx) = dialog.selected() {
-                            let procs: Vec<_> = registry
+                    let idx = self.ui.dialog_mut(win_id).and_then(|d| d.selected_index());
+                    if let Some(idx) = idx {
+                        let procs: Vec<_> = registry
+                            .list()
+                            .into_iter()
+                            .filter(|p| !killed.contains(&p.id))
+                            .collect();
+                        if let Some(p) = procs.get(idx) {
+                            killed.push(p.id.clone());
+                            let fresh: Vec<_> = registry
                                 .list()
                                 .into_iter()
                                 .filter(|p| !killed.contains(&p.id))
                                 .collect();
-                            if let Some(p) = procs.get(idx) {
-                                killed.push(p.id.clone());
-                                let fresh: Vec<_> = registry
-                                    .list()
-                                    .into_iter()
-                                    .filter(|p| !killed.contains(&p.id))
-                                    .collect();
-                                let footer_items: Vec<ui::ListItem> = fresh
-                                    .iter()
-                                    .map(|p| {
-                                        let time = crate::utils::format_duration(
-                                            p.started_at.elapsed().as_secs(),
-                                        );
-                                        ui::ListItem::plain(format!(
-                                            "{} — {time} {}",
-                                            p.command, p.id
-                                        ))
-                                    })
-                                    .collect();
-                                dialog.set_footer_items(footer_items);
+                            let list_lines: Vec<String> = fresh
+                                .iter()
+                                .map(|p| {
+                                    let time = crate::utils::format_duration(
+                                        p.started_at.elapsed().as_secs(),
+                                    );
+                                    format!("{} — {time} {}", p.command, p.id)
+                                })
+                                .collect();
+                            if let Some(buf) = self.ui.buf_mut(list_buf) {
+                                buf.set_all_lines(list_lines);
                             }
                         }
                     }
@@ -2390,31 +2377,37 @@ impl App {
                 ref mut filtered,
                 ref mut pending_d,
                 ref mut content_cache,
+                list_buf,
+                title_buf,
             } => {
+                let list_buf = *list_buf;
+                let title_buf = *title_buf;
                 // DD completion check
                 if *pending_d {
                     *pending_d = false;
                     if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
-                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                            if let Some(sel) = dialog.selected() {
-                                if let Some(&idx) = filtered.get(sel) {
-                                    if let Some(entry) = entries.get(idx) {
-                                        let id = entry.id.clone();
-                                        crate::session::delete(&id);
-                                        entries.remove(idx);
-                                        title_haystacks.remove(idx);
-                                        if let Some(cache) = content_cache.as_mut() {
-                                            cache.remove(&id);
-                                        }
-                                        *filtered = filter_resume_entries(
-                                            entries,
-                                            title_haystacks,
-                                            query,
-                                            *workspace_only,
-                                            current_cwd,
-                                            content_cache.as_ref(),
-                                        );
-                                        refresh_resume_footer(dialog, entries, filtered);
+                        let sel = self.ui.dialog_mut(win_id).and_then(|d| d.selected_index());
+                        if let Some(sel) = sel {
+                            if let Some(&idx) = filtered.get(sel) {
+                                if let Some(entry) = entries.get(idx) {
+                                    let id = entry.id.clone();
+                                    crate::session::delete(&id);
+                                    entries.remove(idx);
+                                    title_haystacks.remove(idx);
+                                    if let Some(cache) = content_cache.as_mut() {
+                                        cache.remove(&id);
+                                    }
+                                    *filtered = filter_resume_entries(
+                                        entries,
+                                        title_haystacks,
+                                        query,
+                                        *workspace_only,
+                                        current_cwd,
+                                        content_cache.as_ref(),
+                                    );
+                                    let lines = resume_list_lines(entries, filtered);
+                                    if let Some(buf) = self.ui.buf_mut(list_buf) {
+                                        buf.set_all_lines(lines);
                                     }
                                 }
                             }
@@ -2435,14 +2428,15 @@ impl App {
                             current_cwd,
                             content_cache.as_ref(),
                         );
-                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                            refresh_resume_footer(dialog, entries, filtered);
-                            let title = if *workspace_only {
-                                "resume (workspace)"
-                            } else {
-                                "resume (all)"
-                            };
-                            dialog.config_mut().title = Some(title.into());
+                        let title = if *workspace_only {
+                            "resume (workspace)"
+                        } else {
+                            "resume (all)"
+                        };
+                        update_resume_title(&mut self.ui, title_buf, title, query);
+                        let lines = resume_list_lines(entries, filtered);
+                        if let Some(buf) = self.ui.buf_mut(list_buf) {
+                            buf.set_all_lines(lines);
                         }
                         return Some(ui::KeyResult::Consumed);
                     }
@@ -2468,9 +2462,15 @@ impl App {
                                 current_cwd,
                                 content_cache.as_ref(),
                             );
-                            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                                refresh_resume_footer(dialog, entries, filtered);
-                                refresh_resume_content(dialog, query);
+                            let title = if *workspace_only {
+                                "resume (workspace)"
+                            } else {
+                                "resume (all)"
+                            };
+                            update_resume_title(&mut self.ui, title_buf, title, query);
+                            let lines = resume_list_lines(entries, filtered);
+                            if let Some(buf) = self.ui.buf_mut(list_buf) {
+                                buf.set_all_lines(lines);
                             }
                         }
                         return Some(ui::KeyResult::Consumed);
@@ -2486,34 +2486,42 @@ impl App {
                                 current_cwd,
                                 content_cache.as_ref(),
                             );
-                            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                                refresh_resume_footer(dialog, entries, filtered);
-                                refresh_resume_content(dialog, query);
+                            let title = if *workspace_only {
+                                "resume (workspace)"
+                            } else {
+                                "resume (all)"
+                            };
+                            update_resume_title(&mut self.ui, title_buf, title, query);
+                            let lines = resume_list_lines(entries, filtered);
+                            if let Some(buf) = self.ui.buf_mut(list_buf) {
+                                buf.set_all_lines(lines);
                             }
                         }
                         return Some(ui::KeyResult::Consumed);
                     }
                     (KeyCode::Delete, _) => {
-                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                            if let Some(sel) = dialog.selected() {
-                                if let Some(&idx) = filtered.get(sel) {
-                                    if let Some(entry) = entries.get(idx) {
-                                        let id = entry.id.clone();
-                                        crate::session::delete(&id);
-                                        entries.remove(idx);
-                                        title_haystacks.remove(idx);
-                                        if let Some(cache) = content_cache.as_mut() {
-                                            cache.remove(&id);
-                                        }
-                                        *filtered = filter_resume_entries(
-                                            entries,
-                                            title_haystacks,
-                                            query,
-                                            *workspace_only,
-                                            current_cwd,
-                                            content_cache.as_ref(),
-                                        );
-                                        refresh_resume_footer(dialog, entries, filtered);
+                        let sel = self.ui.dialog_mut(win_id).and_then(|d| d.selected_index());
+                        if let Some(sel) = sel {
+                            if let Some(&idx) = filtered.get(sel) {
+                                if let Some(entry) = entries.get(idx) {
+                                    let id = entry.id.clone();
+                                    crate::session::delete(&id);
+                                    entries.remove(idx);
+                                    title_haystacks.remove(idx);
+                                    if let Some(cache) = content_cache.as_mut() {
+                                        cache.remove(&id);
+                                    }
+                                    *filtered = filter_resume_entries(
+                                        entries,
+                                        title_haystacks,
+                                        query,
+                                        *workspace_only,
+                                        current_cwd,
+                                        content_cache.as_ref(),
+                                    );
+                                    let lines = resume_list_lines(entries, filtered);
+                                    if let Some(buf) = self.ui.buf_mut(list_buf) {
+                                        buf.set_all_lines(lines);
                                     }
                                 }
                             }
@@ -2525,24 +2533,23 @@ impl App {
                         return Some(ui::KeyResult::Consumed);
                     }
                     (KeyCode::Enter, KeyModifiers::NONE) => {
-                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                            if let Some(sel) = dialog.selected() {
-                                if let Some(&idx) = filtered.get(sel) {
-                                    if let Some(entry) = entries.get(idx) {
-                                        let id = entry.id.clone();
-                                        self.close_float(win_id);
-                                        self.finalize_dialog_close();
-                                        if let Some(loaded) = crate::session::load(&id) {
-                                            self.load_session(loaded);
-                                            self.restore_screen();
-                                            if let Some(tokens) = self.session.context_tokens {
-                                                self.screen.set_context_tokens(tokens);
-                                            }
-                                            self.screen.finish_turn();
-                                            self.transcript_window.scroll_top = u16::MAX;
+                        let sel = self.ui.dialog_mut(win_id).and_then(|d| d.selected_index());
+                        if let Some(sel) = sel {
+                            if let Some(&idx) = filtered.get(sel) {
+                                if let Some(entry) = entries.get(idx) {
+                                    let id = entry.id.clone();
+                                    self.close_float(win_id);
+                                    self.finalize_dialog_close();
+                                    if let Some(loaded) = crate::session::load(&id) {
+                                        self.load_session(loaded);
+                                        self.restore_screen();
+                                        if let Some(tokens) = self.session.context_tokens {
+                                            self.screen.set_context_tokens(tokens);
                                         }
-                                        return Some(ui::KeyResult::Consumed);
+                                        self.screen.finish_turn();
+                                        self.transcript_window.scroll_top = u16::MAX;
                                     }
+                                    return Some(ui::KeyResult::Consumed);
                                 }
                             }
                         }
@@ -2565,9 +2572,15 @@ impl App {
                             current_cwd,
                             content_cache.as_ref(),
                         );
-                        if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
-                            refresh_resume_footer(dialog, entries, filtered);
-                            refresh_resume_content(dialog, query);
+                        let title = if *workspace_only {
+                            "resume (workspace)"
+                        } else {
+                            "resume (all)"
+                        };
+                        update_resume_title(&mut self.ui, title_buf, title, query);
+                        let lines = resume_list_lines(entries, filtered);
+                        if let Some(buf) = self.ui.buf_mut(list_buf) {
+                            buf.set_all_lines(lines);
                         }
                         return Some(ui::KeyResult::Consumed);
                     }
@@ -3558,42 +3571,6 @@ fn format_permission_label(
     }
 }
 
-fn permission_labels(
-    session_entries: &[render::PermissionEntry],
-    workspace_rules: &[crate::workspace_permissions::Rule],
-    items: &[PermissionItem],
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    let has_session = !session_entries.is_empty();
-    let mut in_workspace = false;
-
-    if items.is_empty() {
-        lines.push("  No permissions".into());
-        return lines;
-    }
-
-    for item in items {
-        match item {
-            PermissionItem::Session(_) if !in_workspace && has_session && lines.is_empty() => {
-                lines.push(" Session".into());
-            }
-            PermissionItem::Workspace(_, _) if !in_workspace => {
-                if has_session && !lines.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.push(" Workspace".into());
-                in_workspace = true;
-            }
-            _ => {}
-        }
-        lines.push(format!(
-            "  {}",
-            format_permission_label(session_entries, workspace_rules, item)
-        ));
-    }
-    lines
-}
-
 fn delete_permission_item(
     session_entries: &mut Vec<render::PermissionEntry>,
     workspace_rules: &mut Vec<crate::workspace_permissions::Rule>,
@@ -3619,20 +3596,14 @@ fn delete_permission_item(
     *items = build_permission_items(session_entries, workspace_rules);
 }
 
-fn permission_footer_items(
+fn permission_list_lines(
     session_entries: &[render::PermissionEntry],
     workspace_rules: &[crate::workspace_permissions::Rule],
     items: &[PermissionItem],
-) -> Vec<ui::ListItem> {
+) -> Vec<String> {
     items
         .iter()
-        .map(|item| {
-            ui::ListItem::plain(format_permission_label(
-                session_entries,
-                workspace_rules,
-                item,
-            ))
-        })
+        .map(|item| format_permission_label(session_entries, workspace_rules, item))
         .collect()
 }
 
@@ -3736,30 +3707,28 @@ fn ensure_resume_content_loaded(
     *content_cache = Some(pairs.into_iter().collect());
 }
 
-fn refresh_resume_footer(
-    dialog: &mut ui::FloatDialog,
-    entries: &[render::ResumeEntry],
-    filtered: &[usize],
-) {
+fn resume_list_lines(entries: &[render::ResumeEntry], filtered: &[usize]) -> Vec<String> {
     let now_ms = crate::session::now_ms();
-    let footer_items: Vec<ui::ListItem> = filtered
+    filtered
         .iter()
         .filter_map(|&i| entries.get(i))
         .map(|e| {
             let title = resume_title(e);
             let time_ago = crate::session::time_ago(resume_ts(e), now_ms);
-            ui::ListItem::plain(format!("{time_ago}  {title}"))
+            format!("{time_ago}  {title}")
         })
-        .collect();
-    let footer_h = (footer_items.len() as u16).min(15);
-    dialog.set_footer_items(footer_items);
-    dialog.config_mut().footer_height = Some(footer_h);
+        .collect()
 }
 
-fn refresh_resume_content(dialog: &mut ui::FloatDialog, query: &str) {
-    if query.is_empty() {
-        dialog.set_content_lines(vec!["".into()]);
+fn update_resume_title(ui: &mut ui::Ui, title_buf: ui::BufId, title: &str, query: &str) {
+    let Some(buf) = ui.buf_mut(title_buf) else {
+        return;
+    };
+    let search = if query.is_empty() {
+        String::new()
     } else {
-        dialog.set_content_lines(vec![format!(" search: {query}")]);
-    }
+        format!(" search: {query}")
+    };
+    buf.set_all_lines(vec![title.into(), search]);
+    buf.add_highlight(0, 0, title.len() as u16, ui::buffer::SpanStyle::dim());
 }

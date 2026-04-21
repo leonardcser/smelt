@@ -533,7 +533,7 @@ impl Dialog {
         }
     }
 
-    fn selected_index(&self) -> Option<usize> {
+    pub fn selected_index(&self) -> Option<usize> {
         let panel = self.panels.get(self.focused)?;
         if !matches!(panel.kind, PanelKind::List { .. }) {
             return None;
