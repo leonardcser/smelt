@@ -19,8 +19,8 @@ impl InputState {
     /// apply side effects, and return the appropriate action.
     pub(super) fn accept_picker(&mut self, comp: Completer) -> Action {
         self.history_saved_buf = None;
-        self.buffer.buf.clear();
-        self.cpos = 0;
+        self.win.edit_buf.buf.clear();
+        self.win.cpos = 0;
         match comp.kind {
             CompleterKind::Model => match comp.accept_extra().map(|s| s.to_string()) {
                 Some(k) => Action::MenuResult(MenuResult::ModelSelect(k)),
@@ -103,8 +103,8 @@ impl InputState {
                 match comp.kind {
                     CompleterKind::History => {
                         if let Some(label) = comp.accept() {
-                            self.buffer.buf = label.to_string();
-                            self.cpos = self.buffer.buf.len();
+                            self.win.edit_buf.buf = label.to_string();
+                            self.win.cpos = self.win.edit_buf.buf.len();
                         }
                         self.history_saved_buf = None;
                         Some(Action::Redraw)
@@ -160,8 +160,8 @@ impl InputState {
                 // Restore saved buffer for all picker types.
                 if is_picker {
                     if let Some((buf, cpos)) = self.history_saved_buf.take() {
-                        self.buffer.buf = buf;
-                        self.cpos = cpos;
+                        self.win.edit_buf.buf = buf;
+                        self.win.cpos = cpos;
                     }
                 }
                 Some(Action::Redraw)
@@ -216,8 +216,8 @@ impl InputState {
                 match comp.kind {
                     CompleterKind::History => {
                         if let Some(label) = comp.accept() {
-                            self.buffer.buf = label.to_string();
-                            self.cpos = self.buffer.buf.len();
+                            self.win.edit_buf.buf = label.to_string();
+                            self.win.cpos = self.win.edit_buf.buf.len();
                         }
                         self.history_saved_buf = None;
                     }
@@ -253,14 +253,14 @@ impl InputState {
 
     fn accept_completion(&mut self, comp: &Completer) {
         if let Some(label) = comp.accept() {
-            let end = self.cpos;
+            let end = self.win.cpos;
             let start = comp.anchor;
             if comp.kind == CompleterKind::CommandArg {
                 // Replace just the argument portion after the command prefix.
-                self.buffer.buf.replace_range(start..end, label);
-                self.cpos = start + label.len();
+                self.win.edit_buf.buf.replace_range(start..end, label);
+                self.win.cpos = start + label.len();
             } else {
-                let trigger = &self.buffer.buf[start..start + 1];
+                let trigger = &self.win.edit_buf.buf[start..start + 1];
                 let replacement = if trigger == "/" {
                     format!("/{} ", label)
                 } else if label.contains(' ') {
@@ -268,8 +268,11 @@ impl InputState {
                 } else {
                     format!("@{} ", label)
                 };
-                self.buffer.buf.replace_range(start..end, &replacement);
-                self.cpos = start + replacement.len();
+                self.win
+                    .edit_buf
+                    .buf
+                    .replace_range(start..end, &replacement);
+                self.win.cpos = start + replacement.len();
             }
         }
     }
@@ -284,8 +287,8 @@ impl InputState {
                 || Completer::command_args(arg_anchor, &items),
                 query,
             );
-        } else if find_slash_anchor(&self.buffer.buf, self.cpos).is_some() {
-            let query = self.buffer.buf[1..self.cpos].to_string();
+        } else if find_slash_anchor(&self.win.edit_buf.buf, self.win.cpos).is_some() {
+            let query = self.win.edit_buf.buf[1..self.win.cpos].to_string();
             self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
         } else {
             self.completer = None;
@@ -327,14 +330,14 @@ impl InputState {
                     | CompleterKind::Settings
             )
         }) {
-            let query = self.buffer.buf.clone();
+            let query = self.win.edit_buf.buf.clone();
             self.completer.as_mut().unwrap().update_query(query);
             self.live_preview_picker();
             return;
         }
-        if let Some(at_pos) = cursor_in_at_zone(&self.buffer.buf, self.cpos) {
-            let query = if self.cpos > at_pos + 1 {
-                self.buffer.buf[at_pos + 1..self.cpos].to_string()
+        if let Some(at_pos) = cursor_in_at_zone(&self.win.edit_buf.buf, self.win.cpos) {
+            let query = if self.win.cpos > at_pos + 1 {
+                self.win.edit_buf.buf[at_pos + 1..self.win.cpos].to_string()
             } else {
                 String::new()
             };
@@ -357,11 +360,11 @@ impl InputState {
                 || Completer::command_args(arg_anchor, &items),
                 query,
             );
-        } else if find_slash_anchor(&self.buffer.buf, self.cpos).is_some()
-            || (self.cpos == 0 && self.buffer.buf.starts_with('/'))
+        } else if find_slash_anchor(&self.win.edit_buf.buf, self.win.cpos).is_some()
+            || (self.win.cpos == 0 && self.win.edit_buf.buf.starts_with('/'))
         {
-            let end = self.cpos.max(1);
-            let query = self.buffer.buf[1..end].to_string();
+            let end = self.win.cpos.max(1);
+            let query = self.win.edit_buf.buf[1..end].to_string();
             self.set_or_update_completer(CompleterKind::Command, || Completer::commands(0), query);
         } else {
             self.completer = None;
@@ -386,8 +389,8 @@ impl InputState {
     }
 
     fn arg_query(&self, anchor: usize) -> String {
-        if self.cpos > anchor {
-            self.buffer.buf[anchor..self.cpos].to_string()
+        if self.win.cpos > anchor {
+            self.win.edit_buf.buf[anchor..self.win.cpos].to_string()
         } else {
             String::new()
         }
@@ -399,10 +402,10 @@ impl InputState {
     fn find_command_arg_zone(&self) -> Option<(usize, usize)> {
         for (i, (cmd, _)) in self.command_arg_sources.iter().enumerate() {
             let anchor = cmd.len() + 1; // "/cmd" + space
-            if self.buffer.buf.len() >= anchor
-                && self.buffer.buf.starts_with(cmd.as_str())
-                && self.buffer.buf.as_bytes()[cmd.len()] == b' '
-                && self.cpos >= anchor
+            if self.win.edit_buf.buf.len() >= anchor
+                && self.win.edit_buf.buf.starts_with(cmd.as_str())
+                && self.win.edit_buf.buf.as_bytes()[cmd.len()] == b' '
+                && self.win.cpos >= anchor
             {
                 return Some((i, anchor));
             }

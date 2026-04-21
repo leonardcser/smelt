@@ -26,7 +26,7 @@ impl InputState {
         ev: &Event,
         history: &mut Option<&mut History>,
     ) -> VimBridgeResult {
-        if self.vim.is_none() {
+        if self.win.vim.is_none() {
             return VimBridgeResult::NotAKey;
         }
         let Event::Key(key_ev) = ev else {
@@ -38,21 +38,21 @@ impl InputState {
         // shift+arrow-driven vertical motion's preferred column is
         // preserved when the user next hits j/k, and write it back out
         // after — one source of truth, one `curswant`.
-        let seed = self.cursor.curswant();
-        let vim = self.vim.as_mut().unwrap();
+        let seed = self.win.win_cursor.curswant();
+        let vim = self.win.vim.as_mut().unwrap();
         vim.set_curswant(seed);
         let result = {
             let mut ctx = VimContext {
-                buf: &mut self.buffer.buf,
-                cpos: &mut self.cpos,
-                attachments: &mut self.buffer.attachment_ids,
-                kill_ring: &mut self.kill_ring,
-                history: &mut self.buffer.history,
+                buf: &mut self.win.edit_buf.buf,
+                cpos: &mut self.win.cpos,
+                attachments: &mut self.win.edit_buf.attachment_ids,
+                kill_ring: &mut self.win.kill_ring,
+                history: &mut self.win.edit_buf.history,
             };
             vim.handle_key(key_ev, &mut ctx)
         };
-        let post = self.vim.as_ref().unwrap().curswant();
-        self.cursor.set_curswant(post);
+        let post = self.win.vim.as_ref().unwrap().curswant();
+        self.win.win_cursor.set_curswant(post);
 
         match result {
             vim::Action::Consumed => {
@@ -63,7 +63,7 @@ impl InputState {
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::Submit => {
-                if self.buffer.buf.is_empty() && self.buffer.attachment_ids.is_empty() {
+                if self.win.edit_buf.buf.is_empty() && self.win.edit_buf.attachment_ids.is_empty() {
                     VimBridgeResult::Handled(Action::SubmitEmpty)
                 } else {
                     let display = self.message_display_text();
@@ -73,17 +73,20 @@ impl InputState {
                 }
             }
             vim::Action::HistoryPrev => {
-                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.buffer.buf)) {
-                    self.buffer.buf = entry.to_string();
-                    self.cpos = 0;
+                if let Some(entry) = history
+                    .as_deref_mut()
+                    .and_then(|h| h.up(&self.win.edit_buf.buf))
+                {
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = 0;
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::HistoryNext => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    self.buffer.buf = entry.to_string();
-                    self.cpos = self.buffer.buf.len();
+                    self.win.edit_buf.buf = entry.to_string();
+                    self.win.cpos = self.win.edit_buf.buf.len();
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)
