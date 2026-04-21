@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use ui::component::{Component, DrawContext, KeyResult};
+use ui::component::{Component, CursorInfo, DrawContext, KeyResult};
 use ui::grid::{GridSlice, Style};
 use ui::layout::Rect;
 
@@ -35,16 +35,14 @@ impl PromptRow {
 
 pub(crate) struct PromptView {
     rows: Vec<PromptRow>,
-    cursor: Option<(u16, u16)>,
-    cursor_style: Option<(Style, char)>,
+    cursor_info: Option<CursorInfo>,
 }
 
 impl PromptView {
     pub fn new() -> Self {
         Self {
             rows: Vec::new(),
-            cursor: None,
-            cursor_style: None,
+            cursor_info: None,
         }
     }
 
@@ -53,8 +51,13 @@ impl PromptView {
     }
 
     pub fn set_cursor(&mut self, pos: Option<(u16, u16)>, style: Option<(Style, char)>) {
-        self.cursor = pos;
-        self.cursor_style = style;
+        self.cursor_info = pos.map(|(cx, cy)| {
+            if let Some((s, glyph)) = style {
+                CursorInfo::block(cx, cy, glyph, s)
+            } else {
+                CursorInfo::hardware(cx, cy)
+            }
+        });
     }
 }
 
@@ -106,22 +109,22 @@ impl Component for PromptView {
                 }
             }
         }
-
-        if let Some((cx, cy)) = self.cursor {
-            if let Some((style, glyph)) = self.cursor_style {
-                if cx < w && cy < h {
-                    grid.set(cx, cy, glyph, style);
-                }
-            }
-        }
     }
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
         KeyResult::Ignored
     }
 
-    fn cursor(&self) -> Option<(u16, u16)> {
-        self.cursor
+    fn cursor(&self) -> Option<CursorInfo> {
+        self.cursor_info.clone()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -160,31 +163,25 @@ mod tests {
     fn cursor_position_reported() {
         let mut view = PromptView::new();
         view.set_cursor(Some((5, 2)), None);
-        assert_eq!(view.cursor(), Some((5, 2)));
+        let ci = view.cursor().unwrap();
+        assert_eq!((ci.col, ci.row), (5, 2));
+        assert!(ci.style.is_none());
     }
 
     #[test]
-    fn cursor_style_drawn() {
+    fn cursor_block_style_reported() {
         let cursor_style = Style {
             fg: Some(Color::Black),
             bg: Some(Color::White),
             ..Style::default()
         };
         let mut view = PromptView::new();
-        view.set_rows(vec![plain("abc")]);
         view.set_cursor(Some((1, 0)), Some((cursor_style, 'b')));
-
-        let mut grid = Grid::new(10, 1);
-        let ctx = DrawContext {
-            terminal_width: 10,
-            terminal_height: 1,
-            focused: true,
-        };
-        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
-        view.draw(Rect::new(0, 0, 10, 1), &mut slice, &ctx);
-
-        assert_eq!(grid.cell(1, 0).symbol, 'b');
-        assert_eq!(grid.cell(1, 0).style.fg, Some(Color::Black));
-        assert_eq!(grid.cell(1, 0).style.bg, Some(Color::White));
+        let ci = view.cursor().unwrap();
+        assert_eq!((ci.col, ci.row), (1, 0));
+        let cs = ci.style.unwrap();
+        assert_eq!(cs.glyph, 'b');
+        assert_eq!(cs.style.fg, Some(Color::Black));
+        assert_eq!(cs.style.bg, Some(Color::White));
     }
 }

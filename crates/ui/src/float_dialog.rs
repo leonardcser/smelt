@@ -1,6 +1,6 @@
 use crate::buffer::Buffer;
 use crate::buffer_view::BufferView;
-use crate::component::{Component, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};
 use crate::layout::{Border, Rect};
 use crate::list_select::{ListItem, ListSelect};
@@ -502,7 +502,7 @@ impl Component for FloatDialog {
         KeyResult::Ignored
     }
 
-    fn cursor(&self) -> Option<(u16, u16)> {
+    fn cursor(&self) -> Option<CursorInfo> {
         if let Focus::Input = self.focus {
             self.input.as_ref().and_then(|i| i.cursor())
         } else {

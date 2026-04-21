@@ -189,9 +189,6 @@ pub struct App {
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
-    transcript_view: crate::render::transcript_view::TranscriptView,
-    prompt_view: crate::render::prompt_view::PromptView,
-    status_bar: ui::StatusBar,
     float_tags: std::collections::HashMap<ui::WinId, BuiltinFloat>,
 }
 
@@ -637,14 +634,30 @@ impl App {
                         },
                     ],
                 });
+                let transcript_view = crate::render::transcript_view::TranscriptView::new(w);
+                let prompt_view = crate::render::prompt_view::PromptView::new();
+                let status_bar = ui::StatusBar::new();
+                ui.add_layer(
+                    "transcript",
+                    Box::new(transcript_view),
+                    ui::Rect::new(0, 0, w, h),
+                    0,
+                );
+                ui.add_layer(
+                    "prompt",
+                    Box::new(prompt_view),
+                    ui::Rect::new(0, 0, w, 1),
+                    1,
+                );
+                ui.add_layer(
+                    "status",
+                    Box::new(status_bar),
+                    ui::Rect::new(h.saturating_sub(1), 0, w, 1),
+                    2,
+                );
+                ui.focus_layer("prompt");
                 ui
             },
-            transcript_view: {
-                let (w, _) = terminal::size().unwrap_or((80, 24));
-                crate::render::transcript_view::TranscriptView::new(w)
-            },
-            prompt_view: crate::render::prompt_view::PromptView::new(),
-            status_bar: ui::StatusBar::new(),
             float_tags: std::collections::HashMap::new(),
         }
     }

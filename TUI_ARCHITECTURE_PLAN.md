@@ -671,6 +671,22 @@ Steps 1–4 complete:
   `select:N` → Lua callback. Deleted legacy `render::FloatDialog`,
   `FloatSelect`, `FloatDismiss`.
 
+- Step 6f: Real compositor layers ✅ — transcript, prompt, and status
+  bar are now registered as real compositor layers (not borrowed "base"
+  components). Deleted `render_with` / `cursor_override` pattern from
+  Compositor and Ui. Layer rects set each frame via
+  `ui.set_layer_rect()`. Focus synced from `AppFocus` via
+  `ui.focus_layer()`. New Ui methods: `add_layer`, `set_layer_rect`,
+  `focus_layer`, `layer_mut<T>`, `render` (no base params).
+
+- Step 6g: Generic cursor overlay ✅ — `Component::cursor()` now
+  returns `Option<CursorInfo>` instead of `Option<(u16, u16)>`.
+  `CursorInfo` carries position + optional `CursorStyle { glyph, style }`
+  for block cursors. Compositor paints block cursors into the grid
+  before flush; hardware cursors use terminal escape sequences.
+  Removed manual cursor painting from TranscriptView and PromptView
+  `draw()`. Deleted SoftCursor → CursorInfo conversion in `set_cursor`.
+
 Next: Step 6e — rewrite btw.lua as pure Lua plugin.
 
 ## Phase 7: Event dispatch

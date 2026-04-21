@@ -116,34 +116,9 @@ impl Compositor {
     }
 
     pub fn render<W: Write>(&mut self, w: &mut W) -> std::io::Result<()> {
-        self.render_with(&[], None, w)
-    }
-
-    /// Render external (borrowed) components first, then managed layers
-    /// on top. External components are the main app surfaces (transcript,
-    /// prompt, status bar); managed layers are floats (dialogs, popups).
-    ///
-    /// `cursor_override` lets the caller provide a cursor position from
-    /// an external component (since they're not tracked by the focus system).
-    pub fn render_with<W: Write>(
-        &mut self,
-        base: &[(&dyn Component, Rect)],
-        cursor_override: Option<(u16, u16)>,
-        w: &mut W,
-    ) -> std::io::Result<()> {
         self.current.clear_all();
 
         let focused_id = self.focused.clone();
-
-        for (component, rect) in base {
-            let ctx = DrawContext {
-                terminal_width: self.width,
-                terminal_height: self.height,
-                focused: false,
-            };
-            let mut slice = self.current.slice_mut(*rect);
-            component.draw(*rect, &mut slice, &ctx);
-        }
 
         for layer in &self.layers {
             let ctx = DrawContext {
@@ -155,6 +130,24 @@ impl Compositor {
             layer.component.draw(layer.rect, &mut slice, &ctx);
         }
 
+        // Paint block cursors from focused layer into the grid (before flush).
+        let cursor_info = focused_id.as_deref().and_then(|fid| {
+            self.layers
+                .iter()
+                .find(|l| l.id == fid)
+                .and_then(|l| l.component.cursor().map(|ci| (l.rect, ci)))
+        });
+        let hardware_cursor = cursor_info.as_ref().and_then(|(rect, ci)| {
+            let abs_x = rect.left + ci.col;
+            let abs_y = rect.top + ci.row;
+            if let Some(ref cs) = ci.style {
+                self.current.set(abs_x, abs_y, cs.glyph, cs.style);
+                None
+            } else {
+                Some((abs_x, abs_y))
+            }
+        });
+
         w.queue(BeginSynchronizedUpdate)?;
 
         if self.force_redraw {
@@ -163,16 +156,7 @@ impl Compositor {
             flush_diff(w, self.current.diff(&self.previous))?;
         }
 
-        let cursor_pos = cursor_override.or_else(|| {
-            focused_id.as_deref().and_then(|fid| {
-                self.layers.iter().find(|l| l.id == fid).and_then(|l| {
-                    l.component
-                        .cursor()
-                        .map(|(cx, cy)| (l.rect.left + cx, l.rect.top + cy))
-                })
-            })
-        });
-        if let Some((x, y)) = cursor_pos {
+        if let Some((x, y)) = hardware_cursor {
             w.queue(crossterm::cursor::Show)?;
             w.queue(crossterm::cursor::MoveTo(x, y))?;
         } else {
@@ -419,14 +403,16 @@ mod tests {
 
     #[test]
     fn cursor_position_from_focused() {
+        use crate::component::CursorInfo;
+
         struct CursorComp;
         impl Component for CursorComp {
             fn draw(&self, _: Rect, _: &mut GridSlice<'_>, _: &DrawContext) {}
             fn handle_key(&mut self, _: KeyCode, _: KeyModifiers) -> KeyResult {
                 KeyResult::Ignored
             }
-            fn cursor(&self) -> Option<(u16, u16)> {
-                Some((3, 1))
+            fn cursor(&self) -> Option<CursorInfo> {
+                Some(CursorInfo::hardware(3, 1))
             }
         }
 
