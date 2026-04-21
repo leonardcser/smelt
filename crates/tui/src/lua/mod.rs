@@ -657,6 +657,43 @@ impl LuaRuntime {
         )?;
         api.set("ui", ui_tbl)?;
 
+        // smelt.api.theme
+        let theme_tbl = lua.create_table()?;
+        theme_tbl.set(
+            "accent",
+            lua.create_function(|lua, ()| color_to_lua(lua, crate::theme::accent()))?,
+        )?;
+        theme_tbl.set(
+            "get",
+            lua.create_function(|lua, role: String| {
+                let color = theme_role_get(&role)
+                    .ok_or_else(|| LuaError::RuntimeError(format!("unknown theme role: {role}")))?;
+                color_to_lua(lua, color)
+            })?,
+        )?;
+        theme_tbl.set(
+            "set",
+            lua.create_function(|_, (role, value): (String, mlua::Table)| {
+                let ansi = color_ansi_from_lua(&value)?;
+                theme_role_set(&role, ansi)
+            })?,
+        )?;
+        theme_tbl.set(
+            "snapshot",
+            lua.create_function(|lua, ()| {
+                let t = lua.create_table()?;
+                for (name, color) in theme_snapshot_pairs() {
+                    t.set(name, color_to_lua(lua, color)?)?;
+                }
+                Ok(t)
+            })?,
+        )?;
+        theme_tbl.set(
+            "is_light",
+            lua.create_function(|_, ()| Ok(crate::theme::is_light()))?,
+        )?;
+        api.set("theme", theme_tbl)?;
+
         // smelt.api.buf
         let buf_tbl = lua.create_table()?;
         buf_tbl.set(
@@ -1492,6 +1529,135 @@ fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::styl
     Some(crossterm::style::Color::AnsiValue(val))
 }
 
+// ── theme API helpers ─────────────────────────────────────────────────
+
+/// Encode a `crossterm::style::Color` as a Lua table.
+///
+/// Shapes: `{ ansi = u8 }` for palette colors, `{ rgb = { r, g, b } }`
+/// for truecolor, `{ named = "red" }` for the 16 legacy names.
+fn color_to_lua(lua: &Lua, color: crossterm::style::Color) -> LuaResult<mlua::Table> {
+    use crossterm::style::Color;
+    let t = lua.create_table()?;
+    match color {
+        Color::AnsiValue(v) => t.set("ansi", v)?,
+        Color::Rgb { r, g, b } => {
+            let rgb = lua.create_table()?;
+            rgb.set("r", r)?;
+            rgb.set("g", g)?;
+            rgb.set("b", b)?;
+            t.set("rgb", rgb)?;
+        }
+        Color::Reset => t.set("named", "reset")?,
+        Color::Black => t.set("named", "black")?,
+        Color::DarkGrey => t.set("named", "dark_grey")?,
+        Color::Red => t.set("named", "red")?,
+        Color::DarkRed => t.set("named", "dark_red")?,
+        Color::Green => t.set("named", "green")?,
+        Color::DarkGreen => t.set("named", "dark_green")?,
+        Color::Yellow => t.set("named", "yellow")?,
+        Color::DarkYellow => t.set("named", "dark_yellow")?,
+        Color::Blue => t.set("named", "blue")?,
+        Color::DarkBlue => t.set("named", "dark_blue")?,
+        Color::Magenta => t.set("named", "magenta")?,
+        Color::DarkMagenta => t.set("named", "dark_magenta")?,
+        Color::Cyan => t.set("named", "cyan")?,
+        Color::DarkCyan => t.set("named", "dark_cyan")?,
+        Color::White => t.set("named", "white")?,
+        Color::Grey => t.set("named", "grey")?,
+    }
+    Ok(t)
+}
+
+/// Decode a Lua color table to an ANSI palette index. Accepts
+/// `{ ansi = u8 }`, `{ preset = "name" }`, or `{ rgb = { r, g, b } }`
+/// (rgb is down-sampled via the nearest-palette approximation — we
+/// only store ansi values in theme atomics today).
+fn color_ansi_from_lua(table: &mlua::Table) -> LuaResult<u8> {
+    if let Ok(v) = table.get::<u8>("ansi") {
+        return Ok(v);
+    }
+    if let Ok(name) = table.get::<String>("preset") {
+        return crate::theme::preset_by_name(&name)
+            .ok_or_else(|| LuaError::RuntimeError(format!("unknown preset: {name}")));
+    }
+    if let Ok(rgb) = table.get::<mlua::Table>("rgb") {
+        let r: u8 = rgb.get("r")?;
+        let g: u8 = rgb.get("g")?;
+        let b: u8 = rgb.get("b")?;
+        return Ok(rgb_to_ansi_256(r, g, b));
+    }
+    Err(LuaError::RuntimeError(
+        "color table must have one of: ansi, preset, rgb".into(),
+    ))
+}
+
+/// Nearest 6×6×6 palette index for an sRGB triple. The 216-color
+/// block starts at 16; each channel maps to the nearest of
+/// [0, 95, 135, 175, 215, 255].
+fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
+    fn band(c: u8) -> u8 {
+        let levels = [0u8, 95, 135, 175, 215, 255];
+        levels
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, v)| (c as i32 - **v as i32).abs())
+            .map(|(i, _)| i as u8)
+            .unwrap_or(0)
+    }
+    16 + 36 * band(r) + 6 * band(g) + band(b)
+}
+
+/// Read a named theme role. Returns `None` for unknown names.
+fn theme_role_get(role: &str) -> Option<crossterm::style::Color> {
+    use crate::theme;
+    Some(match role {
+        "accent" => theme::accent(),
+        "slug" => theme::slug_color(),
+        "user_bg" => theme::user_bg(),
+        "code_block_bg" => theme::code_block_bg(),
+        "bar" => theme::bar(),
+        "tool_pending" => theme::tool_pending(),
+        "reason_off" => theme::reason_off(),
+        "muted" => theme::muted(),
+        _ => return None,
+    })
+}
+
+/// Set a writable theme role. Only `accent` and `slug` are mutable
+/// today; everything else is derived from light/dark and returns an
+/// error.
+fn theme_role_set(role: &str, ansi: u8) -> LuaResult<()> {
+    use crate::theme;
+    match role {
+        "accent" => {
+            theme::set_accent(ansi);
+            Ok(())
+        }
+        "slug" => {
+            theme::set_slug_color(ansi);
+            Ok(())
+        }
+        other => Err(LuaError::RuntimeError(format!(
+            "theme role is read-only: {other}"
+        ))),
+    }
+}
+
+/// List of (role_name, current_color) pairs for `theme.snapshot()`.
+fn theme_snapshot_pairs() -> Vec<(&'static str, crossterm::style::Color)> {
+    use crate::theme;
+    vec![
+        ("accent", theme::accent()),
+        ("slug", theme::slug_color()),
+        ("user_bg", theme::user_bg()),
+        ("code_block_bg", theme::code_block_bg()),
+        ("bar", theme::bar()),
+        ("tool_pending", theme::tool_pending()),
+        ("reason_off", theme::reason_off()),
+        ("muted", theme::muted()),
+    ]
+}
+
 /// Convert a `serde_json::Value` to a `mlua::Value`.
 pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
     match v {
@@ -1650,6 +1816,99 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn theme_accent_round_trip() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let old_accent = crate::theme::accent_value();
+        rt.lua
+            .load("smelt.api.theme.set('accent', { ansi = 42 })")
+            .exec()
+            .unwrap();
+        let ansi: u8 = rt
+            .lua
+            .load("return smelt.api.theme.accent().ansi")
+            .eval()
+            .unwrap();
+        assert_eq!(ansi, 42);
+        crate::theme::set_accent(old_accent);
+    }
+
+    #[test]
+    fn theme_preset_sets_accent() {
+        let rt = LuaRuntime::new();
+        let old_accent = crate::theme::accent_value();
+        rt.lua
+            .load("smelt.api.theme.set('accent', { preset = 'sage' })")
+            .exec()
+            .unwrap();
+        let ansi: u8 = rt
+            .lua
+            .load("return smelt.api.theme.accent().ansi")
+            .eval()
+            .unwrap();
+        assert_eq!(ansi, 108); // sage
+        crate::theme::set_accent(old_accent);
+    }
+
+    #[test]
+    fn theme_snapshot_lists_all_roles() {
+        let rt = LuaRuntime::new();
+        let names: Vec<String> = rt
+            .lua
+            .load(
+                r#"
+                local snap = smelt.api.theme.snapshot()
+                local t = {}
+                for k, _ in pairs(snap) do t[#t+1] = k end
+                table.sort(t)
+                return t
+                "#,
+            )
+            .eval::<mlua::Table>()
+            .unwrap()
+            .sequence_values::<String>()
+            .filter_map(|r| r.ok())
+            .collect();
+        for expected in [
+            "accent",
+            "bar",
+            "code_block_bg",
+            "muted",
+            "reason_off",
+            "slug",
+            "tool_pending",
+            "user_bg",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "snapshot missing {expected}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_unknown_role_is_error() {
+        let rt = LuaRuntime::new();
+        let err = rt
+            .lua
+            .load("smelt.api.theme.get('bogus')")
+            .exec()
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown theme role"));
+    }
+
+    #[test]
+    fn theme_read_only_role_set_fails() {
+        let rt = LuaRuntime::new();
+        let err = rt
+            .lua
+            .load("smelt.api.theme.set('muted', { ansi = 1 })")
+            .exec()
+            .unwrap_err();
+        assert!(err.to_string().contains("read-only"));
     }
 
     #[test]
