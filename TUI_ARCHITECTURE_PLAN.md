@@ -530,9 +530,43 @@ The prompt window handles key input, vim motions, cursor rendering.
 Prompt chrome (notification bar, top/bottom bars) is app-level layout
 around the window — not buffer content.
 
-**Step 6: Btw as float** — move btw out of prompt composition into a
-float/dialog. It becomes a `FloatDialog` opened by the app (and later
-by a Lua plugin). Remove btw from Screen and prompt_data.
+**Step 6: Lua float bridge + btw as plugin** — wire Lua's
+`smelt.api.buf/win` to the real `Ui` registry so plugin floats are
+backed by real `ui::Buffer` + `ui::Window` + compositor layers. Then
+prove the architecture by making `/btw` a pure Lua plugin with zero
+btw-specific Rust code.
+
+Sub-steps:
+
+6a. **Remove btw from Screen** — delete `BtwBlock`, all btw methods
+    (`set_btw`, `set_btw_response`, `dismiss_btw`, `has_btw`,
+    `btw_scroll`, `btw_mut`), btw rendering from `prompt_data.rs`
+    and `draw_prompt_sections`, btw handling from
+    `handle_overlay_keys`, btw tick dirty-marking. The feature is
+    broken today (`set_btw` is never called) so this is pure deletion.
+
+6b. **Wire Lua buf/win to Ui** — rewrite Lua's `buf.create()` to call
+    `ui.buf_create()` (real `ui::Buffer`). Rewrite `win.open_float()`
+    to call `ui.win_open_float()` (real `ui::Window`) and add a
+    `ui::FloatDialog` component to the compositor backed by that
+    buffer. Rewrite `buf.set_lines()` to write to the real buffer.
+    Delete `PendingOp::OpenFloat/UpdateFloat/CloseFloat`, `FloatOp`,
+    `drain_float_ops`, and `render::FloatDialog` (legacy float dialog).
+
+6c. **Compositor key dispatch** — when the compositor has a focused
+    layer, route keys through it before normal dispatch. Compositor
+    `KeyResult::Action("dismiss")` fires the Lua on_dismiss callback
+    and removes the layer. `KeyResult::Action("select:N")` fires
+    on_select. Other consumed keys just mark dirty.
+
+6d. **Float sync** — before each render, sync each float's
+    `BufferView` from its backing `ui::Buffer` (same pattern as
+    transcript: `sync_from_buffer()`).
+
+6e. **btw.lua** — rewrite to use generic `smelt.api.buf/win` API:
+    `buf.create()` → `win.open_float(buf, {title, border, hints})`
+    → `engine.ask({on_response = set_lines})`. Zero btw-specific
+    Rust code. This proves the architecture.
 
 **Step 7: Status bar event-driven** — status bar segments are updated
 when the underlying data changes (mode switch, new tokens, cost update),
@@ -543,18 +577,17 @@ Screen shrinks. Data that was in Screen moves to buffers, windows, or
 app state. Delete Screen when empty.
 
 **Step 9: Migrate dialogs** — each of the 10 Dialog implementations
-becomes a `FloatDialog` configuration added as a compositor layer.
+becomes a `ui::FloatDialog` configuration added as a compositor layer.
 Migration order (simplest first):
 1. HelpDialog → FloatDialog with keybindings in buffer, no footer
 2. ExportDialog → FloatDialog with 2-item ListSelect footer
 3. RewindDialog → FloatDialog with turn list in ListSelect
-4. FloatDialog (Lua) → FloatDialog with Lua content + optional footer
-5. PermissionsDialog → FloatDialog with section content + ListSelect
-6. PsDialog → FloatDialog with process list + ListSelect
-7. ResumeDialog → FloatDialog with session list + search TextInput
-8. AgentsDialog → Two FloatDialogs (list + detail)
-9. QuestionDialog → Sequential FloatDialogs (one per question)
-10. ConfirmDialog → FloatDialog with preview buffer + ListSelect + TextInput
+4. PermissionsDialog → FloatDialog with section content + ListSelect
+5. PsDialog → FloatDialog with process list + ListSelect
+6. ResumeDialog → FloatDialog with session list + search TextInput
+7. AgentsDialog → Two FloatDialogs (list + detail)
+8. QuestionDialog → Sequential FloatDialogs (one per question)
+9. ConfirmDialog → FloatDialog with preview buffer + ListSelect + TextInput
 
 Also migrate: Notifications, Completions → float layers.
 
@@ -593,8 +626,11 @@ Steps 1–4 complete:
   InputState is the prompt-specific side-car (completer, menu,
   history, attachments). `Deref<Target = EditBuffer>` still works.
 
-Next: Step 6 — btw as float (move btw out of prompt into a
-FloatDialog, plugin-owned).
+- Step 6a: Remove btw from Screen ✅ (partial) — deleted `BtwBlock`,
+  all btw methods from Screen, btw rendering from `prompt_data.rs`
+  and `draw_prompt_sections`, btw field from `PromptInput`.
+
+Next: Step 6b — wire Lua buf/win to real `Ui` registry, then 6c–6e.
 
 ## Phase 7: Event dispatch
 
@@ -606,15 +642,19 @@ FloatDialog, plugin-owned).
 - Keymap system: buffer-local, window-local, global scopes
 - Vim integration: vim state on windows, framework-level handling
 
-## Phase 8: Lua bindings rewrite
+Note: basic compositor key dispatch for floats lands in Step 6c.
+Phase 7 generalizes it to all components (splits, global keymaps).
 
-**Goal:** Lua talks to `ui` directly. `smelt.api.buf/win` maps 1:1.
+## Phase 8: Lua bindings — remaining operations
 
-- Rewrite `lua.rs` buf/win sections to call ui API
-- Lua creates buffers, opens float windows, sets content, adds highlights
-- Remove `PendingOp::OpenFloat` / `UpdateFloat` / `CloseFloat`
-- Port `btw.lua`, `predict.lua`, `plan_mode.lua` to clean API
-- Btw becomes a pure plugin (not engine-tied)
+**Goal:** Complete the `smelt.api.buf/win` surface beyond floats.
+
+Step 6b lands the core bridge (buf.create, win.open_float,
+buf.set_lines). This phase adds the remaining operations:
+- `buf.set_highlights`, `buf.add_virtual_text`, `buf.set_mark`
+- `win.set_cursor`, `win.get_cursor`, `win.set_scroll`
+- Port `predict.lua`, `plan_mode.lua` to clean API
+- Any remaining Lua plugins that bypass the `Ui` registry
 
 ## Phase 9: Cleanup and polish
 
@@ -635,13 +675,13 @@ Phase 0–2 (DONE: types, text primitives, layout)
 Phase 3–5 (DONE: grid, components, compositor, FloatDialog)
     │
     ▼
-Phase 6 (buffer/window model: transcript + prompt + status + dialogs)
+Phase 6 (buffer/window model + Lua float bridge + btw plugin)
     │
     ▼
-Phase 7 (event dispatch)
+Phase 7 (event dispatch — generalize to all components)
     │
     ▼
-Phase 8 (Lua bindings)
+Phase 8 (Lua bindings — remaining buf/win operations)
     │
     ▼
 Phase 9 (cleanup)
