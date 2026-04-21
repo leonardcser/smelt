@@ -44,8 +44,8 @@ pub use status::StatusPosition;
 pub(crate) use status::{draw_bar, BarSpan};
 
 pub use dialogs::{
-    parse_questions, AgentSnapshot, AgentsDialog, ConfirmDialog, Dialog, DialogResult, Question,
-    QuestionDialog, QuestionOption, SharedSnapshots,
+    parse_questions, AgentSnapshot, ConfirmDialog, Dialog, DialogResult, Question, QuestionDialog,
+    QuestionOption, SharedSnapshots,
 };
 
 /// Layout placement computed by `draw_frame` for the active dialog.
