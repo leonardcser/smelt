@@ -192,8 +192,13 @@ pub enum PendingOp {
     SetGhostText(String),
     /// Clear ghost text from the prompt.
     ClearGhostText,
-    BufCreate { id: u64 },
-    BufSetLines { id: u64, lines: Vec<String> },
+    BufCreate {
+        id: u64,
+    },
+    BufSetLines {
+        id: u64,
+        lines: Vec<String>,
+    },
     WinOpenFloat {
         buf_id: u64,
         title: String,
@@ -204,7 +209,9 @@ pub enum PendingOp {
         id: u64,
         title: Option<String>,
     },
-    WinClose { id: u64 },
+    WinClose {
+        id: u64,
+    },
     /// Send a deferred plugin tool result.
     ResolveToolResult {
         request_id: u64,

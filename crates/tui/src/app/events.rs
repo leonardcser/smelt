@@ -90,6 +90,24 @@ impl App {
             return false;
         }
 
+        // Compositor float: when a float window is focused, route keys
+        // through the compositor. Actions like "dismiss" and "select:N"
+        // are translated into Lua callbacks.
+        if self.ui.focused_float().is_some() {
+            if let Event::Resize(w, h) = ev {
+                self.handle_resize(w, h);
+                return false;
+            }
+            if let Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) = ev
+            {
+                let result = self.ui.handle_key(code, modifiers);
+                self.handle_float_action(result);
+            }
+            return false;
+        }
+
         // Cmdline mode: when the `:` command line is active, route
         // all key events to it. Esc cancels, Enter executes.
         if self.screen.cmdline.active {
@@ -1070,9 +1088,7 @@ impl App {
 
         let cursor_override = prompt_cursor;
         let mut stdout = std::io::stdout();
-        let _ = self
-            .ui
-            .render_with(&base, cursor_override, &mut stdout);
+        let _ = self.ui.render_with(&base, cursor_override, &mut stdout);
 
         // Clean up state.
         self.screen.mark_clean();
@@ -1451,6 +1467,32 @@ impl App {
         self.lua.set_history(self.history.clone());
     }
 
+    fn handle_float_action(&mut self, result: ui::KeyResult) {
+        match result {
+            ui::KeyResult::Action(ref action) if action == "dismiss" => {
+                if let Some(win_id) = self.ui.focused_float() {
+                    let id = win_id.0;
+                    let dismiss_id = id | (1 << 63);
+                    let ops = self.lua.fire_callback(dismiss_id, "");
+                    self.apply_ops(ops);
+                    self.lua.remove_callback(id);
+                    self.lua.remove_callback(dismiss_id);
+                    self.ui.win_close(win_id);
+                    self.ui.buf_delete(ui::BufId(id));
+                }
+            }
+            ui::KeyResult::Action(ref action) if action.starts_with("select:") => {
+                if let Some(win_id) = self.ui.focused_float() {
+                    let id = win_id.0;
+                    let idx_str = &action["select:".len()..];
+                    let ops = self.lua.fire_callback(id, idx_str);
+                    self.apply_ops(ops);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Drain and apply all pending Lua ops (notifications, errors,
     /// commands, engine mutations). Call after any Lua handler dispatch.
     pub(super) fn apply_lua_ops(&mut self) {
@@ -1609,8 +1651,6 @@ impl App {
             }
         }
     }
-
-
 
     fn transcript_dims(&mut self) -> (u16, u16) {
         let total = self.screen.full_transcript_text().len() as u16;

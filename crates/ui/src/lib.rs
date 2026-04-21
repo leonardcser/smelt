@@ -139,7 +139,8 @@ impl Ui {
         self.wins.insert(id, win);
 
         let layer_id = float_layer_id(id);
-        self.compositor.add(&layer_id, Box::new(dialog), rect, zindex);
+        self.compositor
+            .add(&layer_id, Box::new(dialog), rect, zindex);
         self.compositor.focus(&layer_id);
 
         Some(id)
