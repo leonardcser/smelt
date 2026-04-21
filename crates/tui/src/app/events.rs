@@ -897,7 +897,7 @@ impl App {
             crate::app::AppFocus::Prompt => {
                 use crate::text_utils::byte_to_cell;
                 let buf = &self.input.buf;
-                let cpos = self.input.cpos.min(buf.len());
+                let cpos = self.input.win.cpos.min(buf.len());
                 let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
                 let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);
                 let col_cells = byte_to_cell(&buf[line_start..], cpos - line_start);
@@ -1466,7 +1466,7 @@ impl App {
     /// vim_mode + focused_window for callers that need them locally.
     pub(super) fn snapshot_lua_context(&mut self) -> (Option<String>, String) {
         let transcript_text = self.screen.full_transcript_text().join("\n");
-        let prompt_text = self.input.buffer.buf.clone();
+        let prompt_text = self.input.win.edit_buf.buf.clone();
         let focused_window = match self.app_focus {
             crate::app::AppFocus::Content => "transcript",
             crate::app::AppFocus::Prompt => "prompt",
@@ -1877,10 +1877,14 @@ impl App {
     }
 
     fn scroll_prompt_by_lines(&mut self, delta: isize) {
-        let buf = &self.input.buffer.buf;
-        let new_pos = self.input.cursor.move_vertical(buf, self.input.cpos, delta);
-        if new_pos != self.input.cpos {
-            self.input.cpos = new_pos;
+        let buf = &self.input.win.edit_buf.buf;
+        let new_pos = self
+            .input
+            .win
+            .win_cursor
+            .move_vertical(buf, self.input.win.cpos, delta);
+        if new_pos != self.input.win.cpos {
+            self.input.win.cpos = new_pos;
             self.screen.mark_dirty();
         }
     }
@@ -1942,9 +1946,9 @@ impl App {
                     .map(|b| b + buf[b..].chars().next().map_or(0, |c| c.len_utf8()))
             })
             .unwrap_or(buf.len());
-        self.input.cpos = cpos.min(buf.len());
+        self.input.win.cpos = cpos.min(buf.len());
         let want = col as usize;
-        self.input.cursor.set_curswant(Some(want));
+        self.input.win.win_cursor.set_curswant(Some(want));
         self.screen.mark_dirty();
     }
 
@@ -1973,7 +1977,7 @@ impl App {
                 }
             }
             crate::app::AppFocus::Prompt => {
-                self.input.cursor.extend(self.input.cpos);
+                self.input.win.win_cursor.extend(self.input.win.cpos);
                 if let Some(vp) = self.screen.input_viewport() {
                     if let Some(render::ViewportHit::Content { row: r, col: c }) = vp.hit(row, col)
                     {
@@ -2031,10 +2035,10 @@ impl App {
     /// anchor == cpos, so this is a no-op in that case.
     fn copy_prompt_selection_on_release(&mut self) {
         if let Some((s, e)) = self.input.selection_range() {
-            let text: String = self.input.buffer.buf[s..e].to_string();
+            let text: String = self.input.win.edit_buf.buf[s..e].to_string();
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
-        self.input.cursor.clear_anchor();
+        self.input.win.win_cursor.clear_anchor();
         self.screen.mark_dirty();
     }
 
@@ -2042,9 +2046,9 @@ impl App {
     /// (if any) via the shared `Buffer::select_word_at` helper, and
     /// copy it to the clipboard.
     fn select_and_copy_word_in_prompt(&mut self) {
-        let cpos = self.input.cpos;
+        let cpos = self.input.win.cpos;
         if let Some((s, e)) = self.input.select_word_at(cpos) {
-            let text = self.input.buffer.buf[s..e].to_string();
+            let text = self.input.win.edit_buf.buf[s..e].to_string();
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
         self.screen.mark_dirty();

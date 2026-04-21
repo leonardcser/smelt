@@ -587,8 +587,14 @@ Steps 1–4 complete:
   `impl Window for InputState`, `ui::cursor` module (absorbed).
   `WinId` constructor made public.
 
-Next: Step 5 — prompt window (make the prompt a real `ui::Window`
-with an editable buffer).
+- Step 5: Prompt window ✅ — `InputState` now wraps a `ui::Window`
+  (`input.win`) instead of owning separate buffer/cpos/vim/cursor/
+  kill_ring fields. All window state lives on the `ui::Window`;
+  InputState is the prompt-specific side-car (completer, menu,
+  history, attachments). `Deref<Target = EditBuffer>` still works.
+
+Next: Step 6 — btw as float (move btw out of prompt into a
+FloatDialog, plugin-owned).
 
 ## Phase 7: Event dispatch
 
