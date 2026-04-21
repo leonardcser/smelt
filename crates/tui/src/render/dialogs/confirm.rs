@@ -6,6 +6,7 @@ use crate::keymap::{hints, nav_lookup, NavAction};
 use crate::render::highlight::{
     count_inline_diff_rows, print_inline_diff, print_syntax_file, BashHighlighter,
 };
+use crate::render::layout_out::LayoutSink;
 use crate::render::{draw_bar, ConfirmChoice, RenderOut};
 use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 use std::io::Write;
 
 /// Tool-specific scrollable preview content for the confirm dialog.
-enum ConfirmPreview {
+pub(crate) enum ConfirmPreview {
     /// No preview — simple tool calls.
     None,
     /// Inline diff preview for edit_file.
@@ -38,7 +39,7 @@ enum ConfirmPreview {
 }
 
 impl ConfirmPreview {
-    fn from_tool(
+    pub(crate) fn from_tool(
         tool_name: &str,
         desc: &str,
         args: &HashMap<String, serde_json::Value>,
@@ -95,7 +96,7 @@ impl ConfirmPreview {
         }
     }
 
-    fn total_rows(&self, width: usize) -> u16 {
+    pub(crate) fn total_rows(&self, width: usize) -> u16 {
         match self {
             ConfirmPreview::None => 0,
             ConfirmPreview::Diff { old, new, path } => count_inline_diff_rows(old, new, path, old),
@@ -115,14 +116,55 @@ impl ConfirmPreview {
         }
     }
 
-    fn is_some(&self) -> bool {
+    pub(crate) fn is_some(&self) -> bool {
         !matches!(self, ConfirmPreview::None)
     }
 
     /// Whether to show the top dashed separator before the preview.
-    fn has_top_separator(&self) -> bool {
+    pub(crate) fn has_top_separator(&self) -> bool {
         // Bash preview flows directly from the title line — no separator needed.
         !matches!(self, ConfirmPreview::None | ConfirmPreview::BashBody { .. })
+    }
+
+    /// Emit the preview into `buf` via `SpanCollector` → `Buffer`
+    /// projection. Uses the same LayoutSink-based renderers as the
+    /// legacy `render` path, but captures styled spans into `buf`
+    /// instead of ANSI bytes on stdout.
+    pub(crate) fn render_into_buffer(
+        &self,
+        buf: &mut ui::buffer::Buffer,
+        width: u16,
+        theme: &crate::theme::Theme,
+    ) {
+        use crate::render::blocks::render_markdown_inner;
+        use crate::render::to_buffer::render_into_buffer;
+        render_into_buffer(buf, width, theme, |sink| match self {
+            ConfirmPreview::None => {}
+            ConfirmPreview::Diff { old, new, path } => {
+                print_inline_diff(sink, old, new, path, old, 0, u16::MAX);
+            }
+            ConfirmPreview::Notebook(data) => {
+                render_notebook_preview(sink, data, 0, u16::MAX);
+            }
+            ConfirmPreview::FileContent { content, path } => {
+                print_syntax_file(sink, content, path, 0, u16::MAX);
+            }
+            ConfirmPreview::BashBody { full_command } => {
+                let mut bh = BashHighlighter::new();
+                let mut lines = full_command.lines();
+                if let Some(first) = lines.next() {
+                    bh.advance(first);
+                }
+                for line in lines {
+                    sink.print(" ");
+                    bh.print_line(sink, line);
+                    sink.newline();
+                }
+            }
+            ConfirmPreview::PluginMarkdown { content } => {
+                render_markdown_inner(sink, content, width as usize, " ", false, None);
+            }
+        });
     }
 
     fn render(&self, out: &mut RenderOut, skip: u16, viewport: u16, width: usize) {
@@ -335,8 +377,8 @@ fn notebook_preview_rows(data: &NotebookRenderData) -> u16 {
     }
 }
 
-fn render_notebook_preview(
-    out: &mut RenderOut,
+fn render_notebook_preview<S: LayoutSink>(
+    out: &mut S,
     data: &NotebookRenderData,
     skip: u16,
     viewport: u16,
@@ -355,7 +397,7 @@ fn render_notebook_preview(
             return;
         }
         out.print(" ");
-        out.push_fg(theme::muted());
+        out.push_fg(theme::muted().into());
         out.print(line);
         out.pop_style();
         out.newline();
