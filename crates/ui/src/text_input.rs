@@ -1,4 +1,5 @@
 use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
+use crate::dialog::PanelWidget;
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -240,6 +241,28 @@ impl Component for TextInput {
     }
 }
 
+impl PanelWidget for TextInput {
+    fn draw(&self, area: Rect, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
+        <Self as Component>::draw(self, area, slice, ctx);
+    }
+
+    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
+        <Self as Component>::handle_key(self, code, mods)
+    }
+
+    fn cursor(&self) -> Option<CursorInfo> {
+        <Self as Component>::cursor(self)
+    }
+
+    fn content_rows(&self) -> usize {
+        1
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,7 +322,7 @@ mod tests {
     fn ctrl_u_clears() {
         let mut ti = input();
         ti.set_text("some text");
-        let result = ti.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        let result = Component::handle_key(&mut ti, KeyCode::Char('u'), KeyModifiers::CONTROL);
         assert_eq!(result, KeyResult::Consumed);
         assert_eq!(ti.text(), "");
     }
@@ -307,7 +330,7 @@ mod tests {
     #[test]
     fn enter_submits() {
         let mut ti = input();
-        let result = ti.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let result = Component::handle_key(&mut ti, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(result, KeyResult::Action("submit".into()));
     }
 
@@ -316,7 +339,7 @@ mod tests {
         let mut ti = input();
         ti.set_text("abc");
         ti.move_left();
-        let ci = ti.cursor().unwrap();
+        let ci = Component::cursor(&ti).unwrap();
         assert_eq!((ci.col, ci.row), (2, 0));
         assert!(ci.style.is_none());
     }
@@ -332,7 +355,7 @@ mod tests {
             focused: true,
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
-        ti.draw(Rect::new(0, 0, 10, 1), &mut slice, &ctx);
+        Component::draw(&ti, Rect::new(0, 0, 10, 1), &mut slice, &ctx);
         assert_eq!(grid.cell(0, 0).symbol, 'h');
         assert_eq!(grid.cell(4, 0).symbol, 'o');
     }
@@ -347,7 +370,7 @@ mod tests {
             focused: true,
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
-        ti.draw(Rect::new(0, 0, 20, 1), &mut slice, &ctx);
+        Component::draw(&ti, Rect::new(0, 0, 20, 1), &mut slice, &ctx);
         assert_eq!(grid.cell(0, 0).symbol, 't');
         assert!(grid.cell(0, 0).style.dim);
     }
