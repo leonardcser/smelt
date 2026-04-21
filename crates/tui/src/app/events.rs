@@ -1528,38 +1528,70 @@ impl App {
                     self.input_prediction = None;
                     self.screen.mark_dirty();
                 }
-                crate::lua::PendingOp::OpenFloat {
-                    id,
+                crate::lua::PendingOp::BufCreate { id } => {
+                    self.ui.buf_create_with_id(
+                        ui::BufId(id),
+                        ui::buffer::BufCreateOpts {
+                            buftype: ui::buffer::BufType::Scratch,
+                            ..Default::default()
+                        },
+                    );
+                }
+                crate::lua::PendingOp::BufSetLines { id, lines } => {
+                    if let Some(buf) = self.ui.buf_mut(ui::BufId(id)) {
+                        buf.set_all_lines(lines);
+                    }
+                }
+                crate::lua::PendingOp::WinOpenFloat {
+                    buf_id,
                     title,
-                    lines,
-                    loading,
                     footer_items,
                     accent,
                 } => {
-                    self.pending_float_ops.push(FloatOp::Open {
-                        id,
-                        title,
-                        lines,
-                        loading,
-                        footer_items,
-                        accent,
-                    });
+                    let config = ui::FloatConfig {
+                        title: Some(title),
+                        border: ui::Border::Rounded,
+                        ..Default::default()
+                    };
+                    if let Some(win_id) = self.ui.win_open_float(ui::BufId(buf_id), config) {
+                        if let Some(fd) = self.ui.float_dialog_mut(win_id) {
+                            fd.config_mut().accent_style = ui::Style {
+                                fg: accent,
+                                ..Default::default()
+                            };
+                            fd.config_mut().border_style = ui::Style {
+                                fg: Some(crate::theme::accent()),
+                                ..Default::default()
+                            };
+                            fd.config_mut().hint_left = Some("ESC close".into());
+                            fd.config_mut().hint_right = if footer_items.is_empty() {
+                                Some("j/k scroll".into())
+                            } else {
+                                Some("Enter select".into())
+                            };
+                            if !footer_items.is_empty() {
+                                let items: Vec<ui::ListItem> = footer_items
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, label)| {
+                                        ui::ListItem::plain(format!("{}. {}", i + 1, label))
+                                    })
+                                    .collect();
+                                fd.set_footer_items(items);
+                            }
+                        }
+                    }
                 }
-                crate::lua::PendingOp::UpdateFloat {
-                    id,
-                    title,
-                    lines,
-                    loading,
-                } => {
-                    self.pending_float_ops.push(FloatOp::Update {
-                        id,
-                        title,
-                        lines,
-                        loading,
-                    });
+                crate::lua::PendingOp::WinUpdate { id, title } => {
+                    if let Some(win) = self.ui.win_mut(ui::WinId(id)) {
+                        if let Some(t) = title {
+                            win.set_title(Some(t));
+                        }
+                    }
                 }
-                crate::lua::PendingOp::CloseFloat { id } => {
-                    self.pending_float_ops.push(FloatOp::Close { id });
+                crate::lua::PendingOp::WinClose { id } => {
+                    self.ui.win_close(ui::WinId(id));
+                    self.ui.buf_delete(ui::BufId(id));
                 }
                 crate::lua::PendingOp::ResolveToolResult {
                     request_id,
@@ -1578,65 +1610,7 @@ impl App {
         }
     }
 
-    pub(super) fn drain_float_ops(&mut self, active_dialog: &mut Option<Box<dyn render::Dialog>>) {
-        let ops = std::mem::take(&mut self.pending_float_ops);
-        for op in ops {
-            match op {
-                FloatOp::Open {
-                    id,
-                    title,
-                    lines,
-                    loading,
-                    footer_items,
-                    accent,
-                } => {
-                    let vim_enabled = self.settings.vim;
-                    let dlg = render::FloatDialog::new(
-                        id,
-                        title,
-                        lines,
-                        loading,
-                        footer_items,
-                        accent,
-                        vim_enabled,
-                    );
-                    self.open_dialog(Box::new(dlg), active_dialog);
-                }
-                FloatOp::Update {
-                    id,
-                    title,
-                    lines,
-                    loading,
-                } => {
-                    if let Some(d) = active_dialog.as_mut() {
-                        if let Some(fd) = d.as_any_mut().downcast_mut::<render::FloatDialog>() {
-                            if fd.id == id {
-                                if let Some(t) = title {
-                                    fd.set_title(t);
-                                }
-                                if let Some(l) = lines {
-                                    fd.set_lines(l);
-                                }
-                                if let Some(b) = loading {
-                                    fd.set_loading(b);
-                                }
-                            }
-                        }
-                    }
-                }
-                FloatOp::Close { id } => {
-                    if let Some(d) = active_dialog.as_mut() {
-                        if let Some(fd) = d.as_any_mut().downcast_mut::<render::FloatDialog>() {
-                            if fd.id == id {
-                                active_dialog.take();
-                                self.finalize_dialog_close();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+
 
     fn transcript_dims(&mut self) -> (u16, u16) {
         let total = self.screen.full_transcript_text().len() as u16;
