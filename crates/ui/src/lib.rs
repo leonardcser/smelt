@@ -146,7 +146,9 @@ impl Ui {
             dialog.sync_content_from_buffer(b);
         }
 
-        let win = Window::new(id, buf, WinConfig::Float(config));
+        let focusable = config.focusable;
+        let mut win = Window::new(id, buf, WinConfig::Float(config));
+        win.focusable = focusable;
         self.wins.insert(id, win);
 
         let layer_id = float_layer_id(id);
@@ -254,7 +256,9 @@ impl Ui {
         let panel_structs = dialog::build_panels(panels, &self.bufs);
         let dlg = dialog::Dialog::new(dialog_config, panel_structs);
 
-        let win = Window::new(id, primary_buf, WinConfig::Float(float_config));
+        let focusable = float_config.focusable;
+        let mut win = Window::new(id, primary_buf, WinConfig::Float(float_config));
+        win.focusable = focusable;
         self.wins.insert(id, win);
 
         let layer_id = float_layer_id(id);
