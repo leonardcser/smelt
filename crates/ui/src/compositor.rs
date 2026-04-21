@@ -120,6 +120,15 @@ impl Compositor {
 
         let focused_id = self.focused.clone();
 
+        for layer in &mut self.layers {
+            let ctx = DrawContext {
+                terminal_width: self.width,
+                terminal_height: self.height,
+                focused: focused_id.as_deref() == Some(&layer.id),
+            };
+            layer.component.prepare(layer.rect, &ctx);
+        }
+
         for layer in &self.layers {
             let ctx = DrawContext {
                 terminal_width: self.width,

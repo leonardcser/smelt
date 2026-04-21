@@ -108,6 +108,7 @@ impl Default for BufCreateOpts {
     }
 }
 
+#[derive(Clone)]
 pub struct Buffer {
     pub(crate) id: BufId,
     lines: Vec<String>,
