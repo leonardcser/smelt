@@ -44,6 +44,9 @@ pub struct OptionList {
     shortcut_style: Style,
     checkbox_style: Style,
     viewport_rows: u16,
+    /// Per-item wrapped label lines computed in `prepare`. Each item
+    /// occupies `wrapped[i].len().max(1)` visual rows.
+    wrapped: Vec<Vec<String>>,
 }
 
 impl OptionList {
@@ -60,7 +63,20 @@ impl OptionList {
             shortcut_style: Style::default(),
             checkbox_style: Style::default(),
             viewport_rows: 0,
+            wrapped: Vec::new(),
         }
+    }
+
+    /// Byte width of the checkbox/shortcut prefix before the label.
+    fn prefix_cols(&self, item: &OptionItem) -> u16 {
+        let mut cols: u16 = 0;
+        if self.multi {
+            cols += 2; // checkbox + space
+        }
+        if item.shortcut.is_some() {
+            cols += 4; // "(X) "
+        }
+        cols
     }
 
     pub fn multi(mut self, multi: bool) -> Self {
@@ -148,6 +164,21 @@ impl OptionList {
 impl Component for OptionList {
     fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
         self.viewport_rows = area.height;
+        // Re-wrap labels for the current width so multi-line items
+        // render correctly. `prefix_cols` depends on `multi` +
+        // per-item shortcut; both are stable for a widget instance.
+        self.wrapped = self
+            .items
+            .iter()
+            .map(|item| {
+                let avail = area.width.saturating_sub(self.prefix_cols(item));
+                if avail == 0 {
+                    vec![item.label.clone()]
+                } else {
+                    crate::text::wrap_line(&item.label, avail as usize)
+                }
+            })
+            .collect();
         self.ensure_visible();
     }
 
@@ -157,9 +188,9 @@ impl Component for OptionList {
         if w == 0 || h == 0 {
             return;
         }
-        let visible = (h as usize).min(self.items.len().saturating_sub(self.scroll_top));
-        for row in 0..visible {
-            let idx = self.scroll_top + row;
+        let mut row: u16 = 0;
+        let mut idx = self.scroll_top;
+        while row < h && idx < self.items.len() {
             let item = &self.items[idx];
             let is_cursor = idx == self.cursor;
             let base = if is_cursor {
@@ -167,47 +198,65 @@ impl Component for OptionList {
             } else {
                 self.row_style
             };
-
-            let mut col: u16 = 0;
-            // Checkbox for multi-select.
-            if self.multi {
-                let glyph = if self.toggles[idx] { '☒' } else { '☐' };
-                slice.set(col, row as u16, glyph, self.checkbox_style);
-                col = col.saturating_add(1);
-                if col < w {
-                    slice.set(col, row as u16, ' ', base);
-                    col = col.saturating_add(1);
+            let wrapped = self
+                .wrapped
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| vec![item.label.clone()]);
+            let prefix_w = self.prefix_cols(item);
+            for (line_i, line_text) in wrapped.iter().enumerate() {
+                if row >= h {
+                    break;
                 }
-            }
-
-            // Shortcut, e.g. `(a)`.
-            if let Some(sc) = item.shortcut {
-                for ch in ['(', sc, ')'] {
+                let mut col: u16 = 0;
+                if line_i == 0 {
+                    // Checkbox for multi-select on the first line.
+                    if self.multi {
+                        let glyph = if self.toggles[idx] { '☒' } else { '☐' };
+                        slice.set(col, row, glyph, self.checkbox_style);
+                        col = col.saturating_add(1);
+                        if col < w {
+                            slice.set(col, row, ' ', base);
+                            col = col.saturating_add(1);
+                        }
+                    }
+                    // Shortcut `(X) `.
+                    if let Some(sc) = item.shortcut {
+                        for ch in ['(', sc, ')'] {
+                            if col >= w {
+                                break;
+                            }
+                            slice.set(col, row, ch, self.shortcut_style);
+                            col = col.saturating_add(1);
+                        }
+                        if col < w {
+                            slice.set(col, row, ' ', base);
+                            col = col.saturating_add(1);
+                        }
+                    }
+                } else {
+                    // Continuation rows: indent to match the label column.
+                    while col < prefix_w && col < w {
+                        slice.set(col, row, ' ', base);
+                        col = col.saturating_add(1);
+                    }
+                }
+                // Label chars for this wrapped line.
+                for ch in line_text.chars() {
                     if col >= w {
                         break;
                     }
-                    slice.set(col, row as u16, ch, self.shortcut_style);
+                    slice.set(col, row, ch, base);
                     col = col.saturating_add(1);
                 }
-                if col < w {
-                    slice.set(col, row as u16, ' ', base);
+                // Fill rest of row so cursor highlight extends full width.
+                while col < w {
+                    slice.set(col, row, ' ', base);
                     col = col.saturating_add(1);
                 }
+                row = row.saturating_add(1);
             }
-
-            // Label.
-            for ch in item.label.chars() {
-                if col >= w {
-                    break;
-                }
-                slice.set(col, row as u16, ch, base);
-                col = col.saturating_add(1);
-            }
-            // Fill remainder so cursor-row highlight extends full width.
-            while col < w {
-                slice.set(col, row as u16, ' ', base);
-                col = col.saturating_add(1);
-            }
+            idx += 1;
         }
     }
 
@@ -287,7 +336,11 @@ impl Component for OptionList {
 
 impl PanelWidget for OptionList {
     fn content_rows(&self) -> usize {
-        self.items.len()
+        if self.wrapped.is_empty() {
+            self.items.len()
+        } else {
+            self.wrapped.iter().map(|l| l.len().max(1)).sum()
+        }
     }
 }
 
@@ -372,6 +425,22 @@ mod tests {
         assert_eq!(grid.cell(4, 0).symbol, 'Y');
         assert_eq!(grid.cell(5, 0).symbol, 'e');
         assert_eq!(grid.cell(6, 0).symbol, 's');
+    }
+
+    #[test]
+    fn wraps_long_labels_after_prepare() {
+        let mut ol = OptionList::new(vec![OptionItem::new(
+            "always allow long-tool in /tmp/workspace/deeply/nested",
+        )]);
+        let area = Rect::new(0, 0, 20, 10);
+        ol.prepare(area, &ctx(20, 10));
+        // With width 20 and no shortcut/checkbox prefix, a ~50-char
+        // label must wrap into multiple lines.
+        assert!(
+            ol.content_rows() > 1,
+            "expected wrapped rows, got {}",
+            ol.content_rows()
+        );
     }
 
     #[test]
