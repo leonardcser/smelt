@@ -478,11 +478,8 @@ impl Component for QuestionWidget {
                     // Delegate to TextInput's edit keys; ignore its
                     // own submit/cancel actions since Enter/Esc were
                     // handled above.
-                    let r = Component::handle_key(
-                        &mut self.other_inputs[self.active_tab],
-                        code,
-                        mods,
-                    );
+                    let r =
+                        Component::handle_key(&mut self.other_inputs[self.active_tab], code, mods);
                     return match r {
                         KeyResult::Action(_) => KeyResult::Consumed,
                         other => other,

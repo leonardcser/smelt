@@ -185,7 +185,15 @@ mod tests {
         let mut buf = make_buf();
         let theme = test_theme();
         render_into_buffer(&mut buf, 40, &theme, |sink| {
-            print_inline_diff(sink, "old\nline\n", "new\nline\n", "/tmp/x.txt", "old\nline\n", 0, 10);
+            print_inline_diff(
+                sink,
+                "old\nline\n",
+                "new\nline\n",
+                "/tmp/x.txt",
+                "old\nline\n",
+                0,
+                10,
+            );
         });
         // The diff renderer emits at least one styled line per changed
         // line; projecting must produce non-empty buffer content.
