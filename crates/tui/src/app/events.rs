@@ -751,7 +751,6 @@ impl App {
         self.last_width = w;
         self.last_height = h;
         self.ui.set_terminal_size(w, h);
-        self.compositor.resize(w, h);
         let _ = width_changed;
         self.screen.redraw();
     }
@@ -1072,7 +1071,7 @@ impl App {
         let cursor_override = prompt_cursor;
         let mut stdout = std::io::stdout();
         let _ = self
-            .compositor
+            .ui
             .render_with(&base, cursor_override, &mut stdout);
 
         // Clean up state.
