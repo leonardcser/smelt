@@ -915,9 +915,11 @@ impl App {
         if let Some(items) = self.screen.custom_status_items() {
             let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
             let (left, right) = spans_to_segments(&mut spans, width, status_bg);
-            self.status_bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
-            self.status_bar.set_left(left);
-            self.status_bar.set_right(right);
+            if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
+                *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
+                bar.set_left(left);
+                bar.set_right(right);
+            }
             return;
         }
 
@@ -1140,9 +1142,11 @@ impl App {
         self.screen.set_status_position(position);
 
         let (left, right) = spans_to_segments(&mut spans, width, status_bg);
-        self.status_bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
-        self.status_bar.set_left(left);
-        self.status_bar.set_right(right);
+        if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
+            *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
+            bar.set_left(left);
+            bar.set_right(right);
+        }
     }
 
     /// Render a full-mode frame using the compositor pipeline.
@@ -1209,19 +1213,24 @@ impl App {
         self.transcript_window.cursor_col = tcursor.clamped_col;
 
         // Sync TranscriptView from the projected buffer.
-        self.transcript_view.sync_from_buffer(
-            self.screen.transcript_projection.buf(),
-            tdata.clamped_scroll as usize,
-            tdata.pad_left,
-        );
-        self.transcript_view.set_cursor(tcursor.soft_cursor);
-        if tdata.has_scrollbar {
-            self.transcript_view.set_scrollbar(
-                tdata.total_rows as usize,
-                viewport_rows as usize,
+        if let Some(tv) = self
+            .ui
+            .layer_mut::<render::transcript_view::TranscriptView>("transcript")
+        {
+            tv.sync_from_buffer(
+                self.screen.transcript_projection.buf(),
                 tdata.clamped_scroll as usize,
-                tdata.scrollbar_col,
+                tdata.pad_left,
             );
+            tv.set_cursor(tcursor.soft_cursor);
+            if tdata.has_scrollbar {
+                tv.set_scrollbar(
+                    tdata.total_rows as usize,
+                    viewport_rows as usize,
+                    tdata.clamped_scroll as usize,
+                    tdata.scrollbar_col,
+                );
+            }
         }
 
         // ── Prompt ──
@@ -1274,30 +1283,34 @@ impl App {
             self.screen.set_prompt_viewport(None);
         }
 
-        // Push prompt data to PromptView.
-        self.prompt_view.set_rows(prompt_output.rows);
-        let prompt_cursor = prompt_output
-            .cursor
-            .map(|(cx, cy)| (cx, prompt_rect.top + cy));
-        self.prompt_view
-            .set_cursor(prompt_cursor, prompt_output.cursor_style);
+        // Push prompt data to PromptView (cursor is layer-relative).
+        if let Some(pv) = self
+            .ui
+            .layer_mut::<render::prompt_view::PromptView>("prompt")
+        {
+            pv.set_rows(prompt_output.rows);
+            pv.set_cursor(prompt_output.cursor, prompt_output.cursor_style);
+        }
 
         // ── Status bar ──
         self.refresh_status_bar();
 
-        // ── Render via compositor ──
+        // ── Update layer rects and focus ──
         let transcript_rect = ui::Rect::new(0, 0, term_w, viewport_rows);
         let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
+        self.ui.set_layer_rect("transcript", transcript_rect);
+        self.ui.set_layer_rect("prompt", prompt_rect);
+        self.ui.set_layer_rect("status", status_rect);
 
-        let base: Vec<(&dyn ui::Component, ui::Rect)> = vec![
-            (&self.transcript_view as &dyn ui::Component, transcript_rect),
-            (&self.prompt_view as &dyn ui::Component, prompt_rect),
-            (&self.status_bar as &dyn ui::Component, status_rect),
-        ];
+        if self.ui.focused_float().is_none() {
+            match self.app_focus {
+                crate::app::AppFocus::Prompt => self.ui.focus_layer("prompt"),
+                crate::app::AppFocus::Content => self.ui.focus_layer("transcript"),
+            }
+        }
 
-        let cursor_override = prompt_cursor;
         let mut stdout = std::io::stdout();
-        let _ = self.ui.render_with(&base, cursor_override, &mut stdout);
+        let _ = self.ui.render(&mut stdout);
 
         // Clean up state.
         self.screen.mark_clean();

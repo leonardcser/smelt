@@ -25,7 +25,7 @@ pub type AttachmentId = u64;
 
 pub use buffer::{BufType, Buffer, Span, SpanStyle};
 pub use buffer_view::BufferView;
-pub use component::{Component, DrawContext, KeyResult};
+pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult};
 pub use compositor::Compositor;
 pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
@@ -244,16 +244,38 @@ impl Ui {
             .collect()
     }
 
+    // ── Layer management ─────────────────────────────────────────
+
+    pub fn add_layer(
+        &mut self,
+        id: impl Into<String>,
+        component: Box<dyn Component>,
+        rect: Rect,
+        zindex: u16,
+    ) {
+        self.compositor.add(id, component, rect, zindex);
+    }
+
+    pub fn set_layer_rect(&mut self, id: &str, rect: Rect) {
+        self.compositor.set_rect(id, rect);
+    }
+
+    pub fn focus_layer(&mut self, id: impl Into<String>) {
+        self.compositor.focus(id);
+    }
+
+    pub fn layer_mut<T: 'static>(&mut self, id: &str) -> Option<&mut T> {
+        self.compositor
+            .component_mut(id)?
+            .as_any_mut()
+            .downcast_mut::<T>()
+    }
+
     // ── Compositor delegation ──────────────────────────────────────
 
-    pub fn render_with<W: std::io::Write>(
-        &mut self,
-        base: &[(&dyn Component, Rect)],
-        cursor_override: Option<(u16, u16)>,
-        w: &mut W,
-    ) -> std::io::Result<()> {
+    pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         self.sync_float_content();
-        self.compositor.render_with(base, cursor_override, w)
+        self.compositor.render(w)
     }
 
     pub fn handle_key(

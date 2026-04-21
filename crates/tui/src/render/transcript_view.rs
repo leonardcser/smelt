@@ -3,7 +3,7 @@ use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::Buffer;
 use ui::buffer_view::BufferView;
-use ui::component::{Component, DrawContext, KeyResult};
+use ui::component::{Component, CursorInfo, DrawContext, KeyResult};
 use ui::grid::{GridSlice, Style};
 use ui::layout::Rect;
 
@@ -18,7 +18,7 @@ pub(crate) struct TranscriptView {
     pad_left: u16,
     scrollbar_col: u16,
     scrollbar: Option<Scrollbar>,
-    cursor: Option<SoftCursor>,
+    cursor_info: Option<CursorInfo>,
 }
 
 impl TranscriptView {
@@ -28,7 +28,7 @@ impl TranscriptView {
             pad_left: 0,
             scrollbar_col: 0,
             scrollbar: None,
-            cursor: None,
+            cursor_info: None,
         }
     }
 
@@ -54,7 +54,29 @@ impl TranscriptView {
     }
 
     pub fn set_cursor(&mut self, cursor: Option<SoftCursor>) {
-        self.cursor = cursor;
+        self.cursor_info = cursor.map(|c| {
+            let (fg, bg) = if theme::is_light() {
+                (
+                    crossterm::style::Color::White,
+                    crossterm::style::Color::Black,
+                )
+            } else {
+                (
+                    crossterm::style::Color::Black,
+                    crossterm::style::Color::White,
+                )
+            };
+            CursorInfo::block(
+                c.col,
+                c.row,
+                c.glyph,
+                Style {
+                    fg: Some(fg),
+                    bg: Some(bg),
+                    ..Style::default()
+                },
+            )
+        });
     }
 }
 
@@ -80,32 +102,22 @@ impl Component for TranscriptView {
                 grid.set(self.scrollbar_col, row, ' ', style);
             }
         }
-
-        if let Some(ref c) = self.cursor {
-            if c.row < h && c.col < w {
-                let (fg, bg) = if theme::is_light() {
-                    (
-                        crossterm::style::Color::White,
-                        crossterm::style::Color::Black,
-                    )
-                } else {
-                    (
-                        crossterm::style::Color::Black,
-                        crossterm::style::Color::White,
-                    )
-                };
-                let style = Style {
-                    fg: Some(fg),
-                    bg: Some(bg),
-                    ..Style::default()
-                };
-                grid.set(c.col, c.row, c.glyph, style);
-            }
-        }
     }
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
         KeyResult::Ignored
+    }
+
+    fn cursor(&self) -> Option<CursorInfo> {
+        self.cursor_info.clone()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -163,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_soft_cursor() {
+    fn cursor_info_from_soft_cursor() {
         let buf = make_buf(&["abc"]);
         let mut view = TranscriptView::new(20);
         view.sync_from_buffer(&buf, 0, 0);
@@ -173,18 +185,12 @@ mod tests {
             glyph: 'b',
         }));
 
-        let mut grid = Grid::new(20, 1);
-        let ctx = DrawContext {
-            terminal_width: 20,
-            terminal_height: 1,
-            focused: true,
-        };
-        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
-        view.draw(Rect::new(0, 0, 20, 1), &mut slice, &ctx);
-
-        assert_eq!(grid.cell(1, 0).symbol, 'b');
-        assert!(grid.cell(1, 0).style.fg.is_some());
-        assert!(grid.cell(1, 0).style.bg.is_some());
+        let ci = view.cursor().unwrap();
+        assert_eq!((ci.col, ci.row), (1, 0));
+        let cs = ci.style.unwrap();
+        assert_eq!(cs.glyph, 'b');
+        assert!(cs.style.fg.is_some());
+        assert!(cs.style.bg.is_some());
     }
 
     #[test]

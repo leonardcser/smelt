@@ -1,4 +1,4 @@
-use crate::component::{Component, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -234,9 +234,9 @@ impl Component for TextInput {
         }
     }
 
-    fn cursor(&self) -> Option<(u16, u16)> {
+    fn cursor(&self) -> Option<CursorInfo> {
         let visible_col = self.cursor_col.saturating_sub(self.scroll_offset);
-        Some((visible_col as u16, 0))
+        Some(CursorInfo::hardware(visible_col as u16, 0))
     }
 }
 
@@ -316,7 +316,9 @@ mod tests {
         let mut ti = input();
         ti.set_text("abc");
         ti.move_left();
-        assert_eq!(ti.cursor(), Some((2, 0)));
+        let ci = ti.cursor().unwrap();
+        assert_eq!((ci.col, ci.row), (2, 0));
+        assert!(ci.style.is_none());
     }
 
     #[test]
