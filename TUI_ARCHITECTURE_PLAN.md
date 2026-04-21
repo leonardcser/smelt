@@ -110,7 +110,9 @@ patch.
   because the clear path tears down screen state but doesn't force
   a full compositor redraw against the new buffer contents. Fix
   during the prompt + compositor cleanup in 9.6 / 9.9.
-- **Confirm / Question / Agents dialogs still use the legacy
+- ~~Confirm / Question / Agents dialogs still use the legacy~~ (resolved
+  in Step 9.5b items 9–12; all dialogs now on the panel framework.)
+- **(historical) Confirm / Question / Agents dialogs used the legacy
   `trait Dialog`.** They render via the separate `Frame` / `RenderOut`
   path and therefore ignore the fg-accent selection convention,
   the hints-gap rule, and the callback registry. Fixed when they
@@ -1510,16 +1512,11 @@ independently reversible.
    selected)]`. `impl DialogState for Question`. `blocks_agent()
    = true`. Emits answer via `App::resolve_question`.
 
-10. **Migrate Confirm previews** — port the **built-in** `ConfirmPreview`
-    variants (`Diff`, `Notebook`, `FileContent`, `BashBody`) to
-    `fn build_preview_buffer(variant, width, theme, ui_bufs) -> BufId`
-    via the step-4 helper. **No changes** to `print_inline_diff`,
-    `render_notebook_preview`, `print_syntax_file`, or
-    `BashHighlighter`: SpanCollector already captures their output.
-    `PluginMarkdown` is **not** ported — it's deleted in item 11a
-    before the Confirm dialog migration. Test: render an `edit_file`
-    diff preview and verify the buffer's Spans match the expected
-    colors.
+10. ✅ **Migrate Confirm previews** — `ConfirmPreview::render_into_buffer`
+    projects each variant (`Diff`, `Notebook`, `FileContent`,
+    `BashBody`) through `render/to_buffer::render_into_buffer`. No
+    changes needed to `print_inline_diff`, `render_notebook_preview`,
+    `print_syntax_file`, `BashHighlighter`. `PluginMarkdown` deleted.
 
 11a. **LuaTask runtime + dialog/theme APIs + drop plugin_confirm.**
     Five small commits, landing in order:
@@ -1572,27 +1569,50 @@ independently reversible.
     runtime with `EngineAsk` and collapses `callbacks` /
     `ResolveToolResult`.
 
-11. **Migrate Confirm dialog** → `crates/tui/src/app/dialogs/confirm.rs`.
-    Panels: `[Title(Content), Summary(Content, optional),
-    Preview(Content, from step 10), Options(OptionList widget),
-    Reason(TextInput widget, shown when Always menu expanded)]`.
-    State tracks Always-menu expansion + reason-editing mode.
-    `blocks_agent() = true`. Deferred-open via `pending_dialogs`
-    queue (App-level, unchanged). Handles **only built-in tool
-    approvals** — plugin tools use `smelt.api.dialog.open` from
-    their `execute` function.
+11. ✅ **Migrate Confirm dialog** → `crates/tui/src/app/dialogs/confirm.rs`.
+    Panels: `[Title(Content Fit, not focusable),
+    Summary(Content Fit, collapse_when_empty),
+    Preview(Content Fill, dashed separator, collapse_when_empty),
+    Options(OptionList widget Fit, default focus),
+    Reason(TextInput widget Fit, collapse_when_empty)]`. PageUp/Down
+    scroll the preview (via new `Dialog::scroll_panel` public helper);
+    `e` focuses the Reason input. `blocks_agent() = true`. Deferred-
+    open via `pending_dialogs` queue, now gated by
+    `focused_float_blocks_agent` instead of legacy `active_dialog`.
+    Handles built-in tool approvals only; plugin tools use
+    `smelt.api.dialog.open`. Trade-off: the inline-textarea-per-option
+    UX from the legacy dialog is replaced by a dedicated Reason panel
+    (simpler framework fit).
 
 **Cleanup:**
 
-12. **Delete legacy dialog infra.** Once 9 and 11 land:
-    - `render/dialogs/confirm.rs`, `render/dialogs/question.rs`
-    - `trait render::Dialog`, `render::DialogResult`
-    - `render::dialogs::{TextArea, begin_dialog_draw,
-      finish_dialog_frame, render_inline_textarea}`
-    - `App::active_dialog`, `App::handle_dialog_result`,
-      `App::open_dialog`, `DeferredDialog`
-    - Retain `RenderOut` / `StyleState` / `Frame` / `paint_line`
-      until a follow-up step verifies no callers remain (Step 9.7).
+12. ✅ **Delete legacy dialog infra.** Landed with the Confirm
+    migration:
+    - `ConfirmDialog` struct + legacy render fn gone from
+      `render/dialogs/confirm.rs` (only `ConfirmPreview` remains as a
+      pub(crate) data holder).
+    - `QuestionDialog` struct gone from `render/dialogs/question.rs`
+      (only `Question`, `QuestionOption`, `parse_questions` remain).
+    - `trait render::Dialog`, `render::DialogResult`,
+      `render::dialogs::{TextArea, begin_dialog_draw,
+      finish_dialog_frame, render_inline_textarea, char_to_byte}`
+      all deleted.
+    - `App::active_dialog` local + `App::open_dialog`,
+      `App::handle_dialog_result`, `App::finalize_dialog_close`,
+      `App::render_frame`, `App::render_dialog`,
+      `Screen::draw_viewport_dialog_frame`, `DialogPlacement`,
+      and dead `OpenDialog` variants on
+      `CommandAction`/`InputOutcome`/`EventOutcome` all deleted.
+    - `DeferredDialog` kept (it's a queued-permission-request enum,
+      not a legacy dialog trait).
+    - `RenderOut` / `StyleState` / `Frame` / `paint_line` retained
+      for Step 9.7.
+    - Obsolete harness helpers (`open_confirm_dialog*`,
+      `draw_dialog_tick`, `confirm_cycle`) and the two
+      legacy-rendering integration test files
+      (`dialog_lifecycle.rs`, `dialog_overlay_interaction.rs`) removed;
+      new panel-based dialog tests land with the compositor-level
+      harness in Step 9.7.
 
 Bug fixes bundled with this step:
 - Dialog dismiss restoring vim mode when Question was opened from
@@ -1792,26 +1812,25 @@ StyledSegment, most of prompt_data.rs, PromptView.
 surfaces render through BufferView + optional scrollbar. Delete
 TranscriptView. One component type for all buffer-backed surfaces.
 
-### Seam check (2026-04-21)
+### Seam check (2026-04-22)
 
-Re-audit after Step 6h/6i/6j landed. The compositor path handles the
-"normal" frame and six migrated floats. A parallel legacy path
-(`Frame`, `RenderOut`, `StyleState`, `Screen::draw_viewport_dialog_frame`,
-`draw_prompt_sections`, `paint_completer_float`, `queue_status_line`)
-is still live for:
-- Three unmigrated dialogs (Confirm, Question, Agents) via
-  `trait Dialog` + `active_dialog`.
-- Completer popup (only drawn from `draw_prompt_sections`, which is
-  only reached from the legacy prompt path).
-- Cmdline, notification overlays.
-- Status bar queueing during dialog-active frames (dual-write with
-  the new `StatusBar` component).
+Re-audit after Step 9.5b items 9–12 landed. Every dialog now runs
+through the compositor panel framework (Confirm, Question, Agents,
+Resume, Rewind, Permissions, Ps, Help, Export + Lua-driven dialogs).
+`trait Dialog`, `DialogResult`, `active_dialog`, and
+`Screen::draw_viewport_dialog_frame` are gone. The remaining legacy-
+path surface:
+- Completer popup — still drawn via `draw_prompt_sections` /
+  `paint_completer_float`.
+- Cmdline — custom overlay in `draw_prompt_sections`; no compositor
+  float yet.
+- Notification overlays — legacy overlay row.
+- `Frame`, `RenderOut`, `StyleState`, `paint_line`, `queue_status_line`,
+  `queue_dialog_gap` — still used by `render_normal` / prompt
+  rendering; deletion scheduled for Step 9.7 after 9.6 migrates
+  completer/cmdline/notifications.
 
-Both engines drift: transcript selection, completer visibility,
-click coord offset, prompt shift on newline, wheel-over-dialog
-scrolling the transcript, transparent dialog bg, top-anchored
-dialogs — all regressions land on this seam. Step 9 below is the
-dedicated seam-elimination phase.
+Step 9.6 + 9.7 pick up from here.
 
 Next: Step 9 (seam elimination).
 
