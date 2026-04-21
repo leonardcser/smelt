@@ -1901,8 +1901,13 @@ impl App {
                         is_error,
                     });
                 }
-                crate::lua::TaskDriveOutput::OpenDialog { .. } => {
-                    // Wired in step (iv).
+                crate::lua::TaskDriveOutput::OpenDialog {
+                    dialog_id, opts, ..
+                } => {
+                    if let Err(e) = super::dialogs::lua_dialog::open(self, dialog_id, opts) {
+                        self.screen.notify_error(format!("dialog.open: {e}"));
+                        self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
+                    }
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {
                     self.screen.notify_error(msg);

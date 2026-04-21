@@ -10,6 +10,7 @@
 pub mod agents;
 pub mod export;
 pub mod help;
+pub mod lua_dialog;
 pub mod permissions;
 pub mod ps;
 pub mod question;
