@@ -101,9 +101,8 @@ use super::status::{
 };
 use super::working::WorkingState;
 use super::{
-    cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, reasoning_color,
-    DialogPlacement, Frame, FramePrompt, RenderOut, StdioBackend, StyleState, TerminalBackend,
-    SPINNER_FRAMES,
+    cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, reasoning_color, Frame,
+    FramePrompt, RenderOut, StdioBackend, StyleState, TerminalBackend, SPINNER_FRAMES,
 };
 use crate::input::{InputSnapshot, InputState};
 use crate::theme;
@@ -2182,94 +2181,6 @@ impl Screen {
         self.has_scrollback = false;
 
         (clamped, clamped_cursor_line, clamped_cursor_col)
-    }
-
-    /// Alt-buffer dialog frame: paints transcript into the top region
-    /// and returns a `DialogPlacement` for where the caller should draw
-    /// the dialog. Reserves `dialog_height + 1 gap + 1 status` rows at
-    /// the bottom. No scrollback commits; full repaint every frame.
-    pub fn draw_viewport_dialog_frame(
-        &mut self,
-        out: &mut RenderOut,
-        width: usize,
-        dialog_height: u16,
-    ) -> (bool, Option<DialogPlacement>) {
-        let _perf = crate::perf::begin("render:viewport_dialog_frame");
-        self.refresh_cursor_owner();
-        self.update_spinner();
-
-        let raw_dialog_height = dialog_height;
-        let (term_w, term_h) = self.size();
-        out.init_cursor(0, term_w, term_h);
-
-        let has_new_blocks = self.transcript.history.has_unflushed();
-        let has_ephemeral = self.has_ephemeral();
-        let dialog_height_changed = dialog_height != self.prompt.prev_dialog_height;
-
-        if self.prompt.drawn
-            && !has_new_blocks
-            && !dialog_height_changed
-            && !self.dirty
-            && !has_ephemeral
-        {
-            let placement = self.prompt.prev_dialog_row.map(|row| {
-                let max_avail = term_h.saturating_sub(2 + row);
-                DialogPlacement {
-                    row,
-                    granted_rows: dialog_height.min(max_avail),
-                }
-            });
-            return (false, placement);
-        }
-
-        self.layout = super::layout::LayoutState::compute(&super::layout::LayoutInput {
-            term_width: term_w,
-            term_height: term_h,
-            prompt_height: 0,
-            dialog_height: Some(dialog_height),
-            constrain_dialog: self.constrain_dialog,
-        });
-        let viewport_rows = self.layout.viewport_rows();
-
-        out.row = Some(0);
-        out.move_to(0, 0);
-
-        self.paint_transcript(out, width, viewport_rows, 0);
-
-        out.reset_style();
-        if viewport_rows < term_h {
-            for row in viewport_rows..term_h {
-                out.move_to(0, row);
-                let _ = out.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-            }
-        }
-
-        let dialog_row = viewport_rows;
-        self.prompt.drawn = true;
-        self.dirty = false;
-        self.prompt.anchor_row = Some(0);
-        self.prompt.prev_dialog_row = Some(dialog_row);
-        self.prompt.prev_dialog_height = raw_dialog_height;
-        self.prompt.prev_dialog_gap = 0;
-        self.prompt.prev_rows = 0;
-        self.prompt.prev_prompt_ui_rows = 0;
-
-        self.has_scrollback = false;
-
-        let placement = if let Some(d) = &self.layout.dialog {
-            let rect = d.rect;
-            let p = DialogPlacement {
-                row: rect.top,
-                granted_rows: rect.height,
-            };
-            self.layout
-                .push_float(rect, 10, super::layout::HitRegion::Dialog);
-            Some(p)
-        } else {
-            None
-        };
-
-        (true, placement)
     }
 
     /// Measure prompt height without painting. Used by `draw_frame` to

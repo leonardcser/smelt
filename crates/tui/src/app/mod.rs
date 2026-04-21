@@ -237,7 +237,6 @@ enum EventOutcome {
         display: String,
     },
     MenuResult(MenuResult),
-    OpenDialog(Box<dyn render::Dialog>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
@@ -251,7 +250,6 @@ pub enum CommandAction {
     Compact {
         instructions: Option<String>,
     },
-    OpenDialog(Box<dyn render::Dialog>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
@@ -353,7 +351,6 @@ enum InputOutcome {
         instructions: Option<String>,
     },
     Quit,
-    OpenDialog(Box<dyn render::Dialog>),
     CustomCommand(Box<crate::custom_commands::CustomCommand>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
@@ -716,8 +713,6 @@ impl App {
         let mut term_events = EventStream::new();
         let mut agent: Option<TurnState> = None;
 
-        let mut active_dialog: Option<Box<dyn render::Dialog>> = None;
-
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
             let trimmed = msg.trim();
@@ -727,9 +722,7 @@ impl App {
                     self.exec_kill = Some(kill);
                 }
             } else if trimmed == "/resume" {
-                if let CommandAction::OpenDialog(dlg) = self.handle_command(trimmed) {
-                    self.open_dialog(dlg, &mut active_dialog);
-                }
+                self.handle_command(trimmed);
             } else if trimmed == "/settings" {
                 self.input.open_settings(&self.settings_state());
                 self.screen.mark_dirty();
@@ -778,9 +771,7 @@ impl App {
             }
 
             // ── Drain engine events (paused only for Confirm/AskQuestion) ──
-            let blocked = active_dialog.as_ref().is_some_and(|d| d.blocks_agent())
-                || self.focused_float_blocks_agent();
-            if !blocked {
+            if !self.focused_float_blocks_agent() {
                 loop {
                     let ev = match self.engine.try_recv() {
                         Ok(ev) => ev,
@@ -807,7 +798,6 @@ impl App {
                             ctrl,
                             &ag.pending,
                             &mut pending_dialogs,
-                            &mut active_dialog,
                             t.last_keypress,
                         )
                     } else {
@@ -837,13 +827,7 @@ impl App {
                     let content = Content::text(text.clone());
                     // Quit is ignored here: a queued "/exit" shouldn't terminate
                     // the main loop from this re-entry point.
-                    self.apply_input_outcome(
-                        outcome,
-                        content,
-                        &text,
-                        &mut agent,
-                        &mut active_dialog,
-                    );
+                    self.apply_input_outcome(outcome, content, &text, &mut agent);
                 }
             }
 
@@ -895,7 +879,6 @@ impl App {
                     ctrl,
                     pending,
                     &mut pending_dialogs,
-                    &mut active_dialog,
                     t.last_keypress,
                 );
                 match action {
@@ -915,14 +898,17 @@ impl App {
             }
             // Re-dispatch queued dialogs.  Each goes through dispatch_control
             // so auto-approval checks re-run ("always allow" → auto-approve rest).
-            if !pending_dialogs.is_empty() && active_dialog.is_none() && agent.is_some() {
+            if !pending_dialogs.is_empty()
+                && !self.focused_float_blocks_agent()
+                && agent.is_some()
+            {
                 let idle = t
                     .last_keypress
                     .map(|lk| lk.elapsed() >= Duration::from_millis(CONFIRM_DEFER_MS))
                     .unwrap_or(true);
                 while idle
                     && !pending_dialogs.is_empty()
-                    && active_dialog.is_none()
+                    && !self.focused_float_blocks_agent()
                     && agent.is_some()
                 {
                     let deferred = pending_dialogs.pop_front().unwrap();
@@ -937,7 +923,6 @@ impl App {
                         ctrl,
                         pending,
                         &mut pending_dialogs,
-                        &mut active_dialog,
                         t.last_keypress,
                     );
                     match action {
@@ -953,7 +938,7 @@ impl App {
 
             // ── Render ───────────────────────────────────────────────────
             let will_render = self.screen.is_dirty();
-            self.render_frame(agent.is_some(), &mut active_dialog);
+            self.render_normal(agent.is_some());
             if will_render {
                 last_frame = Instant::now();
             }
@@ -993,9 +978,7 @@ impl App {
                     };
 
                     if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
-                        if self.dispatch_terminal_event(
-                            ev, &mut agent, &mut t, &mut active_dialog,
-                        ) {
+                        if self.dispatch_terminal_event(ev, &mut agent, &mut t) {
                             break 'main;
                         }
                     }
@@ -1004,9 +987,7 @@ impl App {
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
                             if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
-                                if self.dispatch_terminal_event(
-                                    ev, &mut agent, &mut t, &mut active_dialog,
-                                ) {
+                                if self.dispatch_terminal_event(ev, &mut agent, &mut t) {
                                     break 'main;
                                 }
                             }
@@ -1018,18 +999,17 @@ impl App {
                         self.scroll_under_mouse(scroll_row, scroll_delta);
                     }
 
-                    self.render_frame(agent.is_some(), &mut active_dialog);
+                    self.render_normal(agent.is_some());
                     last_frame = Instant::now();
                 }
 
-                Some(ev) = self.engine.recv(), if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) && !self.focused_float_blocks_agent() => {
+                Some(ev) = self.engine.recv(), if !self.focused_float_blocks_agent() => {
                     if let Some(ref mut ag) = agent {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
                             &mut pending_dialogs,
-                            &mut active_dialog,
                             t.last_keypress,
                         );
                         match action {
@@ -1085,10 +1065,6 @@ impl App {
                     };
                     want.saturating_sub(since)
                 }) => {
-                    // Mark time-based animations dirty.
-                    if let Some(d) = active_dialog.as_mut() {
-                        d.mark_dirty();
-                    }
                     if self.ui.focused_float().is_some() {
                         self.screen.mark_dirty();
                     }
@@ -1104,7 +1080,7 @@ impl App {
                     // without requiring further mouse motion.
                     self.tick_drag_autoscroll();
                     // Render deferred engine events + animations.
-                    self.render_frame(agent.is_some(), &mut active_dialog);
+                    self.render_normal(agent.is_some());
                     last_frame = Instant::now();
                 }
             }
@@ -1619,66 +1595,6 @@ impl App {
         engine::registry::update_status(my_pid, engine::registry::AgentStatus::Idle);
     }
 
-    /// Render a complete frame. When a dialog is active, content + dialog +
-    /// status line are all painted inside a single `Frame` (one atomic
-    /// synchronized update). Without a dialog, content + prompt are rendered
-    /// via the compositor pipeline.
-    fn render_frame(
-        &mut self,
-        agent_running: bool,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
-    ) {
-        self.screen.set_app_focus(self.app_focus);
-        if let Some(d) = active_dialog.as_mut() {
-            let dialog_height = d.height();
-            let constrain = d.constrain_height();
-            let mut frame = render::Frame::begin(self.screen.backend());
-            let (redirtied, placement) = self.render_dialog(&mut frame, dialog_height, constrain);
-            if redirtied {
-                d.mark_dirty();
-            }
-            if let Some(p) = placement {
-                let w = self.screen.size().0;
-                d.draw(&mut frame, p.row, w, p.granted_rows);
-            }
-            self.screen.queue_dialog_gap(&mut frame);
-            self.screen.queue_status_line(&mut frame);
-        } else {
-            self.render_normal(agent_running);
-        }
-    }
-
-    /// Open a dialog, applying all the side-effects the host needs so no
-    /// call site has to remember them:
-    ///  - erase the prompt
-    ///  - share the kill ring so Ctrl+K/Y span input ↔ dialog
-    ///  - for blocking dialogs: flush pending blocks to scrollback and
-    ///    pause the working-spinner clock (the agent is suspended until
-    ///    the user responds)
-    ///
-    /// Any dialog currently in `active_dialog` is replaced; the caller is
-    /// expected to have finalized it already (via `finalize_dialog_close`).
-    pub(super) fn open_dialog(
-        &mut self,
-        mut dialog: Box<dyn render::Dialog>,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
-    ) {
-        if dialog.blocks_agent() {
-            self.screen.mark_blocks_dirty();
-            self.screen.pause_spinner();
-        }
-        self.screen.erase_prompt();
-        dialog.set_kill_ring(self.input.take_kill_ring());
-        *active_dialog = Some(dialog);
-    }
-
-    /// Clean up the screen after a dialog has been removed from
-    /// `active_dialog`. Idempotent: safe to call when no blocking dialog
-    /// was ever opened (`resume_spinner` is a no-op in that case).
-    pub(super) fn finalize_dialog_close(&mut self) {
-        self.screen.clear_dialog_area();
-        self.screen.resume_spinner();
-    }
 }
 
 /// Poll one item from a `futures_core::Stream`, equivalent to `StreamExt::next`.

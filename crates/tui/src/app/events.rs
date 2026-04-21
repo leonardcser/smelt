@@ -22,81 +22,31 @@ impl App {
         ev: Event,
         agent: &mut Option<TurnState>,
         t: &mut Timers,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
             self.screen.set_focused(matches!(ev, Event::FocusGained));
             return false;
         }
 
-        // Route events to the active dialog if one is showing.
-        if active_dialog.is_some() {
-            // Terminal resize: full clear + redraw screen + redraw dialog.
-            if let Event::Resize(w, h) = ev {
-                self.handle_resize(w, h);
-                active_dialog.as_mut().unwrap().handle_resize();
-                return false;
-            }
-            // BackTab (shift-tab): toggle mode. If the new mode auto-allows
-            // the pending tool call, accept the dialog automatically.
-            if matches!(
-                ev,
-                Event::Key(KeyEvent {
-                    code: KeyCode::BackTab,
-                    ..
-                })
-            ) {
-                self.toggle_mode();
-                if let Some(ctx) = self.confirm_context.take() {
-                    if self
-                        .permissions
-                        .decide(self.mode, &ctx.tool_name, &ctx.args, false)
-                        == Decision::Allow
-                    {
-                        active_dialog.take();
-                        self.finalize_dialog_close();
-                        self.screen
-                            .set_active_status(&ctx.call_id, ToolStatus::Pending);
-                        self.send_permission_decision(ctx.request_id, true, None);
-                    } else {
-                        // Mode changed but still needs confirmation — keep dialog open.
-                        self.confirm_context = Some(ctx);
-                    }
-                }
-                return false;
-            }
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = ev
-            {
-                // Ctrl+L: full redraw (same as outside a dialog).
-                if code == KeyCode::Char('l') && modifiers.contains(KeyModifiers::CONTROL) {
-                    self.screen.redraw();
-                    active_dialog.as_mut().unwrap().mark_dirty();
-                    return false;
-                }
-                let mut d = active_dialog.take().unwrap();
-                if let Some(result) = d.handle_key(code, modifiers) {
-                    // Sync kill ring back from dialog.
-                    if let Some(kr) = d.kill_ring() {
-                        self.input.set_kill_ring(kr.to_string());
-                    }
-                    self.handle_dialog_result(result, agent);
-                    self.input.restore_stash();
-                } else {
-                    *active_dialog = Some(d);
-                }
-            }
-            return false;
-        }
-
         // Compositor float: when a float window is focused, route keys
         // through the compositor. Builtin floats get a chance to intercept
-        // keys before the generic FloatDialog handler runs.
+        // keys before the generic Dialog handler runs. BackTab on a
+        // Confirm float toggles app mode and — if the new mode
+        // auto-allows the pending tool — resolves the dialog.
         if self.ui.focused_float().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
                 return false;
+            }
+            if let Event::Key(KeyEvent {
+                code: KeyCode::BackTab,
+                ..
+            }) = ev
+            {
+                if self.confirm_context.is_some() {
+                    self.handle_confirm_backtab(agent);
+                    return false;
+                }
             }
             if let Event::Key(KeyEvent {
                 code, modifiers, ..
@@ -118,7 +68,7 @@ impl App {
         // all key events to it. Esc cancels, Enter executes.
         if self.screen.cmdline.active {
             if let Event::Key(k) = ev {
-                return self.handle_cmdline_key(k, agent, active_dialog);
+                return self.handle_cmdline_key(k, agent);
             }
             return false;
         }
@@ -228,10 +178,6 @@ impl App {
                 self.screen.mark_dirty();
                 false
             }
-            EventOutcome::OpenDialog(dlg) => {
-                self.open_dialog(dlg, active_dialog);
-                false
-            }
             EventOutcome::Exec(rx, kill) => {
                 self.screen.erase_prompt();
                 self.exec_rx = Some(rx);
@@ -263,13 +209,7 @@ impl App {
                         } else {
                             self.process_input(&text)
                         };
-                        if self.apply_input_outcome(
-                            outcome,
-                            content,
-                            &display,
-                            agent,
-                            active_dialog,
-                        ) {
+                        if self.apply_input_outcome(outcome, content, &display, agent) {
                             return true;
                         }
                     } else if !self.queued_messages.is_empty() {
@@ -284,20 +224,14 @@ impl App {
                         } else {
                             let outcome = self.process_input(&queued);
                             let content = Content::text(queued.clone());
-                            if self.apply_input_outcome(
-                                outcome,
-                                content,
-                                &queued,
-                                agent,
-                                active_dialog,
-                            ) {
+                            if self.apply_input_outcome(outcome, content, &queued, agent) {
                                 return true;
                             }
                         }
                     }
                 }
                 // Restore stash unless a modal/dialog was opened (it will restore on close).
-                if !self.input.has_modal() && active_dialog.is_none() {
+                if !self.input.has_modal() && self.ui.focused_float().is_none() {
                     self.input.restore_stash();
                 }
                 false
@@ -805,7 +739,6 @@ impl App {
             CommandAction::Compact { instructions } => {
                 return InputOutcome::Compact { instructions }
             }
-            CommandAction::OpenDialog(dlg) => return InputOutcome::OpenDialog(dlg),
             CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }
@@ -836,24 +769,6 @@ impl App {
     }
 
     // ── Tick ─────────────────────────────────────────────────────────────
-
-    /// Render a dialog-mode frame into the provided output buffer.
-    /// Returns `(redirtied, placement)` — the bool indicates whether
-    /// content was drawn (caller should re-dirty the dialog), and the
-    /// placement carries the row budget for the dialog.
-    pub(super) fn render_dialog(
-        &mut self,
-        out: &mut render::RenderOut,
-        dialog_height: u16,
-        constrain: bool,
-    ) -> (bool, Option<render::DialogPlacement>) {
-        let _perf = crate::perf::begin("app:tick");
-        let w = render::term_width();
-        self.screen.set_dialog_open(true);
-        self.screen.set_constrain_dialog(constrain);
-        self.screen
-            .draw_viewport_dialog_frame(out, w, dialog_height)
-    }
 
     /// Build the status-bar position record for the focused window.
     /// Buffer-agnostic: reads the current buffer + byte offset from
@@ -1826,6 +1741,51 @@ impl App {
         }
     }
 
+    /// BackTab (shift-tab) on an open Confirm float: toggle app mode,
+    /// and if the new mode auto-allows the pending tool call, resolve
+    /// the confirm with approval and close the float.
+    fn handle_confirm_backtab(&mut self, _agent: &mut Option<super::TurnState>) {
+        self.toggle_mode();
+        let Some(ctx) = self.confirm_context.take() else {
+            return;
+        };
+        if self
+            .permissions
+            .decide(self.mode, &ctx.tool_name, &ctx.args, false)
+            == Decision::Allow
+        {
+            if let Some(win) = self.ui.focused_float() {
+                self.float_states.remove(&win);
+                self.close_float(win);
+            }
+            self.screen
+                .set_active_status(&ctx.call_id, ToolStatus::Pending);
+            self.send_permission_decision(ctx.request_id, true, None);
+        } else {
+            // Mode changed but still needs confirmation — keep dialog open.
+            self.confirm_context = Some(ctx);
+        }
+    }
+
+    /// Close the focused float if it doesn't block the agent (e.g. Ps,
+    /// Permissions, Resume). Used before opening a blocking dialog so
+    /// only one float is visible at a time.
+    pub(super) fn close_focused_non_blocking_float(&mut self) {
+        let Some(win) = self.ui.focused_float() else {
+            return;
+        };
+        let is_non_blocking = self
+            .float_states
+            .get(&win)
+            .is_some_and(|s| !s.blocks_agent());
+        if is_non_blocking {
+            if let Some(mut state) = self.float_states.remove(&win) {
+                state.on_dismiss(self, win);
+            }
+            self.close_float(win);
+        }
+    }
+
     /// True when the focused float dialog blocks agent-event drain
     /// (Confirm / Question gate tool-call permission).
     pub(super) fn focused_float_blocks_agent(&self) -> bool {
@@ -2705,7 +2665,6 @@ impl App {
         &mut self,
         k: KeyEvent,
         agent: &mut Option<super::TurnState>,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) -> bool {
         use crossterm::event::KeyModifiers as M;
         if !self.screen.cmdline.active {
@@ -2734,9 +2693,6 @@ impl App {
                             } else {
                                 self.compact_history(instructions);
                             }
-                        }
-                        CommandAction::OpenDialog(dlg) => {
-                            self.open_dialog(dlg, active_dialog);
                         }
                         CommandAction::Exec(rx, kill) => {
                             self.exec_rx = Some(rx);

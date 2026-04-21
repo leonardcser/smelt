@@ -42,18 +42,9 @@ pub use history::{
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 
 pub use status::StatusPosition;
-pub(crate) use status::{draw_bar, BarSpan};
+pub(crate) use status::BarSpan;
 
-pub use dialogs::{
-    parse_questions, AgentSnapshot, ConfirmDialog, Dialog, DialogResult, Question, QuestionDialog,
-    QuestionOption, SharedSnapshots,
-};
-
-/// Layout placement computed by `draw_frame` for the active dialog.
-pub struct DialogPlacement {
-    pub row: u16,
-    pub granted_rows: u16,
-}
+pub use dialogs::{parse_questions, AgentSnapshot, Question, QuestionOption, SharedSnapshots};
 
 use crate::input::InputState;
 use crate::theme;

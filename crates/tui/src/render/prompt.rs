@@ -14,17 +14,6 @@ pub(super) struct PromptState {
     /// Computed each frame inside `draw_frame`, exposed via `dialog_row()`
     /// getter for the app loop.
     pub prev_dialog_row: Option<u16>,
-    /// Dialog height from the last full layout pass. When the dialog
-    /// height changes, the early-exit path must be skipped to
-    /// recompute scroll and placement.
-    pub prev_dialog_height: u16,
-    /// Whether the last dialog-mode frame drew a 1-row gap between the
-    /// content above and the dialog.  When the gap was drawn and the
-    /// dialog scrolled the content into scrollback, the gap lands as a
-    /// trailing blank in scrollback — the next block render must
-    /// suppress its own leading gap to avoid duplication.  Fullscreen
-    /// dialogs omit the gap, so no suppression is needed.
-    pub prev_dialog_gap: u16,
     /// Persisted scroll offset for multi-line input (vim-style viewport).
     pub input_scroll: usize,
     /// Screen position `(col, row)` of the software block cursor from
@@ -42,8 +31,6 @@ impl PromptState {
             prev_prompt_ui_rows: 0,
             anchor_row: None,
             prev_dialog_row: None,
-            prev_dialog_height: 0,
-            prev_dialog_gap: 0,
             input_scroll: 0,
             soft_cursor: None,
             viewport: None,
