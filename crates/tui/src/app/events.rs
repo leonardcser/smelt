@@ -1804,6 +1804,17 @@ impl App {
         }
     }
 
+    /// True when the focused float dialog blocks agent-event drain
+    /// (Confirm / Question gate tool-call permission).
+    pub(super) fn focused_float_blocks_agent(&self) -> bool {
+        let Some(win) = self.ui.focused_float() else {
+            return false;
+        };
+        self.float_states
+            .get(&win)
+            .is_some_and(|s| s.blocks_agent())
+    }
+
     /// Drive per-tick refresh for the focused builtin float (e.g.
     /// agents dialog syncing live subagent snapshots into its buffer).
     pub(super) fn tick_focused_float(&mut self) {

@@ -19,6 +19,13 @@ use super::{App, TurnState};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 pub trait DialogState {
+    /// Whether this dialog pauses the engine-event drain while open.
+    /// True for Confirm / Question (permission prompts that block a
+    /// tool call); false for everything else. Default: `false`.
+    fn blocks_agent(&self) -> bool {
+        false
+    }
+
     /// Intercept a key before the Dialog's default handler runs. Return
     /// `Some` to short-circuit, `None` to let the default (nav, Enter,
     /// Esc) take over. Default: no interception.

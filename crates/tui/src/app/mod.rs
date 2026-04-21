@@ -777,7 +777,9 @@ impl App {
             }
 
             // ── Drain engine events (paused only for Confirm/AskQuestion) ──
-            if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) {
+            let blocked = active_dialog.as_ref().is_some_and(|d| d.blocks_agent())
+                || self.focused_float_blocks_agent();
+            if !blocked {
                 loop {
                     let ev = match self.engine.try_recv() {
                         Ok(ev) => ev,
@@ -1020,7 +1022,7 @@ impl App {
                     last_frame = Instant::now();
                 }
 
-                Some(ev) = self.engine.recv(), if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) => {
+                Some(ev) = self.engine.recv(), if !active_dialog.as_ref().is_some_and(|d| d.blocks_agent()) && !self.focused_float_blocks_agent() => {
                     if let Some(ref mut ag) = agent {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
