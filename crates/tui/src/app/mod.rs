@@ -190,8 +190,6 @@ pub struct App {
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub pending_float_ops: Vec<FloatOp>,
     pub ui: ui::Ui,
-    /// Compositor-based rendering pipeline.
-    compositor: ui::Compositor,
     transcript_view: crate::render::transcript_view::TranscriptView,
     prompt_view: crate::render::prompt_view::PromptView,
     status_bar: ui::StatusBar,
@@ -625,10 +623,6 @@ impl App {
                     ],
                 });
                 ui
-            },
-            compositor: {
-                let (w, h) = terminal::size().unwrap_or((80, 24));
-                ui::Compositor::new(w, h)
             },
             transcript_view: {
                 let (w, _) = terminal::size().unwrap_or((80, 24));
@@ -1088,7 +1082,7 @@ impl App {
                     if let Some(d) = active_dialog.as_mut() {
                         d.mark_dirty();
                     }
-                    if self.compositor.focused().is_some() {
+                    if self.ui.focused_float().is_some() {
                         self.screen.mark_dirty();
                     }
                     if self.screen.has_active_exec() {

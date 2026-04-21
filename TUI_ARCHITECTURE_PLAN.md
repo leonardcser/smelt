@@ -168,7 +168,7 @@ closes it and opens a detail float. Simpler state, no mode switching.
 We evaluated ratatui and decided against it:
 
 - **Immediate mode vs retained.** Ratatui rebuilds the entire UI every frame.
-  We want retained mode with dirty tracking.
+  We want retained mode with grid diffing (no dirty flags).
 - **No windows.** No concept of persistent viewports with cursor, scroll, focus.
 - **No z-order.** Composites by render order only.
 - **Abstraction clash.** Ratatui's `Buffer` = cell grid. Our `Buffer` = content model.
@@ -710,7 +710,7 @@ Phase 9 (cleanup)
 - **Remote UI protocol (v1).** Local terminal only.
 - **Async Lua.** Sync-only; snapshot/queue pattern avoids borrow issues.
 - **Full nvim compatibility.** We borrow the model, not the exact API.
-- **Immediate mode.** We are retained mode with dirty tracking.
+- **Immediate mode.** We are retained mode with grid diffing.
 
 ---
 

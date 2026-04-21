@@ -53,6 +53,7 @@ pub struct Ui {
     next_win_id: u64,
     layout: Option<LayoutTree>,
     terminal_size: (u16, u16),
+    compositor: Compositor,
 }
 
 impl Ui {
@@ -65,6 +66,7 @@ impl Ui {
             next_win_id: 1,
             layout: None,
             terminal_size: (80, 24),
+            compositor: Compositor::new(80, 24),
         }
     }
 
@@ -118,12 +120,34 @@ impl Ui {
         }
         let id = WinId(self.next_win_id);
         self.next_win_id += 1;
+
+        let (tw, th) = self.terminal_size;
+        let rect = resolve_float_rect(&config, tw, th);
+        let zindex = config.zindex;
+
+        let dialog_config = FloatDialogConfig {
+            title: config.title.clone(),
+            border: config.border,
+            ..FloatDialogConfig::default()
+        };
+        let mut dialog = FloatDialog::new(dialog_config);
+        if let Some(b) = self.bufs.get(&buf) {
+            dialog.sync_content_from_buffer(b);
+        }
+
         let win = Window::new(id, buf, WinConfig::Float(config));
         self.wins.insert(id, win);
+
+        let layer_id = float_layer_id(id);
+        self.compositor.add(&layer_id, Box::new(dialog), rect, zindex);
+        self.compositor.focus(&layer_id);
+
         Some(id)
     }
 
     pub fn win_close(&mut self, id: WinId) {
+        let layer_id = float_layer_id(id);
+        self.compositor.remove(&layer_id);
         self.wins.remove(&id);
         if self.current_win == Some(id) {
             self.current_win = self.wins.keys().next().copied();
@@ -154,6 +178,7 @@ impl Ui {
 
     pub fn set_terminal_size(&mut self, w: u16, h: u16) {
         self.terminal_size = (w, h);
+        self.compositor.resize(w, h);
     }
 
     pub fn terminal_size(&self) -> (u16, u16) {
@@ -218,6 +243,61 @@ impl Ui {
             .collect()
     }
 
+    // ── Compositor delegation ──────────────────────────────────────
+
+    pub fn render_with<W: std::io::Write>(
+        &mut self,
+        base: &[(&dyn Component, Rect)],
+        cursor_override: Option<(u16, u16)>,
+        w: &mut W,
+    ) -> std::io::Result<()> {
+        self.sync_float_content();
+        self.compositor.render_with(base, cursor_override, w)
+    }
+
+    pub fn handle_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+    ) -> KeyResult {
+        self.compositor.handle_key(code, mods)
+    }
+
+    pub fn focused_float(&self) -> Option<WinId> {
+        let focused = self.compositor.focused()?;
+        parse_float_layer_id(focused)
+    }
+
+    pub fn float_dialog_mut(&mut self, win_id: WinId) -> Option<&mut FloatDialog> {
+        let layer_id = float_layer_id(win_id);
+        let comp = self.compositor.component_mut(&layer_id)?;
+        comp.as_any_mut().downcast_mut::<FloatDialog>()
+    }
+
+    pub fn force_redraw(&mut self) {
+        self.compositor.force_redraw();
+    }
+
+    fn sync_float_content(&mut self) {
+        let float_wins: Vec<(WinId, BufId)> = self
+            .wins
+            .iter()
+            .filter(|(_, w)| w.is_float())
+            .map(|(id, w)| (*id, w.buf))
+            .collect();
+
+        for (win_id, buf_id) in float_wins {
+            let layer_id = float_layer_id(win_id);
+            if let Some(buf) = self.bufs.get(&buf_id) {
+                if let Some(comp) = self.compositor.component_mut(&layer_id) {
+                    if let Some(fd) = comp.as_any_mut().downcast_mut::<FloatDialog>() {
+                        fd.sync_content_from_buffer(buf);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn render_floats<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         for (win_id, rect) in self.resolve_float_rects() {
             let win = match self.wins.get(&win_id) {
@@ -278,6 +358,14 @@ fn resolve_float_rect(fc: &FloatConfig, term_w: u16, term_h: u16) -> Rect {
     let h = h.min(term_h.saturating_sub(top));
 
     Rect::new(top, left, w, h)
+}
+
+fn float_layer_id(win_id: WinId) -> String {
+    format!("float:{}", win_id.0)
+}
+
+fn parse_float_layer_id(id: &str) -> Option<WinId> {
+    id.strip_prefix("float:")?.parse::<u64>().ok().map(WinId)
 }
 
 impl Default for Ui {
