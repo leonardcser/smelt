@@ -1,4 +1,4 @@
-mod confirm;
+pub(crate) mod confirm;
 mod question;
 
 pub use confirm::ConfirmDialog;

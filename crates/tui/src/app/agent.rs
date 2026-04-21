@@ -1451,8 +1451,8 @@ impl App {
                 });
                 self.screen
                     .set_active_status(&req.call_id, ToolStatus::Confirm);
-                let dialog = Box::new(ConfirmDialog::new(&req, self.input.vim_enabled()));
-                self.open_dialog(dialog, active_dialog);
+                crate::app::dialogs::confirm::open(self, &req);
+                let _ = active_dialog;
                 LoopAction::Continue
             }
             SessionControl::NeedsAskQuestion { args, request_id } => {
