@@ -418,8 +418,9 @@ impl Dialog {
                     // the scrollbar thumb).
                     view.set_scroll(scroll_top as usize);
                 }
-                DialogPanelContent::Widget(_) => {
+                DialogPanelContent::Widget(widget) => {
                     panel.viewport = None;
+                    crate::option_list::set_option_list_viewport(widget.as_mut(), rect.height);
                 }
             }
             y = y.saturating_add(h);

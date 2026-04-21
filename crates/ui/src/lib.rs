@@ -12,6 +12,7 @@ pub mod grid;
 pub mod kill_ring;
 pub mod layout;
 pub mod list_select;
+pub mod option_list;
 pub mod status_bar;
 pub mod style;
 pub mod text;
@@ -37,6 +38,7 @@ pub use dialog::{
     Dialog, DialogConfig, PanelContent, PanelHeight, PanelKind, PanelSpec, PanelWidget,
     SeparatorStyle,
 };
+pub use option_list::{set_option_list_viewport, OptionItem, OptionList};
 pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
 pub use flush::flush_diff;
