@@ -192,26 +192,19 @@ pub enum PendingOp {
     SetGhostText(String),
     /// Clear ghost text from the prompt.
     ClearGhostText,
-    /// Open or update a named float.
-    OpenFloat {
-        id: u64,
+    BufCreate { id: u64 },
+    BufSetLines { id: u64, lines: Vec<String> },
+    WinOpenFloat {
+        buf_id: u64,
         title: String,
-        lines: Vec<String>,
-        loading: bool,
         footer_items: Vec<String>,
         accent: Option<crossterm::style::Color>,
     },
-    /// Update the content of an existing float.
-    UpdateFloat {
+    WinUpdate {
         id: u64,
         title: Option<String>,
-        lines: Option<Vec<String>>,
-        loading: Option<bool>,
     },
-    /// Close a named float.
-    CloseFloat {
-        id: u64,
-    },
+    WinClose { id: u64 },
     /// Send a deferred plugin tool result.
     ResolveToolResult {
         request_id: u64,
@@ -658,7 +651,11 @@ impl LuaRuntime {
             buf_tbl.set(
                 "create",
                 lua.create_function(move |_, ()| {
-                    Ok(s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                    let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(PendingOp::BufCreate { id });
+                    }
+                    Ok(id)
                 })?,
             )?;
         }
@@ -673,12 +670,7 @@ impl LuaRuntime {
                         .filter_map(|v| v.ok())
                         .collect();
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::UpdateFloat {
-                            id,
-                            title: None,
-                            lines: Some(lines),
-                            loading: None,
-                        });
+                        o.ops.push(PendingOp::BufSetLines { id, lines });
                     }
                     Ok(())
                 })?,
@@ -699,14 +691,13 @@ impl LuaRuntime {
             "mode",
             snap_read!(lua, shared, |o| o.vim_mode.clone().unwrap_or_default()),
         )?;
-        // smelt.api.win.open_float(buf_id, opts) → win_id (same as buf_id for now)
+        // smelt.api.win.open_float(buf_id, opts) → win_id
         {
             let s = shared.clone();
             win_tbl.set(
                 "open_float",
                 lua.create_function(move |lua, (buf_id, opts): (u64, mlua::Table)| {
                     let title: String = opts.get("title").unwrap_or_default();
-                    let loading: bool = opts.get("loading").unwrap_or(false);
                     let accent: Option<crossterm::style::Color> =
                         opts.get::<mlua::Table>("accent").ok().and_then(|t| {
                             t.get::<u8>("ansi")
@@ -734,25 +725,22 @@ impl LuaRuntime {
                         on_dismiss_handle = Some(key);
                     }
 
-                    // Store callbacks
                     if let Some(key) = on_select_handle {
                         if let Ok(mut cbs) = s.callbacks.lock() {
                             cbs.insert(buf_id, LuaHandle { key, dead: false });
                         }
                     }
                     if let Some(key) = on_dismiss_handle {
-                        let dismiss_id = buf_id | (1 << 63); // high bit = dismiss callback
+                        let dismiss_id = buf_id | (1 << 63);
                         if let Ok(mut cbs) = s.callbacks.lock() {
                             cbs.insert(dismiss_id, LuaHandle { key, dead: false });
                         }
                     }
 
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::OpenFloat {
-                            id: buf_id,
+                        o.ops.push(PendingOp::WinOpenFloat {
+                            buf_id,
                             title,
-                            lines: Vec::new(),
-                            loading,
                             footer_items,
                             accent,
                         });
@@ -768,7 +756,7 @@ impl LuaRuntime {
                 "close",
                 lua.create_function(move |_, id: u64| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::CloseFloat { id });
+                        o.ops.push(PendingOp::WinClose { id });
                     }
                     Ok(())
                 })?,
@@ -781,29 +769,9 @@ impl LuaRuntime {
                 "set_title",
                 lua.create_function(move |_, (id, title): (u64, String)| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::UpdateFloat {
+                        o.ops.push(PendingOp::WinUpdate {
                             id,
                             title: Some(title),
-                            lines: None,
-                            loading: None,
-                        });
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
-        // smelt.api.win.set_loading(win_id, loading)
-        {
-            let s = shared.clone();
-            win_tbl.set(
-                "set_loading",
-                lua.create_function(move |_, (id, loading): (u64, bool)| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::UpdateFloat {
-                            id,
-                            title: None,
-                            lines: None,
-                            loading: Some(loading),
                         });
                     }
                     Ok(())
