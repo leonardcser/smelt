@@ -92,7 +92,6 @@ pub(crate) enum CursorOwner {
     Dialog,
     None,
 }
-use super::display::DisplayLine;
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::prompt::PromptState;
 use super::selection::{
@@ -111,25 +110,6 @@ use super::{
 use crate::input::{InputSnapshot, InputState};
 use crate::theme;
 
-/// Map a navigation column (char index among selectable cells) to
-/// a display column (char index in the full display line) using the
-/// `DisplayLine`'s span metadata.
-fn nav_col_to_display_col(dline: &DisplayLine, nav_col: usize) -> usize {
-    let mut sel_count = 0;
-    let mut display_idx = 0;
-    for span in &dline.spans {
-        for _ in span.text.chars() {
-            if span.meta.selectable {
-                if sel_count == nav_col {
-                    return display_idx;
-                }
-                sel_count += 1;
-            }
-            display_idx += 1;
-        }
-    }
-    display_idx
-}
 use crossterm::{
     cursor,
     style::{Color, Print, ResetColor},
@@ -1253,6 +1233,27 @@ impl Screen {
         rows
     }
 
+    /// Full transcript display text — every character including gutters
+    /// and padding. Cursor motions operate on this buffer; non-selectable
+    /// cells are skipped via `snap_to_selectable` after each motion.
+    pub fn full_transcript_display_text(&mut self) -> Vec<String> {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let mut rows = snap.rows.clone();
+        if self.has_ephemeral() {
+            let mut col = SpanCollector::new(tw);
+            self.render_ephemeral_into(&mut col, tw as usize);
+            for line in col.finish().lines {
+                let mut s = String::new();
+                for span in &line.spans {
+                    s.push_str(&span.text);
+                }
+                rows.push(s);
+            }
+        }
+        rows
+    }
+
     /// Navigation-only transcript text: selectable display characters
     /// only (gutters, padding stripped). This is the buffer that vim
     /// motions and cursor positioning operate on.
@@ -1316,6 +1317,38 @@ impl Screen {
         snap.snap_to_selectable(abs_row, col)
             .map(|(_, c)| c)
             .unwrap_or(col)
+    }
+
+    /// Snap a byte offset in the display-text buffer to the nearest
+    /// selectable cell. Returns the (possibly adjusted) byte offset.
+    pub fn snap_cpos_to_selectable(&mut self, rows: &[String], cpos: usize) -> usize {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        let (row, col) = snap.byte_to_row_col(cpos);
+        if let Some((_, snapped_col)) = snap.snap_to_selectable(row, col) {
+            if snapped_col == col {
+                return cpos;
+            }
+            // Convert snapped (row, col) back to byte offset.
+            let mut offset = 0;
+            for (r, line) in rows.iter().enumerate() {
+                if r == row {
+                    let byte_col: usize =
+                        line.chars().take(snapped_col).map(|c| c.len_utf8()).sum();
+                    return offset + byte_col;
+                }
+                offset += line.len() + 1; // +1 for \n
+            }
+        }
+        cpos
+    }
+
+    /// Copy text from a display-text byte range, applying `copy_as`
+    /// substitutions via the snapshot's `copy_range`.
+    pub fn copy_display_range(&mut self, start: usize, end: usize) -> String {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, self.show_thinking);
+        snap.copy_byte_range(start, end)
     }
 
     pub fn working_throbber(&self) -> Option<Throbber> {
@@ -1859,13 +1892,8 @@ impl Screen {
             .unwrap_or(viewport_rows);
         let max_line = visible.saturating_sub(1);
         let line = history_cursor_line.min(max_line);
-        let display_col = self
-            .last_viewport_lines
-            .get(line as usize)
-            .map(|dline| nav_col_to_display_col(dline, history_cursor_col as usize))
-            .unwrap_or(history_cursor_col as usize);
         let max_col = (tw as u16).saturating_sub(1);
-        let col = (display_col as u16).min(max_col);
+        let col = history_cursor_col.min(max_col);
         let under: char = self
             .last_viewport_text
             .get(line as usize)
@@ -2040,15 +2068,8 @@ impl Screen {
             let max_line = visible.saturating_sub(1);
             let line = history_cursor_line.min(max_line);
             let cursor_row = line;
-            // cursor_col is a nav column (selectable chars only);
-            // convert to display column using the viewport's DisplayLine.
-            let display_col = self
-                .last_viewport_lines
-                .get(cursor_row as usize)
-                .map(|dline| nav_col_to_display_col(dline, history_cursor_col as usize))
-                .unwrap_or(history_cursor_col as usize);
             let max_col = (tw as u16).saturating_sub(1);
-            let col = (display_col as u16).min(max_col);
+            let col = history_cursor_col.min(max_col);
             let under: String = self
                 .last_viewport_text
                 .get(cursor_row as usize)
