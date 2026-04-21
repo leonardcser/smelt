@@ -111,11 +111,14 @@ struct ProjectedLine {
 fn project_display_line(dline: &DisplayLine, theme: &Theme) -> ProjectedLine {
     let mut text = String::new();
     let mut highlights = Vec::new();
+    let mut char_offset: u16 = 0;
 
     for span in &dline.spans {
-        let col_start = text.len() as u16;
+        let col_start = char_offset;
         text.push_str(&span.text);
-        let col_end = text.len() as u16;
+        let span_chars = span.text.chars().count() as u16;
+        char_offset += span_chars;
+        let col_end = char_offset;
 
         let style = resolve_span_style(&span.style, theme);
         let has_style = !style_is_default(&style);
