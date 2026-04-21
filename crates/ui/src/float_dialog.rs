@@ -11,6 +11,7 @@ pub struct FloatDialogConfig {
     pub title: Option<String>,
     pub border: Border,
     pub border_style: Style,
+    pub background_style: Style,
     pub max_height: Option<u16>,
     pub hint_left: Option<String>,
     pub hint_right: Option<String>,
@@ -26,6 +27,7 @@ impl Default for FloatDialogConfig {
             title: None,
             border: Border::Rounded,
             border_style: Style::default(),
+            background_style: Style::default(),
             max_height: None,
             hint_left: None,
             hint_right: None,
@@ -339,6 +341,12 @@ impl FloatDialog {
 
 impl Component for FloatDialog {
     fn draw(&self, area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext) {
+        let w = grid.width();
+        let h = grid.height();
+        if w > 0 && h > 0 {
+            grid.fill(Rect::new(0, 0, w, h), ' ', self.config.background_style);
+        }
+
         self.draw_border(grid);
 
         let layout = self.layout_regions(area);
@@ -583,6 +591,36 @@ mod tests {
             terminal_width: w,
             terminal_height: h,
             focused: true,
+        }
+    }
+
+    #[test]
+    fn background_fills_dialog_rect() {
+        use crossterm::style::Color;
+        let bg = Style {
+            bg: Some(Color::Blue),
+            ..Default::default()
+        };
+        let dialog = FloatDialog::new(FloatDialogConfig {
+            border: Border::None,
+            background_style: bg,
+            ..Default::default()
+        });
+
+        let mut grid = Grid::new(10, 4);
+        let area = Rect::new(0, 0, 10, 4);
+        let c = ctx(10, 4);
+        let mut slice = grid.slice_mut(area);
+        dialog.draw(area, &mut slice, &c);
+
+        for y in 0..4 {
+            for x in 0..10 {
+                assert_eq!(
+                    grid.cell(x, y).style.bg,
+                    Some(Color::Blue),
+                    "cell ({x},{y}) missing bg"
+                );
+            }
         }
     }
 

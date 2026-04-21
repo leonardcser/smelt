@@ -1778,6 +1778,10 @@ impl App {
                     fg: Some(crate::theme::accent()),
                     ..Default::default()
                 };
+                cfg.background_style = ui::grid::Style {
+                    bg: Some(crate::theme::bar()),
+                    ..Default::default()
+                };
                 cfg.hint_left = Some(hint_text);
                 cfg.dismiss_keys = vec![
                     (KeyCode::Char('q'), KeyModifiers::NONE),
@@ -1842,6 +1846,10 @@ impl App {
                     fg: Some(crate::theme::accent()),
                     ..Default::default()
                 };
+                cfg.background_style = ui::grid::Style {
+                    bg: Some(crate::theme::bar()),
+                    ..Default::default()
+                };
                 cfg.hint_left = Some(hint_text);
                 cfg.footer_height = Some(footer_h);
             }
@@ -1883,6 +1891,10 @@ impl App {
                 };
                 cfg.border_style = ui::grid::Style {
                     fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.background_style = ui::grid::Style {
+                    bg: Some(crate::theme::bar()),
                     ..Default::default()
                 };
                 cfg.hint_left = Some(hint_text);
@@ -2049,6 +2061,10 @@ impl App {
                     fg: Some(crate::theme::accent()),
                     ..Default::default()
                 };
+                cfg.background_style = ui::grid::Style {
+                    bg: Some(crate::theme::bar()),
+                    ..Default::default()
+                };
                 cfg.hint_left = Some(hint_text);
                 cfg.footer_height = Some(footer_h);
                 cfg.dismiss_keys = vec![(KeyCode::Char('q'), KeyModifiers::NONE)];
@@ -2108,6 +2124,10 @@ impl App {
                 };
                 cfg.border_style = ui::grid::Style {
                     fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.background_style = ui::grid::Style {
+                    bg: Some(crate::theme::bar()),
                     ..Default::default()
                 };
                 cfg.hint_left = Some(hint_text);
@@ -2185,6 +2205,10 @@ impl App {
                 };
                 cfg.border_style = ui::grid::Style {
                     fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.background_style = ui::grid::Style {
+                    bg: Some(crate::theme::bar()),
                     ..Default::default()
                 };
                 cfg.hint_left = Some(hint_text);
@@ -2598,6 +2622,10 @@ impl App {
                             };
                             fd.config_mut().border_style = ui::Style {
                                 fg: Some(crate::theme::accent()),
+                                ..Default::default()
+                            };
+                            fd.config_mut().background_style = ui::Style {
+                                bg: Some(crate::theme::bar()),
                                 ..Default::default()
                             };
                             fd.config_mut().hint_left = Some("ESC close".into());
