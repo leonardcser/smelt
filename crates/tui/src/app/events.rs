@@ -1724,6 +1724,7 @@ impl App {
         );
 
         if let Some(win_id) = win_id {
+            self.float_tags.insert(win_id, BuiltinFloat::Help);
             if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
                 let cfg = dialog.config_mut();
                 cfg.accent_style = ui::grid::Style {
@@ -1743,29 +1744,98 @@ impl App {
         }
     }
 
+    pub(super) fn open_export_float(&mut self) {
+        use crate::keymap::hints;
+
+        let buf_id = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            buftype: ui::buffer::BufType::Scratch,
+            ..Default::default()
+        });
+
+        let hint_text = hints::join(&[hints::SELECT, hints::CANCEL]);
+
+        let win_id = self.ui.win_open_float(
+            buf_id,
+            ui::FloatConfig {
+                title: Some("export".into()),
+                border: ui::Border::Rounded,
+                width: ui::Constraint::Pct(60),
+                height: ui::Constraint::Fixed(8),
+                ..Default::default()
+            },
+        );
+
+        if let Some(win_id) = win_id {
+            self.float_tags.insert(win_id, BuiltinFloat::Export);
+            if let Some(dialog) = self.ui.float_dialog_mut(win_id) {
+                dialog.set_footer_items(vec![
+                    ui::ListItem::plain("Copy to clipboard"),
+                    ui::ListItem::plain("Write to file"),
+                ]);
+                let cfg = dialog.config_mut();
+                cfg.accent_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.border_style = ui::grid::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                };
+                cfg.hint_left = Some(hint_text);
+                cfg.footer_height = Some(2);
+            }
+        }
+    }
+
+    fn close_float(&mut self, win_id: ui::WinId) {
+        let id = win_id.0;
+        let dismiss_id = id | (1 << 63);
+        let ops = self.lua.fire_callback(dismiss_id, "");
+        self.apply_ops(ops);
+        self.lua.remove_callback(id);
+        self.lua.remove_callback(dismiss_id);
+        self.float_tags.remove(&win_id);
+        self.ui.win_close(win_id);
+        self.ui.buf_delete(ui::BufId(id));
+    }
+
     fn handle_float_action(&mut self, result: ui::KeyResult) {
         match result {
             ui::KeyResult::Action(ref action) if action == "dismiss" => {
                 if let Some(win_id) = self.ui.focused_float() {
-                    let id = win_id.0;
-                    let dismiss_id = id | (1 << 63);
-                    let ops = self.lua.fire_callback(dismiss_id, "");
-                    self.apply_ops(ops);
-                    self.lua.remove_callback(id);
-                    self.lua.remove_callback(dismiss_id);
-                    self.ui.win_close(win_id);
-                    self.ui.buf_delete(ui::BufId(id));
+                    self.close_float(win_id);
                 }
             }
             ui::KeyResult::Action(ref action) if action.starts_with("select:") => {
                 if let Some(win_id) = self.ui.focused_float() {
-                    let id = win_id.0;
                     let idx_str = &action["select:".len()..];
+
+                    // Dispatch to Lua callbacks (no-op for Rust floats).
+                    let id = win_id.0;
                     let ops = self.lua.fire_callback(id, idx_str);
                     self.apply_ops(ops);
+
+                    // Dispatch to builtin float handler.
+                    if let Some(&tag) = self.float_tags.get(&win_id) {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            self.handle_builtin_float_select(tag, idx);
+                        }
+                        self.close_float(win_id);
+                    }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn handle_builtin_float_select(&mut self, tag: BuiltinFloat, idx: usize) {
+        match tag {
+            BuiltinFloat::Help => {}
+            BuiltinFloat::Export => match idx {
+                0 => self.export_to_clipboard(),
+                1 => self.export_to_file(),
+                _ => {}
+            },
         }
     }
 

@@ -107,10 +107,10 @@ impl App {
             "/export" => {
                 if self.history.is_empty() {
                     self.screen.notify_error("nothing to export".into());
-                    CommandAction::Continue
                 } else {
-                    CommandAction::OpenDialog(Box::new(render::ExportDialog::new()))
+                    self.open_export_float();
                 }
+                CommandAction::Continue
             }
             "/agents" if self.multi_agent => {
                 let my_pid = std::process::id();

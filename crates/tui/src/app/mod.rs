@@ -192,6 +192,13 @@ pub struct App {
     transcript_view: crate::render::transcript_view::TranscriptView,
     prompt_view: crate::render::prompt_view::PromptView,
     status_bar: ui::StatusBar,
+    float_tags: std::collections::HashMap<ui::WinId, BuiltinFloat>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum BuiltinFloat {
+    Help,
+    Export,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -608,6 +615,7 @@ impl App {
             },
             prompt_view: crate::render::prompt_view::PromptView::new(),
             status_bar: ui::StatusBar::new(),
+            float_tags: std::collections::HashMap::new(),
         }
     }
 
