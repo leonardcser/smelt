@@ -904,7 +904,18 @@ panel under the cursor receives the event via its window's
 dialog regression. `app/events.rs` stops hand-routing mouse events
 to `Content`/`Prompt`.
 
-**Step 9.4 — Unified behavior model: per-window keymaps + per-dialog trait.**
+**Step 9.4 — Unified behavior model: per-window keymaps + per-dialog trait. ✅ DONE**
+
+All six built-in dialogs (Help, Export, Rewind, Permissions, Ps,
+Resume) now live under `crates/tui/src/app/dialogs/`, each in its
+own file with a struct + `impl DialogState`. `events.rs` lost the
+`BuiltinFloat` enum, the `handle_builtin_float_*` dispatchers, the
+permission-item / resume-filter free helpers, and every
+`open_X_float` method — ~800 lines out of `events.rs`, ~900 lines
+of focused per-dialog code in `dialogs/`. `intercept_float_key`
+collapsed to the take/put-back dispatcher shown below.
+
+
 
 The current shape — every built-in dialog's logic smeared across
 `open_X_float`, `handle_builtin_float_select`, `intercept_float_key`,

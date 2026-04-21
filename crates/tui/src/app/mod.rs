@@ -1,6 +1,7 @@
 mod agent;
 pub mod commands;
 pub(crate) use commands::copy_to_clipboard;
+pub(crate) mod dialogs;
 mod events;
 mod history;
 
@@ -189,47 +190,11 @@ pub struct App {
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
-    float_tags: std::collections::HashMap<ui::WinId, BuiltinFloat>,
-}
-
-#[derive(Clone)]
-pub(super) enum BuiltinFloat {
-    Help,
-    Export,
-    Rewind {
-        turns: Vec<(usize, String)>,
-        restore_vim_insert: bool,
-    },
-    Permissions {
-        session_entries: Vec<render::PermissionEntry>,
-        workspace_rules: Vec<crate::workspace_permissions::Rule>,
-        items: Vec<PermissionItem>,
-        pending_d: bool,
-        list_buf: ui::BufId,
-    },
-    Ps {
-        registry: engine::tools::ProcessRegistry,
-        killed: Vec<String>,
-        list_buf: ui::BufId,
-    },
-    Resume {
-        entries: Vec<ResumeEntry>,
-        title_haystacks: Vec<String>,
-        current_cwd: String,
-        query: String,
-        workspace_only: bool,
-        filtered: Vec<usize>,
-        pending_d: bool,
-        content_cache: Option<HashMap<String, String>>,
-        list_buf: ui::BufId,
-        title_buf: ui::BufId,
-    },
-}
-
-#[derive(Clone)]
-pub(super) enum PermissionItem {
-    Session(usize),
-    Workspace(usize, usize),
+    /// Per-window dialog state, dispatched through `DialogState` on
+    /// every intercepted key / select / dismiss. Each entry owns the
+    /// domain state (e.g. resume filter, permission items, kill set)
+    /// and its associated buffer ids.
+    pub(super) float_states: HashMap<ui::WinId, Box<dyn dialogs::DialogState>>,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -252,7 +217,7 @@ struct ConfirmContext {
     request_id: u64,
 }
 
-struct TurnState {
+pub(super) struct TurnState {
     turn_id: u64,
     pending: Vec<PendingTool>,
     _perf: Option<crate::perf::Guard>,
@@ -669,7 +634,7 @@ impl App {
                 ui.focus_layer("prompt_input");
                 ui
             },
-            float_tags: std::collections::HashMap::new(),
+            float_states: HashMap::new(),
         }
     }
 
