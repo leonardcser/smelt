@@ -756,61 +756,11 @@ impl App {
         self.screen.redraw();
     }
 
-    /// Handle overlay keys (notification dismiss + btw scroll/dismiss).
+    /// Handle overlay keys (notification dismiss).
     /// Returns `Some(EventOutcome)` if the event was consumed.
     fn handle_overlay_keys(&mut self, ev: &Event) -> Option<EventOutcome> {
         if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
             self.screen.dismiss_notification();
-        }
-
-        if self.screen.has_btw() {
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = ev
-            {
-                use crate::keymap::{nav_lookup, NavAction};
-                match nav_lookup(*code, *modifiers) {
-                    Some(NavAction::Down) => {
-                        self.screen.btw_scroll(1);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::Up) => {
-                        self.screen.btw_scroll(-1);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::PageDown) => {
-                        let half = (render::term_height() / 2).max(1) as isize;
-                        self.screen.btw_scroll(half);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::PageUp) => {
-                        let half = (render::term_height() / 2).max(1) as isize;
-                        self.screen.btw_scroll(-half);
-                        return Some(EventOutcome::Noop);
-                    }
-                    Some(NavAction::Dismiss) => {
-                        self.screen.dismiss_btw();
-                        return Some(EventOutcome::Noop);
-                    }
-                    _ => {
-                        // Let transparent actions (mode toggles, redraw)
-                        // pass through without dismissing.
-                        let ctx = self.input.key_context(false, false);
-                        match keymap::lookup(*code, *modifiers, &ctx) {
-                            Some(
-                                KeyAction::ToggleMode
-                                | KeyAction::CycleReasoning
-                                | KeyAction::Redraw
-                                | KeyAction::ToggleStash,
-                            ) => return None,
-                            _ => {
-                                self.screen.dismiss_btw();
-                                return Some(EventOutcome::Noop);
-                            }
-                        }
-                    }
-                }
-            }
         }
 
         None
@@ -1036,7 +986,6 @@ impl App {
         let has_prompt_cursor = self.screen.cursor_owner() == render::screen::CursorOwner::Prompt;
         let prev_input_scroll = self.screen.prompt_input_scroll();
         let notification = self.screen.notification().cloned();
-        let vim_enabled = self.input.vim_enabled();
         let bar_info = render::prompt_data::BarInfo {
             model_label: self.screen.model_label().map(|s| s.to_string()),
             reasoning_effort: self.screen.reasoning_effort(),
@@ -1052,7 +1001,6 @@ impl App {
                 notification: notification.as_ref(),
                 queued,
                 stash: &self.input.stash,
-                btw: self.screen.btw_mut(),
                 input: &self.input,
                 prediction,
                 width: term_w,
@@ -1060,8 +1008,6 @@ impl App {
                 has_prompt_cursor,
                 prev_input_scroll,
                 bar_info,
-                vim_enabled,
-                term_height: term_h,
             };
             render::prompt_data::compute_prompt(&mut prompt_input)
         };

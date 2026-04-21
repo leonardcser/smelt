@@ -14,7 +14,6 @@ pub(crate) struct PromptInput<'a> {
     pub notification: Option<&'a super::screen::Notification>,
     pub queued: &'a [String],
     pub stash: &'a Option<crate::input::InputSnapshot>,
-    pub btw: Option<&'a mut super::screen::BtwBlock>,
     pub input: &'a InputState,
     pub prediction: Option<&'a str>,
     pub width: u16,
@@ -22,8 +21,6 @@ pub(crate) struct PromptInput<'a> {
     pub has_prompt_cursor: bool,
     pub prev_input_scroll: usize,
     pub bar_info: BarInfo,
-    pub vim_enabled: bool,
-    pub term_height: u16,
 }
 
 pub(crate) struct BarInfo {
@@ -82,14 +79,6 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
     if input.stash.is_some() {
         rows.push(stash_row(usable));
         row_offset += 1;
-    }
-
-    // ── BTW block ──
-    if let Some(ref mut btw) = input.btw {
-        let term_h = input.term_height as usize;
-        let btw_rows = btw_block_rows(btw, usable, term_h, input.vim_enabled);
-        row_offset += btw_rows.len() as u16;
-        rows.extend(btw_rows);
     }
 
     // ── Top bar ──
@@ -287,139 +276,6 @@ fn stash_row(_usable: usize) -> PromptRow {
             },
         },
     ])
-}
-
-// ── BTW block ──
-
-const BTW_CHROME_ROWS: usize = 4;
-
-fn btw_max_body_rows(term_h: usize) -> usize {
-    (term_h / 2).saturating_sub(BTW_CHROME_ROWS).max(1)
-}
-
-fn btw_block_rows(
-    btw: &mut super::screen::BtwBlock,
-    usable: usize,
-    term_h: usize,
-    vim_enabled: bool,
-) -> Vec<PromptRow> {
-    let max_lines = btw_max_body_rows(term_h).max(1);
-    let mut rows = Vec::new();
-
-    // Header: "/btw question"
-    let max_q = usable.saturating_sub(6);
-    let q: String = btw.question.chars().take(max_q).collect();
-    rows.push(PromptRow::styled(vec![
-        StyledSegment {
-            text: " ".into(),
-            style: Style::default(),
-        },
-        StyledSegment {
-            text: "/btw".into(),
-            style: Style::fg(theme::accent()),
-        },
-        StyledSegment {
-            text: " ".into(),
-            style: Style::default(),
-        },
-        StyledSegment {
-            text: q,
-            style: Style::default(),
-        },
-    ]));
-
-    match btw.response {
-        Some(ref text) => {
-            let render_w = usable;
-
-            if btw.wrapped.is_empty() || btw.wrap_width != render_w {
-                btw.wrapped.clear();
-                let mut buf = super::RenderOut::buffer();
-                super::blocks::render_markdown_inner(&mut buf, text, render_w, "   ", false, None);
-                let _ = std::io::Write::flush(&mut buf);
-                let bytes = buf.into_bytes();
-                let rendered = String::from_utf8_lossy(&bytes);
-                for line in rendered.split("\r\n") {
-                    btw.wrapped.push(line.to_string());
-                }
-                if btw.wrapped.last().is_some_and(|l| l.is_empty()) {
-                    btw.wrapped.pop();
-                }
-                if btw.wrapped.is_empty() {
-                    btw.wrapped.push(String::new());
-                }
-                btw.wrap_width = render_w;
-                let max = btw.wrapped.len().saturating_sub(max_lines);
-                btw.scroll_offset = btw.scroll_offset.min(max);
-            }
-
-            let total = btw.wrapped.len();
-            let visible = total.min(max_lines);
-            let can_scroll = total > max_lines;
-
-            for line in btw.wrapped.iter().skip(btw.scroll_offset).take(visible) {
-                // BTW wrapped lines contain escape sequences from markdown rendering.
-                // For now, render them as plain text (stripping ANSI codes).
-                let plain = strip_ansi(line);
-                rows.push(PromptRow::plain(&plain));
-            }
-
-            // Blank line
-            rows.push(PromptRow::plain(""));
-
-            // Hint
-            let hint = if can_scroll {
-                let end = (btw.scroll_offset + visible).min(total);
-                format!(
-                    "   [{end}/{total}]  {}  {}  esc: close",
-                    crate::keymap::hints::nav(vim_enabled),
-                    crate::keymap::hints::scroll(vim_enabled),
-                )
-            } else {
-                "   esc: close".into()
-            };
-            rows.push(PromptRow::styled(vec![StyledSegment {
-                text: hint,
-                style: Style::fg(theme::muted()),
-            }]));
-        }
-        None => {
-            let frame = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                / 150) as usize
-                % super::SPINNER_FRAMES.len();
-            rows.push(PromptRow::styled(vec![StyledSegment {
-                text: format!("   {} thinking", super::SPINNER_FRAMES[frame]),
-                style: Style::fg(theme::muted()),
-            }]));
-        }
-    }
-
-    // Separator line
-    rows.push(PromptRow::plain(""));
-
-    rows
-}
-
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_esc = false;
-    for ch in s.chars() {
-        if in_esc {
-            if ch.is_ascii_alphabetic() {
-                in_esc = false;
-            }
-            continue;
-        }
-        if ch == '\x1b' {
-            in_esc = true;
-            continue;
-        }
-        out.push(ch);
-    }
-    out
 }
 
 // ── Bar (horizontal rule with optional spans) ──
@@ -1171,19 +1027,12 @@ mod tests {
     }
 
     #[test]
-    fn strip_ansi_removes_escape_sequences() {
-        assert_eq!(strip_ansi("hello \x1b[31mworld\x1b[0m"), "hello world");
-        assert_eq!(strip_ansi("no escapes"), "no escapes");
-    }
-
-    #[test]
     fn compute_prompt_produces_bars_and_status() {
         let input_state = InputState::default();
         let mut prompt_input = PromptInput {
             notification: None,
             queued: &[],
             stash: &None,
-            btw: None,
             input: &input_state,
 
             prediction: None,
@@ -1200,8 +1049,6 @@ mod tests {
                 show_cost: false,
                 session_cost_usd: 0.0,
             },
-            vim_enabled: false,
-            term_height: 24,
         };
         let output = compute_prompt(&mut prompt_input);
         // Should have at least: top bar + input area + bottom bar

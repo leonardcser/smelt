@@ -1088,7 +1088,7 @@ impl App {
                     if let Some(d) = active_dialog.as_mut() {
                         d.mark_dirty();
                     }
-                    if self.screen.has_btw() {
+                    if self.compositor.focused().is_some() {
                         self.screen.mark_dirty();
                     }
                     if self.screen.has_active_exec() {
