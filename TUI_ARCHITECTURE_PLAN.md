@@ -1118,30 +1118,161 @@ agents dialog refreshes from live `SharedSnapshots` every
 event-loop iteration. `DialogResult::AgentsClosed` variant removed;
 dismissal runs `refresh_agent_counts` inline via `on_dismiss`.
 
-**Question** — pending. 556 LoC state machine with multi-question
-tabs, per-question selection, multi-select toggles, and an "Other"
-free-form text input per question. Needs the panel framework's
-`Input` panel kind plus per-panel visited/answered tracking.
-Blocks the agent while open (must mark the dialog blocking so the
-engine-drain loop pauses).
-
-**Confirm** — pending. 1018 LoC. Exercises Content preview with
-syntax highlights (inline diff or `BashHighlighter`), scrollable
-option list with the Always/AlwaysPatterns/AlwaysDir keybind trio
-plus plugin tool options, Input message panel, multi-panel chrome,
-deferred-while-typing behavior (1500 ms after last keystroke), and
-mode-toggle auto-approve (shift-tab). Blocking dialog. Expected
-to need small additions to the panel framework: per-panel
-syntax-aware highlighting (content + styles from decorators,
-already supported) and the deferred-open trigger (trivially lives
-in `App::dispatch_terminal_event`, not in `DialogState`).
-
 Prep already done: the six other legacy dialog impls
 (Export/Help/Permissions/Ps/Resume/Rewind/Agents) under
 `render/dialogs/*.rs` are deleted, their `DialogResult` variants
 removed, their dead arms pruned from `handle_dialog_result`.
 `PermissionEntry` moved to `render::history`. Only Confirm and
 Question remain on the legacy `render::Dialog` trait.
+
+---
+
+### Step 9.5b — Widget architecture for composite dialogs
+
+**Why.** The current `PanelKind::{Content, List, Input}` can't
+represent composite dialogs without multiplying special kinds.
+Question needs tabs + multi-select + inline text input per tab.
+Confirm needs a syntax-highlighted preview + chord-driven option
+list + reason-message input + blocking semantics. Adding a kind
+per UX idea is a franchise; instead we let a panel hold **either
+a buffer or a widget**.
+
+**The model.**
+
+```
+enum PanelContent {
+    Buffer(BufId),               // current — 6 migrated dialogs keep this
+    Widget(Box<dyn PanelWidget>), // new — custom rendering/behavior
+}
+
+pub trait PanelWidget {
+    fn prepare(&mut self, rect: Rect, ctx: &DrawContext) {}
+    fn draw(&self, rect: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext);
+    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult;
+    fn cursor(&self) -> Option<(u16, u16)> { None }  // for text-input widgets
+    fn as_any_mut(&mut self) -> &mut dyn Any;        // for state access
+}
+```
+
+`ui::Dialog` still owns the outer chrome (accent rule, hints row,
+scrollbar, dismiss keys, focus-between-panels). A panel that
+holds a widget delegates draw/keys to it; a panel that holds a
+buffer behaves exactly like today.
+
+**Built-in widgets** (in `crates/ui/src/widgets/`):
+
+- `TextInput { window: Window, buf: BufId, multiline: bool }` —
+  wraps `ui::Window` so it inherits kill ring, vim mode, undo,
+  paste handling. Used by Question's "Other:" and Confirm's
+  reason message.
+- `OptionList { items, selected, multi_select, chords }` —
+  richer than `PanelKind::List`: per-item checkbox glyph (when
+  `multi_select = true`), per-item chord-key map
+  (`'a' → action`) that fires before default nav.
+- `Preview { buf: BufId, highlighter: PreviewHighlight }` —
+  read-only scrollable view with `bash | diff | syntax(ext)`
+  highlight modes. Used by Confirm's tool-call preview.
+- `TabBar { tabs: Vec<TabLabel>, active: usize }` — single-row
+  panel with clickable/keybinded labels. Used by Question's
+  multi-question header.
+
+Widgets are plain `Box<dyn PanelWidget>`; dialog authors can also
+write ad-hoc ones and drop them straight into a `PanelSpec`.
+
+**Escape hatch: bare Components.** For truly custom floats (an
+image viewer, a mini-editor, a dataviz panel), expose a public
+`Ui::add_float_component(rect, zindex, Box<dyn Component>)` that
+bypasses `Dialog` entirely — no chrome, no panels, just a
+compositor layer. This is the "draw whatever you want in a
+window" story; most dialogs will still use the `Dialog` +
+widgets path because chrome consistency is worth the small
+ceremony.
+
+**Blocking dialogs.** Both Confirm and Question pause the
+engine-event drain while open. Add
+`DialogState::blocks_agent() -> bool` (default `false`) and gate
+the drain loop on `self.focused_blocking_float()`. The old
+`active_dialog.blocks_agent()` check migrates to the same shape
+in `float_states`.
+
+**Deferred open.** Confirm delays 1.5 s after the last keystroke
+before opening, so it doesn't interrupt typing. The existing
+`pending_dialogs: VecDeque<DeferredDialog>` stays — it's an
+App-level queue, agnostic to the dialog shape. The open fn
+enqueues; `tick_focused_float`'s sibling `tick_deferred_dialogs`
+fires after the debounce window.
+
+**Implementation order.** Land each as its own commit, so each
+step is independently reviewable and reversible.
+
+1. **Foundation A — blocking semantics.** Add
+   `DialogState::blocks_agent()` (default false). Gate
+   engine-drain loop on both `active_dialog.blocks_agent()` and
+   the focused float's `DialogState::blocks_agent()`. Tests:
+   existing dialogs still pass.
+
+2. **Foundation B — `PanelContent` + `PanelWidget`.** Split the
+   existing buffer-only `Panel` into the `PanelContent` enum.
+   Add the trait. All six migrated dialogs keep working because
+   they use the `Buffer` variant; no call-site change.
+
+3. **Widget — `TextInput`.** Ship in `crates/ui/src/widgets/
+   text_input.rs`. Internally a one-line or multi-line `Window`
+   + `Buffer`. `draw` paints through the buffer's highlight
+   machinery; `handle_key` delegates to `Window::apply_action`.
+   Exposes `text() -> String`, `clear()`, `append(&str)` for
+   host access.
+
+4. **Widget — `OptionList`.** Ship in
+   `crates/ui/src/widgets/option_list.rs`. Can be single- or
+   multi-select; draws through a buffer (checkboxes prefixed as
+   `[x]` / `[ ]` text); exposes `selected_indices() -> Vec<usize>`
+   and a `ChordMap` for pre-default keybinds like Confirm's 'a'.
+
+5. **Widget — `Preview`.** Thin wrapper over a read-only buffer
+   with pre-applied highlight spans. The highlighter is computed
+   at open time (bash → `BashHighlighter`, diff → `print_inline_diff`,
+   file → syntect via `print_syntax_file`), baked into buffer
+   spans, never recomputed.
+
+6. **Escape hatch — `Ui::add_float_component`.** Public API that
+   wraps `compositor.add` with a `WinId` allocation and
+   `float_layer_id` key. Lua bindings wire to this later.
+
+7. **Migrate Question →
+   `crates/tui/src/app/dialogs/question.rs`.** Dialog panels:
+   `[TabBar (if >1 question), Header(Content), OptionList(multi),
+   TextInput("Other:" when selected)]`. State machine lives in
+   `impl DialogState for Question`. Emits Lua-free
+   `ask_question_response` via `App::resolve_question`
+   (unchanged).
+
+8. **Migrate Confirm →
+   `crates/tui/src/app/dialogs/confirm.rs`.** Panels:
+   `[MessageHeader(Content), Preview, OptionList(chord-aware),
+   TextInput(reason, multiline, focusable)]`. State machine:
+   tracks whether 'a' Always-menu is expanded (swap the
+   OptionList's items), tracks reason editing mode. `on_select`
+   translates the chosen option into `ConfirmChoice::*` and
+   calls `App::resolve_confirm` (unchanged).
+
+9. **Delete legacy.** After 7 and 8 land:
+   - `render/dialogs/confirm.rs`, `render/dialogs/question.rs`
+   - `trait render::Dialog`, `render::DialogResult`
+   - `render::dialogs::{TextArea, begin_dialog_draw,
+     finish_dialog_frame, render_inline_textarea}`
+   - `App::active_dialog`, `App::handle_dialog_result`,
+     `App::open_dialog`, `DeferredDialog` (absorbed into float
+     deferred-open queue)
+   - `render::RenderOut`, `render::StyleState`, `render::Frame`,
+     `render::paint_line` (once all callers are gone — may slip
+     to 9.7)
+
+Bug fixes covered as part of this step rather than deferred:
+- Dialog dismiss not restoring vim mode when Question was
+  opened while in Insert (checked before leaving Normal).
+- Confirm preview double-rendering when the underlying tool
+  call emits a `PreToolUse` update mid-dialog.
 
 **Step 9.6 — Migrate overlays to Dialogs.** Completer (one List
 panel, `AnchorCursor`), cmdline (one Input panel, docked bottom),
