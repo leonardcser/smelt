@@ -1193,17 +1193,6 @@ impl App {
                 self.refresh_agent_counts();
             }
             render::DialogResult::PsClosed | render::DialogResult::Dismissed => {}
-            render::DialogResult::FloatSelect { id, index } => {
-                let ops = self.lua.fire_callback(id, &index.to_string());
-                self.apply_ops(ops);
-            }
-            render::DialogResult::FloatDismiss { id } => {
-                let dismiss_id = id | (1 << 63);
-                let ops = self.lua.fire_callback(dismiss_id, "");
-                self.apply_ops(ops);
-                self.lua.remove_callback(id);
-                self.lua.remove_callback(dismiss_id);
-            }
         }
     }
 
