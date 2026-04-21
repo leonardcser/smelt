@@ -19,6 +19,11 @@ pub struct BufferView {
     border: Border,
     title: Option<String>,
     title_style: Style,
+    /// Fallback style for cells that have no per-span highlight and
+    /// no per-line decoration override. Used by containers that pre-
+    /// fill a background (e.g. Dialog panels) so the content keeps
+    /// the container's bg instead of reverting to terminal defaults.
+    default_style: Style,
 }
 
 impl BufferView {
@@ -31,7 +36,12 @@ impl BufferView {
             border: Border::None,
             title: None,
             title_style: Style::default(),
+            default_style: Style::default(),
         }
+    }
+
+    pub fn set_default_style(&mut self, style: Style) {
+        self.default_style = style;
     }
 
     pub fn with_border(mut self, border: Border) -> Self {
@@ -200,28 +210,29 @@ impl BufferView {
             let chars: Vec<char> = line.chars().collect();
             let mut col = 0u16;
 
+            let fallback_style = match bg_override {
+                Some(bg) => Style {
+                    bg: Some(bg),
+                    ..self.default_style
+                },
+                None => self.default_style,
+            };
             if spans.is_empty() {
-                let style = match bg_override {
-                    Some(bg) => Style::bg(bg),
-                    None => Style::default(),
-                };
                 for &ch in &chars {
                     if col >= content_w {
                         break;
                     }
-                    grid.set(offset_x + col, offset_y + row, ch, style);
+                    grid.set(offset_x + col, offset_y + row, ch, fallback_style);
                     col += 1;
                 }
             } else {
                 while col < content_w && (col as usize) < chars.len() {
                     let active = spans.iter().find(|s| col >= s.col_start && col < s.col_end);
                     if let Some(span) = active {
-                        let style = match bg_override {
-                            Some(bg) => Style {
-                                bg: Some(bg),
-                                ..span.style
-                            },
-                            None => span.style,
+                        let style = Style {
+                            fg: span.style.fg.or(fallback_style.fg),
+                            bg: span.style.bg.or(fallback_style.bg),
+                            ..span.style
                         };
                         let end = span.col_end.min(content_w).min(chars.len() as u16);
                         for c in col..end {
@@ -229,11 +240,12 @@ impl BufferView {
                         }
                         col = end;
                     } else {
-                        let style = match bg_override {
-                            Some(bg) => Style::bg(bg),
-                            None => Style::default(),
-                        };
-                        grid.set(offset_x + col, offset_y + row, chars[col as usize], style);
+                        grid.set(
+                            offset_x + col,
+                            offset_y + row,
+                            chars[col as usize],
+                            fallback_style,
+                        );
                         col += 1;
                     }
                 }

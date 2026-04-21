@@ -184,8 +184,13 @@ pub struct Dialog {
 }
 
 impl Dialog {
-    pub(crate) fn new(config: DialogConfig, panels: Vec<DialogPanel>) -> Self {
+    pub(crate) fn new(config: DialogConfig, mut panels: Vec<DialogPanel>) -> Self {
         let focused = panels.iter().position(|p| p.focusable).unwrap_or(0);
+        // Propagate the dialog's bg to each panel's view so glyphs
+        // render on the dialog fill instead of terminal defaults.
+        for panel in panels.iter_mut() {
+            panel.view.set_default_style(config.background_style);
+        }
         Self {
             config,
             panels,
@@ -211,11 +216,15 @@ impl Dialog {
     where
         F: Fn(BufId) -> Option<&'a Buffer>,
     {
+        let default_style = self.config.background_style;
         for panel in &mut self.panels {
             if let Some(buf) = resolve(panel.buf) {
                 panel.line_count = buf.line_count();
                 panel.view.sync_from_buffer(buf);
             }
+            // Inherit the dialog's background so content cells keep
+            // the bg fill after the view paints glyphs.
+            panel.view.set_default_style(default_style);
         }
     }
 
@@ -566,6 +575,9 @@ impl Component for Dialog {
         if w == 0 || h == 0 {
             return;
         }
+        // Fill the entire dialog rect with the background style so
+        // chrome and panel fills share the same bg, and panel glyphs
+        // (which inherit via view.default_style) stay readable.
         grid.fill(Rect::new(0, 0, w, h), ' ', self.config.background_style);
 
         self.draw_top_rule(area, grid);
@@ -884,6 +896,55 @@ mod tests {
         dlg.move_selection(1);
         let r = dlg.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(r, KeyResult::Action("select:1".into()));
+    }
+
+    #[test]
+    fn content_panel_renders_buffer_lines() {
+        let mut bufs = std::collections::HashMap::new();
+        bufs.insert(BufId(1), make_buf(1, &["hello world", "second line"]));
+        let panels = build_panels(
+            vec![PanelSpec::content(BufId(1), PanelHeight::Fill).with_pad_left(0)],
+            &bufs,
+        );
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        let area = Rect::new(0, 0, 20, 5);
+        let mut grid = Grid::new(20, 5);
+        dlg.resolve_panel_rects(area);
+        let mut slice = grid.slice_mut(area);
+        dlg.draw(area, &mut slice, &ctx(20, 5));
+        // Top rule row 0 is '─'; content starts row 1.
+        assert_eq!(grid.cell(0, 1).symbol, 'h');
+        assert_eq!(grid.cell(4, 1).symbol, 'o');
+        assert_eq!(grid.cell(6, 1).symbol, 'w');
+        assert_eq!(grid.cell(0, 2).symbol, 's');
+    }
+
+    #[test]
+    fn list_panel_renders_items_with_bg() {
+        use crossterm::style::Color;
+        let mut bufs = std::collections::HashMap::new();
+        bufs.insert(BufId(1), make_buf(1, &["apple", "banana", "cherry"]));
+        let panels = build_panels(
+            vec![PanelSpec::list(BufId(1), PanelHeight::Fill).with_pad_left(0)],
+            &bufs,
+        );
+        let mut dlg = Dialog::new(
+            DialogConfig {
+                background_style: Style::bg(Color::Black),
+                ..DialogConfig::default()
+            },
+            panels,
+        );
+        let area = Rect::new(0, 0, 20, 5);
+        let mut grid = Grid::new(20, 5);
+        dlg.resolve_panel_rects(area);
+        let mut slice = grid.slice_mut(area);
+        dlg.draw(area, &mut slice, &ctx(20, 5));
+        // Content 'apple' should be on row 1.
+        assert_eq!(grid.cell(0, 1).symbol, 'a');
+        assert_eq!(grid.cell(4, 1).symbol, 'e');
+        // And each content cell should keep the dialog's bg fill.
+        assert_eq!(grid.cell(0, 1).style.bg, Some(Color::Black));
     }
 
     #[test]
