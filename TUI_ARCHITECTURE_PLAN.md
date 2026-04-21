@@ -107,48 +107,169 @@ The **status bar** is the only non-window surface — it's a single-row
 component with no buffer, no scroll, no cursor. Making it a window would
 force an abstraction that doesn't fit.
 
-### One float dialog pattern
+### Dialogs are stacks of panels, panels are windows
 
-All dialogs follow the same visual structure:
+A dialog is a **compositor float window** containing a vertical stack of
+**panels**. Every panel is a real `ui::Window` backed by a `ui::Buffer`.
+There is no separate "dialog content" type — panels are windows, and
+windows have cursor, scroll, vim, selection, kill ring, mouse routing
+for free.
 
 ```
-┌─ Title ────────────────────┐
-│                             │  ← scrollable content (BufferView)
-│                             │
-│  1. Option A                │  ← optional footer (ListSelect)
-│  2. Option B                │
-│                  [hints]    │
-└─────────────────────────────┘
+────────────────────────────────────────   ← top rule (solid ─, accent color)
+ edit_file: src/foo.rs                      ← title panel (Content, Fixed height)
+  making a small diff                       ← summary panel (Content, Fit)
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌   ← dashed ╌ separator between panels
+   12  │ fn foo() {                         ← preview panel (Content, Fill)
+   13- │     old_line();                      full vim + selection + scrollbar
+   13+ │     new_line();                      on the right edge of the panel
+   14  │ }
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Allow edits?                               ← action prompt (Content, Fixed)
+  1. Yes                                    ← options panel (List, Fit)
+  2. Yes + always                             mouse click + wheel scroll work
+  3. No                                       LineDecoration paints selection
+  type message here…                        ← msg input panel (Input, Fit/Fixed)
+                                              — shown only when user starts typing
+ ENTER confirm · m add msg · j/k scroll · ESC cancel   ← hints (StatusBar, Fixed 1)
 ```
 
-Each dialog is a **configuration** of a single `FloatDialog` component, not
-a separate implementation. The visual chrome and layout are unified. Dialog-
-specific behavior (confirm previews, question flow, agent detail) stays in
-the app/domain layer — `FloatDialog` does not absorb all dialog semantics.
+**Chrome** is drawn by the `Dialog` component, not by the panels:
+- Top rule: one accent-colored row of `─` across the dialog's rect.
+- Dashed `╌` separators between panels (per-panel config).
+- Hints row: a `StatusBar` component at the bottom, not a bespoke
+  string pair. Left/right segments, dim style.
+- Background: solid black fill across the dialog's rect.
+- No side or bottom edges. No border box. The terminal's bottom rows
+  visually *become* the dialog.
 
-| Dialog      | Content                        | Footer              |
-|-------------|--------------------------------|----------------------|
-| Help        | Key binding table              | None (scroll only)   |
-| Export      | 2 options                      | ListSelect           |
-| Rewind      | Numbered turns                 | ListSelect           |
-| Resume      | Filtered session list          | ListSelect + search  |
-| Permissions | Section headers + entries      | ListSelect + delete  |
-| Ps          | Process list                   | ListSelect + kill    |
-| Agents list | Agent rows                     | ListSelect + detail  |
-| Agent detail| Prompt + tool calls            | Scroll only          |
-| Float (Lua) | Lines from Lua                 | Optional ListSelect  |
-| Confirm     | Preview (diff/code/plan)       | ListSelect + textarea|
-| Question    | Question text + options        | ListSelect + textarea|
+**Placement** lives on `FloatConfig`:
+```rust
+pub enum Placement {
+    DockBottom { above_rows: u16, full_width: bool },
+    Centered { width: Constraint, height: Constraint },
+    AnchorCursor { width, height },
+    Manual { anchor, row, col, width, height },
+}
+```
+Built-in dialogs default to `DockBottom { above_rows: 1, full_width: true }`
+(one row gap above the status bar). Completer uses `AnchorCursor`. Lua
+floats default to `Centered`.
+
+### Panels
+
+```rust
+pub struct DialogPanel {
+    pub win: WinId,                          // a real ui::Window
+    pub kind: PanelKind,
+    pub height: PanelHeight,
+    pub separator_above: Option<SeparatorStyle>,
+}
+
+pub enum PanelKind {
+    /// Readonly or static text. Supports vim motions, visual selection,
+    /// click-drag, mouse scroll. Used for titles, summaries, previews.
+    Content,
+    /// Selectable rows (cursor line = selected).
+    /// LineDecoration paints the selection highlight. Mouse click moves
+    /// cursor; Enter selects. Multi-select via per-line metadata.
+    List { multi: bool },
+    /// Editable buffer. Single-line for searches, multi-line for
+    /// message/confirm textareas. Same window/buffer as the prompt.
+    Input { multiline: bool },
+}
+
+pub enum PanelHeight {
+    Fixed(u16),   // title, hints, prompt bars
+    Fit,          // shrink to content (short lists)
+    Fill,         // take remaining space (preview)
+}
+```
+
+**Selection rendering**: the List panel reads its window's cursor line
+and applies `LineDecoration::fill_bg` to that line via the same
+mechanism the transcript uses for line highlights. No "selected row"
+concept separate from "cursor line."
+
+**Scrolling**: each panel draws its own scrollbar on its right edge
+from `WindowViewport` / `ScrollbarState` — the same state the
+transcript and prompt use. Inline `[x/y]` scroll readouts in the
+legacy dialog chrome are deleted; the scrollbar is the readout.
+
+**Focus**: `Dialog` owns the focused panel index. Tab cycles forward,
+Shift-Tab backward. Mouse click on a panel focuses it. The focused
+panel receives keys via `Compositor::handle_key` routing.
+
+| Dialog | Panels (top → bottom) |
+|---|---|
+| help | title | keybinding-list |
+| rewind | title | turn-list |
+| export | title | options-list |
+| resume | title | search-input | session-list |
+| permissions | title | entries-list (section headers via LineDecoration) |
+| ps | title | process-list |
+| agents list | title | agent-list |
+| agents detail | title | prompt-content | tool-calls-content |
+| confirm (bash) | title+body-content | options-list | msg-input (when used) |
+| confirm (edit) | title | summary | preview-content | action | options-list | msg-input |
+| question | title | question-text | options-list | msg-input |
+| completer | suggestion-list |
+| cmdline | prompt-input |
+| notification | text-content |
 
 ### Shared rendering for diffs and code
 
-Code diffs, syntax-highlighted files, and notebook previews render into
-**buffers with highlights**. The same rendering code produces content for
-both transcript blocks and confirm dialog previews. This means:
+Diff `-`/`+` coloring, bash syntax highlighting, search-match highlights
+all project into `ui::Buffer` as `Span` / `SpanStyle` and per-line
+`LineDecoration`. The same buffer rendering that the transcript uses
+draws confirm previews, code diffs, notebook previews, and search-
+result highlights. Lua plugins get the same highlight API.
 
-- Diffs in the transcript use the same code as diffs in confirm dialogs
-- A confirm dialog's preview is an interactive buffer you can scroll through
-- Lua plugins can create buffers with highlighted content using the same API
+### Reuse inventory
+
+This model works because the dialog framework is almost entirely
+reuse. Components that carry real weight inside panels:
+
+| Reused | Used for | Already exists |
+|---|---|---|
+| `ui::Window` | every panel's interaction state | yes |
+| `ui::Buffer` | every panel's content | yes |
+| `WindowView` (tui) | panel draw + scrollbar + cursor + hit-test | yes (steps 6g–6j) |
+| `ui::Viewport::hit` | panel mouse routing | yes |
+| `ui::Vim` | normal/visual/yank on any panel | yes |
+| `ui::WindowCursor` | mouse-drag selection in panels | yes |
+| `LineDecoration` | selected-row bg, diff bg, section headers | yes |
+| `SpanStyle` | bash/diff/search highlight | yes |
+| `StatusBar` | dialog hints row | yes |
+| `EditBuffer` + `KillRing` + `UndoHistory` | Input panels | yes |
+| `LayoutTree` | panel-height resolution inside the float rect | yes |
+
+Retired as part of the panel rewrite:
+- `FloatDialog` (renamed to `Dialog`, rewritten around panels)
+- `ListSelect` — a List panel is just a buffer with cursor and
+  LineDecoration; no separate struct.
+- `TextInput` — an Input panel is a small editable window; the
+  prompt's path already supports everything TextInput did plus vim.
+- `FloatDialogConfig::{hint_left, hint_right, hint_style, footer_height}`
+  — replaced by Dialog's StatusBar hints row and per-panel height.
+- `paint_completer_float`, `render/completions.rs` draw path,
+  `render/cmdline.rs` — completer and cmdline become Dialogs.
+- Inline `[x/y]` scroll position rendering in confirm chrome —
+  replaced by the buffer scrollbar.
+
+### Simplify question dialogs
+
+The current question dialog has a complex tab system with `active_tab`,
+`visited`, `answered`, `multi_toggles`, `other_areas`, `editing_other`.
+Replace with a sequential wizard-style flow: one question per Dialog,
+advance to next on answer. Same panel stack as every other dialog.
+
+### Agent detail as separate dialog
+
+The agents dialog currently has a two-mode design (list → detail with
+mode switch). Replace with two separate Dialogs: selecting an agent in
+the list closes it and opens a detail dialog. Simpler state, no mode
+switching.
 
 ### Simplify question dialogs
 
@@ -262,24 +383,34 @@ App has one `render()` entry point that calls `compositor.render()`.
 Temporary internal helpers during migration are prefixed with the
 surface they handle but will be deleted once all surfaces are components.
 
-### FloatDialog
+### Dialog (panel stack)
 
-Reusable component that composes BufferView + optional ListSelect + optional
-TextInput. All dialogs are configurations of this component. Handles:
-- Border + title chrome
-- Solid background fill across the dialog rect (no transcript bleed-through)
-- Scrollable content area (buffer view)
-- Optional selectable footer (list select)
-- Optional inline text input
-- Common keys: scroll, dismiss (Esc), confirm (Enter)
+`Dialog` is the single compositor component behind every built-in
+dialog, completer, cmdline, notification, and Lua float. It owns a
+vertical stack of `DialogPanel`s and draws the chrome around them.
 
-**Placement is a config parameter, not hard-coded.** Dialogs pick a
-`Placement` variant: `Centered`, `DockBottom { above_status,
-full_width }`, `AnchorCursor`, or `AnchorRect`. Built-in dialogs dock
-at the bottom above the status bar and span full terminal width;
-completer anchors to the prompt cursor; Lua floats default to
-centered. Position and sizing live in the config so new dialog types
-don't fork layout code.
+- **Each panel is a real `ui::Window` backed by a `ui::Buffer`.**
+  Not a view. Not a component-with-a-buffer. A window. It has a
+  cursor, scroll, vim state, selection anchor, kill ring, modifiable
+  flag. Mouse, keyboard, selection, copy all work because the window
+  machinery already handles them.
+- **`WindowView` draws each panel.** The same component used for
+  transcript and prompt. Scrollbar on the right edge, cursor overlay,
+  viewport hit-testing — all free.
+- **Chrome = top `─` rule + dashed `╌` separators + `StatusBar`
+  hints row + solid bg fill.** No borders, no sides. Legacy design
+  language, new plumbing.
+- **Placement** lives on `FloatConfig`. Built-in dialogs default to
+  `DockBottom { above_rows: 1, full_width: true }`.
+- **Panel kinds**: `Content` (readonly text / preview), `List`
+  (selectable rows via cursor line + LineDecoration), `Input`
+  (editable line or multi-line).
+- **Focus routing**: Tab / Shift-Tab cycles focused panel; mouse click
+  focuses the hit panel; keys route through `Compositor::handle_key`
+  to the focused window.
+
+`ListSelect` and `TextInput` are retired. They were single-purpose
+wrappers around what `ui::Window` already does.
 
 ### Layout
 
@@ -646,46 +777,72 @@ This step ends when `App::run` calls exactly one thing per tick:
 `self.ui.render()`. No `active_dialog`, no `render_dialog`/
 `render_normal` fork, no `Frame`, no `RenderOut`.
 
-**Step 9.1 — Migrate the final three dialogs to `FloatDialog`.**
-Order: Confirm (heaviest, ~985 lines, preview buffer + ListSelect +
-TextInput), Question (sequential `FloatDialog` per question — kill
-the tab/`visited`/`answered`/`multi_toggles` state machine), Agents
-(two separate `FloatDialog`s — list, then detail; no mode switch).
-Built-in dialog state lives in `BuiltinFloat` enum variants;
-`intercept_float_key()` handles any per-dialog keys (e.g. dd-chord,
-search) before falling through to `FloatDialog::handle_key`.
+**Step 9.1 — New `Dialog` + `DialogPanel` framework (big-bang).**
+Rewrite `ui::FloatDialog` as `ui::Dialog`:
+- A dialog is a vertical stack of `DialogPanel`s, each one a real
+  `ui::Window` backed by a `ui::Buffer`.
+- `PanelKind { Content, List { multi }, Input { multiline } }`.
+- `PanelHeight { Fixed(n), Fit, Fill }` — a `LayoutTree` over the
+  dialog's float rect resolves panel rects.
+- Chrome: top `─` rule (accent), dashed `╌` separators between
+  panels, `StatusBar` hints row at the bottom, solid black bg fill.
+  No border box.
+- List panels render their selection by painting
+  `LineDecoration::fill_bg` on the cursor line — same mechanism the
+  transcript uses for line highlights.
+- Every panel draws its own scrollbar via `WindowViewport` /
+  `ScrollbarState`. Legacy inline `[x/y]` scroll readouts deleted.
 
-**Step 9.2 — Migrate overlays to compositor float layers.**
-Completer (anchored to prompt cursor), cmdline (anchored to bottom),
-notification (ephemeral float above prompt). Each is a `ui::Window`
-with a `ui::Buffer`, opened via `ui.win_open_float()` — same path as
-any dialog. Deletes `paint_completer_float`, `draw_prompt_sections`
-completer/cmdline branches, `Screen::cmdline` overlay drawing.
+Retired in the same commit:
+- `FloatDialog` (superseded by `Dialog`).
+- `ListSelect` (List panel = buffer + cursor + LineDecoration).
+- `TextInput` (Input panel = small editable window — same code path
+  as the prompt).
+- `FloatDialogConfig::{hint_left, hint_right, hint_style,
+  footer_height}` (replaced by the StatusBar hints panel and
+  per-panel height).
 
-**Step 9.3 — Add mouse routing.** `Compositor::handle_mouse(event)`
-hit-tests layers top-down; the topmost layer whose rect contains the
-point consumes the event (click, drag, wheel). Background windows
-only receive the event if no float covers the point. Fixes
-"wheel-over-dialog scrolls transcript" and "click in Resume list
-doesn't select". `app/events.rs` stops hand-routing mouse events to
-`Content`/`Prompt`.
-
-**Step 9.4 — Add `Placement` to `FloatDialog` config.**
+**Step 9.2 — `Placement` on `FloatConfig`.**
 ```rust
 pub enum Placement {
-    Centered,
-    DockBottom { above_status: bool, full_width: bool },
-    AnchorCursor,       // completer
-    AnchorRect(Rect),   // explicit position
+    DockBottom { above_rows: u16, full_width: bool },
+    Centered { width: Constraint, height: Constraint },
+    AnchorCursor { width: Constraint, height: Constraint },
+    Manual { anchor: Anchor, row: i32, col: i32,
+             width: Constraint, height: Constraint },
 }
 ```
-Default: `Centered`. Built-in dialogs (Resume, Permissions, Ps, etc.)
-use `DockBottom { above_status: true, full_width: true }`. Completer
-uses `AnchorCursor`. `FloatDialog::draw` fills its rect with a solid
-background style before drawing components (fixes transparent
-dialogs).
+Built-in dialogs default to `DockBottom { above_rows: 1, full_width: true }`.
+Completer → `AnchorCursor`. Lua floats → `Centered`.
 
-**Step 9.5 — Delete legacy rendering.** After 9.1–9.4 land, the
+**Step 9.3 — `Compositor::handle_mouse` with z-order hit-testing.**
+Walks layers top-down; the topmost layer whose rect contains the
+point consumes the event (click, drag, wheel). Inside a dialog, the
+panel under the cursor receives the event via its window's
+`Viewport::hit`. Fixes "wheel-over-dialog scrolls transcript" and
+"click in Resume list doesn't select" and every other mouse-on-
+dialog regression. `app/events.rs` stops hand-routing mouse events
+to `Content`/`Prompt`.
+
+**Step 9.4 — Migrate the final three dialogs onto `Dialog`.**
+Order: Confirm (heaviest — exercises Content preview with syntax
+highlights, List options, Input message, multi-panel chrome),
+Question (sequential Dialog per question — kill the tab/`visited`/
+`answered`/`multi_toggles` state machine), Agents (two separate
+Dialogs — list, then detail; no mode switch). Per-dialog state
+lives in `BuiltinFloat` enum variants; `intercept_float_key` runs
+before compositor dispatch only when a dialog needs bespoke chord
+behavior.
+
+**Step 9.5 — Migrate overlays to Dialogs.** Completer (one List
+panel, `AnchorCursor`), cmdline (one Input panel, docked bottom),
+notification (one Content panel, ephemeral, `DockBottom` with a
+short timeout). Each is just a Dialog with one panel. Deletes
+`paint_completer_float`, `render/completions.rs` draw path,
+`render/cmdline.rs`, `draw_prompt_sections` overlay branches,
+`Screen::cmdline` drawing.
+
+**Step 9.6 — Delete legacy rendering.** After 9.1–9.5 land, the
 following have no callers and get deleted in a single pass:
 - `trait Dialog`, `DialogResult`, `ListState`, `TextArea`
 - `Frame`, `RenderOut`, `StyleState`, `paint_line`
@@ -699,13 +856,15 @@ following have no callers and get deleted in a single pass:
   layout helper on the prompt window chain — not a prompt-specific
   struct)
 
-**Step 9.6 — Bug fixes on the unified path.** Each collapses to a
+**Step 9.7 — Bug fixes on the unified path.** Each collapses to a
 small, localized change once the seam is gone:
 - **Selection** — `WindowView::draw` reads `window.selection_range()`
   and paints a generic reverse-video overlay into its grid slice.
   Dead `paint_visual_range`/`paint_transcript_cursor` in `screen.rs`
   go away with `Screen`. The `_visual` discard at `events.rs:1171`
   disappears (the range no longer needs to be threaded by hand).
+  Dialog panels inherit the same selection mechanism because they're
+  windows.
 - **Prompt shift on newline** — prompt window's layer rect is
   bottom-anchored; height = `clamp(content_rows, 1..=max)`. Chrome
   (notification, queued, top/bottom bars) stacks as separate layers
@@ -714,9 +873,10 @@ small, localized change once the seam is gone:
   coord translator. Every other `pad_left` subtraction goes away.
 - **Scrollbar center-on-click** — `apply_scrollbar_drag` subtracts
   `thumb_size / 2` on a click outside the current thumb; drags
-  inside the thumb preserve their grab offset.
+  inside the thumb preserve their grab offset. Applies to dialog
+  panels too.
 
-**Step 9.7 — `tail_follow` as a `ui::Window` property.**
+**Step 9.8 — `tail_follow` as a `ui::Window` property.**
 ```rust
 pub struct Window {
     // ...
@@ -733,7 +893,7 @@ last row stays visible; otherwise leave scroll alone. Fresh-session
 resume initializes the transcript cursor on the last row, so
 `tail_follow` is true until the user scrolls.
 
-**Step 9.8 — Delete `Screen`.** With the legacy render path gone,
+**Step 9.9 — Delete `Screen`.** With the legacy render path gone,
 Screen's remaining fields (`transcript`, `parser`, `prompt`,
 `working`, `notification`, `cmdline`, metadata) move to `App` or to
 the buffer projection that owns their display. No more `Screen` type.
