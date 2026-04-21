@@ -5,7 +5,7 @@
 //! shortcut keys (Confirm's `a` / `n` / `e` / `l`), and
 //! widget-managed cursor state.
 
-use crate::component::{CursorInfo, DrawContext, KeyResult};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
 use crate::dialog::PanelWidget;
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
@@ -145,7 +145,7 @@ impl OptionList {
     }
 }
 
-impl PanelWidget for OptionList {
+impl Component for OptionList {
     fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
         self.viewport_rows = area.height;
         self.ensure_visible();
@@ -280,12 +280,14 @@ impl PanelWidget for OptionList {
         None
     }
 
-    fn content_rows(&self) -> usize {
-        self.items.len()
-    }
-
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+impl PanelWidget for OptionList {
+    fn content_rows(&self) -> usize {
+        self.items.len()
     }
 }
 

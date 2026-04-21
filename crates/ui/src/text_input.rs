@@ -239,27 +239,15 @@ impl Component for TextInput {
         let visible_col = self.cursor_col.saturating_sub(self.scroll_offset);
         Some(CursorInfo::hardware(visible_col as u16, 0))
     }
-}
-
-impl PanelWidget for TextInput {
-    fn draw(&self, area: Rect, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
-        <Self as Component>::draw(self, area, slice, ctx);
-    }
-
-    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult {
-        <Self as Component>::handle_key(self, code, mods)
-    }
-
-    fn cursor(&self) -> Option<CursorInfo> {
-        <Self as Component>::cursor(self)
-    }
-
-    fn content_rows(&self) -> usize {
-        1
-    }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+impl PanelWidget for TextInput {
+    fn content_rows(&self) -> usize {
+        1
     }
 }
 
