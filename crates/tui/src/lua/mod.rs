@@ -1507,15 +1507,15 @@ impl Default for LuaRuntime {
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
     (
         "smelt.plugins.plan_mode",
-        include_str!("../../../runtime/lua/smelt/plugins/plan_mode.lua"),
+        include_str!("../../../../runtime/lua/smelt/plugins/plan_mode.lua"),
     ),
     (
         "smelt.plugins.btw",
-        include_str!("../../../runtime/lua/smelt/plugins/btw.lua"),
+        include_str!("../../../../runtime/lua/smelt/plugins/btw.lua"),
     ),
     (
         "smelt.plugins.predict",
-        include_str!("../../../runtime/lua/smelt/plugins/predict.lua"),
+        include_str!("../../../../runtime/lua/smelt/plugins/predict.lua"),
     ),
 ];
 
