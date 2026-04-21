@@ -64,8 +64,10 @@ pub trait PanelWidget: Send {
         let _ = (code, mods);
         KeyResult::Ignored
     }
-    fn cursor(&self, area: Rect) -> Option<CursorInfo> {
-        let _ = area;
+    /// Cursor position relative to the widget's draw area (same
+    /// convention as `Component::cursor`). The dialog translates this
+    /// to dialog-relative coords for the compositor.
+    fn cursor(&self) -> Option<CursorInfo> {
         None
     }
     /// Rows the widget would like to occupy. Used for `PanelHeight::Fit`.
@@ -237,6 +239,10 @@ pub struct Dialog {
     config: DialogConfig,
     panels: Vec<DialogPanel>,
     focused: usize,
+    /// Layer rect from the last `prepare`/`draw`, used to translate
+    /// panel-relative cursor positions back to coords relative to the
+    /// dialog (what the compositor expects from `Component::cursor`).
+    area: Rect,
 }
 
 impl Dialog {
@@ -254,6 +260,7 @@ impl Dialog {
             config,
             panels,
             focused,
+            area: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -665,6 +672,7 @@ impl Dialog {
 
 impl Component for Dialog {
     fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
+        self.area = area;
         self.resolve_panel_rects(area);
     }
 
@@ -824,7 +832,25 @@ impl Component for Dialog {
         // cursor glyph. Widgets may expose a hardware cursor.
         let panel = self.panels.get(self.focused)?;
         if let DialogPanelContent::Widget(widget) = &panel.content {
-            return widget.cursor(panel.rect);
+            let ci = widget.cursor()?;
+            // Widget returns coords relative to its own draw area
+            // (panel.rect). Translate to dialog-relative so the
+            // compositor can add this layer's absolute rect.
+            let rel_col = panel
+                .rect
+                .left
+                .saturating_sub(self.area.left)
+                .saturating_add(ci.col);
+            let rel_row = panel
+                .rect
+                .top
+                .saturating_sub(self.area.top)
+                .saturating_add(ci.row);
+            return Some(CursorInfo {
+                col: rel_col,
+                row: rel_row,
+                style: ci.style,
+            });
         }
         None
     }
@@ -1068,5 +1094,38 @@ mod tests {
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
         let r = dlg.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(r, KeyResult::Action("select:1".into()));
+    }
+
+    #[test]
+    fn widget_panel_receives_keys_and_draws() {
+        use crate::text_input::TextInput;
+        let panels = build_panels(
+            vec![PanelSpec::widget(
+                Box::new(TextInput::new()),
+                PanelHeight::Fixed(1),
+            )],
+            &std::collections::HashMap::new(),
+        );
+        let mut dlg = Dialog::new(DialogConfig::default(), panels);
+        let area = Rect::new(0, 0, 20, 3);
+        dlg.resolve_panel_rects(area);
+        // Type "hi" into the widget via the dialog's key routing.
+        assert_eq!(
+            dlg.handle_key(KeyCode::Char('h'), KeyModifiers::NONE),
+            KeyResult::Consumed
+        );
+        assert_eq!(
+            dlg.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
+            KeyResult::Consumed
+        );
+        // Widget draws the typed text.
+        let mut grid = Grid::new(20, 3);
+        let mut slice = grid.slice_mut(area);
+        dlg.draw(area, &mut slice, &ctx(20, 3));
+        assert_eq!(grid.cell(1, 1).symbol, 'h');
+        assert_eq!(grid.cell(2, 1).symbol, 'i');
+        // Cursor is translated to dialog-relative coords.
+        let ci = dlg.cursor().expect("widget cursor");
+        assert_eq!((ci.col, ci.row), (3, 1));
     }
 }

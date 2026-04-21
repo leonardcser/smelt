@@ -33,7 +33,10 @@ pub use callback::{
 };
 pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult};
 pub use compositor::Compositor;
-pub use dialog::{Dialog, DialogConfig, PanelHeight, PanelKind, PanelSpec, SeparatorStyle};
+pub use dialog::{
+    Dialog, DialogConfig, PanelContent, PanelHeight, PanelKind, PanelSpec, PanelWidget,
+    SeparatorStyle,
+};
 pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
 pub use flush::flush_diff;
