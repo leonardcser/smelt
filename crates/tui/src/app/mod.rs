@@ -205,10 +205,12 @@ pub(super) enum BuiltinFloat {
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
         items: Vec<PermissionItem>,
         pending_d: bool,
+        list_buf: ui::BufId,
     },
     Ps {
         registry: engine::tools::ProcessRegistry,
         killed: Vec<String>,
+        list_buf: ui::BufId,
     },
     Resume {
         entries: Vec<ResumeEntry>,
@@ -219,6 +221,8 @@ pub(super) enum BuiltinFloat {
         filtered: Vec<usize>,
         pending_d: bool,
         content_cache: Option<HashMap<String, String>>,
+        list_buf: ui::BufId,
+        title_buf: ui::BufId,
     },
 }
 
