@@ -47,6 +47,11 @@ impl CursorInfo {
 }
 
 pub trait Component: 'static {
+    /// Resolve any internal layout that depends on the frame's
+    /// allocated rect. Called once per frame before `draw`. Default
+    /// no-op; components with sub-layout (e.g. Dialog's panel stack)
+    /// override this.
+    fn prepare(&mut self, _area: Rect, _ctx: &DrawContext) {}
     fn draw(&self, area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext);
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyResult;
     fn cursor(&self) -> Option<CursorInfo> {

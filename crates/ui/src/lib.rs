@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod buffer_view;
 pub mod component;
 pub mod compositor;
+pub mod dialog;
 pub mod edit_buffer;
 pub mod float_dialog;
 pub mod float_render;
@@ -27,6 +28,7 @@ pub use buffer::{BufType, Buffer, Span, SpanStyle};
 pub use buffer_view::BufferView;
 pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult};
 pub use compositor::Compositor;
+pub use dialog::{Dialog, DialogConfig, PanelHeight, PanelKind, PanelSpec, SeparatorStyle};
 pub use edit_buffer::EditBuffer;
 pub use float_dialog::{FloatDialog, FloatDialogConfig};
 pub use flush::flush_diff;
@@ -155,6 +157,53 @@ impl Ui {
         if self.current_win == Some(id) {
             self.current_win = self.wins.keys().next().copied();
         }
+    }
+
+    /// Open a multi-panel `Dialog` as a compositor float layer.
+    ///
+    /// Panels' buffers stay in `Ui::bufs`; each panel's interaction
+    /// state (cursor, scroll) lives in a dialog-local `Window`. The
+    /// dialog's own `WinId` is registered in `Ui::wins` as a float so
+    /// focus / close paths match `win_open_float`.
+    pub fn dialog_open(
+        &mut self,
+        float_config: FloatConfig,
+        dialog_config: dialog::DialogConfig,
+        panels: Vec<dialog::PanelSpec>,
+    ) -> Option<WinId> {
+        if !panels.iter().all(|p| self.bufs.contains_key(&p.buf)) {
+            return None;
+        }
+        let id = WinId(self.next_win_id);
+        self.next_win_id += 1;
+
+        let (tw, th) = self.terminal_size;
+        let rect = resolve_float_rect(&float_config, tw, th);
+        let zindex = float_config.zindex;
+
+        // Use the first panel's buffer as the dialog window's "buf"
+        // pointer for registry purposes (dialogs are multi-buffer).
+        let primary_buf = panels.first().map(|p| p.buf).unwrap_or(BufId(0));
+
+        let panel_structs = dialog::build_panels(panels, &self.bufs);
+        let dlg = dialog::Dialog::new(dialog_config, panel_structs);
+
+        let win = Window::new(id, primary_buf, WinConfig::Float(float_config));
+        self.wins.insert(id, win);
+
+        let layer_id = float_layer_id(id);
+        self.compositor.add(&layer_id, Box::new(dlg), rect, zindex);
+        self.compositor.focus(&layer_id);
+
+        Some(id)
+    }
+
+    /// Access a `Dialog` compositor layer by its WinId for
+    /// post-creation configuration (hints, dismiss keys, etc.).
+    pub fn dialog_mut(&mut self, win_id: WinId) -> Option<&mut dialog::Dialog> {
+        let layer_id = float_layer_id(win_id);
+        let comp = self.compositor.component_mut(&layer_id)?;
+        comp.as_any_mut().downcast_mut::<dialog::Dialog>()
     }
 
     pub fn win(&self, id: WinId) -> Option<&Window> {
@@ -313,11 +362,26 @@ impl Ui {
 
         for (win_id, buf_id) in float_wins {
             let layer_id = float_layer_id(win_id);
-            if let Some(buf) = self.bufs.get(&buf_id) {
+            if let Some(buf) = self.bufs.get(&buf_id).cloned() {
                 if let Some(comp) = self.compositor.component_mut(&layer_id) {
                     if let Some(fd) = comp.as_any_mut().downcast_mut::<FloatDialog>() {
-                        fd.sync_content_from_buffer(buf);
+                        fd.sync_content_from_buffer(&buf);
                     }
+                }
+            }
+        }
+
+        // Sync all Dialog panels from their buffers.
+        let dialog_layers: Vec<String> = self
+            .wins
+            .iter()
+            .filter(|(_, w)| w.is_float())
+            .map(|(id, _)| float_layer_id(*id))
+            .collect();
+        for layer_id in dialog_layers {
+            if let Some(comp) = self.compositor.component_mut(&layer_id) {
+                if let Some(dlg) = comp.as_any_mut().downcast_mut::<dialog::Dialog>() {
+                    dlg.sync_from_bufs(|bid| self.bufs.get(&bid));
                 }
             }
         }
