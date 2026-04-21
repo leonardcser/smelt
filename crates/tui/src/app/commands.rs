@@ -248,7 +248,6 @@ impl App {
         content: Content,
         display: &str,
         agent: &mut Option<TurnState>,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
     ) -> bool {
         match outcome {
             InputOutcome::StartAgent => {
@@ -276,9 +275,6 @@ impl App {
                 self.screen.erase_prompt();
                 self.reset_session();
                 *agent = None;
-            }
-            InputOutcome::OpenDialog(dlg) => {
-                self.open_dialog(dlg, active_dialog);
             }
             InputOutcome::Continue => {}
             InputOutcome::Quit => return true,
@@ -318,7 +314,6 @@ impl App {
         match run_command(self, input) {
             CommandAction::Quit => Some(EventOutcome::Quit),
             CommandAction::CancelAndClear => Some(EventOutcome::CancelAndClear),
-            CommandAction::OpenDialog(dlg) => Some(EventOutcome::OpenDialog(dlg)),
             CommandAction::Exec(rx, kill) => Some(EventOutcome::Exec(rx, kill)),
             CommandAction::Continue => Some(EventOutcome::Noop),
             CommandAction::Compact { .. } => unreachable!(), // blocked above

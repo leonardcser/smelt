@@ -1080,50 +1080,6 @@ impl App {
             .set_running_procs(self.engine.processes.running_count());
     }
 
-    // ── Dialog resolution ────────────────────────────────────────────────
-
-    pub(super) fn handle_dialog_result(
-        &mut self,
-        result: render::DialogResult,
-        agent: &mut Option<TurnState>,
-    ) {
-        // Dialog-area cleanup + spinner resume happen once here.  Arms that
-        // do a full-screen repaint (rewind, resume) still work — clearing
-        // an already-repainted region is a no-op.
-        self.finalize_dialog_close();
-        match result {
-            render::DialogResult::Confirm {
-                choice,
-                message,
-                tool_name,
-                request_id,
-            } => {
-                let ctx = self.confirm_context.take();
-                let call_id = ctx.as_ref().map(|c| c.call_id.clone()).unwrap_or_default();
-
-                let should_cancel = self.resolve_confirm(
-                    (choice, message),
-                    &call_id,
-                    request_id,
-                    &tool_name,
-                    agent,
-                );
-                if should_cancel && agent.is_some() {
-                    self.finish_turn(true);
-                    *agent = None;
-                }
-            }
-            render::DialogResult::Question { answer, request_id } => {
-                let should_cancel = self.resolve_question(answer, request_id, agent);
-                if should_cancel && agent.is_some() {
-                    self.finish_turn(true);
-                    *agent = None;
-                }
-            }
-            render::DialogResult::Dismissed => {}
-        }
-    }
-
     pub(super) fn session_permission_entries(&self) -> Vec<render::PermissionEntry> {
         let rt = self.runtime_approvals.read().unwrap();
         let mut entries = Vec::new();
@@ -1351,13 +1307,12 @@ impl App {
         ctrl: SessionControl,
         pending: &[PendingTool],
         pending_dialogs: &mut VecDeque<DeferredDialog>,
-        active_dialog: &mut Option<Box<dyn render::Dialog>>,
         last_keypress: Option<Instant>,
     ) -> LoopAction {
-        // Queue dialogs when a blocking dialog is active or the user is typing.
+        // Queue dialogs when a blocking float is open or the user is typing.
         // The queue is drained in the main loop via re-dispatch, so auto-approval
         // checks re-run (handles "always allow" → recheck).
-        let should_queue = active_dialog.as_ref().is_some_and(|d| d.blocks_agent())
+        let should_queue = self.focused_float_blocks_agent()
             || (last_keypress
                 .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
                 && !self.input.buf.is_empty());
@@ -1439,10 +1394,8 @@ impl App {
                         .retain(|p| !rt.has_pattern(&req.tool_name, p));
                 }
 
-                // Close any non-blocking dialog (e.g. Ps) to make room.
-                if active_dialog.take().is_some() {
-                    self.finalize_dialog_close();
-                }
+                // Close any non-blocking float (e.g. Ps) to make room.
+                self.close_focused_non_blocking_float();
                 self.confirm_context = Some(ConfirmContext {
                     call_id: req.call_id.clone(),
                     tool_name: req.tool_name.clone(),
@@ -1452,7 +1405,6 @@ impl App {
                 self.screen
                     .set_active_status(&req.call_id, ToolStatus::Confirm);
                 crate::app::dialogs::confirm::open(self, &req);
-                let _ = active_dialog;
                 LoopAction::Continue
             }
             SessionControl::NeedsAskQuestion { args, request_id } => {
@@ -1462,16 +1414,12 @@ impl App {
                     return LoopAction::Continue;
                 }
 
-                // Close any non-blocking dialog (e.g. Ps) to make room.
-                if active_dialog.take().is_some() {
-                    self.finalize_dialog_close();
-                }
+                self.close_focused_non_blocking_float();
                 // ask_user_question doesn't have a call_id in the permission flow,
                 // use empty string (it targets the last active tool via fallback).
                 self.screen.set_active_status("", ToolStatus::Confirm);
                 let questions = render::parse_questions(&args);
                 crate::app::dialogs::question::open(self, questions, request_id);
-                let _ = active_dialog;
                 LoopAction::Continue
             }
         }
