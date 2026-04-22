@@ -443,7 +443,39 @@ transcript are windows (C3). Revised shape:
   `CursorOwner::Cmdline` still suppresses prompt/transcript cursors.
 
 **C3 · Prompt + Transcript as real `ui::Window`s + Screen deletion.**
-The big atomic commit:
+Original framing was "one atomic commit," but session-boundary
+limits make this unworkable — and the practical experience shows
+incremental green checkpoints shrink Screen without weird invariants.
+Ongoing as a series of mechanical, test-green commits:
+
+- C3 prep (done, 9dde0a9) — thread `show_thinking` as param, delete
+  Screen mirror.
+- C3 step 2 (done, 8b45af9) — delete `CursorOwner` enum,
+  `last_app_focus`, `focused` mirror; compute inline.
+- C3 step 3 (done, fb94530) — move `WorkingState` off Screen onto
+  App.
+- C3 step 4 (done, 35d01d9) — move `transcript_gutters` to App,
+  inline `TRANSCRIPT_GUTTERS` const.
+- C3 step 5 (done, 0976e75) — move `LayoutState` to App, refresh
+  per-frame (fixes pre-existing staleness bug).
+- C3 step 6 (done, e02c9f1) — move `PromptState` fields to App,
+  delete `render::prompt` module.
+- C3 step 7 (done, 0a03125) — route terminal size through
+  `ui.terminal_size()`, delete `Screen::backend()` getter.
+- C3 step 8 (done, 1ed4421) — move `last_transcript_viewport` to
+  App; return via `TranscriptData`; thread viewport into
+  `compute_transcript_cursor`.
+
+Remaining for full C3:
+- Move `last_viewport_text` / `last_viewport_lines` to App (or
+  derive from live `ui.wins` state).
+- Delete `dirty` flag + `mark_dirty` / `mark_clean` / `is_dirty` /
+  `needs_draw` / `redraw`. Compositor grid-diff is the sole
+  change-detection mechanism (~138 callsites).
+- Move `transcript` + `parser` + `transcript_projection` triad to App
+  (coupled via `self.parser.X(&mut self.transcript.history, ...)`).
+- Delete `backend: Box<dyn TerminalBackend>` — inline terminal-direct
+  clear emission into caller or drop entirely.
 - `InputState` holds `win_id: WinId`; the `Window` lives in `ui.wins`.
   All 122 sites of `self.input.win.{cpos, edit_buf, win_cursor,
   kill_ring}` migrate to `self.ui.win_mut(self.input.win_id).unwrap().
@@ -457,21 +489,9 @@ The big atomic commit:
   above prompt window's rect).
 - Queued-messages → compositor float above the prompt.
 - Stash indicator → compositor float / single-row layer.
-- Delete `render::Screen` entirely. `BlockHistory`, `StreamParser`,
-  `TranscriptProjection`, `WorkingState`, `CursorOwner`, `layout` move
-  to App.
-- Delete `dirty` flag + `needs_draw` / `mark_dirty` / `mark_clean`.
-  Compositor grid-diff is the sole change-detection mechanism.
-- Delete `last_viewport_text` / `last_viewport_lines` /
-  `last_transcript_viewport` / `transcript_gutters` caches (read from
-  live Window state).
+- Delete `render::Screen` entirely.
 
-Splitting this is counterproductive — the Screen struct is the glue
-holding all these fields together, and every partial extraction leaves
-a shrunken-but-still-alive Screen with progressively weirder invariants.
-One atomic move.
-
-Expected LOC: net −800..−1200 lines.
+Expected LOC at end: net −800..−1200 lines.
 
 ### Phase D — Lua FFI unification (1 commit)
 
