@@ -1033,10 +1033,6 @@ impl Screen {
         self.show_slug
     }
 
-    pub(crate) fn last_mode(&self) -> protocol::Mode {
-        self.last_mode
-    }
-
     pub(crate) fn mark_clean(&mut self) {
         self.dirty = false;
     }

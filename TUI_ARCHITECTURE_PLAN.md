@@ -105,16 +105,40 @@ legacy `Dialog`/`DialogResult`/`ConfirmDialog`/`QuestionDialog` deleted),
 a review surfaced these follow-ups. They're grouped so the ordering can
 be picked per session.
 
+**Keystone: finalize the rendering architecture before more
+polish.** Multiple bugs (B1 stale mode pill, B3 prompt fade, B5
+transcript status, B6 mouse routing) all trace back to the same
+root cause — the rendering is split between two parallel systems
+(legacy `render::Screen` emitting ANSI bytes + duplicated caches
+like `last_mode`, vs. the new compositor with grid-diff). Every
+bug fix while both paths coexist risks another duplicated-state
+drift.
+
+**Decision:** stop patching symptoms. Complete the compositor
+migration (task #11 "Pin prompt window to terminal bottom" + the
+C1 `Screen` deletion sweep) so there is a single grid, single
+source of truth per field, and the dirty flag can be deleted
+entirely. Only then return to B2/B4/B6/B7. The `last_mode`
+cache is the canonical example of why: fixing it in isolation
+is trivial, but the class of bug only disappears when the cache
+is gone.
+
 **Bugs to fix on the compositor path:**
 
-B1. **Shift+Tab no longer toggles mode.** Routing regression from the
-    legacy-dialog removal. Root cause: mode-toggle was implicit in the
-    legacy Confirm key handling and in the input layer's own BackTab
-    path. On the compositor path the Confirm float intercepts BackTab
-    via `handle_confirm_backtab`, but Shift+Tab pressed outside a
-    blocking float (e.g. focus on transcript / prompt without a
-    pending permission) is no longer wired to `App::toggle_mode`. See
-    **A1** below for the fix shape.
+B1. ✅ **Shift+Tab toggles mode globally.** Fixed by landing A1
+    (global chord layer) and rewiring the status bar to read
+    `self.mode` directly instead of the stale `screen.last_mode`
+    cache. Two commits: `1cf2960` (chord layer: Shift+Tab /
+    Ctrl+T / Ctrl+L) and the mode-pill single-source-of-truth fix.
+
+    **Lesson worth codifying:** the mode was *actually* toggling in
+    `self.mode` and in engine state — only the status-bar pill was
+    stale because it read `screen.last_mode`, a cached copy updated
+    only by the legacy `draw_prompt` path. Duplicated state behind a
+    dirty flag → silent drift. Status-bar rendering now reads the
+    live fields; the `last_mode` cache should be deleted once the
+    legacy `draw_prompt` status code (screen.rs:550) is removed as
+    part of the compositor migration (B3 / task #11).
 
 B2. **Permission-gated tools (e.g. `rm -rf`) ran without a prompt.**
     A real regression, not cosmetic. Possible causes to check in
@@ -212,13 +236,14 @@ B3. **Prompt + status bar fade out over time.** The real cause is
 
 **Architectural follow-ups:**
 
-A1. **Global chord layer in `dispatch_terminal_event`.** Add a small
-    pre-route map that fires regardless of focus: `Shift+Tab` →
-    toggle mode, `Ctrl+T` → toggle thinking, `Ctrl+L` → redraw.
-    Runs *before* float/cmdline/prompt dispatch. Also has the nice
-    side effect of letting `handle_confirm_backtab` go away —
-    instead, the Confirm dialog's `tick` observes `mode` changes and
-    resolves the request if the new mode auto-allows.
+A1. ✅ **Global chord layer in `dispatch_terminal_event`** (commit
+    `1cf2960`). Pre-route map fires regardless of focus:
+    `Shift+Tab` → toggle mode, `Ctrl+T` → cycle reasoning, `Ctrl+L`
+    → full redraw. Runs *before* float/cmdline/prompt dispatch.
+    Still-open follow-up: retire `handle_confirm_backtab` by having
+    Confirm's `tick` observe `mode` changes and resolve when the new
+    mode auto-allows (today the chord layer still routes through
+    `handle_confirm_backtab` when a Confirm float is focused).
 
 A2. **Replace `lua_dialog.rs` with direct UI primitives in Lua.**
     The current shape (`Lua table {title, panels[{kind,...}]}` →
