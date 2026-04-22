@@ -61,6 +61,8 @@ pub enum AppOp {
         session_entries: Vec<crate::render::PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
     },
+    /// Load a saved session by id (Resume dialog).
+    LoadSession(String),
     /// Background LLM call from a Lua plugin.
     BackgroundAsk {
         id: u64,
