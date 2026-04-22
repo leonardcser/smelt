@@ -11,9 +11,6 @@ pub(super) struct PromptState {
     /// `draw_frame` call (always fresh). On first frame or after clear,
     /// falls back to `cursor::position()` once.
     pub anchor_row: Option<u16>,
-    /// Computed each frame inside `draw_frame`, exposed via `dialog_row()`
-    /// getter for the app loop.
-    pub prev_dialog_row: Option<u16>,
     /// Persisted scroll offset for multi-line input (vim-style viewport).
     pub input_scroll: usize,
     /// Screen position `(col, row)` of the software block cursor from
@@ -30,7 +27,6 @@ impl PromptState {
             prev_rows: 0,
             prev_prompt_ui_rows: 0,
             anchor_row: None,
-            prev_dialog_row: None,
             input_scroll: 0,
             soft_cursor: None,
             viewport: None,

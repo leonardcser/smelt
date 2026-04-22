@@ -995,8 +995,8 @@ impl App {
             });
         }
 
-        // Permission pending.
-        if self.screen.pending_dialog() && !self.screen.dialog_open() {
+        // Permission pending (no Confirm float is showing yet).
+        if self.screen.pending_dialog() && self.confirm_context.is_none() {
             spans.push(StatusSpan {
                 text: "permission pending".into(),
                 style: render::StyleState {
@@ -1089,7 +1089,6 @@ impl App {
         let (term_w, term_h) = self.screen.size();
         let width = term_w as usize;
         let show_queued = agent_running || self.is_compacting();
-        self.screen.set_dialog_open(false);
         self.screen.set_app_focus(self.app_focus);
 
         self.sync_transcript_pin();
@@ -1116,8 +1115,6 @@ impl App {
             term_width: term_w,
             term_height: term_h,
             prompt_height: natural_prompt_height,
-            dialog_height: None,
-            constrain_dialog: false,
         });
         let viewport_rows = layout.viewport_rows();
         let prompt_rect = layout.prompt;
