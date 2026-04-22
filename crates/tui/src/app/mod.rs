@@ -792,6 +792,14 @@ impl App {
                 }
             }
             self.tick_focused_float();
+            // Dispatch WinEvent::Tick to migrated dialogs (e.g. Agents
+            // refreshes subagent state here).
+            {
+                let mut lua_invoke =
+                    |_h: ui::LuaHandle, _p: &ui::Payload| -> Vec<String> { Vec::new() };
+                let _ = self.ui.dispatch_tick(&mut lua_invoke);
+            }
+            self.apply_lua_ops();
 
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {

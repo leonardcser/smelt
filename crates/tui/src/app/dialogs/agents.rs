@@ -1,18 +1,21 @@
 use super::super::App;
-use super::DialogState;
+use crate::app::ops::AppOp;
 use crate::render::{AgentSnapshot, SharedSnapshots};
 use crate::utils::format_duration;
 use crossterm::event::{KeyCode, KeyModifiers};
 use engine::registry::{AgentStatus, RegistryEntry};
+use std::cell::RefCell;
+use std::rc::Rc;
+use ui::{Callback, CallbackResult, KeyBind, Payload, WinEvent};
 
-pub struct AgentsList {
+struct AgentsListState {
     my_pid: u32,
     snapshots: SharedSnapshots,
     list_buf: ui::BufId,
     agents: Vec<RegistryEntry>,
 }
 
-pub struct AgentsDetail {
+struct AgentsDetailState {
     my_pid: u32,
     agent_id: String,
     snapshots: SharedSnapshots,
@@ -25,9 +28,8 @@ pub(in crate::app) fn open(app: &mut App) {
     open_list(app, 0);
 }
 
-fn open_list(app: &mut App, initial_selected: usize) {
+pub(in crate::app) fn open_list(app: &mut App, initial_selected: usize) {
     use crate::keymap::hints;
-    use crossterm::event::KeyCode;
 
     let my_pid = std::process::id();
     let snapshots = app.agent_snapshots.clone();
@@ -54,7 +56,7 @@ fn open_list(app: &mut App, initial_selected: usize) {
         vec![(KeyCode::Char('q'), KeyModifiers::NONE)],
     );
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -66,27 +68,109 @@ fn open_list(app: &mut App, initial_selected: usize) {
             ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
             ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
         ],
+    ) else {
+        return;
+    };
+
+    if initial_selected > 0 {
+        if let Some(dialog) = app.ui.dialog_mut(win_id) {
+            dialog.set_selected_index(initial_selected);
+        }
+    }
+
+    let state = Rc::new(RefCell::new(AgentsListState {
+        my_pid,
+        snapshots,
+        list_buf,
+        agents,
+    }));
+
+    let ops = app.lua.ops_handle();
+
+    // Backspace: kill the selected subagent if it belongs to our tree.
+    let state_bs = state.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::plain(KeyCode::Backspace),
+        Callback::Rust(Box::new(move |ctx| {
+            let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
+            let Some(idx) = idx else {
+                return CallbackResult::Consumed;
+            };
+            let mut s = state_bs.borrow_mut();
+            if let Some(agent) = s.agents.get(idx) {
+                let pid = agent.pid;
+                if engine::registry::is_in_tree(pid, s.my_pid) {
+                    engine::registry::kill_agent(pid);
+                    s.agents = engine::registry::children_of(s.my_pid);
+                    let s_ref: &AgentsListState = &s;
+                    refresh_list(ctx.ui, s_ref.list_buf, &s_ref.agents, &s_ref.snapshots);
+                }
+            }
+            CallbackResult::Consumed
+        })),
     );
 
-    if let Some(win_id) = win_id {
-        if initial_selected > 0 {
-            if let Some(dialog) = app.ui.dialog_mut(win_id) {
-                dialog.set_selected_index(initial_selected);
+    // Submit (Enter): swap list for detail view of the selected agent.
+    let state_submit = state.clone();
+    let ops_submit = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Submit,
+        Callback::Rust(Box::new(move |ctx| {
+            if let Payload::Selection { index } = ctx.payload {
+                let s = state_submit.borrow();
+                if let Some(entry) = s.agents.get(index) {
+                    ops_submit.push(AppOp::OpenAgentsDetail {
+                        agent_id: entry.agent_id.clone(),
+                        parent_selected: index,
+                    });
+                }
             }
-        }
-        app.float_states.insert(
-            win_id,
-            Box::new(AgentsList {
-                my_pid,
-                snapshots,
-                list_buf,
-                agents,
-            }),
-        );
-    }
+            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
+
+    // Dismiss: refresh agent counts + close.
+    let ops_dismiss = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            ops_dismiss.push(AppOp::RefreshAgentCounts);
+            ops_dismiss.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
+
+    // Tick: re-read registry and refresh the buffer when anything changed.
+    let state_tick = state;
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Tick,
+        Callback::Rust(Box::new(move |ctx| {
+            let mut s = state_tick.borrow_mut();
+            let fresh = engine::registry::children_of(s.my_pid);
+            let changed = fresh.len() != s.agents.len()
+                || fresh.iter().zip(s.agents.iter()).any(|(a, b)| {
+                    a.agent_id != b.agent_id
+                        || a.status != b.status
+                        || a.task_slug != b.task_slug
+                        || a.pid != b.pid
+                });
+            if changed {
+                s.agents = fresh;
+                let s_ref: &AgentsListState = &s;
+                refresh_list(ctx.ui, s_ref.list_buf, &s_ref.agents, &s_ref.snapshots);
+            }
+            CallbackResult::Consumed
+        })),
+    );
+    let _ = ops;
 }
 
-fn open_detail(app: &mut App, agent_id: String, parent_selected: usize) {
+pub(in crate::app) fn open_detail(app: &mut App, agent_id: String, parent_selected: usize) {
     use crate::keymap::hints;
 
     let my_pid = std::process::id();
@@ -107,7 +191,7 @@ fn open_detail(app: &mut App, agent_id: String, parent_selected: usize) {
     let hint_text = hints::join(&[hints::BACK, hints::scroll(app.input.vim_enabled())]);
     let dialog_config = app.builtin_dialog_config(Some(hint_text), vec![]);
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -121,112 +205,49 @@ fn open_detail(app: &mut App, agent_id: String, parent_selected: usize) {
                 .with_pad_left(2)
                 .focusable(true),
         ],
+    ) else {
+        return;
+    };
+
+    let state = Rc::new(RefCell::new(AgentsDetailState {
+        my_pid,
+        agent_id,
+        snapshots,
+        title_buf,
+        detail_buf,
+        parent_selected,
+    }));
+
+    let ops = app.lua.ops_handle();
+
+    // Dismiss: back-nav to the list view.
+    let state_dismiss = state.clone();
+    let ops_dismiss = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            let initial = state_dismiss.borrow().parent_selected;
+            ops_dismiss.push(AppOp::CloseFloat(ctx.win));
+            ops_dismiss.push(AppOp::OpenAgentsList {
+                initial_selected: initial,
+            });
+            CallbackResult::Consumed
+        })),
     );
 
-    if let Some(win_id) = win_id {
-        app.float_states.insert(
-            win_id,
-            Box::new(AgentsDetail {
-                my_pid,
-                agent_id,
-                snapshots,
-                title_buf,
-                detail_buf,
-                parent_selected,
-            }),
-        );
-    }
-}
-
-impl DialogState for AgentsList {
-    fn handle_key(
-        &mut self,
-        app: &mut App,
-        win: ui::WinId,
-        code: KeyCode,
-        _mods: KeyModifiers,
-    ) -> Option<ui::KeyResult> {
-        if code == KeyCode::Backspace {
-            let idx = app.ui.dialog_mut(win).and_then(|d| d.selected_index());
-            if let Some(idx) = idx {
-                if let Some(agent) = self.agents.get(idx) {
-                    let pid = agent.pid;
-                    if engine::registry::is_in_tree(pid, self.my_pid) {
-                        engine::registry::kill_agent(pid);
-                        self.agents = engine::registry::children_of(self.my_pid);
-                        refresh_list(&mut app.ui, self.list_buf, &self.agents, &self.snapshots);
-                    }
-                }
-            }
-            return Some(ui::KeyResult::Consumed);
-        }
-        None
-    }
-
-    fn on_select(
-        &mut self,
-        app: &mut App,
-        win: ui::WinId,
-        idx: usize,
-        _agent: &mut Option<super::TurnState>,
-    ) {
-        let Some(entry) = self.agents.get(idx) else {
-            return;
-        };
-        let agent_id = entry.agent_id.clone();
-        // close_float will run after on_select; open the detail view
-        // from an on-close follow-up via queuing, but the simplest
-        // approach is to call open_detail directly. The list window
-        // will be closed by the framework immediately after this.
-        let parent_selected = idx;
-        // Drop the list's state first — we're about to close its window.
-        self.agents.clear();
-        // Schedule detail open after the framework closes this window.
-        let _ = win;
-        open_detail(app, agent_id, parent_selected);
-    }
-
-    fn on_dismiss(&mut self, app: &mut App, _win: ui::WinId) {
-        app.refresh_agent_counts();
-    }
-
-    fn tick(&mut self, app: &mut App, _win: ui::WinId) {
-        let fresh = engine::registry::children_of(self.my_pid);
-        let changed = fresh.len() != self.agents.len()
-            || fresh.iter().zip(self.agents.iter()).any(|(a, b)| {
-                a.agent_id != b.agent_id
-                    || a.status != b.status
-                    || a.task_slug != b.task_slug
-                    || a.pid != b.pid
-            });
-        if changed {
-            self.agents = fresh;
-            refresh_list(&mut app.ui, self.list_buf, &self.agents, &self.snapshots);
-        }
-    }
-}
-
-impl DialogState for AgentsDetail {
-    fn on_dismiss(&mut self, app: &mut App, _win: ui::WinId) {
-        let selected = self.parent_selected;
-        open_list(app, selected);
-    }
-
-    fn tick(&mut self, app: &mut App, _win: ui::WinId) {
-        refresh_detail_title(
-            &mut app.ui,
-            self.title_buf,
-            &self.agent_id,
-            self.my_pid,
-            &self.snapshots,
-        );
-        refresh_detail_body(
-            &mut app.ui,
-            self.detail_buf,
-            &self.agent_id,
-            &self.snapshots,
-        );
-    }
+    // Tick: refresh title + body.
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Tick,
+        Callback::Rust(Box::new(move |ctx| {
+            let s = state.borrow();
+            refresh_detail_title(ctx.ui, s.title_buf, &s.agent_id, s.my_pid, &s.snapshots);
+            refresh_detail_body(ctx.ui, s.detail_buf, &s.agent_id, &s.snapshots);
+            CallbackResult::Consumed
+        })),
+    );
+    let _ = ops;
 }
 
 fn find_snapshot(snapshots: &SharedSnapshots, agent_id: &str) -> Option<AgentSnapshot> {

@@ -70,6 +70,21 @@ pub enum AppOp {
         answer: Option<String>,
         request_id: u64,
     },
+    /// Open the Agents list dialog. Used both at command entry and
+    /// as the back-navigation from the Agents detail view.
+    OpenAgentsList {
+        initial_selected: usize,
+    },
+    /// Swap the Agents list for the detail view of a specific
+    /// subagent. `parent_selected` preserves the list cursor for
+    /// when detail is dismissed.
+    OpenAgentsDetail {
+        agent_id: String,
+        parent_selected: usize,
+    },
+    /// Refresh the cached subagent counts on the status bar — fires
+    /// when the Agents list is dismissed.
+    RefreshAgentCounts,
     /// Background LLM call from a Lua plugin.
     BackgroundAsk {
         id: u64,
