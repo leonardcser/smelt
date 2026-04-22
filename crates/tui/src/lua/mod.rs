@@ -202,7 +202,7 @@ pub(crate) struct LuaHandle {
     dead: bool,
 }
 
-pub use crate::app::ops::{AppOp, OpsHandle};
+pub use crate::app::ops::{AppOp, DomainOp, OpsHandle, UiOp};
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).
 /// Populated by `snapshot_engine_context` in the app loop.
@@ -277,6 +277,13 @@ impl LuaOps {
 
     pub fn drain(&mut self) -> Vec<AppOp> {
         std::mem::take(&mut self.ops)
+    }
+
+    /// Queue any op that converts into an `AppOp` — `UiOp`, `DomainOp`,
+    /// or a pre-built `AppOp`. Saves every call site from writing
+    /// `.into()`.
+    pub fn push<O: Into<AppOp>>(&mut self, op: O) {
+        self.ops.push(op.into());
     }
 }
 
@@ -518,7 +525,7 @@ impl LuaRuntime {
                 let s = $s.clone();
                 $lua.create_function(move |_, $val: $ty| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push($op);
+                        o.push($op);
                     }
                     Ok(())
                 })?
@@ -527,7 +534,7 @@ impl LuaRuntime {
                 let s = $s.clone();
                 $lua.create_function(move |_, ()| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push($op);
+                        o.push($op);
                     }
                     Ok(())
                 })?
@@ -545,7 +552,7 @@ impl LuaRuntime {
         )?;
         transcript_tbl.set(
             "yank_block",
-            push_op!(lua, shared, || AppOp::YankBlockAtCursor),
+            push_op!(lua, shared, || DomainOp::YankBlockAtCursor),
         )?;
         api.set("transcript", transcript_tbl)?;
 
@@ -581,7 +588,7 @@ impl LuaRuntime {
         }
         cmd_tbl.set(
             "run",
-            push_op!(lua, shared, |line: String| AppOp::RunCommand(line)),
+            push_op!(lua, shared, |line: String| DomainOp::RunCommand(line)),
         )?;
         {
             let s = shared.clone();
@@ -689,7 +696,7 @@ impl LuaRuntime {
                             .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
                             .unwrap_or(false);
                         if let Ok(mut o) = s.ops.lock() {
-                            o.ops.push(AppOp::RewindToBlock {
+                            o.push(DomainOp::RewindToBlock {
                                 block_idx,
                                 restore_vim_insert,
                             });
@@ -743,40 +750,40 @@ impl LuaRuntime {
         // one stored on disk at `id` (accepts full id or a prefix).
         session_tbl.set(
             "load",
-            push_op!(lua, shared, |id: String| AppOp::LoadSession(id)),
+            push_op!(lua, shared, |id: String| DomainOp::LoadSession(id)),
         )?;
         // smelt.api.session.delete(id) — remove a session from disk.
         // No-op when `id` matches the running session.
         session_tbl.set(
             "delete",
-            push_op!(lua, shared, |id: String| AppOp::DeleteSession(id)),
+            push_op!(lua, shared, |id: String| DomainOp::DeleteSession(id)),
         )?;
         api.set("session", session_tbl)?;
 
         engine_tbl.set(
             "set_model",
-            push_op!(lua, shared, |v: String| AppOp::SetModel(v)),
+            push_op!(lua, shared, |v: String| DomainOp::SetModel(v)),
         )?;
         engine_tbl.set(
             "set_mode",
-            push_op!(lua, shared, |v: String| AppOp::SetMode(v)),
+            push_op!(lua, shared, |v: String| DomainOp::SetMode(v)),
         )?;
         engine_tbl.set(
             "set_reasoning_effort",
-            push_op!(lua, shared, |v: String| AppOp::SetReasoningEffort(v)),
+            push_op!(lua, shared, |v: String| DomainOp::SetReasoningEffort(v)),
         )?;
         engine_tbl.set(
             "submit",
-            push_op!(lua, shared, |v: String| AppOp::Submit(v)),
+            push_op!(lua, shared, |v: String| DomainOp::Submit(v)),
         )?;
-        engine_tbl.set("cancel", push_op!(lua, shared, || AppOp::Cancel))?;
+        engine_tbl.set("cancel", push_op!(lua, shared, || DomainOp::Cancel))?;
         {
             let s = shared.clone();
             engine_tbl.set(
                 "compact",
                 lua.create_function(move |_, instructions: Option<String>| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::Compact(instructions));
+                        o.push(DomainOp::Compact(instructions));
                     }
                     Ok(())
                 })?,
@@ -837,7 +844,7 @@ impl LuaRuntime {
                     }
 
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::EngineAsk {
+                        o.push(DomainOp::EngineAsk {
                             id,
                             system,
                             messages,
@@ -900,7 +907,7 @@ impl LuaRuntime {
                 "kill",
                 lua.create_function(move |_, id: String| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::KillProcess(id));
+                        o.push(DomainOp::KillProcess(id));
                     }
                     Ok(())
                 })?,
@@ -942,7 +949,7 @@ impl LuaRuntime {
         // smelt.api.agent.* — subagent registry bridge. Reads the
         // on-disk registry for sibling agents spawned by the current
         // process. `list` is a pure file read; `kill` routes through
-        // `AppOp::KillAgent` so the tick loop does the teardown.
+        // `DomainOp::KillAgent` so the tick loop does the teardown.
         let agent_tbl = lua.create_table()?;
         agent_tbl.set(
             "list",
@@ -975,7 +982,7 @@ impl LuaRuntime {
         )?;
         agent_tbl.set(
             "kill",
-            push_op!(lua, shared, |pid: u32| AppOp::KillAgent(pid)),
+            push_op!(lua, shared, |pid: u32| DomainOp::KillAgent(pid)),
         )?;
         // smelt.api.agent.snapshots() →
         //   [{ agent_id, prompt, context_tokens?, cost_usd,
@@ -1068,7 +1075,7 @@ impl LuaRuntime {
         // smelt.api.permissions.* — runtime approval rules bridge.
         // `list()` returns { session = [{tool, pattern}], workspace =
         // [{tool, patterns}] }. `sync(spec)` replaces both in one shot
-        // (session via `AppOp::SyncPermissions`, which is the same
+        // (session via `DomainOp::SyncPermissions`, which is the same
         // payload the existing permissions dialog emits on dismiss).
         let permissions_tbl = lua.create_table()?;
         {
@@ -1141,7 +1148,7 @@ impl LuaRuntime {
                         }
                     }
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::SyncPermissions {
+                        o.push(DomainOp::SyncPermissions {
                             session_entries,
                             workspace_rules,
                         });
@@ -1187,19 +1194,19 @@ impl LuaRuntime {
         let ui_tbl = lua.create_table()?;
         ui_tbl.set(
             "set_ghost_text",
-            push_op!(lua, shared, |text: String| AppOp::SetGhostText(text)),
+            push_op!(lua, shared, |text: String| UiOp::SetGhostText(text)),
         )?;
         ui_tbl.set(
             "clear_ghost_text",
-            push_op!(lua, shared, || AppOp::ClearGhostText),
+            push_op!(lua, shared, || UiOp::ClearGhostText),
         )?;
         ui_tbl.set(
             "notify",
-            push_op!(lua, shared, |msg: String| AppOp::Notify(msg)),
+            push_op!(lua, shared, |msg: String| UiOp::Notify(msg)),
         )?;
         ui_tbl.set(
             "notify_error",
-            push_op!(lua, shared, |msg: String| AppOp::NotifyError(msg)),
+            push_op!(lua, shared, |msg: String| UiOp::NotifyError(msg)),
         )?;
         api.set("ui", ui_tbl)?;
 
@@ -1256,7 +1263,7 @@ impl LuaRuntime {
                         .next_buf_id
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::BufCreate { id });
+                        o.push(UiOp::BufCreate { id });
                     }
                     Ok(id)
                 })?,
@@ -1273,7 +1280,7 @@ impl LuaRuntime {
                         .filter_map(|v| v.ok())
                         .collect();
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::BufSetLines { id, lines });
+                        o.push(UiOp::BufSetLines { id, lines });
                     }
                     Ok(())
                 })?,
@@ -1327,7 +1334,7 @@ impl LuaRuntime {
                             None => (None, false, false, false),
                         };
                         if let Ok(mut o) = s.ops.lock() {
-                            o.ops.push(AppOp::BufAddHighlight {
+                            o.push(UiOp::BufAddHighlight {
                                 id,
                                 line: line0 as usize,
                                 col_start: col_start.min(u16::MAX as u64) as u16,
@@ -1358,7 +1365,7 @@ impl LuaRuntime {
                             return Ok(());
                         }
                         if let Ok(mut o) = s.ops.lock() {
-                            o.ops.push(AppOp::BufAddHighlight {
+                            o.push(UiOp::BufAddHighlight {
                                 id,
                                 line: line0 as usize,
                                 col_start: col_start.min(u16::MAX as u64) as u16,
@@ -1436,7 +1443,7 @@ impl LuaRuntime {
                     }
 
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::WinOpenFloat {
+                        o.push(UiOp::WinOpenFloat {
                             buf_id,
                             title,
                             footer_items,
@@ -1454,7 +1461,7 @@ impl LuaRuntime {
                 "close",
                 lua.create_function(move |_, id: u64| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::WinClose { id });
+                        o.push(UiOp::WinClose { id });
                     }
                     Ok(())
                 })?,
@@ -1467,7 +1474,7 @@ impl LuaRuntime {
                 "set_title",
                 lua.create_function(move |_, (id, title): (u64, String)| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::WinUpdate {
+                        o.push(UiOp::WinUpdate {
                             id,
                             title: Some(title),
                         });
@@ -1486,7 +1493,7 @@ impl LuaRuntime {
                 "set_section",
                 lua.create_function(move |_, (name, content): (String, String)| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::SetPromptSection(name, content));
+                        o.push(DomainOp::SetPromptSection(name, content));
                     }
                     Ok(())
                 })?,
@@ -1498,7 +1505,7 @@ impl LuaRuntime {
                 "remove_section",
                 lua.create_function(move |_, name: String| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::RemovePromptSection(name));
+                        o.push(DomainOp::RemovePromptSection(name));
                     }
                     Ok(())
                 })?,
@@ -1559,7 +1566,7 @@ impl LuaRuntime {
                         let content: String = result.get("content").unwrap_or_default();
                         let is_error: bool = result.get("is_error").unwrap_or(false);
                         if let Ok(mut o) = s.ops.lock() {
-                            o.ops.push(AppOp::ResolveToolResult {
+                            o.push(DomainOp::ResolveToolResult {
                                 request_id,
                                 call_id,
                                 content,
@@ -1597,7 +1604,7 @@ impl LuaRuntime {
 
         smelt.set(
             "notify",
-            push_op!(lua, shared, |msg: String| AppOp::Notify(msg)),
+            push_op!(lua, shared, |msg: String| UiOp::Notify(msg)),
         )?;
 
         smelt.set(
@@ -1791,7 +1798,7 @@ impl LuaRuntime {
         };
         if let Err(e) = func.call::<()>(content.to_string()) {
             if let Ok(mut o) = self.shared.ops.lock() {
-                o.ops.push(AppOp::NotifyError(format!("ask callback: {e}")));
+                o.push(UiOp::NotifyError(format!("ask callback: {e}")));
             }
         }
         self.drain_ops()
@@ -1949,7 +1956,7 @@ impl LuaRuntime {
             };
             std::mem::take(&mut *inbox)
         };
-        let mut extra_ops = Vec::new();
+        let mut extra_ops: Vec<AppOp> = Vec::new();
         for ev in events {
             match ev {
                 TaskEvent::DialogResolved {
@@ -1962,8 +1969,9 @@ impl LuaRuntime {
                     if let Some(key) = on_select {
                         if let Ok(func) = self.lua.registry_value::<mlua::Function>(&key) {
                             if let Err(e) = func.call::<()>(()) {
-                                extra_ops
-                                    .push(AppOp::NotifyError(format!("dialog on_select: {e}")));
+                                extra_ops.push(
+                                    UiOp::NotifyError(format!("dialog on_select: {e}")).into(),
+                                );
                             }
                         }
                     }
@@ -1977,7 +1985,8 @@ impl LuaRuntime {
                             self.resolve_dialog(dialog_id, v);
                         }
                         Err(e) => {
-                            extra_ops.push(AppOp::NotifyError(format!("dialog resolve: {e}")));
+                            extra_ops
+                                .push(UiOp::NotifyError(format!("dialog resolve: {e}")).into());
                             self.resolve_dialog(dialog_id, mlua::Value::Nil);
                         }
                     }
@@ -2008,11 +2017,11 @@ impl LuaRuntime {
                     ) {
                         Ok(ctx) => {
                             if let Err(e) = func.call::<()>(ctx) {
-                                extra_ops.push(AppOp::NotifyError(format!("keymap: {e}")));
+                                extra_ops.push(UiOp::NotifyError(format!("keymap: {e}")).into());
                             }
                         }
                         Err(e) => {
-                            extra_ops.push(AppOp::NotifyError(format!("keymap ctx: {e}")));
+                            extra_ops.push(UiOp::NotifyError(format!("keymap ctx: {e}")).into());
                         }
                     }
                 }
@@ -2026,7 +2035,8 @@ impl LuaRuntime {
                         Some(idx0) => match build_picker_result(&self.lua, &opts, idx0) {
                             Ok(v) => v,
                             Err(e) => {
-                                extra_ops.push(AppOp::NotifyError(format!("picker resolve: {e}")));
+                                extra_ops
+                                    .push(UiOp::NotifyError(format!("picker resolve: {e}")).into());
                                 mlua::Value::Nil
                             }
                         },
@@ -2066,11 +2076,13 @@ impl LuaRuntime {
                     ) {
                         Ok(ctx) => {
                             if let Err(e) = func.call::<()>(ctx) {
-                                extra_ops.push(AppOp::NotifyError(format!("dialog callback: {e}")));
+                                extra_ops.push(
+                                    UiOp::NotifyError(format!("dialog callback: {e}")).into(),
+                                );
                             }
                         }
                         Err(e) => {
-                            extra_ops.push(AppOp::NotifyError(format!("dialog ctx: {e}")));
+                            extra_ops.push(UiOp::NotifyError(format!("dialog ctx: {e}")).into());
                         }
                     }
                 }
@@ -2191,7 +2203,7 @@ impl LuaRuntime {
 
     fn record_error(&self, msg: String) {
         if let Ok(mut o) = self.shared.ops.lock() {
-            o.ops.push(AppOp::NotifyError(msg));
+            o.push(UiOp::NotifyError(msg));
         }
     }
 
@@ -2813,7 +2825,7 @@ mod tests {
         rt.drain_ops()
             .into_iter()
             .filter_map(|op| match op {
-                AppOp::Notify(msg) => Some(msg),
+                AppOp::Ui(UiOp::Notify(msg)) => Some(msg),
                 _ => None,
             })
             .collect()
@@ -2823,7 +2835,7 @@ mod tests {
         rt.drain_ops()
             .into_iter()
             .filter_map(|op| match op {
-                AppOp::NotifyError(msg) => Some(msg),
+                AppOp::Ui(UiOp::NotifyError(msg)) => Some(msg),
                 _ => None,
             })
             .collect()
@@ -2833,7 +2845,7 @@ mod tests {
         rt.drain_ops()
             .into_iter()
             .filter_map(|op| match op {
-                AppOp::RunCommand(line) => Some(line),
+                AppOp::Domain(DomainOp::RunCommand(line)) => Some(line),
                 _ => None,
             })
             .collect()
@@ -3440,7 +3452,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::SetMode(m) if m == "plan"));
+        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::SetMode(m)) if m == "plan"));
     }
 
     #[test]
@@ -3452,7 +3464,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::SetModel(m) if m == "gpt-4o"));
+        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::SetModel(m)) if m == "gpt-4o"));
     }
 
     #[test]
@@ -3464,7 +3476,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Cancel));
+        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::Cancel)));
     }
 
     #[test]
@@ -3476,7 +3488,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Submit(t) if t == "hello"));
+        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::Submit(t)) if t == "hello"));
     }
 
     #[test]
@@ -3488,7 +3500,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], AppOp::Compact(Some(s)) if s == "keep tests"));
+        assert!(matches!(&ops[0], AppOp::Domain(DomainOp::Compact(Some(s))) if s == "keep tests"));
     }
 
     #[test]

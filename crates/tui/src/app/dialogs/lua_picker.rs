@@ -3,7 +3,7 @@
 //! the task with `{ index, item }` or `nil`.
 
 use super::super::App;
-use crate::app::ops::AppOp;
+use crate::app::ops::UiOp;
 use crate::lua::TaskEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use mlua::prelude::*;
@@ -20,7 +20,7 @@ struct PickerState {
 
 /// Open a focusable picker float driven by a parked `LuaTask`. On
 /// success, binds Up/Down/Enter/Escape to callbacks that push
-/// `TaskEvent::PickerResolved` + `AppOp::CloseFloat`. Returns `Err`
+/// `TaskEvent::PickerResolved` + `UiOp::CloseFloat`. Returns `Err`
 /// when the opts table is malformed — the caller should resolve the
 /// parked task with `nil` in that case.
 pub fn open(app: &mut App, picker_id: u64, opts_key: mlua::RegistryKey) -> Result<(), String> {
@@ -96,7 +96,7 @@ pub fn open(app: &mut App, picker_id: u64, opts_key: mlua::RegistryKey) -> Resul
                     opts,
                 });
             }
-            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            ops_submit.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );
@@ -116,7 +116,7 @@ pub fn open(app: &mut App, picker_id: u64, opts_key: mlua::RegistryKey) -> Resul
                     opts,
                 });
             }
-            ops_dismiss.push(AppOp::CloseFloat(ctx.win));
+            ops_dismiss.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );

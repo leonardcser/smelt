@@ -4,6 +4,23 @@
 //! handlers and Rust dialog callbacks both queue ops into the same
 //! channel; the app drains them each tick and dispatches through
 //! `App::apply_ops`. One reducer, one mutation log.
+//!
+//! Ops partition into two buckets:
+//!
+//! - **`UiOp`** — pure compositor / buffer / window primitives plus
+//!   ephemeral UI state (notifications, ghost text). No engine calls,
+//!   no app-state mutation beyond the ui layer. Safe to apply in any
+//!   order with respect to domain effects as long as the ui dispatch
+//!   is ordered among itself.
+//! - **`DomainOp`** — app-state mutations, engine commands, session
+//!   lifecycle, permission + agent + process control, tool resolution.
+//!   These reach into the agent loop, persistence, or the Lua runtime.
+//!
+//! Handlers push into the shared queue via `Into<AppOp>`: callers
+//! write `ops.push(UiOp::BufCreate { id })` or `ops.push(DomainOp::
+//! LoadSession(id))` and the queue stays a single ordered stream so
+//! the reducer can apply ui + domain effects in the exact sequence a
+//! handler emitted them.
 
 use std::sync::Arc;
 
@@ -17,9 +34,11 @@ use crate::lua::LuaShared;
 pub struct OpsHandle(pub(crate) Arc<LuaShared>);
 
 impl OpsHandle {
-    pub fn push(&self, op: AppOp) {
+    /// Push any op that converts into an `AppOp` — `UiOp`, `DomainOp`,
+    /// or a pre-built `AppOp`.
+    pub fn push<O: Into<AppOp>>(&self, op: O) {
         if let Ok(mut o) = self.0.ops.lock() {
-            o.ops.push(op);
+            o.ops.push(op.into());
         }
     }
 
@@ -43,11 +62,83 @@ impl OpsHandle {
     }
 }
 
-/// Deferred mutation queued by a handler. Applied by the app loop
-/// after the handler returns, avoiding nested borrows on `App`.
+/// Top-level tagged op carried on the shared queue. Handlers almost
+/// never construct this directly — they push a `UiOp` or `DomainOp`
+/// and rely on `Into<AppOp>`. The wrapper exists so the reducer can
+/// dispatch each variant through the correct sub-handler while
+/// preserving handler emission order across buckets.
 pub enum AppOp {
+    Ui(UiOp),
+    Domain(DomainOp),
+}
+
+impl From<UiOp> for AppOp {
+    fn from(op: UiOp) -> Self {
+        AppOp::Ui(op)
+    }
+}
+
+impl From<DomainOp> for AppOp {
+    fn from(op: DomainOp) -> Self {
+        AppOp::Domain(op)
+    }
+}
+
+/// Pure compositor / window / buffer primitives plus UI chrome.
+pub enum UiOp {
+    /// Show a transient notification toast.
     Notify(String),
+    /// Show a transient error toast (accent-styled).
     NotifyError(String),
+    /// Close a float (universal). Runs the same cleanup path as the
+    /// legacy `close_float`: fires any Lua dismiss callback, removes
+    /// the window from the compositor, deletes the primary buf.
+    CloseFloat(ui::WinId),
+    /// Set ghost text (predicted input) on the prompt.
+    SetGhostText(String),
+    /// Clear ghost text from the prompt.
+    ClearGhostText,
+    BufCreate {
+        id: u64,
+    },
+    BufSetLines {
+        id: u64,
+        lines: Vec<String>,
+    },
+    /// Paint a highlight over `[col_start, col_end)` on `line`. The
+    /// plugin side resolves theme role names to `Color` at push time,
+    /// so the reducer just stitches a `SpanStyle` together. Out-of-
+    /// range line indices are silently dropped — the buffer may have
+    /// shrunk between the plugin's queue and the op's apply.
+    BufAddHighlight {
+        id: u64,
+        line: usize,
+        col_start: u16,
+        col_end: u16,
+        fg: Option<crossterm::style::Color>,
+        bold: bool,
+        italic: bool,
+        dim: bool,
+    },
+    WinOpenFloat {
+        buf_id: u64,
+        title: String,
+        footer_items: Vec<String>,
+        accent: Option<crossterm::style::Color>,
+    },
+    WinUpdate {
+        id: u64,
+        title: Option<String>,
+    },
+    WinClose {
+        id: u64,
+    },
+}
+
+/// App-state mutations, engine commands, and session/agent/permission
+/// control. Anything that reaches past the compositor into the agent
+/// loop, persistence, or the Lua runtime.
+pub enum DomainOp {
     RunCommand(String),
     SetMode(String),
     SetModel(String),
@@ -58,11 +149,6 @@ pub enum AppOp {
     SetPromptSection(String, String),
     RemovePromptSection(String),
     SetPermissionOverrides(protocol::PermissionOverrides),
-    // ── Dialog effects (queued by migrated dialog callbacks) ───────
-    /// Close a float (universal). Runs the same cleanup path as the
-    /// legacy `close_float`: fires any Lua dismiss callback, removes
-    /// the window from the compositor, deletes the primary buf.
-    CloseFloat(ui::WinId),
     /// Rewind to a transcript block (Rewind dialog). `block_idx=None`
     /// means "kept at current"; `restore_vim_insert` re-enters Insert
     /// mode when the dialog was opened from there.
@@ -115,45 +201,6 @@ pub enum AppOp {
         system: String,
         messages: Vec<protocol::Message>,
         task: protocol::AuxiliaryTask,
-    },
-    /// Set ghost text (predicted input) on the prompt.
-    SetGhostText(String),
-    /// Clear ghost text from the prompt.
-    ClearGhostText,
-    BufCreate {
-        id: u64,
-    },
-    BufSetLines {
-        id: u64,
-        lines: Vec<String>,
-    },
-    /// Paint a highlight over `[col_start, col_end)` on `line`. The
-    /// plugin side resolves theme role names to `Color` at push time,
-    /// so the reducer just stitches a `SpanStyle` together. Out-of-
-    /// range line indices are silently dropped — the buffer may have
-    /// shrunk between the plugin's queue and the op's apply.
-    BufAddHighlight {
-        id: u64,
-        line: usize,
-        col_start: u16,
-        col_end: u16,
-        fg: Option<crossterm::style::Color>,
-        bold: bool,
-        italic: bool,
-        dim: bool,
-    },
-    WinOpenFloat {
-        buf_id: u64,
-        title: String,
-        footer_items: Vec<String>,
-        accent: Option<crossterm::style::Color>,
-    },
-    WinUpdate {
-        id: u64,
-        title: Option<String>,
-    },
-    WinClose {
-        id: u64,
     },
     /// Send a deferred plugin tool result.
     ResolveToolResult {
