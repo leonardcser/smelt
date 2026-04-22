@@ -1070,10 +1070,6 @@ impl App {
             });
         }
 
-        // Also update Screen's cached vim/position state for the legacy render path.
-        self.screen.set_status_vim(vim_enabled, vim_mode);
-        self.screen.set_status_position(position);
-
         let (left, right) = spans_to_segments(&mut spans, width, status_bg);
         if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
             *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));

@@ -73,7 +73,6 @@ pub use cache::{
 /// When `None` is passed instead, only content (blocks + active tool) is drawn.
 pub struct FramePrompt<'a> {
     pub state: &'a InputState,
-    pub mode: protocol::Mode,
     pub queued: &'a [String],
     pub prediction: Option<&'a str>,
 }

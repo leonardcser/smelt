@@ -268,7 +268,7 @@ impl TestHarness {
                 self.width as usize,
                 tui::render::FramePrompt {
                     state: &input,
-                    mode: self.mode,
+
                     queued: &[],
                     prediction: None,
                 },
@@ -292,7 +292,7 @@ impl TestHarness {
                 self.width as usize,
                 tui::render::FramePrompt {
                     state: &input,
-                    mode: self.mode,
+
                     queued: &[],
                     prediction: None,
                 },
