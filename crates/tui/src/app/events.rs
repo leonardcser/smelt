@@ -428,7 +428,7 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         KeyAction::OpenHelp => {
-                            super::dialogs::help::open(self);
+                            super::commands::run_command(self, "/help");
                             return EventOutcome::Redraw;
                         }
                         KeyAction::OpenHistorySearch => {

@@ -45,11 +45,15 @@ struct InputEntry {
 }
 
 /// In-closure state for a Lua dialog. Held by `Rc<RefCell>` so the
-/// Submit and Dismiss callbacks share the same options / inputs.
+/// Submit, Dismiss, and keymap callbacks share the same options /
+/// inputs / on_press callback ids.
 struct LuaDialogState {
     dialog_id: u64,
     options: Vec<OptionEntry>,
     inputs: Vec<InputEntry>,
+    /// `shared.callbacks` ids for each registered `on_press`. Removed
+    /// on dialog close so the registry doesn't leak.
+    keymap_callback_ids: Vec<u64>,
 }
 
 /// Open the dialog described by the Lua `opts_key` table. On success,
@@ -141,21 +145,31 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
 
     // Parse plugin keymaps up front so we can fold their hints into the
     // footer alongside the default Confirm / Cancel labels.
-    let mut keymaps: Vec<(KeyBind, String)> = Vec::new();
+    // Each keymap entry is `{ key, on_press = function(ctx) ... end,
+    // hint? }`. The `on_press` callback receives a `ctx` table with
+    // `selected_index`, `inputs`, and `close()` — it decides whether
+    // to mutate state or resolve the dialog.
+    let mut keymaps: Vec<(KeyBind, u64)> = Vec::new();
+    let mut keymap_callback_ids: Vec<u64> = Vec::new();
     let mut extra_hints: Vec<String> = Vec::new();
     if let Ok(km_tbl) = opts.get::<mlua::Table>("keymaps") {
         for entry_res in km_tbl.sequence_values::<mlua::Table>() {
             let entry = entry_res.map_err(|e| format!("keymap entry: {e}"))?;
             let key_str: String = entry.get("key").map_err(|e| format!("keymap.key: {e}"))?;
-            let action: String = entry
-                .get("action")
-                .map_err(|e| format!("keymap.action: {e}"))?;
+            let on_press: mlua::Function = entry
+                .get("on_press")
+                .map_err(|e| format!("keymap.on_press: {e}"))?;
             if let Ok(hint) = entry.get::<String>("hint") {
                 if !hint.is_empty() {
                     extra_hints.push(hint);
                 }
             }
-            keymaps.push((parse_key(&key_str)?, action));
+            let callback_id = app
+                .lua
+                .register_callback(on_press)
+                .map_err(|e| format!("keymap register: {e}"))?;
+            keymaps.push((parse_key(&key_str)?, callback_id));
+            keymap_callback_ids.push(callback_id);
         }
     }
 
@@ -184,6 +198,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         dialog_id,
         options,
         inputs,
+        keymap_callback_ids,
     }));
 
     let ops = app.lua.ops_handle();
@@ -204,6 +219,9 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 None => ("select".to_string(), None),
             };
             let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
+            for id in &s.keymap_callback_ids {
+                ops_submit.remove_callback(*id);
+            }
             ops_submit.push_task_event(TaskEvent::DialogResolved {
                 dialog_id: s.dialog_id,
                 action,
@@ -216,10 +234,11 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         })),
     );
 
-    // Custom keymaps: plugins bind keys like Backspace / ctrl-x that
-    // resolve the dialog with a named `action`. The Lua task resumes
-    // with the action + current selection and decides whether to reopen.
-    for (kb, action) in keymaps {
+    // Custom keymaps: each fires `TaskEvent::KeymapFired`, which the
+    // Lua runtime's `pump_task_events` routes to the registered
+    // `on_press(ctx)` callback. The dialog stays open; the callback
+    // decides what to do via `ctx.close()`, other API calls, etc.
+    for (kb, callback_id) in keymaps {
         let state_k = state.clone();
         let ops_k = ops.clone();
         app.ui.win_set_keymap(
@@ -229,14 +248,13 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
                 let s = state_k.borrow();
                 let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
-                ops_k.push_task_event(TaskEvent::DialogResolved {
+                ops_k.push_task_event(TaskEvent::KeymapFired {
+                    callback_id,
                     dialog_id: s.dialog_id,
-                    action: action.clone(),
-                    option_index: idx.map(|i| i + 1),
+                    win_id: ctx.win,
+                    selected_index: idx,
                     inputs,
-                    on_select: None,
                 });
-                ops_k.push(AppOp::CloseFloat(ctx.win));
                 CallbackResult::Consumed
             })),
         );
@@ -248,6 +266,9 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         WinEvent::Dismiss,
         Callback::Rust(Box::new(move |ctx| {
             let s = state_dismiss.borrow();
+            for id in &s.keymap_callback_ids {
+                ops.remove_callback(*id);
+            }
             ops.push_task_event(TaskEvent::DialogResolved {
                 dialog_id: s.dialog_id,
                 action: "dismiss".into(),
@@ -362,6 +383,52 @@ pub(crate) fn build_result(
         inputs_tbl.set(k, v)?;
     }
     t.set("inputs", inputs_tbl)?;
+    Ok(mlua::Value::Table(t))
+}
+
+/// Build the `ctx` table passed to an `on_press` callback. Carries the
+/// current `selected_index`, input values, and a `close()` function
+/// bound to this dialog's `dialog_id` / `win_id`. Called by
+/// `LuaRuntime::pump_task_events` when handling
+/// [`crate::lua::TaskEvent::KeymapFired`].
+pub(crate) fn build_keymap_ctx(
+    lua: &Lua,
+    shared: std::sync::Arc<crate::lua::LuaShared>,
+    dialog_id: u64,
+    win_id: ui::WinId,
+    selected_index: Option<usize>,
+    inputs: Vec<(String, String)>,
+) -> LuaResult<mlua::Value> {
+    let t = lua.create_table()?;
+    if let Some(i) = selected_index {
+        t.set("selected_index", i + 1)?;
+    }
+    let inputs_tbl = lua.create_table()?;
+    for (k, v) in inputs {
+        inputs_tbl.set(k, v)?;
+    }
+    t.set("inputs", inputs_tbl)?;
+
+    // ctx.close() — resolve the dialog as "dismiss" and close the win.
+    let shared_close = shared.clone();
+    t.set(
+        "close",
+        lua.create_function(move |_, ()| {
+            if let Ok(mut inbox) = shared_close.task_inbox.lock() {
+                inbox.push(crate::lua::TaskEvent::DialogResolved {
+                    dialog_id,
+                    action: "dismiss".into(),
+                    option_index: None,
+                    inputs: Vec::new(),
+                    on_select: None,
+                });
+            }
+            if let Ok(mut ops) = shared_close.ops.lock() {
+                ops.ops.push(AppOp::CloseFloat(win_id));
+            }
+            Ok(())
+        })?,
+    )?;
     Ok(mlua::Value::Table(t))
 }
 

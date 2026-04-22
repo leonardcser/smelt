@@ -38,7 +38,7 @@ pub enum ToolExecResult {
 use mlua::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -273,6 +273,18 @@ pub enum TaskEvent {
         option_index: Option<usize>,
         inputs: Vec<(String, String)>,
         on_select: Option<mlua::RegistryKey>,
+    },
+    /// A plugin-registered keymap on an open Lua dialog fired. The Lua
+    /// module looks up the `on_press` callback by `callback_id`, builds
+    /// a `ctx` table (selected_index, inputs, `close()`), and invokes
+    /// it. Does *not* close the dialog — the callback decides whether
+    /// to call `ctx.close()`.
+    KeymapFired {
+        callback_id: u64,
+        dialog_id: u64,
+        win_id: ui::WinId,
+        selected_index: Option<usize>,
+        inputs: Vec<(String, String)>,
     },
 }
 
@@ -1434,6 +1446,40 @@ impl LuaRuntime {
                         }
                     }
                 }
+                TaskEvent::KeymapFired {
+                    callback_id,
+                    dialog_id,
+                    win_id,
+                    selected_index,
+                    inputs,
+                } => {
+                    let func = {
+                        let Ok(cbs) = self.shared.callbacks.lock() else {
+                            continue;
+                        };
+                        cbs.get(&callback_id)
+                            .filter(|h| !h.dead)
+                            .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
+                    };
+                    let Some(func) = func else { continue };
+                    match crate::app::dialogs::lua_dialog::build_keymap_ctx(
+                        &self.lua,
+                        self.shared.clone(),
+                        dialog_id,
+                        win_id,
+                        selected_index,
+                        inputs,
+                    ) {
+                        Ok(ctx) => {
+                            if let Err(e) = func.call::<()>(ctx) {
+                                extra_ops.push(AppOp::NotifyError(format!("keymap: {e}")));
+                            }
+                        }
+                        Err(e) => {
+                            extra_ops.push(AppOp::NotifyError(format!("keymap ctx: {e}")));
+                        }
+                    }
+                }
             }
         }
         extra_ops
@@ -1443,6 +1489,20 @@ impl LuaRuntime {
     /// tables (e.g. for `resolve_dialog`).
     pub fn lua(&self) -> &Lua {
         &self.lua
+    }
+
+    /// Register a Lua callable under a fresh u64 id in
+    /// `shared.callbacks`. Used by `lua_dialog.rs` to hand on_press
+    /// handlers to `pump_task_events` — the keymap's Rust closure
+    /// pushes a `TaskEvent::KeymapFired { callback_id }`, and the pump
+    /// invokes the registered function.
+    pub fn register_callback(&self, func: mlua::Function) -> mlua::Result<u64> {
+        let key = self.lua.create_registry_value(func)?;
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut cbs) = self.shared.callbacks.lock() {
+            cbs.insert(id, LuaHandle { key, dead: false });
+        }
+        Ok(id)
     }
 
     /// Drive the LuaTask runtime: resume any tasks whose waits have
@@ -2035,6 +2095,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.ps",
         include_str!("../../../../runtime/lua/smelt/plugins/ps.lua"),
     ),
+    (
+        "smelt.plugins.help",
+        include_str!("../../../../runtime/lua/smelt/plugins/help.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -2045,6 +2109,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.export",
     "smelt.plugins.rewind",
     "smelt.plugins.ps",
+    "smelt.plugins.help",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

@@ -39,8 +39,8 @@ smelt.api.cmd.register("help", function()
         { kind = "content", text = table.concat(lines, "\n"), height = "fill" },
       },
       keymaps = {
-        { key = "q", action = "dismiss" },
-        { key = "?", action = "dismiss" },
+        { key = "q", on_press = function(ctx) ctx.close() end },
+        { key = "?", on_press = function(ctx) ctx.close() end },
       },
     })
   end)
