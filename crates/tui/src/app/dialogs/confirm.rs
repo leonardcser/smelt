@@ -24,7 +24,7 @@
 //! - Esc → clear reason and re-focus Options
 
 use super::super::App;
-use crate::app::ops::AppOp;
+use crate::app::ops::{DomainOp, UiOp};
 use crate::keymap::hints;
 use crate::render::dialogs::confirm::ConfirmPreview;
 use crate::render::display::{ColorRole, ColorValue};
@@ -160,7 +160,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         KeyBind::plain(KeyCode::BackTab),
         Callback::Rust(Box::new(move |ctx| {
             let s = state_backtab.borrow();
-            ops_backtab.push(AppOp::ConfirmBackTab {
+            ops_backtab.push(DomainOp::ConfirmBackTab {
                 win: ctx.win,
                 request_id: s.request_id,
                 call_id: s.call_id.clone(),
@@ -187,14 +187,14 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
             let s = state_submit.borrow();
             let choice = s.choices.get(idx).cloned().unwrap_or(ConfirmChoice::No);
             let message = reason_text(ctx.ui, ctx.win);
-            ops_submit.push(AppOp::ResolveConfirm {
+            ops_submit.push(DomainOp::ResolveConfirm {
                 choice,
                 message,
                 request_id: s.request_id,
                 call_id: s.call_id.clone(),
                 tool_name: s.tool_name.clone(),
             });
-            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            ops_submit.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );
@@ -206,14 +206,14 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         WinEvent::Dismiss,
         Callback::Rust(Box::new(move |ctx| {
             let s = state_dismiss.borrow();
-            ops.push(AppOp::ResolveConfirm {
+            ops.push(DomainOp::ResolveConfirm {
                 choice: ConfirmChoice::No,
                 message: None,
                 request_id: s.request_id,
                 call_id: s.call_id.clone(),
                 tool_name: s.tool_name.clone(),
             });
-            ops.push(AppOp::CloseFloat(ctx.win));
+            ops.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );

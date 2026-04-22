@@ -11,7 +11,7 @@
 //! - `{ kind = "input",    name = "x", placeholder? = "..." }`
 
 use super::super::App;
-use crate::app::ops::AppOp;
+use crate::app::ops::UiOp;
 use crate::keymap::hints;
 use crate::lua::TaskEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -292,7 +292,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 inputs,
                 on_select,
             });
-            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            ops_submit.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );
@@ -402,7 +402,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 inputs: Vec::new(),
                 on_select: None,
             });
-            ops.push(AppOp::CloseFloat(ctx.win));
+            ops.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );
@@ -550,7 +550,7 @@ pub(crate) fn build_keymap_ctx(
                 });
             }
             if let Ok(mut ops) = shared_close.ops.lock() {
-                ops.ops.push(AppOp::CloseFloat(win_id));
+                ops.push(UiOp::CloseFloat(win_id));
             }
             Ok(())
         })?,

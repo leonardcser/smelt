@@ -388,15 +388,19 @@ a seam. In order of smallest-impact-first:
   flags plus the main-loop drain block. `apply_ops` mutates
   `self.agent` directly. Thread everywhere `agent: &mut
   Option<TurnState>` was a function argument.
-- **B.cleanup.5 · Split `AppOp` into `DomainOp` + `UiOp`.** `AppOp`
-  mixes three abstraction levels in one 28-variant enum:
-  primitives (`BufCreate`, `WinOpenFloat`, `WinClose`, `BufSetLines`,
-  `WinUpdate`), UI orchestration (`CloseFloat`, `OpenAgentsList`,
-  `SetGhostText`, `ClearGhostText`), and domain effects
-  (`ResolveConfirm`, `LoadSession`, `Compact`, `RunCommand`). Split
-  into `ops::Domain` (app-state mutations, engine commands) and
-  `ops::Ui` (pure compositor/window/buffer primitives). A handler
-  decides which bucket it belongs to.
+- **B.cleanup.5 · Split `AppOp` into `DomainOp` + `UiOp` (shipped
+  2026-04-23).** `AppOp` became a 2-variant wrapper `AppOp::{Ui,
+  Domain}` carrying the two new enums. `UiOp` holds the pure
+  compositor/buffer/window primitives + ephemeral UI chrome (Notify,
+  NotifyError, CloseFloat, SetGhostText/ClearGhostText, BufCreate/
+  BufSetLines/BufAddHighlight, WinOpenFloat/WinUpdate/WinClose).
+  `DomainOp` holds app-state mutations, engine commands, session/
+  agent/permission/process control, tool resolution. Reducer split
+  into `apply_ui_op` + `apply_domain_op` so the dispatch reads like
+  the partition. `OpsHandle::push<O: Into<AppOp>>` + `LuaOps::push
+  <O: Into<AppOp>>` accept `UiOp` / `DomainOp` directly so call sites
+  don't need explicit wrapping. New variants now declare intent at
+  the type level — handlers decide which bucket they belong to.
 - **B.cleanup.6 · `OpsHandle` rename + decouple from `LuaShared`.**
   `OpsHandle` wraps `Arc<LuaShared>` but nothing about it is
   Lua-specific. Move the op channel to its own `Arc<Mutex<OpQueue>>`;

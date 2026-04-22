@@ -6,7 +6,7 @@
 //! when the wait is satisfied (timer elapsed, dialog resolved, …).
 //!
 //! This replaces three ad-hoc patterns:
-//! - `AppOp::ResolveToolResult` + `callbacks: HashMap<u64, …>` +
+//! - `DomainOp::ResolveToolResult` + `callbacks: HashMap<u64, …>` +
 //!   `smelt.api.tools.resolve(...)`.
 //! - `smelt.defer(ms, fn)` callback timers.
 //! - Declarative `confirm = {...}` specs bolted onto tool registration.
