@@ -1846,16 +1846,23 @@ impl App {
                         self.pending_agent_clear_pending = true;
                     }
                 }
-                crate::app::ops::AppOp::OpenAgentsList { initial_selected } => {
+                crate::app::ops::AppOp::AgentsBackToList {
+                    detail_win,
+                    initial_selected,
+                } => {
+                    self.close_float(detail_win);
                     super::dialogs::agents::open_list(self, initial_selected);
                 }
-                crate::app::ops::AppOp::OpenAgentsDetail {
+                crate::app::ops::AppOp::AgentsOpenDetail {
+                    list_win,
                     agent_id,
                     parent_selected,
                 } => {
+                    self.close_float(list_win);
                     super::dialogs::agents::open_detail(self, agent_id, parent_selected);
                 }
-                crate::app::ops::AppOp::RefreshAgentCounts => {
+                crate::app::ops::AppOp::AgentsListDismissed { win } => {
+                    self.close_float(win);
                     self.refresh_agent_counts();
                 }
                 crate::app::ops::AppOp::ResolveConfirm {

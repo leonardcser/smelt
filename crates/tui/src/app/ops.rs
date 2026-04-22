@@ -70,21 +70,26 @@ pub enum AppOp {
         answer: Option<String>,
         request_id: u64,
     },
-    /// Open the Agents list dialog. Used both at command entry and
-    /// as the back-navigation from the Agents detail view.
-    OpenAgentsList {
+    /// Back-nav from the Agents detail view to the list: close the
+    /// detail window and open the list positioned on the row we came
+    /// from.
+    AgentsBackToList {
+        detail_win: ui::WinId,
         initial_selected: usize,
     },
-    /// Swap the Agents list for the detail view of a specific
-    /// subagent. `parent_selected` preserves the list cursor for
-    /// when detail is dismissed.
-    OpenAgentsDetail {
+    /// Drill into the Agents detail view for a specific subagent:
+    /// close the list window and open detail. `parent_selected`
+    /// preserves the list cursor for when detail is dismissed.
+    AgentsOpenDetail {
+        list_win: ui::WinId,
         agent_id: String,
         parent_selected: usize,
     },
-    /// Refresh the cached subagent counts on the status bar — fires
-    /// when the Agents list is dismissed.
-    RefreshAgentCounts,
+    /// Agents list was dismissed (no back-nav) — refresh the cached
+    /// subagent counts in the status bar and close the window.
+    AgentsListDismissed {
+        win: ui::WinId,
+    },
     /// Resolve an open Confirm dialog with the user's choice. Drives
     /// the same logic as the legacy `App::resolve_confirm`. Sets
     /// `pending_agent_cancel` internally when the resolution asks
