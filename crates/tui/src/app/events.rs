@@ -110,10 +110,7 @@ impl App {
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
-                if self.agent.is_some() {
-                    self.finish_turn(true);
-                    self.agent = None;
-                }
+                self.discard_turn(true);
                 true
             }
             EventOutcome::CancelAgent => {
@@ -124,10 +121,7 @@ impl App {
                         "reason": "user_cancel",
                     }),
                 );
-                if self.agent.is_some() {
-                    self.finish_turn(true);
-                    self.agent = None;
-                }
+                self.discard_turn(true);
                 false
             }
             EventOutcome::InterruptWithQueued => {
@@ -136,10 +130,7 @@ impl App {
                 // We must save the queued messages before finish_turn
                 // because the cancel path dumps them into the input buffer.
                 let remaining = std::mem::take(&mut self.queued_messages);
-                if self.agent.is_some() {
-                    self.finish_turn(true);
-                    self.agent = None;
-                }
+                self.discard_turn(true);
                 self.queued_messages = remaining;
                 false
             }

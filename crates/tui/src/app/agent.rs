@@ -276,6 +276,16 @@ impl App {
         self.queued_messages.clear();
     }
 
+    /// Finish and drop the active turn (no-op when idle). Combines
+    /// the `finish_turn` + `self.agent = None` pair every cancel
+    /// site needs.
+    pub(super) fn discard_turn(&mut self, cancelled: bool) {
+        if self.agent.is_some() {
+            self.finish_turn(cancelled);
+            self.agent = None;
+        }
+    }
+
     pub(super) fn finish_turn(&mut self, cancelled: bool) {
         self.sleep_inhibit.release();
         if cancelled {

@@ -785,10 +785,7 @@ impl App {
                                     "source": "try_recv_drain",
                                 }),
                             );
-                            if self.agent.is_some() {
-                                self.finish_turn(false);
-                                self.agent = None;
-                            }
+                            self.discard_turn(false);
                             break;
                         }
                     };
@@ -813,8 +810,7 @@ impl App {
                     match action {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
-                            self.finish_turn(false);
-                            self.agent = None;
+                            self.discard_turn(false);
                             break;
                         }
                     }
@@ -887,12 +883,8 @@ impl App {
                 let action =
                     self.dispatch_control(ctrl, pending_ref, &mut pending_dialogs, t.last_keypress);
                 self.agent = taken;
-                match action {
-                    LoopAction::Continue => {}
-                    LoopAction::Done => {
-                        self.finish_turn(false);
-                        self.agent = None;
-                    }
+                if matches!(action, LoopAction::Done) {
+                    self.discard_turn(false);
                 }
             }
 
@@ -934,12 +926,8 @@ impl App {
                         t.last_keypress,
                     );
                     self.agent = taken;
-                    match action {
-                        LoopAction::Continue => {}
-                        LoopAction::Done => {
-                            self.finish_turn(false);
-                            self.agent = None;
-                        }
+                    if matches!(action, LoopAction::Done) {
+                        self.discard_turn(false);
                     }
                 }
                 self.screen.set_pending_dialog(!pending_dialogs.is_empty());
@@ -1022,12 +1010,8 @@ impl App {
                             t.last_keypress,
                         );
                         self.agent = Some(ag);
-                        match action {
-                            LoopAction::Continue => {}
-                            LoopAction::Done => {
-                                self.finish_turn(false);
-                                self.agent = None;
-                            }
+                        if matches!(action, LoopAction::Done) {
+                            self.discard_turn(false);
                         }
                     } else {
                         // No active turn — handle out-of-band events.
