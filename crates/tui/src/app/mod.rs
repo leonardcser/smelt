@@ -835,9 +835,8 @@ impl App {
             // Tick callback — e.g. Agents pulls a fresh subagent
             // snapshot here each frame.
             {
-                let mut lua_invoke =
-                    |_h: ui::LuaHandle, _p: &ui::Payload| -> Vec<String> { Vec::new() };
-                let _ = self.ui.dispatch_tick(&mut lua_invoke);
+                let mut lua_invoke = |_h: ui::LuaHandle, _p: &ui::Payload| {};
+                self.ui.dispatch_tick(&mut lua_invoke);
             }
             self.apply_lua_ops();
 
