@@ -301,7 +301,6 @@ impl Default for LuaTaskRuntime {
 /// Decoded `coroutine.yield(...)` payload.
 enum Yield {
     Sleep(Duration),
-    #[allow(dead_code)] // step (iv) populates this via smelt.api.dialog.open
     OpenDialog(mlua::RegistryKey),
     OpenPicker(mlua::RegistryKey),
 }
