@@ -44,7 +44,6 @@ pub use status::StatusPosition;
 
 pub use dialogs::{parse_questions, AgentSnapshot, Question, QuestionOption, SharedSnapshots};
 
-use crate::input::InputState;
 use crate::theme;
 use crate::utils::format_duration;
 use crossterm::{
@@ -67,40 +66,6 @@ pub use cache::{
     RenderCache, ToolOutputRenderCache, LAYOUT_CACHE_VERSION, RENDER_CACHE_VERSION,
 };
 
-/// Parameters for rendering the prompt section in `draw_frame`.
-/// When `None` is passed instead, only content (blocks + active tool) is drawn.
-pub struct FramePrompt<'a> {
-    pub state: &'a InputState,
-    pub queued: &'a [String],
-    pub prediction: Option<&'a str>,
-}
-
-/// Abstracts terminal I/O so rendering can target either a real
-/// terminal (stdout + crossterm queries) or an in-memory buffer.
-pub trait TerminalBackend {
-    /// Terminal dimensions `(cols, rows)`.
-    fn size(&self) -> (u16, u16);
-    /// Current cursor row. Used as fallback when `anchor_row` is unset.
-    fn cursor_y(&self) -> u16;
-    /// Build a `RenderOut` that writes to this backend's output.
-    fn make_output(&self) -> RenderOut;
-}
-
-/// Production backend writing to stdout and querying the real terminal.
-pub struct StdioBackend;
-
-impl TerminalBackend for StdioBackend {
-    fn size(&self) -> (u16, u16) {
-        terminal::size().unwrap_or((80, 24))
-    }
-    fn cursor_y(&self) -> u16 {
-        cursor::position().map(|(_, y)| y).unwrap_or(0)
-    }
-    fn make_output(&self) -> RenderOut {
-        RenderOut::scroll()
-    }
-}
-
 /// Tracked terminal style state for diff-based SGR emission.
 #[derive(Clone, Default, PartialEq)]
 pub struct StyleState {
@@ -111,67 +76,6 @@ pub struct StyleState {
     pub italic: bool,
     pub crossedout: bool,
     pub underline: bool,
-}
-
-/// RAII guard for a synchronized terminal update frame.
-///
-/// Creating a `Frame` issues `BeginSynchronizedUpdate`.
-/// Dropping it issues `EndSynchronizedUpdate` and flushes the buffer,
-/// guaranteeing that the terminal paints everything as a single atomic
-/// update — even if the caller forgets to close the frame explicitly.
-///
-/// Cursor visibility is NOT managed by `Frame` — callers that need to
-/// hide/show the cursor should queue those commands explicitly.
-pub struct Frame {
-    pub out: RenderOut,
-}
-
-impl Frame {
-    pub fn begin(backend: &dyn TerminalBackend) -> Self {
-        let mut out = backend.make_output();
-        let _ = out.queue(terminal::BeginSynchronizedUpdate);
-        Self { out }
-    }
-}
-
-impl Drop for Frame {
-    fn drop(&mut self) {
-        let _perf = crate::perf::begin("frame:flush");
-        // Neutralize SGR before handing the terminal back. A new `Frame`
-        // starts with `current = StyleState::default()`, so the terminal
-        // must actually match that — otherwise attributes like dim/italic
-        // from the last painted span bleed into the first span of the next
-        // frame (e.g. a dialog opened after a thinking block under Ctrl+L).
-        // Emitted inside the synchronized-update envelope, so no flicker.
-        if self.out.current != StyleState::default() {
-            let _ = self.out.queue(SetAttribute(Attribute::Reset));
-            let _ = self.out.queue(ResetColor);
-            self.out.current = StyleState::default();
-        }
-        let _ = self.out.queue(terminal::EndSynchronizedUpdate);
-        let bytes = self.out.bytes_queued;
-        {
-            let _p = crate::perf::begin("frame:write_all");
-            let _ = self.out.flush();
-        }
-        self.out.bytes_queued = 0;
-        // Record the payload size so the perf summary can show a
-        // distribution of how many bytes each frame pushed to the TTY.
-        crate::perf::record_value("frame:bytes", bytes as u64);
-    }
-}
-
-impl std::ops::Deref for Frame {
-    type Target = RenderOut;
-    fn deref(&self) -> &RenderOut {
-        &self.out
-    }
-}
-
-impl std::ops::DerefMut for Frame {
-    fn deref_mut(&mut self) -> &mut RenderOut {
-        &mut self.out
-    }
 }
 
 // 1 MiB is enough for any realistic full redraw payload (~640 KB for a

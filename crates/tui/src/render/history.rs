@@ -2,8 +2,8 @@
 //!
 //! Holds the content-addressed block store, layout cache, and all
 //! mutable sidecar state (tool output, exec output, in-flight agents
-//! etc.) that `Screen` tracks. `BlockHistory::paint_viewport` is the
-//! only paint path; it repaints the whole transcript every frame.
+//! etc.) owned by `App`. `BlockHistory::paint_viewport` is the only
+//! paint path; it repaints the whole transcript every frame.
 
 use super::blocks::{gap_between, layout_block, Element};
 use super::cache::ToolOutputRenderCache;
@@ -27,7 +27,7 @@ pub struct ActiveAgent {
 /// In-flight tool call — a thin handle to a streaming `Block::ToolCall`.
 /// The full state (status, output, user_message, elapsed) lives in
 /// `tool_states` keyed by `call_id`; rewrites go through
-/// `Screen::update_tool_state` which invalidates the layout cache.
+/// `App::update_tool_state` which invalidates the layout cache.
 pub struct ActiveTool {
     pub call_id: String,
     pub name: String,
@@ -140,7 +140,7 @@ pub enum Block {
     },
     /// Immutable handle to a committed tool call. The mutable result
     /// (status, elapsed, output, user_message) lives in `BlockHistory::tool_states`
-    /// keyed by `call_id`; look it up with `Screen::tool_state`.
+    /// keyed by `call_id`; look it up with `App::tool_state`.
     ToolCall {
         call_id: String,
         name: String,
