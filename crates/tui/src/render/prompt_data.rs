@@ -6,9 +6,8 @@ use super::status::BarSpan;
 use super::window_view::{StyledSegment, WindowRow};
 use crate::input::InputState;
 use crate::theme;
-use ui::buffer::{BufCreateOpts, Buffer, SpanStyle};
+use ui::buffer::{Buffer, SpanStyle};
 use ui::grid::Style;
-use ui::BufId;
 
 use crossterm::style::Color;
 
@@ -37,7 +36,6 @@ pub(crate) struct BarInfo {
 
 pub(crate) struct PromptOutput {
     pub chrome_rows: Vec<WindowRow>,
-    pub input_buf: Buffer,
     pub cursor: Option<(u16, u16)>,
     pub cursor_style: Option<(Style, char)>,
     pub input_scroll: usize,
@@ -60,7 +58,7 @@ fn cursor_style() -> (Color, Color) {
     }
 }
 
-pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
+pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer) -> PromptOutput {
     let width = input.width as usize;
     let usable = width.saturating_sub(2);
     let mut chrome_rows: Vec<WindowRow> = Vec::new();
@@ -98,7 +96,7 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
 
     // ── Input area ──
     let input_area_start = row_offset;
-    let input_area = compute_input_area(input, usable, row_offset);
+    let input_area = compute_input_area(input, usable, row_offset, input_buf);
     let input_row_count = input_area.visible_rows;
     for _ in 0..input_row_count {
         chrome_rows.push(WindowRow::styled(Vec::new()));
@@ -116,7 +114,6 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>) -> PromptOutput {
 
     PromptOutput {
         chrome_rows,
-        input_buf: input_area.buf,
         cursor: input_area.cursor_info.cursor_pos,
         cursor_style: input_area.cursor_info.cursor_style,
         input_scroll: input_area.scroll_info.scroll_offset,
@@ -503,13 +500,17 @@ struct ScrollInfo {
 }
 
 struct InputArea {
-    buf: Buffer,
     cursor_info: CursorInfo,
     scroll_info: ScrollInfo,
     visible_rows: u16,
 }
 
-fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -> InputArea {
+fn compute_input_area(
+    input: &PromptInput<'_>,
+    usable: usize,
+    row_offset: u16,
+    buf: &mut Buffer,
+) -> InputArea {
     let height = input.height as usize;
     let state = input.input;
     let prediction = input.prediction;
@@ -564,13 +565,6 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
         cursor_pos: None,
         cursor_style: None,
     };
-    let mut buf = Buffer::new(
-        BufId(0),
-        BufCreateOpts {
-            modifiable: true,
-            buftype: ui::BufType::Prompt,
-        },
-    );
 
     if show_prediction {
         let pred = prediction.unwrap();
@@ -619,7 +613,6 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
             }
         }
         return InputArea {
-            buf,
             cursor_info,
             scroll_info: ScrollInfo {
                 scroll_offset: 0,
@@ -679,7 +672,7 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
             let mut cmd_kinds = vec![SpanKind::AtRef; prefix_len.min(line_chars)];
             cmd_kinds.resize(line_chars, SpanKind::Plain);
             add_segments_to_buffer(
-                &mut buf,
+                buf,
                 li,
                 &styled_char_segments(line, &cmd_kinds, line_sel, line_cursor),
             );
@@ -693,7 +686,7 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
                     hint.clone()
                 };
                 add_segments_to_buffer(
-                    &mut buf,
+                    buf,
                     li,
                     &[StyledSegment {
                         text: truncated,
@@ -706,26 +699,26 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
             }
         } else if has_arg_space {
             add_segments_to_buffer(
-                &mut buf,
+                buf,
                 li,
                 &styled_char_segments(line, kinds, line_sel, line_cursor),
             );
         } else if is_command {
             let accent_kinds = vec![SpanKind::AtRef; line.chars().count()];
             add_segments_to_buffer(
-                &mut buf,
+                buf,
                 li,
                 &styled_char_segments(line, &accent_kinds, line_sel, line_cursor),
             );
         } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
             add_segments_to_buffer(
-                &mut buf,
+                buf,
                 li,
                 &exec_bang_segments(line, kinds, line_sel, line_cursor),
             );
         } else {
             add_segments_to_buffer(
-                &mut buf,
+                buf,
                 li,
                 &styled_char_segments(line, kinds, line_sel, line_cursor),
             );
@@ -751,7 +744,6 @@ fn compute_input_area(input: &PromptInput<'_>, usable: usize, row_offset: u16) -
     }
 
     InputArea {
-        buf,
         cursor_info,
         scroll_info: ScrollInfo {
             scroll_offset,
@@ -1060,7 +1052,14 @@ mod tests {
                 session_cost_usd: 0.0,
             },
         };
-        let output = compute_prompt(&mut prompt_input);
+        let mut input_buf = Buffer::new(
+            ui::BufId(0),
+            ui::buffer::BufCreateOpts {
+                modifiable: true,
+                buftype: ui::buffer::BufType::Prompt,
+            },
+        );
+        let output = compute_prompt(&mut prompt_input, &mut input_buf);
         // Should have at least: top bar + input area + bottom bar
         assert!(output.chrome_rows.len() >= 3);
         // Cursor should be in the input area
