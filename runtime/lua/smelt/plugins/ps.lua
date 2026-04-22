@@ -1,9 +1,10 @@
 -- Built-in /ps command.
 --
--- Lists background processes and lets the user kill the selected row
--- with Backspace. Dismiss on Esc. Pure Lua over `process.list()` and
--- `process.kill(id)` + a `keymaps = {{key="bs", action="kill"}}`
--- entry in `dialog.open`.
+-- Lists background processes. Backspace kills the selected row via an
+-- `on_press` callback; the callback sets a loop flag, closes the
+-- dialog, and the plugin reopens with the refreshed list. Esc / Enter
+-- close without looping. Pure Lua over `process.list()` +
+-- `process.kill(id)` + `dialog.open` callback keymaps.
 
 local function format_duration(secs)
   if secs < 60 then
@@ -40,24 +41,29 @@ smelt.api.cmd.register("ps", function()
         table.insert(items, { label = format_proc(p) })
       end
 
-      local result = smelt.api.dialog.open({
+      local snapshot = procs
+      local should_reopen = false
+
+      smelt.api.dialog.open({
         title   = "processes",
         panels  = {
           { kind = "options", items = items },
         },
         keymaps = {
-          { key = "bs", action = "kill", hint = "\u{232b}: kill selected" },
+          { key = "bs", hint = "\u{232b}: kill selected", on_press = function(ctx)
+              if ctx.selected_index then
+                local target = snapshot[ctx.selected_index]
+                if target then
+                  smelt.api.process.kill(target.id)
+                  should_reopen = true
+                end
+              end
+              ctx.close()
+            end },
         },
       })
 
-      if result.action == "dismiss" then
-        return
-      elseif result.action == "kill" and result.option_index then
-        local target = procs[result.option_index]
-        if target then
-          smelt.api.process.kill(target.id)
-        end
-      else
+      if not should_reopen then
         return
       end
     end

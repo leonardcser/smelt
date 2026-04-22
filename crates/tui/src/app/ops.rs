@@ -32,6 +32,15 @@ impl OpsHandle {
             inbox.push(ev);
         }
     }
+
+    /// Remove a callback id from `shared.callbacks`. Used by dialog
+    /// close paths to clean up `on_press` handles so the registry
+    /// doesn't leak.
+    pub fn remove_callback(&self, id: u64) {
+        if let Ok(mut cbs) = self.0.callbacks.lock() {
+            cbs.remove(&id);
+        }
+    }
 }
 
 /// Deferred mutation queued by a handler. Applied by the app loop
