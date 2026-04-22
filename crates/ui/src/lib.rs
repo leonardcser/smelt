@@ -189,14 +189,18 @@ impl Ui {
 
     /// Open a `Picker` float. Accepts any `FloatConfig`; typically
     /// callers pass `focusable: false` and a manually-positioned
-    /// `Placement`. Returns the new `WinId` for later updates via
-    /// `picker_mut` and eventual `win_close`.
+    /// `Placement`. `reversed` paints logical index 0 on the bottom
+    /// visual row — used by pickers that dock *above* the prompt
+    /// (completer `/`, cmdline `:`) so the best match is closest to
+    /// where the user is typing. Returns the new `WinId` for later
+    /// updates via `picker_mut` and eventual `win_close`.
     pub fn picker_open(
         &mut self,
         config: FloatConfig,
         items: Vec<picker::PickerItem>,
         selected: usize,
         style: picker::PickerStyle,
+        reversed: bool,
     ) -> Option<WinId> {
         let id = WinId(self.next_win_id);
         self.next_win_id += 1;
@@ -205,7 +209,9 @@ impl Ui {
         let rect = resolve_float_rect(&config, tw, th);
         let zindex = config.zindex;
 
-        let mut p = picker::Picker::new().with_style(style);
+        let mut p = picker::Picker::new()
+            .with_style(style)
+            .with_reversed(reversed);
         p.set_items(items);
         p.set_selected(selected);
 
