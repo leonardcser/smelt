@@ -756,7 +756,7 @@ wrappers over `App`/`engine` calls):
 
 **F4 · Tier 2 sweep** (~1100 Rust LOC replaced with ~400 Lua):
 - `/permissions` (207 LOC) — **shipped 2026-04-22** (−218 Rust, +102 Lua).
-- `/resume` (441 LOC) — needs F4-pre extension (input `on_change`).
+- `/resume` (441 LOC) — **shipped 2026-04-23** (−441 Rust, +170 Lua).
 - `/agents` (409 LOC) — needs F4-pre extensions (dialog `on_tick`,
   `smelt.api.agent.snapshot`).
 
@@ -1434,6 +1434,25 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-23** — `/resume` ported to Lua plugin (−441 Rust, +170 Lua).
+  Exercises the full F4-pre surface: input `on_change` for live fuzzy
+  filter, `list` panel kind (buffer-backed selectable rows), `BufAddDim`
+  op so metadata columns (size, duration) can dim. Tab now cycles
+  dialog focus (workspace-toggle moved to `alt-w`); when list is
+  focused, typing falls through to the sibling `TextInput` widget so
+  vim-nav (`j`/`k`/`g`/etc.) and filter-typing coexist. Up/Down fall
+  through the opposite direction when input is focused. Mouse wheel
+  on a focused float synthesises Up/Down keys through `ui.handle_key`
+  — enough to scroll list panels without waiting for E2's full
+  compositor hit-test. Hit a silent buf-id collision along the way:
+  Lua's `smelt.api.buf.create` and `Ui::buf_create` both allocated
+  from `1`, so `BufCreate { id: 1 }` stomped the prompt input buffer
+  on first `/resume` open. Fix: partition the buf-id space with
+  `LUA_BUF_ID_BASE = 1 << 32` on a dedicated `LuaShared.next_buf_id`
+  atomic, and change `Ui::buf_create_with_id` to return
+  `Result<BufId, BufId>` so the reducer surfaces `notify_error` on
+  collision instead of silently overwriting. Scrollbar drag + click-
+  to-pick-row still pending (E2).
 - **2026-04-22** — D3 rewritten: **Option 3 chosen** for Lua blocking
   intents. Rather than keep per-intent Rust glue (`lua_dialog.rs`,
   `lua_picker.rs`, future `lua_cmdline.rs`) or collapse them into a
