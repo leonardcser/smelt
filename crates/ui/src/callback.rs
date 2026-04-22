@@ -173,6 +173,12 @@ pub struct CallbackCtx<'a> {
 pub struct Callbacks {
     keymaps: HashMap<WinId, HashMap<KeyBind, Callback>>,
     events: HashMap<WinId, HashMap<WinEvent, Vec<Callback>>>,
+    /// Per-window fallback key handler tried after specific `keymaps`
+    /// miss and before `Component::handle_key` runs. Useful for
+    /// catch-all filter inputs (`Resume` types any printable char
+    /// into its query buffer) where enumerating every chord would
+    /// be absurd.
+    key_fallback: HashMap<WinId, Callback>,
 }
 
 impl Callbacks {
@@ -202,6 +208,22 @@ impl Callbacks {
     pub fn clear_all(&mut self, win: WinId) {
         self.keymaps.remove(&win);
         self.events.remove(&win);
+        self.key_fallback.remove(&win);
+    }
+
+    /// Register a per-window fallback key handler. Runs after
+    /// specific `keymaps` miss and before `Component::handle_key`.
+    /// Replaces any existing fallback for the window.
+    pub fn set_key_fallback(&mut self, win: WinId, cb: Callback) {
+        self.key_fallback.insert(win, cb);
+    }
+
+    pub(crate) fn take_key_fallback(&mut self, win: WinId) -> Option<Callback> {
+        self.key_fallback.remove(&win)
+    }
+
+    pub(crate) fn restore_key_fallback(&mut self, win: WinId, cb: Callback) {
+        self.key_fallback.insert(win, cb);
     }
 
     /// True when at least one callback is registered for `(win, ev)`.

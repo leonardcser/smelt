@@ -1,15 +1,18 @@
 use super::super::App;
-use super::DialogState;
+use crate::app::ops::{AppOp, OpsHandle};
 use crate::render::ResumeEntry;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
+use ui::{Callback, CallbackResult, KeyBind, Payload, WinEvent};
 
 const LEADING: usize = 2;
 const SIZE_COL: usize = 8;
 const TIME_COL: usize = 7;
 const GAP: usize = 2;
 
-pub struct Resume {
+struct ResumeState {
     entries: Vec<ResumeEntry>,
     title_haystacks: Vec<String>,
     current_cwd: String,
@@ -20,6 +23,47 @@ pub struct Resume {
     content_cache: Option<HashMap<String, String>>,
     list_buf: ui::BufId,
     title_buf: ui::BufId,
+}
+
+impl ResumeState {
+    fn recompute_filter(&mut self) {
+        self.filtered = filter_entries(
+            &self.entries,
+            &self.title_haystacks,
+            &self.query,
+            self.workspace_only,
+            &self.current_cwd,
+            self.content_cache.as_ref(),
+        );
+    }
+
+    fn refresh_title(&self, ui: &mut ui::Ui) {
+        refresh_title(ui, self.title_buf, self.workspace_only, &self.query);
+    }
+
+    fn refresh_list(&self, ui: &mut ui::Ui) {
+        refresh_list(ui, self.list_buf, &self.entries, &self.filtered);
+    }
+
+    fn delete_selected(&mut self, ui: &mut ui::Ui, win: ui::WinId) {
+        let sel = ui.dialog_mut(win).and_then(|d| d.selected_index());
+        let Some(sel) = sel else { return };
+        let Some(&idx) = self.filtered.get(sel) else {
+            return;
+        };
+        let Some(entry) = self.entries.get(idx) else {
+            return;
+        };
+        let id = entry.id.clone();
+        crate::session::delete(&id);
+        self.entries.remove(idx);
+        self.title_haystacks.remove(idx);
+        if let Some(cache) = self.content_cache.as_mut() {
+            cache.remove(&id);
+        }
+        self.recompute_filter();
+        self.refresh_list(ui);
+    }
 }
 
 pub(in crate::app) fn open(app: &mut App, entries: Vec<ResumeEntry>) {
@@ -51,7 +95,7 @@ pub(in crate::app) fn open(app: &mut App, entries: Vec<ResumeEntry>) {
     ]);
     let dialog_config = app.builtin_dialog_config(Some(hint_text), vec![]);
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -63,193 +107,188 @@ pub(in crate::app) fn open(app: &mut App, entries: Vec<ResumeEntry>) {
             ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(1)).focusable(false),
             ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
         ],
-    );
+    ) else {
+        return;
+    };
 
-    if let Some(win_id) = win_id {
-        app.float_states.insert(
-            win_id,
-            Box::new(Resume {
-                entries,
-                title_haystacks,
-                current_cwd,
-                query: String::new(),
-                workspace_only: true,
-                filtered,
-                pending_d: false,
-                content_cache: None,
-                list_buf,
-                title_buf,
-            }),
-        );
-    }
-}
+    let state = Rc::new(RefCell::new(ResumeState {
+        entries,
+        title_haystacks,
+        current_cwd,
+        query: String::new(),
+        workspace_only: true,
+        filtered,
+        pending_d: false,
+        content_cache: None,
+        list_buf,
+        title_buf,
+    }));
 
-impl DialogState for Resume {
-    fn handle_key(
-        &mut self,
-        app: &mut App,
-        win: ui::WinId,
-        code: KeyCode,
-        mods: KeyModifiers,
-    ) -> Option<ui::KeyResult> {
-        if self.pending_d {
-            self.pending_d = false;
-            if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
-                let sel = app.ui.dialog_mut(win).and_then(|d| d.selected_index());
-                if let Some(sel) = sel {
-                    if let Some(&idx) = self.filtered.get(sel) {
-                        if let Some(entry) = self.entries.get(idx) {
-                            let id = entry.id.clone();
-                            crate::session::delete(&id);
-                            self.entries.remove(idx);
-                            self.title_haystacks.remove(idx);
-                            if let Some(cache) = self.content_cache.as_mut() {
-                                cache.remove(&id);
-                            }
-                            self.recompute_filter();
-                            refresh_list(&mut app.ui, self.list_buf, &self.entries, &self.filtered);
-                        }
+    let ops = app.lua.ops_handle();
+
+    // Submit (Enter): load selected session.
+    let state_submit = state.clone();
+    let ops_submit = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Submit,
+        Callback::Rust(Box::new(move |ctx| {
+            if let Payload::Selection { index } = ctx.payload {
+                let s = state_submit.borrow();
+                if let Some(&entry_idx) = s.filtered.get(index) {
+                    if let Some(entry) = s.entries.get(entry_idx) {
+                        ops_submit.push(AppOp::LoadSession(entry.id.clone()));
                     }
                 }
-                return Some(ui::KeyResult::Consumed);
             }
-            self.query.push('d');
-        }
+            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
 
-        match (code, mods) {
-            (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
-                self.workspace_only = !self.workspace_only;
-                self.recompute_filter();
-                refresh_title(
-                    &mut app.ui,
-                    self.title_buf,
-                    self.workspace_only,
-                    &self.query,
-                );
-                refresh_list(&mut app.ui, self.list_buf, &self.entries, &self.filtered);
-                Some(ui::KeyResult::Consumed)
+    // Dismiss: just close.
+    let ops_dismiss = ops.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            ops_dismiss.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
+
+    // Ctrl+W: toggle workspace-only filter.
+    let state_w = state.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::ctrl('w'),
+        Callback::Rust(Box::new(move |ctx| {
+            let mut s = state_w.borrow_mut();
+            s.pending_d = false;
+            s.workspace_only = !s.workspace_only;
+            s.recompute_filter();
+            s.refresh_title(ctx.ui);
+            s.refresh_list(ctx.ui);
+            CallbackResult::Consumed
+        })),
+    );
+
+    // Delete: drop selected session.
+    let state_del = state.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::plain(KeyCode::Delete),
+        Callback::Rust(Box::new(move |ctx| {
+            let mut s = state_del.borrow_mut();
+            s.pending_d = false;
+            s.delete_selected(ctx.ui, ctx.win);
+            CallbackResult::Consumed
+        })),
+    );
+
+    // Backspace: plain -> pop char from query; Alt/Ctrl -> delete word.
+    let state_bs = state.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::plain(KeyCode::Backspace),
+        Callback::Rust(Box::new(move |ctx| {
+            let mut s = state_bs.borrow_mut();
+            s.pending_d = false;
+            if !s.query.is_empty() {
+                s.query.pop();
+                s.recompute_filter();
+                s.refresh_title(ctx.ui);
+                s.refresh_list(ctx.ui);
             }
-            (KeyCode::Backspace, m)
-                if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::CONTROL) =>
-            {
-                if !self.query.is_empty() {
-                    let len = self.query.len();
+            CallbackResult::Consumed
+        })),
+    );
+    for mods in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+        let state_wbs = state.clone();
+        app.ui.win_set_keymap(
+            win_id,
+            KeyBind::new(KeyCode::Backspace, mods),
+            Callback::Rust(Box::new(move |ctx| {
+                let mut s = state_wbs.borrow_mut();
+                s.pending_d = false;
+                if !s.query.is_empty() {
+                    let len = s.query.len();
                     let target = crate::text_utils::word_backward_pos(
-                        &self.query,
+                        &s.query,
                         len,
                         crate::text_utils::CharClass::Word,
                     );
-                    self.query.truncate(target);
-                    if !self.query.is_empty() {
-                        ensure_content_loaded(&self.entries, &mut self.content_cache);
+                    s.query.truncate(target);
+                    if !s.query.is_empty() {
+                        let ResumeState {
+                            ref entries,
+                            ref mut content_cache,
+                            ..
+                        } = *s;
+                        ensure_content_loaded(entries, content_cache);
                     }
-                    self.recompute_filter();
-                    refresh_title(
-                        &mut app.ui,
-                        self.title_buf,
-                        self.workspace_only,
-                        &self.query,
-                    );
-                    refresh_list(&mut app.ui, self.list_buf, &self.entries, &self.filtered);
+                    s.recompute_filter();
+                    s.refresh_title(ctx.ui);
+                    s.refresh_list(ctx.ui);
                 }
-                Some(ui::KeyResult::Consumed)
-            }
-            (KeyCode::Backspace, _) => {
-                if !self.query.is_empty() {
-                    self.query.pop();
-                    self.recompute_filter();
-                    refresh_title(
-                        &mut app.ui,
-                        self.title_buf,
-                        self.workspace_only,
-                        &self.query,
-                    );
-                    refresh_list(&mut app.ui, self.list_buf, &self.entries, &self.filtered);
-                }
-                Some(ui::KeyResult::Consumed)
-            }
-            (KeyCode::Delete, _) => {
-                let sel = app.ui.dialog_mut(win).and_then(|d| d.selected_index());
-                if let Some(sel) = sel {
-                    if let Some(&idx) = self.filtered.get(sel) {
-                        if let Some(entry) = self.entries.get(idx) {
-                            let id = entry.id.clone();
-                            crate::session::delete(&id);
-                            self.entries.remove(idx);
-                            self.title_haystacks.remove(idx);
-                            if let Some(cache) = self.content_cache.as_mut() {
-                                cache.remove(&id);
-                            }
-                            self.recompute_filter();
-                            refresh_list(&mut app.ui, self.list_buf, &self.entries, &self.filtered);
-                        }
-                    }
-                }
-                Some(ui::KeyResult::Consumed)
-            }
-            (KeyCode::Char('d'), KeyModifiers::NONE) if self.query.is_empty() => {
-                self.pending_d = true;
-                Some(ui::KeyResult::Consumed)
-            }
-            (KeyCode::Char(c), m) if m.is_empty() || m == KeyModifiers::SHIFT => {
-                self.query.push(c);
-                if !self.query.is_empty() {
-                    ensure_content_loaded(&self.entries, &mut self.content_cache);
-                }
-                self.recompute_filter();
-                refresh_title(
-                    &mut app.ui,
-                    self.title_buf,
-                    self.workspace_only,
-                    &self.query,
-                );
-                refresh_list(&mut app.ui, self.list_buf, &self.entries, &self.filtered);
-                Some(ui::KeyResult::Consumed)
-            }
-            _ => {
-                self.pending_d = false;
-                None
-            }
-        }
-    }
-
-    fn on_select(
-        &mut self,
-        app: &mut App,
-        _win: ui::WinId,
-        idx: usize,
-        _agent: &mut Option<super::TurnState>,
-    ) {
-        let Some(&entry_idx) = self.filtered.get(idx) else {
-            return;
-        };
-        let Some(entry) = self.entries.get(entry_idx) else {
-            return;
-        };
-        let id = entry.id.clone();
-        if let Some(loaded) = crate::session::load(&id) {
-            app.load_session(loaded);
-            app.restore_screen();
-            if let Some(tokens) = app.session.context_tokens {
-                app.screen.set_context_tokens(tokens);
-            }
-            app.screen.finish_turn();
-            app.transcript_window.scroll_top = u16::MAX;
-        }
-    }
-}
-
-impl Resume {
-    fn recompute_filter(&mut self) {
-        self.filtered = filter_entries(
-            &self.entries,
-            &self.title_haystacks,
-            &self.query,
-            self.workspace_only,
-            &self.current_cwd,
-            self.content_cache.as_ref(),
+                CallbackResult::Consumed
+            })),
         );
     }
+
+    // Fallback: any other key. Handles typing into the filter query
+    // (printable chars + optional shift) and the `dd` delete chord
+    // when the query is empty.
+    let state_fb = state;
+    let ops_fb = ops;
+    app.ui.win_set_key_fallback(
+        win_id,
+        Callback::Rust(Box::new(move |ctx| {
+            let Payload::Key { code, mods } = ctx.payload else {
+                return CallbackResult::Pass;
+            };
+            let mut s = state_fb.borrow_mut();
+
+            // dd: two-press delete when query is empty.
+            if s.pending_d {
+                s.pending_d = false;
+                if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
+                    s.delete_selected(ctx.ui, ctx.win);
+                    return CallbackResult::Consumed;
+                }
+                s.query.push('d');
+            }
+
+            if let KeyCode::Char(c) = code {
+                if mods.is_empty() || mods == KeyModifiers::SHIFT {
+                    if c == 'd' && mods == KeyModifiers::NONE && s.query.is_empty() {
+                        s.pending_d = true;
+                        return CallbackResult::Consumed;
+                    }
+                    s.query.push(c);
+                    if !s.query.is_empty() {
+                        let ResumeState {
+                            ref entries,
+                            ref mut content_cache,
+                            ..
+                        } = *s;
+                        ensure_content_loaded(entries, content_cache);
+                    }
+                    s.recompute_filter();
+                    s.refresh_title(ctx.ui);
+                    s.refresh_list(ctx.ui);
+                    return CallbackResult::Consumed;
+                }
+            }
+
+            // Any non-char key we didn't recognize — let the dialog's
+            // default handler process it (nav arrows, Enter, Esc, …).
+            // Also ensure query/pending_d aren't left in an inconsistent
+            // state by falling through.
+            let _ = &ops_fb; // keep capture live
+            CallbackResult::Pass
+        })),
+    );
 }
 
 fn title(entry: &ResumeEntry) -> String {
@@ -400,3 +439,6 @@ fn refresh_title(ui: &mut ui::Ui, title_buf: ui::BufId, workspace_only: bool, qu
     buf.set_all_lines(vec![line]);
     buf.add_highlight(0, 0, label.len() as u16, ui::buffer::SpanStyle::dim());
 }
+
+#[allow(dead_code)]
+fn _ops_marker(_o: &OpsHandle) {}

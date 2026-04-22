@@ -1961,6 +1961,17 @@ impl App {
                 } => {
                     self.sync_permissions(session_entries, workspace_rules);
                 }
+                crate::app::ops::AppOp::LoadSession(id) => {
+                    if let Some(loaded) = crate::session::load(&id) {
+                        self.load_session(loaded);
+                        self.restore_screen();
+                        if let Some(tokens) = self.session.context_tokens {
+                            self.screen.set_context_tokens(tokens);
+                        }
+                        self.screen.finish_turn();
+                        self.transcript_window.scroll_top = u16::MAX;
+                    }
+                }
                 crate::app::ops::AppOp::RewindToBlock {
                     block_idx,
                     restore_vim_insert,

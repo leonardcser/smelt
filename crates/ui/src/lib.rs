@@ -189,6 +189,13 @@ impl Ui {
         self.callbacks.clear_keymap(win, key);
     }
 
+    /// Register a catch-all key handler for a window. Runs after
+    /// specific keymaps miss and before `Component::handle_key`.
+    /// Replaces any existing fallback.
+    pub fn win_set_key_fallback(&mut self, win: WinId, cb: Callback) {
+        self.callbacks.set_key_fallback(win, cb);
+    }
+
     /// Register a callback for a window lifecycle / semantic event.
     /// Multiple callbacks per (win, event) are supported and fire
     /// in registration order.
@@ -465,6 +472,29 @@ impl Ui {
                 }
             };
             self.callbacks.restore_keymap(win, key, cb);
+            r
+        } else if let Some(mut cb) = self.callbacks.take_key_fallback(win) {
+            let r = match &mut cb {
+                Callback::Rust(inner) => {
+                    let mut ctx = CallbackCtx {
+                        ui: self,
+                        win,
+                        payload: Payload::Key { code, mods },
+                        actions: &mut actions,
+                    };
+                    let r = inner(&mut ctx);
+                    match r {
+                        CallbackResult::Consumed => KeyResult::Consumed,
+                        CallbackResult::Pass => self.compositor.handle_key(code, mods),
+                    }
+                }
+                Callback::Lua(handle) => {
+                    let payload = Payload::Key { code, mods };
+                    actions.extend(lua_invoke(*handle, &payload));
+                    KeyResult::Consumed
+                }
+            };
+            self.callbacks.restore_key_fallback(win, cb);
             r
         } else {
             self.compositor.handle_key(code, mods)
