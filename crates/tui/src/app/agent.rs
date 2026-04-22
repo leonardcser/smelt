@@ -135,7 +135,7 @@ impl App {
                     ) {
                         Ok(model) => Some(model),
                         Err(err) => {
-                            self.screen.notify_error(err.to_string());
+                            self.notify_error(err.to_string());
                             None
                         }
                     }
@@ -144,7 +144,7 @@ impl App {
                     match crate::config::resolve_provider_ref(&self.available_models, provider) {
                         Ok(model) => Some(model),
                         Err(err) => {
-                            self.screen.notify_error(err.to_string());
+                            self.notify_error(err.to_string());
                             None
                         }
                     }
@@ -369,7 +369,7 @@ impl App {
                 if !background {
                     if let Some(tokens) = usage.prompt_tokens {
                         if tokens > 0 {
-                            self.screen.set_context_tokens(tokens);
+                            self.context_tokens = Some(tokens);
                             self.session.context_tokens = Some(tokens);
                         }
                     }
@@ -380,7 +380,7 @@ impl App {
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 self.session_cost_usd += cost;
-                self.screen.set_session_cost(self.session_cost_usd);
+                self.screen.mark_dirty();
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -550,8 +550,7 @@ impl App {
                         });
                     self.apply_lua_ops();
                 }
-                self.screen
-                    .set_running_procs(self.engine.processes.running_count());
+                self.screen.mark_dirty();
                 self.refresh_agent_counts();
                 SessionControl::Continue
             }
@@ -637,7 +636,7 @@ impl App {
             }
             EngineEvent::TurnError { message } => {
                 self.screen.set_throbber(render::Throbber::Done);
-                self.screen.notify_error(message);
+                self.notify_error(message);
                 SessionControl::Done
             }
             EngineEvent::Shutdown { .. } => SessionControl::Done,
@@ -765,7 +764,7 @@ impl App {
             }
             EngineEvent::TurnError { message } => {
                 self.screen.set_throbber(render::Throbber::Done);
-                self.screen.notify_error(message);
+                self.notify_error(message);
             }
             EngineEvent::AgentExited {
                 agent_id,
@@ -804,7 +803,7 @@ impl App {
         }
         self.session.title = Some(title);
         self.session.slug = Some(slug.clone());
-        self.screen.set_task_label(slug.clone());
+        self.set_task_label(slug.clone());
         self.pending_title = false;
         self.save_session();
 
@@ -830,14 +829,14 @@ impl App {
         match std::env::var(&self.api_key_env) {
             Ok(key) => Some(key),
             Err(std::env::VarError::NotPresent) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' is not set but is required for API authentication",
                     self.api_key_env
                 ));
                 None
             }
             Err(std::env::VarError::NotUnicode(_)) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
                     self.api_key_env
                 ));
@@ -853,14 +852,14 @@ impl App {
         match std::env::var(key_env) {
             Ok(key) => Some(key),
             Err(std::env::VarError::NotPresent) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' is not set but is required for API authentication",
                     key_env
                 ));
                 None
             }
             Err(std::env::VarError::NotUnicode(_)) => {
-                self.screen.notify_error(format!(
+                self.notify_error(format!(
                     "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
                     key_env
                 ));
@@ -902,7 +901,7 @@ impl App {
     }
 
     pub(super) fn refresh_agent_counts(&mut self) {
-        self.screen.set_agent_count(self.agents.len());
+        self.screen.mark_dirty();
     }
 
     // ── Agent tracking ────────────────────────────────────────────────
@@ -1035,7 +1034,7 @@ impl App {
 
         if session_cost_delta > 0.0 {
             self.session_cost_usd += session_cost_delta;
-            self.screen.set_session_cost(self.session_cost_usd);
+            self.screen.mark_dirty();
         }
 
         if !changed {
@@ -1086,8 +1085,7 @@ impl App {
             None => format!("Background process {id} exited."),
         };
         self.screen.push(Block::Text { content: msg });
-        self.screen
-            .set_running_procs(self.engine.processes.running_count());
+        self.screen.mark_dirty();
     }
 
     pub(super) fn session_permission_entries(&self) -> Vec<render::PermissionEntry> {
@@ -1366,7 +1364,8 @@ impl App {
                 if should_queue {
                     self.screen
                         .set_active_status(&req.call_id, ToolStatus::Confirm);
-                    self.screen.set_pending_dialog(true);
+                    self.pending_dialog = true;
+                    self.screen.mark_dirty();
                     pending_dialogs.push_back(DeferredDialog::Confirm(req));
                     return LoopAction::Continue;
                 }
@@ -1407,7 +1406,8 @@ impl App {
             }
             SessionControl::NeedsAskQuestion { args, request_id } => {
                 if should_queue {
-                    self.screen.set_pending_dialog(true);
+                    self.pending_dialog = true;
+                    self.screen.mark_dirty();
                     pending_dialogs.push_back(DeferredDialog::AskQuestion { args, request_id });
                     return LoopAction::Continue;
                 }

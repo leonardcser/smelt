@@ -395,18 +395,29 @@ a seam. In order of smallest-impact-first:
 
 ### Phase C — Rendering: kill Screen (2–3 commits)
 
-**C1 · Notification + queued + stash + status metadata → compositor.**
-Single commit. These share the notification / status routing surface;
-splitting leaves parallel paths.
-- Notification becomes a compositor float (`focusable=false`, ephemeral).
-- Queued messages become a compositor float above the prompt.
-- Stash indicator becomes a compositor float / single-row layer.
-- Status bar segments read directly from App fields. Delete
-  `Screen::{show_tokens, show_cost, show_slug, show_thinking, show_tps,
-  task_label, custom_status_items, model_label, reasoning_effort,
-  context_tokens, context_window, session_cost_usd, notification,
-  running_procs, running_agents, pending_dialog, has_scrollback}` —
-  move each to App or delete if already duplicated.
+**C1 · Status metadata → App.** Single data-ownership commit. The
+original plan bundled notification/queued/stash float conversion with
+the status-field move, but an audit showed they're orthogonal:
+queued-messages and stash aren't Screen fields (already on
+App/InputState, passed into `compute_prompt` as params), and
+notification-as-float requires prompt-relative placement — which
+presupposes the prompt is a `ui::Window`. That's C3's job. So C1 is
+just the data move.
+
+- Move to App: `model_label`, `reasoning_effort`, `show_tokens`,
+  `show_cost`, `show_slug`, `show_thinking`, `show_tps`,
+  `context_tokens`, `context_window`, `session_cost_usd`, `task_label`,
+  `custom_status_items`, `pending_dialog`, `running_procs`,
+  `running_agents`, `has_scrollback`, `notification` (owner; rendering
+  stays put).
+- `BarInfo` construction reads from App fields directly.
+- Delete the matching Screen setters/getters.
+- Notification/queued/stash rendering paths unchanged — `PromptInput`
+  still carries them by reference.
+
+**C1.follow · Notification / queued / stash → compositor floats**
+is folded into **C3** (see below) where prompt becomes a `ui::Window`
+and floats can anchor relative to its rect.
 
 **C2 · Cmdline as float window.** Self-contained commit. Cmdline
 becomes a single-panel `Input` dialog, focusable, `DockBottom`.
@@ -422,6 +433,10 @@ The big atomic commit:
 - Route prompt keys through `ui.handle_key()` when focused (uses
   `Callbacks` registry populated at startup — typing keys, submit,
   Ctrl+S stash, etc.).
+- Notification → compositor float (ephemeral, non-focusable, anchored
+  above prompt window's rect).
+- Queued-messages → compositor float above the prompt.
+- Stash indicator → compositor float / single-row layer.
 - Delete `render::Screen` entirely. `BlockHistory`, `StreamParser`,
   `TranscriptProjection`, `WorkingState`, `CursorOwner`, `layout` move
   to App.

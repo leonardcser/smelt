@@ -71,7 +71,7 @@ impl App {
             "/resume" => {
                 let entries = self.resume_entries();
                 if entries.is_empty() {
-                    self.screen.notify_error("no saved sessions".into());
+                    self.notify_error("no saved sessions".into());
                 } else {
                     super::dialogs::resume::open(self, entries);
                 }
@@ -80,7 +80,7 @@ impl App {
             "/rewind" => {
                 let turns = self.screen.user_turns();
                 if turns.is_empty() {
-                    self.screen.notify_error("nothing to rewind".into());
+                    self.notify_error("nothing to rewind".into());
                 } else {
                     let restore_vim_insert =
                         self.input.vim_enabled() && self.input.vim_in_insert_mode();
@@ -98,7 +98,7 @@ impl App {
             }
             "/export" => {
                 if self.history.is_empty() {
-                    self.screen.notify_error("nothing to export".into());
+                    self.notify_error("nothing to export".into());
                 } else {
                     super::dialogs::export::open(self);
                 }
@@ -108,7 +108,7 @@ impl App {
                 let my_pid = std::process::id();
                 let children = engine::registry::children_of(my_pid);
                 if children.is_empty() {
-                    self.screen.notify_error("no subagents running".into());
+                    self.notify_error("no subagents running".into());
                 } else {
                     super::dialogs::agents::open(self);
                 }
@@ -116,7 +116,7 @@ impl App {
             }
             "/ps" => {
                 if self.engine.processes.list().is_empty() {
-                    self.screen.notify_error("no background processes".into());
+                    self.notify_error("no background processes".into());
                 } else {
                     super::dialogs::ps::open(self);
                 }
@@ -126,7 +126,7 @@ impl App {
                 let session_entries = self.session_permission_entries();
                 let workspace_rules = crate::workspace_permissions::load(&self.cwd);
                 if session_entries.is_empty() && workspace_rules.is_empty() {
-                    self.screen.notify_error("no permissions".into());
+                    self.notify_error("no permissions".into());
                 } else {
                     super::dialogs::permissions::open(self);
                 }
@@ -156,7 +156,7 @@ impl App {
                         self.apply_model(&key);
                     }
                     Err(err) => {
-                        self.screen.notify_error(err.to_string());
+                        self.notify_error(err.to_string());
                     }
                 }
                 CommandAction::Continue
@@ -202,7 +202,7 @@ impl App {
                 if let Some(value) = crate::theme::preset_by_name(name) {
                     self.apply_accent(value);
                 } else {
-                    self.screen.notify_error(format!("unknown theme: {}", name));
+                    self.notify_error(format!("unknown theme: {}", name));
                 }
                 CommandAction::Continue
             }
@@ -212,7 +212,7 @@ impl App {
                     crate::theme::set_slug_color(value);
                     self.screen.mark_dirty();
                 } else {
-                    self.screen.notify_error(format!("unknown color: {}", name));
+                    self.notify_error(format!("unknown color: {}", name));
                 }
                 CommandAction::Continue
             }
@@ -220,9 +220,9 @@ impl App {
                 let abs_row = self.transcript_window.cursor_abs_row();
                 if let Some(text) = self.screen.block_text_at_row(abs_row) {
                     let _ = copy_to_clipboard(&text);
-                    self.screen.notify("block copied".into());
+                    self.notify("block copied".into());
                 } else {
-                    self.screen.notify_error("no block at cursor".into());
+                    self.notify_error("no block at cursor".into());
                 }
                 CommandAction::Continue
             }
@@ -262,7 +262,7 @@ impl App {
             InputOutcome::Compact { instructions } => {
                 self.screen.mark_dirty();
                 if self.history.is_empty() {
-                    self.screen.notify_error("nothing to compact".into());
+                    self.notify_error("nothing to compact".into());
                 } else {
                     self.compact_history(instructions);
                 }
@@ -307,7 +307,7 @@ impl App {
 
         // Access control: some commands are blocked while running.
         if let Err(reason) = is_allowed_while_running(input) {
-            self.screen.notify_error(reason);
+            self.notify_error(reason);
             return Some(EventOutcome::Noop);
         }
 
@@ -409,7 +409,7 @@ impl App {
         self.api_key_env = resolved.api_key_env.clone();
         self.provider_type = resolved.provider_type.clone();
         self.model_config = (&resolved.config).into();
-        self.screen.set_model_label(self.model.clone());
+        self.screen.mark_dirty();
         let api_key = self.resolve_api_key().unwrap_or_default();
         state::set_selected_model(resolved.key.clone());
         self.engine.send(UiCommand::SetModel {
@@ -439,7 +439,7 @@ impl App {
         f(&mut self.settings);
         self.input.set_vim_enabled(self.settings.vim);
         self.transcript_window.set_vim_enabled(self.settings.vim);
-        self.screen.apply_settings(&self.settings);
+        self.screen.set_show_thinking(self.settings.show_thinking);
         state::save_settings(&self.settings);
         if self.settings.show_thinking != prev_show_thinking {
             self.screen.redraw();
@@ -493,7 +493,7 @@ impl App {
 
     pub(super) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.reasoning_effort = effort;
-        self.screen.set_reasoning_effort(effort);
+        self.screen.mark_dirty();
         state::set_reasoning_effort(effort);
         self.engine.send(UiCommand::SetReasoningEffort { effort });
     }
@@ -508,16 +508,15 @@ impl App {
     pub(super) fn export_to_clipboard(&mut self) {
         let text = self.format_conversation_text();
         if text.is_empty() {
-            self.screen.notify_error("nothing to export".into());
+            self.notify_error("nothing to export".into());
             return;
         }
         match copy_to_clipboard(&text) {
             Ok(()) => {
-                self.screen
-                    .notify("conversation copied to clipboard".into());
+                self.notify("conversation copied to clipboard".into());
             }
             Err(e) => {
-                self.screen.notify_error(format!("clipboard error: {}", e));
+                self.notify_error(format!("clipboard error: {}", e));
             }
         }
     }
@@ -525,7 +524,7 @@ impl App {
     pub(super) fn export_to_file(&mut self) {
         let text = self.format_conversation_text();
         if text.is_empty() {
-            self.screen.notify_error("nothing to export".into());
+            self.notify_error("nothing to export".into());
             return;
         }
         let dir = std::path::PathBuf::from(&self.cwd);
@@ -538,10 +537,10 @@ impl App {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_default();
-                self.screen.notify(format!("exported to {name}"));
+                self.notify(format!("exported to {name}"));
             }
             Err(e) => {
-                self.screen.notify_error(format!("export failed: {e}"));
+                self.notify_error(format!("export failed: {e}"));
             }
         }
     }
