@@ -337,6 +337,16 @@ impl LuaRuntime {
         }
 
         if rt.load_error.is_none() {
+            for &name in AUTOLOAD_MODULES {
+                let code = format!("require('{name}')");
+                if let Err(e) = rt.lua.load(&code).set_name(name).exec() {
+                    rt.load_error = Some(format!("autoload {name}: {e}"));
+                    break;
+                }
+            }
+        }
+
+        if rt.load_error.is_none() {
             if let Some(path) = init_lua_path() {
                 if path.exists() {
                     if let Err(e) = rt.load_init(&path) {
@@ -1739,7 +1749,16 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.predict",
         include_str!("../../../../runtime/lua/smelt/plugins/predict.lua"),
     ),
+    (
+        "smelt.plugins.ask_user_question",
+        include_str!("../../../../runtime/lua/smelt/plugins/ask_user_question.lua"),
+    ),
 ];
+
+/// Plugins that must always be active (the user can't opt out via
+/// init.lua). These are former Rust built-ins migrated to Lua. Required
+/// after the embedded searcher is set up, before user init.lua runs.
+const AUTOLOAD_MODULES: &[&str] = &["smelt.plugins.ask_user_question"];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
 /// from modules embedded in the binary. Falls back to the default searchers
@@ -1911,6 +1930,18 @@ mod tests {
             .eval()
             .expect("eval");
         assert_eq!(version, crate::api::VERSION);
+    }
+
+    #[test]
+    fn autoload_registers_ask_user_question_as_sequential() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let defs = rt.plugin_tool_defs(protocol::Mode::Normal);
+        let ask = defs
+            .iter()
+            .find(|d| d.name == "ask_user_question")
+            .expect("ask_user_question should be auto-registered");
+        assert_eq!(ask.execution_mode, protocol::ToolExecutionMode::Sequential);
     }
 
     #[test]

@@ -1819,11 +1819,6 @@ impl App {
                 } => {
                     self.sync_permissions(session_entries, workspace_rules);
                 }
-                crate::app::ops::AppOp::ResolveQuestion { answer, request_id } => {
-                    // `resolve_question` itself clears `self.agent.pending`
-                    // on the cancel path, so no flag needed.
-                    self.resolve_question(answer, request_id);
-                }
                 crate::app::ops::AppOp::AgentsBackToList {
                     detail_win,
                     initial_selected,

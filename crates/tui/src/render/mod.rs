@@ -42,7 +42,7 @@ pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 pub(crate) use status::BarSpan;
 pub use status::StatusPosition;
 
-pub use dialogs::{parse_questions, AgentSnapshot, Question, QuestionOption, SharedSnapshots};
+pub use dialogs::{AgentSnapshot, SharedSnapshots};
 
 use crate::theme;
 use crate::utils::format_duration;

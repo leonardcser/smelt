@@ -55,9 +55,9 @@ pub struct PluginToolDef {
 
 /// Events emitted by the engine. The UI consumes these to update its display.
 ///
-/// Most variants are fire-and-forget. The exceptions are `RequestPermission`
-/// and `RequestAnswer`, which carry a `request_id` that the UI must eventually
-/// reply to via `UiCommand`.
+/// Most variants are fire-and-forget. The exception is `RequestPermission`,
+/// which carries a `request_id` that the UI must eventually reply to via
+/// `UiCommand::PermissionDecision`.
 ///
 /// Event ordering within a turn:
 ///   Ready → (Thinking* → Text* → ToolStarted → ToolOutput* → ToolFinished)*
@@ -111,12 +111,6 @@ pub enum EngineEvent {
         confirm_message: String,
         approval_patterns: Vec<String>,
         summary: Option<String>,
-    },
-
-    /// Engine needs the user to answer a question (ask_user_question tool).
-    RequestAnswer {
-        request_id: u64,
-        args: HashMap<String, serde_json::Value>,
     },
 
     /// Token usage update after an LLM call.
@@ -241,12 +235,6 @@ pub enum UiCommand {
         request_id: u64,
         approved: bool,
         message: Option<String>,
-    },
-
-    /// Reply to a `RequestAnswer` event.
-    QuestionAnswer {
-        request_id: u64,
-        answer: Option<String>,
     },
 
     /// Change the active mode while the engine is running.

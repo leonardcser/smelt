@@ -63,13 +63,6 @@ pub enum AppOp {
     },
     /// Load a saved session by id (Resume dialog).
     LoadSession(String),
-    /// Resolve an open `ask_user_question` dialog. `answer=None`
-    /// cancels (denial path clears queued tool calls via the
-    /// `pending_agent_clear_pending` flag).
-    ResolveQuestion {
-        answer: Option<String>,
-        request_id: u64,
-    },
     /// Back-nav from the Agents detail view to the list: close the
     /// detail window and open the list positioned on the row we came
     /// from.
