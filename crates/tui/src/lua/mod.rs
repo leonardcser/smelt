@@ -247,6 +247,9 @@ pub(crate) struct LuaShared {
     pub(crate) next_id: AtomicU64,
     pub(crate) history: Mutex<Arc<Vec<protocol::Message>>>,
     pub(crate) tasks: Mutex<LuaTaskRuntime>,
+    /// Background process registry. Installed by `App::new` so Lua
+    /// plugins (e.g. `/ps`) can enumerate and kill procs.
+    pub(crate) processes: Mutex<Option<engine::tools::ProcessRegistry>>,
 }
 
 impl Default for LuaShared {
@@ -263,6 +266,7 @@ impl Default for LuaShared {
             next_id: AtomicU64::new(1),
             history: Mutex::new(Arc::new(Vec::new())),
             tasks: Mutex::new(LuaTaskRuntime::new()),
+            processes: Mutex::new(None),
         }
     }
 }
@@ -668,6 +672,47 @@ impl LuaRuntime {
         }
 
         api.set("engine", engine_tbl)?;
+
+        // smelt.api.process.* — background process registry bridge.
+        let process_tbl = lua.create_table()?;
+        {
+            let s = shared.clone();
+            process_tbl.set(
+                "list",
+                lua.create_function(move |lua, ()| {
+                    let Ok(guard) = s.processes.lock() else {
+                        return lua.create_table();
+                    };
+                    let Some(registry) = guard.as_ref() else {
+                        return lua.create_table();
+                    };
+                    let procs = registry.list();
+                    drop(guard);
+                    let out = lua.create_table()?;
+                    for (i, p) in procs.into_iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("id", p.id)?;
+                        row.set("command", p.command)?;
+                        row.set("elapsed_secs", p.started_at.elapsed().as_secs())?;
+                        out.set(i + 1, row)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+        }
+        {
+            let s = shared.clone();
+            process_tbl.set(
+                "kill",
+                lua.create_function(move |_, id: String| {
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(AppOp::KillProcess(id));
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        api.set("process", process_tbl)?;
 
         // smelt.api.ui
         let ui_tbl = lua.create_table()?;
@@ -1100,6 +1145,14 @@ impl LuaRuntime {
     pub fn set_history(&self, history: Vec<protocol::Message>) {
         if let Ok(mut h) = self.shared.history.lock() {
             *h = Arc::new(history);
+        }
+    }
+
+    /// Install the background process registry so `smelt.api.process.*`
+    /// primitives can enumerate and kill procs. Called once at App start.
+    pub fn set_process_registry(&self, registry: engine::tools::ProcessRegistry) {
+        if let Ok(mut p) = self.shared.processes.lock() {
+            *p = Some(registry);
         }
     }
 
@@ -1871,6 +1924,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.rewind",
         include_str!("../../../../runtime/lua/smelt/plugins/rewind.lua"),
     ),
+    (
+        "smelt.plugins.ps",
+        include_str!("../../../../runtime/lua/smelt/plugins/ps.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1880,6 +1937,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.ask_user_question",
     "smelt.plugins.export",
     "smelt.plugins.rewind",
+    "smelt.plugins.ps",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
@@ -2083,6 +2141,26 @@ mod tests {
         assert!(
             rt.has_command("export"),
             "/export should be registered by the autoloaded plugin"
+        );
+    }
+
+    #[test]
+    fn autoload_registers_ps_command() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        assert!(
+            rt.has_command("ps"),
+            "/ps should be registered by the autoloaded plugin"
+        );
+    }
+
+    #[test]
+    fn autoload_registers_rewind_command() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        assert!(
+            rt.has_command("rewind"),
+            "/rewind should be registered by the autoloaded plugin"
         );
     }
 

@@ -13,14 +13,15 @@
 use super::super::App;
 use crate::app::ops::AppOp;
 use crate::keymap::hints;
+use crossterm::event::{KeyCode, KeyModifiers};
 use mlua::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
 use ui::{
-    BufId, Callback, CallbackResult, OptionItem, OptionList, PanelHeight, PanelSpec, Payload,
-    WinEvent, WinId,
+    BufId, Callback, CallbackResult, KeyBind, OptionItem, OptionList, PanelHeight, PanelSpec,
+    Payload, WinEvent, WinId,
 };
 
 /// Per-option data consumed when the task resumes. Drained out of
@@ -135,8 +136,31 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         return Err("dialog must have at least one panel".into());
     }
 
-    let dialog_config =
-        app.builtin_dialog_config(Some(hints::join(&[hints::CONFIRM, hints::CANCEL])), vec![]);
+    // Parse plugin keymaps up front so we can fold their hints into the
+    // footer alongside the default Confirm / Cancel labels.
+    let mut keymaps: Vec<(KeyBind, String)> = Vec::new();
+    let mut extra_hints: Vec<String> = Vec::new();
+    if let Ok(km_tbl) = opts.get::<mlua::Table>("keymaps") {
+        for entry_res in km_tbl.sequence_values::<mlua::Table>() {
+            let entry = entry_res.map_err(|e| format!("keymap entry: {e}"))?;
+            let key_str: String = entry.get("key").map_err(|e| format!("keymap.key: {e}"))?;
+            let action: String = entry
+                .get("action")
+                .map_err(|e| format!("keymap.action: {e}"))?;
+            if let Ok(hint) = entry.get::<String>("hint") {
+                if !hint.is_empty() {
+                    extra_hints.push(hint);
+                }
+            }
+            keymaps.push((parse_key(&key_str)?, action));
+        }
+    }
+
+    let mut hint_parts: Vec<&str> = vec![hints::CONFIRM, hints::CANCEL];
+    for h in &extra_hints {
+        hint_parts.push(h.as_str());
+    }
+    let dialog_config = app.builtin_dialog_config(Some(hints::join(&hint_parts)), vec![]);
     // Lua dialogs block the agent event drain until the task resumes.
     let win_id = app
         .ui
@@ -189,6 +213,32 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         })),
     );
 
+    // Custom keymaps: plugins bind keys like Backspace / ctrl-x that
+    // resolve the dialog with a named `action`. The Lua task resumes
+    // with the action + current selection and decides whether to reopen.
+    for (kb, action) in keymaps {
+        let state_k = state.clone();
+        let ops_k = ops.clone();
+        app.ui.win_set_keymap(
+            win_id,
+            kb,
+            Callback::Rust(Box::new(move |ctx| {
+                let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
+                let s = state_k.borrow();
+                let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
+                ops_k.push(AppOp::ResolveLuaDialog {
+                    dialog_id: s.dialog_id,
+                    action: action.clone(),
+                    option_index: idx.map(|i| i + 1),
+                    inputs,
+                    on_select: None,
+                });
+                ops_k.push(AppOp::CloseFloat(ctx.win));
+                CallbackResult::Consumed
+            })),
+        );
+    }
+
     let state_dismiss = state;
     app.ui.win_on_event(
         win_id,
@@ -208,6 +258,55 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
     );
 
     Ok(())
+}
+
+/// Parse a plugin-facing key string like `"bs"`, `"tab"`, `"ctrl-x"`,
+/// `"shift-tab"` into a [`KeyBind`]. Case-insensitive for named keys;
+/// single characters are taken verbatim.
+fn parse_key(spec: &str) -> Result<KeyBind, String> {
+    let raw = spec.trim();
+    if raw.is_empty() {
+        return Err("keymap.key: empty string".into());
+    }
+    let (mods, name) = match raw.rsplit_once('-') {
+        Some((prefix, name)) => {
+            let mut mods = KeyModifiers::NONE;
+            for part in prefix.split('-') {
+                match part.to_ascii_lowercase().as_str() {
+                    "ctrl" | "c" => mods |= KeyModifiers::CONTROL,
+                    "alt" | "a" | "meta" | "m" => mods |= KeyModifiers::ALT,
+                    "shift" | "s" => mods |= KeyModifiers::SHIFT,
+                    other => return Err(format!("keymap: unknown modifier '{other}'")),
+                }
+            }
+            (mods, name)
+        }
+        None => (KeyModifiers::NONE, raw),
+    };
+    let code = match name.to_ascii_lowercase().as_str() {
+        "bs" | "backspace" => KeyCode::Backspace,
+        "tab" => {
+            if mods.contains(KeyModifiers::SHIFT) {
+                return Ok(KeyBind::new(KeyCode::BackTab, mods - KeyModifiers::SHIFT));
+            }
+            KeyCode::Tab
+        }
+        "del" | "delete" => KeyCode::Delete,
+        "enter" | "return" => KeyCode::Enter,
+        "esc" | "escape" => KeyCode::Esc,
+        "space" => KeyCode::Char(' '),
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" | "pgup" => KeyCode::PageUp,
+        "pagedown" | "pgdn" => KeyCode::PageDown,
+        s if s.chars().count() == 1 => KeyCode::Char(name.chars().next().unwrap()),
+        other => return Err(format!("keymap: unknown key '{other}'")),
+    };
+    Ok(KeyBind::new(code, mods))
 }
 
 fn collect_inputs(ui: &mut ui::Ui, win: WinId, entries: &[InputEntry]) -> Vec<(String, String)> {

@@ -141,6 +141,9 @@ pub enum AppOp {
         content: String,
         is_error: bool,
     },
+    /// Kill a background process by id (e.g. from `/ps`). The actual
+    /// `ProcessRegistry::stop` runs on the tokio runtime, fire-and-forget.
+    KillProcess(String),
     /// Resolve a Lua-driven dialog opened via `smelt.api.dialog.open`.
     /// Fires the optional per-option `on_select` callback, then resumes
     /// the parked task with a `{action, option_index, inputs}` table.
