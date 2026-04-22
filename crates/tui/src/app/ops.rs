@@ -81,6 +81,10 @@ pub enum AppOp {
     /// Delete a saved session by id (`smelt.api.session.delete`). No-op
     /// if the session is the active one.
     DeleteSession(String),
+    /// Kill a running subagent by PID (`smelt.api.agent.kill`). Runs
+    /// SIGTERM to the whole subtree, deregisters, and cleans up its
+    /// socket. No-op when the PID isn't in the registry anymore.
+    KillAgent(u32),
     /// Back-nav from the Agents detail view to the list: close the
     /// detail window and open the list positioned on the row we came
     /// from.

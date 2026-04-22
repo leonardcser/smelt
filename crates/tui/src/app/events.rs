@@ -1784,6 +1784,11 @@ impl App {
             session_created_at_ms: self.session.created_at_ms,
             session_turns: self.user_turns(),
             vim_enabled: self.input.vim_enabled(),
+            permission_session_entries: self
+                .session_permission_entries()
+                .into_iter()
+                .map(|e| (e.tool, e.pattern))
+                .collect(),
         });
         self.lua.set_history(self.history.clone());
     }
@@ -2049,6 +2054,9 @@ impl App {
                     if id != self.session.id {
                         crate::session::delete(&id);
                     }
+                }
+                crate::app::ops::AppOp::KillAgent(pid) => {
+                    engine::registry::kill_agent(pid);
                 }
                 crate::app::ops::AppOp::RewindToBlock {
                     block_idx,
