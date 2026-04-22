@@ -167,8 +167,7 @@ impl App {
                         // state.
                         self.apply_accent(value);
                     }
-                    MenuResult::ColorSelect(_) => {
-                    }
+                    MenuResult::ColorSelect(_) => {}
                     MenuResult::Stats | MenuResult::Cost | MenuResult::Dismissed => {}
                 }
                 let is_settings = matches!(&result, MenuResult::Settings(_));
@@ -350,12 +349,15 @@ impl App {
                         return EventOutcome::Noop;
                     }
 
-                    let turns = self.user_turns();
-                    if turns.is_empty() {
+                    if self.user_turns().is_empty() {
                         return EventOutcome::Noop;
                     }
-                    let restore_vim_insert = restore_mode == Some(vim::ViMode::Insert);
-                    super::dialogs::rewind::open(self, turns, restore_vim_insert);
+                    let line = if restore_mode == Some(vim::ViMode::Insert) {
+                        "/rewind insert"
+                    } else {
+                        "/rewind"
+                    };
+                    super::commands::run_command(self, line);
                     return EventOutcome::Redraw;
                 }
                 // Single Esc in normal mode — start timer.
@@ -566,8 +568,7 @@ impl App {
             Action::ToggleMode => {
                 self.toggle_mode();
             }
-            Action::Redraw => {
-            }
+            Action::Redraw => {}
             Action::CycleReasoning => {
                 self.cycle_reasoning();
             }
@@ -617,9 +618,7 @@ impl App {
                 self.handle_resize(w as u16, h as u16);
                 EventOutcome::Noop
             }
-            Action::Redraw => {
-                EventOutcome::Redraw
-            }
+            Action::Redraw => EventOutcome::Redraw,
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
                 EventOutcome::Redraw
@@ -775,7 +774,8 @@ impl App {
                 })
             }
             crate::app::AppFocus::Content => {
-                let total_lines = self.full_transcript_display_text(self.settings.show_thinking)
+                let total_lines = self
+                    .full_transcript_display_text(self.settings.show_thinking)
                     .len();
                 if total_lines == 0 {
                     return None;
@@ -1435,8 +1435,7 @@ impl App {
                         let s = crate::text_utils::snap(&buf, s);
                         let e = crate::text_utils::snap(&buf, e);
                         if s < e {
-                            let copy =
-                                self.copy_display_range(s, e, self.settings.show_thinking);
+                            let copy = self.copy_display_range(s, e, self.settings.show_thinking);
                             let _ = crate::app::commands::copy_to_clipboard(&copy);
                         }
                     }
@@ -1591,7 +1590,8 @@ impl App {
     /// Snapshot app state into the Lua ops context and return the
     /// vim_mode + focused_window for callers that need them locally.
     pub(super) fn snapshot_lua_context(&mut self) -> (Option<String>, String) {
-        let transcript_text = self.full_transcript_text(self.settings.show_thinking)
+        let transcript_text = self
+            .full_transcript_text(self.settings.show_thinking)
             .join("\n");
         let prompt_text = self.input.win.edit_buf.buf.clone();
         let focused_window = match self.app_focus {
@@ -1632,6 +1632,7 @@ impl App {
             session_title: self.session.title.clone(),
             session_cwd: self.cwd.clone(),
             session_created_at_ms: self.session.created_at_ms,
+            session_turns: self.user_turns(),
         });
         self.lua.set_history(self.history.clone());
     }
@@ -2033,8 +2034,7 @@ impl App {
     }
 
     fn transcript_dims(&mut self) -> (u16, u16) {
-        let total = self.full_transcript_text(self.settings.show_thinking)
-            .len() as u16;
+        let total = self.full_transcript_text(self.settings.show_thinking).len() as u16;
         let viewport = self.viewport_rows_estimate();
         (total, viewport)
     }
@@ -2136,8 +2136,7 @@ impl App {
                     }
                     return EventOutcome::Noop;
                 }
-                if !self.has_transcript_content(self.settings.show_thinking)
-                {
+                if !self.has_transcript_content(self.settings.show_thinking) {
                     return EventOutcome::Noop;
                 }
                 self.app_focus = crate::app::AppFocus::Content;
@@ -2166,8 +2165,7 @@ impl App {
                     Some(render::ViewportHit::Content { row, col }) => {
                         self.position_content_cursor_from_hit(row, col);
                     }
-                    None => {
-                    }
+                    None => {}
                 }
                 if double {
                     self.select_and_copy_word_in_content();
@@ -2195,16 +2193,12 @@ impl App {
     /// keeps wheel behaviour consistent with the "buffer scroll is
     /// cursor motion" model used by keyboard navigation.
     pub(super) fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
-        if matches!(
-            self.layout.hit_test(row, 0),
-            render::HitRegion::Prompt
-        ) {
+        if matches!(self.layout.hit_test(row, 0), render::HitRegion::Prompt) {
             self.app_focus = crate::app::AppFocus::Prompt;
             self.scroll_prompt_by_lines(delta);
             return;
         }
-        if !self.has_transcript_content(self.settings.show_thinking)
-        {
+        if !self.has_transcript_content(self.settings.show_thinking) {
             return;
         }
         self.app_focus = crate::app::AppFocus::Content;

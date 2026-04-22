@@ -179,6 +179,8 @@ pub struct EngineSnapshot {
     pub session_title: Option<String>,
     pub session_cwd: String,
     pub session_created_at_ms: u64,
+    /// User turn positions: `(block_idx, text)` for each `Block::User`.
+    pub session_turns: Vec<(usize, String)>,
 }
 
 /// Shared state between Lua closures and the app loop.
@@ -506,6 +508,51 @@ impl LuaRuntime {
             "dir",
             snap_read!(lua, shared, |o| o.engine.session_dir.clone()),
         )?;
+        // smelt.api.session.turns() → [{block_idx, label}]. Label is the
+        // first line of each user turn (matches the /rewind display).
+        {
+            let s = shared.clone();
+            session_tbl.set(
+                "turns",
+                lua.create_function(move |lua, ()| {
+                    let turns = s
+                        .ops
+                        .lock()
+                        .map(|o| o.engine.session_turns.clone())
+                        .unwrap_or_default();
+                    let out = lua.create_table()?;
+                    for (i, (block_idx, text)) in turns.into_iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("block_idx", block_idx)?;
+                        let label = text.lines().next().unwrap_or("").to_string();
+                        row.set("label", label)?;
+                        out.set(i + 1, row)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+        }
+        // smelt.api.session.rewind_to(block_idx_or_nil, { restore_vim_insert = bool })
+        {
+            let s = shared.clone();
+            session_tbl.set(
+                "rewind_to",
+                lua.create_function(
+                    move |_, (block_idx, opts): (Option<usize>, Option<mlua::Table>)| {
+                        let restore_vim_insert = opts
+                            .and_then(|t| t.get::<bool>("restore_vim_insert").ok())
+                            .unwrap_or(false);
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.ops.push(AppOp::RewindToBlock {
+                                block_idx,
+                                restore_vim_insert,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
         api.set("session", session_tbl)?;
 
         engine_tbl.set(
@@ -1820,6 +1867,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.export",
         include_str!("../../../../runtime/lua/smelt/plugins/export.lua"),
     ),
+    (
+        "smelt.plugins.rewind",
+        include_str!("../../../../runtime/lua/smelt/plugins/rewind.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1828,6 +1879,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
 const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.ask_user_question",
     "smelt.plugins.export",
+    "smelt.plugins.rewind",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
