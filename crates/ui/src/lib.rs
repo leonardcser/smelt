@@ -329,20 +329,19 @@ impl Ui {
         self.callbacks.on_event(win, ev, cb);
     }
 
-    /// Dispatch a window event to its registered callbacks. Returns
-    /// the collected action strings. `lua_invoke` is called for each
-    /// Lua callback with (handle, payload) and may return extra
-    /// action strings.
+    /// Dispatch a window event to its registered callbacks.
+    /// `lua_invoke` is called for each `Callback::Lua` with
+    /// (handle, payload). Side effects flow through the `AppOp` queue
+    /// that Rust callbacks have via `shared.ops` — no return channel.
     pub fn dispatch_event(
         &mut self,
         win: WinId,
         ev: WinEvent,
         payload: Payload,
-        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload) -> Vec<String>,
-    ) -> Vec<String> {
-        let mut actions = Vec::new();
+        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload),
+    ) {
         let Some(mut cbs) = self.callbacks.take_event(win, ev) else {
-            return actions;
+            return;
         };
         for cb in cbs.iter_mut() {
             match cb {
@@ -351,18 +350,15 @@ impl Ui {
                         ui: self,
                         win,
                         payload: payload.clone(),
-                        actions: &mut actions,
                     };
                     let _ = inner(&mut ctx);
                 }
                 Callback::Lua(handle) => {
-                    let extra = lua_invoke(*handle, &payload);
-                    actions.extend(extra);
+                    lua_invoke(*handle, &payload);
                 }
             }
         }
         self.callbacks.restore_event(win, ev, cbs);
-        actions
     }
 
     /// Open a multi-panel `Dialog` as a compositor float layer.
@@ -572,27 +568,23 @@ impl Ui {
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
     ) -> KeyResult {
-        let (result, _actions) = self.handle_key_with_actions(code, mods, &mut |_, _| Vec::new());
-        result
+        self.handle_key_with_lua(code, mods, &mut |_, _| {})
     }
 
     /// Dispatch a key event through the focused window's keymap
     /// table, falling back to `Component::handle_key` if no binding
-    /// matches. Returns both the compositor result and any action
-    /// strings emitted by callbacks. `lua_invoke` is called for each
-    /// Lua callback with (handle, payload) and returns action
-    /// strings to merge.
-    pub fn handle_key_with_actions(
+    /// matches. `lua_invoke` is called for each `Callback::Lua` with
+    /// (handle, payload). Side effects (app-level commands, etc.)
+    /// flow through `AppOp` from the host side.
+    pub fn handle_key_with_lua(
         &mut self,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
-        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload) -> Vec<String>,
-    ) -> (KeyResult, Vec<String>) {
-        let mut actions = Vec::new();
+        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload),
+    ) -> KeyResult {
         let focused = self.compositor.focused().and_then(parse_float_layer_id);
         let Some(win) = focused else {
-            let result = self.compositor.handle_key(code, mods);
-            return (result, actions);
+            return self.compositor.handle_key(code, mods);
         };
         let key = KeyBind::new(code, mods);
         let result = if let Some(mut cb) = self.callbacks.take_keymap(win, key) {
@@ -602,7 +594,6 @@ impl Ui {
                         ui: self,
                         win,
                         payload: Payload::Key { code, mods },
-                        actions: &mut actions,
                     };
                     let r = inner(&mut ctx);
                     match r {
@@ -612,7 +603,7 @@ impl Ui {
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
-                    actions.extend(lua_invoke(*handle, &payload));
+                    lua_invoke(*handle, &payload);
                     KeyResult::Consumed
                 }
             };
@@ -625,7 +616,6 @@ impl Ui {
                         ui: self,
                         win,
                         payload: Payload::Key { code, mods },
-                        actions: &mut actions,
                     };
                     let r = inner(&mut ctx);
                     match r {
@@ -635,7 +625,7 @@ impl Ui {
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
-                    actions.extend(lua_invoke(*handle, &payload));
+                    lua_invoke(*handle, &payload);
                     KeyResult::Consumed
                 }
             };
@@ -647,37 +637,26 @@ impl Ui {
 
         // Auto-translate widget events into typed `WinEvent` callbacks
         // when the focused window has a matching callback registered.
-        // This is the glue that lets widgets (OptionList, TextInput, …)
-        // emit typed `WidgetEvent` values while dialogs subscribe via
-        // `WinEvent::Submit` / `Dismiss` / `TextChanged`. Unregistered
-        // windows still see the raw `Action(…)` bubble up.
         if let KeyResult::Action(action) = &result {
             if let Some((ev, payload)) = classify_widget_action(action) {
                 if self.callbacks.has_event(win, ev) {
-                    let extra = self.dispatch_event(win, ev, payload, lua_invoke);
-                    actions.extend(extra);
-                    return (KeyResult::Consumed, actions);
+                    self.dispatch_event(win, ev, payload, lua_invoke);
+                    return KeyResult::Consumed;
                 }
             }
         }
-        (result, actions)
+        result
     }
 
     /// Fire `WinEvent::Tick` on every window that has a registered
     /// Tick callback. Used by the app event loop to drive per-frame
     /// refresh of dialogs with live external state (subagent list,
     /// process registry, …).
-    pub fn dispatch_tick(
-        &mut self,
-        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload) -> Vec<String>,
-    ) -> Vec<String> {
-        let mut actions = Vec::new();
+    pub fn dispatch_tick(&mut self, lua_invoke: &mut dyn FnMut(LuaHandle, &Payload)) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {
-            let extra = self.dispatch_event(win, WinEvent::Tick, Payload::None, lua_invoke);
-            actions.extend(extra);
+            self.dispatch_event(win, WinEvent::Tick, Payload::None, lua_invoke);
         }
-        actions
     }
 
     pub fn focused_float(&self) -> Option<WinId> {

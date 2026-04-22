@@ -1857,9 +1857,8 @@ impl App {
         if self.ui.float_config(win).is_some_and(|c| c.blocks_agent) {
             return;
         }
-        let mut lua_invoke =
-            |_handle: ui::LuaHandle, _payload: &ui::Payload| -> Vec<String> { Vec::new() };
-        let _ = self.ui.dispatch_event(
+        let mut lua_invoke = |_handle: ui::LuaHandle, _payload: &ui::Payload| {};
+        self.ui.dispatch_event(
             win,
             ui::WinEvent::Dismiss,
             ui::Payload::None,

@@ -6,9 +6,10 @@
 //!
 //! Callbacks are either Rust closures (`FnMut(&mut CallbackCtx) ->
 //! CallbackResult`) or Lua handles. Both run through the same
-//! dispatcher in `Ui::handle_key` / `Ui::handle_mouse` and can push
-//! app-level effect strings into `CallbackCtx::actions`, which `App`
-//! drains each tick and routes through its reducer.
+//! dispatcher in `Ui::handle_key` / `Ui::dispatch_event`. Side
+//! effects flow through the app-owned `AppOp` queue that Rust
+//! callbacks see via their shared ops handle, or through direct
+//! `ui::Ui` mutations — no return channel for effect strings.
 //!
 //! This is the single behavior mechanism. No `Dialog` /
 //! `DialogBehavior` trait exists; `Component::handle_key` remains as
@@ -156,14 +157,13 @@ impl std::fmt::Debug for Callback {
 
 /// Context passed to Rust callbacks. `ui` is full `&mut Ui`;
 /// callbacks can mutate buffers, open/close floats, change focus,
-/// etc. App-level effects (resume session, rewind, copy to
-/// clipboard, ...) are pushed to `actions` as strings and drained
-/// by the app's reducer.
+/// and queue `AppOp`s via the shared ops handle. No return channel
+/// for effect strings — all side effects flow through `AppOp` or
+/// direct `ui::Ui` mutation.
 pub struct CallbackCtx<'a> {
     pub ui: &'a mut crate::Ui,
     pub win: WinId,
     pub payload: Payload,
-    pub actions: &'a mut Vec<String>,
 }
 
 /// Per-window callback registry owned by `Ui`. Keyed by WinId so
