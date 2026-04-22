@@ -1999,6 +1999,12 @@ impl App {
                         is_error,
                     });
                 }
+                crate::app::ops::AppOp::KillProcess(id) => {
+                    let registry = self.engine.processes.clone();
+                    tokio::spawn(async move {
+                        let _ = registry.stop(&id).await;
+                    });
+                }
                 crate::app::ops::AppOp::ResolveLuaDialog {
                     dialog_id,
                     action,

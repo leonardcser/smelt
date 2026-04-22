@@ -95,14 +95,6 @@ impl App {
                 }
                 CommandAction::Continue
             }
-            "/ps" => {
-                if self.engine.processes.list().is_empty() {
-                    self.notify_error("no background processes".into());
-                } else {
-                    super::dialogs::ps::open(self);
-                }
-                CommandAction::Continue
-            }
             "/permissions" => {
                 let session_entries = self.session_permission_entries();
                 let workspace_rules = crate::workspace_permissions::load(&self.cwd);

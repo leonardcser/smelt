@@ -592,7 +592,7 @@ impl App {
             (ui, input_display_buf)
         };
 
-        Self {
+        let app = Self {
             model,
             api_base,
             api_key_env,
@@ -701,7 +701,9 @@ impl App {
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             input_display_buf,
-        }
+        };
+        app.lua.set_process_registry(app.engine.processes.clone());
+        app
     }
 
     /// Rebuild prompt sections from current app state (mode, instructions, etc.)
