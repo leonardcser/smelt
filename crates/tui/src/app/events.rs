@@ -604,7 +604,8 @@ impl App {
                 self.screen.redraw();
             }
             Action::CenterScroll => {
-                self.screen.center_input_scroll();
+                self.prompt_input_scroll = usize::MAX;
+                self.screen.mark_dirty();
             }
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
@@ -638,7 +639,8 @@ impl App {
                 EventOutcome::Noop
             }
             Action::CenterScroll => {
-                self.screen.center_input_scroll();
+                self.prompt_input_scroll = usize::MAX;
+                self.screen.mark_dirty();
                 EventOutcome::Noop
             }
             Action::Resize {
@@ -1184,7 +1186,7 @@ impl App {
 
         // ── Prompt ──
         // Extract all immutable data first, then take the mutable btw borrow.
-        let prev_input_scroll = self.screen.prompt_input_scroll();
+        let prev_input_scroll = self.prompt_input_scroll;
         let notification = self.notification.as_ref().cloned();
         let bar_info = render::prompt_data::BarInfo {
             model_label: Some(self.model.clone()),
@@ -1222,7 +1224,7 @@ impl App {
         let input_scroll = prompt_output.input_scroll;
         let input_viewport_data = prompt_output.input_viewport;
 
-        self.screen.set_prompt_input_scroll(input_scroll);
+        self.prompt_input_scroll = input_scroll;
 
         let (prompt_input_rect, prompt_viewport) = if let Some(ref ivp) = input_viewport_data {
             let input_rect = ui::Rect::new(
@@ -1249,7 +1251,7 @@ impl App {
                 None,
             )
         };
-        self.screen.set_prompt_viewport(prompt_viewport);
+        self.prompt_viewport = prompt_viewport;
 
         if let Some(pv) = self
             .ui
@@ -1260,8 +1262,8 @@ impl App {
             pv.set_cursor(None, None);
         }
         {
-            let scroll = self.screen.prompt_input_scroll();
-            let viewport = self.screen.input_viewport();
+            let scroll = self.prompt_input_scroll;
+            let viewport = self.prompt_viewport;
             let input_buf_id = self.input_display_buf;
             let buf_snapshot = self.ui.buf(input_buf_id).cloned();
             if let (Some(pv), Some(buf)) = (
@@ -2162,7 +2164,7 @@ impl App {
                 // region — that's the only prompt-area hit we position
                 // for. Clicks on queued messages, bars, status line etc.
                 // only change focus.
-                if let Some(vp) = self.screen.input_viewport() {
+                if let Some(vp) = self.prompt_viewport {
                     if vp.contains(me.row, me.column) {
                         self.app_focus = crate::app::AppFocus::Prompt;
                         if self.begin_scrollbar_drag_if_hit(
@@ -2384,7 +2386,7 @@ impl App {
             }
             crate::app::AppFocus::Prompt => {
                 self.input.win.win_cursor.extend(self.input.win.cpos);
-                if let Some(vp) = self.screen.input_viewport() {
+                if let Some(vp) = self.prompt_viewport {
                     if let Some(render::ViewportHit::Content { row: r, col: c }) = vp.hit(row, col)
                     {
                         self.position_prompt_cursor_from_click(
@@ -2567,7 +2569,7 @@ impl App {
                     .reanchor_to_visible_row(&rows, viewport);
             }
             crate::app::AppFocus::Prompt => {
-                self.screen.set_input_scroll(from_top as usize);
+                self.prompt_input_scroll = from_top as usize;
             }
         }
         self.screen.mark_dirty();
@@ -2577,7 +2579,7 @@ impl App {
     fn viewport_for(&self, target: crate::app::AppFocus) -> Option<render::region::Viewport> {
         match target {
             crate::app::AppFocus::Content => self.screen.transcript_viewport(),
-            crate::app::AppFocus::Prompt => self.screen.input_viewport(),
+            crate::app::AppFocus::Prompt => self.prompt_viewport,
         }
     }
 
