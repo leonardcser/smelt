@@ -1279,12 +1279,72 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        // smelt.api.buf.add_dim(buf_id, line_1_based, col_start, col_end)
-        // Paints a dim span over the given column range on `line`. The
-        // line index is 1-based to match Lua's table conventions; the
+        // smelt.api.buf.add_highlight(buf_id, line_1_based, col_start,
+        //                             col_end, style?)
+        // Paints a styled span over the given column range on `line`.
+        // `line` is 1-based to match Lua's table conventions; the
         // column range is 0-based cell columns and [start, end)
-        // half-open. Useful for dim metadata columns (size, timestamp,
-        // …) next to bright content.
+        // half-open. `style` is `{ fg?, bold?, italic?, dim? }` where
+        // `fg` is a theme role name (resolved to a `Color` at push
+        // time). Unknown roles raise a runtime error. Useful for
+        // drawing accent bars, dim metadata columns, etc.
+        {
+            let s = shared.clone();
+            buf_tbl.set(
+                "add_highlight",
+                lua.create_function(
+                    move |_,
+                          (id, line, col_start, col_end, style): (
+                        u64,
+                        u64,
+                        u64,
+                        u64,
+                        Option<mlua::Table>,
+                    )| {
+                        let Some(line0) = line.checked_sub(1) else {
+                            return Ok(());
+                        };
+                        if col_end <= col_start {
+                            return Ok(());
+                        }
+                        let (fg, bold, italic, dim) = match style {
+                            Some(t) => {
+                                let fg = match t.get::<Option<String>>("fg").ok().flatten() {
+                                    Some(role) => Some(theme_role_get(&role).ok_or_else(|| {
+                                        LuaError::RuntimeError(format!(
+                                            "unknown theme role: {role}"
+                                        ))
+                                    })?),
+                                    None => None,
+                                };
+                                (
+                                    fg,
+                                    t.get::<bool>("bold").unwrap_or(false),
+                                    t.get::<bool>("italic").unwrap_or(false),
+                                    t.get::<bool>("dim").unwrap_or(false),
+                                )
+                            }
+                            None => (None, false, false, false),
+                        };
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.ops.push(AppOp::BufAddHighlight {
+                                id,
+                                line: line0 as usize,
+                                col_start: col_start.min(u16::MAX as u64) as u16,
+                                col_end: col_end.min(u16::MAX as u64) as u16,
+                                fg,
+                                bold,
+                                italic,
+                                dim,
+                            });
+                        }
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
+        // smelt.api.buf.add_dim(buf_id, line_1_based, col_start, col_end)
+        // Convenience wrapper — same as `add_highlight(..., {dim=true})`.
         {
             let s = shared.clone();
             buf_tbl.set(
@@ -1298,11 +1358,15 @@ impl LuaRuntime {
                             return Ok(());
                         }
                         if let Ok(mut o) = s.ops.lock() {
-                            o.ops.push(AppOp::BufAddDim {
+                            o.ops.push(AppOp::BufAddHighlight {
                                 id,
                                 line: line0 as usize,
                                 col_start: col_start.min(u16::MAX as u64) as u16,
                                 col_end: col_end.min(u16::MAX as u64) as u16,
+                                fg: None,
+                                bold: false,
+                                italic: false,
+                                dim: true,
                             });
                         }
                         Ok(())
@@ -2427,6 +2491,7 @@ fn theme_role_get(role: &str) -> Option<crossterm::style::Color> {
         "tool_pending" => theme::tool_pending(),
         "reason_off" => theme::reason_off(),
         "muted" => theme::muted(),
+        "agent" => theme::AGENT,
         _ => return None,
     })
 }
@@ -2463,6 +2528,7 @@ fn theme_snapshot_pairs() -> Vec<(&'static str, crossterm::style::Color)> {
         ("tool_pending", theme::tool_pending()),
         ("reason_off", theme::reason_off()),
         ("muted", theme::muted()),
+        ("agent", theme::AGENT),
     ]
 }
 
@@ -2685,6 +2751,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.resume",
         include_str!("../../../../runtime/lua/smelt/plugins/resume.lua"),
     ),
+    (
+        "smelt.plugins.agents",
+        include_str!("../../../../runtime/lua/smelt/plugins/agents.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -2699,6 +2769,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.yank_block",
     "smelt.plugins.permissions",
     "smelt.plugins.resume",
+    "smelt.plugins.agents",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

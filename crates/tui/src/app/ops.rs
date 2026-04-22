@@ -85,26 +85,6 @@ pub enum AppOp {
     /// SIGTERM to the whole subtree, deregisters, and cleans up its
     /// socket. No-op when the PID isn't in the registry anymore.
     KillAgent(u32),
-    /// Back-nav from the Agents detail view to the list: close the
-    /// detail window and open the list positioned on the row we came
-    /// from.
-    AgentsBackToList {
-        detail_win: ui::WinId,
-        initial_selected: usize,
-    },
-    /// Drill into the Agents detail view for a specific subagent:
-    /// close the list window and open detail. `parent_selected`
-    /// preserves the list cursor for when detail is dismissed.
-    AgentsOpenDetail {
-        list_win: ui::WinId,
-        agent_id: String,
-        parent_selected: usize,
-    },
-    /// Agents list was dismissed (no back-nav) — refresh the cached
-    /// subagent counts in the status bar and close the window.
-    AgentsListDismissed {
-        win: ui::WinId,
-    },
     /// Resolve an open Confirm dialog with the user's choice. Drives
     /// the same logic as the legacy `App::resolve_confirm`. Sets
     /// `pending_agent_cancel` internally when the resolution asks
@@ -147,15 +127,20 @@ pub enum AppOp {
         id: u64,
         lines: Vec<String>,
     },
-    /// Paint a `SpanStyle::dim()` highlight over `[col_start, col_end)`
-    /// on `line`. Out-of-range line indices are silently dropped — the
-    /// buffer may have shrunk between the plugin's queue and the op's
-    /// apply.
-    BufAddDim {
+    /// Paint a highlight over `[col_start, col_end)` on `line`. The
+    /// plugin side resolves theme role names to `Color` at push time,
+    /// so the reducer just stitches a `SpanStyle` together. Out-of-
+    /// range line indices are silently dropped — the buffer may have
+    /// shrunk between the plugin's queue and the op's apply.
+    BufAddHighlight {
         id: u64,
         line: usize,
         col_start: u16,
         col_end: u16,
+        fg: Option<crossterm::style::Color>,
+        bold: bool,
+        italic: bool,
+        dim: bool,
     },
     WinOpenFloat {
         buf_id: u64,

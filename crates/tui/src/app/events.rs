@@ -1996,25 +1996,6 @@ impl App {
                 } => {
                     self.sync_permissions(session_entries, workspace_rules);
                 }
-                crate::app::ops::AppOp::AgentsBackToList {
-                    detail_win,
-                    initial_selected,
-                } => {
-                    self.close_float(detail_win);
-                    super::dialogs::agents::open_list(self, initial_selected);
-                }
-                crate::app::ops::AppOp::AgentsOpenDetail {
-                    list_win,
-                    agent_id,
-                    parent_selected,
-                } => {
-                    self.close_float(list_win);
-                    super::dialogs::agents::open_detail(self, agent_id, parent_selected);
-                }
-                crate::app::ops::AppOp::AgentsListDismissed { win } => {
-                    self.close_float(win);
-                    self.refresh_agent_counts();
-                }
                 crate::app::ops::AppOp::ResolveConfirm {
                     choice,
                     message,
@@ -2123,11 +2104,15 @@ impl App {
                         buf.set_all_lines(lines);
                     }
                 }
-                crate::app::ops::AppOp::BufAddDim {
+                crate::app::ops::AppOp::BufAddHighlight {
                     id,
                     line,
                     col_start,
                     col_end,
+                    fg,
+                    bold,
+                    italic,
+                    dim,
                 } => {
                     if let Some(buf) = self.ui.buf_mut(ui::BufId(id)) {
                         if line < buf.line_count() {
@@ -2135,7 +2120,13 @@ impl App {
                                 line,
                                 col_start,
                                 col_end,
-                                ui::buffer::SpanStyle::dim(),
+                                ui::buffer::SpanStyle {
+                                    fg,
+                                    bg: None,
+                                    bold,
+                                    dim,
+                                    italic,
+                                },
                             );
                         }
                     }
