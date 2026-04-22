@@ -67,8 +67,6 @@ pub struct Screen {
     last_viewport_text: Vec<String>,
     last_viewport_lines: Vec<super::display::DisplayLine>,
     last_transcript_viewport: Option<super::region::Viewport>,
-    /// Centralized layout state computed at the start of each frame.
-    pub(crate) layout: super::layout::LayoutState,
     /// Buffer-backed transcript projection — blocks projected at event time.
     pub(crate) transcript_projection: TranscriptProjection,
     /// Terminal I/O backend (real terminal or test buffer).
@@ -102,11 +100,6 @@ impl Screen {
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
             last_transcript_viewport: None,
-            layout: super::layout::LayoutState::compute(&super::layout::LayoutInput {
-                term_width: 80,
-                term_height: 24,
-                prompt_height: 3,
-            }),
             transcript_projection: TranscriptProjection::new(ui::buffer::Buffer::new(
                 ui::BufId(0),
                 ui::buffer::BufCreateOpts {

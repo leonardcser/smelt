@@ -1128,13 +1128,13 @@ impl App {
             prediction,
             self.notification.is_some(),
         );
-        let layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
+        self.layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
             term_width: term_w,
             term_height: term_h,
             prompt_height: natural_prompt_height,
         });
-        let viewport_rows = layout.viewport_rows();
-        let prompt_rect = layout.prompt;
+        let viewport_rows = self.layout.viewport_rows();
+        let prompt_rect = self.layout.prompt;
         let prompt_height = prompt_rect.height;
 
         // ── Transcript ──
@@ -1607,7 +1607,7 @@ impl App {
     /// gap, so multi-line prompts (and completion menus) don't cause
     /// the scroll math to overshoot.
     fn viewport_rows_estimate(&self) -> u16 {
-        self.screen.layout.viewport_rows().max(1)
+        self.layout.viewport_rows().max(1)
     }
 
     /// Single source of truth for whether the transcript viewport
@@ -2106,7 +2106,7 @@ impl App {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
-        if self.screen.layout.hit_test(me.row, me.column) == render::HitRegion::Status {
+        if self.layout.hit_test(me.row, me.column) == render::HitRegion::Status {
             return EventOutcome::Noop;
         }
         // Drag + release drive tmux-style click-drag-copy. Works in
@@ -2191,7 +2191,7 @@ impl App {
                 }
 
                 if matches!(
-                    self.screen.layout.hit_test(me.row, me.column),
+                    self.layout.hit_test(me.row, me.column),
                     render::HitRegion::Prompt | render::HitRegion::Status
                 ) {
                     if self.app_focus != crate::app::AppFocus::Prompt {
@@ -2265,7 +2265,7 @@ impl App {
     /// cursor motion" model used by keyboard navigation.
     pub(super) fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
         if matches!(
-            self.screen.layout.hit_test(row, 0),
+            self.layout.hit_test(row, 0),
             render::HitRegion::Prompt
         ) {
             self.app_focus = crate::app::AppFocus::Prompt;

@@ -125,6 +125,10 @@ pub struct App {
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).
     pub transcript_gutters: crate::window::WindowGutters,
+    /// Last-computed viewport layout (status / transcript / prompt
+    /// rows). Updated each frame in `render_normal`; read by mouse
+    /// hit-testing and viewport-rows estimation.
+    pub layout: render::layout::LayoutState,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -605,6 +609,11 @@ impl App {
             term_focused: true,
             working: render::working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
+            layout: render::layout::LayoutState::compute(&render::layout::LayoutInput {
+                term_width: 80,
+                term_height: 24,
+                prompt_height: 3,
+            }),
             settings,
             multi_agent,
             agent_id: String::new(),
