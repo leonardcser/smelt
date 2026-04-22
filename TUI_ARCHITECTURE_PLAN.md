@@ -40,7 +40,9 @@ These directives govern how this plan is executed. They override defaults.
 
 - **Format, lint, test at the end of each logical commit.**
   `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings &&
-  cargo test --workspace`. Update the plan, then commit.
+  cargo nextest run --workspace`. (Use `cargo-nextest` — it parallelises
+  across cores and runs the full suite in seconds, vs. `cargo test`'s
+  serial per-crate execution.) Update the plan, then commit.
 
 - **Atomic rewrites over incremental scaffolding.** Some refactors
   cannot be split into a chain of always-green small commits without
@@ -72,7 +74,7 @@ These directives govern how this plan is executed. They override defaults.
 
 ### Testing interactive TUI changes via tmux
 
-Smelt is a full-screen TUI; `cargo test` only covers unit-testable logic.
+Smelt is a full-screen TUI; `cargo nextest run` only covers unit-testable logic.
 For anything visual (dialog rendering, layout, selection, prompt shifts),
 drive the real binary in a tmux pane and capture the screen.
 
