@@ -1,10 +1,6 @@
 use super::super::App;
-use super::{DialogState, TurnState};
-
-pub struct Rewind {
-    turns: Vec<(usize, String)>,
-    restore_vim_insert: bool,
-}
+use crate::app::ops::AppOp;
+use ui::{Callback, CallbackResult, Payload, WinEvent};
 
 pub(in crate::app) fn open(app: &mut App, turns: Vec<(usize, String)>, restore_vim_insert: bool) {
     use crate::keymap::hints;
@@ -41,7 +37,7 @@ pub(in crate::app) fn open(app: &mut App, turns: Vec<(usize, String)>, restore_v
     let footer_h = (total as u16).min(10);
     let dialog_config = app.builtin_dialog_config(Some(hint_text), vec![]);
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -53,44 +49,39 @@ pub(in crate::app) fn open(app: &mut App, turns: Vec<(usize, String)>, restore_v
             ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
             ui::PanelSpec::list(list_buf, ui::PanelHeight::Fit),
         ],
+    ) else {
+        return;
+    };
+
+    let ops = app.lua.ops_handle();
+    let ops_submit = ops.clone();
+    let turn_blocks: Vec<usize> = turns.iter().map(|(idx, _)| *idx).collect();
+    let turns_len = turns.len();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Submit,
+        Callback::Rust(Box::new(move |ctx| {
+            if let Payload::Selection { index } = ctx.payload {
+                let block_idx = if index < turns_len {
+                    turn_blocks.get(index).copied()
+                } else {
+                    None
+                };
+                ops_submit.push(AppOp::RewindToBlock {
+                    block_idx,
+                    restore_vim_insert,
+                });
+            }
+            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
     );
-
-    if let Some(win_id) = win_id {
-        app.float_states.insert(
-            win_id,
-            Box::new(Rewind {
-                turns,
-                restore_vim_insert,
-            }),
-        );
-    }
-}
-
-impl DialogState for Rewind {
-    fn on_select(
-        &mut self,
-        app: &mut App,
-        _win: ui::WinId,
-        idx: usize,
-        agent: &mut Option<TurnState>,
-    ) {
-        let block_idx = if idx < self.turns.len() {
-            Some(self.turns[idx].0)
-        } else {
-            None
-        };
-        if let Some(bidx) = block_idx {
-            if agent.is_some() {
-                app.cancel_agent();
-                *agent = None;
-            }
-            if let Some((text, images)) = app.rewind_to(bidx) {
-                app.input.restore_from_rewind(text, images);
-            }
-            while app.engine.try_recv().is_ok() {}
-            app.save_session();
-        } else if self.restore_vim_insert {
-            app.input.set_vim_mode(crate::vim::ViMode::Insert);
-        }
-    }
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
 }

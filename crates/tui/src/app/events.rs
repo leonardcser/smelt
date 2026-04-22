@@ -1955,6 +1955,28 @@ impl App {
                 crate::app::ops::AppOp::ExportFile => {
                     self.export_to_file();
                 }
+                crate::app::ops::AppOp::SyncPermissions {
+                    session_entries,
+                    workspace_rules,
+                } => {
+                    self.sync_permissions(session_entries, workspace_rules);
+                }
+                crate::app::ops::AppOp::RewindToBlock {
+                    block_idx,
+                    restore_vim_insert,
+                } => {
+                    if let Some(bidx) = block_idx {
+                        self.cancel_agent();
+                        self.pending_agent_cancel = true;
+                        if let Some((text, images)) = self.rewind_to(bidx) {
+                            self.input.restore_from_rewind(text, images);
+                        }
+                        while self.engine.try_recv().is_ok() {}
+                        self.save_session();
+                    } else if restore_vim_insert {
+                        self.input.set_vim_mode(crate::vim::ViMode::Insert);
+                    }
+                }
                 crate::app::ops::AppOp::BackgroundAsk {
                     id,
                     system,

@@ -113,6 +113,12 @@ pub struct App {
     /// Context for the currently-open confirm dialog, used to re-check
     /// permissions when the user toggles mode.
     confirm_context: Option<ConfirmContext>,
+    /// Set by `AppOp::RewindToBlock` (and future ops) to signal the
+    /// main event loop that the active turn should be dropped. The
+    /// reducer can't mutate `agent: &mut Option<TurnState>` directly
+    /// (it lives in the outer loop), so it flags here and the loop
+    /// clears it on the next tick.
+    pub(super) pending_agent_cancel: bool,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
@@ -593,6 +599,7 @@ impl App {
             engine,
             permissions,
             confirm_context: None,
+            pending_agent_cancel: false,
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
@@ -761,6 +768,12 @@ impl App {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
             self.apply_lua_ops();
+            if self.pending_agent_cancel {
+                self.pending_agent_cancel = false;
+                if agent.is_some() {
+                    agent = None;
+                }
+            }
             self.tick_focused_float();
 
             // ── Background polls ─────────────────────────────────────────
