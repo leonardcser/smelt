@@ -5,7 +5,7 @@ direction. Historical narrative preserved below "Completed work".
 
 ## North star
 
-Two commitments drive every remaining change:
+Three commitments drive every remaining change:
 
 1. **One rendering path.** The compositor (`ui::Ui`) owns every pixel. No
    parallel ANSI-emitting layer, no cached "last seen" state inside `app`,
@@ -18,7 +18,16 @@ Two commitments drive every remaining change:
    expressed as callbacks (`ui::Callback`), not as strings the host matches
    on.
 
-Everything below follows from these two.
+3. **Rust core, Lua features.** Rust owns the pixel-pushing layer
+   (compositor, buffers, windows, widgets, rendering) and the
+   security-critical tools (bash, read, write, edit, glob, grep,
+   session/agent lifecycle). Lua plugins own the *what*: which
+   dialogs exist, which tools exist, which slash commands exist, and
+   how their panels are composed. Same model as Neovim — minimal C
+   core, everything user-facing is a plugin. A feature living in
+   Rust that could live in Lua is a bug.
+
+Everything below follows from these three.
 
 ## Implementation instructions
 
@@ -148,12 +157,20 @@ Status bar reads from `self.mode` (source of truth) instead of the
 deleted `last_mode` cache — B1 and B2 resolved.
 
 **Still on the legacy side:**
-- Prompt input isn't a compositor window yet — painted through the
-  remaining Screen infrastructure (task #11).
-- Notification / queued / stash layers are bespoke; should be plain
-  windows (task #9).
-- A shrunken `render::Screen` persists to coordinate transcript paint +
-  prompt paint during migration; deletion is the last gate (task #15).
+- `InputState.win: ui::Window` isn't a `WinId` into `ui.wins` yet —
+  122 callsites still read `self.input.win.{cpos, edit_buf, …}`
+  directly instead of through `ui.win_mut(id)`. Worth doing; no
+  urgency — prompt already paints through the compositor, the inline
+  `Window` just duplicates ownership.
+- Notification / queued / stash layers are still painted as prompt
+  chrome rows (`render/prompt_data.rs:69-82`), not compositor floats.
+  Becomes worthwhile once a Lua plugin wants to own a notification.
+- `render::Screen` struct is gone (commit `6cd800a`). `render/screen.rs`
+  persists as 45 lines of standalone types (`TranscriptData`,
+  `Notification`, `ContentVisualRange` etc.) — fine to leave, can
+  fold into `app/transcript.rs` later.
+- `Frame`, `TerminalBackend`, `StdioBackend`, `FramePrompt` deleted
+  (commit `ef36101`).
 
 ## Dispatch: three parallel systems today
 
@@ -468,75 +485,76 @@ Ongoing as a series of mechanical, test-green commits:
 - C3 step 9 (done, e31aba2) — delete unused `last_viewport_lines`
   field and `display_lines` projection.
 
-**Migrate, don't wrap.** The remaining steps are pure migration —
-fields move off Screen onto App; method bodies move from `impl
-Screen` to `impl App` with field paths rewritten. No forwarder
-methods, no thin wrappers that just call into Screen. Each commit
-deletes more than it adds.
+**Migrate, don't wrap.** Each step deletes more than it adds. This
+principle drove the keystone migration to completion.
 
-Remaining for full C3:
+**Shipped:**
+- **✓ Delete `dirty` flag entirely.** Change detection is now
+  `TranscriptProjection.generation` (work) + `ui::Compositor`
+  grid-diff (paint). No manual bookkeeping.
+- **✓ Migrate `transcript` / `parser` / `transcript_projection` /
+  `last_viewport_text` onto App.** ~60 methods moved verbatim from
+  `impl Screen` into a new `app/transcript.rs` (commit `6cd800a`,
+  net −885 lines).
+- **✓ Delete `Screen` struct, `backend: Box<dyn TerminalBackend>`,
+  `Screen::clear`.** `Frame` + `TerminalBackend` + `StdioBackend` +
+  `FramePrompt` deleted as unused (commit `ef36101`).
 
-- **Delete `dirty` flag entirely.** `Screen::dirty` field,
-  `mark_dirty`/`mark_clean`/`is_dirty`/`needs_draw`/`redraw`
-  methods, all ~138 callsites, internal `self.dirty = true` lines in
-  Screen methods, and the `needs_draw` gate in `render_normal`. The
-  width-invalidate logic from `redraw()` folds into `handle_resize`
-  where it belongs. Change detection is already handled by
-  `TranscriptProjection.generation` (projection work) and
-  `ui::Compositor` grid-diff (paint work). The manual flag is
-  redundant bookkeeping.
-- **Migrate transcript + parser + transcript_projection +
-  last_viewport_text onto App.** Fields move to App. Every `impl
-  Screen` method that touches these (most of them) moves to `impl
-  App` verbatim with `self.transcript.X` / `self.parser.X` /
-  `self.transcript_projection.X` / `self.last_viewport_text` paths.
-  Callsites go from `self.screen.method(args)` to
-  `self.method(args)`.
-- **Delete `backend: Box<dyn TerminalBackend>` and `Screen::clear`.**
-  `Screen::clear` emits terminal clear codes before rebuilding the
-  transcript from history. The compositor handles screen
-  repainting after a state reset, so the direct-emit path is
-  redundant — delete it. `TerminalBackend` may survive as the
-  compositor's paint sink abstraction; that's independent of
-  Screen.
-- **Delete `Screen` struct.** Remove `use`s, delete the module.
-- **InputState + transcript window as `ui::Window`s.** `InputState`
-  holds `win_id: WinId`; the `Window` lives in `ui.wins`. All 122
-  sites of `self.input.win.{cpos, edit_buf, win_cursor, kill_ring}`
-  migrate to `self.ui.win_mut(self.input.win_id).unwrap().<field>`.
-  `transcript_window` likewise becomes a `WinId` pointing into
-  `ui.wins`. Route prompt keys through `ui.handle_key()` when
-  focused (uses the `Callbacks` registry).
+**Deferred (tracked, not blocking):**
+- **InputState → WinId.** Replace `InputState.win: ui::Window` with
+  `win_id: WinId` into `ui.wins`; migrate 122 callsites from
+  `self.input.win.{cpos, edit_buf, win_cursor, kill_ring}` to
+  `ui.win_mut(self.input.win_id)`. Route prompt keys through
+  `ui.handle_key()` with the `Callbacks` registry.
 - **Notification / queued-messages / stash → compositor floats**,
-  anchored above the prompt window's rect.
+  anchored above the prompt window's rect. Becomes worthwhile once
+  a Lua plugin wants plugin-owned notifications (Phase F).
 
-Expected LOC at end: net −800..−1200 lines.
+Actual delivered: net −982 lines on top of the prior phase-1-and-2
+−3147 lines.
 
-### Phase D — Lua FFI unification (1 commit)
+### Phase D — Neovim-model FFI completion
 
-**D1 · PanelSpec + widgets exposed to Lua, plugins rewritten,
-`lua_dialog.rs` deleted, `LuaTask` suspension reshaped.** Atomic
-because partial exposure (e.g. expose PanelSpec but keep the old
-schema parser) leaves two APIs for the same thing.
+**Finding (2026-04-22 audit)**: all five primitives for building a
+feature in Lua *already exist*. `smelt.api.tools.register` +
+`smelt.api.dialog.open` + coroutine yields (`TaskWait::Dialog`) cover
+(a) register a tool the LLM sees, (b) receive the invocation, (c)
+open a UI dialog, (d) await the user's reply, (e) return the reply
+as the tool's result. `plan_mode.lua`'s `exit_plan_mode` tool is a
+working proof.
 
-Inside:
-1. Userdata constructors: `ui.panel_content(buf, height)`,
-   `ui.panel_list(buf, height)`, `ui.panel_widget(widget, height)`,
-   `ui.option_list(options)`, `ui.text_input(opts)`. Builder methods
-   for focusable/separator/pad_left/collapse_when_empty. `PanelHeight`
-   variants exposed verbatim.
-2. Rewrite `plan_mode.lua` on `ui.dialog_open(float_cfg, dialog_cfg,
-   panels)` with callbacks pushing `AppOp::{ApproveTool, DenyTool}`
-   via `smelt.api.agent.approve/deny` wrappers.
-3. Delete `crates/tui/src/app/dialogs/lua_dialog.rs` (~360 lines).
-4. Delete `smelt.api.dialog.open` schema parser and
-   `{action, option_index, inputs}` result table.
-5. Reshape `LuaTask::OpenDialog` → `TaskWait::AwaitEvent { win, event }`
-   returning `Payload`. Lua side: `ui.await_event(win, "submit"):
-   as_selection()`.
-6. `btw.lua` verified unchanged (already on primitives).
+Phase D now reduces to three focused commits:
 
-Expected LOC: net −600..−800 lines.
+**D1 · `execution_mode` on plugin tools.** Add
+`ToolExecutionMode::{Concurrent, Sequential}` to `PluginToolDef`. The
+engine today treats plugin tools as concurrent; a plugin tool that
+opens a dialog and awaits user reply must block the LLM turn the
+same way the Rust `ask_user_question` does (it routes through
+`sequential_queue` — see `crates/engine/src/agent.rs:1215`). With
+this field plumbed through `StartTurn`, the engine routes plugin
+tools to the right queue. Unblocks Phase F1.
+
+**D2 · Expose `PanelSpec` + widgets as userdata.** Today
+`smelt.api.dialog.open` takes a Lua table and
+`crates/tui/src/app/dialogs/lua_dialog.rs` (~290 lines) parses it
+into `PanelSpec`s, losing shape along the way. Replace with userdata
+constructors — `ui.panel_content(buf, height)`, `ui.option_list(items)`,
+`ui.text_input(opts)` — so `dialog.open(float_cfg, dialog_cfg, panels)`
+takes `PanelSpec` directly, no translation.
+
+**D3 · Delete `lua_dialog.rs` schema parser + result-table.** After
+D2, `ui.dialog_open(...)` returns a `WinId`; plugins
+`ui.await_event(win, "submit")` using the existing `TaskWait::Dialog`
+mechanism (renamed `TaskWait::AwaitEvent { win, event }` for
+symmetry). `{action, option_index, inputs}` result table retired in
+favor of typed `Payload`.
+
+**D4 · (optional, standalone) Typed widget events.** B.cleanup.8
+item. Widgets return `WidgetEvent` enum instead of
+`KeyResult::Action(String)`. Not required for plugin-migration; can
+ship alongside or after Phase F.
+
+Expected LOC: net −400..−600.
 
 ### Phase E — UX polish (3 small commits, can each stand alone)
 
@@ -552,6 +570,67 @@ enables both.
 **E3 · TextInput as the blessed input widget** — Confirm's reason,
 Resume's filter, Agents' search all use the same `TextInput` with
 identical cursor / vim / keymap behavior. (B8)
+
+### Phase F — Lua plugin sweep
+
+With Phase D shipped, migrate features *out of Rust into Lua
+plugins*. Rust shrinks to core (pixels + security); Lua owns the
+composition layer. Neovim-model: `bash`/`edit_file`/`grep` stay
+Rust, but `/resume`, `/agents`, `ask_user_question` become plugins.
+
+The 2026-04-22 survey identified ~1750 LOC of candidate
+dialogs/commands. Staged in three tiers:
+
+**F1 · Keystone: `ask_user_question.lua`** (proves the pattern).
+Delete:
+- `crates/engine/src/tools/ask_user_question.rs` (82 LOC)
+- `crates/tui/src/app/dialogs/question.rs` (595 LOC)
+- `crates/tui/src/render/dialogs/question.rs` (60 LOC, `parse_questions`)
+- `AppOp::ResolveQuestion`, `SessionControl::NeedsAskQuestion`,
+  `DeferredDialog::AskQuestion`, `resolve_question()`,
+  `EngineEvent::RequestAnswer` / `UiCommand::QuestionAnswer`
+  protocol pair.
+
+Replace with ~40 LOC of `ask_user_question.lua` using
+`smelt.api.tools.register` (with `execution_mode = "sequential"`
+from D1) + `smelt.api.dialog.open`. Net **~−950 Rust LOC, +40 Lua**.
+This one commit validates the entire Neovim-model direction.
+
+**F2 · Tier 1 sweep — no new Rust APIs needed** (~650 Rust LOC
+replaced with ~200 Lua):
+- `/help` — static keybind text (109 LOC dialog)
+- `/export` — two-option menu (72 LOC dialog)
+- `/rewind` — turn selector (87 LOC, needs `smelt.api.session.turns`)
+- `/ps` — process list (114 LOC, needs `smelt.api.process.list`)
+- `/model`, `/theme`, `/stats`, `/cost`, `/yank-block` commands.
+
+**F3 · Expose session/agent/permissions/process APIs.** Four small
+Rust modules exposing already-existing internal state (thin
+wrappers over `App`/`engine` calls):
+- `smelt.api.session.{list, load, delete, export, turns}`
+- `smelt.api.agent.{list, kill, peek}` + tick-event subscription
+- `smelt.api.permissions.{list, sync}`
+- `smelt.api.process.{list, kill, read_output}`
+
+**F4 · Tier 2 sweep** (~1100 Rust LOC replaced with ~400 Lua):
+- `/resume` (441 LOC)
+- `/agents` (409 LOC)
+- `/permissions` (207 LOC)
+
+**Stays in Rust forever** (security / perf / protocol):
+- Tools: `bash`, `read`, `write`, `edit_file`, `glob`, `grep`,
+  `web_fetch`, `web_search`, `notebook`, agent-spawn/stop/message,
+  `load_skill`.
+- Rendering: compositor, buffers, windows, widgets (`OptionList`,
+  `TextInput`), dialog framework, panels, syntax highlight, stream
+  parser, transcript projection.
+- `Confirm` dialog (permission UI + diff preview — security gate).
+- Session lifecycle: `/clear`, `/fork`, `/compact`.
+- Engine protocol + agent loop.
+
+Expected total LOC after F1+F2+F4: net **−2000..−2500 Rust, +400..+600
+Lua**. Result: `crates/tui/src/app/dialogs/` shrinks to ~3 files
+(`confirm.rs`, the Lua dispatcher, and framework helpers).
 
 ---
 
@@ -1066,6 +1145,20 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-22** — plan pivot: added North-star commitment #3
+  ("Rust core, Lua features"). Phase D reframed as "Neovim-model FFI
+  completion" — audit showed all primitives to build features in Lua
+  already exist; remaining work is 3 focused commits (execution_mode,
+  PanelSpec userdata, delete schema-parser). New Phase F added for
+  Lua-plugin migration sweep (F1 keystone: `ask_user_question.lua`,
+  F2 Tier 1, F3 new APIs, F4 Tier 2). Expected total delta:
+  ~−2000..−2500 Rust, +400..+600 Lua.
+- **2026-04-22** — `render::Screen` struct deleted; guts migrated onto
+  `App` (new `app/transcript.rs`, ~60 methods moved verbatim). Commits
+  `6cd800a` (−885) and `ef36101` (−97 dead-type sweep:
+  `Frame`/`TerminalBackend`/`StdioBackend`/`FramePrompt`). Phase C3
+  now has two deferred items (InputState→WinId, notification-floats);
+  not blocking.
 - **2026-04-22** — Phase A landed: `lua::PendingOp` → `app::ops::AppOp`
   (new module). ~60 callsites renamed; `LuaOps.ops: Vec<AppOp>` +
   `App::apply_ops(Vec<AppOp>)` stay as the one drain/reducer pair.
