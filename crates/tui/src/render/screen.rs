@@ -96,9 +96,7 @@ use super::selection::{
     build_char_kinds, build_display_spans, compute_visual_line_offsets, map_cursor,
     render_styled_chars, spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
 };
-use super::status::{
-    draw_bar, render_status_spans, vim_mode_label, BarSpan, StatusItem, StatusPosition, StatusSpan,
-};
+use super::status::{draw_bar, BarSpan, StatusItem};
 use super::working::WorkingState;
 use super::{
     cursor_colors, draw_soft_cursor, emit_newlines, format_tokens, reasoning_color, Frame,
@@ -146,17 +144,8 @@ pub struct Screen {
     show_cost: bool,
     show_slug: bool,
     show_thinking: bool,
-    /// Cached state for rendering the status line during dialogs.
-    last_vim_enabled: bool,
-    last_vim_mode: Option<crate::vim::ViMode>,
-    last_mode: protocol::Mode,
     /// App-level focus (Prompt / History). Driven by App::app_focus.
     last_app_focus: crate::app::AppFocus,
-    /// Buffer-agnostic cursor/scroll snapshot for the focused window
-    /// (prompt or transcript). Pushed by `App::tick_prompt` each frame
-    /// so the status line reads a single, already-computed record
-    /// instead of recomputing from stale view fields.
-    last_status_position: Option<StatusPosition>,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `draw_viewport_frame`. Used by the content pane's motion
     /// handlers and yank to reason over what the user actually sees.
@@ -232,11 +221,7 @@ impl Screen {
             show_cost: true,
             show_slug: true,
             show_thinking: true,
-            last_vim_enabled: false,
-            last_vim_mode: None,
-            last_mode: protocol::Mode::Normal,
             last_app_focus: crate::app::AppFocus::Prompt,
-            last_status_position: None,
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
             transcript_gutters: crate::window::WindowGutters {
@@ -437,243 +422,6 @@ impl Screen {
         }
         out.newline();
         let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    }
-
-    /// Render the status line at the very last row of the terminal into
-    /// the given output buffer.  Used as a callback inside dialog sync frames
-    /// so the status bar is painted atomically with dialog content.
-    pub fn queue_status_line(&self, out: &mut RenderOut) {
-        let (_, h) = self.size();
-        if h == 0 {
-            return;
-        }
-        let _ = out.queue(cursor::SavePosition);
-        let _ = out.queue(cursor::MoveTo(0, h - 1));
-        out.reset_style();
-        self.render_status_line(out);
-        let _ = out.queue(cursor::RestorePosition);
-    }
-
-    /// Render the status line content at the current cursor position.
-    /// Responsively drops/truncates elements when the terminal is too narrow.
-    fn render_status_line(&self, out: &mut RenderOut) {
-        if self.cmdline.active {
-            let (w, h) = self.size();
-            self.cmdline.render(out, w, h - 1);
-            return;
-        }
-        let (w, _) = self.size();
-        let width = w as usize;
-        let status_bg = Color::AnsiValue(233);
-
-        if let Some(ref items) = self.custom_status_items {
-            let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
-            render_status_spans(out, &mut spans, width, status_bg);
-            return;
-        }
-
-        // ── Build all status spans ──
-        let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
-
-        // Slug pill: spinner (always visible) + label (truncatable).
-        let is_compacting = self.working.throbber == Some(Throbber::Compacting);
-        let spinner = self.working.spinner_char();
-        let pill_bg = if is_compacting {
-            Color::White
-        } else {
-            theme::slug_color()
-        };
-        let pill_style = StyleState {
-            fg: Some(Color::Black),
-            bg: Some(pill_bg),
-            ..StyleState::default()
-        };
-
-        if let Some(sp) = spinner {
-            spans.push(StatusSpan {
-                text: format!(" {sp} "),
-                style: pill_style.clone(),
-                priority: 0,
-                ..StatusSpan::default()
-            });
-            let label = if is_compacting {
-                "compacting ".into()
-            } else if self.show_slug {
-                self.task_label
-                    .as_ref()
-                    .map(|l| format!("{l} "))
-                    .unwrap_or_else(|| "working ".into())
-            } else {
-                "working ".into()
-            };
-            spans.push(StatusSpan {
-                text: label,
-                style: pill_style,
-                priority: 5,
-                truncatable: true,
-                ..StatusSpan::default()
-            });
-        } else if self.show_slug {
-            if let Some(ref label) = self.task_label {
-                spans.push(StatusSpan {
-                    text: format!(" {label} "),
-                    style: pill_style,
-                    priority: 5,
-                    truncatable: true,
-                    ..StatusSpan::default()
-                });
-            }
-        }
-
-        if self.last_vim_enabled {
-            let vim_label = vim_mode_label(self.last_vim_mode).unwrap_or("NORMAL");
-            let vim_fg = match self.last_vim_mode {
-                Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
-                Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
-                    Color::AnsiValue(176)
-                }
-                _ => Color::AnsiValue(74),
-            };
-            spans.push(StatusSpan {
-                text: format!(" {vim_label} "),
-                style: StyleState {
-                    fg: Some(vim_fg),
-                    bg: Some(Color::AnsiValue(236)),
-                    ..StyleState::default()
-                },
-                priority: 3,
-                ..StatusSpan::default()
-            });
-        }
-
-        // Mode indicator.
-        let (mode_icon, mode_name, mode_fg) = match self.last_mode {
-            protocol::Mode::Plan => ("◇ ", "plan", theme::PLAN),
-            protocol::Mode::Apply => ("→ ", "apply", theme::APPLY),
-            protocol::Mode::Yolo => ("⚡", "yolo", theme::YOLO),
-            protocol::Mode::Normal => ("○ ", "normal", theme::muted()),
-        };
-        spans.push(StatusSpan {
-            text: format!(" {mode_icon}{mode_name} "),
-            style: StyleState {
-                fg: Some(mode_fg),
-                bg: Some(Color::AnsiValue(234)),
-                ..StyleState::default()
-            },
-            priority: 1,
-            ..StatusSpan::default()
-        });
-
-        // Throbber status (timer, tok/s, retry, done, interrupted).
-        // Skip the first span for active states — it duplicates the pill.
-        let throbber_spans = self.working.throbber_spans(self.show_tps);
-        let is_active = matches!(
-            self.working.throbber,
-            Some(Throbber::Working) | Some(Throbber::Compacting) | Some(Throbber::Retrying { .. })
-        );
-        let status_bar_spans: &[BarSpan] = if is_active && !throbber_spans.is_empty() {
-            &throbber_spans[1..]
-        } else {
-            &throbber_spans
-        };
-        for bar_span in status_bar_spans {
-            // Map BarSpan priorities: timer (0) → 4, tok/s (3) → 6.
-            let priority = match bar_span.priority {
-                0 => 4,
-                3 => 6,
-                p => p,
-            };
-            spans.push(StatusSpan {
-                text: bar_span.text.clone(),
-                style: StyleState {
-                    fg: Some(bar_span.color),
-                    bg: Some(status_bg),
-                    bold: bar_span.bold,
-                    dim: bar_span.dim,
-                    ..StyleState::default()
-                },
-                priority,
-                ..StatusSpan::default()
-            });
-        }
-
-        // Permission pending.
-        if self.pending_dialog && !self.dialog_open {
-            spans.push(StatusSpan {
-                text: "permission pending".into(),
-                style: StyleState {
-                    fg: Some(theme::accent()),
-                    bg: Some(status_bg),
-                    bold: true,
-                    ..StyleState::default()
-                },
-                priority: 2,
-                group: true,
-                ..StatusSpan::default()
-            });
-        }
-
-        // Running procs.
-        if self.running_procs > 0 {
-            let label = if self.running_procs == 1 {
-                "1 proc".into()
-            } else {
-                format!("{} procs", self.running_procs)
-            };
-            spans.push(StatusSpan {
-                text: label,
-                style: StyleState {
-                    fg: Some(theme::accent()),
-                    bg: Some(status_bg),
-                    ..StyleState::default()
-                },
-                priority: 2,
-                group: true,
-                ..StatusSpan::default()
-            });
-        }
-
-        // Running agents.
-        if self.running_agents > 0 {
-            let label = if self.running_agents == 1 {
-                "1 agent".into()
-            } else {
-                format!("{} agents", self.running_agents)
-            };
-            spans.push(StatusSpan {
-                text: label,
-                style: StyleState {
-                    fg: Some(theme::AGENT),
-                    bg: Some(status_bg),
-                    ..StyleState::default()
-                },
-                priority: 2,
-                group: true,
-                ..StatusSpan::default()
-            });
-        }
-
-        // Right-aligned cursor / scroll position — buffer-agnostic.
-        // The app pushes a `StatusPosition` each tick derived from the
-        // focused window; missing = no focused buffer yet (dialogs,
-        // early frames) so we simply omit the span.
-        if let Some(p) = self.last_status_position {
-            spans.push(StatusSpan {
-                text: p.render(),
-                style: StyleState {
-                    fg: Some(theme::muted()),
-                    bg: Some(status_bg),
-                    ..StyleState::default()
-                },
-                priority: 3,
-                truncatable: true,
-                align_right: true,
-                ..StatusSpan::default()
-            });
-        }
-
-        // ── Responsive layout ──
-        render_status_spans(out, &mut spans, width, status_bg);
     }
 
     /// Dismiss a dialog overlay.
@@ -1410,35 +1158,9 @@ impl Screen {
         self.dirty = true;
     }
 
-    /// Override the vim mode shown in the status bar. Called by the
-    /// app each frame with the **focused window's** vim mode so the
-    /// status bar is contextual — prompt mode when the prompt is
-    /// focused, transcript mode when the transcript window is
-    /// focused. Without this, the cached value from the last prompt
-    /// render is stale relative to the focused window.
-    /// Push the focused window's cursor position + scroll into the
-    /// status bar. One setter for every buffer — the app computes a
-    /// buffer-agnostic `StatusPosition` from the focused window and
-    /// the status line renders it right-aligned, so the format is
-    /// identical regardless of which window has focus.
-    pub fn set_status_position(&mut self, p: Option<StatusPosition>) {
-        if self.last_status_position != p {
-            self.last_status_position = p;
-            self.dirty = true;
-        }
-    }
-
     pub fn set_custom_status(&mut self, items: Option<Vec<StatusItem>>) {
         self.custom_status_items = items;
         self.dirty = true;
-    }
-
-    pub fn set_status_vim(&mut self, enabled: bool, mode: Option<crate::vim::ViMode>) {
-        if self.last_vim_enabled != enabled || self.last_vim_mode != mode {
-            self.last_vim_enabled = enabled;
-            self.last_vim_mode = mode;
-            self.dirty = true;
-        }
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -1739,20 +1461,13 @@ impl Screen {
         self.redraw();
     }
 
-    pub fn draw_prompt(
-        &mut self,
-        state: &InputState,
-        mode: protocol::Mode,
-        width: usize,
-        scroll_top: u16,
-    ) -> u16 {
+    pub fn draw_prompt(&mut self, state: &InputState, width: usize, scroll_top: u16) -> u16 {
         let mut frame = Frame::begin(&*self.backend);
         let (clamped, _, _) = self.draw_viewport_frame(
             &mut frame,
             width,
             FramePrompt {
                 state,
-                mode,
                 queued: &[],
                 prediction: None,
             },
@@ -2089,7 +1804,6 @@ impl Screen {
         self.draw_prompt_sections(
             out,
             prompt.state,
-            prompt.mode,
             width,
             prompt.queued,
             prompt.prediction,
@@ -2229,19 +1943,12 @@ impl Screen {
         &mut self,
         out: &mut RenderOut,
         state: &InputState,
-        mode: protocol::Mode,
         width: usize,
         queued: &[String],
         prediction: Option<&str>,
         height: usize,
     ) -> u16 {
         let _perf = crate::perf::begin("render:prompt");
-        // Note: `last_vim_enabled` and `last_vim_mode` are now set by
-        // `App::tick_prompt` via `set_status_vim(...)` so the status
-        // bar reflects the *focused* window's vim mode, not whatever
-        // the prompt happened to be in. Only `last_mode` is cached
-        // here since it's the agent mode, not the vim mode.
-        self.last_mode = mode;
         self.prompt.soft_cursor = None;
         let usable = width.saturating_sub(2);
         // Neutralize any styling carried over from the preceding
@@ -2587,10 +2294,6 @@ impl Screen {
 
         draw_bar(out, width, None, None, bar_color);
 
-        // Status line — always drawn as the last prompt row.
-        out.newline();
-        self.render_status_line(out);
-
         // Floating overlay above the prompt (completer or menu).
         let anchor = self.layout.prompt.top;
         if let Some(ref ms) = state.menu {
@@ -2751,20 +2454,6 @@ mod tests {
     use crate::render::{FramePrompt, StdioBackend};
 
     #[test]
-    fn status_line_renders_content() {
-        let mut screen = Screen::with_backend(Box::new(StdioBackend));
-        screen.set_running_procs(1);
-        let mut out = RenderOut::buffer();
-        screen.queue_status_line(&mut out);
-        let rendered = String::from_utf8(out.into_bytes()).unwrap();
-        // Status line should contain the "proc" indicator.
-        assert!(
-            rendered.contains("proc"),
-            "status line missing proc indicator: {rendered:?}"
-        );
-    }
-
-    #[test]
     fn prompt_sections_reset_terminal_style_before_rendering() {
         let mut screen = Screen::with_backend(Box::new(StdioBackend));
         screen.set_anchor_row(0);
@@ -2775,7 +2464,6 @@ mod tests {
             40,
             FramePrompt {
                 state: &input,
-                mode: protocol::Mode::Normal,
                 queued: &[],
                 prediction: None,
             },

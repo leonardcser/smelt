@@ -692,7 +692,6 @@ impl App {
         }
         let clamped = self.screen.draw_prompt(
             &self.input,
-            self.mode,
             render::term_width(),
             self.transcript_window.scroll_top,
         );

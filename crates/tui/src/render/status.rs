@@ -7,7 +7,7 @@
 //! highest-priority (least-important) spans first.
 
 use super::{layout_out::display_width, selection::truncate_str, RenderOut, StyleState};
-use crossterm::{cursor, style::Color, terminal, QueueableCommand};
+use crossterm::style::Color;
 
 /// A structured status item that Lua (or internal code) provides.
 /// Rust owns width fitting, priority dropping, and truncation.
@@ -104,112 +104,6 @@ pub(crate) struct StatusSpan {
 /// Separator inserted between groups in the status line.
 const STATUS_SEP: &str = " \u{00b7} "; // " · "
 const STATUS_SEP_LEN: usize = 3;
-
-/// Render status spans with responsive dropping and truncation.
-///
-/// Algorithm:
-/// 1. Calculate total width of all visible spans (including group separators).
-/// 2. While total > available width, find the highest-priority span and either
-///    truncate it (if truncatable) or remove it entirely.
-/// 3. Render the surviving spans left-to-right with group separators.
-pub(crate) fn render_status_spans(
-    out: &mut RenderOut,
-    spans: &mut Vec<StatusSpan>,
-    width: usize,
-    fill_bg: Color,
-) {
-    // Right-aligned spans sit at the tail with a one-cell gap before
-    // the terminal edge. They participate in the same priority-based
-    // drop-to-fit algorithm as left-aligned spans.
-    const RIGHT_EDGE_GAP: usize = 1;
-
-    let span_cols = |spans: &[StatusSpan], right: bool| -> usize {
-        let mut w = 0;
-        let mut first = true;
-        for s in spans.iter().filter(|s| s.align_right == right) {
-            if s.group && !first {
-                w += STATUS_SEP_LEN;
-            }
-            w += display_width(&s.text);
-            first = false;
-        }
-        w
-    };
-    let total_width = |spans: &[StatusSpan]| -> usize {
-        let left = span_cols(spans, false);
-        let right = span_cols(spans, true);
-        let gap = if right > 0 { RIGHT_EDGE_GAP } else { 0 };
-        left + right + gap
-    };
-
-    while total_width(spans) > width && !spans.is_empty() {
-        let max_pri = spans.iter().map(|s| s.priority).max().unwrap_or(0);
-        if max_pri == 0 {
-            break;
-        }
-        let trunc_idx = spans
-            .iter()
-            .rposition(|s| s.priority == max_pri && s.truncatable);
-        if let Some(idx) = trunc_idx {
-            let available =
-                width.saturating_sub(total_width(spans) - display_width(&spans[idx].text));
-            if available >= 2 {
-                spans[idx].text = truncate_str(&spans[idx].text, available);
-                continue;
-            }
-        }
-        spans.retain(|s| s.priority != max_pri);
-    }
-
-    let sep_style = StyleState {
-        fg: Some(crate::theme::muted()),
-        bg: Some(fill_bg),
-        dim: true,
-        ..StyleState::default()
-    };
-    let paint_group =
-        |out: &mut RenderOut, group: &[&StatusSpan], sep_style: &StyleState| -> usize {
-            let mut col = 0;
-            for (i, span) in group.iter().enumerate() {
-                if span.group && i > 0 {
-                    out.push_style(sep_style.clone());
-                    out.print(STATUS_SEP);
-                    out.pop_style();
-                    col += STATUS_SEP_LEN;
-                }
-                out.push_style(span.style.clone());
-                out.print(&span.text);
-                out.pop_style();
-                col += display_width(&span.text);
-            }
-            col
-        };
-
-    let left: Vec<&StatusSpan> = spans.iter().filter(|s| !s.align_right).collect();
-    let right: Vec<&StatusSpan> = spans.iter().filter(|s| s.align_right).collect();
-
-    let _ = paint_group(out, &left, &sep_style);
-
-    // Clear the middle gap + any unused right-side cells in bg.
-    out.push_style(StyleState {
-        bg: Some(fill_bg),
-        ..StyleState::default()
-    });
-    let _ = out.queue(terminal::Clear(terminal::ClearType::UntilNewLine));
-    out.pop_style();
-
-    if !right.is_empty() {
-        let right_cells = span_cols(spans, true);
-        let right_start = width
-            .saturating_sub(right_cells)
-            .saturating_sub(RIGHT_EDGE_GAP);
-        let _ = out.queue(cursor::MoveToColumn(right_start as u16));
-        // Continue the bg so the trailing right-edge gap inherits it.
-        let _ = paint_group(out, &right, &sep_style);
-    }
-
-    out.reset_style();
-}
 
 pub(crate) fn spans_to_segments(
     spans: &mut Vec<StatusSpan>,
