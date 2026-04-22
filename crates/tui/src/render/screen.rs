@@ -61,7 +61,6 @@ use std::time::Duration;
 pub struct Screen {
     pub(crate) transcript: Transcript,
     parser: super::stream_parser::StreamParser,
-    dirty: bool,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `project_transcript_buffer`. Read by
     /// `compute_transcript_cursor` to look up the glyph under the soft
@@ -95,7 +94,6 @@ impl Screen {
         Self {
             transcript: Transcript::new(),
             parser: super::stream_parser::StreamParser::new(),
-            dirty: true,
             last_viewport_text: Vec::new(),
             transcript_projection: TranscriptProjection::new(ui::buffer::Buffer::new(
                 ui::BufId(0),
@@ -132,7 +130,6 @@ impl Screen {
     pub fn start_active_agent(&mut self, agent_id: String) {
         self.parser
             .start_active_agent(&mut self.transcript.history, agent_id);
-        self.dirty = true;
     }
 
     pub fn update_active_agent(
@@ -149,7 +146,6 @@ impl Screen {
             tool_calls,
             status,
         );
-        self.dirty = true;
     }
 
     pub fn cancel_active_agents(&mut self) {
@@ -160,13 +156,11 @@ impl Screen {
     pub fn finish_active_agent(&mut self, agent_id: &str) {
         self.parser
             .finish_active_agent(&mut self.transcript.history, agent_id);
-        self.dirty = true;
     }
 
     pub fn finish_all_active_agents(&mut self) {
         self.parser
             .finish_all_active_agents(&mut self.transcript.history);
-        self.dirty = true;
     }
 
     pub fn begin_turn(&mut self) {
@@ -175,24 +169,20 @@ impl Screen {
 
     pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
         self.transcript.push_tool_call(block, state);
-        self.dirty = true;
     }
 
     pub fn push(&mut self, block: Block) {
         self.transcript.push(block);
-        self.dirty = true;
     }
 
     pub fn append_streaming_thinking(&mut self, delta: &str) {
         self.parser
             .append_streaming_thinking(&mut self.transcript.history, delta);
-        self.dirty = true;
     }
 
     pub fn flush_streaming_thinking(&mut self) {
         self.parser
             .flush_streaming_thinking(&mut self.transcript.history);
-        self.dirty = true;
     }
 
     /// Gap before a thinking summary overlay, skipping over hidden thinking blocks.
@@ -222,13 +212,11 @@ impl Screen {
     pub fn append_streaming_text(&mut self, delta: &str) {
         self.parser
             .append_streaming_text(&mut self.transcript.history, delta);
-        self.dirty = true;
     }
 
     pub fn flush_streaming_text(&mut self) {
         self.parser
             .flush_streaming_text(&mut self.transcript.history);
-        self.dirty = true;
     }
 
     pub fn start_tool(
@@ -240,29 +228,24 @@ impl Screen {
     ) {
         self.parser
             .start_tool(&mut self.transcript.history, call_id, name, summary, args);
-        self.dirty = true;
     }
 
     pub fn start_exec(&mut self, command: String) {
         self.parser
             .start_exec(&mut self.transcript.history, command);
-        self.dirty = true;
     }
 
     pub fn append_exec_output(&mut self, chunk: &str) {
         self.parser
             .append_exec_output(&mut self.transcript.history, chunk);
-        self.dirty = true;
     }
 
     pub fn finish_exec(&mut self, exit_code: Option<i32>) {
         self.parser.finish_exec(exit_code);
-        self.dirty = true;
     }
 
     pub fn finalize_exec(&mut self) {
         self.parser.finalize_exec(&mut self.transcript.history);
-        self.dirty = true;
     }
 
     pub fn has_active_exec(&self) -> bool {
@@ -272,19 +255,16 @@ impl Screen {
     pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
         self.parser
             .append_active_output(&mut self.transcript.history, call_id, chunk);
-        self.dirty = true;
     }
 
     pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
         self.parser
             .set_active_status(&mut self.transcript.history, call_id, status);
-        self.dirty = true;
     }
 
     pub fn set_active_user_message(&mut self, call_id: &str, msg: String) {
         self.parser
             .set_active_user_message(&mut self.transcript.history, call_id, msg);
-        self.dirty = true;
     }
 
     pub fn finish_tool(
@@ -301,11 +281,6 @@ impl Screen {
             output,
             engine_elapsed,
         );
-        self.dirty = true;
-    }
-
-    pub(crate) fn mark_clean(&mut self) {
-        self.dirty = false;
     }
 
     pub(crate) fn measure_prompt_height_pub(
@@ -483,31 +458,20 @@ impl Screen {
         snap.copy_byte_range(start, end)
     }
 
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.dirty || self.transcript.history.has_unflushed()
-    }
-
     pub fn finish_turn(&mut self) {
         let _perf = crate::perf::begin("render:finish_turn");
         self.parser
             .finalize_active_tools(&mut self.transcript.history);
-        self.dirty = true;
     }
 
     pub fn finalize_active_tools(&mut self) {
         self.parser
             .finalize_active_tools(&mut self.transcript.history);
-        self.dirty = true;
     }
 
     pub fn finalize_active_tools_as(&mut self, status: ToolStatus) {
         self.parser
             .finalize_active_tools_as(&mut self.transcript.history, status);
-        self.dirty = true;
     }
 
     pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
@@ -520,7 +484,6 @@ impl Screen {
 
     pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
         self.transcript.set_block_view_state(id, state);
-        self.dirty = true;
     }
 
     pub fn block_status(&self, id: BlockId) -> Status {
@@ -537,13 +500,10 @@ impl Screen {
 
     pub fn rewrite_block(&mut self, id: BlockId, block: Block) {
         self.transcript.rewrite_block(id, block);
-        self.dirty = true;
     }
 
     pub fn push_streaming(&mut self, block: Block) -> BlockId {
-        let id = self.transcript.push_streaming(block);
-        self.dirty = true;
-        id
+        self.transcript.push_streaming(block)
     }
 
     pub fn streaming_block_ids(&self) -> Vec<BlockId> {
@@ -555,25 +515,22 @@ impl Screen {
         call_id: &str,
         mutator: impl FnOnce(&mut ToolState),
     ) -> bool {
-        let result = self.transcript.update_tool_state(call_id, mutator);
-        if result {
-            self.dirty = true;
-        }
-        result
+        self.transcript.update_tool_state(call_id, mutator)
     }
 
     pub fn set_tool_state(&mut self, call_id: String, state: ToolState) {
         self.transcript.set_tool_state(call_id, state);
     }
 
-    /// Force a full repaint on the next tick.
-    pub fn redraw(&mut self) {
-        let _perf = crate::perf::begin("redraw");
-        let (w, _) = self.size();
-        if w as usize != self.transcript.history.cache_width {
-            self.transcript.history.invalidate_for_width(w as usize);
+    /// Invalidate the width-dependent block layout cache when the
+    /// terminal width changes. Called from the resize handler; the
+    /// projection picks up the fresh layouts on the next render.
+    pub fn invalidate_for_width(&mut self, width: u16) {
+        if width as usize != self.transcript.history.cache_width {
+            self.transcript
+                .history
+                .invalidate_for_width(width as usize);
         }
-        self.dirty = true;
     }
 
     pub fn clear(&mut self) {
@@ -736,7 +693,6 @@ impl Screen {
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.transcript.truncate_to(block_idx);
         self.parser.clear_tools_and_agents();
-        self.redraw();
     }
 
     /// Update spinner animation state. Call before rendering. Returns
@@ -755,16 +711,6 @@ impl Screen {
         // duration ticks up without needing an explicit engine event.
         self.parser.tick_active_agents(&mut self.transcript.history);
         changed
-    }
-
-    /// Returns true when there is content or prompt work to render.
-    pub fn needs_draw(&self, is_dialog: bool, show_thinking: bool) -> bool {
-        let has_new_blocks = self.transcript.history.has_unflushed();
-        if is_dialog {
-            has_new_blocks || (self.has_ephemeral(show_thinking) && self.dirty)
-        } else {
-            has_new_blocks || self.dirty
-        }
     }
 
     /// Project transcript blocks into a `ui::Buffer`. Gated by generation —

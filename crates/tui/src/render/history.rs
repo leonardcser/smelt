@@ -368,7 +368,6 @@ pub(super) struct BlockHistory {
     /// True iff the layout cache has changed since the last persisted save.
     /// When false, `save_session` skips writing the layout cache file.
     pub(super) cache_dirty: bool,
-    pub(super) flushed: usize,
     /// Block ids that transitioned from `Streaming` to `Done` since the
     /// last drain. Drained by the app loop to emit `block_done`
     /// autocmds into the Lua runtime.
@@ -392,7 +391,6 @@ impl BlockHistory {
             statuses: HashMap::new(),
             cache_width: 0,
             cache_dirty: false,
-            flushed: 0,
             finished_blocks: Vec::new(),
             generation: 0,
         }
@@ -566,10 +564,6 @@ impl BlockHistory {
         }
     }
 
-    pub(super) fn has_unflushed(&self) -> bool {
-        self.flushed < self.order.len()
-    }
-
     pub(super) fn clear(&mut self) {
         self.order.clear();
         self.blocks.clear();
@@ -579,7 +573,6 @@ impl BlockHistory {
         self.tool_states.clear();
         self.view_states.clear();
         self.statuses.clear();
-        self.flushed = 0;
         self.cache_dirty = true;
         self.bump_generation();
     }
@@ -686,7 +679,6 @@ impl BlockHistory {
             self.view_states.remove(&id);
             self.statuses.remove(&id);
         }
-        self.flushed = self.flushed.min(self.order.len());
         self.cache_dirty = true;
         self.bump_generation();
         self.gc_tool_states();
@@ -781,11 +773,8 @@ mod tests {
         });
 
         let _ = history.total_rows(100, true);
-        history.flushed = 0;
         let _ = history.total_rows(80, true);
-        history.flushed = 0;
         let _ = history.total_rows(100, true);
-        history.flushed = 0;
         let _ = history.total_rows(80, true);
 
         let content_hash = history.content_hash(id);
@@ -839,7 +828,6 @@ mod tests {
             "rewrite must not change order"
         );
 
-        history.flushed = 0;
         let _ = history.total_rows(80, true);
         let keys: Vec<u64> = history
             .artifacts

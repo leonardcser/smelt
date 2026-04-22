@@ -715,28 +715,6 @@ impl App {
     /// Width available for transcript content. Reserves the rightmost
     /// column for the scrollbar track so the scrollbar never overpaints
     /// rendered content and mouse hit-testing has a stable target.
-    /// Request a full repaint on the next tick.
-    pub fn mark_dirty(&mut self) {
-        render::Screen::mark_dirty(&mut self.screen);
-    }
-
-    pub fn mark_clean(&mut self) {
-        render::Screen::mark_clean(&mut self.screen);
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        render::Screen::is_dirty(&self.screen)
-    }
-
-    pub fn needs_draw(&self, is_dialog: bool) -> bool {
-        render::Screen::needs_draw(&self.screen, is_dialog, self.settings.show_thinking)
-    }
-
-    /// Invalidate cached width-dependent layout and request a redraw.
-    pub fn redraw(&mut self) {
-        render::Screen::redraw(&mut self.screen);
-    }
-
     pub fn transcript_width(&self) -> usize {
         let (w, _) = self.ui.terminal_size();
         (self.transcript_gutters.content_width(w) as usize).max(1)
@@ -747,7 +725,6 @@ impl App {
             message,
             is_error: false,
         });
-        self.screen.mark_dirty();
     }
 
     pub fn notify_error(&mut self, message: String) {
@@ -755,13 +732,11 @@ impl App {
             message,
             is_error: true,
         });
-        self.screen.mark_dirty();
     }
 
     pub fn dismiss_notification(&mut self) {
         if self.notification.is_some() {
             self.notification = None;
-            self.screen.mark_dirty();
         }
     }
 
@@ -771,7 +746,6 @@ impl App {
         } else {
             Some(label)
         };
-        self.screen.mark_dirty();
     }
 
     // ── Unified event loop ───────────────────────────────────────────────
@@ -805,7 +779,6 @@ impl App {
             if let Some(ref slug) = self.session.slug {
                 self.set_task_label(slug.clone());
             }
-            self.screen.mark_dirty();
             self.screen.finish_turn();
             self.transcript_window.scroll_top = u16::MAX;
         }
@@ -835,11 +808,9 @@ impl App {
                 self.handle_command(trimmed);
             } else if trimmed == "/settings" {
                 self.input.open_settings(&self.settings_state());
-                self.screen.mark_dirty();
             } else if let Some(reason) = classify_startup_command(trimmed) {
                 self.notify_error(format!("\"{}\" {}", trimmed, reason));
             } else {
-                self.screen.mark_dirty();
                 let content = Content::text(msg.clone());
                 let turn = self.begin_agent_turn(&msg, content);
                 self.agent = Some(turn);
@@ -854,7 +825,6 @@ impl App {
             pending_pane_chord: None,
         };
         let mut pending_dialogs: VecDeque<DeferredDialog> = VecDeque::new();
-        let mut last_frame = Instant::now();
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
         'main: loop {
@@ -863,7 +833,6 @@ impl App {
             self.lua.tick_timers();
             self.drive_lua_tasks();
             self.custom_status_items = self.lua.tick_statusline();
-            self.screen.mark_dirty();
             for _id in self.screen.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
@@ -882,7 +851,6 @@ impl App {
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
                     self.context_window = result;
-                    self.screen.mark_dirty();
                     ctx_rx = None;
                 }
             }
@@ -938,7 +906,6 @@ impl App {
             if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
                 if let Some(cmd) = crate::custom_commands::resolve(text.trim(), self.multi_agent) {
-                    self.screen.mark_dirty();
                     let turn = self.begin_custom_command_turn(cmd);
                     self.agent = Some(turn);
                 } else if !text.is_empty() {
@@ -954,7 +921,6 @@ impl App {
             if self.agent.is_none() && !self.pending_agent_messages.is_empty() {
                 let msgs = std::mem::take(&mut self.pending_agent_messages);
                 self.history.extend(msgs);
-                self.screen.mark_dirty();
                 let turn = self.begin_agent_message_turn();
                 self.agent = Some(turn);
             }
@@ -1010,7 +976,6 @@ impl App {
             if self.agent.is_none() && !pending_dialogs.is_empty() {
                 pending_dialogs.clear();
                 self.pending_dialog = false;
-                self.screen.mark_dirty();
             }
             // Re-dispatch queued dialogs.  Each goes through dispatch_control
             // so auto-approval checks re-run ("always allow" → auto-approve rest).
@@ -1049,15 +1014,11 @@ impl App {
                     }
                 }
                 self.pending_dialog = !pending_dialogs.is_empty();
-                self.screen.mark_dirty();
             }
 
             // ── Render ───────────────────────────────────────────────────
-            let will_render = self.screen.is_dirty();
             self.render_normal(self.agent.is_some());
-            if will_render {
-                last_frame = Instant::now();
-            }
+            let last_frame = Instant::now();
 
             // ── Wait for next event ──────────────────────────────────────
             tokio::select! {
@@ -1116,7 +1077,6 @@ impl App {
                     }
 
                     self.render_normal(self.agent.is_some());
-                    last_frame = Instant::now();
                 }
 
                 Some(ev) = self.engine.recv(), if !self.focused_float_blocks_agent() => {
@@ -1164,29 +1124,30 @@ impl App {
                     // When drag-autoscroll is running, fire fast so we
                     // advance one line per tick and the motion stays
                     // smooth; the interval itself ramps down the longer
-                    // the cursor is parked at the edge.
+                    // the cursor is parked at the edge. While an
+                    // animation is in flight (spinner, exec output,
+                    // subagent turn, open dialog) we tick at the
+                    // normal frame interval; otherwise idle at 80ms.
                     let since = last_frame.elapsed();
+                    let has_animation = self.ui.focused_float().is_some()
+                        || self.screen.has_active_exec()
+                        || self.working.throbber.is_some()
+                        || self
+                            .agents
+                            .iter()
+                            .any(|a| a.status == AgentTrackStatus::Working);
                     let want = if let Some(started) = self.drag_autoscroll_since {
                         let held = started.elapsed().as_millis() as u64;
                         // Start at ~33 lines/sec (30 ms), ramp to ~200 lines/sec (5 ms).
                         let ms = 30u64.saturating_sub(held / 120).max(5);
                         Duration::from_millis(ms)
-                    } else if self.screen.is_dirty() {
+                    } else if has_animation {
                         MIN_FRAME_INTERVAL
                     } else {
                         Duration::from_millis(80)
                     };
                     want.saturating_sub(since)
                 }) => {
-                    if self.ui.focused_float().is_some() {
-                        self.screen.mark_dirty();
-                    }
-                    if self.screen.has_active_exec() {
-                        self.screen.mark_dirty();
-                    }
-                    if self.agents.iter().any(|a| a.status == AgentTrackStatus::Working) {
-                        self.screen.mark_dirty();
-                    }
                     // Auto-scroll while the user is mid-drag with the
                     // cursor parked on the top/bottom row of the
                     // transcript — extends selection past the viewport
@@ -1194,7 +1155,6 @@ impl App {
                     self.tick_drag_autoscroll();
                     // Render deferred engine events + animations.
                     self.render_normal(self.agent.is_some());
-                    last_frame = Instant::now();
                 }
             }
         }

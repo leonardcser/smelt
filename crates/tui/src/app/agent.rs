@@ -57,7 +57,6 @@ impl App {
         let Some(api_key) = self.resolve_api_key() else {
             {
                 self.working.set_throbber(render::Throbber::Done);
-                self.mark_dirty();
             };
             return TurnState {
                 turn_id: 0,
@@ -68,7 +67,6 @@ impl App {
 
         {
             self.working.set_throbber(render::Throbber::Working);
-            self.mark_dirty();
         };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
@@ -245,7 +243,6 @@ impl App {
         self.maybe_generate_title(Some(&evaluated));
         {
             self.working.set_throbber(render::Throbber::Working);
-            self.mark_dirty();
         };
 
         let turn_id = self.next_turn_id;
@@ -283,7 +280,6 @@ impl App {
         self.engine.send(UiCommand::Cancel);
         {
             self.working.set_throbber(render::Throbber::Interrupted);
-            self.mark_dirty();
         };
         self.queued_messages.clear();
     }
@@ -325,7 +321,6 @@ impl App {
         if cancelled {
             {
                 self.working.set_throbber(render::Throbber::Interrupted);
-                self.mark_dirty();
             };
             // If a title/slug generation was in-flight, discard it so stale
             // TitleGenerated events don't update the session. But if a slug
@@ -348,7 +343,6 @@ impl App {
         } else {
             {
                 self.working.set_throbber(render::Throbber::Done);
-                self.mark_dirty();
             };
             self.input_prediction = None;
         }
@@ -396,12 +390,10 @@ impl App {
                     }
                     {
                         self.working.set_throbber(render::Throbber::Working);
-                        self.mark_dirty();
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
                 self.session_cost_usd += cost;
-                self.mark_dirty();
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -571,7 +563,6 @@ impl App {
                         });
                     self.apply_lua_ops();
                 }
-                self.mark_dirty();
                 self.refresh_agent_counts();
                 SessionControl::Continue
             }
@@ -601,7 +592,6 @@ impl App {
                     delay: Duration::from_millis(delay_ms),
                     attempt,
                 });
-                self.mark_dirty();
                 SessionControl::Continue
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
@@ -612,7 +602,6 @@ impl App {
                 if self.pending_compact_epoch != self.compact_epoch {
                     {
                         self.working.set_throbber(render::Throbber::Done);
-                        self.mark_dirty();
                     };
                     return SessionControl::Continue;
                 }
@@ -662,7 +651,6 @@ impl App {
             EngineEvent::TurnError { message } => {
                 {
                     self.working.set_throbber(render::Throbber::Done);
-                    self.mark_dirty();
                 };
                 self.notify_error(message);
                 SessionControl::Done
@@ -767,7 +755,7 @@ impl App {
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
-                    { self.working.set_throbber(render::Throbber::Done); self.mark_dirty(); };
+                    self.working.set_throbber(render::Throbber::Done);
                     return;
                 }
                 self.apply_compaction(messages);
@@ -791,7 +779,7 @@ impl App {
                 self.handle_process_completed(id, exit_code);
             }
             EngineEvent::TurnError { message } => {
-                { self.working.set_throbber(render::Throbber::Done); self.mark_dirty(); };
+                self.working.set_throbber(render::Throbber::Done);
                 self.notify_error(message);
             }
             EngineEvent::AgentExited {
@@ -842,7 +830,6 @@ impl App {
     fn handle_input_prediction(&mut self, text: String) {
         if self.input.buf.is_empty() {
             self.input_prediction = Some(text);
-            self.mark_dirty();
         }
     }
 
@@ -929,7 +916,6 @@ impl App {
     }
 
     pub(super) fn refresh_agent_counts(&mut self) {
-        self.mark_dirty();
     }
 
     // ── Agent tracking ────────────────────────────────────────────────
@@ -1062,7 +1048,6 @@ impl App {
 
         if session_cost_delta > 0.0 {
             self.session_cost_usd += session_cost_delta;
-            self.mark_dirty();
         }
 
         if !changed {
@@ -1113,7 +1098,6 @@ impl App {
             None => format!("Background process {id} exited."),
         };
         self.screen.push(Block::Text { content: msg });
-        self.mark_dirty();
     }
 
     pub(super) fn session_permission_entries(&self) -> Vec<render::PermissionEntry> {
@@ -1393,7 +1377,6 @@ impl App {
                     self.screen
                         .set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.pending_dialog = true;
-                    self.mark_dirty();
                     pending_dialogs.push_back(DeferredDialog::Confirm(req));
                     return LoopAction::Continue;
                 }
@@ -1435,7 +1418,6 @@ impl App {
             SessionControl::NeedsAskQuestion { args, request_id } => {
                 if should_queue {
                     self.pending_dialog = true;
-                    self.mark_dirty();
                     pending_dialogs.push_back(DeferredDialog::AskQuestion { args, request_id });
                     return LoopAction::Continue;
                 }
