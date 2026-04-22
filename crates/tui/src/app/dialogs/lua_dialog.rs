@@ -21,8 +21,8 @@ use std::rc::Rc;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
 use ui::{
-    BufId, Callback, CallbackResult, KeyBind, OptionItem, OptionList, PanelHeight, PanelSpec,
-    Payload, WinEvent, WinId,
+    BufId, Callback, CallbackResult, FitMax, KeyBind, OptionItem, OptionList, PanelHeight,
+    PanelSpec, Payload, WinEvent, WinId,
 };
 
 /// Per-option data consumed when the task resumes. Drained out of
@@ -229,7 +229,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
             ui::FloatConfig {
                 title,
                 border: ui::Border::None,
-                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
+                placement: ui::Placement::fit_content(FitMax::HalfScreen),
                 blocks_agent: true,
                 ..Default::default()
             },

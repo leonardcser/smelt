@@ -631,10 +631,18 @@ Expected LOC: net −400..−600.
 
 ### Phase E — UX polish (3 small commits, can each stand alone)
 
-**E1 · `Placement::FitContent { max: HalfScreen | FullScreen }`** +
-Rewind/Resume/Permissions migrations. Fix Fill-vs-Fit in
-`resolve_panel_rects` so List panels with `Fit` scroll internally past
-the cap. (B4)
+**E1 · `Placement::FitContent { max: HalfScreen | FullScreen }`** —
+**shipped 2026-04-23.** `Ui::dialog_open` now pre-syncs the dialog's
+panel `line_count`s before placement resolution so FitContent lands
+at the right height on the first frame; `resolve_float_rects` queries
+`Ui::natural_dialog_height(win_id)` via the compositor on each
+render so live-updating dialogs (`/agents` on tick, `/resume` on
+filter) shrink and grow with their content. All Lua-plugin dialogs
+now use `fit_content(HalfScreen)` instead of the previous fixed
+`Pct(60)` dock. List panels with `Fill` under FitContent scroll
+internally past the cap — the existing bottom-clip logic in
+`resolve_panel_rects` handles overflow correctly now that the area
+is content-sized. (B4 resolved)
 
 **E2 · `Compositor::hit_test` + mouse routing to focused float +
 scrollbar click-drag.** (B6 + B7) Single commit — mouse routing
@@ -814,13 +822,6 @@ being migrated". Every commit closes a chapter.
 
 ## Open UX bugs (fall out of the above)
 
-- **B4 — dialog height convention.** Rewind uses `Fixed(14 max)`, Resume
-  uses `Pct(60)`, neither reflects content. Introduce
-  `Placement::FitContent { max: HalfScreen | FullScreen }`. Fix
-  Fill-vs-Fit in `resolve_panel_rects` so a List panel with
-  `PanelHeight::Fit` scrolls internally past the cap instead of being
-  over-allocated rows. Rewind/Resume → `FitContent { max: HalfScreen }`;
-  Permissions → `FitContent { max: FullScreen }`. Falls out of step 5.
 - **B5 — transcript status under float.** Status row disappears when a
   float docks bottom; should layer above the float's gutter. Fixes
   itself once the status bar is a top-level compositor layer rather than
@@ -1433,6 +1434,21 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-23** — Phase E1 shipped: `Placement::FitContent { max }`
+  with `FitMax::{HalfScreen, FullScreen}`. All Lua dialogs switched
+  from the fixed `dock_bottom_full_width(Pct(60))` to
+  `fit_content(HalfScreen)`. `Dialog::natural_height()` sums panel
+  `line_count`s + chrome (top rule + hints + separators); under
+  FitContent a panel with `Fill` height counts by its content so the
+  "as tall as content, up to cap" contract holds. `Ui::dialog_open`
+  now pre-runs `sync_from_bufs` before placement so the first frame
+  lands at the correct size instead of the cap fallback. `resolve_
+  float_rects` queries `Ui::natural_dialog_height(win_id)` on every
+  render so live-updating dialogs (`/agents` on tick, `/resume` as
+  the user types) shrink and grow smoothly. List panels that overflow
+  the cap use the existing bottom-clip path + internal scroll — no
+  new code there. Net: ~80 LOC in `ui::layout` + `ui::lib` + 1 line
+  in `lua_dialog.rs`; fixes B4.
 - **2026-04-23** — `/agents` ported to Lua plugin (−409 Rust, +215 Lua).
   Two views stitched by a single `smelt.task` loop: list view uses
   `on_tick` to poll `smelt.api.agent.list()` and re-render when the

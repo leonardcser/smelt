@@ -46,7 +46,9 @@ pub use flush::flush_diff;
 pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
-pub use layout::{Anchor, Border, Constraint, FloatRelative, Gutters, LayoutTree, Placement, Rect};
+pub use layout::{
+    Anchor, Border, Constraint, FitMax, FloatRelative, Gutters, LayoutTree, Placement, Rect,
+};
 pub use list_select::{ListItem, ListSelect};
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
@@ -154,7 +156,7 @@ impl Ui {
         self.next_win_id += 1;
 
         let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th);
+        let rect = resolve_float_rect(&config, tw, th, None);
         let zindex = config.zindex;
 
         let dialog_config = FloatDialogConfig {
@@ -218,7 +220,7 @@ impl Ui {
         self.next_win_id += 1;
 
         let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th);
+        let rect = resolve_float_rect(&config, tw, th, None);
         let zindex = config.zindex;
 
         let mut p = picker::Picker::new()
@@ -271,7 +273,7 @@ impl Ui {
         self.next_win_id += 1;
 
         let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th);
+        let rect = resolve_float_rect(&config, tw, th, None);
         let zindex = config.zindex;
 
         let n = notification::Notification::new(message, level).with_style(style);
@@ -386,7 +388,6 @@ impl Ui {
         self.next_win_id += 1;
 
         let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&float_config, tw, th);
         let zindex = float_config.zindex;
 
         // Use the first buffer-backed panel's buffer as the dialog
@@ -401,7 +402,13 @@ impl Ui {
             .unwrap_or(BufId(0));
 
         let panel_structs = dialog::build_panels(panels, &self.bufs);
-        let dlg = dialog::Dialog::new(dialog_config, panel_structs);
+        let mut dlg = dialog::Dialog::new(dialog_config, panel_structs);
+        // Pre-sync so `FitContent` sees a populated `line_count` on
+        // the first frame — otherwise the dialog lands at the cap
+        // height on open, then snaps to fit on the next render.
+        dlg.sync_from_bufs(|bid| self.bufs.get(&bid));
+        let natural_h = Some(dlg.natural_height());
+        let rect = resolve_float_rect(&float_config, tw, th, natural_h);
 
         let focusable = float_config.focusable;
         let mut win = Window::new(id, primary_buf, WinConfig::Float(float_config));
@@ -494,7 +501,8 @@ impl Ui {
             _ => return None,
         };
         let (tw, th) = self.terminal_size;
-        Some(resolve_float_rect(fc, tw, th))
+        let natural_h = self.natural_dialog_height(win_id);
+        Some(resolve_float_rect(fc, tw, th, natural_h))
     }
 
     pub fn resolve_float_rects(&self) -> Vec<(WinId, Rect)> {
@@ -507,9 +515,22 @@ impl Ui {
                     WinConfig::Float(f) => f,
                     _ => return None,
                 };
-                Some((id, resolve_float_rect(fc, tw, th)))
+                let natural_h = self.natural_dialog_height(id);
+                Some((id, resolve_float_rect(fc, tw, th, natural_h)))
             })
             .collect()
+    }
+
+    /// Peek at the dialog's current natural height for placement. Only
+    /// meaningful once `sync_float_content` has run on this frame —
+    /// returns `None` for non-dialog floats or dialogs that haven't
+    /// populated `panel.line_count` yet, which the `FitContent`
+    /// placement interprets as "use the cap as a fallback".
+    fn natural_dialog_height(&self, win_id: WinId) -> Option<u16> {
+        let layer_id = float_layer_id(win_id);
+        let comp = self.compositor.component(&layer_id)?;
+        let dlg = comp.as_any().downcast_ref::<dialog::Dialog>()?;
+        Some(dlg.natural_height())
     }
 
     // ── Layer management ─────────────────────────────────────────
@@ -690,10 +711,11 @@ impl Ui {
     /// float repositions without close + reopen.
     pub fn refresh_float_rect(&mut self, win: WinId) {
         let (tw, th) = self.terminal_size;
+        let natural_h = self.natural_dialog_height(win);
         let Some(WinConfig::Float(cfg)) = self.wins.get(&win).map(|w| &w.config) else {
             return;
         };
-        let rect = resolve_float_rect(cfg, tw, th);
+        let rect = resolve_float_rect(cfg, tw, th, natural_h);
         let layer_id = float_layer_id(win);
         self.compositor.set_rect(&layer_id, rect);
     }
@@ -810,11 +832,16 @@ fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {
     }
 }
 
-fn resolve_float_rect(fc: &FloatConfig, term_w: u16, term_h: u16) -> Rect {
-    resolve_placement(&fc.placement, term_w, term_h)
+fn resolve_float_rect(fc: &FloatConfig, term_w: u16, term_h: u16, natural_h: Option<u16>) -> Rect {
+    resolve_placement(&fc.placement, term_w, term_h, natural_h)
 }
 
-fn resolve_placement(p: &layout::Placement, term_w: u16, term_h: u16) -> Rect {
+fn resolve_placement(
+    p: &layout::Placement,
+    term_w: u16,
+    term_h: u16,
+    natural_h: Option<u16>,
+) -> Rect {
     match p {
         layout::Placement::DockBottom {
             above_rows,
@@ -832,6 +859,24 @@ fn resolve_placement(p: &layout::Placement, term_w: u16, term_h: u16) -> Rect {
             let left = (term_w.saturating_sub(w)) / 2;
             let top = term_h.saturating_sub(*above_rows).saturating_sub(h);
             Rect::new(top, left, w, h)
+        }
+        layout::Placement::FitContent { max } => {
+            // Dock at bottom, full width, 1 status-bar row reserved.
+            // Height = natural_h clamped to the `max` cap; natural_h
+            // comes from `Ui::natural_dialog_height(win_id)` at the
+            // call site. If the caller didn't supply one (rect is
+            // being computed before the dialog registered — first
+            // open), fall back to the cap so the dialog lands somewhere
+            // sensible and the next render corrects it.
+            let above_rows = 1u16;
+            let avail_h = term_h.saturating_sub(above_rows);
+            let cap = match max {
+                layout::FitMax::HalfScreen => avail_h / 2,
+                layout::FitMax::FullScreen => avail_h,
+            };
+            let h = natural_h.unwrap_or(cap).min(cap).min(avail_h).max(1);
+            let top = term_h.saturating_sub(above_rows).saturating_sub(h);
+            Rect::new(top, 0, term_w, h)
         }
         layout::Placement::Centered { width, height } => {
             let w = resolve_constraint_dim(*width, term_w).min(term_w);

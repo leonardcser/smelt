@@ -48,6 +48,18 @@ pub enum Constraint {
     Fill,
 }
 
+/// Upper bound on `Placement::FitContent`. Keeps pathologically tall
+/// content (long permission lists, agent logs) from eating the whole
+/// screen while still giving short content a snug fit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FitMax {
+    /// Cap at half the terminal height.
+    HalfScreen,
+    /// Cap at (nearly) the full terminal height — keeps `above_rows`
+    /// reserved so the status bar / prompt remains visible.
+    FullScreen,
+}
+
 /// High-level dialog / float placement inside the terminal. Chosen over
 /// raw anchor+row+col to keep per-dialog call sites free of rect math.
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +73,12 @@ pub enum Placement {
         max_width: Constraint,
         max_height: Constraint,
     },
+    /// Like `DockBottom` but height tracks the dialog's content: the
+    /// renderer asks the dialog for its natural height (sum of panel
+    /// `line_count`s + chrome) and clamps to `max`. Short dialogs
+    /// shrink, long dialogs cap and scroll internally. Always
+    /// full-width; reserves 1 row above for the status bar.
+    FitContent { max: FitMax },
     /// Centered in the terminal.
     Centered {
         width: Constraint,
@@ -99,6 +117,10 @@ impl Placement {
 
     pub fn centered(width: Constraint, height: Constraint) -> Self {
         Placement::Centered { width, height }
+    }
+
+    pub fn fit_content(max: FitMax) -> Self {
+        Placement::FitContent { max }
     }
 }
 
