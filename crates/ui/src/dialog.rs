@@ -263,6 +263,36 @@ impl Dialog {
         self.panels.len()
     }
 
+    /// Natural dialog height: sum of each panel's desired rows (from
+    /// the latest `sync_from_bufs`) plus chrome (top rule + optional
+    /// hints block + per-panel separator rows). Consumed by
+    /// `Placement::FitContent` to size the float to its contents.
+    /// `Fill` panels count by `line_count` here so the cap behaviour
+    /// stays consistent — under FitContent the dialog is "as tall as
+    /// content, up to cap", not "stretch to fill".
+    pub fn natural_height(&self) -> u16 {
+        let top_rule_rows = 1u16;
+        let hints_rows = if self.config.hints.is_some() { 2 } else { 0 };
+        let sep_rows: u16 = self
+            .panels
+            .iter()
+            .map(|p| if p.separator_above.is_some() { 1 } else { 0 })
+            .sum();
+        let content_rows: u16 = self
+            .panels
+            .iter()
+            .filter(|p| !(p.collapse_when_empty && p.line_count == 0))
+            .map(|p| match p.height {
+                PanelHeight::Fixed(n) => n,
+                PanelHeight::Fit | PanelHeight::Fill => p.line_count as u16,
+            })
+            .sum();
+        top_rule_rows
+            .saturating_add(hints_rows)
+            .saturating_add(sep_rows)
+            .saturating_add(content_rows)
+    }
+
     pub fn focused_panel(&self) -> usize {
         self.focused
     }
