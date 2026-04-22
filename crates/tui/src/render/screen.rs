@@ -47,7 +47,6 @@ pub enum ContentVisualKind {
 }
 
 use super::layout_out::{LayoutSink, SpanCollector};
-use super::prompt::PromptState;
 use super::selection::wrap_and_locate_cursor;
 use super::{emit_newlines, Frame, StdioBackend, TerminalBackend, SPINNER_FRAMES};
 use crate::input::InputState;
@@ -59,7 +58,6 @@ use std::time::Duration;
 pub struct Screen {
     pub(crate) transcript: Transcript,
     parser: super::stream_parser::StreamParser,
-    prompt: PromptState,
     dirty: bool,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `draw_viewport_frame`. Used by the content pane's motion
@@ -95,7 +93,6 @@ impl Screen {
         Self {
             transcript: Transcript::new(),
             parser: super::stream_parser::StreamParser::new(),
-            prompt: PromptState::new(),
             dirty: true,
             last_viewport_text: Vec::new(),
             last_viewport_lines: Vec::new(),
@@ -312,18 +309,6 @@ impl Screen {
         self.dirty = true;
     }
 
-    pub(crate) fn prompt_input_scroll(&self) -> usize {
-        self.prompt.input_scroll
-    }
-
-    pub(crate) fn set_prompt_input_scroll(&mut self, scroll: usize) {
-        self.prompt.input_scroll = scroll;
-    }
-
-    pub(crate) fn set_prompt_viewport(&mut self, vp: Option<super::region::Viewport>) {
-        self.prompt.viewport = vp;
-    }
-
     pub(crate) fn set_transcript_viewport(&mut self, vp: Option<super::region::Viewport>) {
         self.last_transcript_viewport = vp;
     }
@@ -345,17 +330,6 @@ impl Screen {
 
     pub(crate) fn transcript_viewport(&self) -> Option<super::region::Viewport> {
         self.last_transcript_viewport
-    }
-
-    pub(crate) fn input_viewport(&self) -> Option<super::region::Viewport> {
-        self.prompt.viewport
-    }
-
-    /// Overwrite the prompt's top-relative input scroll offset. Used by
-    /// scrollbar click/drag to jump the input viewport.
-    pub(crate) fn set_input_scroll(&mut self, offset: usize) {
-        self.prompt.input_scroll = offset;
-        self.dirty = true;
     }
 
     /// Plain-text rendering of the last-painted viewport rows (top to
@@ -536,15 +510,6 @@ impl Screen {
         self.dirty || self.transcript.history.has_unflushed()
     }
 
-    /// Center the input viewport on the cursor (vim `zz`).
-    pub fn center_input_scroll(&mut self) {
-        // The actual centering happens in draw_prompt_sections using a
-        // sentinel value. We set input_scroll to usize::MAX so the
-        // scroll logic knows to center instead of preserving position.
-        self.prompt.input_scroll = usize::MAX;
-        self.dirty = true;
-    }
-
     pub fn finish_turn(&mut self) {
         let _perf = crate::perf::begin("render:finish_turn");
         self.parser
@@ -638,7 +603,6 @@ impl Screen {
     pub fn clear(&mut self) {
         self.transcript.history.clear();
         self.parser.clear();
-        self.prompt = PromptState::new();
 
         let mut frame = Frame::begin(&*self.backend);
         let _ = frame.queue(cursor::MoveTo(0, 0));

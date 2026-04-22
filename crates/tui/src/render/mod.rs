@@ -9,7 +9,6 @@ mod history;
 pub(crate) mod layout;
 pub(crate) mod layout_out;
 mod paint;
-mod prompt;
 pub(crate) mod prompt_data;
 pub(crate) mod region;
 pub(crate) mod screen;

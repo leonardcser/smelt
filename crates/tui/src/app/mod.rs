@@ -129,6 +129,14 @@ pub struct App {
     /// rows). Updated each frame in `render_normal`; read by mouse
     /// hit-testing and viewport-rows estimation.
     pub layout: render::layout::LayoutState,
+    /// Persisted scroll offset for the multi-line prompt input
+    /// (vim-style viewport). `usize::MAX` is a sentinel used by `zz`
+    /// that asks the next paint to re-center on the cursor.
+    pub prompt_input_scroll: usize,
+    /// Buffer viewport for the prompt input text area, recorded after
+    /// paint. Used by scrollbar click/drag and input-focus mouse
+    /// routing.
+    pub(crate) prompt_viewport: Option<render::region::Viewport>,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -614,6 +622,8 @@ impl App {
                 term_height: 24,
                 prompt_height: 3,
             }),
+            prompt_input_scroll: 0,
+            prompt_viewport: None,
             settings,
             multi_agent,
             agent_id: String::new(),
