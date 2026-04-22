@@ -2,7 +2,7 @@
 //!
 //! `Transcript` owns the block history and the width-keyed display
 //! snapshot. Streaming input parsing lives in `StreamParser` (owned
-//! by `Screen`).
+//! by `App`).
 
 use super::display::SpanMeta;
 use super::history::{Block, BlockHistory, BlockId, LayoutKey, Status, ToolState, ViewState};

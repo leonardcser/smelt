@@ -1,7 +1,6 @@
 //! Transcript ownership on `App` — block history, streaming state
 //! (thinking / text / tools / agents / exec), projection to a
-//! ui::Buffer, and the transcript-cursor glyph cache. Moved here
-//! from `render::Screen` as part of C3.
+//! ui::Buffer, and the transcript-cursor glyph cache.
 
 use super::*;
 use crate::render::blocks;

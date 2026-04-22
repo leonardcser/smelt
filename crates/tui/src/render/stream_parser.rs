@@ -5,7 +5,7 @@
 //! and writes finished blocks into a `BlockHistory`. It is transient
 //! input state — only alive while the engine is streaming.
 //!
-//! `Screen` owns a `StreamParser` alongside the `Transcript` (block
+//! `App` owns a `StreamParser` alongside the `Transcript` (block
 //! store + snapshot cache). The dependency is one-way: parser writes
 //! into `BlockHistory`, never reads the snapshot.
 
