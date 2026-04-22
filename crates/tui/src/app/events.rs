@@ -1857,7 +1857,10 @@ impl App {
         if self.ui.float_config(win).is_some_and(|c| c.blocks_agent) {
             return;
         }
-        let mut lua_invoke = |_handle: ui::LuaHandle, _payload: &ui::Payload| {};
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: ui::LuaHandle, payload: &ui::Payload| {
+            lua.invoke_callback(handle, payload);
+        };
         self.ui.dispatch_event(
             win,
             ui::WinEvent::Dismiss,
