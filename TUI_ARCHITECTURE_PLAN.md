@@ -320,9 +320,10 @@ These can interleave with the dispatch arc; none are critical path.
     anchor_row, soft_cursor}` + `move_cursor_past_prompt` +
     `erase_prompt` (no-op since legacy draw path deletion). Replace
     `erase_prompt()` callsites with `mark_dirty()`.
-  - **Commit 2** — make the prompt input `Buffer` persistent (owned by
-    `InputState`, created at startup, updated on edits) instead of
-    rebuilt every frame in `compute_prompt()`.
+  - **Commit 2 ✅** — prompt input `Buffer` has a stable `BufId`
+    owned by `ui.bufs`. Created once at `App::new`, mutated in place
+    by `compute_prompt(&mut PromptInput, &mut Buffer)`. The ad-hoc
+    `Buffer::new(BufId(0), …)` inside `compute_input_area` is gone.
   - **Commit 3** — register `InputState.win` in `ui.wins` so it's a
     real window (stop here for tmux smoke test).
   - **Commit 4** — route prompt keys through `ui.handle_key()` when
@@ -842,6 +843,8 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-22** — task #11 commit 2 landed: prompt input Buffer now
+  persistent in `ui.bufs` with stable BufId owned by App. Tests green.
 - **2026-04-22** — task #11 commit 1 landed: dead `PromptState` fields
   + `move_cursor_past_prompt` + `erase_prompt` deleted. All
   `erase_prompt()` callsites swapped to `mark_dirty()`. Tests green.

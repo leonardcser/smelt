@@ -1190,11 +1190,14 @@ impl App {
                 prev_input_scroll,
                 bar_info,
             };
-            render::prompt_data::compute_prompt(&mut prompt_input)
+            let input_buf = self
+                .ui
+                .buf_mut(self.input_display_buf)
+                .expect("input_display_buf must be registered at startup");
+            render::prompt_data::compute_prompt(&mut prompt_input, input_buf)
         };
 
         let chrome_rows = prompt_output.chrome_rows;
-        let input_buf = prompt_output.input_buf;
         let cursor = prompt_output.cursor;
         let cursor_style = prompt_output.cursor_style;
         let input_scroll = prompt_output.input_scroll;
@@ -1237,13 +1240,20 @@ impl App {
             pv.set_viewport(None);
             pv.set_cursor(None, None);
         }
-        if let Some(pv) = self
-            .ui
-            .layer_mut::<render::window_view::WindowView>("prompt_input")
         {
-            pv.sync_from_buffer(&input_buf, self.screen.prompt_input_scroll());
-            pv.set_viewport(self.screen.input_viewport());
-            pv.set_cursor(cursor, cursor_style);
+            let scroll = self.screen.prompt_input_scroll();
+            let viewport = self.screen.input_viewport();
+            let input_buf_id = self.input_display_buf;
+            let buf_snapshot = self.ui.buf(input_buf_id).cloned();
+            if let (Some(pv), Some(buf)) = (
+                self.ui
+                    .layer_mut::<render::window_view::WindowView>("prompt_input"),
+                buf_snapshot,
+            ) {
+                pv.sync_from_buffer(&buf, scroll);
+                pv.set_viewport(viewport);
+                pv.set_cursor(cursor, cursor_style);
+            }
         }
 
         // ── Status bar ──

@@ -190,6 +190,10 @@ pub struct App {
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
+    /// Stable `BufId` for the prompt input's styled display buffer.
+    /// Populated each frame by `compute_prompt` and read by the
+    /// `prompt_input` WindowView layer.
+    pub(super) input_display_buf: ui::BufId,
     /// Per-window dialog state, dispatched through `DialogState` on
     /// every intercepted key / select / dismiss. Each entry owns the
     /// domain state (e.g. resume filter, permission items, kill set)
@@ -504,6 +508,59 @@ impl App {
         // Load workspace rules from disk into them at startup.
         let runtime_approvals = engine.runtime_approvals();
 
+        let (ui, input_display_buf) = {
+            let (w, h) = terminal::size().unwrap_or((80, 24));
+            let mut ui = ui::Ui::new();
+            ui.set_terminal_size(w, h);
+            ui.set_layout(ui::LayoutTree::Split {
+                direction: ui::layout::Direction::Vertical,
+                children: vec![
+                    ui::LayoutTree::Leaf {
+                        name: "transcript".into(),
+                        constraint: ui::Constraint::Fill,
+                    },
+                    ui::LayoutTree::Leaf {
+                        name: "prompt".into(),
+                        constraint: ui::Constraint::Pct(25),
+                    },
+                ],
+            });
+            let input_display_buf = ui.buf_create(ui::buffer::BufCreateOpts {
+                modifiable: true,
+                buftype: ui::buffer::BufType::Prompt,
+            });
+            let transcript_view = crate::render::window_view::WindowView::new();
+            let prompt_chrome_view = crate::render::window_view::WindowView::new();
+            let prompt_input_view = crate::render::window_view::WindowView::new();
+            let status_bar = ui::StatusBar::new();
+            ui.add_layer(
+                "transcript",
+                Box::new(transcript_view),
+                ui::Rect::new(0, 0, w, h),
+                0,
+            );
+            ui.add_layer(
+                "prompt",
+                Box::new(prompt_chrome_view),
+                ui::Rect::new(0, 0, w, 1),
+                1,
+            );
+            ui.add_layer(
+                "prompt_input",
+                Box::new(prompt_input_view),
+                ui::Rect::new(0, 0, w, 1),
+                2,
+            );
+            ui.add_layer(
+                "status",
+                Box::new(status_bar),
+                ui::Rect::new(h.saturating_sub(1), 0, w, 1),
+                3,
+            );
+            ui.focus_layer("prompt_input");
+            (ui, input_display_buf)
+        };
+
         Self {
             model,
             api_base,
@@ -583,54 +640,8 @@ impl App {
             skill_section: None,
             agent_prompt_config: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
-            ui: {
-                let (w, h) = terminal::size().unwrap_or((80, 24));
-                let mut ui = ui::Ui::new();
-                ui.set_terminal_size(w, h);
-                ui.set_layout(ui::LayoutTree::Split {
-                    direction: ui::layout::Direction::Vertical,
-                    children: vec![
-                        ui::LayoutTree::Leaf {
-                            name: "transcript".into(),
-                            constraint: ui::Constraint::Fill,
-                        },
-                        ui::LayoutTree::Leaf {
-                            name: "prompt".into(),
-                            constraint: ui::Constraint::Pct(25),
-                        },
-                    ],
-                });
-                let transcript_view = crate::render::window_view::WindowView::new();
-                let prompt_chrome_view = crate::render::window_view::WindowView::new();
-                let prompt_input_view = crate::render::window_view::WindowView::new();
-                let status_bar = ui::StatusBar::new();
-                ui.add_layer(
-                    "transcript",
-                    Box::new(transcript_view),
-                    ui::Rect::new(0, 0, w, h),
-                    0,
-                );
-                ui.add_layer(
-                    "prompt",
-                    Box::new(prompt_chrome_view),
-                    ui::Rect::new(0, 0, w, 1),
-                    1,
-                );
-                ui.add_layer(
-                    "prompt_input",
-                    Box::new(prompt_input_view),
-                    ui::Rect::new(0, 0, w, 1),
-                    2,
-                );
-                ui.add_layer(
-                    "status",
-                    Box::new(status_bar),
-                    ui::Rect::new(h.saturating_sub(1), 0, w, 1),
-                    3,
-                );
-                ui.focus_layer("prompt_input");
-                ui
-            },
+            ui,
+            input_display_buf,
             float_states: HashMap::new(),
         }
     }
