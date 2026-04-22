@@ -222,13 +222,13 @@ pub async fn engine_task(
                     } => {
                         spawn_predict_request(&config, &client, history, &event_tx, generation);
                     }
-                    UiCommand::BackgroundAsk {
+                    UiCommand::EngineAsk {
                         id,
                         system,
                         messages,
                         task,
                     } => {
-                        spawn_background_ask(
+                        spawn_engine_ask(
                             &config, &client, id, system, messages, task, &event_tx,
                         );
                     }
@@ -447,23 +447,16 @@ fn spawn_predict_request(
     });
 }
 
-fn spawn_background_ask(
+fn spawn_engine_ask(
     config: &EngineConfig,
     client: &reqwest::Client,
     id: u64,
     system: String,
     mut messages: Vec<protocol::Message>,
-    task: Option<String>,
+    task: AuxiliaryTask,
     event_tx: &mpsc::UnboundedSender<EngineEvent>,
 ) {
-    let aux_task = match task.as_deref() {
-        Some("prediction") => AuxiliaryTask::Prediction,
-        Some("btw") => AuxiliaryTask::Btw,
-        Some("compaction") => AuxiliaryTask::Compaction,
-        Some("title") => AuxiliaryTask::Title,
-        _ => AuxiliaryTask::Btw, // default to btw routing
-    };
-    let request = config.aux_or_primary(aux_task);
+    let request = config.aux_or_primary(task);
     let provider = build_provider_from_api(&request.api, client);
     let pricing = PricingContext::from_api(&request.api);
     let model = request.model;
@@ -488,7 +481,7 @@ fn spawn_background_ask(
             }
             Err(e) => format!("error: {e}"),
         };
-        let _ = tx.send(EngineEvent::BackgroundAskResponse { id, content });
+        let _ = tx.send(EngineEvent::EngineAskResponse { id, content });
     });
 }
 
@@ -812,13 +805,13 @@ impl<'a> Turn<'a> {
                 );
                 true
             }
-            UiCommand::BackgroundAsk {
+            UiCommand::EngineAsk {
                 id,
                 system,
                 messages,
                 task,
             } => {
-                spawn_background_ask(
+                spawn_engine_ask(
                     self.config,
                     self.http_client,
                     id,

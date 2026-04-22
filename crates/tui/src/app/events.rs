@@ -1926,13 +1926,13 @@ impl App {
                         self.input.set_vim_mode(crate::vim::ViMode::Insert);
                     }
                 }
-                crate::app::ops::AppOp::BackgroundAsk {
+                crate::app::ops::AppOp::EngineAsk {
                     id,
                     system,
                     messages,
                     task,
                 } => {
-                    self.engine.send(UiCommand::BackgroundAsk {
+                    self.engine.send(UiCommand::EngineAsk {
                         id,
                         system,
                         messages,

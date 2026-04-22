@@ -507,7 +507,18 @@ impl LuaRuntime {
                 "ask",
                 lua.create_function(move |lua, spec: mlua::Table| {
                     let system: String = spec.get("system")?;
-                    let task: Option<String> = spec.get("task")?;
+                    let task_str: Option<String> = spec.get("task")?;
+                    let task = match task_str.as_deref() {
+                        Some("title") => protocol::AuxiliaryTask::Title,
+                        Some("prediction") => protocol::AuxiliaryTask::Prediction,
+                        Some("compaction") => protocol::AuxiliaryTask::Compaction,
+                        Some("btw") | None => protocol::AuxiliaryTask::Btw,
+                        Some(other) => {
+                            return Err(mlua::Error::external(format!(
+                                "engine.ask: unknown task {other:?}; expected one of title / prediction / compaction / btw"
+                            )));
+                        }
+                    };
                     let on_response: Option<mlua::Function> = spec.get("on_response")?;
 
                     let mut messages = Vec::new();
@@ -543,7 +554,7 @@ impl LuaRuntime {
                     }
 
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(AppOp::BackgroundAsk {
+                        o.ops.push(AppOp::EngineAsk {
                             id,
                             system,
                             messages,

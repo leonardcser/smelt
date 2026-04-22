@@ -223,13 +223,7 @@ pub struct EngineConfig {
     pub redact_secrets: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum AuxiliaryTask {
-    Title,
-    Prediction,
-    Compaction,
-    Btw,
-}
+pub use protocol::AuxiliaryTask;
 
 impl EngineConfig {
     /// Resolve the model+api to use for an auxiliary task. Falls back to the

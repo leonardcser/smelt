@@ -96,12 +96,14 @@ pub enum AppOp {
         call_id: String,
         tool_name: String,
     },
-    /// Background LLM call from a Lua plugin.
-    BackgroundAsk {
+    /// One-shot LLM call initiated by a Lua plugin
+    /// (`smelt.api.engine.ask`). Applied by sending a matching
+    /// `UiCommand::EngineAsk` to the engine.
+    EngineAsk {
         id: u64,
         system: String,
         messages: Vec<protocol::Message>,
-        task: Option<String>,
+        task: protocol::AuxiliaryTask,
     },
     /// Set ghost text (predicted input) on the prompt.
     SetGhostText(String),
