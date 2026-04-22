@@ -757,8 +757,7 @@ wrappers over `App`/`engine` calls):
 **F4 · Tier 2 sweep** (~1100 Rust LOC replaced with ~400 Lua):
 - `/permissions` (207 LOC) — **shipped 2026-04-22** (−218 Rust, +102 Lua).
 - `/resume` (441 LOC) — **shipped 2026-04-23** (−441 Rust, +170 Lua).
-- `/agents` (409 LOC) — needs F4-pre extensions (dialog `on_tick`,
-  `smelt.api.agent.snapshot`).
+- `/agents` (409 LOC) — **shipped 2026-04-23** (−409 Rust, +215 Lua).
 
 **F4-pre · `dialog.open` extensions** — two small surfaces that
 unblock the remaining Tier 2 ports without waiting for D2/Option 3:
@@ -1434,6 +1433,23 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-23** — `/agents` ported to Lua plugin (−409 Rust, +215 Lua).
+  Two views stitched by a single `smelt.task` loop: list view uses
+  `on_tick` to poll `smelt.api.agent.list()` and re-render when the
+  registry changes, Backspace kills the selected agent, Enter nests
+  into `open_detail` (its own `dialog.open`) which also ticks to
+  live-update prompt + tool-call log via `smelt.api.agent.snapshots`.
+  Dismissing detail falls back into the outer loop → list reopens.
+  Three supporting extensions landed: (a) `content` panel now accepts
+  `buf = <id>` (previously only `text = "..."`), plus `focusable` +
+  `pad_left` opts, so scrollable plugin-owned buffers can live inside
+  a Lua dialog; (b) `BufAddDim` generalised to `BufAddHighlight` with
+  `{fg?, bold?, italic?, dim?}` — `fg` is a theme role string, e.g.
+  `fg = "agent"` for the detail title's accent; (c) `"agent"` theme
+  role exposed. `AppOp::AgentsBackToList` / `AgentsOpenDetail` /
+  `AgentsListDismissed` deleted alongside the Rust dialog. Completer
+  still gates `/agents` on multi-agent mode because the name stays in
+  `command_items()` — Lua takes precedence on dispatch.
 - **2026-04-23** — `/resume` ported to Lua plugin (−441 Rust, +170 Lua).
   Exercises the full F4-pre surface: input `on_change` for live fuzzy
   filter, `list` panel kind (buffer-backed selectable rows), `BufAddDim`

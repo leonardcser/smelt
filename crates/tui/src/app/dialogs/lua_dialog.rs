@@ -91,9 +91,25 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         let height = parse_height(&panel)?;
         match kind.as_str() {
             "content" => {
-                let text: String = panel.get("text").unwrap_or_default();
-                let buf = make_text_buffer(app, &text);
-                panel_specs.push(PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit)));
+                // `content` accepts either `text = "..."` (the plugin
+                // hands us a literal string, we make a throwaway buf)
+                // or `buf = <id>` (the plugin owns a buffer it mutates
+                // live via `smelt.api.buf.*`). Mutually exclusive —
+                // `buf` wins when both are set.
+                let buf = if let Ok(id) = panel.get::<u64>("buf") {
+                    BufId(id)
+                } else {
+                    let text: String = panel.get("text").unwrap_or_default();
+                    make_text_buffer(app, &text)
+                };
+                let focusable: bool = panel.get("focusable").unwrap_or(false);
+                let pad_left: u16 = panel.get("pad_left").unwrap_or(0);
+                let mut spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit));
+                if pad_left > 0 {
+                    spec = spec.with_pad_left(pad_left);
+                }
+                spec = spec.focusable(focusable);
+                panel_specs.push(spec);
             }
             "markdown" => {
                 let text: String = panel.get("text").unwrap_or_default();

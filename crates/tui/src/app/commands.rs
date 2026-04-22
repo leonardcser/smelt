@@ -76,16 +76,6 @@ impl App {
                 self.update_settings(|s| s.show_thinking = !s.show_thinking);
                 CommandAction::Continue
             }
-            "/agents" if self.multi_agent => {
-                let my_pid = std::process::id();
-                let children = engine::registry::children_of(my_pid);
-                if children.is_empty() {
-                    self.notify_error("no subagents running".into());
-                } else {
-                    super::dialogs::agents::open(self);
-                }
-                CommandAction::Continue
-            }
             "/fork" | "/branch" => {
                 self.fork_session();
                 CommandAction::Continue
