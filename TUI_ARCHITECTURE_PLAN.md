@@ -203,13 +203,25 @@ a single commit because they can't be split without intermediaries.
 
 **Decision (2026-04-22): option (a) — typed effect ops.** Rust and Lua
 callbacks are identical because both push typed ops into the same
-`actions` channel. No `&mut App` reentrance, no parallel dispatch paths,
-no stringly-typed matching.
+channel. No `&mut App` reentrance, no parallel dispatch paths, no
+stringly-typed matching.
 
-`ui::Callback::Rust` stays `FnMut(&mut CallbackCtx)`; `CallbackCtx.actions`
-changes from `&mut Vec<String>` to `&mut Vec<AppOp>`. Every dialog effect
-that today lives inside a `DialogState::on_select` body becomes a variant
-on a new `AppOp` enum in `tui`. The reducer drains ops each tick.
+**Decision (2026-04-22, refined for Phase B):**
+- *(1a) Shared channel*: `AppOp` lives in `tui` (it references tui-only
+  types). `ui::CallbackCtx.actions: Vec<String>` stays structurally for
+  ui-level compatibility but tui's Rust closures ignore it — they
+  capture a clone of `Arc<Mutex<AppOps>>` (same channel Lua already
+  uses) and push `AppOp` directly. One drain path, symmetric Rust/Lua.
+- *(2a) Widgets stay pure*: `ui::KeyResult::Action(String)` stays as
+  the *internal* widget→container protocol inside `ui`. The Dialog /
+  Window container translates `Action("select:N")` /
+  `Action("dismiss")` into `dispatch_event(WinEvent::Submit/Dismiss,
+  Payload::…)` so widgets don't need access to `Callbacks` or a
+  `WinId`. The host-side (tui) string matching on `Action(...)` is
+  what gets deleted.
+
+Every dialog effect that today lives inside a `DialogState::on_select`
+body becomes a variant on `AppOp`. The reducer drains ops each tick.
 
 ```rust
 // crates/tui/src/app/ops.rs (new)
@@ -262,13 +274,58 @@ as reference material for Phase B.
 **Note on `CallbackCtx.actions`**: Phase A does NOT touch
 `ui::CallbackCtx.actions: Vec<String>`. `AppOp` references tui-only
 types (`ApprovalScope`, `Mode`, `ResolvedSettings`, `CustomCommand`,
-`PermissionEntry`) and can't live in `ui`. Phase B designs the Rust
-callback mechanism — parallel registry in `tui::app::callbacks` with
-`&mut App` closures is the current leading design.
+`PermissionEntry`) and can't live in `ui`. Phase B wires Rust closures
+to capture `Arc<Mutex<AppOps>>` (the same channel Lua uses) and push
+`AppOp` directly — `CallbackCtx.actions` stays as a ui-level field
+but tui code doesn't write to it.
 
-### Phase B — Dispatch unification (1 atomic commit)
+### Phase B — Dispatch unification (multiple small commits)
 
-**B1 · All 9 dialogs + `DialogState` deletion + `KeyResult::Action`
+**Revised 2026-04-22**: landing Phase B as one 2000+ line atomic
+commit isn't practical to execute carefully. We break Phase B into
+a series of small, individually-landable commits. Each commit leaves
+the tree compiling and passing tests. The two dispatch systems
+(`DialogState` + `Callbacks`) coexist at the *codebase* level during
+the transition — but never at the *per-dialog* level. Each dialog
+belongs to exactly one system. No shim, no forwarding, no
+scaffolding code that gets deleted next commit.
+
+Sub-commit ordering:
+
+- **B.0 · Infrastructure.** `ui::Ui` auto-translates widget
+  `KeyResult::Action("select:N"|"submit"|"dismiss")` into
+  `dispatch_event(WinEvent::Submit|Dismiss, Payload::…)` *only when
+  the target window has a callback registered for that event*.
+  Unregistered windows keep bubbling `Action` as before — preserves
+  unmigrated dialogs. Adds `WinEvent::Tick` variant. Adds
+  `Ui::dispatch_tick(win, lua_invoke)` helper.
+- **B.1..B.6 · Per-dialog migrations.** Each commit migrates one
+  or a small group of related dialogs and deletes its
+  `DialogState` impl + `float_states.insert` line. `DialogState`
+  trait remains alive — still used by unmigrated dialogs.
+  1. Help, Export, Ps (trivial).
+  2. Rewind, Permissions.
+  3. Resume.
+  4. Question.
+  5. Agents (list↔detail swap).
+  6. Confirm (`blocks_agent`, `ApprovalScope` submenu).
+- **B.final · Delete `DialogState` infrastructure.** Once all 9
+  dialogs are migrated, drop `DialogState` trait, `ActionResult`,
+  `App::float_states` HashMap, `handle_float_action`,
+  `intercept_float_key`, `tick_focused_float`,
+  `focused_float_blocks_agent` (replaced by
+  `App::blocking_wins: HashSet<WinId>`). Drop host-side
+  `KeyResult::Action` matching in `events.rs:74` and `:1709`.
+- **B.rename · `BackgroundAsk` → `EngineAsk`.** Separate commit.
+  Rename `AppOp::BackgroundAsk`, `UiCommand::BackgroundAsk`,
+  `EngineEvent::BackgroundAskResponse`. Replace `task:
+  Option<String>` with a typed `AuxiliaryTask` enum (moved from
+  `engine` to `protocol`). Delete the silent `_ => Btw` fallback
+  in `spawn_background_ask`.
+
+Original (pre-revision) atomic-commit plan:
+
+**B1 (superseded) · All 9 dialogs + `DialogState` deletion + `KeyResult::Action`
 deletion.** Atomic because splitting it per dialog forces DialogState
 + Callbacks to coexist — exactly the scaffolding we're avoiding.
 
@@ -286,9 +343,17 @@ Inside the commit (done in order but shipped together):
    `pending_dialogs` queue. Hardest; landing last.
 7. Delete `DialogState` trait, `ActionResult`, `App::float_states`
    HashMap, take/put-back dance in `events.rs`.
-8. Delete `KeyResult::Action(String)` and host string matching.
-   Widgets fire events through `Callbacks` directly; `OptionList`
-   emits `WinEvent::Submit(index)` via its configured callback.
+8. Delete host-side string matching on `KeyResult::Action`. The
+   Dialog / Window container translates widget action strings
+   (`select:N`, `dismiss`, `submit`) into `dispatch_event(WinEvent::…,
+   Payload::…)` internally. `KeyResult::Action` stays as the
+   widget→container protocol inside `ui`, invisible to tui.
+9. Rename `BackgroundAsk` → `EngineAsk` across `AppOp`,
+   `UiCommand`, `EngineEvent` (`BackgroundAskResponse` →
+   `EngineAskResponse`). Replace `task: Option<String>` with a
+   typed `AuxiliaryTask` enum (moved from `engine` to `protocol`).
+   Delete the `_ => AuxiliaryTask::Btw` silent fallback in
+   `spawn_background_ask`; unknown task → error.
 
 Expected LOC: net −400..−600 lines.
 
