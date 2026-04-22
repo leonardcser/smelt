@@ -87,7 +87,6 @@ pub(crate) enum CursorOwner {
     Prompt,
     Transcript,
     Cmdline,
-    Dialog,
     None,
 }
 use super::layout_out::{LayoutSink, SpanCollector};
@@ -127,16 +126,8 @@ pub struct Screen {
     reasoning_effort: protocol::ReasoningEffort,
     /// True once terminal auto-scrolling has pushed content into scrollback.
     pub has_scrollback: bool,
-    /// Skip the next `mark_blocks_dirty` call so the next `draw_frame`
-    /// picks up the blocks instead of a stale mid-dialog repaint.
-    defer_pending_render: bool,
     /// A permission dialog is waiting for the user to stop typing.
     pending_dialog: bool,
-    /// A dialog is currently open (confirm, rewind, etc.).
-    dialog_open: bool,
-    /// Whether the active dialog's height should be constrained to
-    /// `max(h/2, natural_space)` to limit scroll-up.
-    constrain_dialog: bool,
     running_procs: usize,
     running_agents: usize,
     show_tps: bool,
@@ -210,10 +201,7 @@ impl Screen {
             model_label: None,
             reasoning_effort: Default::default(),
             has_scrollback: false,
-            defer_pending_render: false,
             pending_dialog: false,
-            dialog_open: false,
-            constrain_dialog: false,
             running_procs: 0,
             running_agents: 0,
             show_tps: true,
@@ -233,8 +221,6 @@ impl Screen {
                 term_width: 80,
                 term_height: 24,
                 prompt_height: 3,
-                dialog_height: None,
-                constrain_dialog: false,
             }),
             transcript_projection: TranscriptProjection::new(ui::buffer::Buffer::new(
                 ui::BufId(0),
@@ -283,14 +269,7 @@ impl Screen {
             return;
         }
         self.focused = focused;
-        // Focus only affects the prompt's soft cursor visual.  When a
-        // dialog is open, the prompt isn't drawn — marking it dirty
-        // would force a full dialog-mode repaint whose bottom-gap
-        // cleanup (`queue_dialog_gap`) clears the screen below the
-        // dialog's anchor row, flashing the dialog off and on.
-        if !self.dialog_open {
-            self.dirty = true;
-        }
+        self.dirty = true;
     }
 
     /// Set the prompt anchor row explicitly (used by test harness).
@@ -399,68 +378,6 @@ impl Screen {
         self.parser
             .finish_all_active_agents(&mut self.transcript.history);
         self.dirty = true;
-    }
-
-    /// Row where a dialog should start rendering (lines up with the prompt bar).
-    pub fn dialog_row(&self) -> u16 {
-        self.prompt.prev_dialog_row.unwrap_or(0)
-    }
-
-    /// Emit a blank gap line after the dialog, then clear any stale
-    /// rows between the dialog and the status bar.  Called globally
-    /// from `render_frame` so every dialog gets the same gap without
-    /// each one needing to emit it.
-    ///
-    /// Only emits when `out` is in overlay mode (`out.row` is `Some`).
-    /// On early-exit frames where the dialog didn't redraw, `out.row`
-    /// stays `None` (scroll mode) and a newline would push a `\r\n`
-    /// into scrollback, polluting the scroll buffer and shifting the
-    /// visible dialog.
-    pub fn queue_dialog_gap(&self, out: &mut RenderOut) {
-        if out.row.is_none() {
-            return;
-        }
-        out.newline();
-        let _ = out.queue(terminal::Clear(terminal::ClearType::FromCursorDown));
-    }
-
-    /// Dismiss a dialog overlay.
-    ///
-    /// Clears from the screen anchor (or the dialog row, whichever is
-    /// higher) down, so any ephemeral overlay shifted upward by
-    /// `ScrollUp` is wiped along with the dialog bar itself.
-    pub fn clear_dialog_area(&mut self) {
-        let dialog_row = self.prompt.prev_dialog_row.unwrap_or(0);
-        let screen_anchor = self.prompt.anchor_row.unwrap_or(dialog_row);
-        let clear_from = screen_anchor.min(dialog_row);
-
-        let height = self.size().1;
-        let mut frame = Frame::begin(&*self.backend);
-        for row in clear_from..height {
-            let _ = frame.queue(cursor::MoveTo(0, row));
-            let _ = frame.queue(terminal::Clear(terminal::ClearType::CurrentLine));
-        }
-        // When the dialog scrolled enough to push the anchor to row 0,
-        // the prompt gap that was between the last block and the dialog
-        // got pushed into scrollback.  The next block render would emit
-        // gap_between() again, creating a double blank line.  Suppress
-        // the leading gap so only the scrollback copy remains.
-        // Fullscreen dialogs omit the gap (see the `gap` calc in
-        // `draw_frame` dialog mode) — nothing was scrolled into
-        // scrollback to duplicate, so don't suppress.
-        let scrolled_by_dialog = screen_anchor == 0 && self.has_scrollback;
-        self.defer_pending_render = true;
-        // Only reset anchor/prev_rows when the dialog caused ScrollUp
-        // (prompt was physically moved). For non-scrolled dialogs the
-        // prompt is still in its original position — just mark dirty so
-        // it redraws in place.
-        if scrolled_by_dialog || self.prompt.anchor_row.is_none() {
-            self.prompt.anchor_row = Some(clear_from);
-            self.prompt.prev_rows = 0;
-        }
-        self.prompt.drawn = false;
-        self.dirty = true;
-        self.prompt.prev_dialog_row = None;
     }
 
     /// Move the cursor to the line after the prompt so the shell resumes cleanly.
@@ -681,8 +598,6 @@ impl Screen {
     fn refresh_cursor_owner(&mut self) {
         self.cursor_owner = if self.cmdline.active {
             CursorOwner::Cmdline
-        } else if self.dialog_open {
-            CursorOwner::Dialog
         } else if !self.focused {
             CursorOwner::None
         } else {
@@ -747,10 +662,6 @@ impl Screen {
 
     pub(crate) fn pending_dialog(&self) -> bool {
         self.pending_dialog
-    }
-
-    pub(crate) fn dialog_open(&self) -> bool {
-        self.dialog_open
     }
 
     pub(crate) fn running_procs(&self) -> usize {
@@ -1128,32 +1039,6 @@ impl Screen {
         self.dirty = true;
     }
 
-    pub fn set_dialog_open(&mut self, open: bool) {
-        if open == self.dialog_open {
-            return;
-        }
-        self.dialog_open = open;
-        // Spinner pause/resume is handled by the caller based on
-        // whether the dialog blocks the agent — non-blocking dialogs
-        // keep the spinner animating.
-        self.dirty = true;
-    }
-
-    pub fn set_constrain_dialog(&mut self, constrain: bool) {
-        self.constrain_dialog = constrain;
-    }
-
-    /// Pause the working spinner. Used when a blocking dialog (confirm,
-    /// question) opens and the agent is suspended.
-    pub fn pause_spinner(&mut self) {
-        self.working.pause();
-    }
-
-    /// Resume the working spinner after a blocking dialog closes.
-    pub fn resume_spinner(&mut self) {
-        self.working.resume();
-    }
-
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -1253,14 +1138,6 @@ impl Screen {
 
     /// Whether any content (blocks, active tool, active exec) exists above
     pub fn mark_blocks_dirty(&mut self) {
-        // Under the flat-line viewport model, blocks are never flushed
-        // to scrollback — the next frame repaints the transcript from
-        // scratch. Just mark the screen dirty so the tick loop picks
-        // up any newly-pushed blocks.
-        if self.defer_pending_render {
-            self.defer_pending_render = false;
-            return;
-        }
         self.dirty = true;
     }
 
@@ -1832,7 +1709,6 @@ impl Screen {
         self.prompt.drawn = true;
         self.prompt.prev_rows = prompt_height;
         self.prompt.anchor_row = Some(viewport_rows + gap_rows);
-        self.prompt.prev_dialog_row = Some(viewport_rows + gap_rows);
         self.prompt.prev_prompt_ui_rows = prompt_height;
     }
 
@@ -1863,8 +1739,6 @@ impl Screen {
             term_width: term_w,
             term_height: term_h,
             prompt_height: natural_prompt_height,
-            dialog_height: None,
-            constrain_dialog: false,
         });
         let viewport_rows = self.layout.viewport_rows();
         let prompt_height = self.layout.prompt.height;
