@@ -542,7 +542,7 @@ struct ToolSlot<'a> {
 /// Tool calls from one LLM response, sorted by how they execute.
 ///
 /// Tools whose base decision is `Allow` go into `ready` (run concurrently)
-/// or `sequential` (one at a time, currently only `ask_user_question`).
+/// or `sequential_plugins` (plugin tools that blocked the LLM turn).
 /// Tools whose decision is `Ask` go into `pending_perms`; they sit in
 /// `slots` waiting for a `PermissionDecision` to either launch or cancel.
 /// `Deny` decisions don't land here at all — they produce a synthetic
@@ -551,7 +551,6 @@ struct ToolExecutionPlan<'a> {
     slots: Vec<ToolSlot<'a>>,
     ready: Vec<usize>,
     pending_perms: Vec<(usize, u64)>,
-    sequential: Vec<usize>,
     /// Plugin tools awaiting execution by the TUI (request_id, call_id, start).
     pending_plugins: Vec<(u64, String, Instant)>,
     /// Plugin tools that opted into sequential execution — deferred
@@ -1131,7 +1130,6 @@ impl<'a> Turn<'a> {
             slots: Vec::new(),
             ready: Vec::new(),
             pending_perms: Vec::new(),
-            sequential: Vec::new(),
             pending_plugins: Vec::new(),
             sequential_plugins: Vec::new(),
         };
@@ -1226,11 +1224,7 @@ impl<'a> Turn<'a> {
                         confirm_msg: None,
                         start: tool_start,
                     });
-                    if tc.function.name == "ask_user_question" {
-                        plan.sequential.push(idx);
-                    } else {
-                        plan.ready.push(idx);
-                    }
+                    plan.ready.push(idx);
                 }
                 Decision::Deny => {
                     self.push_tool_result(
@@ -1427,17 +1421,14 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Phase 2b: sequential tools (currently only `ask_user_question`).
+    /// Phase 2b: sequential plugin tools — deferred past the concurrent
+    /// phase and dispatched one at a time. Used by plugin tools that
+    /// open a dialog and await a user reply.
     async fn run_sequential(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
-        completed: &mut [Option<ToolResult>],
+        _completed: &mut [Option<ToolResult>],
     ) -> Vec<(String, String, bool)> {
-        for &i in &plan.sequential {
-            let result = self.ask_user(&plan.slots[i].args).await;
-            completed[i] = Some(result);
-        }
-
         let mut plugin_results = Vec::new();
         for (tc, args, start) in &plan.sequential_plugins {
             if self.cancel.is_cancelled() {
@@ -1642,20 +1633,8 @@ impl<'a> Turn<'a> {
         (result.map(|r| (r, had_injected)), pt, pr)
     }
 
-    /// Handle the ask_user_question tool by requesting an answer from the TUI.
-    async fn ask_user(&mut self, args: &HashMap<String, Value>) -> ToolResult {
-        let request_id = next_request_id();
-        self.emit(EngineEvent::RequestAnswer {
-            request_id,
-            args: args.clone(),
-        });
-        let answer = self.wait_for_answer(request_id).await;
-        ToolResult::ok(answer.unwrap_or_else(|| "no response".to_string()))
-    }
-
     /// Wait for a PluginToolResult matching the given request_id.
-    /// Applies mid-wait mode/model/reasoning changes the same way
-    /// `wait_for_answer` does.
+    /// Applies mid-wait mode/model/reasoning changes.
     async fn wait_for_plugin_result(&mut self, request_id: u64) -> Option<(String, bool)> {
         loop {
             match self.cmd_rx.recv().await {
@@ -1665,48 +1644,6 @@ impl<'a> Turn<'a> {
                     is_error,
                     ..
                 }) if id == request_id => return Some((content, is_error)),
-                Some(UiCommand::SetMode {
-                    mode,
-                    system_prompt,
-                    plugin_tools,
-                }) => {
-                    self.mode = mode;
-                    if let Some(p) = system_prompt {
-                        self.system_prompt = p;
-                    } else {
-                        self.regenerate_system_prompt();
-                    }
-                    if let Some(t) = plugin_tools {
-                        self.plugin_tools = t;
-                    }
-                }
-                Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
-                Some(UiCommand::SetModel {
-                    model,
-                    api_base,
-                    api_key,
-                    provider_type,
-                }) => self.apply_model_change(model, api_base, api_key, provider_type),
-                Some(UiCommand::Cancel) => {
-                    self.cancel.cancel();
-                    return None;
-                }
-                None => return None,
-                Some(other) => {
-                    self.handle_background_cmd(other);
-                }
-            }
-        }
-    }
-
-    /// Wait for a QuestionAnswer matching the given request_id.
-    async fn wait_for_answer(&mut self, request_id: u64) -> Option<String> {
-        loop {
-            match self.cmd_rx.recv().await {
-                Some(UiCommand::QuestionAnswer {
-                    request_id: id,
-                    answer,
-                }) if id == request_id => return answer,
                 Some(UiCommand::SetMode {
                     mode,
                     system_prompt,

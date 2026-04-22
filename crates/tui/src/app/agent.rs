@@ -584,9 +584,6 @@ impl App {
                 summary,
                 request_id,
             })),
-            EngineEvent::RequestAnswer { request_id, args } => {
-                SessionControl::NeedsAskQuestion { args, request_id }
-            }
             EngineEvent::Retrying { delay_ms, attempt } => {
                 self.working.set_throbber(render::Throbber::Retrying {
                     delay: Duration::from_millis(delay_ms),
@@ -1285,39 +1282,6 @@ impl App {
         }
     }
 
-    /// Resolve a completed question dialog.
-    /// `answer` is `Some(json)` on confirm, `None` on cancel.
-    /// Returns `true` if the agent should be cancelled.
-    pub(super) fn resolve_question(&mut self, answer: Option<String>, request_id: u64) -> bool {
-        match answer {
-            Some(json) => {
-                self.engine.send(UiCommand::QuestionAnswer {
-                    request_id,
-                    answer: Some(json),
-                });
-                false
-            }
-            None => {
-                engine::log::entry(
-                    engine::log::Level::Info,
-                    "agent_stop",
-                    &serde_json::json!({
-                        "reason": "question_cancelled",
-                    }),
-                );
-                self.engine.send(UiCommand::QuestionAnswer {
-                    request_id,
-                    answer: None,
-                });
-                self.finish_tool("", ToolStatus::Denied, None, None);
-                if let Some(ref mut ag) = self.agent {
-                    ag.pending.clear();
-                }
-                true
-            }
-        }
-    }
-
     // ── Control dispatch ─────────────────────────────────────────────────
 
     pub(super) fn dispatch_control(
@@ -1415,21 +1379,6 @@ impl App {
                 self.close_focused_non_blocking_float();
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
                 crate::app::dialogs::confirm::open(self, &req);
-                LoopAction::Continue
-            }
-            SessionControl::NeedsAskQuestion { args, request_id } => {
-                if should_queue {
-                    self.pending_dialog = true;
-                    pending_dialogs.push_back(DeferredDialog::AskQuestion { args, request_id });
-                    return LoopAction::Continue;
-                }
-
-                self.close_focused_non_blocking_float();
-                // ask_user_question doesn't have a call_id in the permission flow,
-                // use empty string (it targets the last active tool via fallback).
-                self.set_active_status("", ToolStatus::Confirm);
-                let questions = render::parse_questions(&args);
-                crate::app::dialogs::question::open(self, questions, request_id);
                 LoopAction::Continue
             }
         }

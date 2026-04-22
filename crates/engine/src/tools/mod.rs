@@ -1,4 +1,3 @@
-mod ask_user_question;
 pub(crate) mod background;
 mod bash;
 mod bash_background;
@@ -53,7 +52,6 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
     }
 }
 
-pub use ask_user_question::AskUserQuestionTool;
 pub use background::{ProcessInfo, ProcessRegistry};
 pub use bash::BashTool;
 pub use bash_background::{format_read_result, ReadProcessOutputTool, StopProcessTool};
@@ -525,7 +523,6 @@ pub fn build_tools(
     r.register(Box::new(BashTool));
     r.register(Box::new(GlobTool));
     r.register(Box::new(GrepTool));
-    r.register(Box::new(AskUserQuestionTool));
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(WebSearchTool));
     r.register(Box::new(NotebookEditTool {

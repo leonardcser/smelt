@@ -454,10 +454,6 @@ static NEXT_CHILD_REQUEST_ID: std::sync::atomic::AtomicU64 =
 /// A permission dialog deferred because the user was actively typing.
 enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
-    AskQuestion {
-        args: HashMap<String, serde_json::Value>,
-        request_id: u64,
-    },
 }
 
 // ── Supporting types ─────────────────────────────────────────────────────────
@@ -465,10 +461,6 @@ enum DeferredDialog {
 pub enum SessionControl {
     Continue,
     NeedsConfirm(Box<ConfirmRequest>),
-    NeedsAskQuestion {
-        args: HashMap<String, serde_json::Value>,
-        request_id: u64,
-    },
     Done,
 }
 
@@ -876,7 +868,7 @@ impl App {
                 }
             }
 
-            // ── Drain engine events (paused only for Confirm/AskQuestion) ──
+            // ── Drain engine events (paused only for Confirm) ──
             if !self.focused_float_blocks_agent() {
                 loop {
                     let ev = match self.engine.try_recv() {
@@ -1016,9 +1008,6 @@ impl App {
                     let deferred = pending_dialogs.pop_front().unwrap();
                     let ctrl = match deferred {
                         DeferredDialog::Confirm(req) => SessionControl::NeedsConfirm(req),
-                        DeferredDialog::AskQuestion { args, request_id } => {
-                            SessionControl::NeedsAskQuestion { args, request_id }
-                        }
                     };
                     let taken = self.agent.take();
                     let pending_ref: &[crate::app::PendingTool] =
@@ -1301,12 +1290,6 @@ impl App {
                                 message: None,
                             });
                         }
-                        EngineEvent::RequestAnswer { request_id, .. } => {
-                            self.engine.send(UiCommand::QuestionAnswer {
-                                request_id,
-                                answer: Some("User is not available (headless mode).".into()),
-                            });
-                        }
                         EngineEvent::TurnError { .. } | EngineEvent::TurnComplete { .. } => {
                             break;
                         }
@@ -1379,12 +1362,6 @@ impl App {
                             request_id,
                             approved,
                             message: None,
-                        });
-                    }
-                    EngineEvent::RequestAnswer { request_id, .. } => {
-                        self.engine.send(UiCommand::QuestionAnswer {
-                            request_id,
-                            answer: Some("User is not available (headless mode).".into()),
                         });
                     }
                     EngineEvent::Messages { .. } => {}
@@ -1641,12 +1618,6 @@ impl App {
                             ).await;
                             self.engine.send(UiCommand::PermissionDecision {
                                 request_id, approved, message,
-                            });
-                        }
-                        EngineEvent::RequestAnswer { request_id, .. } => {
-                            self.engine.send(UiCommand::QuestionAnswer {
-                                request_id,
-                                answer: Some("User is not available (subagent mode).".into()),
                             });
                         }
                         EngineEvent::Messages { messages, .. } => {

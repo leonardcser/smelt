@@ -5,9 +5,6 @@
 //! migration (Step 9.5b items 9–12).
 
 pub(crate) mod confirm;
-mod question;
-
-pub use question::{parse_questions, Question, QuestionOption};
 
 use crate::app::AgentToolEntry;
 use std::sync::{Arc, Mutex};

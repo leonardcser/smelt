@@ -909,7 +909,6 @@ fn print_tool_output<S: LayoutSink>(
         "edit_file" if !is_error => render_edit_output(out, output, args),
         "write_file" if !is_error => render_write_output(out, args),
         "edit_notebook" if !is_error => render_notebook_output(out, output, width),
-        "ask_user_question" if !is_error => render_question_output(out, content, width),
         "exit_plan_mode" if !is_error => render_plan_output(out, args, width),
         "bash" | "read_process_output" | "stop_process" => {
             render_wrapped_output(out, content, is_error, width)
@@ -1039,45 +1038,6 @@ fn render_notebook_output<S: LayoutSink>(out: &mut S, output: &ToolOutput, width
             0,
             0,
         );
-    }
-    rows
-}
-
-fn render_question_output<S: LayoutSink>(out: &mut S, content: &str, width: usize) -> u16 {
-    let max_cols = width.saturating_sub(3);
-    let mut rows = 0u16;
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content) {
-        for (question, answer) in &map {
-            let answer_str = match answer {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Array(arr) => arr
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                other => other.to_string(),
-            };
-            let combined = format!("{} {}", question, answer_str);
-            let segs = wrap_line(&combined, max_cols);
-            if segs.len() > 1 {
-                out.mark_wrapped();
-            }
-            for seg in &segs {
-                print_dim(out, &format!("  {}", seg));
-                out.newline();
-                rows += 1;
-            }
-        }
-    } else {
-        let segs = wrap_line(content, max_cols);
-        if segs.len() > 1 {
-            out.mark_wrapped();
-        }
-        for seg in &segs {
-            print_dim(out, &format!("  {}", seg));
-            out.newline();
-            rows += 1;
-        }
     }
     rows
 }

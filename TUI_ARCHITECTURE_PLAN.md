@@ -582,6 +582,18 @@ The 2026-04-22 survey identified ~1750 LOC of candidate
 dialogs/commands. Staged in three tiers:
 
 **F1 · Keystone: `ask_user_question.lua`** (proves the pattern).
+
+Decisions (2026-04-22):
+- **Multi-question handling: iterate** — when the LLM sends N
+  questions, the plugin opens one `dialog.open` per question in a
+  loop. Simpler UX (one question at a time, no tabs), no new panel
+  kind needed.
+- **Answer wire format**: match the old JSON-object shape (question
+  text as key) for LLM compatibility.
+- **Auto-load**: hardcode `require('smelt.plugins.ask_user_question')`
+  at Lua runtime init. Generalize to an autoload list later when
+  more core plugins migrate.
+
 Delete:
 - `crates/engine/src/tools/ask_user_question.rs` (82 LOC)
 - `crates/tui/src/app/dialogs/question.rs` (595 LOC)
