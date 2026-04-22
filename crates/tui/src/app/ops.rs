@@ -48,6 +48,19 @@ pub enum AppOp {
     ExportClipboard,
     /// Export transcript to file (Export dialog).
     ExportFile,
+    /// Rewind to a transcript block (Rewind dialog). `block_idx=None`
+    /// means "kept at current"; `restore_vim_insert` re-enters Insert
+    /// mode when the dialog was opened from there.
+    RewindToBlock {
+        block_idx: Option<usize>,
+        restore_vim_insert: bool,
+    },
+    /// Sync the App's permission state with what the Permissions
+    /// dialog has in memory. Fired on dismiss.
+    SyncPermissions {
+        session_entries: Vec<crate::render::PermissionEntry>,
+        workspace_rules: Vec<crate::workspace_permissions::Rule>,
+    },
     /// Background LLM call from a Lua plugin.
     BackgroundAsk {
         id: u64,

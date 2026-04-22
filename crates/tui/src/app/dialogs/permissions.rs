@@ -1,8 +1,11 @@
 use super::super::App;
-use super::DialogState;
+use crate::app::ops::AppOp;
 use crate::render::PermissionEntry;
 use crate::workspace_permissions::Rule;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::cell::RefCell;
+use std::rc::Rc;
+use ui::{Callback, CallbackResult, KeyBind, WinEvent};
 
 #[derive(Clone)]
 enum Item {
@@ -10,7 +13,7 @@ enum Item {
     Workspace(usize, usize),
 }
 
-pub struct Permissions {
+struct PermState {
     session_entries: Vec<PermissionEntry>,
     workspace_rules: Vec<Rule>,
     items: Vec<Item>,
@@ -54,7 +57,7 @@ pub(in crate::app) fn open(app: &mut App) {
         vec![(KeyCode::Char('q'), KeyModifiers::NONE)],
     );
 
-    let win_id = app.ui.dialog_open(
+    let Some(win_id) = app.ui.dialog_open(
         ui::FloatConfig {
             title: None,
             border: ui::Border::None,
@@ -66,61 +69,73 @@ pub(in crate::app) fn open(app: &mut App) {
             ui::PanelSpec::content(title_buf, ui::PanelHeight::Fixed(2)).focusable(false),
             ui::PanelSpec::list(list_buf, ui::PanelHeight::Fill),
         ],
+    ) else {
+        return;
+    };
+
+    let state = Rc::new(RefCell::new(PermState {
+        session_entries,
+        workspace_rules,
+        items,
+        pending_d: false,
+        list_buf,
+    }));
+
+    // `d` chord: first press arms pending_d, second press deletes. `dd`
+    // mirrors vim line-delete.
+    let state_d = state.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::char('d'),
+        Callback::Rust(Box::new(move |ctx| {
+            let mut s = state_d.borrow_mut();
+            if s.pending_d {
+                s.pending_d = false;
+                let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
+                if let Some(idx) = idx {
+                    s.delete_at(idx);
+                    s.refresh_list(ctx.ui);
+                }
+            } else {
+                s.pending_d = true;
+            }
+            CallbackResult::Consumed
+        })),
     );
 
-    if let Some(win_id) = win_id {
-        app.float_states.insert(
-            win_id,
-            Box::new(Permissions {
-                session_entries,
-                workspace_rules,
-                items,
-                pending_d: false,
-                list_buf,
-            }),
-        );
-    }
+    let state_bs = state.clone();
+    app.ui.win_set_keymap(
+        win_id,
+        KeyBind::plain(KeyCode::Backspace),
+        Callback::Rust(Box::new(move |ctx| {
+            let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
+            if let Some(idx) = idx {
+                let mut s = state_bs.borrow_mut();
+                s.delete_at(idx);
+                s.refresh_list(ctx.ui);
+            }
+            CallbackResult::Consumed
+        })),
+    );
+
+    let ops = app.lua.ops_handle();
+    let state_dismiss = state.clone();
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            let s = state_dismiss.borrow();
+            ops.push(AppOp::SyncPermissions {
+                session_entries: s.session_entries.clone(),
+                workspace_rules: s.workspace_rules.clone(),
+            });
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
 }
 
-impl DialogState for Permissions {
-    fn handle_key(
-        &mut self,
-        app: &mut App,
-        win: ui::WinId,
-        code: KeyCode,
-        mods: KeyModifiers,
-    ) -> Option<ui::KeyResult> {
-        if self.pending_d {
-            self.pending_d = false;
-            if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
-                if let Some(idx) = app.ui.dialog_mut(win).and_then(|d| d.selected_index()) {
-                    self.delete_at(idx);
-                    self.refresh_list(app);
-                }
-                return Some(ui::KeyResult::Consumed);
-            }
-        }
-        if code == KeyCode::Char('d') && mods == KeyModifiers::NONE {
-            self.pending_d = true;
-            return Some(ui::KeyResult::Consumed);
-        }
-        if code == KeyCode::Backspace {
-            if let Some(idx) = app.ui.dialog_mut(win).and_then(|d| d.selected_index()) {
-                self.delete_at(idx);
-                self.refresh_list(app);
-            }
-            return Some(ui::KeyResult::Consumed);
-        }
-        self.pending_d = false;
-        None
-    }
-
-    fn on_dismiss(&mut self, app: &mut App, _win: ui::WinId) {
-        app.sync_permissions(self.session_entries.clone(), self.workspace_rules.clone());
-    }
-}
-
-impl Permissions {
+impl PermState {
     fn delete_at(&mut self, idx: usize) {
         let Some(item) = self.items.get(idx).cloned() else {
             return;
@@ -141,13 +156,13 @@ impl Permissions {
         self.items = build_items(&self.session_entries, &self.workspace_rules);
     }
 
-    fn refresh_list(&self, app: &mut App) {
+    fn refresh_list(&self, ui: &mut ui::Ui) {
         let lines: Vec<String> = self
             .items
             .iter()
             .map(|item| format_label(&self.session_entries, &self.workspace_rules, item))
             .collect();
-        if let Some(buf) = app.ui.buf_mut(self.list_buf) {
+        if let Some(buf) = ui.buf_mut(self.list_buf) {
             buf.set_all_lines(lines);
         }
     }
