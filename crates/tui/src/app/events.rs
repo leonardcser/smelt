@@ -1991,6 +1991,18 @@ impl App {
                         self.pending_agent_clear_pending = true;
                     }
                 }
+                crate::app::ops::AppOp::OpenAgentsList { initial_selected } => {
+                    super::dialogs::agents::open_list(self, initial_selected);
+                }
+                crate::app::ops::AppOp::OpenAgentsDetail {
+                    agent_id,
+                    parent_selected,
+                } => {
+                    super::dialogs::agents::open_detail(self, agent_id, parent_selected);
+                }
+                crate::app::ops::AppOp::RefreshAgentCounts => {
+                    self.refresh_agent_counts();
+                }
                 crate::app::ops::AppOp::LoadSession(id) => {
                     if let Some(loaded) = crate::session::load(&id) {
                         self.load_session(loaded);
