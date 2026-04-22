@@ -299,4 +299,3 @@ fn render_notebook_preview<S: LayoutSink>(
         );
     }
 }
-

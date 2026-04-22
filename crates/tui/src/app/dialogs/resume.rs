@@ -439,4 +439,3 @@ fn refresh_title(ui: &mut ui::Ui, title_buf: ui::BufId, workspace_only: bool, qu
     buf.set_all_lines(vec![line]);
     buf.add_highlight(0, 0, label.len() as u16, ui::buffer::SpanStyle::dim());
 }
-
