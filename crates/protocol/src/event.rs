@@ -7,6 +7,20 @@ use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMe
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Auxiliary LLM task — routed to a dedicated auxiliary model when the
+/// engine config has one, otherwise falls back to the primary model.
+/// `Btw` is the generic escape hatch (plain `/btw` prompts, plugin
+/// `engine.ask` calls without a specific task tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryTask {
+    Title,
+    Prediction,
+    Compaction,
+    #[default]
+    Btw,
+}
+
 /// A tool defined by a Lua plugin. Sent from TUI to engine so the engine
 /// can include it in LLM tool definitions and proxy execution back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +128,8 @@ pub enum EngineEvent {
     /// Predicted next user input (ghost text autocomplete).
     InputPrediction { text: String, generation: u64 },
 
-    /// Response to a `UiCommand::BackgroundAsk` request.
-    BackgroundAskResponse { id: u64, content: String },
+    /// Response to a `UiCommand::EngineAsk` request.
+    EngineAskResponse { id: u64, content: String },
 
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
@@ -263,15 +277,16 @@ pub enum UiCommand {
         generation: u64,
     },
 
-    /// Generic background LLM call from a Lua plugin. The engine spawns a
-    /// one-shot request and returns the response as `BackgroundAskResponse`.
-    BackgroundAsk {
+    /// One-shot LLM call initiated by a Lua plugin. The engine spawns
+    /// a fire-and-forget request routed through `task`'s auxiliary
+    /// model (or the primary model when the routing slot is empty) and
+    /// returns the response as `EngineAskResponse`.
+    EngineAsk {
         id: u64,
         system: String,
         messages: Vec<Message>,
-        /// Auxiliary task for model routing. When `None`, uses the primary model.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        task: Option<String>,
+        #[serde(default)]
+        task: AuxiliaryTask,
     },
 
     /// Result of a plugin tool execution (response to `ExecutePluginTool`).

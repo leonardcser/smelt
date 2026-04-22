@@ -230,13 +230,7 @@ pub struct ResolvedModel {
     pub config: ModelConfig,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuxiliaryTask {
-    Title,
-    Prediction,
-    Compaction,
-    Btw,
-}
+pub use protocol::AuxiliaryTask;
 
 #[derive(Debug, Clone)]
 pub struct AuxiliaryRouting {
