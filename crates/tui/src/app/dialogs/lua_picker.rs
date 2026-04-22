@@ -53,9 +53,12 @@ pub fn open(app: &mut App, picker_id: u64, opts_key: mlua::RegistryKey) -> Resul
         ..Default::default()
     };
 
+    // Lua picker floats default to non-reversed (top-down) since they
+    // don't necessarily dock above a prompt — the plugin controls the
+    // placement.
     let win_id = app
         .ui
-        .picker_open(float_config, items, 0, Default::default())
+        .picker_open(float_config, items, 0, Default::default(), false)
         .ok_or_else(|| "picker.open: failed to create float".to_string())?;
 
     let state = Rc::new(RefCell::new(PickerState {

@@ -184,6 +184,12 @@ impl InputState {
                 comp.move_down();
                 Some(Action::Redraw)
             }
+            // Completer pickers dock *above* the prompt and paint
+            // reversed — logical index 0 (best match) sits on the
+            // bottom visual row. Arrow keys follow visual direction:
+            // Up moves toward higher logical indices (worse matches,
+            // higher on screen); Down moves toward lower indices
+            // (better matches, bottom of the picker).
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
             })
@@ -196,7 +202,7 @@ impl InputState {
                 if comp.results.len() <= 1 && !is_picker {
                     return None;
                 }
-                comp.move_up();
+                comp.move_down();
                 self.live_preview_picker();
                 Some(Action::Redraw)
             }
@@ -213,7 +219,7 @@ impl InputState {
                 if comp.results.len() <= 1 && !is_picker {
                     return None;
                 }
-                comp.move_down();
+                comp.move_up();
                 self.live_preview_picker();
                 Some(Action::Redraw)
             }

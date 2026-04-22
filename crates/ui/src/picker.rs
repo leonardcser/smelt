@@ -73,6 +73,11 @@ pub struct Picker {
     max_visible_rows: u16,
     /// Cached scroll_top computed each `prepare`.
     scroll_top: usize,
+    /// When true, logical index 0 is painted on the *bottom* visible
+    /// row and the list grows upward. Used for pickers that dock above
+    /// the prompt (completer `/`, cmdline `:`): the best match is
+    /// closest to where the user is typing.
+    reversed: bool,
 }
 
 impl Picker {
@@ -83,6 +88,7 @@ impl Picker {
             style: PickerStyle::default(),
             max_visible_rows: u16::MAX,
             scroll_top: 0,
+            reversed: false,
         }
     }
 
@@ -94,6 +100,15 @@ impl Picker {
     pub fn with_max_rows(mut self, rows: u16) -> Self {
         self.max_visible_rows = rows;
         self
+    }
+
+    pub fn with_reversed(mut self, reversed: bool) -> Self {
+        self.reversed = reversed;
+        self
+    }
+
+    pub fn reversed(&self) -> bool {
+        self.reversed
     }
 
     pub fn set_items(&mut self, items: Vec<PickerItem>) {
@@ -175,12 +190,13 @@ impl Component for Picker {
 
         if self.items.is_empty() {
             let label = "(no matches)";
+            let row: u16 = if self.reversed { h - 1 } else { 0 };
             let mut col: u16 = 1;
             for ch in label.chars() {
                 if col >= w {
                     break;
                 }
-                slice.set(col, 0, ch, self.style.unselected_fg);
+                slice.set(col, row, ch, self.style.unselected_fg);
                 col = col.saturating_add(1);
             }
             return;
@@ -193,7 +209,15 @@ impl Component for Picker {
         let end = (self.scroll_top + h as usize).min(self.items.len());
         for (row_i, item_i) in (self.scroll_top..end).enumerate() {
             let item = &self.items[item_i];
-            let row = row_i as u16;
+            // Reversed pickers paint logical index 0 at the bottom row
+            // so the "best match" sits closest to the prompt. Every
+            // higher index steps one row upward. Non-reversed mode is
+            // the regular top-down list.
+            let row = if self.reversed {
+                (h - 1).saturating_sub(row_i as u16)
+            } else {
+                row_i as u16
+            };
             let is_selected = item_i == self.selected;
             let label_style = if is_selected {
                 self.style.selected_fg

@@ -1366,7 +1366,11 @@ impl App {
                 description_fg: ui::Style::dim(),
                 background: ui::Style::default(),
             };
-            open_win = self.ui.picker_open(config, items.clone(), selected, style);
+            // The completer dock above the prompt — reverse the visual
+            // so the best match lands on the bottom row.
+            open_win = self
+                .ui
+                .picker_open(config, items.clone(), selected, style, true);
         }
 
         if let Some(win) = open_win {
