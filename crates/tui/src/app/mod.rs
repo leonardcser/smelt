@@ -704,6 +704,7 @@ impl App {
             input_display_buf,
         };
         app.lua.set_process_registry(app.engine.processes.clone());
+        app.lua.set_agent_snapshots(app.agent_snapshots.clone());
         app
     }
 

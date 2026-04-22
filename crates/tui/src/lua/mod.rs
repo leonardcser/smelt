@@ -297,6 +297,10 @@ pub(crate) struct LuaShared {
     /// Background process registry. Installed by `App::new` so Lua
     /// plugins (e.g. `/ps`) can enumerate and kill procs.
     pub(crate) processes: Mutex<Option<engine::tools::ProcessRegistry>>,
+    /// Shared list of subagent snapshots, installed by `App::new` so
+    /// `smelt.api.agent.snapshots` can return live prompt / tool-call /
+    /// cost data without touching App directly.
+    pub(crate) agent_snapshots: Mutex<Option<crate::render::SharedSnapshots>>,
     /// Task-runtime inbox. Dialog callbacks / other UI events that need
     /// to *resume a Lua coroutine* push here instead of through `ops`.
     /// Keeps the reducer's `AppOp` enum free of Lua-task variants; the
@@ -343,6 +347,26 @@ pub enum TaskEvent {
         /// resolver can look up the picked entry by index.
         opts: mlua::RegistryKey,
     },
+    /// An input panel on an open dialog had its text edited. Lua pump
+    /// invokes the registered `on_change(ctx)` callback (non-closing,
+    /// same shape as `KeymapFired`).
+    InputChanged {
+        callback_id: u64,
+        dialog_id: u64,
+        win_id: ui::WinId,
+        selected_index: Option<usize>,
+        inputs: Vec<(String, String)>,
+    },
+    /// The engine tick fired while an `on_tick` callback is registered
+    /// on a dialog. Routes through the Lua pump to the handler; keeps
+    /// the dialog open.
+    TickFired {
+        callback_id: u64,
+        dialog_id: u64,
+        win_id: ui::WinId,
+        selected_index: Option<usize>,
+        inputs: Vec<(String, String)>,
+    },
 }
 
 impl Default for LuaShared {
@@ -360,6 +384,7 @@ impl Default for LuaShared {
             history: Mutex::new(Arc::new(Vec::new())),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             processes: Mutex::new(None),
+            agent_snapshots: Mutex::new(None),
             task_inbox: Mutex::new(Vec::new()),
         }
     }
@@ -946,6 +971,68 @@ impl LuaRuntime {
             "kill",
             push_op!(lua, shared, |pid: u32| AppOp::KillAgent(pid)),
         )?;
+        // smelt.api.agent.snapshots() →
+        //   [{ agent_id, prompt, context_tokens?, cost_usd,
+        //      tool_calls = [{ call_id, tool_name, summary, status,
+        //                      elapsed_ms? }] }]
+        // Live aggregated state of every tracked subagent — prompt is
+        // the original spawn task, tool_calls is the append-only log
+        // of tool activity. Drives `/agents` detail rendering.
+        {
+            let s = shared.clone();
+            agent_tbl.set(
+                "snapshots",
+                lua.create_function(move |lua, ()| {
+                    let snaps = {
+                        let Ok(guard) = s.agent_snapshots.lock() else {
+                            return lua.create_table();
+                        };
+                        let Some(ref shared_snaps) = *guard else {
+                            return lua.create_table();
+                        };
+                        shared_snaps
+                            .lock()
+                            .map(|v| v.clone())
+                            .unwrap_or_default()
+                    };
+                    let out = lua.create_table()?;
+                    for (i, snap) in snaps.into_iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("agent_id", snap.agent_id)?;
+                        row.set("prompt", snap.prompt.as_str())?;
+                        row.set("cost_usd", snap.cost_usd)?;
+                        if let Some(t) = snap.context_tokens {
+                            row.set("context_tokens", t)?;
+                        }
+                        let calls = lua.create_table()?;
+                        for (j, call) in snap.tool_calls.into_iter().enumerate() {
+                            let c = lua.create_table()?;
+                            c.set("call_id", call.call_id)?;
+                            c.set("tool_name", call.tool_name)?;
+                            c.set("summary", call.summary)?;
+                            c.set(
+                                "status",
+                                match call.status {
+                                    crate::render::ToolStatus::Pending => "pending",
+                                    crate::render::ToolStatus::Confirm => "confirm",
+                                    crate::render::ToolStatus::Ok => "ok",
+                                    crate::render::ToolStatus::Err => "err",
+                                    crate::render::ToolStatus::Denied => "denied",
+                                },
+                            )?;
+                            if let Some(d) = call.elapsed {
+                                c.set("elapsed_ms", d.as_millis() as u64)?;
+                            }
+                            calls.set(j + 1, c)?;
+                        }
+                        row.set("tool_calls", calls)?;
+                        out.set(i + 1, row)?;
+                    }
+                    Ok(out)
+                })?,
+            )?;
+        }
+
         // smelt.api.agent.peek(pid, max_lines?) → [line]
         // Last N lines of the agent's log file under its session_dir.
         // Returns an empty table for unknown pids or unreadable logs.
@@ -1559,6 +1646,15 @@ impl LuaRuntime {
         }
     }
 
+    /// Install the shared subagent-snapshot list so
+    /// `smelt.api.agent.snapshots()` can return live prompt /
+    /// tool-call / cost data. Called once at App start.
+    pub fn set_agent_snapshots(&self, snaps: crate::render::SharedSnapshots) {
+        if let Ok(mut s) = self.shared.agent_snapshots.lock() {
+            *s = Some(snaps);
+        }
+    }
+
     /// Clear the snapshot fields after dispatching.
     pub fn clear_context(&self) {
         if let Ok(mut o) = self.shared.ops.lock() {
@@ -1840,6 +1936,48 @@ impl LuaRuntime {
                         },
                     };
                     self.resolve_picker(picker_id, value);
+                }
+                TaskEvent::InputChanged {
+                    callback_id,
+                    dialog_id,
+                    win_id,
+                    selected_index,
+                    inputs,
+                }
+                | TaskEvent::TickFired {
+                    callback_id,
+                    dialog_id,
+                    win_id,
+                    selected_index,
+                    inputs,
+                } => {
+                    let func = {
+                        let Ok(cbs) = self.shared.callbacks.lock() else {
+                            continue;
+                        };
+                        cbs.get(&callback_id)
+                            .filter(|h| !h.dead)
+                            .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
+                    };
+                    let Some(func) = func else { continue };
+                    match crate::app::dialogs::lua_dialog::build_keymap_ctx(
+                        &self.lua,
+                        self.shared.clone(),
+                        dialog_id,
+                        win_id,
+                        selected_index,
+                        inputs,
+                    ) {
+                        Ok(ctx) => {
+                            if let Err(e) = func.call::<()>(ctx) {
+                                extra_ops
+                                    .push(AppOp::NotifyError(format!("dialog callback: {e}")));
+                            }
+                        }
+                        Err(e) => {
+                            extra_ops.push(AppOp::NotifyError(format!("dialog ctx: {e}")));
+                        }
+                    }
                 }
             }
         }

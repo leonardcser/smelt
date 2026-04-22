@@ -1160,13 +1160,15 @@ mod tests {
         let area = Rect::new(0, 0, 20, 3);
         dlg.resolve_panel_rects(area);
         // Type "hi" into the widget via the dialog's key routing.
+        // TextInput emits a `text_changed` action per edit so callers
+        // can subscribe to `WinEvent::TextChanged`.
         assert_eq!(
             dlg.handle_key(KeyCode::Char('h'), KeyModifiers::NONE),
-            KeyResult::Consumed
+            KeyResult::Action("text_changed".into())
         );
         assert_eq!(
             dlg.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
-            KeyResult::Consumed
+            KeyResult::Action("text_changed".into())
         );
         // Widget draws the typed text.
         let mut grid = Grid::new(20, 3);

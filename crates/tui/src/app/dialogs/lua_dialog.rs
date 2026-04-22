@@ -42,6 +42,10 @@ struct OptionEntry {
 struct InputEntry {
     name: String,
     panel_index: usize,
+    /// Optional `on_change(ctx)` callback id. When present, each
+    /// keystroke edit fires `TaskEvent::InputChanged`; when absent,
+    /// edits are consumed silently.
+    on_change: Option<u64>,
 }
 
 /// In-closure state for a Lua dialog. Held by `Rc<RefCell>` so the
@@ -54,6 +58,11 @@ struct DialogState {
     /// `shared.callbacks` ids for each registered `on_press`. Removed
     /// on dialog close so the registry doesn't leak.
     keymap_callback_ids: Vec<u64>,
+    /// `shared.callbacks` ids for each input panel's `on_change`.
+    /// Removed alongside the keymap ids on dialog close.
+    input_change_callback_ids: Vec<u64>,
+    /// Optional dialog-level `on_tick` callback id.
+    on_tick_id: Option<u64>,
 }
 
 /// Open the dialog described by the Lua `opts_key` table. On success,
@@ -133,7 +142,15 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                 }
                 let widget = Box::new(ti);
                 panel_specs.push(PanelSpec::widget(widget, PanelHeight::Fit));
-                inputs.push(InputEntry { name, panel_index });
+                let on_change = panel
+                    .get::<mlua::Function>("on_change")
+                    .ok()
+                    .and_then(|f| app.lua.register_callback(f).ok());
+                inputs.push(InputEntry {
+                    name,
+                    panel_index,
+                    on_change,
+                });
             }
             other => return Err(format!("unknown panel kind: {other}")),
         }
@@ -194,11 +211,25 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         )
         .ok_or_else(|| "failed to open dialog window".to_string())?;
 
+    // Harvest on_change callback ids for cleanup on close.
+    let input_change_callback_ids: Vec<u64> =
+        inputs.iter().filter_map(|i| i.on_change).collect();
+
+    // Optional top-level `on_tick = fn(ctx)` — fired every engine tick
+    // while the dialog is open. Lets plugins refresh from live
+    // external state (registry, process list) without reopening.
+    let on_tick_id: Option<u64> = opts
+        .get::<mlua::Function>("on_tick")
+        .ok()
+        .and_then(|f| app.lua.register_callback(f).ok());
+
     let state = Rc::new(RefCell::new(DialogState {
         dialog_id,
         options,
         inputs,
         keymap_callback_ids,
+        input_change_callback_ids,
+        on_tick_id,
     }));
 
     let ops = app.lua.ops_handle();
@@ -221,6 +252,12 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
             let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
             for id in &s.keymap_callback_ids {
                 ops_submit.remove_callback(*id);
+            }
+            for id in &s.input_change_callback_ids {
+                ops_submit.remove_callback(*id);
+            }
+            if let Some(id) = s.on_tick_id {
+                ops_submit.remove_callback(id);
             }
             ops_submit.push_task_event(TaskEvent::DialogResolved {
                 dialog_id: s.dialog_id,
@@ -260,6 +297,63 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         );
     }
 
+    // Input panel text-change events. If any input panel registered an
+    // `on_change` callback, install a single `WinEvent::TextChanged`
+    // handler that fans out to per-input callbacks (there's usually
+    // only one input panel per dialog, but the dispatch handles
+    // multiple).
+    if state.borrow().inputs.iter().any(|i| i.on_change.is_some()) {
+        let state_c = state.clone();
+        let ops_c = ops.clone();
+        app.ui.win_on_event(
+            win_id,
+            WinEvent::TextChanged,
+            Callback::Rust(Box::new(move |ctx| {
+                let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
+                let s = state_c.borrow();
+                let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
+                for input in &s.inputs {
+                    if let Some(cb_id) = input.on_change {
+                        ops_c.push_task_event(TaskEvent::InputChanged {
+                            callback_id: cb_id,
+                            dialog_id: s.dialog_id,
+                            win_id: ctx.win,
+                            selected_index: idx,
+                            inputs: inputs.clone(),
+                        });
+                    }
+                }
+                CallbackResult::Consumed
+            })),
+        );
+    }
+
+    // Dialog-level tick callback. Fires on every engine tick while the
+    // dialog is open, lets the plugin refresh panel buffers from live
+    // external state (subagent registry, process list, session list
+    // cache). No payload — callback re-queries whatever it needs.
+    if let Some(tick_cb_id) = state.borrow().on_tick_id {
+        let state_t = state.clone();
+        let ops_t = ops.clone();
+        app.ui.win_on_event(
+            win_id,
+            WinEvent::Tick,
+            Callback::Rust(Box::new(move |ctx| {
+                let idx = ctx.ui.dialog_mut(ctx.win).and_then(|d| d.selected_index());
+                let s = state_t.borrow();
+                let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
+                ops_t.push_task_event(TaskEvent::TickFired {
+                    callback_id: tick_cb_id,
+                    dialog_id: s.dialog_id,
+                    win_id: ctx.win,
+                    selected_index: idx,
+                    inputs,
+                });
+                CallbackResult::Consumed
+            })),
+        );
+    }
+
     let state_dismiss = state;
     app.ui.win_on_event(
         win_id,
@@ -268,6 +362,12 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
             let s = state_dismiss.borrow();
             for id in &s.keymap_callback_ids {
                 ops.remove_callback(*id);
+            }
+            for id in &s.input_change_callback_ids {
+                ops.remove_callback(*id);
+            }
+            if let Some(id) = s.on_tick_id {
+                ops.remove_callback(id);
             }
             ops.push_task_event(TaskEvent::DialogResolved {
                 dialog_id: s.dialog_id,
