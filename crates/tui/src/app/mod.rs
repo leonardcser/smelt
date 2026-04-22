@@ -99,6 +99,17 @@ pub struct App {
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     pub context_window: Option<u32>,
+    /// Latest observed input-token count for the active session.
+    pub context_tokens: Option<u32>,
+    /// Short task label (slug) shown on the status bar after the throbber.
+    pub task_label: Option<String>,
+    /// A permission dialog is waiting for the user to stop typing.
+    pub pending_dialog: bool,
+    /// Custom status items from a Lua provider. When `Some`, these
+    /// replace the built-in status spans entirely.
+    pub custom_status_items: Option<Vec<render::status::StatusItem>>,
+    /// Ephemeral notification shown above the prompt, dismissed on any key.
+    pub notification: Option<render::screen::Notification>,
     pub settings: state::ResolvedSettings,
     pub multi_agent: bool,
     /// Human-readable name for this agent.
@@ -486,9 +497,7 @@ impl App {
         };
         crate::completer::set_multi_agent(multi_agent);
         let mut screen = Screen::new();
-        screen.set_model_label(model.clone());
-        screen.set_reasoning_effort(reasoning_effort);
-        screen.apply_settings(&settings);
+        screen.set_show_thinking(settings.show_thinking);
 
         let cwd = std::env::current_dir()
             .ok()
@@ -573,6 +582,11 @@ impl App {
             session: session::Session::new(),
             shared_session,
             context_window: None,
+            context_tokens: None,
+            task_label: None,
+            pending_dialog: false,
+            custom_status_items: None,
+            notification: None,
             settings,
             multi_agent,
             agent_id: String::new(),
@@ -656,6 +670,38 @@ impl App {
         s
     }
 
+    pub fn notify(&mut self, message: String) {
+        self.notification = Some(render::screen::Notification {
+            message,
+            is_error: false,
+        });
+        self.screen.mark_dirty();
+    }
+
+    pub fn notify_error(&mut self, message: String) {
+        self.notification = Some(render::screen::Notification {
+            message,
+            is_error: true,
+        });
+        self.screen.mark_dirty();
+    }
+
+    pub fn dismiss_notification(&mut self) {
+        if self.notification.is_some() {
+            self.notification = None;
+            self.screen.mark_dirty();
+        }
+    }
+
+    pub fn set_task_label(&mut self, label: String) {
+        self.task_label = if label.trim().is_empty() {
+            None
+        } else {
+            Some(label)
+        };
+        self.screen.mark_dirty();
+    }
+
     // ── Unified event loop ───────────────────────────────────────────────
 
     /// Set the receiver for child agent permission requests (from socket bridge).
@@ -682,21 +728,22 @@ impl App {
         if !self.history.is_empty() {
             self.restore_screen();
             if let Some(tokens) = self.session.context_tokens {
-                self.screen.set_context_tokens(tokens);
+                self.context_tokens = Some(tokens);
             }
             if let Some(ref slug) = self.session.slug {
-                self.screen.set_task_label(slug.clone());
+                self.set_task_label(slug.clone());
             }
+            self.screen.mark_dirty();
             self.screen.finish_turn();
             self.transcript_window.scroll_top = u16::MAX;
         }
         if let Some(message) = self.startup_auth_error.take() {
-            self.screen.notify_error(message);
+            self.notify_error(message);
         }
 
         // Surface any Lua load errors on the first frame.
         if let Some(err) = self.lua.load_error.take() {
-            self.screen.notify_error(format!("lua init: {err}"));
+            self.notify_error(format!("lua init: {err}"));
         }
         self.snapshot_engine_context(false);
         self.lua.emit(crate::lua::AutocmdEvent::SessionStart);
@@ -718,8 +765,7 @@ impl App {
                 self.input.open_settings(&self.settings_state());
                 self.screen.mark_dirty();
             } else if let Some(reason) = classify_startup_command(trimmed) {
-                self.screen
-                    .notify_error(format!("\"{}\" {}", trimmed, reason));
+                self.notify_error(format!("\"{}\" {}", trimmed, reason));
             } else {
                 self.screen.mark_dirty();
                 let content = Content::text(msg.clone());
@@ -744,7 +790,8 @@ impl App {
             self.snapshot_engine_context(self.agent.is_some());
             self.lua.tick_timers();
             self.drive_lua_tasks();
-            self.screen.set_custom_status(self.lua.tick_statusline());
+            self.custom_status_items = self.lua.tick_statusline();
+            self.screen.mark_dirty();
             for _id in self.screen.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
@@ -763,9 +810,7 @@ impl App {
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
                     self.context_window = result;
-                    if let Some(w) = result {
-                        self.screen.set_context_window(w);
-                    }
+                    self.screen.mark_dirty();
                     ctx_rx = None;
                 }
             }
@@ -892,7 +937,8 @@ impl App {
             // If agent was cancelled while dialogs were pending, discard them.
             if self.agent.is_none() && !pending_dialogs.is_empty() {
                 pending_dialogs.clear();
-                self.screen.set_pending_dialog(false);
+                self.pending_dialog = false;
+                self.screen.mark_dirty();
             }
             // Re-dispatch queued dialogs.  Each goes through dispatch_control
             // so auto-approval checks re-run ("always allow" → auto-approve rest).
@@ -930,7 +976,8 @@ impl App {
                         self.discard_turn(false);
                     }
                 }
-                self.screen.set_pending_dialog(!pending_dialogs.is_empty());
+                self.pending_dialog = !pending_dialogs.is_empty();
+                self.screen.mark_dirty();
             }
 
             // ── Render ───────────────────────────────────────────────────

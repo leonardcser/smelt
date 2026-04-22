@@ -347,7 +347,7 @@ impl App {
                     if self.screen.working_throbber() == Some(render::Throbber::Compacting) {
                         self.compact_epoch += 1;
                         self.screen.set_throbber(render::Throbber::Interrupted);
-                        self.screen.notify("compaction cancelled".into());
+                        self.notify("compaction cancelled".into());
                         if restore_mode == Some(vim::ViMode::Insert) {
                             self.input.set_vim_mode(vim::ViMode::Insert);
                         }
@@ -600,7 +600,7 @@ impl App {
                 self.screen.center_input_scroll();
             }
             Action::NotifyError(msg) => {
-                self.screen.notify_error(msg);
+                self.notify_error(msg);
                 self.screen.mark_dirty();
             }
             Action::MenuResult(result) => return EventOutcome::MenuResult(result),
@@ -646,7 +646,7 @@ impl App {
                 EventOutcome::Redraw
             }
             Action::NotifyError(msg) => {
-                self.screen.notify_error(msg);
+                self.notify_error(msg);
                 EventOutcome::Redraw
             }
             Action::Noop => EventOutcome::Noop,
@@ -661,12 +661,12 @@ impl App {
         let tmp = match tempfile::Builder::new().suffix(".md").tempfile() {
             Ok(f) => f,
             Err(e) => {
-                self.screen.notify_error(format!("tmpfile: {e}"));
+                self.notify_error(format!("tmpfile: {e}"));
                 return;
             }
         };
         if let Err(e) = std::fs::write(tmp.path(), &self.input.buf) {
-            self.screen.notify_error(format!("write tmp: {e}"));
+            self.notify_error(format!("write tmp: {e}"));
             return;
         }
 
@@ -687,14 +687,13 @@ impl App {
                 Ok(new) => {
                     crate::api::buf::replace(&mut self.input, new, None);
                 }
-                Err(e) => self.screen.notify_error(format!("read tmp: {e}")),
+                Err(e) => self.notify_error(format!("read tmp: {e}")),
             },
             Ok(s) => {
-                self.screen
-                    .notify_error(format!("{editor} exited with {s}"));
+                self.notify_error(format!("{editor} exited with {s}"));
             }
             Err(e) => {
-                self.screen.notify_error(format!("{editor}: {e}"));
+                self.notify_error(format!("{editor}: {e}"));
             }
         }
     }
@@ -714,8 +713,8 @@ impl App {
     /// Handle overlay keys (notification dismiss).
     /// Returns `Some(EventOutcome)` if the event was consumed.
     fn handle_overlay_keys(&mut self, ev: &Event) -> Option<EventOutcome> {
-        if matches!(ev, Event::Key(_)) && self.screen.has_notification() {
-            self.screen.dismiss_notification();
+        if matches!(ev, Event::Key(_)) && self.notification.is_some() {
+            self.dismiss_notification();
         }
 
         None
@@ -829,7 +828,7 @@ impl App {
         let status_bg = Color::AnsiValue(233);
 
         // Custom status items (from Lua plugins) override everything.
-        if let Some(items) = self.screen.custom_status_items() {
+        if let Some(items) = self.custom_status_items.as_ref() {
             let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
             let (left, right) = spans_to_segments(&mut spans, width, status_bg);
             if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
@@ -865,9 +864,9 @@ impl App {
             });
             let label = if is_compacting {
                 "compacting ".into()
-            } else if self.screen.show_slug() {
-                self.screen
-                    .task_label()
+            } else if self.settings.show_slug {
+                self.task_label
+                    .as_deref()
                     .map(|l| format!("{l} "))
                     .unwrap_or_else(|| "working ".into())
             } else {
@@ -880,8 +879,8 @@ impl App {
                 truncatable: true,
                 ..StatusSpan::default()
             });
-        } else if self.screen.show_slug() {
-            if let Some(label) = self.screen.task_label() {
+        } else if self.settings.show_slug {
+            if let Some(label) = self.task_label.as_deref() {
                 spans.push(StatusSpan {
                     text: format!(" {label} "),
                     style: pill_style,
@@ -947,7 +946,7 @@ impl App {
         });
 
         // Throbber spans (timer, tok/s, etc.).
-        let throbber_spans = self.screen.throbber_spans();
+        let throbber_spans = self.screen.throbber_spans(self.settings.show_tps);
         let is_active = matches!(
             self.screen.working_throbber(),
             Some(render::Throbber::Working)
@@ -980,7 +979,7 @@ impl App {
         }
 
         // Permission pending (no Confirm float is showing yet).
-        if self.screen.pending_dialog() && !self.focused_float_blocks_agent() {
+        if self.pending_dialog && !self.focused_float_blocks_agent() {
             spans.push(StatusSpan {
                 text: "permission pending".into(),
                 style: render::StyleState {
@@ -996,7 +995,7 @@ impl App {
         }
 
         // Running procs.
-        let running_procs = self.screen.running_procs();
+        let running_procs = self.engine.processes.running_count();
         if running_procs > 0 {
             let label = if running_procs == 1 {
                 "1 proc".into()
@@ -1017,7 +1016,7 @@ impl App {
         }
 
         // Running agents.
-        let running_agents = self.screen.running_agents();
+        let running_agents = self.agents.len();
         if running_agents > 0 {
             let label = if running_agents == 1 {
                 "1 agent".into()
@@ -1092,9 +1091,13 @@ impl App {
         self.screen.refresh_cursor_owner_pub();
 
         // ── Compute layout ──
-        let natural_prompt_height =
-            self.screen
-                .measure_prompt_height_pub(&self.input, width, queued, prediction);
+        let natural_prompt_height = self.screen.measure_prompt_height_pub(
+            &self.input,
+            width,
+            queued,
+            prediction,
+            self.notification.is_some(),
+        );
         let layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
             term_width: term_w,
             term_height: term_h,
@@ -1151,15 +1154,15 @@ impl App {
         // Extract all immutable data first, then take the mutable btw borrow.
         let has_prompt_cursor = self.screen.cursor_owner() == render::screen::CursorOwner::Prompt;
         let prev_input_scroll = self.screen.prompt_input_scroll();
-        let notification = self.screen.notification().cloned();
+        let notification = self.notification.as_ref().cloned();
         let bar_info = render::prompt_data::BarInfo {
-            model_label: self.screen.model_label().map(|s| s.to_string()),
-            reasoning_effort: self.screen.reasoning_effort(),
-            show_tokens: self.screen.show_tokens(),
-            context_tokens: self.screen.context_tokens(),
-            context_window: self.screen.context_window(),
-            show_cost: self.screen.show_cost(),
-            session_cost_usd: self.screen.session_cost_usd(),
+            model_label: Some(self.model.clone()),
+            reasoning_effort: self.reasoning_effort,
+            show_tokens: self.settings.show_tokens,
+            context_tokens: self.context_tokens,
+            context_window: self.context_window,
+            show_cost: self.settings.show_cost,
+            session_cost_usd: self.session_cost_usd,
         };
 
         let prompt_output = {
@@ -1626,7 +1629,7 @@ impl App {
             reasoning_effort: self.reasoning_effort.label().to_string(),
             is_busy,
             session_cost: self.session_cost_usd,
-            context_tokens: self.screen.context_tokens(),
+            context_tokens: self.context_tokens,
             context_window: self.context_window,
             session_dir: session_dir.display().to_string(),
             session_id: self.session.id.clone(),
@@ -1746,12 +1749,12 @@ impl App {
                     dialog_id, opts, ..
                 } => {
                     if let Err(e) = super::dialogs::lua_dialog::open(self, dialog_id, opts) {
-                        self.screen.notify_error(format!("dialog.open: {e}"));
+                        self.notify_error(format!("dialog.open: {e}"));
                         self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
                     }
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {
-                    self.screen.notify_error(msg);
+                    self.notify_error(msg);
                 }
             }
         }
@@ -1761,8 +1764,8 @@ impl App {
     pub(super) fn apply_ops(&mut self, ops: Vec<crate::app::ops::AppOp>) {
         for op in ops {
             match op {
-                crate::app::ops::AppOp::Notify(msg) => self.screen.notify(msg),
-                crate::app::ops::AppOp::NotifyError(msg) => self.screen.notify_error(msg),
+                crate::app::ops::AppOp::Notify(msg) => self.notify(msg),
+                crate::app::ops::AppOp::NotifyError(msg) => self.notify_error(msg),
                 crate::app::ops::AppOp::RunCommand(line) => {
                     let _ = crate::api::cmd::run(self, &line);
                 }
@@ -1770,8 +1773,7 @@ impl App {
                     if let Some(mode) = Mode::parse(&mode_str) {
                         self.set_mode(mode);
                     } else {
-                        self.screen
-                            .notify_error(format!("unknown mode: {mode_str}"));
+                        self.notify_error(format!("unknown mode: {mode_str}"));
                     }
                 }
                 crate::app::ops::AppOp::SetModel(model) => {
@@ -1781,8 +1783,7 @@ impl App {
                     if let Some(effort) = ReasoningEffort::parse(&effort_str) {
                         self.set_reasoning_effort(effort);
                     } else {
-                        self.screen
-                            .notify_error(format!("unknown reasoning effort: {effort_str}"));
+                        self.notify_error(format!("unknown reasoning effort: {effort_str}"));
                     }
                 }
                 crate::app::ops::AppOp::Cancel => {
@@ -1790,7 +1791,7 @@ impl App {
                 }
                 crate::app::ops::AppOp::Compact(instructions) => {
                     if self.history.is_empty() {
-                        self.screen.notify_error("nothing to compact".into());
+                        self.notify_error("nothing to compact".into());
                     } else {
                         self.compact_history(instructions);
                     }
@@ -1886,7 +1887,8 @@ impl App {
                         self.load_session(loaded);
                         self.restore_screen();
                         if let Some(tokens) = self.session.context_tokens {
-                            self.screen.set_context_tokens(tokens);
+                            self.context_tokens = Some(tokens);
+                            self.screen.mark_dirty();
                         }
                         self.screen.finish_turn();
                         self.transcript_window.scroll_top = u16::MAX;
@@ -2021,7 +2023,7 @@ impl App {
                     if let Some(key) = on_select {
                         if let Ok(func) = self.lua.lua().registry_value::<mlua::Function>(&key) {
                             if let Err(e) = func.call::<()>(()) {
-                                self.screen.notify_error(format!("dialog on_select: {e}"));
+                                self.notify_error(format!("dialog on_select: {e}"));
                             }
                         }
                     }
@@ -2036,7 +2038,7 @@ impl App {
                             self.lua.resolve_dialog(dialog_id, v);
                         }
                         Err(e) => {
-                            self.screen.notify_error(format!("dialog resolve: {e}"));
+                            self.notify_error(format!("dialog resolve: {e}"));
                             self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
                         }
                     }
@@ -2627,7 +2629,7 @@ impl App {
         let snap = self
             .screen
             .transcript
-            .snapshot(tw, self.screen.show_thinking());
+            .snapshot(tw, self.settings.show_thinking);
         if snap.rows.is_empty() {
             return None;
         }
@@ -2695,7 +2697,7 @@ impl App {
                         }
                         CommandAction::Compact { instructions } => {
                             if self.history.is_empty() {
-                                self.screen.notify_error("nothing to compact".into());
+                                self.notify_error("nothing to compact".into());
                             } else {
                                 self.compact_history(instructions);
                             }

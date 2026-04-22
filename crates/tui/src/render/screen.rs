@@ -60,7 +60,6 @@ pub(crate) enum CursorOwner {
 use super::layout_out::{LayoutSink, SpanCollector};
 use super::prompt::PromptState;
 use super::selection::wrap_and_locate_cursor;
-use super::status::StatusItem;
 use super::working::WorkingState;
 use super::{emit_newlines, Frame, StdioBackend, TerminalBackend, SPINNER_FRAMES};
 use crate::input::InputState;
@@ -75,21 +74,10 @@ pub struct Screen {
     prompt: PromptState,
     dirty: bool,
     working: WorkingState,
-    context_tokens: Option<u32>,
-    context_window: Option<u32>,
-    session_cost_usd: f64,
-    model_label: Option<String>,
-    reasoning_effort: protocol::ReasoningEffort,
-    /// True once terminal auto-scrolling has pushed content into scrollback.
-    pub has_scrollback: bool,
-    /// A permission dialog is waiting for the user to stop typing.
-    pending_dialog: bool,
-    running_procs: usize,
-    running_agents: usize,
-    show_tps: bool,
-    show_tokens: bool,
-    show_cost: bool,
-    show_slug: bool,
+    /// Mirror of `App.settings.show_thinking`, consulted by the
+    /// transcript snapshot / copy paths. Synced by
+    /// `Screen::set_show_thinking` on every settings change until
+    /// Phase C3 deletes Screen and consumers take this as a parameter.
     show_thinking: bool,
     /// App-level focus (Prompt / History). Driven by App::app_focus.
     last_app_focus: crate::app::AppFocus,
@@ -107,15 +95,6 @@ pub struct Screen {
     pub(crate) layout: super::layout::LayoutState,
     /// Buffer-backed transcript projection — blocks projected at event time.
     pub(crate) transcript_projection: TranscriptProjection,
-    /// Ephemeral notification shown above the prompt, dismissed on any key.
-    notification: Option<Notification>,
-    /// Short task label (slug) shown on the status bar after the throbber.
-    task_label: Option<String>,
-
-    /// Custom status items from a Lua provider. When `Some`, these
-    /// replace the built-in status spans entirely.
-    custom_status_items: Option<Vec<StatusItem>>,
-
     /// Nvim-style command line rendered inside the status bar row.
     pub(crate) cmdline: super::cmdline::CmdlineState,
     /// Who owns the soft cursor this frame. Recomputed at the start of
@@ -151,19 +130,6 @@ impl Screen {
             prompt: PromptState::new(),
             dirty: true,
             working: WorkingState::new(),
-            context_tokens: None,
-            context_window: None,
-            session_cost_usd: 0.0,
-            model_label: None,
-            reasoning_effort: Default::default(),
-            has_scrollback: false,
-            pending_dialog: false,
-            running_procs: 0,
-            running_agents: 0,
-            show_tps: true,
-            show_tokens: true,
-            show_cost: true,
-            show_slug: true,
             show_thinking: true,
             last_app_focus: crate::app::AppFocus::Prompt,
             last_viewport_text: Vec::new(),
@@ -185,9 +151,6 @@ impl Screen {
                     buftype: ui::buffer::BufType::Nofile,
                 },
             )),
-            notification: None,
-            task_label: None,
-            custom_status_items: None,
             cmdline: super::cmdline::CmdlineState::new(),
             cursor_owner: CursorOwner::Prompt,
             backend,
@@ -211,8 +174,11 @@ impl Screen {
         (self.transcript_gutters.content_width(w) as usize).max(1)
     }
 
-    pub fn show_thinking(&self) -> bool {
-        self.show_thinking
+    pub fn set_show_thinking(&mut self, v: bool) {
+        if self.show_thinking != v {
+            self.show_thinking = v;
+            self.dirty = true;
+        }
     }
 
     /// Expose the backend for dialogs that need output + size.
@@ -238,57 +204,6 @@ impl Screen {
 
     pub fn tool_states_snapshot(&self) -> HashMap<String, ToolState> {
         self.transcript.tool_states_snapshot()
-    }
-
-    pub fn notify(&mut self, message: String) {
-        self.notification = Some(Notification {
-            message,
-            is_error: false,
-        });
-        self.dirty = true;
-    }
-
-    pub fn notify_error(&mut self, message: String) {
-        self.notification = Some(Notification {
-            message,
-            is_error: true,
-        });
-        self.dirty = true;
-    }
-
-    pub fn dismiss_notification(&mut self) {
-        if self.notification.is_some() {
-            self.notification = None;
-            self.dirty = true;
-        }
-    }
-
-    pub fn has_notification(&self) -> bool {
-        self.notification.is_some()
-    }
-
-    /// Apply all toggle settings from a resolved settings snapshot.
-    pub fn apply_settings(&mut self, s: &crate::state::ResolvedSettings) {
-        self.show_tps = s.show_tps;
-        self.show_tokens = s.show_tokens;
-        self.show_cost = s.show_cost;
-        self.show_slug = s.show_slug;
-        self.show_thinking = s.show_thinking;
-        self.dirty = true;
-    }
-
-    pub fn set_running_procs(&mut self, count: usize) {
-        if count != self.running_procs {
-            self.running_procs = count;
-            self.dirty = true;
-        }
-    }
-
-    pub fn set_agent_count(&mut self, count: usize) {
-        if count != self.running_agents {
-            self.running_agents = count;
-            self.dirty = true;
-        }
     }
 
     pub fn start_active_agent(&mut self, agent_id: String) {
@@ -466,54 +381,6 @@ impl Screen {
         self.dirty = true;
     }
 
-    pub fn set_context_tokens(&mut self, tokens: u32) {
-        self.context_tokens = Some(tokens);
-        self.dirty = true;
-    }
-
-    pub fn set_context_window(&mut self, window: u32) {
-        self.context_window = Some(window);
-        self.dirty = true;
-    }
-
-    pub fn clear_context_tokens(&mut self) {
-        self.context_tokens = None;
-        self.dirty = true;
-    }
-
-    pub fn context_tokens(&self) -> Option<u32> {
-        self.context_tokens
-    }
-
-    pub fn set_session_cost(&mut self, usd: f64) {
-        self.session_cost_usd = usd;
-        self.dirty = true;
-    }
-
-    pub fn set_model_label(&mut self, label: String) {
-        self.model_label = Some(label);
-        self.dirty = true;
-    }
-
-    pub fn set_task_label(&mut self, label: String) {
-        if label.trim().is_empty() {
-            self.task_label = None;
-        } else {
-            self.task_label = Some(label);
-        }
-        self.dirty = true;
-    }
-
-    pub fn clear_task_label(&mut self) {
-        self.task_label = None;
-        self.dirty = true;
-    }
-
-    pub fn set_reasoning_effort(&mut self, effort: protocol::ReasoningEffort) {
-        self.reasoning_effort = effort;
-        self.dirty = true;
-    }
-
     pub fn set_app_focus(&mut self, focus: crate::app::AppFocus) {
         if self.last_app_focus != focus {
             self.last_app_focus = focus;
@@ -538,10 +405,6 @@ impl Screen {
         self.cursor_owner
     }
 
-    pub(crate) fn notification(&self) -> Option<&Notification> {
-        self.notification.as_ref()
-    }
-
     pub(crate) fn prompt_input_scroll(&self) -> usize {
         self.prompt.input_scroll
     }
@@ -558,60 +421,12 @@ impl Screen {
         self.last_transcript_viewport = vp;
     }
 
-    pub(crate) fn model_label(&self) -> Option<&str> {
-        self.model_label.as_deref()
-    }
-
-    pub(crate) fn reasoning_effort(&self) -> protocol::ReasoningEffort {
-        self.reasoning_effort
-    }
-
-    pub(crate) fn show_tokens(&self) -> bool {
-        self.show_tokens
-    }
-
-    pub(crate) fn context_window(&self) -> Option<u32> {
-        self.context_window
-    }
-
-    pub(crate) fn show_cost(&self) -> bool {
-        self.show_cost
-    }
-
-    pub(crate) fn session_cost_usd(&self) -> f64 {
-        self.session_cost_usd
-    }
-
-    pub(crate) fn pending_dialog(&self) -> bool {
-        self.pending_dialog
-    }
-
-    pub(crate) fn running_procs(&self) -> usize {
-        self.running_procs
-    }
-
-    pub(crate) fn running_agents(&self) -> usize {
-        self.running_agents
-    }
-
     pub(crate) fn spinner_char(&self) -> Option<&'static str> {
         self.working.spinner_char()
     }
 
-    pub(crate) fn throbber_spans(&self) -> Vec<super::status::BarSpan> {
-        self.working.throbber_spans(self.show_tps)
-    }
-
-    pub(crate) fn task_label(&self) -> Option<&str> {
-        self.task_label.as_deref()
-    }
-
-    pub(crate) fn custom_status_items(&self) -> Option<&Vec<super::StatusItem>> {
-        self.custom_status_items.as_ref()
-    }
-
-    pub(crate) fn show_slug(&self) -> bool {
-        self.show_slug
+    pub(crate) fn throbber_spans(&self, show_tps: bool) -> Vec<super::status::BarSpan> {
+        self.working.throbber_spans(show_tps)
     }
 
     pub(crate) fn mark_clean(&mut self) {
@@ -628,8 +443,9 @@ impl Screen {
         width: usize,
         queued: &[String],
         prediction: Option<&str>,
+        has_notification: bool,
     ) -> u16 {
-        self.measure_prompt_height(state, width, queued, prediction)
+        self.measure_prompt_height(state, width, queued, prediction, has_notification)
     }
 
     pub(crate) fn transcript_viewport(&self) -> Option<super::region::Viewport> {
@@ -825,17 +641,7 @@ impl Screen {
         self.dirty = true;
     }
 
-    pub fn set_pending_dialog(&mut self, pending: bool) {
-        self.pending_dialog = pending;
-        self.dirty = true;
-    }
-
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
-    pub fn set_custom_status(&mut self, items: Option<Vec<StatusItem>>) {
-        self.custom_status_items = items;
         self.dirty = true;
     }
 
@@ -947,10 +753,6 @@ impl Screen {
         self.parser.clear();
         self.prompt = PromptState::new();
         self.working.clear();
-        self.context_tokens = None;
-        self.session_cost_usd = 0.0;
-        self.task_label = None;
-        self.has_scrollback = false;
 
         let mut frame = Frame::begin(&*self.backend);
         let _ = frame.queue(cursor::MoveTo(0, 0));
@@ -1289,12 +1091,13 @@ impl Screen {
         width: usize,
         queued: &[String],
         prediction: Option<&str>,
+        has_notification: bool,
     ) -> u16 {
         let usable = width.saturating_sub(2);
         let text_w = usable.saturating_sub(2).max(1);
 
         // Extra rows: notification + queued + stash + btw.
-        let notification: u16 = if self.notification.is_some() { 1 } else { 0 };
+        let notification: u16 = if has_notification { 1 } else { 0 };
         let stash: u16 = if state.stash.is_some() { 1 } else { 0 };
 
         let mut queued_rows = 0u16;

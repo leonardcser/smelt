@@ -55,7 +55,7 @@ impl App {
 
     /// Record current token count and cost so they can be restored on rewind.
     pub(super) fn snapshot_tokens(&mut self) {
-        if let Some(tokens) = self.screen.context_tokens() {
+        if let Some(tokens) = self.context_tokens {
             self.token_snapshots.push((self.history.len(), tokens));
         }
         self.cost_snapshots
@@ -64,7 +64,7 @@ impl App {
 
     pub(super) fn fork_session(&mut self) {
         if self.history.is_empty() {
-            self.screen.notify_error("nothing to fork".into());
+            self.notify_error("nothing to fork".into());
             return;
         }
         self.save_session();
@@ -74,7 +74,7 @@ impl App {
         self.session = forked;
         self.save_session();
         self.flush_persist();
-        self.screen.notify(format!("forked from {original_id}"));
+        self.notify(format!("forked from {original_id}"));
     }
 
     pub fn reset_session(&mut self) {
@@ -86,6 +86,8 @@ impl App {
         self.pending_agent_blocks.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
+        self.context_tokens = None;
+        self.task_label = None;
         self.screen.clear();
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
@@ -93,7 +95,7 @@ impl App {
         self.engine.processes.clear();
         self.reset_subagents_for_new_session();
         self.session = session::Session::new();
-        self.screen.set_session_cost(0.0);
+        self.screen.mark_dirty();
         self.pending_title = false;
         self.compact_epoch += 1;
         if let Ok(mut guard) = self.shared_session.lock() {
@@ -136,11 +138,11 @@ impl App {
 
         self.session = loaded;
         if let Some(ref slug) = self.session.slug {
-            self.screen.set_task_label(slug.clone());
+            self.set_task_label(slug.clone());
         }
         self.history = self.session.messages.clone();
         self.restore_snapshots_from_session();
-        self.screen.set_session_cost(self.session_cost_usd);
+        self.screen.mark_dirty();
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.input.clear();
@@ -185,7 +187,7 @@ impl App {
     fn rebuild_screen_from_history(&mut self) {
         self.screen.clear();
         if let Some(ref slug) = self.session.slug {
-            self.screen.set_task_label(slug.clone());
+            self.set_task_label(slug.clone());
         }
         if self.history.is_empty() {
             return;
@@ -542,7 +544,8 @@ impl App {
         self.session_cost_usd = carried_cost;
 
         self.restore_screen();
-        self.screen.clear_context_tokens();
+        self.context_tokens = None;
+        self.screen.mark_dirty();
         self.save_session();
         self.screen.set_throbber(render::Throbber::Done);
         self.transcript_window.scroll_top = u16::MAX;
@@ -555,7 +558,7 @@ impl App {
         let Some(ctx) = self.context_window else {
             return;
         };
-        let Some(tokens) = self.screen.context_tokens() else {
+        let Some(tokens) = self.context_tokens else {
             return;
         };
         if tokens as u64 * 100 >= ctx as u64 * engine::compact_threshold_percent() {
@@ -605,12 +608,8 @@ impl App {
 
         self.history.truncate(hist_idx);
         self.truncate_snapshots_to(hist_idx);
-        self.screen.set_session_cost(self.session_cost_usd);
-        if let Some(&(_, tokens)) = self.token_snapshots.last() {
-            self.screen.set_context_tokens(tokens);
-        } else {
-            self.screen.clear_context_tokens();
-        }
+        self.context_tokens = self.token_snapshots.last().map(|&(_, t)| t);
+        self.screen.mark_dirty();
         self.screen.truncate_to(block_idx);
         self.reset_session_permissions();
         self.compact_epoch += 1;
