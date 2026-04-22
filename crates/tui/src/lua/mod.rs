@@ -161,60 +161,7 @@ pub(crate) struct LuaHandle {
     dead: bool,
 }
 
-/// Deferred mutation queued by a Lua handler. Applied by the app loop
-/// after the handler returns, avoiding nested borrows on `App`.
-pub enum PendingOp {
-    Notify(String),
-    NotifyError(String),
-    RunCommand(String),
-    SetMode(String),
-    SetModel(String),
-    SetReasoningEffort(String),
-    Cancel,
-    Compact(Option<String>),
-    Submit(String),
-    SetPromptSection(String, String),
-    RemovePromptSection(String),
-    SetPermissionOverrides(protocol::PermissionOverrides),
-    /// Background LLM call from a Lua plugin.
-    BackgroundAsk {
-        id: u64,
-        system: String,
-        messages: Vec<protocol::Message>,
-        task: Option<String>,
-    },
-    /// Set ghost text (predicted input) on the prompt.
-    SetGhostText(String),
-    /// Clear ghost text from the prompt.
-    ClearGhostText,
-    BufCreate {
-        id: u64,
-    },
-    BufSetLines {
-        id: u64,
-        lines: Vec<String>,
-    },
-    WinOpenFloat {
-        buf_id: u64,
-        title: String,
-        footer_items: Vec<String>,
-        accent: Option<crossterm::style::Color>,
-    },
-    WinUpdate {
-        id: u64,
-        title: Option<String>,
-    },
-    WinClose {
-        id: u64,
-    },
-    /// Send a deferred plugin tool result.
-    ResolveToolResult {
-        request_id: u64,
-        call_id: String,
-        content: String,
-        is_error: bool,
-    },
-}
+pub use crate::app::ops::AppOp;
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).
 /// Populated by `snapshot_engine_context` in the app loop.
@@ -236,7 +183,7 @@ pub struct EngineSnapshot {
 /// **Reads**: snapshot fields populated by `set_context()` before a
 /// handler runs. Lua reads these via `smelt.api.transcript.text()` etc.
 ///
-/// **Writes**: `ops` collects deferred mutations (`PendingOp`) that the
+/// **Writes**: `ops` collects deferred mutations (`AppOp`) that the
 /// app drains and applies after the handler returns.
 ///
 /// One `Arc<Mutex<LuaOps>>` replaces the old separate
@@ -252,7 +199,7 @@ pub struct LuaOps {
     // ── reads (snapshot) — engine state ─────────────────────────────
     pub engine: EngineSnapshot,
     // ── writes (queued mutations) ───────────────────────────────────
-    pub ops: Vec<PendingOp>,
+    pub ops: Vec<AppOp>,
 }
 
 impl LuaOps {
@@ -276,7 +223,7 @@ impl LuaOps {
         self.vim_mode = None;
     }
 
-    pub fn drain(&mut self) -> Vec<PendingOp> {
+    pub fn drain(&mut self) -> Vec<AppOp> {
         std::mem::take(&mut self.ops)
     }
 }
@@ -434,7 +381,7 @@ impl LuaRuntime {
         api.set("transcript", transcript_tbl)?;
 
         // smelt.api.win.focus() / smelt.api.win.mode()
-        // Helper macro: lock shared.ops and push a PendingOp.
+        // Helper macro: lock shared.ops and push an AppOp.
         macro_rules! push_op {
             ($lua:expr, $s:expr, |$val:ident : $ty:ty| $op:expr) => {{
                 let s = $s.clone();
@@ -473,7 +420,7 @@ impl LuaRuntime {
         }
         cmd_tbl.set(
             "run",
-            push_op!(lua, shared, |line: String| PendingOp::RunCommand(line)),
+            push_op!(lua, shared, |line: String| AppOp::RunCommand(line)),
         )?;
         {
             let s = shared.clone();
@@ -525,28 +472,28 @@ impl LuaRuntime {
 
         engine_tbl.set(
             "set_model",
-            push_op!(lua, shared, |v: String| PendingOp::SetModel(v)),
+            push_op!(lua, shared, |v: String| AppOp::SetModel(v)),
         )?;
         engine_tbl.set(
             "set_mode",
-            push_op!(lua, shared, |v: String| PendingOp::SetMode(v)),
+            push_op!(lua, shared, |v: String| AppOp::SetMode(v)),
         )?;
         engine_tbl.set(
             "set_reasoning_effort",
-            push_op!(lua, shared, |v: String| PendingOp::SetReasoningEffort(v)),
+            push_op!(lua, shared, |v: String| AppOp::SetReasoningEffort(v)),
         )?;
         engine_tbl.set(
             "submit",
-            push_op!(lua, shared, |v: String| PendingOp::Submit(v)),
+            push_op!(lua, shared, |v: String| AppOp::Submit(v)),
         )?;
-        engine_tbl.set("cancel", push_op!(lua, shared, || PendingOp::Cancel))?;
+        engine_tbl.set("cancel", push_op!(lua, shared, || AppOp::Cancel))?;
         {
             let s = shared.clone();
             engine_tbl.set(
                 "compact",
                 lua.create_function(move |_, instructions: Option<String>| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::Compact(instructions));
+                        o.ops.push(AppOp::Compact(instructions));
                     }
                     Ok(())
                 })?,
@@ -596,7 +543,7 @@ impl LuaRuntime {
                     }
 
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::BackgroundAsk {
+                        o.ops.push(AppOp::BackgroundAsk {
                             id,
                             system,
                             messages,
@@ -630,19 +577,19 @@ impl LuaRuntime {
         let ui_tbl = lua.create_table()?;
         ui_tbl.set(
             "set_ghost_text",
-            push_op!(lua, shared, |text: String| PendingOp::SetGhostText(text)),
+            push_op!(lua, shared, |text: String| AppOp::SetGhostText(text)),
         )?;
         ui_tbl.set(
             "clear_ghost_text",
-            push_op!(lua, shared, || PendingOp::ClearGhostText),
+            push_op!(lua, shared, || AppOp::ClearGhostText),
         )?;
         ui_tbl.set(
             "notify",
-            push_op!(lua, shared, |msg: String| PendingOp::Notify(msg)),
+            push_op!(lua, shared, |msg: String| AppOp::Notify(msg)),
         )?;
         ui_tbl.set(
             "notify_error",
-            push_op!(lua, shared, |msg: String| PendingOp::NotifyError(msg)),
+            push_op!(lua, shared, |msg: String| AppOp::NotifyError(msg)),
         )?;
         api.set("ui", ui_tbl)?;
 
@@ -697,7 +644,7 @@ impl LuaRuntime {
                 lua.create_function(move |_, ()| {
                     let id = s.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::BufCreate { id });
+                        o.ops.push(AppOp::BufCreate { id });
                     }
                     Ok(id)
                 })?,
@@ -714,7 +661,7 @@ impl LuaRuntime {
                         .filter_map(|v| v.ok())
                         .collect();
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::BufSetLines { id, lines });
+                        o.ops.push(AppOp::BufSetLines { id, lines });
                     }
                     Ok(())
                 })?,
@@ -782,7 +729,7 @@ impl LuaRuntime {
                     }
 
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::WinOpenFloat {
+                        o.ops.push(AppOp::WinOpenFloat {
                             buf_id,
                             title,
                             footer_items,
@@ -800,7 +747,7 @@ impl LuaRuntime {
                 "close",
                 lua.create_function(move |_, id: u64| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::WinClose { id });
+                        o.ops.push(AppOp::WinClose { id });
                     }
                     Ok(())
                 })?,
@@ -813,7 +760,7 @@ impl LuaRuntime {
                 "set_title",
                 lua.create_function(move |_, (id, title): (u64, String)| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::WinUpdate {
+                        o.ops.push(AppOp::WinUpdate {
                             id,
                             title: Some(title),
                         });
@@ -832,7 +779,7 @@ impl LuaRuntime {
                 "set_section",
                 lua.create_function(move |_, (name, content): (String, String)| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::SetPromptSection(name, content));
+                        o.ops.push(AppOp::SetPromptSection(name, content));
                     }
                     Ok(())
                 })?,
@@ -844,7 +791,7 @@ impl LuaRuntime {
                 "remove_section",
                 lua.create_function(move |_, name: String| {
                     if let Ok(mut o) = s.ops.lock() {
-                        o.ops.push(PendingOp::RemovePromptSection(name));
+                        o.ops.push(AppOp::RemovePromptSection(name));
                     }
                     Ok(())
                 })?,
@@ -902,7 +849,7 @@ impl LuaRuntime {
                         let content: String = result.get("content").unwrap_or_default();
                         let is_error: bool = result.get("is_error").unwrap_or(false);
                         if let Ok(mut o) = s.ops.lock() {
-                            o.ops.push(PendingOp::ResolveToolResult {
+                            o.ops.push(AppOp::ResolveToolResult {
                                 request_id,
                                 call_id,
                                 content,
@@ -920,7 +867,7 @@ impl LuaRuntime {
 
         smelt.set(
             "notify",
-            push_op!(lua, shared, |msg: String| PendingOp::Notify(msg)),
+            push_op!(lua, shared, |msg: String| AppOp::Notify(msg)),
         )?;
 
         smelt.set(
@@ -1065,7 +1012,7 @@ impl LuaRuntime {
     }
 
     /// Drain all pending ops queued by Lua handlers.
-    pub fn drain_ops(&self) -> Vec<PendingOp> {
+    pub fn drain_ops(&self) -> Vec<AppOp> {
         let Ok(mut o) = self.shared.ops.lock() else {
             return Vec::new();
         };
@@ -1074,7 +1021,7 @@ impl LuaRuntime {
 
     /// Fire the `on_response` callback for a completed `engine.ask()` call.
     /// Returns any queued ops produced by the callback.
-    pub fn fire_callback(&self, id: u64, content: &str) -> Vec<PendingOp> {
+    pub fn fire_callback(&self, id: u64, content: &str) -> Vec<AppOp> {
         let handle = {
             let Ok(mut cbs) = self.shared.callbacks.lock() else {
                 return vec![];
@@ -1089,8 +1036,7 @@ impl LuaRuntime {
         };
         if let Err(e) = func.call::<()>(content.to_string()) {
             if let Ok(mut o) = self.shared.ops.lock() {
-                o.ops
-                    .push(PendingOp::NotifyError(format!("ask callback: {e}")));
+                o.ops.push(AppOp::NotifyError(format!("ask callback: {e}")));
             }
         }
         self.drain_ops()
@@ -1324,7 +1270,7 @@ impl LuaRuntime {
 
     fn record_error(&self, msg: String) {
         if let Ok(mut o) = self.shared.ops.lock() {
-            o.ops.push(PendingOp::NotifyError(msg));
+            o.ops.push(AppOp::NotifyError(msg));
         }
     }
 
@@ -1804,7 +1750,7 @@ mod tests {
         rt.drain_ops()
             .into_iter()
             .filter_map(|op| match op {
-                PendingOp::Notify(msg) => Some(msg),
+                AppOp::Notify(msg) => Some(msg),
                 _ => None,
             })
             .collect()
@@ -1814,7 +1760,7 @@ mod tests {
         rt.drain_ops()
             .into_iter()
             .filter_map(|op| match op {
-                PendingOp::NotifyError(msg) => Some(msg),
+                AppOp::NotifyError(msg) => Some(msg),
                 _ => None,
             })
             .collect()
@@ -1824,7 +1770,7 @@ mod tests {
         rt.drain_ops()
             .into_iter()
             .filter_map(|op| match op {
-                PendingOp::RunCommand(line) => Some(line),
+                AppOp::RunCommand(line) => Some(line),
                 _ => None,
             })
             .collect()
@@ -2367,7 +2313,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], PendingOp::SetMode(m) if m == "plan"));
+        assert!(matches!(&ops[0], AppOp::SetMode(m) if m == "plan"));
     }
 
     #[test]
@@ -2379,7 +2325,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], PendingOp::SetModel(m) if m == "gpt-4o"));
+        assert!(matches!(&ops[0], AppOp::SetModel(m) if m == "gpt-4o"));
     }
 
     #[test]
@@ -2391,7 +2337,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], PendingOp::Cancel));
+        assert!(matches!(&ops[0], AppOp::Cancel));
     }
 
     #[test]
@@ -2403,7 +2349,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], PendingOp::Submit(t) if t == "hello"));
+        assert!(matches!(&ops[0], AppOp::Submit(t) if t == "hello"));
     }
 
     #[test]
@@ -2415,7 +2361,7 @@ mod tests {
             .expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], PendingOp::Compact(Some(s)) if s == "keep tests"));
+        assert!(matches!(&ops[0], AppOp::Compact(Some(s)) if s == "keep tests"));
     }
 
     #[test]

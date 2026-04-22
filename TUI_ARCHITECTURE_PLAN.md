@@ -247,14 +247,24 @@ ARE the Lua plugin API.
 
 ### Phase A — AppOp foundation (1 commit)
 
-**A1 · AppOp enum + reducer + CallbackCtx rewire.** Single commit:
-grep every `&mut App.*` mutation triggered by a UI event across
-`InputOutcome`, `MenuResult`, `DialogState::{on_select, on_dismiss,
-on_action, handle_key}`, `handle_float_action`, `CommandAction`. Draft
-`AppOp` variants. Land `App::apply_ops(Vec<AppOp>)` reducer. Change
-`CallbackCtx.actions: Vec<String>` → `Vec<AppOp>`. Tests update for any
-trivial existing callback consumers (only tests reference this today).
-No production callers yet — vocabulary only. Tree is green.
+**A1 · Rename `PendingOp` → `AppOp`, relocate to `app/ops.rs`.** The
+existing `lua::PendingOp` enum already plays this role for Lua-side
+ops and `App::apply_ops` already drains it. Rename, move to its own
+module, update the ~66 callsites. The `LuaShared.ops: Vec<AppOp>`
+channel stays — Lua continues to push through it.
+
+This commit doesn't add new variants. Phase B adds them as dialog
+conversions need each one (Rust forbids unused enum variants without
+`#[allow(dead_code)]`, which the plan forbids). The inventory from
+the pre-Phase-A research pass stays in commit-message / plan notes
+as reference material for Phase B.
+
+**Note on `CallbackCtx.actions`**: Phase A does NOT touch
+`ui::CallbackCtx.actions: Vec<String>`. `AppOp` references tui-only
+types (`ApprovalScope`, `Mode`, `ResolvedSettings`, `CustomCommand`,
+`PermissionEntry`) and can't live in `ui`. Phase B designs the Rust
+callback mechanism — parallel registry in `tui::app::callbacks` with
+`&mut App` closures is the current leading design.
 
 ### Phase B — Dispatch unification (1 atomic commit)
 
@@ -881,6 +891,10 @@ coherent arc because splitting them left two render engines coexisting.
 
 ## Progress log
 
+- **2026-04-22** — Phase A landed: `lua::PendingOp` → `app::ops::AppOp`
+  (new module). ~60 callsites renamed; `LuaOps.ops: Vec<AppOp>` +
+  `App::apply_ops(Vec<AppOp>)` stay as the one drain/reducer pair.
+  Build/clippy/tests green.
 - **2026-04-22** — task #11 commit 2 landed: prompt input Buffer now
   persistent in `ui.bufs` with stable BufId owned by App. Tests green.
 - **2026-04-22** — task #11 commit 1 landed: dead `PromptState` fields

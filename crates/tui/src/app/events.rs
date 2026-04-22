@@ -1895,15 +1895,15 @@ impl App {
         self.apply_lua_ops();
     }
 
-    pub(super) fn apply_ops(&mut self, ops: Vec<crate::lua::PendingOp>) {
+    pub(super) fn apply_ops(&mut self, ops: Vec<crate::app::ops::AppOp>) {
         for op in ops {
             match op {
-                crate::lua::PendingOp::Notify(msg) => self.screen.notify(msg),
-                crate::lua::PendingOp::NotifyError(msg) => self.screen.notify_error(msg),
-                crate::lua::PendingOp::RunCommand(line) => {
+                crate::app::ops::AppOp::Notify(msg) => self.screen.notify(msg),
+                crate::app::ops::AppOp::NotifyError(msg) => self.screen.notify_error(msg),
+                crate::app::ops::AppOp::RunCommand(line) => {
                     let _ = crate::api::cmd::run(self, &line);
                 }
-                crate::lua::PendingOp::SetMode(mode_str) => {
+                crate::app::ops::AppOp::SetMode(mode_str) => {
                     if let Some(mode) = Mode::parse(&mode_str) {
                         self.set_mode(mode);
                     } else {
@@ -1911,10 +1911,10 @@ impl App {
                             .notify_error(format!("unknown mode: {mode_str}"));
                     }
                 }
-                crate::lua::PendingOp::SetModel(model) => {
+                crate::app::ops::AppOp::SetModel(model) => {
                     self.apply_model(&model);
                 }
-                crate::lua::PendingOp::SetReasoningEffort(effort_str) => {
+                crate::app::ops::AppOp::SetReasoningEffort(effort_str) => {
                     if let Some(effort) = ReasoningEffort::parse(&effort_str) {
                         self.set_reasoning_effort(effort);
                     } else {
@@ -1922,29 +1922,29 @@ impl App {
                             .notify_error(format!("unknown reasoning effort: {effort_str}"));
                     }
                 }
-                crate::lua::PendingOp::Cancel => {
+                crate::app::ops::AppOp::Cancel => {
                     self.engine.send(UiCommand::Cancel);
                 }
-                crate::lua::PendingOp::Compact(instructions) => {
+                crate::app::ops::AppOp::Compact(instructions) => {
                     if self.history.is_empty() {
                         self.screen.notify_error("nothing to compact".into());
                     } else {
                         self.compact_history(instructions);
                     }
                 }
-                crate::lua::PendingOp::Submit(text) => {
+                crate::app::ops::AppOp::Submit(text) => {
                     self.queued_messages.push(text);
                 }
-                crate::lua::PendingOp::SetPromptSection(name, content) => {
+                crate::app::ops::AppOp::SetPromptSection(name, content) => {
                     self.prompt_sections.set(&name, content);
                 }
-                crate::lua::PendingOp::RemovePromptSection(name) => {
+                crate::app::ops::AppOp::RemovePromptSection(name) => {
                     self.prompt_sections.remove(&name);
                 }
-                crate::lua::PendingOp::SetPermissionOverrides(_overrides) => {
+                crate::app::ops::AppOp::SetPermissionOverrides(_overrides) => {
                     // TODO: store overrides and include in StartTurn
                 }
-                crate::lua::PendingOp::BackgroundAsk {
+                crate::app::ops::AppOp::BackgroundAsk {
                     id,
                     system,
                     messages,
@@ -1957,15 +1957,15 @@ impl App {
                         task,
                     });
                 }
-                crate::lua::PendingOp::SetGhostText(text) => {
+                crate::app::ops::AppOp::SetGhostText(text) => {
                     self.input_prediction = Some(text);
                     self.screen.mark_dirty();
                 }
-                crate::lua::PendingOp::ClearGhostText => {
+                crate::app::ops::AppOp::ClearGhostText => {
                     self.input_prediction = None;
                     self.screen.mark_dirty();
                 }
-                crate::lua::PendingOp::BufCreate { id } => {
+                crate::app::ops::AppOp::BufCreate { id } => {
                     self.ui.buf_create_with_id(
                         ui::BufId(id),
                         ui::buffer::BufCreateOpts {
@@ -1974,12 +1974,12 @@ impl App {
                         },
                     );
                 }
-                crate::lua::PendingOp::BufSetLines { id, lines } => {
+                crate::app::ops::AppOp::BufSetLines { id, lines } => {
                     if let Some(buf) = self.ui.buf_mut(ui::BufId(id)) {
                         buf.set_all_lines(lines);
                     }
                 }
-                crate::lua::PendingOp::WinOpenFloat {
+                crate::app::ops::AppOp::WinOpenFloat {
                     buf_id,
                     title,
                     footer_items,
@@ -2023,18 +2023,18 @@ impl App {
                         }
                     }
                 }
-                crate::lua::PendingOp::WinUpdate { id, title } => {
+                crate::app::ops::AppOp::WinUpdate { id, title } => {
                     if let Some(win) = self.ui.win_mut(ui::WinId(id)) {
                         if let Some(t) = title {
                             win.set_title(Some(t));
                         }
                     }
                 }
-                crate::lua::PendingOp::WinClose { id } => {
+                crate::app::ops::AppOp::WinClose { id } => {
                     self.ui.win_close(ui::WinId(id));
                     self.ui.buf_delete(ui::BufId(id));
                 }
-                crate::lua::PendingOp::ResolveToolResult {
+                crate::app::ops::AppOp::ResolveToolResult {
                     request_id,
                     call_id,
                     content,

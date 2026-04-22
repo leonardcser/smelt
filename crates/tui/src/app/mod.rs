@@ -4,6 +4,7 @@ pub(crate) use commands::copy_to_clipboard;
 pub(crate) mod dialogs;
 mod events;
 mod history;
+pub mod ops;
 
 use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
 use crate::render::{
