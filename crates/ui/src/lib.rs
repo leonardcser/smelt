@@ -439,34 +439,71 @@ impl Ui {
         let mut actions = Vec::new();
         let focused = self.compositor.focused().and_then(parse_float_layer_id);
         let Some(win) = focused else {
-            return (self.compositor.handle_key(code, mods), actions);
+            let result = self.compositor.handle_key(code, mods);
+            return (result, actions);
         };
         let key = KeyBind::new(code, mods);
-        let Some(mut cb) = self.callbacks.take_keymap(win, key) else {
-            return (self.compositor.handle_key(code, mods), actions);
+        let result = if let Some(mut cb) = self.callbacks.take_keymap(win, key) {
+            let r = match &mut cb {
+                Callback::Rust(inner) => {
+                    let mut ctx = CallbackCtx {
+                        ui: self,
+                        win,
+                        payload: Payload::Key { code, mods },
+                        actions: &mut actions,
+                    };
+                    let r = inner(&mut ctx);
+                    match r {
+                        CallbackResult::Consumed => KeyResult::Consumed,
+                        CallbackResult::Pass => self.compositor.handle_key(code, mods),
+                    }
+                }
+                Callback::Lua(handle) => {
+                    let payload = Payload::Key { code, mods };
+                    actions.extend(lua_invoke(*handle, &payload));
+                    KeyResult::Consumed
+                }
+            };
+            self.callbacks.restore_keymap(win, key, cb);
+            r
+        } else {
+            self.compositor.handle_key(code, mods)
         };
-        let result = match &mut cb {
-            Callback::Rust(inner) => {
-                let mut ctx = CallbackCtx {
-                    ui: self,
-                    win,
-                    payload: Payload::Key { code, mods },
-                    actions: &mut actions,
-                };
-                let r = inner(&mut ctx);
-                match r {
-                    CallbackResult::Consumed => KeyResult::Consumed,
-                    CallbackResult::Pass => self.compositor.handle_key(code, mods),
+
+        // Auto-translate widget action strings into typed events when
+        // the focused window has a matching callback registered. This
+        // is the glue that lets widgets (OptionList, TextInput, …)
+        // stay pure `KeyResult::Action(…)` emitters while dialogs
+        // behave via typed `WinEvent` callbacks. Unregistered windows
+        // still see the raw `Action(…)` bubble up.
+        if let KeyResult::Action(action) = &result {
+            if let Some((ev, payload)) = classify_widget_action(action) {
+                if self.callbacks.has_event(win, ev) {
+                    let extra = self.dispatch_event(win, ev, payload, lua_invoke);
+                    actions.extend(extra);
+                    return (KeyResult::Consumed, actions);
                 }
             }
-            Callback::Lua(handle) => {
-                let payload = Payload::Key { code, mods };
-                actions.extend(lua_invoke(*handle, &payload));
-                KeyResult::Consumed
-            }
-        };
-        self.callbacks.restore_keymap(win, key, cb);
+        }
         (result, actions)
+    }
+
+    /// Fire `WinEvent::Tick` on every window that has a registered
+    /// Tick callback. Used by the app event loop to drive per-frame
+    /// refresh of dialogs with live external state (subagent list,
+    /// process registry, …). Replaces the legacy
+    /// `DialogState::tick` slot.
+    pub fn dispatch_tick(
+        &mut self,
+        lua_invoke: &mut dyn FnMut(LuaHandle, &Payload) -> Vec<String>,
+    ) -> Vec<String> {
+        let mut actions = Vec::new();
+        let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
+        for win in wins {
+            let extra = self.dispatch_event(win, WinEvent::Tick, Payload::None, lua_invoke);
+            actions.extend(extra);
+        }
+        actions
     }
 
     pub fn focused_float(&self) -> Option<WinId> {
@@ -544,6 +581,35 @@ impl Ui {
         }
         Ok(())
     }
+}
+
+/// Map widget-emitted action strings (produced by `OptionList`,
+/// `TextInput`, `Dialog`, `FloatDialog`) into a typed
+/// `(WinEvent, Payload)` pair for auto-dispatch. Returns `None`
+/// for actions that don't have a semantic event mapping — those
+/// keep bubbling as `KeyResult::Action(…)` so existing host-side
+/// string matching (legacy dialogs) still works.
+fn classify_widget_action(action: &str) -> Option<(WinEvent, Payload)> {
+    if action == "dismiss" {
+        return Some((WinEvent::Dismiss, Payload::None));
+    }
+    if action == "submit" {
+        return Some((WinEvent::Submit, Payload::None));
+    }
+    if let Some(idx) = action.strip_prefix("select:") {
+        if let Ok(index) = idx.parse::<usize>() {
+            return Some((WinEvent::Submit, Payload::Selection { index }));
+        }
+    }
+    if let Some(text) = action.strip_prefix("submit:") {
+        return Some((
+            WinEvent::Submit,
+            Payload::Text {
+                content: text.to_string(),
+            },
+        ));
+    }
+    None
 }
 
 fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {

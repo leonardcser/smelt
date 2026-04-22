@@ -75,6 +75,11 @@ pub enum WinEvent {
     TextChanged,
     /// User triggered dismissal (Esc or a configured dismiss key).
     Dismiss,
+    /// Fired once per event-loop iteration on each registered window.
+    /// Replaces the legacy `DialogState::tick` slot; used by floats
+    /// that need to refresh their content from live external state
+    /// (subagent registry, process list, etc.).
+    Tick,
 }
 
 /// Payload attached to a callback invocation. The variants map 1:1
@@ -197,6 +202,25 @@ impl Callbacks {
     pub fn clear_all(&mut self, win: WinId) {
         self.keymaps.remove(&win);
         self.events.remove(&win);
+    }
+
+    /// True when at least one callback is registered for `(win, ev)`.
+    /// Used by the auto-dispatch path to decide whether to translate
+    /// widget `KeyResult::Action` strings into event dispatches.
+    pub fn has_event(&self, win: WinId, ev: WinEvent) -> bool {
+        self.events
+            .get(&win)
+            .and_then(|t| t.get(&ev))
+            .is_some_and(|v| !v.is_empty())
+    }
+
+    /// List every window that has at least one callback registered
+    /// for `ev`. Used by `Ui::dispatch_tick`.
+    pub fn wins_with_event(&self, ev: WinEvent) -> Vec<WinId> {
+        self.events
+            .iter()
+            .filter_map(|(win, table)| table.get(&ev).filter(|v| !v.is_empty()).map(|_| *win))
+            .collect()
     }
 
     /// Remove and return a keymap callback so it can be invoked with
