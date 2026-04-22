@@ -765,6 +765,9 @@ fn classify_widget_action(action: &str) -> Option<(WinEvent, Payload)> {
     if action == "submit" {
         return Some((WinEvent::Submit, Payload::None));
     }
+    if action == "text_changed" {
+        return Some((WinEvent::TextChanged, Payload::None));
+    }
     if let Some(idx) = action.strip_prefix("select:") {
         if let Ok(index) = idx.parse::<usize>() {
             return Some((WinEvent::Submit, Payload::Selection { index }));
