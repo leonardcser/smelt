@@ -755,9 +755,39 @@ wrappers over `App`/`engine` calls):
 - `smelt.api.process.{list, kill, read_output}`
 
 **F4 · Tier 2 sweep** (~1100 Rust LOC replaced with ~400 Lua):
-- `/resume` (441 LOC)
-- `/agents` (409 LOC)
-- `/permissions` (207 LOC)
+- `/permissions` (207 LOC) — **shipped 2026-04-22** (−218 Rust, +102 Lua).
+- `/resume` (441 LOC) — needs F4-pre extension (input `on_change`).
+- `/agents` (409 LOC) — needs F4-pre extensions (dialog `on_tick`,
+  `smelt.api.agent.snapshot`).
+
+**F4-pre · `dialog.open` extensions** — two small surfaces that
+unblock the remaining Tier 2 ports without waiting for D2/Option 3:
+
+1. **Input panel `on_change` callback.** Today `dialog.open` input
+   panels only surface their final text on `Submit`. Add an
+   optional `on_change = function(ctx) … end` per input panel,
+   fired on every buffer change with `ctx.inputs`, so Lua can
+   rebuild sibling panels live (required for `/resume`'s fuzzy
+   filter UX). Routed via a new `TaskEvent::InputChanged`; same
+   pattern as `KeymapFired`.
+
+2. **Dialog-level `on_tick` callback.** Add a top-level
+   `on_tick = function(ctx) … end` to the `dialog.open` opts table,
+   fired every engine tick. Lets Lua re-read external state (agent
+   registry, process list) and refresh panels without closing and
+   reopening. `/agents` needs this to live-update status + task
+   slug while the dialog is open.
+
+3. **`smelt.api.agent.snapshot(agent_id)`** — small addition that
+   snapshots `app.agent_snapshots` (working / idle, task_slug,
+   rolling log) per agent id into `LuaOps`, so `/agents` detail
+   can render without going through the registry round-trip.
+
+Net: ~60 Rust LOC added across `lua_dialog.rs` + `lua/mod.rs` +
+`EngineSnapshot`; unlocks two 400+ LOC Rust dialog deletions. The
+extensions survive D2/Option 3 unchanged because they live on the
+dialog opts table, which `runtime/lua/smelt/dialog.lua` will carry
+forward verbatim.
 
 **Stays in Rust forever** (security / perf / protocol):
 - Tools: `bash`, `read`, `write`, `edit_file`, `glob`, `grep`,
@@ -1447,6 +1477,23 @@ coherent arc because splitting them left two render engines coexisting.
   sync — mirrors the existing `custom_commands::list()` /
   `builtin_commands::list()` pattern. F1.5b (collapse to single
   registry) remains pending.
+- **2026-04-22** — Phase F3 shipped. Exposed
+  `smelt.api.session.{list, load, delete}`,
+  `smelt.api.agent.{list, kill, peek}`,
+  `smelt.api.permissions.{list, sync}`, and
+  `smelt.api.process.read_output` — thin wrappers over existing
+  internal state. `AppOp::DeleteSession` + `AppOp::KillAgent` added.
+  `EngineSnapshot.permission_session_entries` plumbed through
+  `snapshot_engine_context` so permissions.list() serves snapshot
+  data without App access. Unblocked F4 Tier 2.
+- **2026-04-22** — Phase F4 started. `/permissions` ported to Lua
+  plugin (−218 Rust, +102 Lua). Uses `dd` chord via a Lua-side
+  pending flag; Backspace fallback; syncs on every close. The
+  remaining `/resume` and `/agents` hit gaps in the `dialog.open`
+  Lua surface (no input `on_change` for live filter, no dialog
+  `on_tick` for registry refresh, no agent snapshot API) — added
+  as **F4-pre** to the plan rather than queuing them behind the
+  bigger D2/Option 3 refactor.
 - **2026-04-22** — `ui::Notification` component landed. Non-focusable
   ephemeral toast, sibling to `Picker`. `App.notification` changed from
   an inline `Notification` struct to `Option<WinId>`; notify/
