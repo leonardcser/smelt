@@ -99,7 +99,6 @@ impl App {
         self.engine.processes.clear();
         self.reset_subagents_for_new_session();
         self.session = session::Session::new();
-        self.mark_dirty();
         self.pending_title = false;
         self.compact_epoch += 1;
         if let Ok(mut guard) = self.shared_session.lock() {
@@ -146,7 +145,6 @@ impl App {
         }
         self.history = self.session.messages.clone();
         self.restore_snapshots_from_session();
-        self.mark_dirty();
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.input.clear();
@@ -528,7 +526,6 @@ impl App {
         self.pending_compact_epoch = self.compact_epoch;
         {
             self.working.set_throbber(render::Throbber::Compacting);
-            self.mark_dirty();
         };
         self.engine.send(UiCommand::Compact {
             history: self.history.clone(),
@@ -540,7 +537,6 @@ impl App {
         if messages.is_empty() {
             {
                 self.working.set_throbber(render::Throbber::Done);
-                self.mark_dirty();
             };
             return;
         }
@@ -555,11 +551,9 @@ impl App {
 
         self.restore_screen();
         self.context_tokens = None;
-        self.mark_dirty();
         self.save_session();
         {
             self.working.set_throbber(render::Throbber::Done);
-            self.mark_dirty();
         };
         self.transcript_window.scroll_top = u16::MAX;
     }
@@ -622,7 +616,6 @@ impl App {
         self.history.truncate(hist_idx);
         self.truncate_snapshots_to(hist_idx);
         self.context_tokens = self.token_snapshots.last().map(|&(_, t)| t);
-        self.mark_dirty();
         self.screen.truncate_to(block_idx);
         self.reset_session_permissions();
         self.compact_epoch += 1;

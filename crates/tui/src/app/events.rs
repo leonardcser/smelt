@@ -22,7 +22,6 @@ impl App {
             let focused = matches!(ev, Event::FocusGained);
             if self.term_focused != focused {
                 self.term_focused = focused;
-                self.mark_dirty();
             }
             return false;
         }
@@ -41,16 +40,13 @@ impl App {
                 match (*code, *modifiers) {
                     (KeyCode::BackTab, _) => {
                         self.toggle_mode();
-                        self.mark_dirty();
                         return false;
                     }
                     (KeyCode::Char('t'), m) if m.contains(KeyModifiers::CONTROL) => {
                         self.cycle_reasoning();
-                        self.mark_dirty();
                         return false;
                     }
                     (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
-                        self.redraw();
                         self.ui.force_redraw();
                         return false;
                     }
@@ -163,7 +159,6 @@ impl App {
                     }
                     MenuResult::ModelSelect(ref key) => {
                         self.apply_model(key);
-                        self.mark_dirty();
                     }
                     MenuResult::ThemeSelect(value) => {
                         // Live preview already set the in-memory accent;
@@ -173,7 +168,6 @@ impl App {
                         self.apply_accent(value);
                     }
                     MenuResult::ColorSelect(_) => {
-                        self.redraw();
                     }
                     MenuResult::Stats | MenuResult::Cost | MenuResult::Dismissed => {}
                 }
@@ -181,11 +175,9 @@ impl App {
                 if !is_settings {
                     self.input.restore_stash();
                 }
-                self.mark_dirty();
                 false
             }
             EventOutcome::Exec(rx, kill) => {
-                self.mark_dirty();
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
                 false
@@ -203,7 +195,6 @@ impl App {
                     let text = content.text_content();
                     if !text.is_empty() {
                         self.queued_messages.push(text);
-                        self.mark_dirty();
                     }
                 } else {
                     let text = content.text_content();
@@ -224,7 +215,6 @@ impl App {
                         if let Some(cmd) =
                             crate::custom_commands::resolve(queued.trim(), self.multi_agent)
                         {
-                            self.mark_dirty();
                             let turn = self.begin_custom_command_turn(cmd);
                             self.agent = Some(turn);
                         } else {
@@ -352,7 +342,6 @@ impl App {
                         self.compact_epoch += 1;
                         {
                             self.working.set_throbber(render::Throbber::Interrupted);
-                            self.mark_dirty();
                         };
                         self.notify("compaction cancelled".into());
                         if restore_mode == Some(vim::ViMode::Insert) {
@@ -402,7 +391,6 @@ impl App {
                         let full = self.input_prediction.take().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
                         crate::api::buf::replace(&mut self.input, line, None);
-                        self.mark_dirty();
                         return EventOutcome::Redraw;
                     }
                     Some(
@@ -427,17 +415,14 @@ impl App {
                         KeyAction::ClearBuffer => {
                             // Dismiss menu/completer first, then clear buffer.
                             if let Some(result) = self.input.dismiss_menu() {
-                                self.mark_dirty();
                                 return EventOutcome::MenuResult(result);
                             }
                             if self.input.completer.is_some() {
                                 self.input.completer = None;
-                                self.mark_dirty();
                                 return EventOutcome::Redraw;
                             }
                             t.last_ctrlc = Some(Instant::now());
                             self.input.clear();
-                            self.mark_dirty();
                             return EventOutcome::Redraw;
                         }
                         KeyAction::OpenHelp => {
@@ -447,7 +432,6 @@ impl App {
                         KeyAction::OpenHistorySearch => {
                             if self.input.history_search_query().is_none() {
                                 self.input.open_history_search(&self.input_history);
-                                self.mark_dirty();
                             }
                             return EventOutcome::Redraw;
                         }
@@ -487,33 +471,27 @@ impl App {
                     KeyAction::CancelAgent => {
                         // Dismiss menu/completer first, then cancel.
                         if let Some(result) = self.input.dismiss_menu() {
-                            self.mark_dirty();
                             return EventOutcome::MenuResult(result);
                         }
                         if self.input.completer.is_some() {
                             self.input.completer = None;
-                            self.mark_dirty();
                             return EventOutcome::Noop;
                         }
                         self.queued_messages.clear();
-                        self.mark_dirty();
                         return EventOutcome::CancelAgent;
                     }
                     KeyAction::ClearBuffer => {
                         // Dismiss menu/completer first, then clear.
                         if let Some(result) = self.input.dismiss_menu() {
-                            self.mark_dirty();
                             return EventOutcome::MenuResult(result);
                         }
                         if self.input.completer.is_some() {
                             self.input.completer = None;
-                            self.mark_dirty();
                             return EventOutcome::Noop;
                         }
                         t.last_ctrlc = Some(Instant::now());
                         self.input.clear();
                         self.queued_messages.clear();
-                        self.mark_dirty();
                         return EventOutcome::Noop;
                     }
                     _ => {
@@ -533,7 +511,6 @@ impl App {
         ) {
             if self.input.has_modal() {
                 let action = self.input.handle_event(ev, None);
-                self.mark_dirty();
                 return self.dispatch_input_action(action);
             }
             match resolve_agent_esc(
@@ -544,7 +521,6 @@ impl App {
             ) {
                 EscAction::VimToNormal => {
                     self.input.handle_event(ev, None);
-                    self.mark_dirty();
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -554,13 +530,11 @@ impl App {
                     }
                     crate::api::buf::replace(&mut self.input, combined, None);
                     self.queued_messages.clear();
-                    self.mark_dirty();
                 }
                 EscAction::Cancel { restore_vim } => {
                     if let Some(mode) = restore_vim {
                         self.input.set_vim_mode(mode);
                     }
-                    self.mark_dirty();
                     return EventOutcome::CancelAgent;
                 }
                 EscAction::StartTimer => {}
@@ -583,7 +557,6 @@ impl App {
                 if !text.is_empty() {
                     self.queued_messages.push(text);
                 }
-                self.mark_dirty();
             }
             Action::SubmitEmpty => {
                 if !self.queued_messages.is_empty() {
@@ -594,22 +567,18 @@ impl App {
                 self.toggle_mode();
             }
             Action::Redraw => {
-                self.mark_dirty();
             }
             Action::CycleReasoning => {
                 self.cycle_reasoning();
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
-                self.redraw();
             }
             Action::CenterScroll => {
                 self.prompt_input_scroll = usize::MAX;
-                self.mark_dirty();
             }
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
-                self.mark_dirty();
             }
             Action::MenuResult(result) => return EventOutcome::MenuResult(result),
             Action::Noop | Action::Resize { .. } => {}
@@ -635,12 +604,10 @@ impl App {
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
-                self.redraw();
                 EventOutcome::Noop
             }
             Action::CenterScroll => {
                 self.prompt_input_scroll = usize::MAX;
-                self.mark_dirty();
                 EventOutcome::Noop
             }
             Action::Resize {
@@ -651,7 +618,6 @@ impl App {
                 EventOutcome::Noop
             }
             Action::Redraw => {
-                self.mark_dirty();
                 EventOutcome::Redraw
             }
             Action::NotifyError(msg) => {
@@ -715,8 +681,9 @@ impl App {
         self.last_width = w;
         self.last_height = h;
         self.ui.set_terminal_size(w, h);
-        let _ = width_changed;
-        self.redraw();
+        if width_changed {
+            self.screen.invalidate_for_width(w);
+        }
     }
 
     /// Handle overlay keys (notification dismiss).
@@ -1088,12 +1055,7 @@ impl App {
     /// Render a full-mode frame using the compositor pipeline.
     pub(super) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
-        if self.screen.update_spinner(&mut self.working) {
-            self.mark_dirty();
-        }
-        if !self.needs_draw(false) {
-            return;
-        }
+        self.screen.update_spinner(&mut self.working);
 
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
@@ -1298,7 +1260,6 @@ impl App {
         let _ = self.ui.render(&mut stdout);
 
         // Clean up state.
-        self.mark_clean();
     }
 
     // ── Content pane key handler — drives `Vim` over a readonly
@@ -1314,7 +1275,6 @@ impl App {
         // Ctrl-C from a non-prompt pane returns focus to the prompt.
         if k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
             self.app_focus = crate::app::AppFocus::Prompt;
-            self.mark_dirty();
             return EventOutcome::Redraw;
         }
 
@@ -1478,7 +1438,6 @@ impl App {
                             let _ = crate::app::commands::copy_to_clipboard(&copy);
                         }
                     }
-                    self.mark_dirty();
                     return EventOutcome::Redraw;
                 }
                 _ => None,
@@ -1493,7 +1452,6 @@ impl App {
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window.resync(&rows, viewport);
                 self.sync_transcript_pin();
-                self.mark_dirty();
                 return EventOutcome::Redraw;
             }
         }
@@ -1515,7 +1473,6 @@ impl App {
         self.transcript_window
             .scroll_by_lines(delta, &rows, viewport);
         self.snap_transcript_cursor();
-        self.mark_dirty();
     }
 
     /// Build the transcript buffer, run `key` through the content-pane
@@ -1542,7 +1499,6 @@ impl App {
                 }
                 self.snap_transcript_cursor();
                 self.sync_transcript_pin();
-                self.mark_dirty();
                 true
             }
         }
@@ -1937,7 +1893,6 @@ impl App {
                         self.restore_screen();
                         if let Some(tokens) = self.session.context_tokens {
                             self.context_tokens = Some(tokens);
-                            self.mark_dirty();
                         }
                         self.screen.finish_turn();
                         self.transcript_window.scroll_top = u16::MAX;
@@ -1974,11 +1929,9 @@ impl App {
                 }
                 crate::app::ops::AppOp::SetGhostText(text) => {
                     self.input_prediction = Some(text);
-                    self.mark_dirty();
                 }
                 crate::app::ops::AppOp::ClearGhostText => {
                     self.input_prediction = None;
-                    self.mark_dirty();
                 }
                 crate::app::ops::AppOp::BufCreate { id } => {
                     self.ui.buf_create_with_id(
@@ -2198,7 +2151,6 @@ impl App {
                 ) {
                     if self.app_focus != crate::app::AppFocus::Prompt {
                         self.app_focus = crate::app::AppFocus::Prompt;
-                        self.mark_dirty();
                         return EventOutcome::Redraw;
                     }
                     return EventOutcome::Noop;
@@ -2236,7 +2188,6 @@ impl App {
                         self.position_content_cursor_from_hit(row, col);
                     }
                     None => {
-                        self.mark_dirty();
                     }
                 }
                 if double {
@@ -2292,7 +2243,6 @@ impl App {
             .move_vertical(buf, self.input.win.cpos, delta);
         if new_pos != self.input.win.cpos {
             self.input.win.cpos = new_pos;
-            self.mark_dirty();
         }
     }
 
@@ -2356,7 +2306,6 @@ impl App {
         self.input.win.cpos = cpos.min(buf.len());
         let want = col as usize;
         self.input.win.win_cursor.set_curswant(Some(want));
-        self.mark_dirty();
     }
 
     /// Extend the content-pane visual selection to the cell under the
@@ -2394,10 +2343,8 @@ impl App {
                             vp.scroll_top as usize,
                             vp.content_width,
                         );
-                        return;
                     }
                 }
-                self.mark_dirty();
             }
         }
     }
@@ -2446,7 +2393,6 @@ impl App {
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
         self.input.win.win_cursor.clear_anchor();
-        self.mark_dirty();
     }
 
     /// Double-click on the prompt: select the word under the cursor
@@ -2458,7 +2404,6 @@ impl App {
             let text = self.input.win.edit_buf.buf[s..e].to_string();
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
-        self.mark_dirty();
     }
 
     /// Double-click on the content pane: enter vim Visual over the
@@ -2473,7 +2418,6 @@ impl App {
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
         self.sync_transcript_pin();
-        self.mark_dirty();
     }
 
     /// Finalise a mouse interaction. Only copies when `dragged` is true —
@@ -2508,7 +2452,6 @@ impl App {
             self.transcript_window.win_cursor.clear_anchor();
         }
         self.sync_transcript_pin();
-        self.mark_dirty();
     }
 
     /// Snap the viewport so the scrollbar thumb lands at screen row
@@ -2571,7 +2514,6 @@ impl App {
                 self.prompt_input_scroll = from_top as usize;
             }
         }
-        self.mark_dirty();
     }
 
     /// Lookup the currently-painted viewport for a pane.
@@ -2593,7 +2535,6 @@ impl App {
             .screen
             .full_transcript_display_text(self.settings.show_thinking);
         if rows.is_empty() {
-            self.mark_dirty();
             return;
         }
         let Some(region) = self.transcript_viewport else {
@@ -2612,7 +2553,6 @@ impl App {
                 .snap_col_to_selectable(line_idx, display_col, self.settings.show_thinking);
         self.transcript_window
             .jump_to_line_col(&rows, line_idx, snapped, viewport_rows);
-        self.mark_dirty();
     }
 
     /// Ctrl-W pane chord. Returns `Some` when the event was consumed by
@@ -2631,7 +2571,6 @@ impl App {
                 t.pending_pane_chord = None;
                 if navigated {
                     self.toggle_pane_focus();
-                    self.mark_dirty();
                     return Some(EventOutcome::Redraw);
                 }
                 // Non-navigation follow-up — fall through so the key is
@@ -2678,7 +2617,6 @@ impl App {
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.refocus(&rows, viewport);
         self.snap_transcript_cursor();
-        self.mark_dirty();
     }
 
     /// Snap the transcript cursor to the nearest selectable cell.
@@ -2749,7 +2687,6 @@ impl App {
 
     pub fn open_cmdline(&mut self) {
         self.cmdline.open();
-        self.mark_dirty();
     }
 
     fn handle_cmdline_key(&mut self, k: KeyEvent) -> bool {
@@ -2761,11 +2698,9 @@ impl App {
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
                 self.cmdline.close();
-                self.mark_dirty();
             }
             (KeyCode::Enter, _) => {
                 let line = self.cmdline.submit();
-                self.mark_dirty();
                 if !line.is_empty() {
                     let action = super::commands::run_command(self, &format!(":{line}"));
                     match action {
@@ -2801,7 +2736,6 @@ impl App {
                     self.cmdline.update_completer(&lua_cmds);
                 }
                 self.cmdline.apply_selected_completion();
-                self.mark_dirty();
             }
             (KeyCode::BackTab, _)
             | (KeyCode::Char('k'), M::CONTROL)
@@ -2815,7 +2749,6 @@ impl App {
                     self.cmdline.update_completer(&lua_cmds);
                 }
                 self.cmdline.apply_selected_completion();
-                self.mark_dirty();
             }
             (KeyCode::Backspace, _) => {
                 self.cmdline.backspace();
@@ -2824,36 +2757,28 @@ impl App {
                 } else {
                     needs_completer_update = true;
                 }
-                self.mark_dirty();
             }
             (KeyCode::Delete, _) => {
                 self.cmdline.delete();
                 needs_completer_update = true;
-                self.mark_dirty();
             }
             (KeyCode::Left, _) => {
                 self.cmdline.move_left();
-                self.mark_dirty();
             }
             (KeyCode::Right, _) => {
                 self.cmdline.move_right();
-                self.mark_dirty();
             }
             (KeyCode::Up, _) => {
                 self.cmdline.history_up();
-                self.mark_dirty();
             }
             (KeyCode::Down, _) => {
                 self.cmdline.history_down();
-                self.mark_dirty();
             }
             (KeyCode::Home, _) | (KeyCode::Char('a'), M::CONTROL) => {
                 self.cmdline.move_start();
-                self.mark_dirty();
             }
             (KeyCode::End, _) | (KeyCode::Char('e'), M::CONTROL) => {
                 self.cmdline.move_end();
-                self.mark_dirty();
             }
             (KeyCode::Char('w'), M::CONTROL) => {
                 self.cmdline.delete_word_back();
@@ -2862,18 +2787,15 @@ impl App {
                 } else {
                     needs_completer_update = true;
                 }
-                self.mark_dirty();
             }
             (KeyCode::Char('u'), M::CONTROL) => {
                 self.cmdline.buf.clear();
                 self.cmdline.cursor = 0;
                 self.cmdline.completer = None;
-                self.mark_dirty();
             }
             (KeyCode::Char(ch), M::NONE | M::SHIFT) => {
                 self.cmdline.insert_char(ch);
                 needs_completer_update = true;
-                self.mark_dirty();
             }
             _ => {}
         }
