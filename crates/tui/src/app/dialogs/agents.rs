@@ -121,13 +121,16 @@ pub(in crate::app) fn open_list(app: &mut App, initial_selected: usize) {
             if let Payload::Selection { index } = ctx.payload {
                 let s = state_submit.borrow();
                 if let Some(entry) = s.agents.get(index) {
-                    ops_submit.push(AppOp::OpenAgentsDetail {
+                    ops_submit.push(AppOp::AgentsOpenDetail {
+                        list_win: ctx.win,
                         agent_id: entry.agent_id.clone(),
                         parent_selected: index,
                     });
+                    return CallbackResult::Consumed;
                 }
             }
-            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            // No selection resolved — dismiss the list cleanly.
+            ops_submit.push(AppOp::AgentsListDismissed { win: ctx.win });
             CallbackResult::Consumed
         })),
     );
@@ -138,8 +141,7 @@ pub(in crate::app) fn open_list(app: &mut App, initial_selected: usize) {
         win_id,
         WinEvent::Dismiss,
         Callback::Rust(Box::new(move |ctx| {
-            ops_dismiss.push(AppOp::RefreshAgentCounts);
-            ops_dismiss.push(AppOp::CloseFloat(ctx.win));
+            ops_dismiss.push(AppOp::AgentsListDismissed { win: ctx.win });
             CallbackResult::Consumed
         })),
     );
@@ -227,10 +229,10 @@ pub(in crate::app) fn open_detail(app: &mut App, agent_id: String, parent_select
         win_id,
         WinEvent::Dismiss,
         Callback::Rust(Box::new(move |ctx| {
-            let initial = state_dismiss.borrow().parent_selected;
-            ops_dismiss.push(AppOp::CloseFloat(ctx.win));
-            ops_dismiss.push(AppOp::OpenAgentsList {
-                initial_selected: initial,
+            let initial_selected = state_dismiss.borrow().parent_selected;
+            ops_dismiss.push(AppOp::AgentsBackToList {
+                detail_win: ctx.win,
+                initial_selected,
             });
             CallbackResult::Consumed
         })),
