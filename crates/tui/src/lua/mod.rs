@@ -224,6 +224,10 @@ pub struct EngineSnapshot {
     pub session_turns: Vec<(usize, String)>,
     /// Vim emulation setting (from settings, not the current vim mode).
     pub vim_enabled: bool,
+    /// Current-session permission rules: `(tool, pattern)` with
+    /// `pattern = "*"` meaning blanket-allow for the tool, or `tool =
+    /// "directory"` for path-based approvals.
+    pub permission_session_entries: Vec<(String, String)>,
 }
 
 /// Shared state between Lua closures and the app loop.
@@ -871,7 +875,196 @@ impl LuaRuntime {
                 })?,
             )?;
         }
+        // smelt.api.process.read_output(id) → { text, running, exit_code? }
+        // Drains all captured output since the last read. Destructive:
+        // finished processes are deregistered once their output is
+        // consumed. This matches the `bash_output` tool semantics so
+        // plugins composing `/ps + tail` behave like the model does.
+        {
+            let s = shared.clone();
+            process_tbl.set(
+                "read_output",
+                lua.create_function(move |lua, id: String| {
+                    let Ok(guard) = s.processes.lock() else {
+                        return lua.create_table();
+                    };
+                    let Some(registry) = guard.as_ref() else {
+                        return lua.create_table();
+                    };
+                    match registry.read(&id) {
+                        Ok((text, running, exit_code)) => {
+                            let t = lua.create_table()?;
+                            t.set("text", text)?;
+                            t.set("running", running)?;
+                            if let Some(code) = exit_code {
+                                t.set("exit_code", code)?;
+                            }
+                            Ok(t)
+                        }
+                        Err(_) => lua.create_table(),
+                    }
+                })?,
+            )?;
+        }
         api.set("process", process_tbl)?;
+
+        // smelt.api.agent.* — subagent registry bridge. Reads the
+        // on-disk registry for sibling agents spawned by the current
+        // process. `list` is a pure file read; `kill` routes through
+        // `AppOp::KillAgent` so the tick loop does the teardown.
+        let agent_tbl = lua.create_table()?;
+        agent_tbl.set(
+            "list",
+            lua.create_function(|lua, ()| {
+                let my_pid = std::process::id();
+                let entries = engine::registry::children_of(my_pid);
+                let out = lua.create_table()?;
+                for (i, e) in entries.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("pid", e.pid)?;
+                    row.set("agent_id", e.agent_id)?;
+                    row.set("session_id", e.session_id)?;
+                    row.set("cwd", e.cwd)?;
+                    row.set(
+                        "status",
+                        match e.status {
+                            engine::registry::AgentStatus::Working => "working",
+                            engine::registry::AgentStatus::Idle => "idle",
+                        },
+                    )?;
+                    row.set("task_slug", e.task_slug.unwrap_or_default())?;
+                    row.set("git_root", e.git_root.unwrap_or_default())?;
+                    row.set("git_branch", e.git_branch.unwrap_or_default())?;
+                    row.set("depth", e.depth)?;
+                    row.set("started_at", e.started_at)?;
+                    out.set(i + 1, row)?;
+                }
+                Ok(out)
+            })?,
+        )?;
+        agent_tbl.set(
+            "kill",
+            push_op!(lua, shared, |pid: u32| AppOp::KillAgent(pid)),
+        )?;
+        // smelt.api.agent.peek(pid, max_lines?) → [line]
+        // Last N lines of the agent's log file under its session_dir.
+        // Returns an empty table for unknown pids or unreadable logs.
+        agent_tbl.set(
+            "peek",
+            lua.create_function(|lua, (pid, max_lines): (u32, Option<usize>)| {
+                let my_pid = std::process::id();
+                let entries = engine::registry::children_of(my_pid);
+                let Some(entry) = entries.iter().find(|e| e.pid == pid) else {
+                    return lua.create_table();
+                };
+                // Resolve the subagent's session directory relative to
+                // its reported session_id; the shared helper does the
+                // config_dir + session_id join.
+                let session = match crate::session::load(&entry.session_id) {
+                    Some(s) => s,
+                    None => return lua.create_table(),
+                };
+                let dir = crate::session::dir_for(&session);
+                let lines = engine::registry::read_agent_logs(
+                    &dir,
+                    pid,
+                    max_lines.unwrap_or(200),
+                );
+                let out = lua.create_table()?;
+                for (i, line) in lines.into_iter().enumerate() {
+                    out.set(i + 1, line)?;
+                }
+                Ok(out)
+            })?,
+        )?;
+        api.set("agent", agent_tbl)?;
+
+        // smelt.api.permissions.* — runtime approval rules bridge.
+        // `list()` returns { session = [{tool, pattern}], workspace =
+        // [{tool, patterns}] }. `sync(spec)` replaces both in one shot
+        // (session via `AppOp::SyncPermissions`, which is the same
+        // payload the existing permissions dialog emits on dismiss).
+        let permissions_tbl = lua.create_table()?;
+        {
+            let s = shared.clone();
+            permissions_tbl.set(
+                "list",
+                lua.create_function(move |lua, ()| {
+                    let (session_entries, cwd) = {
+                        let Ok(o) = s.ops.lock() else {
+                            return lua.create_table();
+                        };
+                        (
+                            o.engine.permission_session_entries.clone(),
+                            o.engine.session_cwd.clone(),
+                        )
+                    };
+                    let out = lua.create_table()?;
+                    let session_arr = lua.create_table()?;
+                    for (i, (tool, pattern)) in session_entries.into_iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("tool", tool)?;
+                        row.set("pattern", pattern)?;
+                        session_arr.set(i + 1, row)?;
+                    }
+                    out.set("session", session_arr)?;
+                    let workspace_arr = lua.create_table()?;
+                    for (i, rule) in crate::workspace_permissions::load(&cwd)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let row = lua.create_table()?;
+                        row.set("tool", rule.tool)?;
+                        let pats = lua.create_table()?;
+                        for (j, p) in rule.patterns.into_iter().enumerate() {
+                            pats.set(j + 1, p)?;
+                        }
+                        row.set("patterns", pats)?;
+                        workspace_arr.set(i + 1, row)?;
+                    }
+                    out.set("workspace", workspace_arr)?;
+                    Ok(out)
+                })?,
+            )?;
+        }
+        {
+            let s = shared.clone();
+            permissions_tbl.set(
+                "sync",
+                lua.create_function(move |_, spec: mlua::Table| {
+                    let mut session_entries: Vec<crate::render::PermissionEntry> = Vec::new();
+                    if let Ok(arr) = spec.get::<mlua::Table>("session") {
+                        for row in arr.sequence_values::<mlua::Table>().flatten() {
+                            let tool: String = row.get("tool").unwrap_or_default();
+                            let pattern: String = row.get("pattern").unwrap_or_default();
+                            session_entries.push(crate::render::PermissionEntry { tool, pattern });
+                        }
+                    }
+                    let mut workspace_rules: Vec<crate::workspace_permissions::Rule> = Vec::new();
+                    if let Ok(arr) = spec.get::<mlua::Table>("workspace") {
+                        for row in arr.sequence_values::<mlua::Table>().flatten() {
+                            let tool: String = row.get("tool").unwrap_or_default();
+                            let mut patterns: Vec<String> = Vec::new();
+                            if let Ok(pats) = row.get::<mlua::Table>("patterns") {
+                                for p in pats.sequence_values::<String>().flatten() {
+                                    patterns.push(p);
+                                }
+                            }
+                            workspace_rules
+                                .push(crate::workspace_permissions::Rule { tool, patterns });
+                        }
+                    }
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.ops.push(AppOp::SyncPermissions {
+                            session_entries,
+                            workspace_rules,
+                        });
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        api.set("permissions", permissions_tbl)?;
 
         // smelt.api.keymap.help_sections() → [{title, entries: [{label, detail}]}]
         // Pure lookup over the built-in hint tables; toggles the vim row
