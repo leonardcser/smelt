@@ -134,4 +134,14 @@ pub enum AppOp {
         content: String,
         is_error: bool,
     },
+    /// Resolve a Lua-driven dialog opened via `smelt.api.dialog.open`.
+    /// Fires the optional per-option `on_select` callback, then resumes
+    /// the parked task with a `{action, option_index, inputs}` table.
+    ResolveLuaDialog {
+        dialog_id: u64,
+        action: String,
+        option_index: Option<usize>,
+        inputs: Vec<(String, String)>,
+        on_select: Option<mlua::RegistryKey>,
+    },
 }

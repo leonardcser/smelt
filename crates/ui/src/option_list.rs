@@ -265,11 +265,14 @@ impl Component for OptionList {
             return KeyResult::Ignored;
         }
         // Per-item shortcut characters take priority over default
-        // navigation keys. Enables Confirm's `a` / `n` / `e` / `l`.
+        // navigation keys. Moves the cursor to the matched item and
+        // emits `select:N` — host code only has to handle the
+        // Selection payload, never raw shortcut strings.
         if mods == KeyModifiers::NONE {
             if let KeyCode::Char(c) = code {
-                if self.items.iter().any(|it| it.shortcut == Some(c)) {
-                    return KeyResult::Action(format!("shortcut:{c}"));
+                if let Some(idx) = self.items.iter().position(|it| it.shortcut == Some(c)) {
+                    self.cursor = idx;
+                    return KeyResult::Action(format!("select:{idx}"));
                 }
             }
         }
@@ -387,10 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_char_returns_shortcut_action() {
+    fn shortcut_char_selects_matched_item() {
         let mut ol = OptionList::new(items3());
         let r = ol.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action("shortcut:a".into()));
+        assert_eq!(r, KeyResult::Action("select:2".into()));
+        assert_eq!(ol.cursor(), 2);
     }
 
     #[test]

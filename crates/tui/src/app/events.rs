@@ -2157,6 +2157,38 @@ impl App {
                         is_error,
                     });
                 }
+                crate::app::ops::AppOp::ResolveLuaDialog {
+                    dialog_id,
+                    action,
+                    option_index,
+                    inputs,
+                    on_select,
+                } => {
+                    if let Some(key) = on_select {
+                        if let Ok(func) =
+                            self.lua.lua().registry_value::<mlua::Function>(&key)
+                        {
+                            if let Err(e) = func.call::<()>(()) {
+                                self.screen.notify_error(format!("dialog on_select: {e}"));
+                            }
+                        }
+                    }
+                    let result = super::dialogs::lua_dialog::build_result(
+                        self.lua.lua(),
+                        &action,
+                        option_index,
+                        inputs,
+                    );
+                    match result {
+                        Ok(v) => {
+                            self.lua.resolve_dialog(dialog_id, v);
+                        }
+                        Err(e) => {
+                            self.screen.notify_error(format!("dialog resolve: {e}"));
+                            self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
+                        }
+                    }
+                }
             }
         }
     }

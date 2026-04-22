@@ -10,16 +10,23 @@
 //! - `{ kind = "options",  items = [{label, action?, shortcut?, on_select?}] }`
 //! - `{ kind = "input",    name = "x", placeholder? = "..." }`
 
-use super::super::{App, TurnState};
-use super::{ActionResult, DialogState};
+use super::super::App;
+use crate::app::ops::AppOp;
 use crate::keymap::hints;
 use mlua::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
-use ui::{BufId, OptionItem, OptionList, PanelHeight, PanelSpec};
+use ui::{
+    BufId, Callback, CallbackResult, OptionItem, OptionList, PanelHeight, PanelSpec, Payload,
+    WinEvent, WinId,
+};
 
-/// Per-option data the DialogState needs to build the result table on
-/// selection. Index matches the `OptionList` row.
+/// Per-option data consumed when the task resumes. Drained out of
+/// `LuaDialogState` into the [`AppOp::ResolveLuaDialog`] payload when
+/// the user selects an option, so the RegistryKey (which isn't Clone)
+/// moves cleanly from the dialog's state to the reducer.
 struct OptionEntry {
     /// Action string reported back to the task (`result.action`).
     /// Defaults to `"select"` when the plugin didn't specify one.
@@ -34,145 +41,18 @@ struct InputEntry {
     panel_index: usize,
 }
 
-/// DialogState for a Lua-driven dialog. Resolves its parked task on
-/// option selection or dismiss.
-pub struct LuaDialog {
+/// In-closure state for a Lua dialog. Held by `Rc<RefCell>` so the
+/// Submit and Dismiss callbacks share the same options / inputs.
+struct LuaDialogState {
     dialog_id: u64,
     options: Vec<OptionEntry>,
     inputs: Vec<InputEntry>,
-    /// Index of the `OptionList` panel (if any). Shortcut routing
-    /// reads the list's current selection via this index.
-    options_panel: Option<usize>,
-}
-
-impl DialogState for LuaDialog {
-    fn blocks_agent(&self) -> bool {
-        true
-    }
-
-    fn on_action(
-        &mut self,
-        app: &mut App,
-        win: ui::WinId,
-        action: &str,
-        _agent: &mut Option<TurnState>,
-    ) -> ActionResult {
-        if let Some(idx_str) = action.strip_prefix("select:") {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                self.resolve_with_option(app, win, idx);
-                return ActionResult::Close;
-            }
-        }
-        if let Some(ch) = action.strip_prefix("shortcut:") {
-            if let Some(idx) = self.find_shortcut_index(app, win, ch) {
-                self.resolve_with_option(app, win, idx);
-                return ActionResult::Close;
-            }
-        }
-        if action == "dismiss" {
-            self.resolve_dismissed(app);
-            return ActionResult::Close;
-        }
-        ActionResult::Pass
-    }
-
-    fn on_dismiss(&mut self, app: &mut App, _win: ui::WinId) {
-        self.resolve_dismissed(app);
-    }
-}
-
-impl LuaDialog {
-    fn find_shortcut_index(&self, app: &mut App, win: ui::WinId, ch_str: &str) -> Option<usize> {
-        let panel_idx = self.options_panel?;
-        let list = app
-            .ui
-            .dialog_mut(win)
-            .and_then(|d| d.panel_widget_mut::<OptionList>(panel_idx))?;
-        let ch = ch_str.chars().next()?;
-        list.items().iter().position(|it| it.shortcut == Some(ch))
-    }
-
-    fn resolve_with_option(&self, app: &mut App, win: ui::WinId, idx: usize) {
-        // Fire on_select side effect before resuming the task so
-        // Lua callbacks see the pre-resume state.
-        if let Some(entry) = self.options.get(idx) {
-            if let Some(ref key) = entry.on_select {
-                if let Ok(func) = app.lua.lua().registry_value::<mlua::Function>(key) {
-                    if let Err(e) = func.call::<()>(()) {
-                        app.screen.notify_error(format!("dialog on_select: {e}"));
-                    }
-                    app.apply_lua_ops();
-                }
-            }
-        }
-        let action = self
-            .options
-            .get(idx)
-            .map(|e| e.action.clone())
-            .unwrap_or_else(|| "select".into());
-        let inputs = self.collect_inputs(app, win);
-        let result = build_result(app.lua.lua(), &action, Some(idx + 1), inputs);
-        match result {
-            Ok(v) => {
-                app.lua.resolve_dialog(self.dialog_id, v);
-            }
-            Err(e) => {
-                app.screen.notify_error(format!("dialog resolve: {e}"));
-                app.lua.resolve_dialog(self.dialog_id, mlua::Value::Nil);
-            }
-        }
-    }
-
-    fn resolve_dismissed(&self, app: &mut App) {
-        let result = build_result(app.lua.lua(), "dismiss", None, Vec::new());
-        match result {
-            Ok(v) => {
-                app.lua.resolve_dialog(self.dialog_id, v);
-            }
-            Err(_) => {
-                app.lua.resolve_dialog(self.dialog_id, mlua::Value::Nil);
-            }
-        }
-    }
-
-    fn collect_inputs(&self, app: &mut App, win: ui::WinId) -> Vec<(String, String)> {
-        let mut out = Vec::with_capacity(self.inputs.len());
-        for entry in &self.inputs {
-            let text = app
-                .ui
-                .dialog_mut(win)
-                .and_then(|d| d.panel_widget_mut::<TextInput>(entry.panel_index))
-                .map(|w| w.text().to_string())
-                .unwrap_or_default();
-            out.push((entry.name.clone(), text));
-        }
-        out
-    }
-}
-
-fn build_result(
-    lua: &Lua,
-    action: &str,
-    option_index: Option<usize>,
-    inputs: Vec<(String, String)>,
-) -> LuaResult<mlua::Value> {
-    let t = lua.create_table()?;
-    t.set("action", action)?;
-    if let Some(i) = option_index {
-        t.set("option_index", i)?;
-    }
-    let inputs_tbl = lua.create_table()?;
-    for (k, v) in inputs {
-        inputs_tbl.set(k, v)?;
-    }
-    t.set("inputs", inputs_tbl)?;
-    Ok(mlua::Value::Table(t))
 }
 
 /// Open the dialog described by the Lua `opts_key` table. On success,
-/// registers a `LuaDialog` state so the task will be resumed on
-/// user resolution. Returns `Err` when the table is malformed — the
-/// caller should resolve the parked task with an error string.
+/// registers Submit/Dismiss callbacks that resume the parked task.
+/// Returns `Err` when the table is malformed — the caller should
+/// resolve the parked task with an error string.
 pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Result<(), String> {
     let opts: mlua::Table = app
         .lua
@@ -184,11 +64,9 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         .get("panels")
         .map_err(|e| format!("dialog panels: {e}"))?;
 
-    // Build per-panel state + PanelSpecs.
     let mut panel_specs: Vec<PanelSpec> = Vec::new();
     let mut options: Vec<OptionEntry> = Vec::new();
     let mut inputs: Vec<InputEntry> = Vec::new();
-    let mut options_panel: Option<usize> = None;
 
     for pair in panels_tbl.sequence_values::<mlua::Table>() {
         let panel = pair.map_err(|e| format!("dialog panel entry: {e}"))?;
@@ -237,7 +115,6 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
                         .with_shortcut_style(accent_style()),
                 );
                 panel_specs.push(PanelSpec::widget(widget, PanelHeight::Fit));
-                options_panel = Some(panel_index);
             }
             "input" => {
                 let name: String = panel.get("name").unwrap_or_default();
@@ -260,27 +137,112 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
 
     let dialog_config =
         app.builtin_dialog_config(Some(hints::join(&[hints::CONFIRM, hints::CANCEL])), vec![]);
-    let win_id = app.ui.dialog_open(
-        ui::FloatConfig {
-            title,
-            border: ui::Border::None,
-            placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
-            ..Default::default()
-        },
-        dialog_config,
-        panel_specs,
-    );
-    let win_id = win_id.ok_or_else(|| "failed to open dialog window".to_string())?;
-    app.float_states.insert(
+    let win_id = app
+        .ui
+        .dialog_open(
+            ui::FloatConfig {
+                title,
+                border: ui::Border::None,
+                placement: ui::Placement::dock_bottom_full_width(ui::Constraint::Pct(60)),
+                ..Default::default()
+            },
+            dialog_config,
+            panel_specs,
+        )
+        .ok_or_else(|| "failed to open dialog window".to_string())?;
+
+    // Lua dialogs block the agent event drain until the task resumes.
+    app.blocking_wins.insert(win_id);
+
+    let state = Rc::new(RefCell::new(LuaDialogState {
+        dialog_id,
+        options,
+        inputs,
+    }));
+
+    let ops = app.lua.ops_handle();
+
+    let state_submit = state.clone();
+    let ops_submit = ops.clone();
+    app.ui.win_on_event(
         win_id,
-        Box::new(LuaDialog {
-            dialog_id,
-            options,
-            inputs,
-            options_panel,
-        }),
+        WinEvent::Submit,
+        Callback::Rust(Box::new(move |ctx| {
+            let idx = match ctx.payload {
+                Payload::Selection { index } => index,
+                _ => 0,
+            };
+            let mut s = state_submit.borrow_mut();
+            let (action, on_select) = match s.options.get_mut(idx) {
+                Some(entry) => (entry.action.clone(), entry.on_select.take()),
+                None => ("select".to_string(), None),
+            };
+            let inputs = collect_inputs(ctx.ui, ctx.win, &s.inputs);
+            ops_submit.push(AppOp::ResolveLuaDialog {
+                dialog_id: s.dialog_id,
+                action,
+                option_index: Some(idx + 1),
+                inputs,
+                on_select,
+            });
+            ops_submit.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
     );
+
+    let state_dismiss = state;
+    app.ui.win_on_event(
+        win_id,
+        WinEvent::Dismiss,
+        Callback::Rust(Box::new(move |ctx| {
+            let s = state_dismiss.borrow();
+            ops.push(AppOp::ResolveLuaDialog {
+                dialog_id: s.dialog_id,
+                action: "dismiss".into(),
+                option_index: None,
+                inputs: Vec::new(),
+                on_select: None,
+            });
+            ops.push(AppOp::CloseFloat(ctx.win));
+            CallbackResult::Consumed
+        })),
+    );
+
     Ok(())
+}
+
+fn collect_inputs(ui: &mut ui::Ui, win: WinId, entries: &[InputEntry]) -> Vec<(String, String)> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let text = ui
+            .dialog_mut(win)
+            .and_then(|d| d.panel_widget_mut::<TextInput>(entry.panel_index))
+            .map(|w| w.text().to_string())
+            .unwrap_or_default();
+        out.push((entry.name.clone(), text));
+    }
+    out
+}
+
+/// Build the result table the Lua task resumes with. Called by
+/// `apply_ops` when handling [`AppOp::ResolveLuaDialog`].
+pub(crate) fn build_result(
+    lua: &Lua,
+    action: &str,
+    option_index: Option<usize>,
+    inputs: Vec<(String, String)>,
+) -> LuaResult<mlua::Value> {
+    let t = lua.create_table()?;
+    t.set("action", action)?;
+    if let Some(i) = option_index {
+        t.set("option_index", i)?;
+    }
+    let inputs_tbl = lua.create_table()?;
+    for (k, v) in inputs {
+        inputs_tbl.set(k, v)?;
+    }
+    t.set("inputs", inputs_tbl)?;
+    Ok(mlua::Value::Table(t))
 }
 
 fn accent_style() -> ui::grid::Style {
