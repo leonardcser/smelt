@@ -9,8 +9,8 @@ pub mod ops;
 
 use crate::input::{resolve_agent_esc, Action, EscAction, History, InputState, MenuResult};
 use crate::render::{
-    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ResumeEntry,
-    ToolOutput, ToolStatus,
+    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ResumeEntry, ToolOutput,
+    ToolStatus,
 };
 use crate::session::Session;
 use crate::{render, session, state, vim};

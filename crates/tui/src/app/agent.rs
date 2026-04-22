@@ -912,8 +912,7 @@ impl App {
         self.cancel_active_agents();
     }
 
-    pub(super) fn refresh_agent_counts(&mut self) {
-    }
+    pub(super) fn refresh_agent_counts(&mut self) {}
 
     // ── Agent tracking ────────────────────────────────────────────────
 

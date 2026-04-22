@@ -1173,8 +1173,7 @@ impl<'a> Turn<'a> {
                                     .push((request_id, tc.id.clone(), tool_start));
                             }
                             protocol::ToolExecutionMode::Sequential => {
-                                plan.sequential_plugins
-                                    .push((tc, args.clone(), tool_start));
+                                plan.sequential_plugins.push((tc, args.clone(), tool_start));
                             }
                         }
                         continue;

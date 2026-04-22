@@ -408,9 +408,7 @@ impl App {
     /// projection picks up the fresh layouts on the next render.
     pub fn invalidate_for_width(&mut self, width: u16) {
         if width as usize != self.transcript.history.cache_width {
-            self.transcript
-                .history
-                .invalidate_for_width(width as usize);
+            self.transcript.history.invalidate_for_width(width as usize);
         }
     }
 
@@ -597,7 +595,8 @@ impl App {
 
         let total_rows = self.transcript_projection.total_lines() as u16;
 
-        let geom = crate::render::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
+        let geom =
+            crate::render::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
         let clamped_scroll = geom.clamped_scroll();
 
         let layer_w = gutters.layer_width(width as u16);

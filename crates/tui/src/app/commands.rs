@@ -77,17 +77,6 @@ impl App {
                 }
                 CommandAction::Continue
             }
-            "/rewind" => {
-                let turns = self.user_turns();
-                if turns.is_empty() {
-                    self.notify_error("nothing to rewind".into());
-                } else {
-                    let restore_vim_insert =
-                        self.input.vim_enabled() && self.input.vim_in_insert_mode();
-                    super::dialogs::rewind::open(self, turns, restore_vim_insert);
-                }
-                CommandAction::Continue
-            }
             "/vim" => {
                 self.update_settings(|s| s.vim = !s.vim);
                 CommandAction::Continue
@@ -203,8 +192,7 @@ impl App {
             }
             "/yank-block" => {
                 let abs_row = self.transcript_window.cursor_abs_row();
-                if let Some(text) = self.block_text_at_row(abs_row, self.settings.show_thinking)
-                {
+                if let Some(text) = self.block_text_at_row(abs_row, self.settings.show_thinking) {
                     let _ = copy_to_clipboard(&text);
                     self.notify("block copied".into());
                 } else {
@@ -474,9 +462,7 @@ impl App {
         crate::theme::set_accent(value);
         state::set_accent(value);
     }
-
 }
-
 
 /// Copy text to the system clipboard using platform commands.
 pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
