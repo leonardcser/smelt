@@ -495,7 +495,7 @@ impl Screen {
         let _perf = crate::perf::begin("render:finish_turn");
         self.parser
             .finalize_active_tools(&mut self.transcript.history);
-        self.mark_blocks_dirty();
+        self.dirty = true;
     }
 
     pub fn finalize_active_tools(&mut self) {
@@ -564,11 +564,6 @@ impl Screen {
 
     pub fn set_tool_state(&mut self, call_id: String, state: ToolState) {
         self.transcript.set_tool_state(call_id, state);
-    }
-
-    /// Whether any content (blocks, active tool, active exec) exists above
-    pub fn mark_blocks_dirty(&mut self) {
-        self.dirty = true;
     }
 
     /// Force a full repaint on the next tick.

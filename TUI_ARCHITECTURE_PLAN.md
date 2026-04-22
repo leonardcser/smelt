@@ -465,31 +465,50 @@ Ongoing as a series of mechanical, test-green commits:
 - C3 step 8 (done, 1ed4421) — move `last_transcript_viewport` to
   App; return via `TranscriptData`; thread viewport into
   `compute_transcript_cursor`.
+- C3 step 9 (done, e31aba2) — delete unused `last_viewport_lines`
+  field and `display_lines` projection.
+
+**Migrate, don't wrap.** The remaining steps are pure migration —
+fields move off Screen onto App; method bodies move from `impl
+Screen` to `impl App` with field paths rewritten. No forwarder
+methods, no thin wrappers that just call into Screen. Each commit
+deletes more than it adds.
 
 Remaining for full C3:
-- Move `last_viewport_text` / `last_viewport_lines` to App (or
-  derive from live `ui.wins` state).
-- Delete `dirty` flag + `mark_dirty` / `mark_clean` / `is_dirty` /
-  `needs_draw` / `redraw`. Compositor grid-diff is the sole
-  change-detection mechanism (~138 callsites).
-- Move `transcript` + `parser` + `transcript_projection` triad to App
-  (coupled via `self.parser.X(&mut self.transcript.history, ...)`).
-- Delete `backend: Box<dyn TerminalBackend>` — inline terminal-direct
-  clear emission into caller or drop entirely.
-- `InputState` holds `win_id: WinId`; the `Window` lives in `ui.wins`.
-  All 122 sites of `self.input.win.{cpos, edit_buf, win_cursor,
-  kill_ring}` migrate to `self.ui.win_mut(self.input.win_id).unwrap().
-  <field>`.
-- `transcript_window` likewise becomes a `WinId` pointing into
-  `ui.wins`.
-- Route prompt keys through `ui.handle_key()` when focused (uses
-  `Callbacks` registry populated at startup — typing keys, submit,
-  Ctrl+S stash, etc.).
-- Notification → compositor float (ephemeral, non-focusable, anchored
-  above prompt window's rect).
-- Queued-messages → compositor float above the prompt.
-- Stash indicator → compositor float / single-row layer.
-- Delete `render::Screen` entirely.
+
+- **Delete `dirty` flag entirely.** `Screen::dirty` field,
+  `mark_dirty`/`mark_clean`/`is_dirty`/`needs_draw`/`redraw`
+  methods, all ~138 callsites, internal `self.dirty = true` lines in
+  Screen methods, and the `needs_draw` gate in `render_normal`. The
+  width-invalidate logic from `redraw()` folds into `handle_resize`
+  where it belongs. Change detection is already handled by
+  `TranscriptProjection.generation` (projection work) and
+  `ui::Compositor` grid-diff (paint work). The manual flag is
+  redundant bookkeeping.
+- **Migrate transcript + parser + transcript_projection +
+  last_viewport_text onto App.** Fields move to App. Every `impl
+  Screen` method that touches these (most of them) moves to `impl
+  App` verbatim with `self.transcript.X` / `self.parser.X` /
+  `self.transcript_projection.X` / `self.last_viewport_text` paths.
+  Callsites go from `self.screen.method(args)` to
+  `self.method(args)`.
+- **Delete `backend: Box<dyn TerminalBackend>` and `Screen::clear`.**
+  `Screen::clear` emits terminal clear codes before rebuilding the
+  transcript from history. The compositor handles screen
+  repainting after a state reset, so the direct-emit path is
+  redundant — delete it. `TerminalBackend` may survive as the
+  compositor's paint sink abstraction; that's independent of
+  Screen.
+- **Delete `Screen` struct.** Remove `use`s, delete the module.
+- **InputState + transcript window as `ui::Window`s.** `InputState`
+  holds `win_id: WinId`; the `Window` lives in `ui.wins`. All 122
+  sites of `self.input.win.{cpos, edit_buf, win_cursor, kill_ring}`
+  migrate to `self.ui.win_mut(self.input.win_id).unwrap().<field>`.
+  `transcript_window` likewise becomes a `WinId` pointing into
+  `ui.wins`. Route prompt keys through `ui.handle_key()` when
+  focused (uses the `Callbacks` registry).
+- **Notification / queued-messages / stash → compositor floats**,
+  anchored above the prompt window's rect.
 
 Expected LOC at end: net −800..−1200 lines.
 

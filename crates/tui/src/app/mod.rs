@@ -715,6 +715,28 @@ impl App {
     /// Width available for transcript content. Reserves the rightmost
     /// column for the scrollbar track so the scrollbar never overpaints
     /// rendered content and mouse hit-testing has a stable target.
+    /// Request a full repaint on the next tick.
+    pub fn mark_dirty(&mut self) {
+        render::Screen::mark_dirty(&mut self.screen);
+    }
+
+    pub fn mark_clean(&mut self) {
+        render::Screen::mark_clean(&mut self.screen);
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        render::Screen::is_dirty(&self.screen)
+    }
+
+    pub fn needs_draw(&self, is_dialog: bool) -> bool {
+        render::Screen::needs_draw(&self.screen, is_dialog, self.settings.show_thinking)
+    }
+
+    /// Invalidate cached width-dependent layout and request a redraw.
+    pub fn redraw(&mut self) {
+        render::Screen::redraw(&mut self.screen);
+    }
+
     pub fn transcript_width(&self) -> usize {
         let (w, _) = self.ui.terminal_size();
         (self.transcript_gutters.content_width(w) as usize).max(1)

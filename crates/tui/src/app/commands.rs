@@ -144,7 +144,7 @@ impl App {
                     .collect();
                 if !models.is_empty() {
                     self.input.open_model_completer(&models);
-                    self.screen.mark_dirty();
+                    self.mark_dirty();
                 }
                 CommandAction::Continue
             }
@@ -163,24 +163,24 @@ impl App {
             }
             "/settings" => {
                 self.input.open_settings(&self.settings_state());
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 CommandAction::Continue
             }
             "/theme" => {
                 self.input.open_theme_completer();
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 CommandAction::Continue
             }
             "/color" => {
                 self.input.open_color_completer();
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 CommandAction::Continue
             }
             "/stats" => {
                 let entries = crate::metrics::load();
                 let stats = crate::metrics::render_stats(&entries);
                 self.input.open_stats(stats);
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 CommandAction::Continue
             }
             "/cost" => {
@@ -194,7 +194,7 @@ impl App {
                     &resolved,
                 );
                 self.input.open_cost(lines);
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 CommandAction::Continue
             }
             _ if input.starts_with("/theme ") => {
@@ -210,7 +210,7 @@ impl App {
                 let name = input.strip_prefix("/color ").unwrap().trim();
                 if let Some(value) = crate::theme::preset_by_name(name) {
                     crate::theme::set_slug_color(value);
-                    self.screen.mark_dirty();
+                    self.mark_dirty();
                 } else {
                     self.notify_error(format!("unknown color: {}", name));
                 }
@@ -253,17 +253,17 @@ impl App {
     ) -> bool {
         match outcome {
             InputOutcome::StartAgent => {
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 let turn = self.begin_agent_turn(display, content);
                 self.agent = Some(turn);
             }
             InputOutcome::CustomCommand(cmd) => {
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 let turn = self.begin_custom_command_turn(*cmd);
                 self.agent = Some(turn);
             }
             InputOutcome::Compact { instructions } => {
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 if self.history.is_empty() {
                     self.notify_error("nothing to compact".into());
                 } else {
@@ -271,12 +271,12 @@ impl App {
                 }
             }
             InputOutcome::Exec(rx, kill) => {
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
             }
             InputOutcome::CancelAndClear => {
-                self.screen.mark_dirty();
+                self.mark_dirty();
                 self.reset_session();
                 self.agent = None;
             }
@@ -412,7 +412,7 @@ impl App {
         self.api_key_env = resolved.api_key_env.clone();
         self.provider_type = resolved.provider_type.clone();
         self.model_config = (&resolved.config).into();
-        self.screen.mark_dirty();
+        self.mark_dirty();
         let api_key = self.resolve_api_key().unwrap_or_default();
         state::set_selected_model(resolved.key.clone());
         self.engine.send(UiCommand::SetModel {
@@ -446,7 +446,7 @@ impl App {
         if self.settings.show_thinking != prev_show_thinking {
             self.screen.redraw();
         } else {
-            self.screen.mark_dirty();
+            self.mark_dirty();
         }
     }
 
@@ -469,7 +469,7 @@ impl App {
             system_prompt: Some(system_prompt),
             plugin_tools: Some(plugin_tools),
         });
-        self.screen.mark_dirty();
+        self.mark_dirty();
         if old != mode {
             let from = old.as_str().to_string();
             let to = mode.as_str().to_string();
@@ -495,7 +495,7 @@ impl App {
 
     pub(super) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.reasoning_effort = effort;
-        self.screen.mark_dirty();
+        self.mark_dirty();
         state::set_reasoning_effort(effort);
         self.engine.send(UiCommand::SetReasoningEffort { effort });
     }
