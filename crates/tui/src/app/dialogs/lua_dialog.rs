@@ -26,7 +26,7 @@ use ui::{
 };
 
 /// Per-option data consumed when the task resumes. Drained out of
-/// `LuaDialogState` into the [`TaskEvent::DialogResolved`] payload when
+/// `DialogState` into the [`TaskEvent::DialogResolved`] payload when
 /// the user selects an option, so the RegistryKey (which isn't Clone)
 /// moves cleanly from the dialog's state to the Lua task-runtime
 /// inbox.
@@ -47,7 +47,7 @@ struct InputEntry {
 /// In-closure state for a Lua dialog. Held by `Rc<RefCell>` so the
 /// Submit, Dismiss, and keymap callbacks share the same options /
 /// inputs / on_press callback ids.
-struct LuaDialogState {
+struct DialogState {
     dialog_id: u64,
     options: Vec<OptionEntry>,
     inputs: Vec<InputEntry>,
@@ -194,7 +194,7 @@ pub fn open(app: &mut App, dialog_id: u64, opts_key: mlua::RegistryKey) -> Resul
         )
         .ok_or_else(|| "failed to open dialog window".to_string())?;
 
-    let state = Rc::new(RefCell::new(LuaDialogState {
+    let state = Rc::new(RefCell::new(DialogState {
         dialog_id,
         options,
         inputs,
