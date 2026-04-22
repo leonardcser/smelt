@@ -944,7 +944,7 @@ impl App {
         }
 
         // Mode indicator.
-        let mode = self.screen.last_mode();
+        let mode = self.mode;
         let (mode_icon, mode_name, mode_fg) = match mode {
             protocol::Mode::Plan => ("◇ ", "plan", crate::theme::PLAN),
             protocol::Mode::Apply => ("→ ", "apply", crate::theme::APPLY),
