@@ -596,6 +596,18 @@ takes `PanelSpec` directly, no translation. Also exposes `WinId` as
 Lua userdata and `win.set_keymap(id, key, lua_fn)` accepting Lua
 functions (required for D3 below).
 
+**D2a · `Callback::Lua` invocation** (shipped 2026-04-23).
+`LuaRuntime::invoke_callback(handle, payload)` looks up the
+registered mlua::Function under `shared.callbacks[handle.0]`,
+builds a payload table (`{ index = 1-based }`, `{ text = … }`,
+`{ code, mods }`, or empty for `Payload::None`), and calls the fn.
+Errors are recorded via `record_error`. The two stub `lua_invoke`
+closures in `events.rs::close_focused_non_blocking_float` and
+`app/mod.rs` tick loop now call this directly. Zero behavior
+change today since no Rust code registers `Callback::Lua`, but the
+plumbing is the prereq for `smelt.api.win.set_keymap(id, key,
+lua_fn)` in the D2b picker-first migration.
+
 **D3 · Collapse intent glue into Lua runtime files.** After D2,
 **delete `lua_dialog.rs` and `lua_picker.rs` entirely** — no
 generic `lua_float.rs` successor, no `TaskDriveOutput::OpenDialog`/

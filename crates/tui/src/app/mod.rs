@@ -845,7 +845,10 @@ impl App {
             // Tick callback — e.g. Agents pulls a fresh subagent
             // snapshot here each frame.
             {
-                let mut lua_invoke = |_h: ui::LuaHandle, _p: &ui::Payload| {};
+                let lua = &self.lua;
+                let mut lua_invoke = |handle: ui::LuaHandle, payload: &ui::Payload| {
+                    lua.invoke_callback(handle, payload);
+                };
                 self.ui.dispatch_tick(&mut lua_invoke);
             }
             self.apply_lua_ops();

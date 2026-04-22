@@ -2111,6 +2111,44 @@ impl LuaRuntime {
         Ok(id)
     }
 
+    /// Invoke the Lua function registered under `handle.0` with a
+    /// table derived from `payload`. The table shape is:
+    /// - `Payload::None` → empty table.
+    /// - `Payload::Key` → `{ code = "<crossterm KeyCode>", mods =
+    ///   "<crossterm KeyModifiers>" }`.
+    /// - `Payload::Selection` → `{ index = <one-based usize> }`.
+    /// - `Payload::Text` → `{ text = <string> }`.
+    ///
+    /// Plugins pull out whatever fields they need; missing fields are
+    /// `nil`, which matches their semantic meaning. Errors are
+    /// recorded via `record_error`; ops produced by the callback
+    /// remain on `shared.ops` for the next `apply_lua_ops` drain.
+    pub fn invoke_callback(&self, handle: ui::LuaHandle, payload: &ui::Payload) {
+        let Some(func) = (match self.shared.callbacks.lock() {
+            Ok(cbs) => cbs
+                .get(&handle.0)
+                .filter(|h| !h.dead)
+                .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok()),
+            Err(_) => None,
+        }) else {
+            return;
+        };
+        let payload_table = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("callback payload: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = populate_payload_table(&payload_table, payload) {
+            self.record_error(format!("callback payload: {e}"));
+            return;
+        }
+        if let Err(e) = func.call::<()>(payload_table) {
+            self.record_error(format!("callback `{}`: {e}", handle.0));
+        }
+    }
+
     /// Drive the LuaTask runtime: resume any tasks whose waits have
     /// been satisfied (sleep elapsed, dialog resolved, …), park any
     /// new yields, and return the outputs for the app to act on.
@@ -2637,6 +2675,25 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
     }
 }
 
+/// Fill a Lua table with fields from a `ui::Payload` for
+/// `LuaRuntime::invoke_callback`. Variant → fields:
+/// - `None` → empty
+/// - `Key { code, mods }` → `{ code = Debug(code), mods = Debug(mods) }`
+/// - `Selection { index }` → `{ index = 1 + index }` (one-based)
+/// - `Text { content }` → `{ text = content }`
+fn populate_payload_table(table: &mlua::Table, payload: &ui::Payload) -> mlua::Result<()> {
+    match payload {
+        ui::Payload::None => Ok(()),
+        ui::Payload::Key { code, mods } => {
+            table.set("code", format!("{code:?}"))?;
+            table.set("mods", format!("{mods:?}"))?;
+            Ok(())
+        }
+        ui::Payload::Selection { index } => table.set("index", *index + 1),
+        ui::Payload::Text { content } => table.set("text", content.clone()),
+    }
+}
+
 /// Build the resume value for a resolved picker. Looks up
 /// `opts.items[index0 + 1]` and returns `{ index = 1-based, item = <entry> }`.
 /// Returns an error if the opts key was stale or missing `items`.
@@ -2849,6 +2906,57 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn invoke_callback_runs_registered_fn_with_selection_payload() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                _G.recorded = nil
+                _G.test_cb = function(ctx) _G.recorded = ctx.index end
+            "#,
+            )
+            .exec()
+            .unwrap();
+        let func: mlua::Function = rt.lua.load("test_cb").eval().unwrap();
+        let id = rt.register_callback(func).unwrap();
+        rt.invoke_callback(ui::LuaHandle(id), &ui::Payload::Selection { index: 2 });
+        let recorded: u64 = rt.lua.load("return _G.recorded").eval().unwrap();
+        // Payload is 0-indexed; Lua gets 1-based.
+        assert_eq!(recorded, 3);
+    }
+
+    #[test]
+    fn invoke_callback_text_payload() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                _G.t = nil
+                _G.cb = function(ctx) _G.t = ctx.text end
+            "#,
+            )
+            .exec()
+            .unwrap();
+        let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
+        let id = rt.register_callback(func).unwrap();
+        rt.invoke_callback(
+            ui::LuaHandle(id),
+            &ui::Payload::Text {
+                content: "hi".into(),
+            },
+        );
+        let t: String = rt.lua.load("return _G.t").eval().unwrap();
+        assert_eq!(t, "hi");
+    }
+
+    #[test]
+    fn invoke_callback_unknown_handle_is_noop() {
+        let rt = LuaRuntime::new();
+        // Nothing registered under id 9999 — should silently succeed.
+        rt.invoke_callback(ui::LuaHandle(9999), &ui::Payload::None);
     }
 
     #[test]
