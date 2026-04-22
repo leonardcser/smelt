@@ -1154,7 +1154,6 @@ impl App {
         call_id: &str,
         request_id: u64,
         tool_name: &str,
-        agent: &mut Option<TurnState>,
     ) -> bool {
         let label = match &choice {
             ConfirmChoice::Yes => "approved",
@@ -1240,7 +1239,7 @@ impl App {
                 self.screen
                     .finish_tool(call_id, ToolStatus::Denied, None, None);
                 if has_message {
-                    if let Some(ref mut ag) = agent {
+                    if let Some(ref mut ag) = self.agent {
                         ag.pending.retain(|p| p.call_id != call_id);
                     }
                     false
@@ -1253,7 +1252,7 @@ impl App {
                             "tool": tool_name,
                         }),
                     );
-                    if let Some(ref mut ag) = agent {
+                    if let Some(ref mut ag) = self.agent {
                         ag.pending.clear();
                     }
                     true
@@ -1265,12 +1264,7 @@ impl App {
     /// Resolve a completed question dialog.
     /// `answer` is `Some(json)` on confirm, `None` on cancel.
     /// Returns `true` if the agent should be cancelled.
-    pub(super) fn resolve_question(
-        &mut self,
-        answer: Option<String>,
-        request_id: u64,
-        agent: &mut Option<TurnState>,
-    ) -> bool {
+    pub(super) fn resolve_question(&mut self, answer: Option<String>, request_id: u64) -> bool {
         match answer {
             Some(json) => {
                 self.engine.send(UiCommand::QuestionAnswer {
@@ -1292,7 +1286,7 @@ impl App {
                     answer: None,
                 });
                 self.screen.finish_tool("", ToolStatus::Denied, None, None);
-                if let Some(ref mut ag) = agent {
+                if let Some(ref mut ag) = self.agent {
                     ag.pending.clear();
                 }
                 true

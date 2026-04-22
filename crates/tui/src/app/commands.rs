@@ -247,16 +247,17 @@ impl App {
         outcome: InputOutcome,
         content: Content,
         display: &str,
-        agent: &mut Option<TurnState>,
     ) -> bool {
         match outcome {
             InputOutcome::StartAgent => {
                 self.screen.mark_dirty();
-                *agent = Some(self.begin_agent_turn(display, content));
+                let turn = self.begin_agent_turn(display, content);
+                self.agent = Some(turn);
             }
             InputOutcome::CustomCommand(cmd) => {
                 self.screen.mark_dirty();
-                *agent = Some(self.begin_custom_command_turn(*cmd));
+                let turn = self.begin_custom_command_turn(*cmd);
+                self.agent = Some(turn);
             }
             InputOutcome::Compact { instructions } => {
                 self.screen.mark_dirty();
@@ -274,7 +275,7 @@ impl App {
             InputOutcome::CancelAndClear => {
                 self.screen.mark_dirty();
                 self.reset_session();
-                *agent = None;
+                self.agent = None;
             }
             InputOutcome::Continue => {}
             InputOutcome::Quit => return true,

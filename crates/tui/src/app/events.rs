@@ -17,12 +17,7 @@ impl App {
 
     /// Handle a single terminal event, potentially starting/stopping agents.
     /// Returns `true` if the app should quit.
-    pub(super) fn dispatch_terminal_event(
-        &mut self,
-        ev: Event,
-        agent: &mut Option<TurnState>,
-        t: &mut Timers,
-    ) -> bool {
+    pub(super) fn dispatch_terminal_event(&mut self, ev: Event, t: &mut Timers) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
             self.screen.set_focused(matches!(ev, Event::FocusGained));
             return false;
@@ -84,7 +79,7 @@ impl App {
         // all key events to it. Esc cancels, Enter executes.
         if self.screen.cmdline.active {
             if let Event::Key(k) = ev {
-                return self.handle_cmdline_key(k, agent);
+                return self.handle_cmdline_key(k);
             }
             return false;
         }
@@ -106,7 +101,7 @@ impl App {
             return false;
         }
 
-        let outcome = if agent.is_some() {
+        let outcome = if self.agent.is_some() {
             self.handle_event_running(ev, t)
         } else {
             self.handle_event_idle(ev, t)
@@ -115,9 +110,9 @@ impl App {
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
-                if agent.is_some() {
+                if self.agent.is_some() {
                     self.finish_turn(true);
-                    *agent = None;
+                    self.agent = None;
                 }
                 true
             }
@@ -129,9 +124,9 @@ impl App {
                         "reason": "user_cancel",
                     }),
                 );
-                if agent.is_some() {
+                if self.agent.is_some() {
                     self.finish_turn(true);
-                    *agent = None;
+                    self.agent = None;
                 }
                 false
             }
@@ -141,9 +136,9 @@ impl App {
                 // We must save the queued messages before finish_turn
                 // because the cancel path dumps them into the input buffer.
                 let remaining = std::mem::take(&mut self.queued_messages);
-                if agent.is_some() {
+                if self.agent.is_some() {
                     self.finish_turn(true);
-                    *agent = None;
+                    self.agent = None;
                 }
                 self.queued_messages = remaining;
                 false
@@ -157,7 +152,7 @@ impl App {
                     }),
                 );
                 self.reset_session();
-                *agent = None;
+                self.agent = None;
                 false
             }
             EventOutcome::MenuResult(result) => {
@@ -224,7 +219,7 @@ impl App {
                         } else {
                             self.process_input(&text)
                         };
-                        if self.apply_input_outcome(outcome, content, &display, agent) {
+                        if self.apply_input_outcome(outcome, content, &display) {
                             return true;
                         }
                     } else if !self.queued_messages.is_empty() {
@@ -235,11 +230,12 @@ impl App {
                             crate::custom_commands::resolve(queued.trim(), self.multi_agent)
                         {
                             self.screen.mark_dirty();
-                            *agent = Some(self.begin_custom_command_turn(cmd));
+                            let turn = self.begin_custom_command_turn(cmd);
+                            self.agent = Some(turn);
                         } else {
                             let outcome = self.process_input(&queued);
                             let content = Content::text(queued.clone());
-                            if self.apply_input_outcome(outcome, content, &queued, agent) {
+                            if self.apply_input_outcome(outcome, content, &queued) {
                                 return true;
                             }
                         }
@@ -1704,11 +1700,7 @@ impl App {
         let Some(win) = self.ui.focused_float() else {
             return;
         };
-        if self
-            .ui
-            .float_config(win)
-            .is_some_and(|c| c.blocks_agent)
-        {
+        if self.ui.float_config(win).is_some_and(|c| c.blocks_agent) {
             return;
         }
         let mut lua_invoke =
@@ -1840,11 +1832,9 @@ impl App {
                     self.sync_permissions(session_entries, workspace_rules);
                 }
                 crate::app::ops::AppOp::ResolveQuestion { answer, request_id } => {
-                    let was_cancel = answer.is_none();
-                    self.resolve_question(answer, request_id, &mut None);
-                    if was_cancel {
-                        self.pending_agent_clear_pending = true;
-                    }
+                    // `resolve_question` itself clears `self.agent.pending`
+                    // on the cancel path, so no flag needed.
+                    self.resolve_question(answer, request_id);
                 }
                 crate::app::ops::AppOp::AgentsBackToList {
                     detail_win,
@@ -1872,20 +1862,14 @@ impl App {
                     call_id,
                     tool_name,
                 } => {
-                    let should_cancel = self.resolve_confirm(
-                        (choice, message),
-                        &call_id,
-                        request_id,
-                        &tool_name,
-                        &mut None,
-                    );
+                    let should_cancel =
+                        self.resolve_confirm((choice, message), &call_id, request_id, &tool_name);
                     if should_cancel {
-                        // Mirror the legacy confirm.rs::resolve path:
-                        // `app.finish_turn(true); *agent = None;`. Heavy
-                        // cancel — flushes engine events, kills blocking
-                        // subagents, emits TurnEnd.
+                        // Heavy cancel: flushes engine events, kills
+                        // blocking subagents, emits TurnEnd, drops the
+                        // active turn.
                         self.finish_turn(true);
-                        self.pending_agent_cancel = true;
+                        self.agent = None;
                     }
                 }
                 crate::app::ops::AppOp::ConfirmBackTab {
@@ -1900,8 +1884,7 @@ impl App {
                         == Decision::Allow
                     {
                         self.close_float(win);
-                        self.screen
-                            .set_active_status(&call_id, ToolStatus::Pending);
+                        self.screen.set_active_status(&call_id, ToolStatus::Pending);
                         self.send_permission_decision(request_id, true, None);
                     }
                     // Otherwise: mode changed but dialog stays open so
@@ -1924,7 +1907,7 @@ impl App {
                 } => {
                     if let Some(bidx) = block_idx {
                         self.cancel_agent();
-                        self.pending_agent_cancel = true;
+                        self.agent = None;
                         if let Some((text, images)) = self.rewind_to(bidx) {
                             self.input.restore_from_rewind(text, images);
                         }
@@ -2697,7 +2680,7 @@ impl App {
         self.screen.mark_dirty();
     }
 
-    fn handle_cmdline_key(&mut self, k: KeyEvent, agent: &mut Option<super::TurnState>) -> bool {
+    fn handle_cmdline_key(&mut self, k: KeyEvent) -> bool {
         use crossterm::event::KeyModifiers as M;
         if !self.screen.cmdline.active {
             return false;
@@ -2717,7 +2700,7 @@ impl App {
                         CommandAction::Quit => return true,
                         CommandAction::CancelAndClear => {
                             self.reset_session();
-                            *agent = None;
+                            self.agent = None;
                         }
                         CommandAction::Compact { instructions } => {
                             if self.history.is_empty() {

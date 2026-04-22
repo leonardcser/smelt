@@ -110,17 +110,11 @@ pub struct App {
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
     permissions: Arc<Permissions>,
-    /// Set by `AppOp::RewindToBlock` (and future ops) to signal the
-    /// main event loop that the active turn should be dropped. The
-    /// reducer can't mutate `agent: &mut Option<TurnState>` directly
-    /// (it lives in the outer loop), so it flags here and the loop
-    /// clears it on the next tick.
-    pub(super) pending_agent_cancel: bool,
-    /// Set by `AppOp::ResolveQuestion` with `answer=None` to request
-    /// the outer loop clear `agent.pending` (queued tool calls) —
-    /// without dropping the turn itself. A lighter-touch signal than
-    /// `pending_agent_cancel`.
-    pub(super) pending_agent_clear_pending: bool,
+    /// The active turn's state, or `None` when the app is idle.
+    /// Owned by `App` so reducer handlers (`apply_ops`) can mutate
+    /// it directly rather than threading `&mut Option<TurnState>`
+    /// through every call chain.
+    pub(super) agent: Option<TurnState>,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
@@ -587,8 +581,7 @@ impl App {
             available_models,
             engine,
             permissions,
-            pending_agent_cancel: false,
-            pending_agent_clear_pending: false,
+            agent: None,
             input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
@@ -710,7 +703,6 @@ impl App {
         self.apply_lua_ops();
 
         let mut term_events = EventStream::new();
-        let mut agent: Option<TurnState> = None;
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
@@ -731,7 +723,8 @@ impl App {
             } else {
                 self.screen.mark_dirty();
                 let content = Content::text(msg.clone());
-                agent = Some(self.begin_agent_turn(&msg, content));
+                let turn = self.begin_agent_turn(&msg, content);
+                self.agent = Some(turn);
             }
         }
 
@@ -748,7 +741,7 @@ impl App {
 
         'main: loop {
             // ── Lua timer + notification pump ────────────────────────────
-            self.snapshot_engine_context(agent.is_some());
+            self.snapshot_engine_context(self.agent.is_some());
             self.lua.tick_timers();
             self.drive_lua_tasks();
             self.screen.set_custom_status(self.lua.tick_statusline());
@@ -756,18 +749,6 @@ impl App {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }
             self.apply_lua_ops();
-            if self.pending_agent_cancel {
-                self.pending_agent_cancel = false;
-                if agent.is_some() {
-                    agent = None;
-                }
-            }
-            if self.pending_agent_clear_pending {
-                self.pending_agent_clear_pending = false;
-                if let Some(ref mut a) = agent {
-                    a.pending.clear();
-                }
-            }
             // Fire `WinEvent::Tick` on every window with a registered
             // Tick callback — e.g. Agents pulls a fresh subagent
             // snapshot here each frame.
@@ -804,21 +785,26 @@ impl App {
                                     "source": "try_recv_drain",
                                 }),
                             );
-                            if agent.is_some() {
+                            if self.agent.is_some() {
                                 self.finish_turn(false);
-                                agent = None;
+                                self.agent = None;
                             }
                             break;
                         }
                     };
-                    let action = if let Some(ref mut ag) = agent {
+                    // Take the TurnState out for the duration of the
+                    // dispatch so `handle_engine_event` can borrow its
+                    // fields while we still hold `&mut self`.
+                    let action = if let Some(mut ag) = self.agent.take() {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-                        self.dispatch_control(
+                        let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
                             &mut pending_dialogs,
                             t.last_keypress,
-                        )
+                        );
+                        self.agent = Some(ag);
+                        action
                     } else {
                         // No active turn — handle out-of-band events.
                         self.handle_engine_event_idle(ev);
@@ -828,7 +814,7 @@ impl App {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
                             self.finish_turn(false);
-                            agent = None;
+                            self.agent = None;
                             break;
                         }
                     }
@@ -836,26 +822,28 @@ impl App {
             }
 
             // ── Auto-start from leftover queued messages (one per turn) ──
-            if agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
+            if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
                 if let Some(cmd) = crate::custom_commands::resolve(text.trim(), self.multi_agent) {
                     self.screen.mark_dirty();
-                    agent = Some(self.begin_custom_command_turn(cmd));
+                    let turn = self.begin_custom_command_turn(cmd);
+                    self.agent = Some(turn);
                 } else if !text.is_empty() {
                     let outcome = self.process_input(&text);
                     let content = Content::text(text.clone());
                     // Quit is ignored here: a queued "/exit" shouldn't terminate
                     // the main loop from this re-entry point.
-                    self.apply_input_outcome(outcome, content, &text, &mut agent);
+                    self.apply_input_outcome(outcome, content, &text);
                 }
             }
 
             // ── Auto-start from pending agent messages ─────────────────
-            if agent.is_none() && !self.pending_agent_messages.is_empty() {
+            if self.agent.is_none() && !self.pending_agent_messages.is_empty() {
                 let msgs = std::mem::take(&mut self.pending_agent_messages);
                 self.history.extend(msgs);
                 self.screen.mark_dirty();
-                agent = Some(self.begin_agent_message_turn());
+                let turn = self.begin_agent_message_turn();
+                self.agent = Some(turn);
             }
 
             // ── Drain spawned children → track agents ─────────────────────
@@ -893,27 +881,32 @@ impl App {
                     summary,
                     request_id,
                 }));
-                let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
+                let taken = self.agent.take();
+                let pending_ref: &[crate::app::PendingTool] =
+                    taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
                 let action =
-                    self.dispatch_control(ctrl, pending, &mut pending_dialogs, t.last_keypress);
+                    self.dispatch_control(ctrl, pending_ref, &mut pending_dialogs, t.last_keypress);
+                self.agent = taken;
                 match action {
                     LoopAction::Continue => {}
                     LoopAction::Done => {
                         self.finish_turn(false);
-                        agent = None;
+                        self.agent = None;
                     }
                 }
             }
 
             // ── Process pending permission dialogs ──────────────────────
             // If agent was cancelled while dialogs were pending, discard them.
-            if agent.is_none() && !pending_dialogs.is_empty() {
+            if self.agent.is_none() && !pending_dialogs.is_empty() {
                 pending_dialogs.clear();
                 self.screen.set_pending_dialog(false);
             }
             // Re-dispatch queued dialogs.  Each goes through dispatch_control
             // so auto-approval checks re-run ("always allow" → auto-approve rest).
-            if !pending_dialogs.is_empty() && !self.focused_float_blocks_agent() && agent.is_some()
+            if !pending_dialogs.is_empty()
+                && !self.focused_float_blocks_agent()
+                && self.agent.is_some()
             {
                 let idle = t
                     .last_keypress
@@ -922,7 +915,7 @@ impl App {
                 while idle
                     && !pending_dialogs.is_empty()
                     && !self.focused_float_blocks_agent()
-                    && agent.is_some()
+                    && self.agent.is_some()
                 {
                     let deferred = pending_dialogs.pop_front().unwrap();
                     let ctrl = match deferred {
@@ -931,14 +924,21 @@ impl App {
                             SessionControl::NeedsAskQuestion { args, request_id }
                         }
                     };
-                    let pending = agent.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                    let action =
-                        self.dispatch_control(ctrl, pending, &mut pending_dialogs, t.last_keypress);
+                    let taken = self.agent.take();
+                    let pending_ref: &[crate::app::PendingTool] =
+                        taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
+                    let action = self.dispatch_control(
+                        ctrl,
+                        pending_ref,
+                        &mut pending_dialogs,
+                        t.last_keypress,
+                    );
+                    self.agent = taken;
                     match action {
                         LoopAction::Continue => {}
                         LoopAction::Done => {
                             self.finish_turn(false);
-                            agent = None;
+                            self.agent = None;
                         }
                     }
                 }
@@ -947,7 +947,7 @@ impl App {
 
             // ── Render ───────────────────────────────────────────────────
             let will_render = self.screen.is_dirty();
-            self.render_normal(agent.is_some());
+            self.render_normal(self.agent.is_some());
             if will_render {
                 last_frame = Instant::now();
             }
@@ -987,7 +987,7 @@ impl App {
                     };
 
                     if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
-                        if self.dispatch_terminal_event(ev, &mut agent, &mut t) {
+                        if self.dispatch_terminal_event(ev, &mut t) {
                             break 'main;
                         }
                     }
@@ -996,7 +996,7 @@ impl App {
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
                             if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
-                                if self.dispatch_terminal_event(ev, &mut agent, &mut t) {
+                                if self.dispatch_terminal_event(ev, &mut t) {
                                     break 'main;
                                 }
                             }
@@ -1008,12 +1008,12 @@ impl App {
                         self.scroll_under_mouse(scroll_row, scroll_delta);
                     }
 
-                    self.render_normal(agent.is_some());
+                    self.render_normal(self.agent.is_some());
                     last_frame = Instant::now();
                 }
 
                 Some(ev) = self.engine.recv(), if !self.focused_float_blocks_agent() => {
-                    if let Some(ref mut ag) = agent {
+                    if let Some(mut ag) = self.agent.take() {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
                             ctrl,
@@ -1021,11 +1021,12 @@ impl App {
                             &mut pending_dialogs,
                             t.last_keypress,
                         );
+                        self.agent = Some(ag);
                         match action {
                             LoopAction::Continue => {}
                             LoopAction::Done => {
                                 self.finish_turn(false);
-                                agent = None;
+                                self.agent = None;
                             }
                         }
                     } else {
@@ -1089,14 +1090,14 @@ impl App {
                     // without requiring further mouse motion.
                     self.tick_drag_autoscroll();
                     // Render deferred engine events + animations.
-                    self.render_normal(agent.is_some());
+                    self.render_normal(self.agent.is_some());
                     last_frame = Instant::now();
                 }
             }
         }
 
         // Cleanup
-        if agent.is_some() {
+        if self.agent.is_some() {
             self.finish_turn(true);
         }
         self.lua.emit(crate::lua::AutocmdEvent::Shutdown);
