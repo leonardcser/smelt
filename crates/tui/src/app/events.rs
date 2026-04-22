@@ -28,25 +28,43 @@ impl App {
             return false;
         }
 
+        // Global chord layer: these keys fire in every focus context
+        // (prompt, content, cmdline, or any float). Intercepted before
+        // focus-specific routing so no handler below can swallow them.
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = &ev
+        {
+            match (*code, *modifiers) {
+                (KeyCode::BackTab, _) => {
+                    if self.confirm_context.is_some() && self.ui.focused_float().is_some() {
+                        self.handle_confirm_backtab(agent);
+                    } else {
+                        self.toggle_mode();
+                        self.screen.mark_dirty();
+                    }
+                    return false;
+                }
+                (KeyCode::Char('t'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.cycle_reasoning();
+                    self.screen.mark_dirty();
+                    return false;
+                }
+                (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.screen.redraw();
+                    self.ui.force_redraw();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         // Compositor float: when a float window is focused, route keys
-        // through the compositor. Builtin floats get a chance to intercept
-        // keys before the generic Dialog handler runs. BackTab on a
-        // Confirm float toggles app mode and — if the new mode
-        // auto-allows the pending tool — resolves the dialog.
+        // through the compositor.
         if self.ui.focused_float().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
                 return false;
-            }
-            if let Event::Key(KeyEvent {
-                code: KeyCode::BackTab,
-                ..
-            }) = ev
-            {
-                if self.confirm_context.is_some() {
-                    self.handle_confirm_backtab(agent);
-                    return false;
-                }
             }
             if let Event::Key(KeyEvent {
                 code, modifiers, ..
