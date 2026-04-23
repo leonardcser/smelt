@@ -17,8 +17,7 @@ pub struct BufferView {
     decorations: Vec<LineDecoration>,
     scroll_offset: usize,
     border: Border,
-    title: Option<String>,
-    title_style: Style,
+    border_style: Style,
     /// Fallback style for cells that have no per-span highlight and
     /// no per-line decoration override. Used by containers that pre-
     /// fill a background (e.g. Dialog panels) so the content keeps
@@ -34,8 +33,7 @@ impl BufferView {
             decorations: Vec::new(),
             scroll_offset: 0,
             border: Border::None,
-            title: None,
-            title_style: Style::default(),
+            border_style: Style::default(),
             default_style: Style::default(),
         }
     }
@@ -46,16 +44,6 @@ impl BufferView {
 
     pub fn with_border(mut self, border: Border) -> Self {
         self.border = border;
-        self
-    }
-
-    pub fn with_title(mut self, title: impl Into<String>) -> Self {
-        self.title = Some(title.into());
-        self
-    }
-
-    pub fn with_title_style(mut self, style: Style) -> Self {
-        self.title_style = style;
         self
     }
 
@@ -73,10 +61,6 @@ impl BufferView {
 
     pub fn scroll_offset(&self) -> usize {
         self.scroll_offset
-    }
-
-    pub fn set_title(&mut self, title: Option<String>) {
-        self.title = title;
     }
 
     pub fn set_border(&mut self, border: Border) {
@@ -147,24 +131,11 @@ impl BufferView {
             return;
         }
 
-        let style = self.title_style;
+        let style = self.border_style;
 
         grid.set(0, 0, tl, style);
-        if let Some(ref title) = self.title {
-            grid.set(1, 0, h, style);
-            let max_title = (w as usize).saturating_sub(4);
-            for (i, ch) in title.chars().take(max_title).enumerate() {
-                grid.set(2 + i as u16, 0, ch, style);
-            }
-            let title_len = title.chars().take(max_title).count();
-            grid.set(2 + title_len as u16, 0, h, style);
-            for col in (3 + title_len as u16)..w.saturating_sub(1) {
-                grid.set(col, 0, h, style);
-            }
-        } else {
-            for col in 1..w.saturating_sub(1) {
-                grid.set(col, 0, h, style);
-            }
+        for col in 1..w.saturating_sub(1) {
+            grid.set(col, 0, h, style);
         }
         grid.set(w - 1, 0, tr, style);
 
@@ -349,24 +320,6 @@ mod tests {
         assert_eq!(grid.cell(0, 2).symbol, '└');
         assert_eq!(grid.cell(1, 1).symbol, 'h');
         assert_eq!(grid.cell(5, 1).symbol, 'o');
-    }
-
-    #[test]
-    fn renders_with_title() {
-        let view = BufferView::new()
-            .with_border(Border::Rounded)
-            .with_title("test");
-        let mut grid = Grid::new(20, 3);
-        let ctx = DrawContext {
-            terminal_width: 20,
-            terminal_height: 3,
-            focused: false,
-        };
-        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 3));
-        view.draw(Rect::new(0, 0, 20, 3), &mut slice, &ctx);
-        assert_eq!(grid.cell(0, 0).symbol, '╭');
-        assert_eq!(grid.cell(2, 0).symbol, 't');
-        assert_eq!(grid.cell(5, 0).symbol, 't');
     }
 
     #[test]

@@ -119,19 +119,6 @@ pub enum UiOp {
         italic: bool,
         dim: bool,
     },
-    WinOpenFloat {
-        buf_id: u64,
-        title: String,
-        footer_items: Vec<String>,
-        accent: Option<crossterm::style::Color>,
-    },
-    WinUpdate {
-        id: u64,
-        title: Option<String>,
-    },
-    WinClose {
-        id: u64,
-    },
     /// Register a Lua fn (previously stashed in `shared.callbacks`
     /// under `callback_id`) as a `Callback::Lua` keymap on `win`.
     /// Pushed by `smelt.api.win.set_keymap`; the reducer does the

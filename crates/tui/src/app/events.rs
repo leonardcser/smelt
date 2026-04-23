@@ -1962,61 +1962,6 @@ impl App {
                     }
                 }
             }
-            UiOp::WinOpenFloat {
-                buf_id,
-                title,
-                footer_items,
-                accent,
-            } => {
-                let config = ui::FloatConfig {
-                    title: Some(title),
-                    border: ui::Border::Rounded,
-                    ..Default::default()
-                };
-                if let Some(win_id) = self.ui.win_open_float(ui::BufId(buf_id), config) {
-                    if let Some(fd) = self.ui.float_dialog_mut(win_id) {
-                        fd.config_mut().accent_style = ui::Style {
-                            fg: accent,
-                            ..Default::default()
-                        };
-                        fd.config_mut().border_style = ui::Style {
-                            fg: Some(crate::theme::accent()),
-                            ..Default::default()
-                        };
-                        fd.config_mut().background_style = ui::Style {
-                            bg: Some(crate::theme::bar()),
-                            ..Default::default()
-                        };
-                        fd.config_mut().hint_left = Some("ESC close".into());
-                        fd.config_mut().hint_right = if footer_items.is_empty() {
-                            Some("j/k scroll".into())
-                        } else {
-                            Some("Enter select".into())
-                        };
-                        if !footer_items.is_empty() {
-                            let items: Vec<ui::ListItem> = footer_items
-                                .iter()
-                                .enumerate()
-                                .map(|(i, label)| {
-                                    ui::ListItem::plain(format!("{}. {}", i + 1, label))
-                                })
-                                .collect();
-                            fd.set_footer_items(items);
-                        }
-                    }
-                }
-            }
-            UiOp::WinUpdate { id, title } => {
-                if let Some(win) = self.ui.win_mut(ui::WinId(id)) {
-                    if let Some(t) = title {
-                        win.set_title(Some(t));
-                    }
-                }
-            }
-            UiOp::WinClose { id } => {
-                self.ui.win_close(ui::WinId(id));
-                self.ui.buf_delete(ui::BufId(id));
-            }
             UiOp::WinBindLuaKeymap {
                 win,
                 key,

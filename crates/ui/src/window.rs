@@ -212,19 +212,6 @@ impl Window {
         }
     }
 
-    pub fn title(&self) -> Option<&str> {
-        match &self.config {
-            WinConfig::Float(f) => f.title.as_deref(),
-            WinConfig::Split(_) => None,
-        }
-    }
-
-    pub fn set_title(&mut self, title: Option<String>) {
-        if let WinConfig::Float(ref mut f) = self.config {
-            f.title = title;
-        }
-    }
-
     // ── Vim ────────────────────────────────────────────────────────────
 
     pub fn set_vim_enabled(&mut self, enabled: bool) {
