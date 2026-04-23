@@ -395,33 +395,13 @@ pub(crate) struct LuaShared {
     pub(crate) task_inbox: Mutex<Vec<TaskEvent>>,
 }
 
-/// Events that drive the Lua task runtime — dialog resolutions,
-/// keymap-fired callbacks, anything that resumes or invokes a Lua
-/// coroutine / handler. Lives on [`LuaShared::task_inbox`].
+/// Events that drive the Lua task runtime — picker resolution and
+/// externally-allocated coroutine resumes. Dialogs used to route their
+/// Submit / Dismiss / keymap / input-change / tick events through
+/// here, but the Lua-side `runtime/lua/smelt/dialog.lua` now registers
+/// `Callback::Lua` handlers directly via `smelt.api.win.set_keymap` /
+/// `on_event`, so the dialog variants are gone.
 pub enum TaskEvent {
-    /// A compositor dialog was submitted or dismissed. The Lua module
-    /// fires the optional per-option `on_select` (consuming its key)
-    /// and resumes the parked task with `{action, option_index,
-    /// inputs}`.
-    DialogResolved {
-        dialog_id: u64,
-        action: String,
-        option_index: Option<usize>,
-        inputs: Vec<(String, String)>,
-        on_select: Option<mlua::RegistryKey>,
-    },
-    /// A plugin-registered keymap on an open Lua dialog fired. The Lua
-    /// module looks up the `on_press` callback by `callback_id`, builds
-    /// a `ctx` table (selected_index, inputs, `close()`), and invokes
-    /// it. Does *not* close the dialog — the callback decides whether
-    /// to call `ctx.close()`.
-    KeymapFired {
-        callback_id: u64,
-        dialog_id: u64,
-        win_id: ui::WinId,
-        selected_index: Option<usize>,
-        inputs: Vec<(String, String)>,
-    },
     /// A picker opened via `smelt.api.picker.open` was resolved. The Lua
     /// module looks up the stored items under `opts_key`, builds
     /// `{ index = 1-based, item = <entry> }` (or `nil` on dismiss), and
@@ -441,26 +421,6 @@ pub enum TaskEvent {
     ExternalResolved {
         external_id: u64,
         value: mlua::RegistryKey,
-    },
-    /// An input panel on an open dialog had its text edited. Lua pump
-    /// invokes the registered `on_change(ctx)` callback (non-closing,
-    /// same shape as `KeymapFired`).
-    InputChanged {
-        callback_id: u64,
-        dialog_id: u64,
-        win_id: ui::WinId,
-        selected_index: Option<usize>,
-        inputs: Vec<(String, String)>,
-    },
-    /// The engine tick fired while an `on_tick` callback is registered
-    /// on a dialog. Routes through the Lua pump to the handler; keeps
-    /// the dialog open.
-    TickFired {
-        callback_id: u64,
-        dialog_id: u64,
-        win_id: ui::WinId,
-        selected_index: Option<usize>,
-        inputs: Vec<(String, String)>,
     },
 }
 
@@ -2190,72 +2150,6 @@ impl LuaRuntime {
         let mut extra_ops: Vec<AppOp> = Vec::new();
         for ev in events {
             match ev {
-                TaskEvent::DialogResolved {
-                    dialog_id,
-                    action,
-                    option_index,
-                    inputs,
-                    on_select,
-                } => {
-                    if let Some(key) = on_select {
-                        if let Ok(func) = self.lua.registry_value::<mlua::Function>(&key) {
-                            if let Err(e) = func.call::<()>(()) {
-                                extra_ops.push(
-                                    UiOp::NotifyError(format!("dialog on_select: {e}")).into(),
-                                );
-                            }
-                        }
-                    }
-                    match crate::app::dialogs::lua_dialog::build_result(
-                        &self.lua,
-                        &action,
-                        option_index,
-                        inputs,
-                    ) {
-                        Ok(v) => {
-                            self.resolve_dialog(dialog_id, v);
-                        }
-                        Err(e) => {
-                            extra_ops
-                                .push(UiOp::NotifyError(format!("dialog resolve: {e}")).into());
-                            self.resolve_dialog(dialog_id, mlua::Value::Nil);
-                        }
-                    }
-                }
-                TaskEvent::KeymapFired {
-                    callback_id,
-                    dialog_id,
-                    win_id,
-                    selected_index,
-                    inputs,
-                } => {
-                    let func = {
-                        let Ok(cbs) = self.shared.callbacks.lock() else {
-                            continue;
-                        };
-                        cbs.get(&callback_id)
-                            .filter(|h| !h.dead)
-                            .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
-                    };
-                    let Some(func) = func else { continue };
-                    match crate::app::dialogs::lua_dialog::build_keymap_ctx(
-                        &self.lua,
-                        self.shared.clone(),
-                        dialog_id,
-                        win_id,
-                        selected_index,
-                        inputs,
-                    ) {
-                        Ok(ctx) => {
-                            if let Err(e) = func.call::<()>(ctx) {
-                                extra_ops.push(UiOp::NotifyError(format!("keymap: {e}")).into());
-                            }
-                        }
-                        Err(e) => {
-                            extra_ops.push(UiOp::NotifyError(format!("keymap ctx: {e}")).into());
-                        }
-                    }
-                }
                 TaskEvent::PickerResolved {
                     picker_id,
                     selected_index,
@@ -2277,49 +2171,6 @@ impl LuaRuntime {
                 TaskEvent::ExternalResolved { external_id, value } => {
                     let v = self.lua.registry_value(&value).unwrap_or(mlua::Value::Nil);
                     self.resolve_external(external_id, v);
-                }
-                TaskEvent::InputChanged {
-                    callback_id,
-                    dialog_id,
-                    win_id,
-                    selected_index,
-                    inputs,
-                }
-                | TaskEvent::TickFired {
-                    callback_id,
-                    dialog_id,
-                    win_id,
-                    selected_index,
-                    inputs,
-                } => {
-                    let func = {
-                        let Ok(cbs) = self.shared.callbacks.lock() else {
-                            continue;
-                        };
-                        cbs.get(&callback_id)
-                            .filter(|h| !h.dead)
-                            .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
-                    };
-                    let Some(func) = func else { continue };
-                    match crate::app::dialogs::lua_dialog::build_keymap_ctx(
-                        &self.lua,
-                        self.shared.clone(),
-                        dialog_id,
-                        win_id,
-                        selected_index,
-                        inputs,
-                    ) {
-                        Ok(ctx) => {
-                            if let Err(e) = func.call::<()>(ctx) {
-                                extra_ops.push(
-                                    UiOp::NotifyError(format!("dialog callback: {e}")).into(),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            extra_ops.push(UiOp::NotifyError(format!("dialog ctx: {e}")).into());
-                        }
-                    }
                 }
             }
         }
@@ -3012,20 +2863,10 @@ function smelt.api.sleep(ms)
   return coroutine.yield({__yield = "sleep", ms = ms})
 end
 
--- Open a dialog and wait for the user's answer. Blocks the task
--- coroutine. Returns a table:
---   { action = "<option.action> | 'dismiss'",
---     option_index = <1-based int | nil>,
---     inputs       = { [name] = "<text>", … } }
-function smelt.api.dialog.open(opts)
-  if not coroutine.isyieldable() then
-    error("smelt.api.dialog.open: call from inside smelt.task(fn) or tool.execute", 2)
-  end
-  if type(opts) ~= "table" then
-    error("smelt.api.dialog.open: expected table of options", 2)
-  end
-  return coroutine.yield({__yield = "dialog", opts = opts})
-end
+-- `smelt.api.dialog.open` is installed by `runtime/lua/smelt/dialog.lua`,
+-- which wraps a raw `{__yield = "dialog", opts = ...}` (the Rust side
+-- opens the float + panels and resumes with `{win_id = …}`) with full
+-- Lua-side callback registration, result building, and task.resume.
 
 -- Open a focusable picker (single-column selection list) and wait for
 -- the user's choice. Blocks the task coroutine.
@@ -3058,6 +2899,10 @@ impl Default for LuaRuntime {
 
 /// Modules embedded in the binary, available via `require("smelt.plugins.X")`.
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
+    (
+        "smelt.dialog",
+        include_str!("../../../../runtime/lua/smelt/dialog.lua"),
+    ),
     (
         "smelt.plugins.plan_mode",
         include_str!("../../../../runtime/lua/smelt/plugins/plan_mode.lua"),
@@ -3112,6 +2957,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
 /// init.lua). These are former Rust built-ins migrated to Lua. Required
 /// after the embedded searcher is set up, before user init.lua runs.
 const AUTOLOAD_MODULES: &[&str] = &[
+    "smelt.dialog",
     "smelt.plugins.ask_user_question",
     "smelt.plugins.export",
     "smelt.plugins.rewind",
@@ -3495,26 +3341,32 @@ mod tests {
     }
 
     #[test]
-    fn dialog_open_yield_parks_task_and_resume_delivers_result() {
+    fn dialog_open_yield_parks_task_and_emits_open_dialog_output() {
+        // After the D3 port, `smelt.api.dialog.open` is a thick Lua
+        // wrapper implemented in `runtime/lua/smelt/dialog.lua`. End-
+        // to-end resolution now requires the App-level reducer (which
+        // opens the float, wires `Callback::Lua` keymaps, and routes
+        // Submit/Dismiss back through Lua) and can't be exercised
+        // inside a pure `LuaRuntime` test. This test just verifies the
+        // foundation: the raw `{__yield = "dialog", opts = ...}` still
+        // parks the task and emits an `OpenDialog` drive output.
         let rt = LuaRuntime::new();
         rt.lua
             .load(
                 r#"
                 smelt.api.tools.register({
-                  name = "confirm_then_return",
+                  name = "confirm_raw_yield",
                   description = "",
                   parameters = { type = "object", properties = {} },
                   execute = function()
-                    local r = smelt.api.dialog.open({
+                    -- Bypass the thick wrapper in dialog.lua to exercise
+                    -- just the raw yield shape.
+                    local r = coroutine.yield({__yield = "dialog", opts = {
                       panels = {
                         { kind = "content", text = "please confirm" },
-                        { kind = "options", items = {
-                          { label = "yes", action = "approve" },
-                          { label = "no",  action = "deny"    },
-                        }},
                       },
-                    })
-                    return r.action
+                    }})
+                    return tostring(r.win_id)
                   end,
                 })
                 "#,
@@ -3523,31 +3375,13 @@ mod tests {
             .unwrap();
         let args = std::collections::HashMap::new();
         assert!(matches!(
-            rt.execute_plugin_tool("confirm_then_return", &args, 1, "c"),
+            rt.execute_plugin_tool("confirm_raw_yield", &args, 1, "c"),
             ToolExecResult::Pending
         ));
-        // Drive picks up the deferred OpenDialog from the inline execute.
         let outs = rt.drive_tasks();
-        let (task_dialog_id, _opts_key) = outs
+        assert!(outs
             .iter()
-            .find_map(|o| match o {
-                TaskDriveOutput::OpenDialog { dialog_id, .. } => Some((*dialog_id, 0u8)),
-                _ => None,
-            })
-            .expect("expected OpenDialog yield");
-        // Now resolve the dialog as if the user chose "approve".
-        let result = rt
-            .lua
-            .load(r#"return { action = "approve", option_index = 1, inputs = {} }"#)
-            .eval::<mlua::Value>()
-            .unwrap();
-        assert!(rt.resolve_dialog(task_dialog_id, result));
-        // Next drive resumes the task; it should complete with "approve".
-        let outs = rt.drive_tasks();
-        assert!(outs.iter().any(|o| matches!(
-            o,
-            TaskDriveOutput::ToolComplete { content, is_error: false, .. } if content == "approve"
-        )));
+            .any(|o| matches!(o, TaskDriveOutput::OpenDialog { .. })));
     }
 
     #[test]

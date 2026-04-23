@@ -1923,12 +1923,24 @@ impl App {
                 }
                 crate::lua::TaskDriveOutput::OpenDialog {
                     dialog_id, opts, ..
-                } => {
-                    if let Err(e) = super::dialogs::lua_dialog::open(self, dialog_id, opts) {
+                } => match super::dialogs::lua_dialog::open(self, opts) {
+                    Ok(win_id) => {
+                        let value = self
+                            .lua
+                            .lua()
+                            .create_table()
+                            .and_then(|t| {
+                                t.set("win_id", win_id.0)?;
+                                Ok(mlua::Value::Table(t))
+                            })
+                            .unwrap_or(mlua::Value::Nil);
+                        self.lua.resolve_dialog(dialog_id, value);
+                    }
+                    Err(e) => {
                         self.notify_error(format!("dialog.open: {e}"));
                         self.lua.resolve_dialog(dialog_id, mlua::Value::Nil);
                     }
-                }
+                },
                 crate::lua::TaskDriveOutput::OpenPicker {
                     picker_id, opts, ..
                 } => {

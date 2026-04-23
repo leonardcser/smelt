@@ -668,6 +668,27 @@ Lua keymaps, and resume its caller coroutine end-to-end without any
 per-intent Rust glue. The D2b migration itself (port picker + delete
 `lua_picker.rs`) is the next commit.
 
+**D3 · dialog port** (shipped 2026-04-23). `smelt.api.dialog.open`
+now lives in `runtime/lua/smelt/dialog.lua`. Rust keeps the
+opts→`PanelSpec` translator (~180 LOC in `lua_dialog.rs`, down from
+~550) because building panels needs `&mut Ui` and render pipeline
+access; everything else — Submit / Dismiss / custom keymaps /
+`on_select` / `on_change` / `on_tick`, result-table construction —
+moved to Lua using `ctx.panels` pull-reads, `smelt.api.win.set_keymap`,
+`smelt.api.win.on_event`, `smelt.api.task.alloc` + `resume`, and
+`smelt.api.win.close`. The Rust→Lua protocol is a two-step yield:
+`{__yield = "dialog", opts = opts}` opens the float and resumes with
+`{win_id = …}`; Lua then registers handlers and yields
+`{__yield = "external", id = task_id}` for the final result. The
+plugin-facing contract (`{action, option_index, inputs}` result,
+`ctx.{selected_index, inputs, close, win}` inside keymap callbacks)
+is preserved by `dialog.lua` wrappers, so `permissions.lua`,
+`agents.lua`, `resume.lua`, `ps.lua`, `help.lua` need no changes.
+Deleted: `TaskEvent::{DialogResolved, KeymapFired, InputChanged,
+TickFired}` + their `pump_task_events` branches, `build_result`,
+`build_keymap_ctx`, `DialogState`, per-option `OptionEntry`, per-input
+`InputEntry`. Net: −497 lines Rust, +200 lines Lua runtime file.
+
 **D3 · Collapse intent glue into Lua runtime files.** After D2,
 **delete `lua_dialog.rs` and `lua_picker.rs` entirely** — no
 generic `lua_float.rs` successor, no `TaskDriveOutput::OpenDialog`/
