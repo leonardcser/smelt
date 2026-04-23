@@ -1,21 +1,38 @@
 mod agent;
 pub mod commands;
 mod transcript;
+pub(crate) mod transcript_cache;
 pub(crate) mod transcript_model;
+pub(crate) mod transcript_present;
+pub(crate) mod working;
 pub(crate) use commands::copy_to_clipboard;
 pub(crate) mod dialogs;
 mod events;
 mod history;
 pub mod ops;
 
+/// Snapshot of a tracked agent's state, published by the main loop
+/// and consumed by the agents dialog.
+#[derive(Clone)]
+pub struct AgentSnapshot {
+    pub agent_id: String,
+    pub prompt: Arc<String>,
+    pub tool_calls: Vec<AgentToolEntry>,
+    pub context_tokens: Option<u32>,
+    pub cost_usd: f64,
+}
+
+/// Shared, live-updating list of agent snapshots.
+pub type SharedSnapshots = Arc<Mutex<Vec<AgentSnapshot>>>;
+
 pub(crate) use crate::app::transcript_model::{
     AgentBlockStatus, ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest,
     PermissionEntry, Throbber, ToolOutput, ToolState, ToolStatus, ViewState,
 };
 use crate::input::{resolve_agent_esc, Action, EscAction, History, MenuResult, PromptState};
-use crate::render::tool_arg_summary;
 use crate::session::Session;
 use crate::{render, session, state, vim};
+use engine::tools::tool_arg_summary;
 use engine::{permissions::Decision, EngineHandle, Permissions};
 use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
 
@@ -145,7 +162,7 @@ pub struct App {
     /// Spinner + throbber state (active timer, TPS samples, elapsed).
     /// Consulted by the status bar each frame; `set_throbber` is the
     /// single write path, mirrored from engine lifecycle events.
-    pub working: render::working::WorkingState,
+    pub working: working::WorkingState,
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).
     pub transcript_gutters: crate::window::WindowGutters,
@@ -172,7 +189,7 @@ pub struct App {
     /// All tracked subagents (blocking and background).
     pub agents: Vec<TrackedAgent>,
     /// Shared agent snapshots for live dialog updates.
-    pub agent_snapshots: render::SharedSnapshots,
+    pub agent_snapshots: crate::app::SharedSnapshots,
     pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
     permissions: Arc<Permissions>,
@@ -601,7 +618,7 @@ impl App {
             cmdline_history: Vec::new(),
             cmdline_completer: None,
             term_focused: true,
-            working: render::working::WorkingState::new(),
+            working: working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
             layout: render::layout::LayoutState::compute(&render::layout::LayoutInput {
                 term_width: 80,

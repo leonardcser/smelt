@@ -134,7 +134,7 @@ fn queued_message_rows(queued: &[String], usable: usize) -> Vec<WindowRow> {
 
     for msg in queued {
         let is_command = crate::completer::Completer::is_command(msg.trim());
-        let geom = super::blocks::UserBlockGeometry::new(msg, text_w);
+        let geom = crate::app::transcript_present::UserBlockGeometry::new(msg, text_w);
         for line in &geom.lines {
             if line.is_empty() {
                 let fill_w = if geom.block_w > 0 {

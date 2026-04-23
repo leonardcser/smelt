@@ -533,13 +533,14 @@ impl App {
                         } else {
                             ToolStatus::Ok
                         };
-                        let render_cache = render::build_tool_output_render_cache(
-                            &removed.name,
-                            &removed.args,
-                            &result.content,
-                            result.is_error,
-                            result.metadata.as_ref(),
-                        );
+                        let render_cache =
+                            crate::app::transcript_cache::build_tool_output_render_cache(
+                                &removed.name,
+                                &removed.args,
+                                &result.content,
+                                result.is_error,
+                                result.metadata.as_ref(),
+                            );
                         let output = Some(Box::new(ToolOutput {
                             content: result.content,
                             is_error: result.is_error,
@@ -1079,10 +1080,10 @@ impl App {
 
     /// Update the shared snapshots so the /agents dialog sees live data.
     fn sync_agent_snapshots(&self) {
-        let snaps: Vec<render::AgentSnapshot> = self
+        let snaps: Vec<crate::app::AgentSnapshot> = self
             .agents
             .iter()
-            .map(|a| render::AgentSnapshot {
+            .map(|a| crate::app::AgentSnapshot {
                 agent_id: a.agent_id.clone(),
                 prompt: a.prompt.clone(),
                 tool_calls: a.tool_calls.clone(),

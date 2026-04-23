@@ -1,7 +1,4 @@
-pub(crate) mod blocks;
-pub(crate) mod cache;
 mod context;
-pub(crate) mod dialogs;
 pub(crate) mod display;
 pub(crate) mod highlight;
 pub(crate) mod layout;
@@ -17,7 +14,6 @@ pub(crate) mod transcript;
 pub(crate) mod transcript_buf;
 pub(crate) mod viewport;
 pub(crate) mod window_view;
-pub mod working;
 
 pub(crate) use layout::HitRegion;
 pub use status::StatusItem;
@@ -29,8 +25,6 @@ pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 
 pub(crate) use status::BarSpan;
 pub use status::StatusPosition;
-
-pub use dialogs::{AgentSnapshot, SharedSnapshots};
 
 use crate::theme;
 use crate::utils::format_duration;
@@ -48,11 +42,6 @@ use std::io::{self, Write};
 pub use context::{LayoutContext, PaintContext};
 pub use display::DisplayBlock;
 pub use highlight::warm_up_syntect;
-
-pub use cache::{
-    build_tool_output_render_cache, session_render_hash, CachedNotebookEdit, PersistedLayoutCache,
-    RenderCache, ToolOutputRenderCache, LAYOUT_CACHE_VERSION, RENDER_CACHE_VERSION,
-};
 
 /// Tracked terminal style state for diff-based SGR emission.
 #[derive(Clone, Default, PartialEq)]
@@ -572,10 +561,10 @@ pub(super) fn resolve_role_live(role: display::ColorRole) -> Color {
     }
 }
 
-pub(super) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
+pub(crate) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
 
 /// A markdown table separator line (e.g. `|---|---|`).
-pub(super) fn is_table_separator(line: &str) -> bool {
+pub(crate) fn is_table_separator(line: &str) -> bool {
     let t = line.trim();
     !t.is_empty()
         && t.chars()
@@ -585,7 +574,7 @@ pub(super) fn is_table_separator(line: &str) -> bool {
 /// Context for rendering content inside a bordered box.
 /// When passed to `render_markdown` and its sub-renderers, each output line
 /// gets a colored left border prefix and a right border suffix with padding.
-pub(super) struct BoxContext {
+pub(crate) struct BoxContext {
     /// Left border string printed before each line (e.g. "   │ ").
     pub left: &'static str,
     /// Right border string printed after padding (e.g. " │").
@@ -640,8 +629,6 @@ pub fn term_width() -> usize {
 pub fn term_height() -> usize {
     terminal::size().map(|(_, h)| h as usize).unwrap_or(24)
 }
-
-pub use engine::tools::tool_arg_summary;
 
 pub fn tool_timeout_label(args: &HashMap<String, serde_json::Value>) -> Option<String> {
     let ms = args.get("timeout_ms").and_then(|v| v.as_u64())?;

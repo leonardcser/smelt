@@ -14,12 +14,11 @@
 //! layout cache survives paint (theme changes resolve `ColorRole::*`
 //! freshly each frame). The IR cache survives layout invalidation
 //! (resize prunes layouts but not the underlying diff IR).
-use super::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
-use crate::app::transcript_model::BlockArtifact;
+use super::transcript_model::BlockArtifact;
+use crate::render::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
 use engine::tools::NotebookRenderData;
-use protocol::{Message, TurnMeta};
+use protocol::Message;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub const RENDER_CACHE_VERSION: u32 = 1;
@@ -166,17 +165,6 @@ pub enum ToolOutputRenderCache {
 pub struct CachedNotebookEdit {
     pub data: NotebookRenderData,
     pub diff: Option<CachedInlineDiff>,
-}
-
-pub fn session_render_hash(messages: &[Message], turn_metas: &[(usize, TurnMeta)]) -> String {
-    let mut hasher = Sha256::new();
-    if let Ok(bytes) = serde_json::to_vec(messages) {
-        hasher.update(bytes);
-    }
-    if let Ok(bytes) = serde_json::to_vec(turn_metas) {
-        hasher.update(bytes);
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 pub fn build_tool_output_render_cache(

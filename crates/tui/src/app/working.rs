@@ -1,5 +1,5 @@
-use super::{BarSpan, SPINNER_FRAMES};
-use crate::app::transcript_model::Throbber;
+use super::transcript_model::Throbber;
+use crate::render::{BarSpan, SPINNER_FRAMES};
 use crate::theme;
 use crate::utils::format_duration;
 use crossterm::style::Color;

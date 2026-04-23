@@ -289,7 +289,7 @@ fn make_markdown_buffer(app: &mut App, text: &str) -> BufId {
     let width: u16 = 80;
     if let Some(buf) = app.ui.buf_mut(id) {
         crate::render::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
-            crate::render::blocks::render_markdown_inner(
+            crate::app::transcript_present::render_markdown_inner(
                 sink,
                 text,
                 width as usize,

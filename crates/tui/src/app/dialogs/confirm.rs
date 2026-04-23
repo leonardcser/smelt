@@ -24,10 +24,10 @@
 //! - Esc → clear reason and re-focus Options
 
 use super::super::App;
+use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::app::ops::{DomainOp, UiOp};
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::keymap::hints;
-use crate::render::dialogs::confirm::ConfirmPreview;
 use crate::render::display::{ColorRole, ColorValue};
 use crate::render::layout_out::{LayoutSink, SpanCollector};
 use crate::theme;

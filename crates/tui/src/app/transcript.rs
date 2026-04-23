@@ -6,9 +6,11 @@ use super::transcript_model::{
     AgentBlockStatus, Block, BlockId, Status, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 use super::*;
-use crate::render::blocks;
-use crate::render::blocks::{gap_between, render_thinking_summary, thinking_summary, Element};
-use crate::render::cache::{PersistedLayoutCache, RenderCache};
+use crate::app::transcript_cache::{PersistedLayoutCache, RenderCache};
+use crate::app::transcript_present as blocks;
+use crate::app::transcript_present::{
+    gap_between, render_thinking_summary, thinking_summary, Element,
+};
 use crate::render::layout_out::{LayoutSink, SpanCollector};
 use crate::render::selection::wrap_and_locate_cursor;
 use crate::render::SPINNER_FRAMES;
