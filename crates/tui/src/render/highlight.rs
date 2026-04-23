@@ -160,7 +160,7 @@ pub(super) fn render_highlighted<S: LayoutSink>(
     emitted
 }
 
-pub(super) fn print_syntax_file<S: LayoutSink>(
+pub(crate) fn print_syntax_file<S: LayoutSink>(
     out: &mut S,
     content: &str,
     path: &str,
@@ -170,7 +170,7 @@ pub(super) fn print_syntax_file<S: LayoutSink>(
     print_syntax_file_ext(out, content, path, None, skip, max_rows)
 }
 
-pub(super) fn print_syntax_file_ext<S: LayoutSink>(
+pub(crate) fn print_syntax_file_ext<S: LayoutSink>(
     out: &mut S,
     content: &str,
     path: &str,
@@ -258,7 +258,7 @@ fn cached_spans_for_line(h: &mut HighlightLines, line: &str) -> Vec<CachedSpan> 
         .collect()
 }
 
-pub(super) fn build_inline_diff_cache(
+pub(crate) fn build_inline_diff_cache(
     old: &str,
     new: &str,
     path: &str,
@@ -267,7 +267,7 @@ pub(super) fn build_inline_diff_cache(
     build_inline_diff_cache_ext(old, new, path, anchor, None)
 }
 
-pub(super) fn build_inline_diff_cache_ext(
+pub(crate) fn build_inline_diff_cache_ext(
     old: &str,
     new: &str,
     path: &str,
@@ -511,7 +511,7 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
 /// Render a syntax-highlighted inline diff.
 /// `skip` rows are computed but not emitted; up to `max_rows` visible rows
 /// are written to `out`.
-pub(super) fn print_inline_diff<S: LayoutSink>(
+pub(crate) fn print_inline_diff<S: LayoutSink>(
     out: &mut S,
     old: &str,
     new: &str,
@@ -586,7 +586,7 @@ fn split_cached_spans_into_rows<S: LayoutSink>(
     rows
 }
 
-pub(super) fn print_cached_inline_diff<S: LayoutSink>(
+pub(crate) fn print_cached_inline_diff<S: LayoutSink>(
     out: &mut S,
     cache: &CachedInlineDiff,
     skip: u16,

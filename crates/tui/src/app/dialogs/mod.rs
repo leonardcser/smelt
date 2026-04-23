@@ -3,3 +3,4 @@
 //! `crate::lua::ui_ops`.
 
 pub mod confirm;
+pub(crate) mod confirm_preview;

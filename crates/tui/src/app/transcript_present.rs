@@ -1,20 +1,29 @@
+//! Projection: `Block` + `ToolState` + `LayoutContext` → `DisplayBlock`.
+//!
+//! Pattern-matches on the domain `Block` enum and emits presentation-
+//! layer spans through `SpanCollector`. The only consumer is
+//! `BlockHistory::ensure_rows`, which caches the result per
+//! `LayoutKey`. Render paints the resulting `DisplayBlock`; it has no
+//! further knowledge of `Block` variants.
+
+use super::transcript_model::{
+    AgentBlockStatus, ApprovalScope, Block, ConfirmChoice, ToolOutput, ToolState, ToolStatus,
+    ViewState,
+};
+use crate::render::display::{
+    ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
+};
+use crate::render::highlight::{
+    print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
+    render_code_block, render_markdown_table, BashHighlighter,
+};
+use crate::render::layout_out::{display_width, LayoutSink, SpanCollector};
+use crate::render::{truncate_str, wrap_line, LayoutContext};
 use crate::theme;
 use crate::utils::format_duration;
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
 use std::time::Duration;
-
-use super::display::{ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle};
-use super::highlight::{
-    print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
-    render_code_block, render_markdown_table, BashHighlighter,
-};
-use super::layout_out::{display_width, LayoutSink, SpanCollector};
-use super::{truncate_str, wrap_line, LayoutContext};
-use crate::app::transcript_model::{
-    AgentBlockStatus, ApprovalScope, Block, ConfirmChoice, ToolOutput, ToolState, ToolStatus,
-    ViewState,
-};
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines
 /// with a computed `block_w` for multiline bubble rendering.
@@ -89,8 +98,8 @@ pub(crate) fn layout_block(
 
 /// Truncate / collapse the laid-out block according to its view state.
 /// Runs post-layout so every block variant gets the same treatment.
-fn apply_view_state(display: &mut super::display::DisplayBlock, state: ViewState) {
-    use super::display::{ColorRole, ColorValue, DisplayLine, DisplaySpan, SpanStyle};
+fn apply_view_state(display: &mut crate::render::display::DisplayBlock, state: ViewState) {
+    use crate::render::display::{ColorRole, ColorValue, DisplayLine, DisplaySpan, SpanStyle};
     let total = display.lines.len();
     let ellipsis_line = |text: String| -> DisplayLine {
         DisplayLine {
@@ -437,7 +446,7 @@ pub(super) fn render_block<S: LayoutSink>(
             out.print(&header);
             out.pop_style();
             out.newline();
-            let bctx = super::BoxContext {
+            let bctx = crate::render::BoxContext {
                 left: "\u{2502} ",
                 right: "",
                 color: crate::theme::AGENT.into(),
@@ -971,7 +980,7 @@ fn render_edit_output<S: LayoutSink>(
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     if new.is_empty() {
         print_dim_count(out, old.lines().count(), "line deleted", "lines deleted")
-    } else if let Some(crate::render::ToolOutputRenderCache::InlineDiff(cache)) =
+    } else if let Some(crate::app::transcript_cache::ToolOutputRenderCache::InlineDiff(cache)) =
         output.render_cache.as_ref()
     {
         print_cached_inline_diff(out, cache, 0, 0)
@@ -1011,7 +1020,7 @@ fn render_notebook_output<S: LayoutSink>(out: &mut S, output: &ToolOutput, width
             0,
             0,
         );
-    } else if let Some(crate::render::ToolOutputRenderCache::NotebookEdit(ref nb)) =
+    } else if let Some(crate::app::transcript_cache::ToolOutputRenderCache::NotebookEdit(ref nb)) =
         output.render_cache
     {
         if let Some(ref cache) = nb.diff {
@@ -1047,7 +1056,7 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&super::BoxContext>,
+    bctx: Option<&crate::render::BoxContext>,
 ) -> u16 {
     let _perf = crate::perf::begin("render:markdown");
     let max_cols = if let Some(b) = bctx {
@@ -1137,7 +1146,7 @@ pub(crate) fn render_markdown_inner<S: LayoutSink>(
             }
             let trimmed = lines[i].trim_start();
             {
-                use super::highlight::{
+                use crate::render::highlight::{
                     emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans,
                     InlineSpan, InlineStyle,
                 };
@@ -1294,7 +1303,7 @@ fn is_horizontal_rule(line: &str) -> bool {
 /// only renders 3 of them to match the visual weight of list markers.
 fn render_horizontal_rule<S: LayoutSink>(
     out: &mut S,
-    bctx: Option<&super::BoxContext>,
+    bctx: Option<&crate::render::BoxContext>,
     indent: &str,
 ) -> u16 {
     // Use box-drawing character, render only 3 chars (like list markers)
@@ -1309,7 +1318,7 @@ fn render_horizontal_rule<S: LayoutSink>(
     out.push_dim();
     out.print_with_meta(
         &hr,
-        super::display::SpanMeta {
+        crate::render::display::SpanMeta {
             selectable: true,
             copy_as: Some("---".into()),
         },
@@ -1329,12 +1338,12 @@ fn render_markdown_table_from_lines<S: LayoutSink>(
     out: &mut S,
     lines: &[&str],
     dim: bool,
-    bctx: Option<&super::BoxContext>,
+    bctx: Option<&crate::render::BoxContext>,
     indent: &str,
 ) -> u16 {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
-        if super::is_table_separator(line) {
+        if crate::render::is_table_separator(line) {
             continue;
         }
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
@@ -1376,7 +1385,7 @@ fn render_plan_output<S: LayoutSink>(
     rows += 1;
 
     // Body: markdown rendering inside the plan box.
-    let bctx = super::BoxContext {
+    let bctx = crate::render::BoxContext {
         left: "  \u{2502} ",
         right: " \u{2502}",
         color: theme::PLAN.into(),
@@ -1546,7 +1555,7 @@ pub(super) fn print_user_highlights<S: LayoutSink>(
         }
 
         // @path references validated against the filesystem.
-        if let Some((token, end)) = super::try_at_ref(&chars, i) {
+        if let Some((token, end)) = crate::render::try_at_ref(&chars, i) {
             flush(out, &mut plain);
             accent(out, token);
             i = end;

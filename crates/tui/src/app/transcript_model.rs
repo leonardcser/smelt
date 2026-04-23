@@ -5,8 +5,8 @@
 //! owned by `App`. Held inside `app::transcript::Transcript`, which
 //! adds projection / streaming / paint orchestration on top.
 
-use crate::render::blocks::{gap_between, layout_block, Element};
-use crate::render::cache::ToolOutputRenderCache;
+use crate::app::transcript_cache::ToolOutputRenderCache;
+use crate::app::transcript_present::{gap_between, layout_block, Element};
 use crate::render::{DisplayBlock, LayoutContext};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};

@@ -394,7 +394,7 @@ pub(crate) struct LuaShared {
     /// Shared list of subagent snapshots, installed by `App::new` so
     /// `smelt.api.agent.snapshots` can return live prompt / tool-call /
     /// cost data without touching App directly.
-    pub(crate) agent_snapshots: Mutex<Option<crate::render::SharedSnapshots>>,
+    pub(crate) agent_snapshots: Mutex<Option<crate::app::SharedSnapshots>>,
     /// Task-runtime inbox. Dialog callbacks / other UI events that need
     /// to *resume a Lua coroutine* push here instead of through `ops`.
     /// Keeps the reducer's `AppOp` enum free of Lua-task variants; the
@@ -584,7 +584,7 @@ impl LuaRuntime {
     /// Install the shared subagent-snapshot list so
     /// `smelt.api.agent.snapshots()` can return live prompt /
     /// tool-call / cost data. Called once at App start.
-    pub fn set_agent_snapshots(&self, snaps: crate::render::SharedSnapshots) {
+    pub fn set_agent_snapshots(&self, snaps: crate::app::SharedSnapshots) {
         if let Ok(mut s) = self.shared.agent_snapshots.lock() {
             *s = Some(snaps);
         }
