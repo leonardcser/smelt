@@ -1,14 +1,13 @@
-//! Block history and block-domain types.
+//! Transcript domain model.
 //!
-//! Holds the content-addressed block store, layout cache, and all
-//! mutable sidecar state (tool output, exec output, in-flight agents
-//! etc.) owned by `App`. `BlockHistory::paint_viewport` is the only
-//! paint path; it repaints the whole transcript every frame.
+//! The content-addressed block store, layout cache, and all mutable
+//! sidecar state (tool output, exec output, in-flight agents etc.)
+//! owned by `App`. Held inside `app::transcript::Transcript`, which
+//! adds projection / streaming / paint orchestration on top.
 
-use super::blocks::{gap_between, layout_block, Element};
-use super::cache::ToolOutputRenderCache;
-use super::context::LayoutContext;
-use super::display::DisplayBlock;
+use crate::render::blocks::{gap_between, layout_block, Element};
+use crate::render::cache::ToolOutputRenderCache;
+use crate::render::{DisplayBlock, LayoutContext};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -104,21 +103,6 @@ impl ToolState {
     }
 }
 
-#[derive(Clone)]
-pub struct ResumeEntry {
-    pub id: String,
-    pub title: String,
-    pub subtitle: Option<String>,
-    pub updated_at_ms: u64,
-    pub created_at_ms: u64,
-    pub cwd: Option<String>,
-    pub parent_id: Option<String>,
-    /// Nesting depth for display (0 = root, 1 = fork, etc.)
-    pub depth: usize,
-    /// Cached text-content size in bytes (None if unknown).
-    pub size_bytes: Option<u64>,
-}
-
 #[derive(Clone, serde::Serialize)]
 pub enum Block {
     User {
@@ -172,7 +156,7 @@ pub enum Block {
         agent_id: String,
         slug: Option<String>,
         blocking: bool,
-        tool_calls: Vec<crate::app::AgentToolEntry>,
+        tool_calls: Vec<super::AgentToolEntry>,
         status: AgentBlockStatus,
         elapsed: Option<Duration>,
     },
@@ -702,20 +686,11 @@ impl BlockHistory {
         self.tool_states.retain(|cid, _| live.contains(cid));
     }
 
-    /// Flat-line viewport painter. Lays out every block, then paints the
-    /// slice of rendered rows that fits the viewport, shifted upward by
-    /// `scroll_offset` (0 = stuck to bottom).
-    ///
-    /// Overlay-only: each row is placed via `MoveTo`. Callers own clearing
-    /// the viewport region prior to calling (so rows left blank by a short
-    /// transcript stay cleared).
-    ///
-    /// Returns the clamped scroll offset (for the caller to sync state).
     /// Plain-text rendering of the full transcript at the given width.
     #[cfg(test)]
     pub(crate) fn total_rows(&mut self, width: usize, show_thinking: bool) -> u16 {
         let key = LayoutKey {
-            view_state: super::history::ViewState::Expanded,
+            view_state: ViewState::Expanded,
             width: width as u16,
             show_thinking,
             content_hash: 0,

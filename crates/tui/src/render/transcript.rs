@@ -5,7 +5,9 @@
 //! by `App`).
 
 use super::display::SpanMeta;
-use super::history::{Block, BlockHistory, BlockId, LayoutKey, Status, ToolState, ViewState};
+use crate::app::transcript_model::{
+    Block, BlockHistory, BlockId, LayoutKey, Status, ToolState, ViewState,
+};
 use std::collections::HashMap;
 use std::ops::Range;
 

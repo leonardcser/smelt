@@ -1,6 +1,6 @@
 use super::display::DisplayLine;
-use super::history::{BlockHistory, LayoutKey, ViewState};
 use super::to_buffer::{apply_to_buffer, project_display_line, ProjectedLine};
+use crate::app::transcript_model::{BlockHistory, LayoutKey, ViewState};
 use crate::theme::Theme;
 use ui::buffer::Buffer;
 

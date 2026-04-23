@@ -289,9 +289,9 @@ impl App {
                                     .unwrap_or_else(|| result_text.contains("finished:"));
                                 let is_error = output.as_ref().is_some_and(|o| o.is_error);
                                 let block_status = if is_error {
-                                    render::AgentBlockStatus::Error
+                                    AgentBlockStatus::Error
                                 } else {
-                                    render::AgentBlockStatus::Done
+                                    AgentBlockStatus::Done
                                 };
                                 let elapsed = tool_elapsed
                                     .get(&tc.id)
@@ -355,7 +355,7 @@ impl App {
                                     summary,
                                     args,
                                 },
-                                crate::render::ToolState {
+                                ToolState {
                                     status,
                                     elapsed,
                                     output: output.map(Box::new),
@@ -498,13 +498,13 @@ impl App {
     }
 
     pub fn is_compacting(&self) -> bool {
-        self.working.throbber == Some(render::Throbber::Compacting)
+        self.working.throbber == Some(Throbber::Compacting)
     }
 
     pub fn compact_history(&mut self, instructions: Option<String>) {
         self.pending_compact_epoch = self.compact_epoch;
         {
-            self.working.set_throbber(render::Throbber::Compacting);
+            self.working.set_throbber(Throbber::Compacting);
         };
         self.engine.send(UiCommand::Compact {
             history: self.history.clone(),
@@ -515,7 +515,7 @@ impl App {
     pub(super) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
         if messages.is_empty() {
             {
-                self.working.set_throbber(render::Throbber::Done);
+                self.working.set_throbber(Throbber::Done);
             };
             return;
         }
@@ -532,7 +532,7 @@ impl App {
         self.context_tokens = None;
         self.save_session();
         {
-            self.working.set_throbber(render::Throbber::Done);
+            self.working.set_throbber(Throbber::Done);
         };
         self.transcript_window.scroll_top = u16::MAX;
     }

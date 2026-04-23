@@ -356,10 +356,10 @@ impl App {
                     let restore_mode = t.esc_vim_mode.take();
 
                     // Cancel in-flight compaction on double-Esc.
-                    if self.working.throbber == Some(render::Throbber::Compacting) {
+                    if self.working.throbber == Some(Throbber::Compacting) {
                         self.compact_epoch += 1;
                         {
-                            self.working.set_throbber(render::Throbber::Interrupted);
+                            self.working.set_throbber(Throbber::Interrupted);
                         };
                         self.notify("compaction cancelled".into());
                         if restore_mode == Some(vim::ViMode::Insert) {
@@ -840,7 +840,7 @@ impl App {
         let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
 
         // Slug pill: spinner + label.
-        let is_compacting = self.working.throbber == Some(render::Throbber::Compacting);
+        let is_compacting = self.working.throbber == Some(Throbber::Compacting);
         let pill_bg = if is_compacting {
             Color::White
         } else {
@@ -947,9 +947,7 @@ impl App {
         let throbber_spans = self.working.throbber_spans(self.settings.show_tps);
         let is_active = matches!(
             self.working.throbber,
-            Some(render::Throbber::Working)
-                | Some(render::Throbber::Compacting)
-                | Some(render::Throbber::Retrying { .. })
+            Some(Throbber::Working) | Some(Throbber::Compacting) | Some(Throbber::Retrying { .. })
         );
         let skip = if is_active && !throbber_spans.is_empty() {
             1
@@ -2912,7 +2910,7 @@ impl App {
     /// Determine which block the content cursor is currently on, if any.
     /// Derives the absolute row from `cpos` (byte offset in the display
     /// buffer), then looks up the snapshot's `block_of_row`.
-    fn focused_block_id(&mut self) -> Option<render::BlockId> {
+    fn focused_block_id(&mut self) -> Option<BlockId> {
         let tw = self.transcript_width() as u16;
         let snap = self.transcript.snapshot(tw, self.settings.show_thinking);
         if snap.rows.is_empty() {
@@ -2933,7 +2931,7 @@ impl App {
         let block_id = self.focused_block_id()?;
         let is_tool = matches!(
             self.transcript.block(block_id),
-            Some(render::Block::ToolCall { .. })
+            Some(Block::ToolCall { .. })
         );
         if !is_tool {
             return None;
@@ -2942,8 +2940,8 @@ impl App {
             KeyCode::Char('e') => {
                 let vs = self.block_view_state(block_id);
                 let next = match vs {
-                    render::ViewState::Expanded => render::ViewState::Collapsed,
-                    _ => render::ViewState::Expanded,
+                    ViewState::Expanded => ViewState::Collapsed,
+                    _ => ViewState::Expanded,
                 };
                 self.set_block_view_state(block_id, next);
                 Some(EventOutcome::Redraw)

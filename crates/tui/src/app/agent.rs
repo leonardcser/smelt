@@ -56,7 +56,7 @@ impl App {
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
             {
-                self.working.set_throbber(render::Throbber::Done);
+                self.working.set_throbber(Throbber::Done);
             };
             return TurnState {
                 turn_id: 0,
@@ -66,7 +66,7 @@ impl App {
         };
 
         {
-            self.working.set_throbber(render::Throbber::Working);
+            self.working.set_throbber(Throbber::Working);
         };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
@@ -242,7 +242,7 @@ impl App {
         }
         self.maybe_generate_title(Some(&evaluated));
         {
-            self.working.set_throbber(render::Throbber::Working);
+            self.working.set_throbber(Throbber::Working);
         };
 
         let turn_id = self.next_turn_id;
@@ -279,7 +279,7 @@ impl App {
         self.sleep_inhibit.release();
         self.engine.send(UiCommand::Cancel);
         {
-            self.working.set_throbber(render::Throbber::Interrupted);
+            self.working.set_throbber(Throbber::Interrupted);
         };
         self.queued_messages.clear();
     }
@@ -320,7 +320,7 @@ impl App {
         self.finalize_active_tools();
         if cancelled {
             {
-                self.working.set_throbber(render::Throbber::Interrupted);
+                self.working.set_throbber(Throbber::Interrupted);
             };
             // If a title/slug generation was in-flight, discard it so stale
             // TitleGenerated events don't update the session. But if a slug
@@ -342,7 +342,7 @@ impl App {
             }
         } else {
             {
-                self.working.set_throbber(render::Throbber::Done);
+                self.working.set_throbber(Throbber::Done);
             };
             self.input_prediction = None;
         }
@@ -389,7 +389,7 @@ impl App {
                         self.working.record_tokens_per_sec(tps);
                     }
                     {
-                        self.working.set_throbber(render::Throbber::Working);
+                        self.working.set_throbber(Throbber::Working);
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
@@ -585,7 +585,7 @@ impl App {
                 request_id,
             })),
             EngineEvent::Retrying { delay_ms, attempt } => {
-                self.working.set_throbber(render::Throbber::Retrying {
+                self.working.set_throbber(Throbber::Retrying {
                     delay: Duration::from_millis(delay_ms),
                     attempt,
                 });
@@ -598,7 +598,7 @@ impl App {
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
                     {
-                        self.working.set_throbber(render::Throbber::Done);
+                        self.working.set_throbber(Throbber::Done);
                     };
                     return SessionControl::Continue;
                 }
@@ -647,7 +647,7 @@ impl App {
             }
             EngineEvent::TurnError { message } => {
                 {
-                    self.working.set_throbber(render::Throbber::Done);
+                    self.working.set_throbber(Throbber::Done);
                 };
                 self.notify_error(message);
                 SessionControl::Done
@@ -752,7 +752,7 @@ impl App {
             }
             EngineEvent::CompactionComplete { messages } => {
                 if self.pending_compact_epoch != self.compact_epoch {
-                    self.working.set_throbber(render::Throbber::Done);
+                    self.working.set_throbber(Throbber::Done);
                     return;
                 }
                 self.apply_compaction(messages);
@@ -776,7 +776,7 @@ impl App {
                 self.handle_process_completed(id, exit_code);
             }
             EngineEvent::TurnError { message } => {
-                self.working.set_throbber(render::Throbber::Done);
+                self.working.set_throbber(Throbber::Done);
                 self.notify_error(message);
             }
             EngineEvent::AgentExited {
@@ -949,7 +949,7 @@ impl App {
                     slug: None,
                     blocking: false,
                     tool_calls: Vec::new(),
-                    status: render::AgentBlockStatus::Running,
+                    status: AgentBlockStatus::Running,
                     elapsed: None,
                 });
             }
@@ -1057,9 +1057,9 @@ impl App {
             .filter(|a| a.blocking)
             .map(|a| {
                 let status = match a.status {
-                    super::AgentTrackStatus::Working => render::AgentBlockStatus::Running,
-                    super::AgentTrackStatus::Idle => render::AgentBlockStatus::Done,
-                    super::AgentTrackStatus::Error => render::AgentBlockStatus::Error,
+                    super::AgentTrackStatus::Working => AgentBlockStatus::Running,
+                    super::AgentTrackStatus::Idle => AgentBlockStatus::Done,
+                    super::AgentTrackStatus::Error => AgentBlockStatus::Error,
                 };
                 (
                     a.agent_id.clone(),
@@ -1102,18 +1102,18 @@ impl App {
         self.push_block(Block::Text { content: msg });
     }
 
-    pub(super) fn session_permission_entries(&self) -> Vec<render::PermissionEntry> {
+    pub(super) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
         let rt = self.runtime_approvals.read().unwrap();
         let mut entries = Vec::new();
         for (tool, patterns) in rt.session_tool_entries() {
             if patterns.is_empty() {
-                entries.push(render::PermissionEntry {
+                entries.push(PermissionEntry {
                     tool,
                     pattern: "*".into(),
                 });
             } else {
                 for p in patterns {
-                    entries.push(render::PermissionEntry {
+                    entries.push(PermissionEntry {
                         tool: tool.clone(),
                         pattern: p,
                     });
@@ -1121,7 +1121,7 @@ impl App {
             }
         }
         for dir in rt.session_dirs() {
-            entries.push(render::PermissionEntry {
+            entries.push(PermissionEntry {
                 tool: "directory".into(),
                 pattern: dir.display().to_string(),
             });
@@ -1131,7 +1131,7 @@ impl App {
 
     pub(super) fn sync_permissions(
         &mut self,
-        session_entries: Vec<render::PermissionEntry>,
+        session_entries: Vec<PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
     ) {
         // Rebuild session approvals from flattened entries.

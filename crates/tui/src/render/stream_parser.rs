@@ -9,11 +9,11 @@
 //! store + snapshot cache). The dependency is one-way: parser writes
 //! into `BlockHistory`, never reads the snapshot.
 
-use super::history::{
+use super::is_table_separator;
+use crate::app::transcript_model::{
     ActiveAgent, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block, BlockHistory,
     BlockId, Status, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
 };
-use super::is_table_separator;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
