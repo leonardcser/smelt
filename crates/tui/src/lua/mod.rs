@@ -395,25 +395,13 @@ pub(crate) struct LuaShared {
     pub(crate) task_inbox: Mutex<Vec<TaskEvent>>,
 }
 
-/// Events that drive the Lua task runtime — picker resolution and
-/// externally-allocated coroutine resumes. Dialogs used to route their
-/// Submit / Dismiss / keymap / input-change / tick events through
-/// here, but the Lua-side `runtime/lua/smelt/dialog.lua` now registers
-/// `Callback::Lua` handlers directly via `smelt.api.win.set_keymap` /
-/// `on_event`, so the dialog variants are gone.
+/// Events that drive the Lua task runtime. After the D3 dialog + D2b
+/// picker ports both runtime files (`runtime/lua/smelt/dialog.lua`,
+/// `runtime/lua/smelt/picker.lua`) register `Callback::Lua` handlers
+/// directly via `smelt.api.win.set_keymap` / `on_event` and resolve
+/// themselves via `smelt.api.task.resume`, so the only remaining
+/// event is the externally-allocated resume itself.
 pub enum TaskEvent {
-    /// A picker opened via `smelt.api.picker.open` was resolved. The Lua
-    /// module looks up the stored items under `opts_key`, builds
-    /// `{ index = 1-based, item = <entry> }` (or `nil` on dismiss), and
-    /// resumes the parked task.
-    PickerResolved {
-        picker_id: u64,
-        /// 0-based index into the original items list. `None` on dismiss.
-        selected_index: Option<usize>,
-        /// Registry key for the original `opts.items` table so the
-        /// resolver can look up the picked entry by index.
-        opts: mlua::RegistryKey,
-    },
     /// `smelt.api.task.resume(id, value)` posts this to route the
     /// resume through the Lua pump. The pump looks up the parked task
     /// by `id` and resumes it with the stored value on the next
@@ -1765,9 +1753,29 @@ impl LuaRuntime {
         )?;
         api.set("fuzzy", fuzzy_tbl)?;
 
-        // smelt.api.picker placeholder — populated by TASK_YIELD_PRIMITIVES
-        // with `open(opts)`.
-        api.set("picker", lua.create_table()?)?;
+        // smelt.api.picker — `set_selected` here plus a thick
+        // `picker.open` wrapper in `runtime/lua/smelt/picker.lua` that
+        // owns navigation keymaps, selection tracking, and task.resume.
+        {
+            let picker_tbl = lua.create_table()?;
+            {
+                let s = shared.clone();
+                picker_tbl.set(
+                    "set_selected",
+                    lua.create_function(move |_, (win_id, idx): (u64, i64)| {
+                        let index = if idx < 0 { 0 } else { idx as usize };
+                        if let Ok(mut o) = s.ops.lock() {
+                            o.push(UiOp::PickerSetSelected {
+                                win: ui::WinId(win_id),
+                                index,
+                            });
+                        }
+                        Ok(())
+                    })?,
+                )?;
+            }
+            api.set("picker", picker_tbl)?;
+        }
 
         smelt.set("api", api)?;
 
@@ -2147,27 +2155,9 @@ impl LuaRuntime {
             };
             std::mem::take(&mut *inbox)
         };
-        let mut extra_ops: Vec<AppOp> = Vec::new();
+        let extra_ops: Vec<AppOp> = Vec::new();
         for ev in events {
             match ev {
-                TaskEvent::PickerResolved {
-                    picker_id,
-                    selected_index,
-                    opts,
-                } => {
-                    let value = match selected_index {
-                        None => mlua::Value::Nil,
-                        Some(idx0) => match build_picker_result(&self.lua, &opts, idx0) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                extra_ops
-                                    .push(UiOp::NotifyError(format!("picker resolve: {e}")).into());
-                                mlua::Value::Nil
-                            }
-                        },
-                    };
-                    self.resolve_picker(picker_id, value);
-                }
                 TaskEvent::ExternalResolved { external_id, value } => {
                     let v = self.lua.registry_value(&value).unwrap_or(mlua::Value::Nil);
                     self.resolve_external(external_id, v);
@@ -2827,27 +2817,6 @@ fn build_panels_table(lua: &Lua, panels: &[ui::PanelSnapshot]) -> mlua::Result<m
     Ok(out)
 }
 
-/// Build the resume value for a resolved picker. Looks up
-/// `opts.items[index0 + 1]` and returns `{ index = 1-based, item = <entry> }`.
-/// Returns an error if the opts key was stale or missing `items`.
-fn build_picker_result(
-    lua: &Lua,
-    opts_key: &mlua::RegistryKey,
-    index0: usize,
-) -> Result<mlua::Value, String> {
-    let opts: mlua::Table = lua
-        .registry_value(opts_key)
-        .map_err(|e| format!("opts: {e}"))?;
-    let items: mlua::Table = opts.get("items").map_err(|e| format!("items: {e}"))?;
-    let item: mlua::Value = items
-        .get(index0 + 1)
-        .map_err(|e| format!("item[{}]: {e}", index0 + 1))?;
-    let out = lua.create_table().map_err(|e| e.to_string())?;
-    out.set("index", index0 + 1).map_err(|e| e.to_string())?;
-    out.set("item", item).map_err(|e| e.to_string())?;
-    Ok(mlua::Value::Table(out))
-}
-
 /// Lua source injected at bootstrap to install the task-yielding
 /// primitives. Each checks `coroutine.isyieldable()` so calls from
 /// outside a task raise a clear error rather than failing later.
@@ -2868,27 +2837,10 @@ end
 -- opens the float + panels and resumes with `{win_id = …}`) with full
 -- Lua-side callback registration, result building, and task.resume.
 
--- Open a focusable picker (single-column selection list) and wait for
--- the user's choice. Blocks the task coroutine.
--- opts = {
---   items = { "str" | { label=..., description?=..., prefix?=... }, ... },
---   title? = string,
---   placement? = "center" | "cursor" | "bottom" (default "center"),
--- }
--- Returns { index = <1-based int>, item = <original entry> } on select,
--- or nil on dismiss.
-function smelt.api.picker.open(opts)
-  if not coroutine.isyieldable() then
-    error("smelt.api.picker.open: call from inside smelt.task(fn) or tool.execute", 2)
-  end
-  if type(opts) ~= "table" then
-    error("smelt.api.picker.open: expected table of options", 2)
-  end
-  if type(opts.items) ~= "table" then
-    error("smelt.api.picker.open: opts.items must be a table", 2)
-  end
-  return coroutine.yield({__yield = "picker", opts = opts})
-end
+-- `smelt.api.picker.open` is installed by `runtime/lua/smelt/picker.lua`,
+-- which wraps a raw `{__yield = "picker", opts = ...}` (the Rust side
+-- opens the focusable float and resumes with `{win_id = …}`) with full
+-- Lua-side navigation keymaps, selection tracking, and task.resume.
 "#;
 
 impl Default for LuaRuntime {
@@ -2902,6 +2854,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     (
         "smelt.dialog",
         include_str!("../../../../runtime/lua/smelt/dialog.lua"),
+    ),
+    (
+        "smelt.picker",
+        include_str!("../../../../runtime/lua/smelt/picker.lua"),
     ),
     (
         "smelt.plugins.plan_mode",
@@ -2958,6 +2914,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
 /// after the embedded searcher is set up, before user init.lua runs.
 const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.dialog",
+    "smelt.picker",
     "smelt.plugins.ask_user_question",
     "smelt.plugins.export",
     "smelt.plugins.rewind",

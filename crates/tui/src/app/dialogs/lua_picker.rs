@@ -1,29 +1,17 @@
-//! Focusable `ui::Picker` float opened by a parked `LuaTask` that
-//! yielded `smelt.api.picker.open({...})`. On Enter/Escape, resumes
-//! the task with `{ index, item }` or `nil`.
+//! Picker float opener for `smelt.api.picker.open` yields. Rust parses
+//! `opts` into `PickerItem`s and opens the focusable float; everything
+//! else — Up/Down/Ctrl-J/K/Enter/Esc navigation, selection tracking,
+//! resolution — lives in `runtime/lua/smelt/picker.lua`, which drives
+//! `Ui::picker_set_selected` through `smelt.api.picker.set_selected`
+//! and resumes the parked task via `smelt.api.task.resume`.
 
 use super::super::App;
-use crate::app::ops::UiOp;
-use crate::lua::TaskEvent;
-use crossterm::event::{KeyCode, KeyModifiers};
-use mlua::prelude::*;
-use std::cell::RefCell;
-use std::rc::Rc;
-use ui::{Callback, CallbackResult, Constraint, FloatConfig, KeyBind, Placement, WinId};
+use ui::{Constraint, FloatConfig, Placement, WinId};
 
-/// Stash for the picker's opts registry key. Taken once on resolve so
-/// the pump can look up the picked item.
-struct PickerState {
-    picker_id: u64,
-    opts: Option<mlua::RegistryKey>,
-}
-
-/// Open a focusable picker float driven by a parked `LuaTask`. On
-/// success, binds Up/Down/Enter/Escape to callbacks that push
-/// `TaskEvent::PickerResolved` + `UiOp::CloseFloat`. Returns `Err`
-/// when the opts table is malformed — the caller should resolve the
-/// parked task with `nil` in that case.
-pub fn open(app: &mut App, picker_id: u64, opts_key: mlua::RegistryKey) -> Result<(), String> {
+/// Open the picker float described by the Lua `opts_key` table. On
+/// success, returns the new `WinId` so the caller can resolve the
+/// parked task. Returns `Err` when the table is malformed.
+pub fn open(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String> {
     let lua = app.lua.lua();
     let opts: mlua::Table = lua
         .registry_value(&opts_key)
@@ -61,92 +49,13 @@ pub fn open(app: &mut App, picker_id: u64, opts_key: mlua::RegistryKey) -> Resul
         .picker_open(float_config, items, 0, Default::default(), false)
         .ok_or_else(|| "picker.open: failed to create float".to_string())?;
 
-    let state = Rc::new(RefCell::new(PickerState {
-        picker_id,
-        opts: Some(opts_key),
-    }));
-
-    // Navigation keymaps (don't resolve).
-    bind_move(app, win_id, KeyCode::Up, KeyModifiers::NONE, -1);
-    bind_move(app, win_id, KeyCode::Down, KeyModifiers::NONE, 1);
-    bind_move(app, win_id, KeyCode::Char('k'), KeyModifiers::CONTROL, -1);
-    bind_move(app, win_id, KeyCode::Char('j'), KeyModifiers::CONTROL, 1);
-    bind_move(app, win_id, KeyCode::Char('p'), KeyModifiers::CONTROL, -1);
-    bind_move(app, win_id, KeyCode::Char('n'), KeyModifiers::CONTROL, 1);
-
-    // Submit — Enter with current selection.
-    let ops = app.lua.ops_handle();
-    let state_submit = state.clone();
-    let ops_submit = ops.clone();
-    app.ui.win_set_keymap(
-        win_id,
-        KeyBind::plain(KeyCode::Enter),
-        Callback::Rust(Box::new(move |ctx| {
-            let selected = ctx
-                .ui
-                .picker_mut(ctx.win)
-                .map(|p| p.selected())
-                .unwrap_or(0);
-            let mut s = state_submit.borrow_mut();
-            let opts = s.opts.take();
-            if let Some(opts) = opts {
-                ops_submit.push_task_event(TaskEvent::PickerResolved {
-                    picker_id: s.picker_id,
-                    selected_index: Some(selected),
-                    opts,
-                });
-            }
-            ops_submit.push(UiOp::CloseFloat(ctx.win));
-            CallbackResult::Consumed
-        })),
-    );
-
-    // Dismiss — Escape.
-    let state_dismiss = state;
-    let ops_dismiss = ops;
-    app.ui.win_set_keymap(
-        win_id,
-        KeyBind::plain(KeyCode::Esc),
-        Callback::Rust(Box::new(move |ctx| {
-            let mut s = state_dismiss.borrow_mut();
-            if let Some(opts) = s.opts.take() {
-                ops_dismiss.push_task_event(TaskEvent::PickerResolved {
-                    picker_id: s.picker_id,
-                    selected_index: None,
-                    opts,
-                });
-            }
-            ops_dismiss.push(UiOp::CloseFloat(ctx.win));
-            CallbackResult::Consumed
-        })),
-    );
-
-    Ok(())
+    Ok(win_id)
 }
 
-fn bind_move(app: &mut App, win: WinId, code: KeyCode, mods: KeyModifiers, delta: isize) {
-    app.ui.win_set_keymap(
-        win,
-        KeyBind::new(code, mods),
-        Callback::Rust(Box::new(move |ctx| {
-            if let Some(picker) = ctx.ui.picker_mut(ctx.win) {
-                let n = picker.items().len();
-                if n == 0 {
-                    return CallbackResult::Consumed;
-                }
-                let cur = picker.selected() as isize;
-                let next = (cur + delta).rem_euclid(n as isize) as usize;
-                picker.set_selected(next);
-            }
-            CallbackResult::Consumed
-        })),
-    );
-}
-
-fn parse_item(v: &LuaValue) -> Result<ui::picker::PickerItem, String> {
+fn parse_item(v: &mlua::Value) -> Result<ui::picker::PickerItem, String> {
     match v {
-        LuaValue::String(s) => Ok(ui::picker::PickerItem::new(s.to_string_lossy().to_string())),
-        LuaValue::Table(t) => {
+        mlua::Value::String(s) => Ok(ui::picker::PickerItem::new(s.to_string_lossy().to_string())),
+        mlua::Value::Table(t) => {
             let label: String = t
                 .get("label")
                 .map_err(|e| format!("picker item.label: {e}"))?;
