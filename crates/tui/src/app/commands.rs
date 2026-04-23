@@ -472,6 +472,7 @@ impl App {
         if old != self.model {
             let from = old;
             let to = self.model.clone();
+            self.snapshot_engine_context(self.agent.is_some());
             self.lua
                 .emit_data(crate::lua::AutocmdEvent::ModelChange, |lua| {
                     let t = lua.create_table()?;
@@ -514,6 +515,7 @@ impl App {
         if old != mode {
             let from = old.as_str().to_string();
             let to = mode.as_str().to_string();
+            self.snapshot_engine_context(self.agent.is_some());
             self.lua
                 .emit_data(crate::lua::AutocmdEvent::ModeChange, |lua| {
                     let t = lua.create_table()?;

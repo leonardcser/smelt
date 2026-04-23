@@ -1102,10 +1102,9 @@ impl<'a> Turn<'a> {
                 (0..plan.slots.len()).map(|_| None).collect();
             let (cancelled, deferred, mut plugin_results) =
                 self.execute_concurrent(&mut plan, &mut completed).await;
-            if !cancelled {
-                let seq_plugin_results = self.run_sequential(&plan, &mut completed).await;
-                plugin_results.extend(seq_plugin_results);
-            } else {
+            let seq_plugin_results = self.run_sequential(&plan, &mut completed).await;
+            plugin_results.extend(seq_plugin_results);
+            if cancelled {
                 self.mark_unfinished_cancelled(&plan, &completed);
             }
             self.collect_results(&plan, completed);
@@ -1429,19 +1428,26 @@ impl<'a> Turn<'a> {
         _completed: &mut [Option<ToolResult>],
     ) -> Vec<(String, String, bool)> {
         let mut plugin_results = Vec::new();
+        let mut cancelled = false;
         for (tc, args, start) in &plan.sequential_plugins {
-            if self.cancel.is_cancelled() {
-                break;
-            }
-            let request_id = next_request_id();
-            let _ = self.event_tx.send(EngineEvent::ExecutePluginTool {
-                request_id,
-                call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
-                args: args.clone(),
-            });
-            let Some((content, is_error)) = self.wait_for_plugin_result(request_id).await else {
-                break;
+            let (content, is_error) = if cancelled || self.cancel.is_cancelled() {
+                cancelled = true;
+                ("cancelled".to_string(), true)
+            } else {
+                let request_id = next_request_id();
+                let _ = self.event_tx.send(EngineEvent::ExecutePluginTool {
+                    request_id,
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    args: args.clone(),
+                });
+                match self.wait_for_plugin_result(request_id).await {
+                    Some(result) => result,
+                    None => {
+                        cancelled = true;
+                        ("cancelled".to_string(), true)
+                    }
+                }
             };
             let elapsed_ms = Some(start.elapsed().as_millis() as u64);
             let _ = self.event_tx.send(EngineEvent::ToolFinished {
