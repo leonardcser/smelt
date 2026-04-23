@@ -668,6 +668,19 @@ Lua keymaps, and resume its caller coroutine end-to-end without any
 per-intent Rust glue. The D2b migration itself (port picker + delete
 `lua_picker.rs`) is the next commit.
 
+**D2b · picker port** (shipped 2026-04-23). Mirror of the dialog
+port. `smelt.api.picker.open` now lives in
+`runtime/lua/smelt/picker.lua`. Rust keeps only the opts→`PickerItem`
+translator (~80 LOC, down from ~185 in `lua_picker.rs`); the Lua side
+tracks the selected index locally and pushes updates to the Rust
+`ui::Picker` via a new `smelt.api.picker.set_selected(win, idx)`
+primitive backed by `UiOp::PickerSetSelected`. Up/Down/Ctrl-K/J/P/N,
+Enter, Esc are all registered as `Callback::Lua` keymaps on the open
+float. Result shape (`{index = <1-based>, item}` or `nil`) preserved,
+plugin API unchanged. With both D3 dialog and D2b picker ported,
+`TaskEvent::PickerResolved` + `build_picker_result` are gone — the
+runtime's only remaining event is `ExternalResolved`.
+
 **D3 · dialog port** (shipped 2026-04-23). `smelt.api.dialog.open`
 now lives in `runtime/lua/smelt/dialog.lua`. Rust keeps the
 opts→`PanelSpec` translator (~180 LOC in `lua_dialog.rs`, down from

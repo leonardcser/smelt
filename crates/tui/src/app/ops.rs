@@ -151,6 +151,14 @@ pub enum UiOp {
         event: ui::WinEvent,
         callback_id: u64,
     },
+    /// Drive the `ui::Picker` at `win` to a new 0-based `index`. Pushed
+    /// by `smelt.api.picker.set_selected` from Lua-side nav keymaps in
+    /// `runtime/lua/smelt/picker.lua`; the reducer calls
+    /// `ui.picker_mut(win).set_selected(index)`.
+    PickerSetSelected {
+        win: ui::WinId,
+        index: usize,
+    },
 }
 
 /// App-state mutations, engine commands, and session/agent/permission

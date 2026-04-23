@@ -1943,12 +1943,24 @@ impl App {
                 },
                 crate::lua::TaskDriveOutput::OpenPicker {
                     picker_id, opts, ..
-                } => {
-                    if let Err(e) = super::dialogs::lua_picker::open(self, picker_id, opts) {
+                } => match super::dialogs::lua_picker::open(self, opts) {
+                    Ok(win_id) => {
+                        let value = self
+                            .lua
+                            .lua()
+                            .create_table()
+                            .and_then(|t| {
+                                t.set("win_id", win_id.0)?;
+                                Ok(mlua::Value::Table(t))
+                            })
+                            .unwrap_or(mlua::Value::Nil);
+                        self.lua.resolve_picker(picker_id, value);
+                    }
+                    Err(e) => {
                         self.notify_error(format!("picker.open: {e}"));
                         self.lua.resolve_picker(picker_id, mlua::Value::Nil);
                     }
-                }
+                },
                 crate::lua::TaskDriveOutput::Error(msg) => {
                     self.notify_error(msg);
                 }
@@ -2097,6 +2109,11 @@ impl App {
             } => {
                 self.ui
                     .win_on_event(win, event, ui::Callback::Lua(ui::LuaHandle(callback_id)));
+            }
+            UiOp::PickerSetSelected { win, index } => {
+                if let Some(p) = self.ui.picker_mut(win) {
+                    p.set_selected(index);
+                }
             }
         }
     }
