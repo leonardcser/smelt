@@ -1182,18 +1182,35 @@ impl LuaRuntime {
             )?;
         }
 
+        // smelt.statusline.{register, unregister}
         {
-            let s = shared.clone();
-            smelt.set(
-                "statusline",
-                lua.create_function(move |lua, handler: mlua::Function| {
-                    let key = lua.create_registry_value(handler)?;
-                    if let Ok(mut slot) = s.statusline.lock() {
-                        *slot = Some(LuaHandle { key });
-                    }
-                    Ok(())
-                })?,
-            )?;
+            let statusline_tbl = lua.create_table()?;
+            {
+                let s = shared.clone();
+                statusline_tbl.set(
+                    "register",
+                    lua.create_function(move |lua, (name, handler): (String, mlua::Function)| {
+                        let key = lua.create_registry_value(handler)?;
+                        if let Ok(mut map) = s.statusline_sources.lock() {
+                            map.insert(name, LuaHandle { key });
+                        }
+                        Ok(())
+                    })?,
+                )?;
+            }
+            {
+                let s = shared.clone();
+                statusline_tbl.set(
+                    "unregister",
+                    lua.create_function(move |_, name: String| {
+                        if let Ok(mut map) = s.statusline_sources.lock() {
+                            map.remove(&name);
+                        }
+                        Ok(())
+                    })?,
+                )?;
+            }
+            smelt.set("statusline", statusline_tbl)?;
         }
 
         {

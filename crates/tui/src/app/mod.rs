@@ -141,9 +141,10 @@ pub struct App {
     pub task_label: Option<String>,
     /// A permission dialog is waiting for the user to stop typing.
     pub pending_dialog: bool,
-    /// Custom status items from a Lua provider. When `Some`, these
-    /// replace the built-in status spans entirely.
-    pub custom_status_items: Option<Vec<render::status::StatusItem>>,
+    /// Items returned by Lua-registered statusline sources. Appended
+    /// after the Rust-side built-in spans each frame; priority /
+    /// align_right on each item controls layout.
+    pub custom_status_items: Vec<render::status::StatusItem>,
     /// Open `ui::Notification` float, if one is visible. Dismissed on
     /// any key (see `handle_overlay_keys`). `None` when no toast.
     pub notification: Option<ui::WinId>,
@@ -618,7 +619,7 @@ impl App {
             context_tokens: None,
             task_label: None,
             pending_dialog: false,
-            custom_status_items: None,
+            custom_status_items: Vec::new(),
             notification: None,
             cmdline_win: None,
             cmdline_history: Vec::new(),

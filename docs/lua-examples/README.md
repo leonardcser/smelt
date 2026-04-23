@@ -5,7 +5,7 @@ Drop any of these files into `~/.config/smelt/init.lua` (or `dofile` them from y
 - **per_project.lua** — auto-load `$PWD/.smelt/init.lua` on top of the user config.
 - **mode_keybinds.lua** — `<C-y>` copies transcript or prompt depending on focused window, demonstrating `smelt.win.focus()` for context-aware keybinds.
 - **yank_block.lua** — `<Space>y` yanks the block under the cursor using `/yank-block`.
-- **statusline.lua** — custom status bar showing the current directory path, git branch, and clock via `smelt.statusline(fn)`.
+- **statusline.lua** — three statusline sources (cwd, git branch, clock) added alongside the built-ins via `smelt.statusline.register(name, fn)`.
 - **override.lua** — register a custom command (`/hello`) and remap a keybind (`<C-s>` to `/fork`).
 
 ## API surface
@@ -23,7 +23,7 @@ hangs off `smelt.*` — flat namespace, Neovim-style.
 - `smelt.on(event, fn)` — register an autocmd handler
 - `smelt.defer(ms, fn)` — schedule a one-shot timer
 - `smelt.spawn(fn)` — run `fn` as a coroutine-backed task (so it can yield on `sleep` / `dialog.open` / `picker.open`)
-- `smelt.statusline(fn)` — register a custom status line provider
+- `smelt.statusline.register(name, fn)` / `unregister(name)` — add or remove a status bar source (items append to built-ins)
 
 ### Commands
 
