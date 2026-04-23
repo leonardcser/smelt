@@ -25,11 +25,11 @@
 
 use super::super::App;
 use crate::app::ops::{DomainOp, UiOp};
+use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::keymap::hints;
 use crate::render::dialogs::confirm::ConfirmPreview;
 use crate::render::display::{ColorRole, ColorValue};
 use crate::render::layout_out::{LayoutSink, SpanCollector};
-use crate::render::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::theme;
 use crossterm::event::KeyCode;
 use std::cell::RefCell;

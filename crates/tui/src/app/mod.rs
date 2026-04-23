@@ -1,16 +1,19 @@
 mod agent;
 pub mod commands;
 mod transcript;
+pub(crate) mod transcript_model;
 pub(crate) use commands::copy_to_clipboard;
 pub(crate) mod dialogs;
 mod events;
 mod history;
 pub mod ops;
 
-use crate::input::{resolve_agent_esc, Action, EscAction, History, MenuResult, PromptState};
-use crate::render::{
-    tool_arg_summary, ApprovalScope, Block, ConfirmChoice, ConfirmRequest, ToolOutput, ToolStatus,
+pub(crate) use crate::app::transcript_model::{
+    AgentBlockStatus, ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest,
+    PermissionEntry, Throbber, ToolOutput, ToolState, ToolStatus, ViewState,
 };
+use crate::input::{resolve_agent_esc, Action, EscAction, History, MenuResult, PromptState};
+use crate::render::tool_arg_summary;
 use crate::session::Session;
 use crate::{render, session, state, vim};
 use engine::{permissions::Decision, EngineHandle, Permissions};

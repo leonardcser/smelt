@@ -507,11 +507,11 @@ impl LuaRuntime {
                             c.set(
                                 "status",
                                 match call.status {
-                                    crate::render::ToolStatus::Pending => "pending",
-                                    crate::render::ToolStatus::Confirm => "confirm",
-                                    crate::render::ToolStatus::Ok => "ok",
-                                    crate::render::ToolStatus::Err => "err",
-                                    crate::render::ToolStatus::Denied => "denied",
+                                    crate::app::transcript_model::ToolStatus::Pending => "pending",
+                                    crate::app::transcript_model::ToolStatus::Confirm => "confirm",
+                                    crate::app::transcript_model::ToolStatus::Ok => "ok",
+                                    crate::app::transcript_model::ToolStatus::Err => "err",
+                                    crate::app::transcript_model::ToolStatus::Denied => "denied",
                                 },
                             )?;
                             if let Some(d) = call.elapsed {
@@ -599,12 +599,16 @@ impl LuaRuntime {
             permissions_tbl.set(
                 "sync",
                 lua.create_function(move |_, spec: mlua::Table| {
-                    let mut session_entries: Vec<crate::render::PermissionEntry> = Vec::new();
+                    let mut session_entries: Vec<crate::app::transcript_model::PermissionEntry> =
+                        Vec::new();
                     if let Ok(arr) = spec.get::<mlua::Table>("session") {
                         for row in arr.sequence_values::<mlua::Table>().flatten() {
                             let tool: String = row.get("tool").unwrap_or_default();
                             let pattern: String = row.get("pattern").unwrap_or_default();
-                            session_entries.push(crate::render::PermissionEntry { tool, pattern });
+                            session_entries.push(crate::app::transcript_model::PermissionEntry {
+                                tool,
+                                pattern,
+                            });
                         }
                     }
                     let mut workspace_rules: Vec<crate::workspace_permissions::Rule> = Vec::new();

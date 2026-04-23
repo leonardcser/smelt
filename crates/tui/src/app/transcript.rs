@@ -2,13 +2,13 @@
 //! (thinking / text / tools / agents / exec), projection to a
 //! ui::Buffer, and the transcript-cursor glyph cache.
 
+use super::transcript_model::{
+    AgentBlockStatus, Block, BlockId, Status, ToolOutputRef, ToolState, ToolStatus, ViewState,
+};
 use super::*;
 use crate::render::blocks;
 use crate::render::blocks::{gap_between, render_thinking_summary, thinking_summary, Element};
 use crate::render::cache::{PersistedLayoutCache, RenderCache};
-use crate::render::history::{
-    AgentBlockStatus, Block, BlockId, Status, ToolOutputRef, ToolState, ToolStatus, ViewState,
-};
 use crate::render::layout_out::{LayoutSink, SpanCollector};
 use crate::render::selection::wrap_and_locate_cursor;
 use crate::render::SPINNER_FRAMES;

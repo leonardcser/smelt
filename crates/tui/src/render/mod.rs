@@ -4,7 +4,6 @@ mod context;
 pub(crate) mod dialogs;
 pub(crate) mod display;
 pub(crate) mod highlight;
-pub(crate) mod history;
 pub(crate) mod layout;
 pub(crate) mod layout_out;
 mod paint;
@@ -25,12 +24,6 @@ pub use status::StatusItem;
 pub use transcript::{SnapshotCell, TranscriptSnapshot};
 pub(crate) use ui::ViewportHit;
 pub use viewport::ViewportGeom;
-
-pub use history::{
-    ActiveAgent, ActiveTool, AgentBlockStatus, ApprovalScope, Block, BlockArtifact, BlockId,
-    ConfirmChoice, ConfirmRequest, LayoutKey, PermissionEntry, ResumeEntry, Status, Throbber,
-    ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
-};
 
 pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 

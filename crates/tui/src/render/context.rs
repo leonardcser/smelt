@@ -1,6 +1,6 @@
 //! Width-independent context plumbed through layout and paint stages.
 
-use super::history::ViewState;
+use crate::app::transcript_model::ViewState;
 use crate::theme::Theme;
 
 /// Settings that flow through the layout stage. Layout produces a

@@ -51,8 +51,8 @@ pub mod buf {
 /// `rewrite`, `invoke`, and per-block keymaps arrive in Stage 3.5's
 /// subsequent slices as the `active_*` → live-block collapse progresses.
 pub mod block {
+    use crate::app::transcript_model::{Block, BlockId, Status, ViewState};
     use crate::app::App;
-    use crate::render::{Block, BlockId, Status, ViewState};
 
     /// Current view state of a block.
     pub fn view_state(app: &App, id: BlockId) -> ViewState {

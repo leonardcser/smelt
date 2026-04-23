@@ -186,7 +186,7 @@ pub enum DomainOp {
     /// Sync the App's permission state with what the Permissions
     /// dialog has in memory. Fired on dismiss.
     SyncPermissions {
-        session_entries: Vec<crate::render::PermissionEntry>,
+        session_entries: Vec<crate::app::transcript_model::PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
     },
     /// Load a saved session by id (Resume dialog, `smelt.api.session.load`).
@@ -202,7 +202,7 @@ pub enum DomainOp {
     /// `pending_agent_cancel` internally when the resolution asks
     /// the turn to cancel.
     ResolveConfirm {
-        choice: crate::render::ConfirmChoice,
+        choice: crate::app::transcript_model::ConfirmChoice,
         message: Option<String>,
         request_id: u64,
         call_id: String,

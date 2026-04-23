@@ -15,7 +15,7 @@
 //! freshly each frame). The IR cache survives layout invalidation
 //! (resize prunes layouts but not the underlying diff IR).
 use super::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
-use super::BlockArtifact;
+use crate::app::transcript_model::BlockArtifact;
 use engine::tools::NotebookRenderData;
 use protocol::{Message, TurnMeta};
 use serde::{Deserialize, Serialize};

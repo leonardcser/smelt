@@ -9,11 +9,11 @@ use super::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, BashHighlighter,
 };
-use super::history::ViewState;
 use super::layout_out::{display_width, LayoutSink, SpanCollector};
-use super::{
-    truncate_str, wrap_line, ApprovalScope, Block, ConfirmChoice, LayoutContext, ToolOutput,
-    ToolState, ToolStatus,
+use super::{truncate_str, wrap_line, LayoutContext};
+use crate::app::transcript_model::{
+    AgentBlockStatus, ApprovalScope, Block, ConfirmChoice, ToolOutput, ToolState, ToolStatus,
+    ViewState,
 };
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines
@@ -73,7 +73,7 @@ const DEFAULT_PREVIEW_LINES: usize = 3;
 ///
 /// `state` must be `Some(_)` for `Block::ToolCall` and is unused for every
 /// other variant.
-pub(super) fn layout_block(
+pub(crate) fn layout_block(
     block: &Block,
     state: Option<&ToolState>,
     ctx: &LayoutContext,
@@ -472,11 +472,10 @@ fn render_agent_block<S: LayoutSink>(
     slug: Option<&str>,
     blocking: bool,
     tool_calls: &[crate::app::AgentToolEntry],
-    status: super::AgentBlockStatus,
+    status: AgentBlockStatus,
     elapsed: Option<Duration>,
     width: usize,
 ) -> u16 {
-    use super::AgentBlockStatus;
     let mut rows = 0u16;
 
     // Header: " + agent_id · slug [✓/✗] [elapsed]"
