@@ -57,18 +57,6 @@ impl App {
         let width = term_w as usize;
         let status_bg = Color::AnsiValue(233);
 
-        // Custom status items (from Lua plugins) override everything.
-        if let Some(items) = self.custom_status_items.as_ref() {
-            let mut spans: Vec<StatusSpan> = items.iter().map(|i| i.to_span(status_bg)).collect();
-            let (left, right) = spans_to_segments(&mut spans, width, status_bg);
-            if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
-                *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
-                bar.set_left(left);
-                bar.set_right(right);
-            }
-            return;
-        }
-
         let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
 
         // Slug pill: spinner + label.
@@ -278,6 +266,12 @@ impl App {
                 align_right: true,
                 ..StatusSpan::default()
             });
+        }
+
+        // Append Lua-registered statusline sources at the end. Priority
+        // and align_right on each item determine final placement.
+        for item in &self.custom_status_items {
+            spans.push(item.to_span(status_bg));
         }
 
         let (left, right) = spans_to_segments(&mut spans, width, status_bg);

@@ -372,7 +372,7 @@ pub(crate) struct LuaShared {
     pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     pub(crate) autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
     pub(crate) timers: Mutex<Vec<(Instant, LuaHandle)>>,
-    pub(crate) statusline: Mutex<Option<LuaHandle>>,
+    pub(crate) statusline_sources: Mutex<HashMap<String, LuaHandle>>,
     pub(crate) plugin_tools: Mutex<HashMap<String, LuaHandle>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
@@ -427,7 +427,7 @@ impl Default for LuaShared {
             keymaps: Mutex::new(HashMap::new()),
             autocmds: Mutex::new(HashMap::new()),
             timers: Mutex::new(Vec::new()),
-            statusline: Mutex::new(None),
+            statusline_sources: Mutex::new(HashMap::new()),
             plugin_tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -754,42 +754,43 @@ impl LuaRuntime {
         }
     }
 
-    /// Call the Lua statusline provider (if registered) and return
-    /// the resulting status items. Returns `None` if no provider is set.
-    pub fn tick_statusline(&self) -> Option<Vec<crate::render::StatusItem>> {
-        let handle = self.shared.statusline.lock().ok()?;
-        let handle = handle.as_ref()?;
-        let func = self
-            .lua
-            .registry_value::<mlua::Function>(&handle.key)
-            .ok()?;
-        match func.call::<mlua::Table>(()) {
-            Ok(table) => {
-                let mut items = Vec::new();
-                for pair in table.sequence_values::<mlua::Table>() {
-                    let Ok(entry) = pair else { continue };
-                    let text: String = entry.get("text").unwrap_or_default();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    items.push(crate::render::StatusItem {
-                        text,
-                        fg: ansi_color_from_lua(&entry, "fg"),
-                        bg: ansi_color_from_lua(&entry, "bg"),
-                        bold: entry.get("bold").unwrap_or(false),
-                        priority: entry.get("priority").unwrap_or(0),
-                        align_right: entry.get("align_right").unwrap_or(false),
-                        truncatable: entry.get("truncatable").unwrap_or(false),
-                        group: entry.get("group").unwrap_or(false),
-                    });
+    /// Call every registered statusline source and return the combined
+    /// item list (appended to Rust-side built-ins at the status-bar
+    /// layer). Each source returns either a single item table or a list
+    /// of items; empty-text items are skipped.
+    pub fn tick_statusline(&self) -> Vec<crate::render::StatusItem> {
+        let Ok(sources) = self.shared.statusline_sources.lock() else {
+            return Vec::new();
+        };
+        let mut names: Vec<&String> = sources.keys().collect();
+        names.sort();
+        let mut items = Vec::new();
+        let mut errors = Vec::new();
+        for name in names {
+            let Some(handle) = sources.get(name) else {
+                continue;
+            };
+            let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+                continue;
+            };
+            match func.call::<mlua::Value>(()) {
+                Ok(mlua::Value::Nil) => {}
+                Ok(mlua::Value::Table(t)) => {
+                    collect_statusline_items(&t, &mut items);
                 }
-                Some(items)
-            }
-            Err(e) => {
-                self.record_error(format!("statusline: {e}"));
-                None
+                Ok(_) => {
+                    errors.push(format!("statusline[{name}]: expected table"));
+                }
+                Err(e) => {
+                    errors.push(format!("statusline[{name}]: {e}"));
+                }
             }
         }
+        drop(sources);
+        for msg in errors {
+            self.record_error(msg);
+        }
+        items
     }
 
     fn record_error(&self, msg: String) {
@@ -820,6 +821,41 @@ impl LuaRuntime {
 fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::style::Color> {
     let val: u8 = table.get(key).ok()?;
     Some(crossterm::style::Color::AnsiValue(val))
+}
+
+/// Parse a single-item or list-of-items Lua table into `StatusItem`s
+/// and append them to `out`. Empty-text items are skipped.
+fn collect_statusline_items(table: &mlua::Table, out: &mut Vec<crate::render::StatusItem>) {
+    let looks_like_item = table.contains_key("text").unwrap_or(false);
+    if looks_like_item {
+        if let Some(item) = statusline_item_from(table) {
+            out.push(item);
+        }
+        return;
+    }
+    for pair in table.sequence_values::<mlua::Table>() {
+        let Ok(entry) = pair else { continue };
+        if let Some(item) = statusline_item_from(&entry) {
+            out.push(item);
+        }
+    }
+}
+
+fn statusline_item_from(entry: &mlua::Table) -> Option<crate::render::StatusItem> {
+    let text: String = entry.get("text").ok()?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::render::StatusItem {
+        text,
+        fg: ansi_color_from_lua(entry, "fg"),
+        bg: ansi_color_from_lua(entry, "bg"),
+        bold: entry.get("bold").unwrap_or(false),
+        priority: entry.get("priority").unwrap_or(0),
+        align_right: entry.get("align_right").unwrap_or(false),
+        truncatable: entry.get("truncatable").unwrap_or(false),
+        group: entry.get("group").unwrap_or(false),
+    })
 }
 
 /// Convert a `serde_json::Value` to a `mlua::Value`.

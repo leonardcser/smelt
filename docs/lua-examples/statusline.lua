@@ -1,5 +1,6 @@
--- Custom status bar showing cwd path and git branch.
--- Drop this into ~/.config/smelt/init.lua to try.
+-- Three statusline sources: a cwd label, a git branch pill, and a
+-- clock. Each registered independently; items are appended to the
+-- Rust-side built-in spans (slug, vim mode, model, cost, position, …).
 
 local function git_branch()
   local f = io.popen("git rev-parse --abbrev-ref HEAD 2>/dev/null")
@@ -9,34 +10,21 @@ local function git_branch()
   return branch
 end
 
-smelt.statusline(function()
+smelt.statusline.register("cwd", function()
   local cwd = os.getenv("PWD") or ""
   local home = os.getenv("HOME") or ""
   if home ~= "" and cwd:sub(1, #home) == home then
     cwd = "~" .. cwd:sub(#home + 1)
   end
+  return { text = " " .. cwd .. " ", bold = true, fg = 75, priority = 0, truncatable = true }
+end)
 
+smelt.statusline.register("git_branch", function()
   local branch = git_branch()
+  if not branch then return nil end
+  return { text = " " .. branch .. " ", fg = 114, priority = 1, group = true }
+end)
 
-  local items = {
-    { text = " " .. cwd .. " ", bold = true, fg = 75, priority = 0, truncatable = true },
-  }
-
-  if branch then
-    items[#items + 1] = {
-      text = " " .. branch .. " ",
-      fg = 114,
-      priority = 1,
-      group = true,
-    }
-  end
-
-  items[#items + 1] = {
-    text = os.date("%H:%M"),
-    fg = 245,
-    priority = 2,
-    align_right = true,
-  }
-
-  return items
+smelt.statusline.register("clock", function()
+  return { text = os.date("%H:%M"), fg = 245, priority = 2, align_right = true }
 end)
