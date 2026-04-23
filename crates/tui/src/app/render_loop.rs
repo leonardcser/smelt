@@ -1,0 +1,384 @@
+//! Per-frame render loop: projects transcript/prompt/status into the
+//! compositor layers and syncs overlay floats (completer, notifications).
+
+use super::*;
+
+impl App {
+    pub(super) fn render_normal(&mut self, agent_running: bool) {
+        let _perf = crate::perf::begin("app:tick_compositor");
+        self.update_spinner();
+
+        let (term_w, term_h) = self.ui.terminal_size();
+        let width = term_w as usize;
+        let show_queued = agent_running || self.is_compacting();
+
+        self.sync_transcript_pin();
+        if self.transcript_window.is_pinned() {
+            let (total, viewport) = self.transcript_dims();
+            self.transcript_window.apply_pin(total, viewport);
+        }
+        let queued_owned: Vec<String> = if show_queued {
+            self.queued_messages.clone()
+        } else {
+            Vec::new()
+        };
+        let prediction_owned: Option<String> = if show_queued {
+            None
+        } else {
+            self.input_prediction.clone()
+        };
+        let queued: &[String] = &queued_owned;
+        let prediction: Option<&str> = prediction_owned.as_deref();
+
+        // Compute cursor ownership for this frame. Cmdline steals the
+        // cursor (via its compositor layer); terminal-unfocused
+        // suppresses; otherwise app_focus decides prompt-vs-transcript.
+        let cmdline_active = self.cmdline_win.is_some();
+        let has_prompt_cursor = !cmdline_active
+            && self.term_focused
+            && matches!(self.app_focus, crate::app::AppFocus::Prompt);
+        let has_transcript_cursor = !cmdline_active
+            && self.term_focused
+            && matches!(self.app_focus, crate::app::AppFocus::Content);
+
+        // ── Compute layout ──
+        let natural_prompt_height =
+            self.measure_prompt_height(&self.input, width, queued, prediction);
+        self.layout = render::layout::LayoutState::compute(&render::layout::LayoutInput {
+            term_width: term_w,
+            term_height: term_h,
+            prompt_height: natural_prompt_height,
+        });
+        let viewport_rows = self.layout.viewport_rows();
+        let prompt_rect = self.layout.prompt;
+        let prompt_height = prompt_rect.height;
+
+        // ── Transcript ──
+        let t_pad = self.transcript_gutters.pad_left;
+        let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
+        let tdata = self.project_transcript_buffer(
+            width,
+            viewport_rows,
+            self.transcript_window.scroll_top,
+            self.settings.show_thinking,
+        );
+        self.transcript_window.scroll_top = tdata.clamped_scroll;
+
+        // Compute transcript cursor.
+        let tcursor = self.compute_transcript_cursor(
+            width,
+            viewport_rows,
+            self.transcript_window.cursor_line,
+            self.transcript_window.cursor_col,
+            has_transcript_cursor,
+            Some(&tdata.viewport),
+        );
+        self.transcript_window.cursor_line = tcursor.clamped_line;
+        self.transcript_window.cursor_col = tcursor.clamped_col;
+
+        let transcript_viewport = ui::WindowViewport::new(
+            transcript_rect,
+            self.transcript_gutters.content_width(term_w),
+            tdata.total_rows,
+            tdata.clamped_scroll,
+            ui::ScrollbarState::new(tdata.scrollbar_col + t_pad, tdata.total_rows, viewport_rows),
+        );
+        self.transcript_viewport = Some(transcript_viewport);
+
+        let transcript_selection =
+            self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
+
+        // Sync transcript WindowView from the projected buffer.
+        if let Some(tv) = self
+            .ui
+            .layer_mut::<render::window_view::WindowView>("transcript")
+        {
+            tv.sync_from_buffer(
+                self.transcript_projection.buf(),
+                tdata.clamped_scroll as usize,
+            );
+            for (line, col_start, col_end) in &transcript_selection {
+                tv.add_highlight(
+                    *line,
+                    *col_start,
+                    *col_end,
+                    ui::grid::Style::bg(crate::theme::selection_bg()),
+                );
+            }
+            tv.set_soft_cursor(tcursor.soft_cursor);
+            tv.set_viewport(Some(transcript_viewport));
+        }
+
+        // ── Prompt ──
+        // Extract all immutable data first, then take the mutable btw borrow.
+        let prev_input_scroll = self.prompt_input_scroll;
+        let bar_info = render::prompt_data::BarInfo {
+            model_label: Some(self.model.clone()),
+            reasoning_effort: self.reasoning_effort,
+            show_tokens: self.settings.show_tokens,
+            context_tokens: self.context_tokens,
+            context_window: self.context_window,
+            show_cost: self.settings.show_cost,
+            session_cost_usd: self.session_cost_usd,
+        };
+
+        let prompt_output = {
+            let mut prompt_input = render::prompt_data::PromptInput {
+                queued,
+                stash: &self.input.stash,
+                input: &self.input,
+                prediction,
+                width: term_w,
+                height: prompt_height,
+                has_prompt_cursor,
+                prev_input_scroll,
+                bar_info,
+            };
+            let input_buf = self
+                .ui
+                .buf_mut(self.input_display_buf)
+                .expect("input_display_buf must be registered at startup");
+            render::prompt_data::compute_prompt(&mut prompt_input, input_buf)
+        };
+
+        let chrome_rows = prompt_output.chrome_rows;
+        let cursor = prompt_output.cursor;
+        let cursor_style = prompt_output.cursor_style;
+        let input_scroll = prompt_output.input_scroll;
+        let input_viewport_data = prompt_output.input_viewport;
+
+        self.prompt_input_scroll = input_scroll;
+
+        let (prompt_input_rect, prompt_viewport) = if let Some(ref ivp) = input_viewport_data {
+            let input_rect = ui::Rect::new(
+                prompt_rect.top + ivp.top_row,
+                0,
+                prompt_rect.width,
+                ivp.rows,
+            );
+            let viewport = ui::WindowViewport::new(
+                input_rect,
+                ivp.content_width,
+                ivp.total_rows,
+                ivp.scroll_top,
+                ui::ScrollbarState::new(
+                    prompt_rect.width.saturating_sub(1),
+                    ivp.total_rows,
+                    ivp.rows,
+                ),
+            );
+            (input_rect, Some(viewport))
+        } else {
+            (
+                ui::Rect::new(prompt_rect.bottom(), 0, prompt_rect.width, 0),
+                None,
+            )
+        };
+        self.prompt_viewport = prompt_viewport;
+
+        if let Some(pv) = self
+            .ui
+            .layer_mut::<render::window_view::WindowView>("prompt")
+        {
+            pv.set_rows(chrome_rows);
+            pv.set_viewport(None);
+            pv.set_cursor(None, None);
+        }
+        {
+            let scroll = self.prompt_input_scroll;
+            let viewport = self.prompt_viewport;
+            let input_buf_id = self.input_display_buf;
+            let buf_snapshot = self.ui.buf(input_buf_id).cloned();
+            if let (Some(pv), Some(buf)) = (
+                self.ui
+                    .layer_mut::<render::window_view::WindowView>("prompt_input"),
+                buf_snapshot,
+            ) {
+                pv.sync_from_buffer(&buf, scroll);
+                pv.set_viewport(viewport);
+                pv.set_cursor(cursor, cursor_style);
+            }
+        }
+
+        // ── Status bar ──
+        self.refresh_status_bar();
+
+        // ── Update layer rects and focus ──
+        let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
+        self.ui.set_layer_rect("transcript", transcript_rect);
+        self.ui.set_layer_rect("prompt", prompt_rect);
+        self.ui.set_layer_rect("prompt_input", prompt_input_rect);
+        self.ui.set_layer_rect("status", status_rect);
+
+        if self.ui.focused_float().is_none() {
+            match self.app_focus {
+                crate::app::AppFocus::Prompt => self.ui.focus_layer("prompt_input"),
+                crate::app::AppFocus::Content => self.ui.focus_layer("transcript"),
+            }
+        }
+
+        self.sync_completer_float(prompt_rect);
+        self.sync_notification_float(prompt_rect);
+
+        let mut stdout = std::io::stdout();
+        let _ = self.ui.render(&mut stdout);
+
+        // Clean up state.
+    }
+
+    // ── Completer float ────────────────────────────────────────────
+    //
+    // Mirrors the active `CompleterSession` into a `ui::Picker`
+    // compositor float. The session (`PromptState.completer`) holds both
+    // the matcher model *and* the `picker_win: Option<WinId>` — one
+    // owner, one lifecycle. Matches the shape a future Lua completer
+    // plugin would hold in its own local state.
+    //
+    // `focusable = false` ensures keys keep flowing to the prompt,
+    // driving `completer_bridge::handle_completer_event`.
+    fn sync_completer_float(&mut self, prompt_rect: ui::Rect) {
+        // Drain any Picker floats that were orphaned when their session
+        // ended (session held the WinId; when it dropped, it queued the
+        // WinId here for out-of-band close).
+        for win in std::mem::take(&mut self.input.pending_picker_close) {
+            self.ui.win_close(win);
+        }
+
+        let (max_rows, n_results, selected, items, existing_win) =
+            match self.input.completer.as_ref() {
+                Some(session) => {
+                    let prefix = match session.kind {
+                        crate::completer::CompleterKind::Command => "/",
+                        crate::completer::CompleterKind::File => "./",
+                        _ => "",
+                    };
+                    let items: Vec<ui::PickerItem> = session
+                        .results
+                        .iter()
+                        .map(|r| {
+                            let mut it = ui::PickerItem::new(r.label.clone()).with_prefix(prefix);
+                            if let Some(desc) = r.description.as_deref() {
+                                it = it.with_description(desc);
+                            }
+                            it
+                        })
+                        .collect();
+                    (
+                        session.max_visible_rows(),
+                        session.results.len(),
+                        session.selected,
+                        items,
+                        session.picker_win,
+                    )
+                }
+                None => return,
+            };
+
+        let visible = n_results.min(max_rows).max(1);
+        let height = visible as u16;
+        let top = prompt_rect.top.saturating_sub(height);
+        let desired = ui::Rect::new(top, prompt_rect.left, prompt_rect.width, height);
+
+        // Close + forget the old Picker if the desired rect changed —
+        // reopening is how we reposition under Placement::Manual.
+        let mut open_win = existing_win;
+        if let Some(win) = open_win {
+            let same = match self.ui.float_config(win).map(|c| c.placement) {
+                Some(ui::Placement::Manual {
+                    row,
+                    col,
+                    width: w,
+                    height: h,
+                    ..
+                }) => {
+                    row == desired.top as i32
+                        && col == desired.left as i32
+                        && matches!(w, ui::Constraint::Fixed(v) if v == desired.width)
+                        && matches!(h, ui::Constraint::Fixed(v) if v == desired.height)
+                }
+                _ => false,
+            };
+            if !same {
+                self.ui.win_close(win);
+                open_win = None;
+            }
+        }
+
+        if open_win.is_none() {
+            let config = ui::FloatConfig {
+                placement: ui::Placement::Manual {
+                    anchor: ui::Anchor::NW,
+                    row: desired.top as i32,
+                    col: desired.left as i32,
+                    width: ui::Constraint::Fixed(desired.width),
+                    height: ui::Constraint::Fixed(desired.height),
+                },
+                border: ui::Border::None,
+                title: None,
+                zindex: 60,
+                focusable: false,
+                blocks_agent: false,
+            };
+            let style = ui::PickerStyle {
+                selected_fg: ui::Style {
+                    fg: Some(crate::theme::accent()),
+                    ..Default::default()
+                },
+                unselected_fg: ui::Style::dim(),
+                description_fg: ui::Style::dim(),
+                background: ui::Style::default(),
+            };
+            // The completer dock above the prompt — reverse the visual
+            // so the best match lands on the bottom row.
+            open_win = self
+                .ui
+                .picker_open(config, items.clone(), selected, style, true);
+        }
+
+        if let Some(win) = open_win {
+            if let Some(p) = self.ui.picker_mut(win) {
+                p.set_items(items);
+                p.set_selected(selected);
+            }
+        }
+
+        // Persist the handle back onto the session so next frame finds it.
+        if let Some(session) = self.input.completer.as_mut() {
+            session.picker_win = open_win;
+        }
+    }
+
+    // ── Notification float ─────────────────────────────────────────
+    //
+    // The `ui::Notification` float (if open) is positioned one row
+    // above the prompt rect. Called each frame alongside
+    // `sync_completer_float`. Open/close is driven by `notify` /
+    // `notify_error` / `dismiss_notification`; this just keeps the
+    // rect current across terminal resizes.
+    fn sync_notification_float(&mut self, prompt_rect: ui::Rect) {
+        let Some(win) = self.notification else {
+            return;
+        };
+        let (tw, _th) = self.ui.terminal_size();
+        let desired_top = prompt_rect.top.saturating_sub(1) as i32;
+
+        let needs_update = match self.ui.float_config(win).map(|c| c.placement) {
+            Some(ui::Placement::Manual { row, width: w, .. }) => {
+                row != desired_top || !matches!(w, ui::Constraint::Fixed(v) if v == tw)
+            }
+            _ => true,
+        };
+
+        if needs_update {
+            if let Some(cfg) = self.ui.float_config_mut(win) {
+                cfg.placement = ui::Placement::Manual {
+                    anchor: ui::Anchor::NW,
+                    row: desired_top,
+                    col: 0,
+                    width: ui::Constraint::Fixed(tw),
+                    height: ui::Constraint::Fixed(1),
+                };
+            }
+        }
+    }
+}

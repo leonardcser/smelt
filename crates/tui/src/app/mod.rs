@@ -6,10 +6,16 @@ pub(crate) mod transcript_model;
 pub(crate) mod transcript_present;
 pub(crate) mod working;
 pub(crate) use commands::copy_to_clipboard;
+mod cmdline;
+mod content_keys;
 pub(crate) mod dialogs;
 mod events;
 mod history;
+mod mouse;
 pub mod ops;
+mod ops_apply;
+mod render_loop;
+mod status_bar;
 
 /// Snapshot of a tracked agent's state, published by the main loop
 /// and consumed by the agents dialog.
