@@ -858,82 +858,10 @@ impl LuaRuntime {
         {
             let s = shared.clone();
             win_tbl.set(
-                "open_float",
-                lua.create_function(move |lua, (buf_id, opts): (u64, mlua::Table)| {
-                    let title: String = opts.get("title").unwrap_or_default();
-                    let accent: Option<crossterm::style::Color> =
-                        opts.get::<mlua::Table>("accent").ok().and_then(|t| {
-                            t.get::<u8>("ansi")
-                                .ok()
-                                .map(crossterm::style::Color::AnsiValue)
-                        });
-
-                    let mut footer_items = Vec::new();
-                    let mut on_select_handle = None;
-                    let mut on_dismiss_handle = None;
-                    if let Ok(footer) = opts.get::<mlua::Table>("footer") {
-                        if let Ok(items) = footer.get::<mlua::Table>("items") {
-                            footer_items = items
-                                .sequence_values::<String>()
-                                .filter_map(|v| v.ok())
-                                .collect();
-                        }
-                        if let Ok(func) = footer.get::<mlua::Function>("on_select") {
-                            let key = lua.create_registry_value(func)?;
-                            on_select_handle = Some(key);
-                        }
-                    }
-                    if let Ok(func) = opts.get::<mlua::Function>("on_dismiss") {
-                        let key = lua.create_registry_value(func)?;
-                        on_dismiss_handle = Some(key);
-                    }
-
-                    if let Some(key) = on_select_handle {
-                        if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(buf_id, LuaHandle { key });
-                        }
-                    }
-                    if let Some(key) = on_dismiss_handle {
-                        let dismiss_id = buf_id | (1 << 63);
-                        if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(dismiss_id, LuaHandle { key });
-                        }
-                    }
-
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::WinOpenFloat {
-                            buf_id,
-                            title,
-                            footer_items,
-                            accent,
-                        });
-                    }
-                    Ok(buf_id)
-                })?,
-            )?;
-        }
-        {
-            let s = shared.clone();
-            win_tbl.set(
                 "close",
                 lua.create_function(move |_, id: u64| {
                     if let Ok(mut o) = s.ops.lock() {
                         o.push(UiOp::CloseFloat(ui::WinId(id)));
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let s = shared.clone();
-            win_tbl.set(
-                "set_title",
-                lua.create_function(move |_, (id, title): (u64, String)| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::WinUpdate {
-                            id,
-                            title: Some(title),
-                        });
                     }
                     Ok(())
                 })?,

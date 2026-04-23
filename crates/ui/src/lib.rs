@@ -6,13 +6,10 @@ pub mod component;
 pub mod compositor;
 pub mod dialog;
 pub mod edit_buffer;
-pub mod float_dialog;
-pub mod float_render;
 pub mod flush;
 pub mod grid;
 pub mod kill_ring;
 pub mod layout;
-pub mod list_select;
 pub mod notification;
 pub mod option_list;
 pub mod picker;
@@ -51,7 +48,6 @@ pub use dialog::{
     PanelWidget, SeparatorStyle,
 };
 pub use edit_buffer::EditBuffer;
-pub use float_dialog::{FloatDialog, FloatDialogConfig};
 pub use flush::flush_diff;
 pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
@@ -59,7 +55,6 @@ pub use kill_ring::KillRing;
 pub use layout::{
     Anchor, Border, Constraint, FitMax, FloatRelative, Gutters, LayoutTree, Placement, Rect,
 };
-pub use list_select::{ListItem, ListSelect};
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
 pub use picker::{Picker, PickerItem, PickerStyle};
@@ -155,42 +150,6 @@ impl Ui {
         if self.current_win.is_none() {
             self.current_win = Some(id);
         }
-        Some(id)
-    }
-
-    pub fn win_open_float(&mut self, buf: BufId, config: FloatConfig) -> Option<WinId> {
-        if !self.bufs.contains_key(&buf) {
-            return None;
-        }
-        let id = WinId(self.next_win_id);
-        self.next_win_id += 1;
-
-        let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th, None);
-        let zindex = config.zindex;
-
-        let dialog_config = FloatDialogConfig {
-            title: config.title.clone(),
-            border: config.border,
-            ..FloatDialogConfig::default()
-        };
-        let mut dialog = FloatDialog::new(dialog_config);
-        if let Some(b) = self.bufs.get(&buf) {
-            dialog.sync_content_from_buffer(b);
-        }
-
-        let focusable = config.focusable;
-        let mut win = Window::new(id, buf, WinConfig::Float(config));
-        win.focusable = focusable;
-        self.wins.insert(id, win);
-
-        let layer_id = float_layer_id(id);
-        self.compositor
-            .add(&layer_id, Box::new(dialog), rect, zindex);
-        if focusable {
-            self.compositor.focus(&layer_id);
-        }
-
         Some(id)
     }
 
@@ -800,36 +759,11 @@ impl Ui {
         self.compositor.set_rect(&layer_id, rect);
     }
 
-    pub fn float_dialog_mut(&mut self, win_id: WinId) -> Option<&mut FloatDialog> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component_mut(&layer_id)?;
-        comp.as_any_mut().downcast_mut::<FloatDialog>()
-    }
-
     pub fn force_redraw(&mut self) {
         self.compositor.force_redraw();
     }
 
     fn sync_float_content(&mut self) {
-        let float_wins: Vec<(WinId, BufId)> = self
-            .wins
-            .iter()
-            .filter(|(_, w)| w.is_float())
-            .map(|(id, w)| (*id, w.buf))
-            .collect();
-
-        for (win_id, buf_id) in float_wins {
-            let layer_id = float_layer_id(win_id);
-            if let Some(buf) = self.bufs.get(&buf_id).cloned() {
-                if let Some(comp) = self.compositor.component_mut(&layer_id) {
-                    if let Some(fd) = comp.as_any_mut().downcast_mut::<FloatDialog>() {
-                        fd.sync_content_from_buffer(&buf);
-                    }
-                }
-            }
-        }
-
-        // Sync all Dialog panels from their buffers.
         let dialog_layers: Vec<String> = self
             .wins
             .iter()
@@ -844,38 +778,12 @@ impl Ui {
             }
         }
     }
-
-    pub fn render_floats<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        for (win_id, rect) in self.resolve_float_rects() {
-            let win = match self.wins.get(&win_id) {
-                Some(w) => w,
-                None => continue,
-            };
-            let buf = match self.bufs.get(&win.buf) {
-                Some(b) => b,
-                None => continue,
-            };
-            let (border, title_style) = match &win.config {
-                WinConfig::Float(fc) => (fc.border, buffer::SpanStyle::default()),
-                _ => continue,
-            };
-            let frame = float_render::FloatFrame {
-                rect,
-                border,
-                title: win.title().map(String::from),
-                title_style,
-                scroll_offset: win.scroll_top as usize,
-            };
-            float_render::render_float(w, buf, &frame)?;
-        }
-        Ok(())
-    }
 }
 
 /// Map a widget-emitted `WidgetEvent` to a `(WinEvent, Payload)` pair
-/// for auto-dispatch. Widgets (`OptionList`, `TextInput`, `Dialog`,
-/// `FloatDialog`) return typed events; this just fans them out to the
-/// callback system's event names.
+/// for auto-dispatch. Widgets (`OptionList`, `TextInput`, `Dialog`)
+/// return typed events; this just fans them out to the callback
+/// system's event names.
 fn classify_widget_action(ev: &WidgetEvent) -> Option<(WinEvent, Payload)> {
     use WidgetEvent::*;
     Some(match ev {
@@ -1019,11 +927,21 @@ mod tests {
         ui
     }
 
+    fn open_stub_float(ui: &mut Ui, config: FloatConfig) -> WinId {
+        ui.picker_open(
+            config,
+            vec![picker::PickerItem::new("stub")],
+            0,
+            picker::PickerStyle::default(),
+            false,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn float_default_config() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui.win_open_float(buf, FloatConfig::default()).unwrap();
+        let win = open_stub_float(&mut ui, FloatConfig::default());
         let rect = ui.resolve_float(win).unwrap();
         // Default placement: Centered 80%x50%.
         assert_eq!(rect.width, 64);
@@ -1033,22 +951,19 @@ mod tests {
     #[test]
     fn float_manual_placement() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    placement: Placement::Manual {
-                        anchor: Anchor::NW,
-                        row: 4,
-                        col: 10,
-                        width: Constraint::Fixed(60),
-                        height: Constraint::Fixed(16),
-                    },
-                    ..Default::default()
+        let win = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                placement: Placement::Manual {
+                    anchor: Anchor::NW,
+                    row: 4,
+                    col: 10,
+                    width: Constraint::Fixed(60),
+                    height: Constraint::Fixed(16),
                 },
-            )
-            .unwrap();
+                ..Default::default()
+            },
+        );
         let rect = ui.resolve_float(win).unwrap();
         assert_eq!(rect, Rect::new(4, 10, 60, 16));
     }
@@ -1056,22 +971,19 @@ mod tests {
     #[test]
     fn float_se_anchor() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    placement: Placement::Manual {
-                        anchor: Anchor::SE,
-                        row: 24,
-                        col: 80,
-                        width: Constraint::Fixed(40),
-                        height: Constraint::Fixed(10),
-                    },
-                    ..Default::default()
+        let win = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                placement: Placement::Manual {
+                    anchor: Anchor::SE,
+                    row: 24,
+                    col: 80,
+                    width: Constraint::Fixed(40),
+                    height: Constraint::Fixed(10),
                 },
-            )
-            .unwrap();
+                ..Default::default()
+            },
+        );
         let rect = ui.resolve_float(win).unwrap();
         assert_eq!(rect, Rect::new(14, 40, 40, 10));
     }
@@ -1079,22 +991,19 @@ mod tests {
     #[test]
     fn float_clamped_to_terminal() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    placement: Placement::Manual {
-                        anchor: Anchor::NW,
-                        row: 20,
-                        col: 70,
-                        width: Constraint::Fixed(30),
-                        height: Constraint::Fixed(10),
-                    },
-                    ..Default::default()
+        let win = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                placement: Placement::Manual {
+                    anchor: Anchor::NW,
+                    row: 20,
+                    col: 70,
+                    width: Constraint::Fixed(30),
+                    height: Constraint::Fixed(10),
                 },
-            )
-            .unwrap();
+                ..Default::default()
+            },
+        );
         let rect = ui.resolve_float(win).unwrap();
         assert_eq!(rect.width, 10);
         assert_eq!(rect.height, 4);
@@ -1103,16 +1012,13 @@ mod tests {
     #[test]
     fn dock_bottom_full_width() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    placement: Placement::dock_bottom_full_width(Constraint::Fixed(6)),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let win = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                placement: Placement::dock_bottom_full_width(Constraint::Fixed(6)),
+                ..Default::default()
+            },
+        );
         let rect = ui.resolve_float(win).unwrap();
         assert_eq!(rect.width, 80);
         assert_eq!(rect.height, 6);
@@ -1124,34 +1030,27 @@ mod tests {
     #[test]
     fn floats_z_ordered_returns_sorted() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let w1 = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    zindex: 100,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let w2 = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    zindex: 10,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let w3 = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    zindex: 50,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let w1 = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                zindex: 100,
+                ..Default::default()
+            },
+        );
+        let w2 = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                zindex: 10,
+                ..Default::default()
+            },
+        );
+        let w3 = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                zindex: 50,
+                ..Default::default()
+            },
+        );
         let ordered = ui.floats_z_ordered();
         assert_eq!(ordered, vec![w2, w3, w1]);
     }
@@ -1159,28 +1058,23 @@ mod tests {
     #[test]
     fn resolve_float_rects_matches_z_order() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let _w1 = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    zindex: 100,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let _w2 = ui
-            .win_open_float(
-                buf,
-                FloatConfig {
-                    zindex: 10,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let w1 = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                zindex: 100,
+                ..Default::default()
+            },
+        );
+        let w2 = open_stub_float(
+            &mut ui,
+            FloatConfig {
+                zindex: 10,
+                ..Default::default()
+            },
+        );
         let rects = ui.resolve_float_rects();
         assert_eq!(rects.len(), 2);
-        assert_eq!(rects[0].0, _w2);
-        assert_eq!(rects[1].0, _w1);
+        assert_eq!(rects[0].0, w2);
+        assert_eq!(rects[1].0, w1);
     }
 }
