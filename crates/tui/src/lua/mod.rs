@@ -4,8 +4,8 @@
 //! Current scope:
 //! - **D1 bootstrap** — loads `~/.config/smelt/init.lua` at startup
 //!   (honouring `XDG_CONFIG_HOME`). Missing files are not errors.
-//! - **D2 api shim** — `smelt.api.version`, `smelt.api.cmd.register`,
-//!   `smelt.keymap`, `smelt.on` all accept Lua callables and store
+//! - **D2 api shim** — `smelt.version`, `smelt.cmd.register`,
+//!   `smelt.keymap.set`, `smelt.on` all accept Lua callables and store
 //!   them in per-category registries that the app polls on the tick.
 //! - **D3 autocmd dispatch** — `AutocmdRegistry` + `emit_autocmd` run
 //!   handlers synchronously; errors are logged and the next handler
@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 /// Process-global snapshot of Lua-registered `/command` names and their
-/// optional descriptions. Written by `smelt.api.cmd.register`, read by
+/// optional descriptions. Written by `smelt.cmd.register`, read by
 /// `Completer::commands` / `Completer::is_command` — same free-function
 /// pattern as `custom_commands::list` / `builtin_commands::list`.
 ///
@@ -112,7 +112,7 @@ pub enum AutocmdEvent {
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
 /// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc). Unrecognized
 /// chords return `None` so the dispatcher falls through to the normal
-/// handlers. This is the lookup key for `smelt.keymap(_, chord, fn)`.
+/// handlers. This is the lookup key for `smelt.keymap.set(_, chord, fn)`.
 pub fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     use crossterm::event::{KeyCode, KeyModifiers as M};
     let mods = key.modifiers;
@@ -310,7 +310,7 @@ pub struct EngineSnapshot {
 /// Shared state between Lua closures and the app loop.
 ///
 /// **Reads**: snapshot fields populated by `set_context()` before a
-/// handler runs. Lua reads these via `smelt.api.transcript.text()` etc.
+/// handler runs. Lua reads these via `smelt.transcript.text()` etc.
 ///
 /// **Writes**: `ops` collects deferred mutations (`AppOp`) that the
 /// app drains and applies after the handler returns.
@@ -392,7 +392,7 @@ pub(crate) struct LuaShared {
     /// plugins (e.g. `/ps`) can enumerate and kill procs.
     pub(crate) processes: Mutex<Option<engine::tools::ProcessRegistry>>,
     /// Shared list of subagent snapshots, installed by `App::new` so
-    /// `smelt.api.agent.snapshots` can return live prompt / tool-call /
+    /// `smelt.agent.snapshots` can return live prompt / tool-call /
     /// cost data without touching App directly.
     pub(crate) agent_snapshots: Mutex<Option<crate::app::SharedSnapshots>>,
     /// Task-runtime inbox. Dialog callbacks / other UI events that need
@@ -573,7 +573,7 @@ impl LuaRuntime {
         }
     }
 
-    /// Install the background process registry so `smelt.api.process.*`
+    /// Install the background process registry so `smelt.process.*`
     /// primitives can enumerate and kill procs. Called once at App start.
     pub fn set_process_registry(&self, registry: engine::tools::ProcessRegistry) {
         if let Ok(mut p) = self.shared.processes.lock() {
@@ -582,7 +582,7 @@ impl LuaRuntime {
     }
 
     /// Install the shared subagent-snapshot list so
-    /// `smelt.api.agent.snapshots()` can return live prompt /
+    /// `smelt.agent.snapshots()` can return live prompt /
     /// tool-call / cost data. Called once at App start.
     pub fn set_agent_snapshots(&self, snaps: crate::app::SharedSnapshots) {
         if let Ok(mut s) = self.shared.agent_snapshots.lock() {
@@ -1236,11 +1236,7 @@ mod tests {
     fn runtime_exposes_api_version() {
         let rt = LuaRuntime::new();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let version: String = rt
-            .lua
-            .load("return smelt.api.version")
-            .eval()
-            .expect("eval");
+        let version: String = rt.lua.load("return smelt.version").eval().expect("eval");
         assert_eq!(version, crate::api::VERSION);
     }
 
@@ -1310,7 +1306,7 @@ mod tests {
 
     #[test]
     fn dialog_request_open_queues_ui_op_and_parks_task() {
-        // `smelt.api.dialog.open` is a thick Lua wrapper in
+        // `smelt.ui.dialog.open` is a thick Lua wrapper in
         // `runtime/lua/smelt/dialog.lua` that allocs an external task
         // id, calls `_request_open`, and parks on External. End-to-end
         // resolution requires the App-level reducer (which actually
@@ -1322,13 +1318,13 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                smelt.api.tools.register({
+                smelt.tools.register({
                   name = "confirm_raw_yield",
                   description = "",
                   parameters = { type = "object", properties = {} },
                   execute = function()
                     local id = smelt.api.task.alloc()
-                    smelt.api.dialog._request_open(id, {
+                    smelt.ui.dialog._request_open(id, {
                       panels = {
                         { kind = "content", text = "please confirm" },
                       },
@@ -1355,7 +1351,7 @@ mod tests {
     #[test]
     fn dialog_open_outside_task_errors() {
         let rt = LuaRuntime::new();
-        let res: LuaResult<()> = rt.lua.load("smelt.api.dialog.open({panels = {}})").exec();
+        let res: LuaResult<()> = rt.lua.load("smelt.ui.dialog.open({panels = {}})").exec();
         assert!(res.is_err());
     }
 
@@ -1365,7 +1361,7 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                smelt.api.tools.register({
+                smelt.tools.register({
                   name = "echo",
                   description = "",
                   parameters = { type = "object", properties = {} },
@@ -1392,7 +1388,7 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                smelt.api.tools.register({
+                smelt.tools.register({
                   name = "wait_then_yes",
                   description = "",
                   parameters = { type = "object", properties = {} },
@@ -1459,7 +1455,7 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                    smelt.api.cmd.register("hello", function()
+                    smelt.cmd.register("hello", function()
                         smelt.notify("hello world")
                     end)
                 "#,
@@ -1478,7 +1474,7 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                    smelt.keymap("n", "<C-g>", function()
+                    smelt.keymap.set("n", "<C-g>", function()
                         smelt.notify("ctrl-g")
                     end)
                 "#,
@@ -1497,7 +1493,7 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                    smelt.keymap("", "<C-h>", function()
+                    smelt.keymap.set("", "<C-h>", function()
                         smelt.notify("any-mode")
                     end)
                 "#,
@@ -1553,7 +1549,7 @@ mod tests {
     fn cmd_run_queues_for_dispatch() {
         let rt = LuaRuntime::new();
         rt.lua
-            .load(r#"smelt.api.cmd.run("/compact")"#)
+            .load(r#"smelt.cmd.run("/compact")"#)
             .exec()
             .expect("exec");
         let queued = drain_commands(&rt);
@@ -1627,7 +1623,7 @@ mod tests {
         rt.lua
             .load(
                 r#"
-                    smelt.api.cmd.register("broken", function()
+                    smelt.cmd.register("broken", function()
                         error("kaboom")
                     end)
                 "#,
@@ -1646,14 +1642,14 @@ mod tests {
         rt.set_context(Some("hello world".into()), None, None, None);
         let text: String = rt
             .lua
-            .load("return smelt.api.transcript.text()")
+            .load("return smelt.transcript.text()")
             .eval()
             .expect("eval");
         assert_eq!(text, "hello world");
         rt.clear_context();
         let text: String = rt
             .lua
-            .load("return smelt.api.transcript.text()")
+            .load("return smelt.transcript.text()")
             .eval()
             .expect("eval");
         assert_eq!(text, "");
@@ -1680,7 +1676,7 @@ mod tests {
         });
         let model: String = rt
             .lua
-            .load("return smelt.api.engine.model()")
+            .load("return smelt.engine.model()")
             .eval()
             .expect("eval");
         assert_eq!(model, "claude-opus-4");
@@ -1695,7 +1691,7 @@ mod tests {
         });
         let mode: String = rt
             .lua
-            .load("return smelt.api.engine.mode()")
+            .load("return smelt.engine.mode()")
             .eval()
             .expect("eval");
         assert_eq!(mode, "plan");
@@ -1710,7 +1706,7 @@ mod tests {
         });
         let busy: bool = rt
             .lua
-            .load("return smelt.api.engine.is_busy()")
+            .load("return smelt.engine.is_busy()")
             .eval()
             .expect("eval");
         assert!(busy);
@@ -1725,7 +1721,7 @@ mod tests {
         });
         let cost: f64 = rt
             .lua
-            .load("return smelt.api.engine.cost()")
+            .load("return smelt.engine.cost()")
             .eval()
             .expect("eval");
         assert!((cost - 1.23).abs() < 0.001);
@@ -1741,13 +1737,13 @@ mod tests {
         });
         let tokens: u32 = rt
             .lua
-            .load("return smelt.api.engine.context_tokens()")
+            .load("return smelt.engine.context_tokens()")
             .eval()
             .expect("eval");
         assert_eq!(tokens, 5000);
         let window: u32 = rt
             .lua
-            .load("return smelt.api.engine.context_window()")
+            .load("return smelt.engine.context_window()")
             .eval()
             .expect("eval");
         assert_eq!(window, 128000);
@@ -1757,7 +1753,7 @@ mod tests {
     fn engine_set_mode_queues_op() {
         let rt = LuaRuntime::new();
         rt.lua
-            .load(r#"smelt.api.engine.set_mode("plan")"#)
+            .load(r#"smelt.engine.set_mode("plan")"#)
             .exec()
             .expect("exec");
         let ops = rt.drain_ops();
@@ -1769,7 +1765,7 @@ mod tests {
     fn engine_set_model_queues_op() {
         let rt = LuaRuntime::new();
         rt.lua
-            .load(r#"smelt.api.engine.set_model("gpt-4o")"#)
+            .load(r#"smelt.engine.set_model("gpt-4o")"#)
             .exec()
             .expect("exec");
         let ops = rt.drain_ops();
@@ -1780,10 +1776,7 @@ mod tests {
     #[test]
     fn engine_cancel_queues_op() {
         let rt = LuaRuntime::new();
-        rt.lua
-            .load("smelt.api.engine.cancel()")
-            .exec()
-            .expect("exec");
+        rt.lua.load("smelt.engine.cancel()").exec().expect("exec");
         let ops = rt.drain_ops();
         assert_eq!(ops.len(), 1);
         assert!(matches!(&ops[0], AppOp::Domain(DomainOp::Cancel)));
@@ -1793,7 +1786,7 @@ mod tests {
     fn engine_submit_queues_op() {
         let rt = LuaRuntime::new();
         rt.lua
-            .load(r#"smelt.api.engine.submit("hello")"#)
+            .load(r#"smelt.engine.submit("hello")"#)
             .exec()
             .expect("exec");
         let ops = rt.drain_ops();
@@ -1805,7 +1798,7 @@ mod tests {
     fn engine_compact_queues_op() {
         let rt = LuaRuntime::new();
         rt.lua
-            .load(r#"smelt.api.engine.compact("keep tests")"#)
+            .load(r#"smelt.engine.compact("keep tests")"#)
             .exec()
             .expect("exec");
         let ops = rt.drain_ops();
@@ -1867,7 +1860,7 @@ mod tests {
         });
         let effort: String = rt
             .lua
-            .load("return smelt.api.engine.reasoning_effort()")
+            .load("return smelt.engine.reasoning_effort()")
             .eval()
             .expect("eval");
         assert_eq!(effort, "high");

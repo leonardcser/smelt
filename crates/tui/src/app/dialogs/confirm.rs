@@ -1,5 +1,5 @@
 //! Confirm dialog — built-in tool approvals. Plugin tools drive their
-//! own dialogs through `smelt.api.dialog.open`.
+//! own dialogs through `smelt.ui.dialog.open`.
 //!
 //! Panels (top to bottom):
 //! - 0 `Title` (Content, Fit) — ` tool: desc` (bash-syntax-highlighted

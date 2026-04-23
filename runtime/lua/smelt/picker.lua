@@ -1,15 +1,15 @@
--- Lua-side implementation of `smelt.api.picker.open(opts)`.
+-- Lua-side implementation of `smelt.ui.picker.open(opts)`.
 --
 -- Rust still owns the focusable `ui::Picker` float (opening it needs
 -- `&mut Ui` and builds a `PickerItem` list from the opts table). Once
 -- the float is open, everything else — navigation keymaps, selection
 -- tracking, Enter/Escape resolution — lives here. Lua keeps a local
 -- `selected` counter and pushes it to Rust through
--- `smelt.api.picker.set_selected` each time the user moves.
+-- `smelt.ui.picker.set_selected` each time the user moves.
 --
 -- Protocol (everything rides on `TaskWait::External`):
 --   1. Alloc an external task id for the open ack, call
---      `smelt.api.picker._request_open(open_id, opts)` (queues a
+--      `smelt.ui.picker._request_open(open_id, opts)` (queues a
 --      `UiOp::OpenLuaPicker`), yield External — reducer opens the
 --      focusable float and resolves with `{win_id = <u64>}`.
 --   2. Alloc a second id for the final result. Register nav keymaps
@@ -22,26 +22,26 @@
 
 local M = {}
 
-function smelt.api.picker.open(opts)
+function smelt.ui.picker.open(opts)
   if not coroutine.isyieldable() then
-    error("smelt.api.picker.open: call from inside smelt.task(fn) or tool.execute", 2)
+    error("smelt.ui.picker.open: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
   if type(opts) ~= "table" then
-    error("smelt.api.picker.open: expected table of options", 2)
+    error("smelt.ui.picker.open: expected table of options", 2)
   end
   if type(opts.items) ~= "table" then
-    error("smelt.api.picker.open: opts.items must be a table", 2)
+    error("smelt.ui.picker.open: opts.items must be a table", 2)
   end
   local items = opts.items
   local n = #items
   if n == 0 then
-    error("smelt.api.picker.open: opts.items must be non-empty", 2)
+    error("smelt.ui.picker.open: opts.items must be non-empty", 2)
   end
 
   -- Step 1: queue a picker-open op and park the task. The reducer
   -- opens the focusable float and resolves us with `{win_id = <u64>}`.
   local open_id = smelt.api.task.alloc()
-  smelt.api.picker._request_open(open_id, opts)
+  smelt.ui.picker._request_open(open_id, opts)
   local opened = coroutine.yield({__yield = "external", id = open_id})
   if type(opened) ~= "table" or type(opened.win_id) ~= "number" then
     return nil
@@ -58,7 +58,7 @@ function smelt.api.picker.open(opts)
 
   local function move(delta)
     selected = ((selected - 1 + delta) % n) + 1
-    smelt.api.picker.set_selected(win_id, selected - 1)
+    smelt.ui.picker.set_selected(win_id, selected - 1)
   end
 
   -- Step 3: navigation keymaps — don't resolve, just move + sync.

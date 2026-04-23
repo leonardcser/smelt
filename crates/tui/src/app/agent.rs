@@ -695,7 +695,7 @@ impl App {
                 args,
             } => {
                 // Plugins open their own confirm dialogs via
-                // `smelt.api.dialog.open` from inside `execute`. The
+                // `smelt.ui.dialog.open` from inside `execute`. The
                 // core no longer special-cases plugin tools here.
                 self.handle_plugin_tool(request_id, call_id, tool_name, args);
                 SessionControl::Continue
@@ -708,7 +708,7 @@ impl App {
     ///
     /// Handlers run as `LuaTask`s. A handler that doesn't yield
     /// completes synchronously and the result is forwarded right away.
-    /// A handler that yields (e.g. via `smelt.api.dialog.open`) parks;
+    /// A handler that yields (e.g. via `smelt.ui.dialog.open`) parks;
     /// its result arrives later through `drive_tasks()`.
     fn handle_plugin_tool(
         &mut self,

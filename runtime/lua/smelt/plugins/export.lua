@@ -32,9 +32,9 @@ local function file_stamp(ms)
 end
 
 local function default_export_path()
-  local dir  = smelt.api.session.cwd() or "."
-  local slug = slugify(smelt.api.session.title())
-  local stamp = file_stamp(smelt.api.session.created_at_ms())
+  local dir  = smelt.session.cwd() or "."
+  local slug = slugify(smelt.session.title())
+  local stamp = file_stamp(smelt.session.created_at_ms())
   local base = string.format("%s/smelt-%s-%s.md", dir, slug, stamp)
   -- Disambiguate against existing files.
   local path = base
@@ -51,21 +51,21 @@ end
 
 local function format_markdown()
   local parts = {}
-  local title = smelt.api.session.title()
+  local title = smelt.session.title()
   if title and title ~= "" then
     table.insert(parts, "# " .. title .. "\n")
   end
 
   local meta = {}
-  local model = smelt.api.engine.model()
+  local model = smelt.engine.model()
   if model and model ~= "" then
     table.insert(meta, "**Model:** " .. model)
   end
-  local cwd = smelt.api.session.cwd()
+  local cwd = smelt.session.cwd()
   if cwd and cwd ~= "" then
     table.insert(meta, "**CWD:** `" .. cwd .. "`")
   end
-  local created = smelt.api.session.created_at_ms()
+  local created = smelt.session.created_at_ms()
   if created and created > 0 then
     table.insert(meta, "**Date:** " .. format_timestamp(created))
   end
@@ -75,7 +75,7 @@ local function format_markdown()
   end
 
   -- Build a lookup: tool_call_id -> (content, is_error).
-  local history = smelt.api.engine.history()
+  local history = smelt.engine.history()
   local tool_results = {}
   for _, msg in ipairs(history) do
     if msg.role == "tool" and msg.tool_call_id and msg.content then
@@ -118,14 +118,14 @@ local function format_markdown()
   return table.concat(parts, "\n")
 end
 
-smelt.api.cmd.register("export", function()
-  if #smelt.api.engine.history() == 0 then
-    smelt.api.ui.notify_error("nothing to export")
+smelt.cmd.register("export", function()
+  if #smelt.engine.history() == 0 then
+    smelt.notify_error("nothing to export")
     return
   end
 
-  smelt.task(function()
-    local result = smelt.api.dialog.open({
+  smelt.spawn(function()
+    local result = smelt.ui.dialog.open({
       title  = "export",
       panels = {
         { kind = "options", items = {
@@ -142,18 +142,18 @@ smelt.api.cmd.register("export", function()
     local markdown = format_markdown()
     if result.option_index == 1 then
       smelt.clipboard(markdown)
-      smelt.api.ui.notify("conversation copied to clipboard")
+      smelt.notify("conversation copied to clipboard")
     elseif result.option_index == 2 then
       local path = default_export_path()
       local f, err = io.open(path, "w")
       if not f then
-        smelt.api.ui.notify_error("export failed: " .. (err or "unknown"))
+        smelt.notify_error("export failed: " .. (err or "unknown"))
         return
       end
       f:write(markdown)
       f:close()
       local name = path:match("([^/]+)$") or path
-      smelt.api.ui.notify("exported to " .. name)
+      smelt.notify("exported to " .. name)
     end
   end)
 end, { desc = "copy conversation to clipboard" })

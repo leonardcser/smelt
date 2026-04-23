@@ -1,5 +1,5 @@
-//! Lua → ui translators for `smelt.api.dialog.open` and
-//! `smelt.api.picker.open`. These parse the plugin-supplied `opts`
+//! Lua → ui translators for `smelt.ui.dialog.open` and
+//! `smelt.ui.picker.open`. These parse the plugin-supplied `opts`
 //! tables into the typed `PanelSpec` / `PickerItem` shapes that the
 //! `ui` crate consumes, create the compositor float, and hand the new
 //! `WinId` back to the parked Lua task. Everything else — keymap

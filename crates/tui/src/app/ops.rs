@@ -138,7 +138,7 @@ pub enum UiOp {
         callback_id: u64,
     },
     /// Drive the `ui::Picker` at `win` to a new 0-based `index`. Pushed
-    /// by `smelt.api.picker.set_selected` from Lua-side nav keymaps in
+    /// by `smelt.ui.picker.set_selected` from Lua-side nav keymaps in
     /// `runtime/lua/smelt/picker.lua`; the reducer calls
     /// `ui.picker_mut(win).set_selected(index)`.
     PickerSetSelected {
@@ -146,7 +146,7 @@ pub enum UiOp {
         index: usize,
     },
     /// Open a Lua-described dialog float. Pushed by
-    /// `smelt.api.dialog._request_open(task_id, opts)`. The reducer
+    /// `smelt.ui.dialog._request_open(task_id, opts)`. The reducer
     /// runs `lua_dialog::open`, then resolves the parked
     /// `TaskWait::External(task_id)` with `{win_id = …}` (or `nil` on
     /// error). Lua code owns all keymap/event wiring in
@@ -189,12 +189,12 @@ pub enum DomainOp {
         session_entries: Vec<crate::app::transcript_model::PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
     },
-    /// Load a saved session by id (Resume dialog, `smelt.api.session.load`).
+    /// Load a saved session by id (Resume dialog, `smelt.session.load`).
     LoadSession(String),
-    /// Delete a saved session by id (`smelt.api.session.delete`). No-op
+    /// Delete a saved session by id (`smelt.session.delete`). No-op
     /// if the session is the active one.
     DeleteSession(String),
-    /// Kill a running subagent by PID (`smelt.api.agent.kill`). Runs
+    /// Kill a running subagent by PID (`smelt.agent.kill`). Runs
     /// SIGTERM to the whole subtree, deregisters, and cleans up its
     /// socket. No-op when the PID isn't in the registry anymore.
     KillAgent(u32),
@@ -220,7 +220,7 @@ pub enum DomainOp {
         args: std::collections::HashMap<String, serde_json::Value>,
     },
     /// One-shot LLM call initiated by a Lua plugin
-    /// (`smelt.api.engine.ask`). Applied by sending a matching
+    /// (`smelt.engine.ask`). Applied by sending a matching
     /// `UiCommand::EngineAsk` to the engine.
     EngineAsk {
         id: u64,
