@@ -5,7 +5,7 @@
 //! of items with one selected row, never steals focus, and is reused
 //! across every caller that needs "pick one from a list" UX — the
 //! prompt's `/` command completer, the cmdline's `:` completer, the
-//! Lua `smelt.api.picker.open` primitive.
+//! Lua `smelt.ui.picker.open` primitive.
 
 use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};

@@ -14,10 +14,10 @@ local function build_labels(turns)
   return labels
 end
 
-smelt.api.cmd.register("rewind", function(args)
-  local turns = smelt.api.session.turns()
+smelt.cmd.register("rewind", function(args)
+  local turns = smelt.session.turns()
   if #turns == 0 then
-    smelt.api.ui.notify_error("nothing to rewind")
+    smelt.notify_error("nothing to rewind")
     return
   end
 
@@ -26,14 +26,14 @@ smelt.api.cmd.register("rewind", function(args)
   -- dispatching). Otherwise honor the current vim mode.
   local restore_vim_insert = (args == "insert") or (smelt.api.win.mode() == "Insert")
 
-  smelt.task(function()
+  smelt.spawn(function()
     local labels = build_labels(turns)
     local options = {}
     for _, label in ipairs(labels) do
       table.insert(options, { label = label })
     end
 
-    local result = smelt.api.dialog.open({
+    local result = smelt.ui.dialog.open({
       title  = "rewind",
       panels = {
         { kind = "options", items = options },
@@ -50,7 +50,7 @@ smelt.api.cmd.register("rewind", function(args)
       block_idx = turns[idx].block_idx
     end
 
-    smelt.api.session.rewind_to(block_idx, {
+    smelt.session.rewind_to(block_idx, {
       restore_vim_insert = restore_vim_insert,
     })
   end)

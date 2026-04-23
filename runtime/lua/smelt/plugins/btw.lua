@@ -9,25 +9,25 @@ local SYSTEM = "You are a helpful assistant. The user is asking a quick side que
   .. "while working on something else. Answer concisely and directly. "
   .. "You have the conversation history for context."
 
-smelt.api.cmd.register("btw", function(args)
+smelt.cmd.register("btw", function(args)
   local question = args or ""
   if question == "" then
-    smelt.api.ui.notify_error("usage: /btw <question>")
+    smelt.notify_error("usage: /btw <question>")
     return
   end
 
-  smelt.task(function()
+  smelt.spawn(function()
     local buf = smelt.api.buf.create()
     smelt.api.buf.set_lines(buf, { "thinking…" })
 
-    local history = smelt.api.engine.history()
+    local history = smelt.engine.history()
     local messages = {}
     for _, msg in ipairs(history) do
       table.insert(messages, { role = msg.role, content = msg.content or "" })
     end
     table.insert(messages, { role = "user", content = question })
 
-    smelt.api.engine.ask({
+    smelt.engine.ask({
       system = SYSTEM,
       messages = messages,
       task = "btw",
@@ -40,7 +40,7 @@ smelt.api.cmd.register("btw", function(args)
       end,
     })
 
-    smelt.api.dialog.open({
+    smelt.ui.dialog.open({
       title = question,
       panels = {
         { kind = "content", buf = buf, height = "fill" },

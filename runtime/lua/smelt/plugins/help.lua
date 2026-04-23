@@ -2,7 +2,7 @@
 --
 -- Scrollable dialog listing every registered keybinding in two columns
 -- (label · detail). Content is generated on-demand from
--- `smelt.api.keymap.help_sections()` which reflects the active vim
+-- `smelt.keymap.help()` which reflects the active vim
 -- setting.
 
 local function build_lines(sections)
@@ -29,11 +29,11 @@ local function build_lines(sections)
   return lines
 end
 
-smelt.api.cmd.register("help", function()
-  smelt.task(function()
-    local sections = smelt.api.keymap.help_sections()
+smelt.cmd.register("help", function()
+  smelt.spawn(function()
+    local sections = smelt.keymap.help()
     local lines = build_lines(sections)
-    smelt.api.dialog.open({
+    smelt.ui.dialog.open({
       title   = "help",
       panels  = {
         { kind = "content", text = table.concat(lines, "\n"), height = "fill" },

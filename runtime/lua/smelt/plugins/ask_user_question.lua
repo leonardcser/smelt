@@ -8,7 +8,7 @@
 -- multiSelect in the schema is accepted for LLM compatibility but
 -- treated as single-select for now.
 
-smelt.api.tools.register({
+smelt.tools.register({
   name = "ask_user_question",
   description = "Ask the user questions to gather preferences, clarify instructions, or get decisions on implementation choices. Present 1-4 questions with 2-4 options each.",
   execution_mode = "sequential",
@@ -89,7 +89,7 @@ smelt.api.tools.register({
         title = "question"
       end
 
-      local result = smelt.api.dialog.open({
+      local result = smelt.ui.dialog.open({
         title = title,
         blocks_agent = true,
         panels = {

@@ -16,9 +16,9 @@
 //! so plugin code reads as synchronous:
 //!
 //! ```lua
-//! smelt.task(function()
+//! smelt.spawn(function()
 //!   smelt.api.sleep(200)
-//!   local r = smelt.api.dialog.open({...})
+//!   local r = smelt.ui.dialog.open({...})
 //!   return r.action
 //! end)
 //! ```
@@ -47,7 +47,7 @@ enum TaskWait {
 
 /// What to do when a task's top-level function returns.
 pub enum TaskCompletion {
-    /// `smelt.task(fn)` kickoff — return value is discarded, errors
+    /// `smelt.spawn(fn)` kickoff — return value is discarded, errors
     /// surface as notifications.
     FireAndForget,
     /// Tool `execute` handler — return value is delivered to the
@@ -96,7 +96,7 @@ impl LuaTaskRuntime {
     /// Spawn a task from a Lua function. The task runs on the next
     /// `drive` call; `initial_arg` is passed to the handler on first
     /// resume (i.e. becomes its first argument). Pass `Nil` for
-    /// zero-arg kickoffs (`smelt.task(fn)`) and the args table for
+    /// zero-arg kickoffs (`smelt.spawn(fn)`) and the args table for
     /// tool execute.
     pub fn spawn(
         &mut self,

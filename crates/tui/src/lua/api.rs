@@ -16,9 +16,11 @@ use std::time::{Duration, Instant};
 impl LuaRuntime {
     pub(super) fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
         let smelt = lua.create_table()?;
-
         let api = lua.create_table()?;
-        api.set("version", crate::api::VERSION)?;
+        let smelt_ui = lua.create_table()?;
+        let smelt_keymap = lua.create_table()?;
+
+        smelt.set("version", crate::api::VERSION)?;
 
         // Helper macro: lock shared.ops and read a snapshot field.
         macro_rules! snap_read {
@@ -55,7 +57,7 @@ impl LuaRuntime {
             }};
         }
 
-        // smelt.api.transcript.text()
+        // smelt.transcript.text()
         let transcript_tbl = lua.create_table()?;
         transcript_tbl.set(
             "text",
@@ -68,9 +70,9 @@ impl LuaRuntime {
             "yank_block",
             push_op!(lua, shared, || DomainOp::YankBlockAtCursor),
         )?;
-        api.set("transcript", transcript_tbl)?;
+        smelt.set("transcript", transcript_tbl)?;
 
-        // smelt.api.cmd
+        // smelt.cmd
         let cmd_tbl = lua.create_table()?;
         {
             let s = shared.clone();
@@ -120,9 +122,9 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        api.set("cmd", cmd_tbl)?;
+        smelt.set("cmd", cmd_tbl)?;
 
-        // smelt.api.engine.*
+        // smelt.engine.*
         let engine_tbl = lua.create_table()?;
 
         engine_tbl.set("model", snap_read!(lua, shared, |o| o.engine.model.clone()))?;
@@ -150,7 +152,7 @@ impl LuaRuntime {
             snap_read!(lua, shared, |o| o.engine.session_id.clone()),
         )?;
 
-        // smelt.api.session.*
+        // smelt.session.*
         let session_tbl = lua.create_table()?;
         session_tbl.set(
             "title",
@@ -257,7 +259,7 @@ impl LuaRuntime {
             "delete",
             push_op!(lua, shared, |id: String| DomainOp::DeleteSession(id)),
         )?;
-        api.set("session", session_tbl)?;
+        smelt.set("session", session_tbl)?;
 
         engine_tbl.set(
             "set_model",
@@ -289,7 +291,7 @@ impl LuaRuntime {
             )?;
         }
 
-        // smelt.api.engine.ask({ system, messages?, question?, task?, on_response })
+        // smelt.engine.ask({ system, messages?, question?, task?, on_response })
         {
             let s = shared.clone();
             engine_tbl.set(
@@ -355,7 +357,7 @@ impl LuaRuntime {
             )?;
         }
 
-        // smelt.api.engine.history() → [{role, content, tool_calls?, tool_call_id?}]
+        // smelt.engine.history() → [{role, content, tool_calls?, tool_call_id?}]
         {
             let s = shared.clone();
             engine_tbl.set(
@@ -371,9 +373,9 @@ impl LuaRuntime {
             )?;
         }
 
-        api.set("engine", engine_tbl)?;
+        smelt.set("engine", engine_tbl)?;
 
-        // smelt.api.process.*
+        // smelt.process.*
         let process_tbl = lua.create_table()?;
         {
             let s = shared.clone();
@@ -438,9 +440,9 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        api.set("process", process_tbl)?;
+        smelt.set("process", process_tbl)?;
 
-        // smelt.api.agent.*
+        // smelt.agent.*
         let agent_tbl = lua.create_table()?;
         agent_tbl.set(
             "list",
@@ -548,9 +550,9 @@ impl LuaRuntime {
                 Ok(out)
             })?,
         )?;
-        api.set("agent", agent_tbl)?;
+        smelt.set("agent", agent_tbl)?;
 
-        // smelt.api.permissions.*
+        // smelt.permissions.*
         let permissions_tbl = lua.create_table()?;
         {
             let s = shared.clone();
@@ -635,9 +637,9 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        api.set("permissions", permissions_tbl)?;
+        smelt.set("permissions", permissions_tbl)?;
 
-        // smelt.api.keymap.help_sections()
+        // smelt.keymap.help_sections()
         let keymap_tbl = lua.create_table()?;
         {
             let s = shared.clone();
@@ -664,27 +666,26 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        api.set("keymap", keymap_tbl)?;
+        smelt_keymap.set("help", keymap_tbl.get::<mlua::Function>("help_sections")?)?;
 
-        // smelt.api.ui
-        let ui_tbl = lua.create_table()?;
-        ui_tbl.set(
-            "set_ghost_text",
+        // smelt.ui.ghost_text.{set, clear}
+        let ghost_text_tbl = lua.create_table()?;
+        ghost_text_tbl.set(
+            "set",
             push_op!(lua, shared, |text: String| UiOp::SetGhostText(text)),
         )?;
-        ui_tbl.set(
-            "clear_ghost_text",
-            push_op!(lua, shared, || UiOp::ClearGhostText),
-        )?;
-        ui_tbl.set(
+        ghost_text_tbl.set("clear", push_op!(lua, shared, || UiOp::ClearGhostText))?;
+        smelt_ui.set("ghost_text", ghost_text_tbl)?;
+
+        // smelt.notify / smelt.notify_error (top-level convenience).
+        smelt.set(
             "notify",
             push_op!(lua, shared, |msg: String| UiOp::Notify(msg)),
         )?;
-        ui_tbl.set(
+        smelt.set(
             "notify_error",
             push_op!(lua, shared, |msg: String| UiOp::NotifyError(msg)),
         )?;
-        api.set("ui", ui_tbl)?;
 
         // smelt.api.theme
         let theme_tbl = lua.create_table()?;
@@ -960,7 +961,7 @@ impl LuaRuntime {
             api.set("task", task_tbl)?;
         }
 
-        // smelt.api.prompt.set_section(name, content) / remove_section(name)
+        // smelt.prompt.set_section(name, content) / remove_section(name)
         let prompt_tbl = lua.create_table()?;
         {
             let s = shared.clone();
@@ -986,9 +987,9 @@ impl LuaRuntime {
                 })?,
             )?;
         }
-        api.set("prompt", prompt_tbl)?;
+        smelt.set("prompt", prompt_tbl)?;
 
-        // smelt.api.tools.register(def) / unregister(name) / resolve(...)
+        // smelt.tools.register(def) / unregister(name) / resolve(...)
         let tools_tbl = lua.create_table()?;
         let s = shared.clone();
         let tools_register = lua.create_function(move |lua, def: mlua::Table| {
@@ -1051,7 +1052,7 @@ impl LuaRuntime {
                 )?,
             )?;
         }
-        api.set("tools", tools_tbl)?;
+        smelt.set("tools", tools_tbl)?;
 
         // smelt.api.fuzzy.score
         let fuzzy_tbl = lua.create_table()?;
@@ -1067,7 +1068,7 @@ impl LuaRuntime {
         )?;
         api.set("fuzzy", fuzzy_tbl)?;
 
-        // smelt.api.picker
+        // smelt.ui.picker
         {
             let picker_tbl = lua.create_table()?;
             {
@@ -1099,10 +1100,10 @@ impl LuaRuntime {
                     })?,
                 )?;
             }
-            api.set("picker", picker_tbl)?;
+            smelt_ui.set("picker", picker_tbl)?;
         }
 
-        // smelt.api.dialog
+        // smelt.ui.dialog
         {
             let dialog_tbl = lua.create_table()?;
             {
@@ -1118,15 +1119,11 @@ impl LuaRuntime {
                     })?,
                 )?;
             }
-            api.set("dialog", dialog_tbl)?;
+            smelt_ui.set("dialog", dialog_tbl)?;
         }
 
         smelt.set("api", api)?;
-
-        smelt.set(
-            "notify",
-            push_op!(lua, shared, |msg: String| UiOp::Notify(msg)),
-        )?;
+        smelt.set("ui", smelt_ui)?;
 
         smelt.set(
             "clipboard",
@@ -1138,8 +1135,8 @@ impl LuaRuntime {
 
         {
             let s = shared.clone();
-            smelt.set(
-                "keymap",
+            smelt_keymap.set(
+                "set",
                 lua.create_function(
                     move |lua, (mode, chord, handler): (String, String, mlua::Function)| {
                         let key = lua.create_registry_value(handler)?;
@@ -1151,6 +1148,7 @@ impl LuaRuntime {
                 )?,
             )?;
         }
+        smelt.set("keymap", smelt_keymap)?;
 
         {
             let s = shared.clone();
@@ -1203,7 +1201,7 @@ impl LuaRuntime {
         {
             let s = shared.clone();
             smelt.set(
-                "task",
+                "spawn",
                 lua.create_function(move |lua, handler: mlua::Function| {
                     if let Ok(mut rt) = s.tasks.lock() {
                         rt.spawn(lua, handler, LuaValue::Nil, TaskCompletion::FireAndForget)?;
@@ -1417,23 +1415,21 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
 /// outside a task raise a clear error rather than failing later.
 const TASK_YIELD_PRIMITIVES: &str = r#"
 smelt.api = smelt.api or {}
-smelt.api.dialog = smelt.api.dialog or {}
-smelt.api.picker = smelt.api.picker or {}
 
 function smelt.api.sleep(ms)
   if not coroutine.isyieldable() then
-    error("smelt.api.sleep: call from inside smelt.task(fn) or tool.execute", 2)
+    error("smelt.api.sleep: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
   return coroutine.yield({__yield = "sleep", ms = ms})
 end
 
--- `smelt.api.dialog.open` is installed by `runtime/lua/smelt/dialog.lua`.
--- It allocs a task id, calls `smelt.api.dialog._request_open(task_id,
+-- `smelt.ui.dialog.open` is installed by `runtime/lua/smelt/dialog.lua`.
+-- It allocs a task id, calls `smelt.ui.dialog._request_open(task_id,
 -- opts)` (which queues a `UiOp::OpenLuaDialog` so the reducer opens
 -- the float + panels and resolves the task with `{win_id = …}`), parks
 -- on an External yield, then wires Lua-side keymaps/events and parks
 -- again for the final result.
 
--- `smelt.api.picker.open` is installed by `runtime/lua/smelt/picker.lua`
+-- `smelt.ui.picker.open` is installed by `runtime/lua/smelt/picker.lua`
 -- with the same `_request_open` → External pattern.
 "#;

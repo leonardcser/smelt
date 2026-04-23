@@ -42,18 +42,18 @@ local function delete_entry(perms, m)
   end
 end
 
-smelt.api.cmd.register("permissions", function()
-  smelt.task(function()
-    local perms = smelt.api.permissions.list()
+smelt.cmd.register("permissions", function()
+  smelt.spawn(function()
+    local perms = smelt.permissions.list()
     if #(perms.session or {}) == 0 and #(perms.workspace or {}) == 0 then
-      smelt.api.ui.notify_error("no permissions")
+      smelt.notify_error("no permissions")
       return
     end
 
     while true do
       local items, mapping = build_items(perms)
       if #items == 0 then
-        smelt.api.permissions.sync(perms)
+        smelt.permissions.sync(perms)
         return
       end
 
@@ -70,7 +70,7 @@ smelt.api.cmd.register("permissions", function()
         ctx.close()
       end
 
-      smelt.api.dialog.open({
+      smelt.ui.dialog.open({
         title   = "permissions",
         panels  = {
           { kind = "options", items = items },
@@ -89,7 +89,7 @@ smelt.api.cmd.register("permissions", function()
       })
 
       if not deleted_this_round then
-        smelt.api.permissions.sync(perms)
+        smelt.permissions.sync(perms)
         return
       end
     end

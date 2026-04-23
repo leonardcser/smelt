@@ -13,7 +13,7 @@ smelt.on("turn_end", function(_, data)
     return
   end
 
-  smelt.api.ui.clear_ghost_text()
+  smelt.ui.ghost_text.clear()
 
   local history = data.messages or {}
 
@@ -57,14 +57,14 @@ smelt.on("turn_end", function(_, data)
     .. table.concat(parts, "\n\n")
     .. "\n\nPredict the user's next message."
 
-  smelt.api.engine.ask({
+  smelt.engine.ask({
     system = SYSTEM,
     question = question,
     task = "prediction",
     on_response = function(content)
       local text = content:match("^%s*(.-)%s*$") or ""
       if text ~= "" then
-        smelt.api.ui.set_ghost_text(text)
+        smelt.ui.ghost_text.set(text)
       end
     end,
   })

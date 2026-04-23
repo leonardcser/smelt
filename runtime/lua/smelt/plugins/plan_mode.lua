@@ -81,7 +81,7 @@ local function generate_plan_name()
 end
 
 local function save_plan(summary)
-  local session_dir = smelt.api.engine.session_dir()
+  local session_dir = smelt.engine.session_dir()
   if session_dir == "" then
     return nil, "no session directory"
   end
@@ -106,9 +106,9 @@ local function save_plan(summary)
 end
 
 local function activate()
-  smelt.api.prompt.set_section("plan_mode", PLAN_PROMPT)
+  smelt.prompt.set_section("plan_mode", PLAN_PROMPT)
 
-  smelt.api.tools.register({
+  smelt.tools.register({
     name = "exit_plan_mode",
     description = "Signal that planning is complete and ready for user approval. Call this when your plan is finalized.",
     modes = { "plan" },
@@ -128,7 +128,7 @@ local function activate()
       -- Open the confirm dialog and wait for the user's answer.
       -- `dialog.open` yields the task coroutine; `result` is
       -- `{ action, option_index, inputs }`.
-      local result = smelt.api.dialog.open({
+      local result = smelt.ui.dialog.open({
         title  = "plan",
         blocks_agent = true,
         panels = {
@@ -137,7 +137,7 @@ local function activate()
             {
               label = "yes, and auto-apply",
               action = "approve",
-              on_select = function() smelt.api.engine.set_mode("apply") end,
+              on_select = function() smelt.engine.set_mode("apply") end,
             },
             { label = "yes", action = "approve" },
             { label = "no",  action = "deny"    },
@@ -161,13 +161,13 @@ local function activate()
 end
 
 local function deactivate()
-  smelt.api.prompt.remove_section("plan_mode")
-  smelt.api.tools.unregister("exit_plan_mode")
+  smelt.prompt.remove_section("plan_mode")
+  smelt.tools.unregister("exit_plan_mode")
 end
 
 -- React to mode changes.
 smelt.on("mode_change", function()
-  local mode = smelt.api.engine.mode()
+  local mode = smelt.engine.mode()
   if mode == "plan" then
     activate()
   else
@@ -176,6 +176,6 @@ smelt.on("mode_change", function()
 end)
 
 -- If we're already in plan mode at load time, activate immediately.
-if smelt.api.engine.mode() == "plan" then
+if smelt.engine.mode() == "plan" then
   activate()
 end

@@ -103,15 +103,15 @@ local function refresh_list(buf_id, filtered, now_ms)
   end
 end
 
-smelt.api.cmd.register("resume", function()
-  smelt.task(function()
-    local entries = smelt.api.session.list()
+smelt.cmd.register("resume", function()
+  smelt.spawn(function()
+    local entries = smelt.session.list()
     if #entries == 0 then
-      smelt.api.ui.notify_error("no saved sessions")
+      smelt.notify_error("no saved sessions")
       return
     end
 
-    local current_cwd = smelt.api.session.cwd()
+    local current_cwd = smelt.session.cwd()
     local now_ms = os.time() * 1000
     local workspace_only = true
     local query = ""
@@ -127,7 +127,7 @@ smelt.api.cmd.register("resume", function()
       return (idx and idx > 0) and filtered[idx] or nil
     end
 
-    local result = smelt.api.dialog.open({
+    local result = smelt.ui.dialog.open({
       title   = "resume",
       panels  = {
         { kind = "input", name = "query",
@@ -148,7 +148,7 @@ smelt.api.cmd.register("resume", function()
         { key = "ctrl-d", hint = "^d: delete", on_press = function(ctx)
             local e = selected_entry(ctx.selected_index)
             if e then
-              smelt.api.session.delete(e.id)
+              smelt.session.delete(e.id)
               for i, x in ipairs(entries) do
                 if x.id == e.id then table.remove(entries, i); break end
               end
@@ -163,7 +163,7 @@ smelt.api.cmd.register("resume", function()
     local idx = result.option_index
     local e = selected_entry(idx)
     if e then
-      smelt.api.session.load(e.id)
+      smelt.session.load(e.id)
     end
   end)
 end, { desc = "resume saved session" })

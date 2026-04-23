@@ -22,16 +22,16 @@ local function format_proc(p)
   return string.format("%s — %s %s", p.command, format_duration(p.elapsed_secs or 0), p.id)
 end
 
-smelt.api.cmd.register("ps", function()
-  local procs = smelt.api.process.list()
+smelt.cmd.register("ps", function()
+  local procs = smelt.process.list()
   if #procs == 0 then
-    smelt.api.ui.notify_error("no background processes")
+    smelt.notify_error("no background processes")
     return
   end
 
-  smelt.task(function()
+  smelt.spawn(function()
     while true do
-      procs = smelt.api.process.list()
+      procs = smelt.process.list()
       if #procs == 0 then
         return
       end
@@ -44,7 +44,7 @@ smelt.api.cmd.register("ps", function()
       local snapshot = procs
       local should_reopen = false
 
-      smelt.api.dialog.open({
+      smelt.ui.dialog.open({
         title   = "processes",
         panels  = {
           { kind = "options", items = items },
@@ -54,7 +54,7 @@ smelt.api.cmd.register("ps", function()
               if ctx.selected_index then
                 local target = snapshot[ctx.selected_index]
                 if target then
-                  smelt.api.process.kill(target.id)
+                  smelt.process.kill(target.id)
                   should_reopen = true
                 end
               end

@@ -1,11 +1,11 @@
 -- Built-in /agents command.
 --
--- Two views stitched together with a single `smelt.task`:
+-- Two views stitched together with a single `smelt.spawn`:
 --   1. List view  — one row per subagent with live status, tokens, cost.
 --                   Backspace kills the selected agent; Enter opens its
 --                   detail view.
 --   2. Detail view — prompt + tool-call log for one agent, live-updated
---                    via `on_tick` + `smelt.api.agent.snapshots`.
+--                    via `on_tick` + `smelt.agent.snapshots`.
 -- Dismissing the detail view navigates back to the list.
 
 local function format_duration(secs)
@@ -107,7 +107,7 @@ end
 
 local function refresh_detail_title(title_buf, agent_id)
   local entry
-  for _, a in ipairs(smelt.api.agent.list()) do
+  for _, a in ipairs(smelt.agent.list()) do
     if a.agent_id == agent_id then entry = a; break end
   end
   local line = " " .. agent_id
@@ -120,7 +120,7 @@ local function refresh_detail_title(title_buf, agent_id)
       line = line .. " \u{00b7} " .. entry.task_slug
     end
   end
-  local snap = find_snapshot(smelt.api.agent.snapshots(), agent_id)
+  local snap = find_snapshot(smelt.agent.snapshots(), agent_id)
   if snap then
     if snap.context_tokens and snap.context_tokens > 0 then
       line = line .. "  " .. format_tokens(snap.context_tokens)
@@ -145,7 +145,7 @@ local function split_lines(s)
 end
 
 local function refresh_detail_body(detail_buf, agent_id)
-  local snap = find_snapshot(smelt.api.agent.snapshots(), agent_id)
+  local snap = find_snapshot(smelt.agent.snapshots(), agent_id)
   if not snap then
     smelt.api.buf.set_lines(detail_buf, { "(agent not tracked)" })
     return
@@ -183,7 +183,7 @@ local function open_detail(agent_id)
   refresh_detail_title(title_buf, agent_id)
   refresh_detail_body(detail_buf, agent_id)
 
-  local result = smelt.api.dialog.open({
+  local result = smelt.ui.dialog.open({
     panels = {
       { kind = "content", buf = title_buf, height = 2 },
       { kind = "content", buf = detail_buf, height = "fill",
@@ -197,22 +197,22 @@ local function open_detail(agent_id)
   return result
 end
 
-smelt.api.cmd.register("agents", function()
-  smelt.task(function()
+smelt.cmd.register("agents", function()
+  smelt.spawn(function()
     while true do
-      local agents = smelt.api.agent.list()
+      local agents = smelt.agent.list()
       if #agents == 0 then
-        smelt.api.ui.notify_error("no subagents running")
+        smelt.notify_error("no subagents running")
         return
       end
 
       local list_buf = smelt.api.buf.create()
-      refresh_list(list_buf, agents, smelt.api.agent.snapshots())
+      refresh_list(list_buf, agents, smelt.agent.snapshots())
       local title_buf = smelt.api.buf.create()
       smelt.api.buf.set_lines(title_buf, { "agents", "" })
       smelt.api.buf.add_dim(title_buf, 1, 0, #"agents")
 
-      local result = smelt.api.dialog.open({
+      local result = smelt.ui.dialog.open({
         panels = {
           { kind = "content", buf = title_buf, height = 2 },
           { kind = "list", buf = list_buf, height = "fill" },
@@ -221,17 +221,17 @@ smelt.api.cmd.register("agents", function()
           { key = "bs", hint = "\u{232b}: kill", on_press = function(ctx)
               local idx = ctx.selected_index
               if idx and agents[idx] then
-                smelt.api.agent.kill(agents[idx].pid)
-                agents = smelt.api.agent.list()
-                refresh_list(list_buf, agents, smelt.api.agent.snapshots())
+                smelt.agent.kill(agents[idx].pid)
+                agents = smelt.agent.list()
+                refresh_list(list_buf, agents, smelt.agent.snapshots())
               end
             end },
         },
         on_tick = function(ctx)
-          local fresh = smelt.api.agent.list()
+          local fresh = smelt.agent.list()
           if agents_changed(fresh, agents) then
             agents = fresh
-            refresh_list(list_buf, agents, smelt.api.agent.snapshots())
+            refresh_list(list_buf, agents, smelt.agent.snapshots())
           end
         end,
       })

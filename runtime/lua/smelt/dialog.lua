@@ -1,4 +1,4 @@
--- Lua-side implementation of `smelt.api.dialog.open(opts)`.
+-- Lua-side implementation of `smelt.ui.dialog.open(opts)`.
 --
 -- Rust still owns float/panel creation (building `PanelSpec` from an
 -- `opts` table needs Ui access and render plumbing, and exposing the
@@ -10,7 +10,7 @@
 -- Protocol (everything rides on `TaskWait::External`; no bespoke
 -- dialog-yield variant):
 --   1. Alloc an external task id for the open ack, call
---      `smelt.api.dialog._request_open(open_id, opts)` (queues a
+--      `smelt.ui.dialog._request_open(open_id, opts)` (queues a
 --      `UiOp::OpenLuaDialog`), yield External — reducer opens the
 --      float and resolves with `{win_id = <u64>}`.
 --   2. Alloc a second id for the final result. Register
@@ -64,12 +64,12 @@ local function collect_inputs(raw_ctx, input_panels)
   return out
 end
 
-function smelt.api.dialog.open(opts)
+function smelt.ui.dialog.open(opts)
   if not coroutine.isyieldable() then
-    error("smelt.api.dialog.open: call from inside smelt.task(fn) or tool.execute", 2)
+    error("smelt.ui.dialog.open: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
   if type(opts) ~= "table" then
-    error("smelt.api.dialog.open: expected table of options", 2)
+    error("smelt.ui.dialog.open: expected table of options", 2)
   end
 
   -- Walk panels once to find the (first) options panel and map input
@@ -107,7 +107,7 @@ function smelt.api.dialog.open(opts)
   -- Step 1: queue a dialog-open op and park the task. The reducer
   -- opens the float + panels and resolves us with `{win_id = <u64>}`.
   local open_id = smelt.api.task.alloc()
-  smelt.api.dialog._request_open(open_id, opts)
+  smelt.ui.dialog._request_open(open_id, opts)
   local opened = coroutine.yield({__yield = "external", id = open_id})
   if type(opened) ~= "table" or type(opened.win_id) ~= "number" then
     return { action = "dismiss", inputs = {} }
@@ -138,7 +138,7 @@ function smelt.api.dialog.open(opts)
     if type(on_select_fn) == "function" then
       local ok, err = pcall(on_select_fn)
       if not ok then
-        smelt.api.ui.notify_error("dialog on_select: " .. tostring(err))
+        smelt.notify_error("dialog on_select: " .. tostring(err))
       end
     end
     smelt.api.win.close(win_id)
@@ -168,7 +168,7 @@ function smelt.api.dialog.open(opts)
           local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
           local ok, err = pcall(on_press, ctx)
           if not ok then
-            smelt.api.ui.notify_error("dialog keymap: " .. tostring(err))
+            smelt.notify_error("dialog keymap: " .. tostring(err))
           end
         end)
       end
@@ -184,7 +184,7 @@ function smelt.api.dialog.open(opts)
       for _, fn in pairs(input_on_change) do
         local ok, err = pcall(fn, ctx)
         if not ok then
-          smelt.api.ui.notify_error("dialog on_change: " .. tostring(err))
+          smelt.notify_error("dialog on_change: " .. tostring(err))
         end
       end
     end)
@@ -198,7 +198,7 @@ function smelt.api.dialog.open(opts)
       local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
       local ok, err = pcall(on_tick, ctx)
       if not ok then
-        smelt.api.ui.notify_error("dialog on_tick: " .. tostring(err))
+        smelt.notify_error("dialog on_tick: " .. tostring(err))
       end
     end)
   end

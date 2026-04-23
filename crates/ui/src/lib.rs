@@ -167,7 +167,7 @@ impl Ui {
     //
     // Non-focusable dropdown component. One primitive reused by the
     // prompt `/` completer, the cmdline `:` completer, and Lua
-    // `smelt.api.picker.open`. Mirrors Neovim's `pum_grid`: caller drives
+    // `smelt.ui.picker.open`. Mirrors Neovim's `pum_grid`: caller drives
     // selection, component paints.
 
     /// Open a `Picker` float. Accepts any `FloatConfig`; typically
