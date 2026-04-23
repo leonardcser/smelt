@@ -11,9 +11,11 @@ mod content_keys;
 pub(crate) mod dialogs;
 mod events;
 mod history;
+mod lua_bridge;
 mod mouse;
 pub mod ops;
 mod ops_apply;
+mod pane_focus;
 mod render_loop;
 mod status_bar;
 
