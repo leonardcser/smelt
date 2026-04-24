@@ -1,8 +1,9 @@
-use crate::buffer::{Buffer, LineDecoration, SpanMeta};
+use crate::buffer::{Buffer, LineDecoration, Span, SpanMeta};
 use crate::component::{Component, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};
 use crate::layout::{Border, Rect};
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::sync::Arc;
 
 pub struct HighlightSpan {
     pub col_start: u16,
@@ -12,9 +13,15 @@ pub struct HighlightSpan {
 }
 
 pub struct BufferView {
-    lines: Vec<String>,
-    highlights: Vec<Vec<HighlightSpan>>,
-    decorations: Vec<LineDecoration>,
+    /// Lines/decorations/buf_highlights are `Arc`-shared with the source
+    /// `Buffer`: sync is a refcount bump, not a deep copy.
+    lines: Arc<Vec<String>>,
+    /// Spans imported from the source `Buffer`.
+    buf_highlights: Arc<Vec<Vec<Span>>>,
+    /// Transient overlays pushed by `add_highlight` each frame
+    /// (selection, search); cleared on `sync_from_buffer`.
+    transient_highlights: Vec<Vec<HighlightSpan>>,
+    decorations: Arc<Vec<LineDecoration>>,
     scroll_offset: usize,
     border: Border,
     border_style: Style,
@@ -28,9 +35,10 @@ pub struct BufferView {
 impl BufferView {
     pub fn new() -> Self {
         Self {
-            lines: Vec::new(),
-            highlights: Vec::new(),
-            decorations: Vec::new(),
+            lines: Arc::new(Vec::new()),
+            buf_highlights: Arc::new(Vec::new()),
+            transient_highlights: Vec::new(),
+            decorations: Arc::new(Vec::new()),
             scroll_offset: 0,
             border: Border::None,
             border_style: Style::default(),
@@ -48,9 +56,10 @@ impl BufferView {
     }
 
     pub fn set_lines(&mut self, lines: Vec<String>) {
-        self.lines = lines;
-        self.highlights.clear();
-        self.decorations.clear();
+        self.lines = Arc::new(lines);
+        self.buf_highlights = Arc::new(Vec::new());
+        self.transient_highlights.clear();
+        self.decorations = Arc::new(Vec::new());
     }
 
     pub fn set_scroll(&mut self, offset: usize) {
@@ -72,40 +81,17 @@ impl BufferView {
     }
 
     pub fn sync_from_buffer(&mut self, buf: &Buffer) {
-        self.lines = buf.lines().to_vec();
-        self.highlights.clear();
-        for i in 0..buf.line_count() {
-            let spans = buf.highlights_at(i);
-            if spans.is_empty() {
-                self.highlights.push(Vec::new());
-            } else {
-                let converted: Vec<HighlightSpan> = spans
-                    .iter()
-                    .map(|s| HighlightSpan {
-                        col_start: s.col_start,
-                        col_end: s.col_end,
-                        style: Style {
-                            fg: s.style.fg,
-                            bg: s.style.bg,
-                            bold: s.style.bold,
-                            dim: s.style.dim,
-                            italic: s.style.italic,
-                            ..Style::default()
-                        },
-                        meta: s.meta.clone(),
-                    })
-                    .collect();
-                self.highlights.push(converted);
-            }
-        }
-        self.decorations = buf.decorations().to_vec();
+        self.lines = Arc::clone(buf.lines_arc());
+        self.buf_highlights = Arc::clone(buf.highlights_arc());
+        self.decorations = Arc::clone(buf.decorations_arc());
+        self.transient_highlights.clear();
     }
 
     pub fn add_highlight(&mut self, line: usize, col_start: u16, col_end: u16, style: Style) {
-        while self.highlights.len() <= line {
-            self.highlights.push(Vec::new());
+        while self.transient_highlights.len() <= line {
+            self.transient_highlights.push(Vec::new());
         }
-        self.highlights[line].push(HighlightSpan {
+        self.transient_highlights[line].push(HighlightSpan {
             col_start,
             col_end,
             style,
@@ -171,8 +157,13 @@ impl BufferView {
             }
             let line = &self.lines[line_idx];
             let decoration = self.decorations.get(line_idx);
-            let spans = self
-                .highlights
+            let buf_spans = self
+                .buf_highlights
+                .get(line_idx)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let transient_spans = self
+                .transient_highlights
                 .get(line_idx)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
@@ -188,7 +179,7 @@ impl BufferView {
                 },
                 None => self.default_style,
             };
-            if spans.is_empty() {
+            if buf_spans.is_empty() && transient_spans.is_empty() {
                 for &ch in &chars {
                     if col >= content_w {
                         break;
@@ -197,13 +188,27 @@ impl BufferView {
                     col += 1;
                 }
             } else {
-                // Layered merge: every span that covers `col` contributes;
-                // later spans (pushed after the projection sync) override
-                // earlier non-None fg/bg. Lets a selection-bg overlay tint
-                // the background while preserving the underlying fg.
+                // Layered merge: `buf_spans` paint first (from the source
+                // buffer), then `transient_spans` overlay (selection /
+                // search highlights re-applied each frame). Within each
+                // layer, later spans override earlier non-None fg/bg so
+                // a selection-bg tint preserves the underlying fg.
                 while col < content_w && (col as usize) < chars.len() {
                     let mut style = fallback_style;
-                    for span in spans {
+                    for span in buf_spans {
+                        if col >= span.col_start && col < span.col_end {
+                            if span.style.fg.is_some() {
+                                style.fg = span.style.fg;
+                            }
+                            if span.style.bg.is_some() {
+                                style.bg = span.style.bg;
+                            }
+                            style.bold |= span.style.bold;
+                            style.dim |= span.style.dim;
+                            style.italic |= span.style.italic;
+                        }
+                    }
+                    for span in transient_spans {
                         if col >= span.col_start && col < span.col_end {
                             if span.style.fg.is_some() {
                                 style.fg = span.style.fg;
@@ -341,11 +346,17 @@ mod tests {
 
     #[test]
     fn renders_fill_bg_decoration() {
-        let mut view = make_view(vec!["hi"]);
-        view.decorations.push(LineDecoration {
-            fill_bg: Some(Color::Blue),
-            ..LineDecoration::default()
-        });
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["hi".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                fill_bg: Some(Color::Blue),
+                ..LineDecoration::default()
+            },
+        );
+        let mut view = BufferView::new();
+        view.sync_from_buffer(&buf);
         let mut grid = Grid::new(10, 1);
         let ctx = DrawContext {
             terminal_width: 10,
@@ -362,11 +373,17 @@ mod tests {
 
     #[test]
     fn renders_gutter_bg_decoration() {
-        let mut view = make_view(vec!["ab"]);
-        view.decorations.push(LineDecoration {
-            gutter_bg: Some(Color::Yellow),
-            ..LineDecoration::default()
-        });
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["ab".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                gutter_bg: Some(Color::Yellow),
+                ..LineDecoration::default()
+            },
+        );
+        let mut view = BufferView::new();
+        view.sync_from_buffer(&buf);
         let mut grid = Grid::new(10, 1);
         let ctx = DrawContext {
             terminal_width: 10,
@@ -416,9 +433,9 @@ mod tests {
 
         let mut view = BufferView::new();
         view.sync_from_buffer(&buf);
-        assert!(view.highlights[0][0].meta.selectable);
+        assert!(view.buf_highlights[0][0].meta.selectable);
         assert_eq!(
-            view.highlights[0][0].meta.copy_as.as_deref(),
+            view.buf_highlights[0][0].meta.copy_as.as_deref(),
             Some("copied")
         );
     }
