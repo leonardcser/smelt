@@ -196,7 +196,6 @@ impl App {
             pv.set_cursor(None, None);
         }
         {
-            let scroll = self.prompt_input_scroll;
             let viewport = self.prompt_viewport;
             let input_buf_id = self.input_display_buf;
             let buf_snapshot = self.ui.buf(input_buf_id).cloned();
@@ -205,7 +204,14 @@ impl App {
                     .layer_mut::<render::window_view::WindowView>("prompt_input"),
                 buf_snapshot,
             ) {
-                pv.sync_from_buffer(&buf, scroll);
+                // `compute_input_area` already wrote only the visible
+                // slice of wrapped lines into `buf`, with highlights
+                // indexed 0..content_rows. Passing the absolute scroll
+                // here would make `BufferView::draw_content` skip past
+                // the slice and render empty rows — the buffer offset
+                // must be 0, while the *viewport* above still carries
+                // the real scroll so the scrollbar tracks correctly.
+                pv.sync_from_buffer(&buf, 0);
                 pv.set_viewport(viewport);
                 pv.set_cursor(cursor, cursor_style);
             }
