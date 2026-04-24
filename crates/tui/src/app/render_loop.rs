@@ -12,10 +12,21 @@ impl App {
         let width = term_w as usize;
         let show_queued = agent_running || self.is_compacting();
 
-        self.sync_transcript_pin();
-        if self.transcript_window.is_pinned() {
-            let (total, viewport) = self.transcript_dims();
-            self.transcript_window.apply_pin(total, viewport);
+        // Freeze the transcript viewport when the user has an active
+        // selection / vim visual / mouse drag — streaming rows grow
+        // into scrollback rather than shifting their selection. Outside
+        // those gestures, `follow_tail` (toggled by wheel / keyboard
+        // scroll) decides: true snaps to the newest row each frame so
+        // content appended below stays visible, even when the viewport
+        // resizes (e.g. prompt grew and shrank the transcript).
+        let has_selection = self.transcript_window.win_cursor.anchor().is_some();
+        let in_vim_visual = matches!(
+            self.transcript_window.vim.as_ref().map(|v| v.mode()),
+            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
+        );
+        let freeze = has_selection || in_vim_visual || self.mouse_drag_active;
+        if !freeze && self.transcript_window.follow_tail {
+            self.transcript_window.scroll_top = u16::MAX;
         }
         let queued_owned: Vec<String> = if show_queued {
             self.queued_messages.clone()

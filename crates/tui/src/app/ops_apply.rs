@@ -244,7 +244,7 @@ impl App {
                         self.context_tokens = Some(tokens);
                     }
                     self.finish_transcript_turn();
-                    self.transcript_window.scroll_top = u16::MAX;
+                    self.transcript_window.scroll_to_bottom();
                 }
             }
             DomainOp::DeleteSession(id) => {
