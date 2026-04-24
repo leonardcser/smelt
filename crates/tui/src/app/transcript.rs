@@ -293,6 +293,21 @@ impl App {
 
     pub fn block_text_at_row(&mut self, abs_row: usize, show_thinking: bool) -> Option<String> {
         let tw = self.transcript_width() as u16;
+        // Prefer the block's raw markdown source (text-bearing variants
+        // expose `Block::raw_text`) so yanking a rendered markdown block
+        // returns `**bold**`, `` `code` ``, fenced blocks, tables etc.
+        // verbatim. Fall back to cell-walking for structured blocks
+        // (tool / agent / confirm) whose "raw" form isn't a single
+        // string.
+        let block_id = {
+            let snap = self.transcript.snapshot(tw, show_thinking);
+            snap.block_of_row.get(abs_row).copied().flatten()
+        };
+        if let Some(id) = block_id {
+            if let Some(raw) = self.transcript.block(id).and_then(|b| b.raw_text()) {
+                return Some(raw);
+            }
+        }
         let snap = self.transcript.snapshot(tw, show_thinking);
         snap.block_text_at(abs_row)
     }
