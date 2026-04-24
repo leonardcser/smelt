@@ -483,6 +483,7 @@ impl Vim {
             'Y' => {
                 let (start, end) = current_line_range(ctx.buf, *ctx.cpos);
                 ctx.yank_range(start, end, true);
+                ctx.kill_ring.mark_yanked();
                 self.reset_pending();
                 Action::Consumed
             }
@@ -1083,6 +1084,7 @@ impl Vim {
                 if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
                     let linewise = self.mode == ViMode::VisualLine;
                     ctx.yank_range(start, end, linewise);
+                    ctx.kill_ring.mark_yanked();
                     *ctx.cpos = start;
                 }
                 self.exit_visual();
@@ -1712,6 +1714,7 @@ impl Vim {
             }
             Op::Yank => {
                 ctx.yank_range(start, end, false);
+                ctx.kill_ring.mark_yanked();
                 *ctx.cpos = start;
             }
         }
@@ -1772,8 +1775,11 @@ impl Vim {
                 return Action::Consumed;
             }
             Op::Yank => {
+                // `yy` / `Y`: linewise yank leaves the cursor in place,
+                // matching vim's default cpoptions. Only delete / change
+                // operators (and visual-mode yank) reposition.
                 ctx.yank_range(s, e, true);
-                *ctx.cpos = s;
+                ctx.kill_ring.mark_yanked();
             }
         }
         Action::Consumed
@@ -2211,6 +2217,33 @@ mod tests {
         h.handle(key('$'));
         h.handle(key('p'));
         assert_eq!(h.buf, "hello worldhello ");
+    }
+
+    #[test]
+    fn test_yy_keeps_cursor_in_place() {
+        // Regression: `yy` used to snap the cursor to column 0 of the
+        // yanked line. Vim's default behavior is "linewise yank does
+        // not move the cursor"; both `yy` and `Y` should leave the
+        // cursor exactly where it was.
+        let mut h = TestHarness::new("hello world\nsecond line");
+        h.handle(key('l')); // cpos=1
+        h.handle(key('l')); // cpos=2
+        h.handle(key('l')); // cpos=3
+        let before = h.cpos;
+        h.handle(key('y'));
+        h.handle(key('y'));
+        assert_eq!(h.cpos, before, "yy must not move cursor");
+        assert_eq!(h.kill_ring.current(), "hello world\n");
+    }
+
+    #[test]
+    fn test_capital_y_keeps_cursor_in_place() {
+        let mut h = TestHarness::new("hello world\nsecond line");
+        h.handle(key('l'));
+        h.handle(key('l'));
+        let before = h.cpos;
+        h.handle(key('Y'));
+        assert_eq!(h.cpos, before, "Y must not move cursor");
     }
 
     #[test]

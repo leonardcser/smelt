@@ -1097,9 +1097,22 @@ impl App {
             // Pre-compute animation signal here so the sleep expression
             // inside `tokio::select!` below can read it without holding
             // a borrow on `self` that conflicts with other branches.
+            let now = Instant::now();
+            let yank_flash_active = self
+                .input
+                .win
+                .kill_ring
+                .yank_flash_until()
+                .is_some_and(|t| t > now)
+                || self
+                    .transcript_window
+                    .kill_ring
+                    .yank_flash_until()
+                    .is_some_and(|t| t > now);
             let has_animation = self.ui.focused_float().is_some()
                 || self.has_active_exec()
                 || self.working.throbber.is_some()
+                || yank_flash_active
                 || self
                     .agents
                     .iter()

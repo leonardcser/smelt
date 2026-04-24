@@ -472,7 +472,7 @@ fn compute_input_area(
     let display_buf = spans_to_string(&spans);
     let char_kinds = build_char_kinds(&spans);
     let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
-    let display_selection = state.selection_range().map(|(start, end)| {
+    let display_selection = state.display_selection_range().map(|(start, end)| {
         let raw_start_char = crate::input::char_pos(&state.buf, start);
         let raw_end_char = crate::input::char_pos(&state.buf, end);
         let ds = map_cursor(raw_start_char, &state.buf, &spans);

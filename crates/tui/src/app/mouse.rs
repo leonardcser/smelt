@@ -528,24 +528,26 @@ impl App {
         }
         let buf = rows.join("\n");
         let cpos = self.transcript_window.compute_cpos(&rows);
-        let (s, e) = if let Some(vim) = self.transcript_window.vim.as_ref() {
+        let active_selection = if let Some(vim) = self.transcript_window.vim.as_ref() {
             match vim.mode() {
                 crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine => {
-                    match vim.visual_range(&buf, cpos) {
-                        Some(range) => range,
-                        None => return Vec::new(),
-                    }
+                    vim.visual_range(&buf, cpos)
                 }
-                _ => match self.transcript_window.win_cursor.range(cpos) {
-                    Some(range) => range,
-                    None => return Vec::new(),
-                },
+                _ => self.transcript_window.win_cursor.range(cpos),
             }
         } else {
-            match self.transcript_window.win_cursor.range(cpos) {
-                Some(range) => range,
-                None => return Vec::new(),
-            }
+            self.transcript_window.win_cursor.range(cpos)
+        };
+        // Fall back to the yank-flash range so the selection bg
+        // briefly paints over the yanked text after `y`-family vim ops
+        // (mirrors nvim's `vim.highlight.on_yank`).
+        let (s, e) = match active_selection.or_else(|| {
+            self.transcript_window
+                .kill_ring
+                .yank_flash_range(std::time::Instant::now())
+        }) {
+            Some(range) => range,
+            None => return Vec::new(),
         };
         if s >= e {
             return Vec::new();
