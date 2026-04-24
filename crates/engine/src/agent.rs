@@ -1396,6 +1396,22 @@ impl<'a> Turn<'a> {
             }
         };
 
+        if cancelled {
+            for (_, call_id, start) in plan.pending_plugins.drain(..) {
+                let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                    call_id: call_id.clone(),
+                    result: ToolOutcome {
+                        content: "cancelled".to_string(),
+                        is_error: true,
+                        metadata: None,
+                    },
+                    elapsed_ms,
+                });
+                plugin_results.push((call_id, "cancelled".to_string(), true));
+            }
+        }
+
         (cancelled, deferred, plugin_results)
     }
 
