@@ -53,8 +53,11 @@ local function format_row(entry, now_ms)
     (entry.updated_at_ms > 0) and entry.updated_at_ms or entry.created_at_ms,
     now_ms
   )
+  -- size right-aligned (column edge), time left-aligned so the
+  -- size↔time gap is exactly GAP. Title still starts at a fixed
+  -- column because TIME_COL pads on the right.
   return string.format(
-    "%s%" .. SIZE_COL .. "s%s%" .. TIME_COL .. "s%s%s",
+    "%s%" .. SIZE_COL .. "s%s%-" .. TIME_COL .. "s%s%s",
     string.rep(" ", LEADING),
     size_str,
     string.rep(" ", GAP),

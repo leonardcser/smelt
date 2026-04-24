@@ -774,7 +774,9 @@ impl App {
             },
             border: ui::Border::None,
             title: None,
-            zindex: 55,
+            // Sits below dialogs (default float zindex 50) so a toast
+            // never obscures a modal asking for input.
+            zindex: 40,
             focusable: false,
             blocks_agent: false,
         };
