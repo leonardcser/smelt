@@ -90,6 +90,18 @@ impl App {
                 self.close_cmdline();
                 Some(false)
             }
+            (KeyCode::Backspace, M::NONE) | (KeyCode::Char('w'), M::CONTROL) => {
+                let empty = self
+                    .cmdline_win
+                    .and_then(|w| self.ui.cmdline(w))
+                    .is_some_and(|c| c.text().is_empty());
+                if empty {
+                    self.close_cmdline();
+                    Some(false)
+                } else {
+                    None
+                }
+            }
             (KeyCode::Enter, _) => {
                 let line = self
                     .cmdline_win

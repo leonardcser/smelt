@@ -143,6 +143,9 @@ pub struct App {
     pub task_label: Option<String>,
     /// A permission dialog is waiting for the user to stop typing.
     pub pending_dialog: bool,
+    /// Set by reducer handlers (e.g. `DomainOp::RunCommand` dispatching
+    /// `/quit`) to request the main loop break out on its next check.
+    pub(super) pending_quit: bool,
     /// Items returned by Lua-registered statusline sources. Appended
     /// after the Rust-side built-in spans each frame; priority /
     /// align_right on each item controls layout.
@@ -621,6 +624,7 @@ impl App {
             context_tokens: None,
             task_label: None,
             pending_dialog: false,
+            pending_quit: false,
             custom_status_items: Vec::new(),
             notification: None,
             cmdline_win: None,
@@ -880,6 +884,10 @@ impl App {
         const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
         'main: loop {
+            if self.pending_quit {
+                self.discard_turn(true);
+                break 'main;
+            }
             // ── Lua timer + notification pump ────────────────────────────
             self.snapshot_engine_context(self.agent.is_some());
             self.lua.tick_timers();

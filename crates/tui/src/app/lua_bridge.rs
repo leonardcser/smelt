@@ -28,7 +28,7 @@ impl App {
             Some(focused_window.to_string()),
             vim_mode.clone(),
         );
-        self.snapshot_engine_context(false);
+        self.snapshot_engine_context(self.agent.is_some());
         (vim_mode, focused_window.to_string())
     }
 
