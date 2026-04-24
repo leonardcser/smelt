@@ -246,7 +246,38 @@ impl Window {
     }
 
     pub fn select_word_at(&mut self, _rows: &[String], cpos: usize) -> Option<(usize, usize)> {
-        let (start, end) = self.edit_buf.word_range_at(cpos)?;
+        self.select_word_at_transparent(cpos, &[])
+    }
+
+    /// Like `select_word_at` but with `transparent` byte positions that
+    /// the word-boundary walk crosses as if they were word chars
+    /// (used for soft-wrap `\n` so a word broken across display rows
+    /// selects as one unit). `transparent` must be sorted ascending.
+    pub fn select_word_at_transparent(
+        &mut self,
+        cpos: usize,
+        transparent: &[usize],
+    ) -> Option<(usize, usize)> {
+        let (start, end) = self.edit_buf.word_range_at_transparent(cpos, transparent)?;
+        self.cpos = end.saturating_sub(1).max(start);
+        if let Some(vim) = self.vim.as_mut() {
+            vim.begin_visual(ViMode::Visual, start);
+        } else {
+            self.win_cursor.set_anchor(Some(start));
+        }
+        Some((start, end))
+    }
+
+    /// Select the source line containing `cpos` and enter Visual mode
+    /// anchored at the line's start. `hard_breaks` lists byte positions
+    /// of `\n` characters that are real line breaks (not soft-wrap
+    /// continuations), sorted ascending. We use plain `Visual` rather
+    /// than `VisualLine` because `VisualLine` snaps to display rows
+    /// (every `\n`), which would collapse selection to a single
+    /// wrapped row for soft-wrapped content. Returns the byte range of
+    /// the selected source line.
+    pub fn select_line_at(&mut self, cpos: usize, hard_breaks: &[usize]) -> Option<(usize, usize)> {
+        let (start, end) = self.edit_buf.line_range_at(cpos, hard_breaks)?;
         self.cpos = end.saturating_sub(1).max(start);
         if let Some(vim) = self.vim.as_mut() {
             vim.begin_visual(ViMode::Visual, start);

@@ -80,15 +80,26 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let dragged = self.mouse_drag_active && self.drag_on_scrollbar.is_none();
+                let had_anchor_span =
+                    self.drag_anchor_word.is_some() || self.drag_anchor_line.is_some();
                 match self.app_focus {
                     crate::app::AppFocus::Content => {
-                        self.copy_content_selection_and_clear(dragged);
+                        // A double/triple-click already copied the
+                        // initial word/line; on release we re-copy the
+                        // (possibly extended) selection if the user
+                        // dragged OR if there's a word/line anchor
+                        // even without a drag (so the initial copy is
+                        // reasserted).
+                        let should_copy = dragged || had_anchor_span;
+                        self.copy_content_selection_and_clear(should_copy);
                     }
                     crate::app::AppFocus::Prompt => {
                         self.copy_prompt_selection_on_release();
                     }
                 }
                 self.mouse_drag_active = false;
+                self.drag_anchor_word = None;
+                self.drag_anchor_line = None;
                 self.drag_autoscroll_since = None;
                 self.drag_on_scrollbar = None;
                 self.sync_transcript_pin();
@@ -116,15 +127,26 @@ impl App {
                     self.mouse_drag_active = true;
                     return EventOutcome::Redraw;
                 }
-                // Double-click detection: two primary-button Downs on
-                // the same cell within 400ms → word-select + copy.
+                // Click-count tracking: successive primary-button Downs
+                // on the same cell within 400ms increment the count.
+                // 2 → word-select + copy, 3 → line-select + copy. After
+                // 3 the count wraps back to 1 so a fourth click starts
+                // a fresh gesture.
                 let now = Instant::now();
-                let double = self.last_click.is_some_and(|(t, r, c)| {
-                    now.duration_since(t) < Duration::from_millis(400)
-                        && r == me.row
-                        && c == me.column
-                });
-                self.last_click = Some((now, me.row, me.column));
+                let count = match self.last_click {
+                    Some((t, r, c, n))
+                        if now.duration_since(t) < Duration::from_millis(400)
+                            && r == me.row
+                            && c == me.column
+                            && n < 3 =>
+                    {
+                        n + 1
+                    }
+                    _ => 1,
+                };
+                self.last_click = Some((now, me.row, me.column, count));
+                let double = count == 2;
+                let triple = count == 3;
 
                 // First, check if the click lands inside the input text
                 // region — that's the only prompt-area hit we position
@@ -198,6 +220,10 @@ impl App {
                         self.position_content_cursor_from_hit(row, col);
                     }
                     None => {}
+                }
+                if triple {
+                    self.select_and_copy_line_in_content();
+                    return EventOutcome::Redraw;
                 }
                 if double {
                     self.select_and_copy_word_in_content();
@@ -340,6 +366,16 @@ impl App {
                 } else {
                     self.position_content_cursor_from_hit(row, col);
                 }
+                // Anchored drag extension: if the gesture started with
+                // a word/line selection, grow outward in full-word or
+                // full-line units instead of single cells so the
+                // original unit stays inside the selection regardless
+                // of drag direction.
+                if self.drag_anchor_word.is_some() {
+                    self.extend_word_anchored_drag();
+                } else if self.drag_anchor_line.is_some() {
+                    self.extend_line_anchored_drag();
+                }
             }
             crate::app::AppFocus::Prompt => {
                 self.input.win.win_cursor.extend(self.input.win.cpos);
@@ -355,6 +391,88 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Anchored word-drag: `drag_anchor_word = (ws, we)`. Move cpos to
+    /// the far side of the word at the current drag position so the
+    /// selection always covers `[ws, we)` plus any words the drag has
+    /// crossed into. Flips the vim visual anchor when the drag goes
+    /// before the original word so the range direction stays correct.
+    fn extend_word_anchored_drag(&mut self) {
+        let Some((ws, we)) = self.drag_anchor_word else {
+            return;
+        };
+        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let (soft, _hard) = self.transcript_line_breaks(self.settings.show_thinking);
+        let p = self.transcript_window.compute_cpos(&rows);
+        let (new_cpos, new_anchor) = if p >= we {
+            let far = self
+                .transcript_window
+                .edit_buf
+                .word_range_at_transparent(p, &soft)
+                .map(|(_, e)| e.saturating_sub(1).max(ws))
+                .unwrap_or(p.max(we.saturating_sub(1)));
+            (far, ws)
+        } else if p < ws {
+            let near = self
+                .transcript_window
+                .edit_buf
+                .word_range_at_transparent(p, &soft)
+                .map(|(s, _)| s)
+                .unwrap_or(p);
+            (near, we.saturating_sub(1).max(ws))
+        } else {
+            (we.saturating_sub(1).max(ws), ws)
+        };
+        self.transcript_window.cpos = new_cpos;
+        if let Some(vim) = self.transcript_window.vim.as_mut() {
+            vim.begin_visual(crate::vim::ViMode::Visual, new_anchor);
+        } else {
+            self.transcript_window
+                .win_cursor
+                .set_anchor(Some(new_anchor));
+        }
+    }
+
+    /// Anchored line-drag: `drag_anchor_line = (ls, le)`. Expand the
+    /// selection to cover the source line at the drag position plus
+    /// the originally-selected line, whichever direction the drag
+    /// went. Flips the vim visual anchor across the original line
+    /// as needed.
+    fn extend_line_anchored_drag(&mut self) {
+        let Some((ls, le)) = self.drag_anchor_line else {
+            return;
+        };
+        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let (_soft, hard) = self.transcript_line_breaks(self.settings.show_thinking);
+        let p = self.transcript_window.compute_cpos(&rows);
+        let (new_cpos, new_anchor) = if p >= le {
+            let far = self
+                .transcript_window
+                .edit_buf
+                .line_range_at(p, &hard)
+                .map(|(_, e)| e.saturating_sub(1).max(ls))
+                .unwrap_or(p.max(le.saturating_sub(1)));
+            (far, ls)
+        } else if p < ls {
+            let near = self
+                .transcript_window
+                .edit_buf
+                .line_range_at(p, &hard)
+                .map(|(s, _)| s)
+                .unwrap_or(p);
+            (near, le.saturating_sub(1).max(ls))
+        } else {
+            (le.saturating_sub(1).max(ls), ls)
+        };
+        self.transcript_window.cpos = new_cpos;
+        if let Some(vim) = self.transcript_window.vim.as_mut() {
+            vim.begin_visual(crate::vim::ViMode::Visual, new_anchor);
+        } else {
+            self.transcript_window
+                .win_cursor
+                .set_anchor(Some(new_anchor));
         }
     }
 
@@ -475,12 +593,38 @@ impl App {
     }
 
     /// Double-click on the content pane: enter vim Visual over the
-    /// word under the cursor and copy it.
+    /// word under the cursor and copy it. Treats soft-wrap `\n` as
+    /// transparent so a word split by display wrapping still selects
+    /// as one unit. Records the word span so a subsequent drag extends
+    /// by full-word units while keeping the original word inside.
     fn select_and_copy_word_in_content(&mut self) {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let (soft, _hard) = self.transcript_line_breaks(self.settings.show_thinking);
         let cpos = self.transcript_window.compute_cpos(&rows);
-        if let Some((s, e)) = self.transcript_window.select_word_at(&rows, cpos) {
-            let text = self.transcript_window.edit_buf.buf[s..e].to_string();
+        if let Some((s, e)) = self
+            .transcript_window
+            .select_word_at_transparent(cpos, &soft)
+        {
+            self.drag_anchor_word = Some((s, e));
+            self.drag_anchor_line = None;
+            let text = self.copy_display_range(s, e, self.settings.show_thinking);
+            let _ = crate::app::commands::copy_to_clipboard(&text);
+        }
+        self.sync_transcript_pin();
+    }
+
+    /// Triple-click on the content pane: select the source line under
+    /// the cursor (spanning soft-wrapped display rows) and copy it.
+    /// Records the line span so a subsequent drag extends by full-line
+    /// units.
+    fn select_and_copy_line_in_content(&mut self) {
+        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let (_soft, hard) = self.transcript_line_breaks(self.settings.show_thinking);
+        let cpos = self.transcript_window.compute_cpos(&rows);
+        if let Some((s, e)) = self.transcript_window.select_line_at(cpos, &hard) {
+            self.drag_anchor_line = Some((s, e));
+            self.drag_anchor_word = None;
+            let text = self.copy_display_range(s, e, self.settings.show_thinking);
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
         self.sync_transcript_pin();

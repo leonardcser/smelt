@@ -257,13 +257,24 @@ pub struct App {
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
     pub transcript_window: ui::Window,
-    /// Last primary-mouse-Down time and cell. Used to detect
-    /// double-clicks (two rapid clicks on the same cell → word-select).
-    pub last_click: Option<(Instant, u16, u16)>,
+    /// Last primary-mouse-Down time, cell, and click count. Successive
+    /// clicks on the same cell within a short window increment the
+    /// count: 2 → word-select, 3 → line-select.
+    pub last_click: Option<(Instant, u16, u16, u8)>,
     /// Primary mouse button is held — we're mid-drag. The transcript
     /// stays frozen from Down to Up so selected text can't shift
     /// under the user's cursor while the agent streams new rows.
     pub mouse_drag_active: bool,
+    /// When a double-click locked a word as the drag origin, the
+    /// original word's `(start, end)` byte span in the transcript
+    /// buffer. Subsequent drags extend the selection by full-word
+    /// units, keeping this span inside regardless of drag direction.
+    pub drag_anchor_word: Option<(usize, usize)>,
+    /// When a triple-click locked a source line as the drag origin,
+    /// the original line's `(start, end)` byte span in the transcript
+    /// buffer. Subsequent drags extend the selection by full-line
+    /// units, keeping this span inside regardless of drag direction.
+    pub drag_anchor_line: Option<(usize, usize)>,
     /// When drag-autoscroll is currently engaged (cursor parked at a
     /// viewport edge while the user holds mouse-1), the timestamp it
     /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
@@ -691,6 +702,8 @@ impl App {
             },
             last_click: None,
             mouse_drag_active: false,
+            drag_anchor_word: None,
+            drag_anchor_line: None,
             drag_autoscroll_since: None,
             drag_on_scrollbar: None,
             lua: crate::lua::LuaRuntime::new(),
