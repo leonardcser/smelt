@@ -775,33 +775,6 @@ impl App {
         self.layout.viewport_rows().max(1)
     }
 
-    /// Single source of truth for whether the transcript viewport
-    /// should be pinned. The viewport pins when the user has an
-    /// active selection *or* is in the middle of a mouse drag — new
-    /// agent output then flows into scrollback without shifting the
-    /// rows the user is looking at. When the pin releases, scroll
-    /// resumes its normal stuck-to-bottom behavior.
-    pub(super) fn sync_transcript_pin(&mut self) {
-        let has_selection = self.transcript_window.win_cursor.anchor().is_some();
-        let in_vim_visual = matches!(
-            self.transcript_window.vim.as_ref().map(|v| v.mode()),
-            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
-        );
-        let (total, viewport) = self.transcript_dims();
-        let max_scroll = total.saturating_sub(viewport);
-        let cursor_off_bottom = self.transcript_window.scroll_top < max_scroll
-            || self.transcript_window.cursor_line + 1 < viewport;
-        let want_pin =
-            has_selection || in_vim_visual || self.mouse_drag_active || cursor_off_bottom;
-        if want_pin {
-            if !self.transcript_window.is_pinned() {
-                self.transcript_window.pin(total);
-            }
-        } else {
-            self.transcript_window.unpin();
-        }
-    }
-
     /// Snapshot app state into the Lua ops context and return the
     /// vim_mode + focused_window for callers that need them locally.
     /// Build the common `DialogConfig` used by all built-in dialogs

@@ -534,7 +534,7 @@ impl App {
         {
             self.working.set_throbber(Throbber::Done);
         };
-        self.transcript_window.scroll_top = u16::MAX;
+        self.transcript_window.scroll_to_bottom();
     }
 
     pub(super) fn maybe_auto_compact(&mut self) {

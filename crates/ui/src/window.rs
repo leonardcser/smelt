@@ -169,7 +169,12 @@ pub struct Window {
     pub scroll_top: u16,
     pub cursor_line: u16,
     pub cursor_col: u16,
-    pub pinned_last_total: Option<u16>,
+    /// Autoscroll flag for append-only buffers. `true` keeps the
+    /// viewport snapped to the newest row — new content flows in
+    /// below and the viewport follows. Flipped to `false` as soon as
+    /// the user scrolls away from the bottom; back to `true` when
+    /// they scroll back to it.
+    pub follow_tail: bool,
     pub cursor_positioned: bool,
 }
 
@@ -188,7 +193,7 @@ impl Window {
             scroll_top: 0,
             cursor_line: 0,
             cursor_col: 0,
-            pinned_last_total: None,
+            follow_tail: true,
             cursor_positioned: false,
         }
     }
@@ -350,27 +355,14 @@ impl Window {
         self.cursor_line = cursor_line;
     }
 
-    // ── Pin ────────────────────────────────────────────────────────────
+    // ── Follow-tail ────────────────────────────────────────────────────
 
-    pub fn pin(&mut self, total_rows: u16) {
-        self.pinned_last_total = Some(total_rows);
-    }
-
-    pub fn unpin(&mut self) {
-        self.pinned_last_total = None;
-    }
-
-    pub fn apply_pin(&mut self, total_rows: u16, viewport_rows: u16) {
-        if self.pinned_last_total.is_none() {
-            return;
-        }
-        let max = total_rows.saturating_sub(viewport_rows);
-        self.scroll_top = self.scroll_top.min(max);
-        self.pinned_last_total = Some(total_rows);
-    }
-
-    pub fn is_pinned(&self) -> bool {
-        self.pinned_last_total.is_some()
+    /// Snap to the bottom of the buffer and re-enable autoscroll.
+    /// `scroll_top = u16::MAX` is the "go to bottom" sentinel; the
+    /// per-frame clamp in the render loop resolves it to `max_scroll`.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_top = u16::MAX;
+        self.follow_tail = true;
     }
 
     // ── Navigation ─────────────────────────────────────────────────────
@@ -515,6 +507,7 @@ impl Window {
         let max_scroll = total_lines.saturating_sub(viewport_rows as usize) as isize;
         let new = ((self.scroll_top as isize) + delta).clamp(0, max_scroll);
         self.scroll_top = new as u16;
+        self.follow_tail = new >= max_scroll;
     }
 
     pub fn scroll_by_lines(&mut self, delta: isize, rows: &[String], viewport_rows: u16) {
@@ -532,6 +525,8 @@ impl Window {
             }
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
+        let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        self.follow_tail = self.scroll_top >= max_scroll;
     }
 
     pub fn jump_to_line_col(
@@ -553,6 +548,8 @@ impl Window {
         let landed_col = byte_to_cell(line, col_bytes);
         self.win_cursor.set_curswant(Some(landed_col));
         self.sync_from_cpos(rows, &offsets, viewport_rows);
+        let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
+        self.follow_tail = self.scroll_top >= max_scroll;
     }
 }
 
@@ -577,40 +574,33 @@ mod tests {
     }
 
     #[test]
-    fn apply_pin_holds_scroll_top_on_growth() {
+    fn scroll_view_by_unsticks_from_bottom() {
         let mut w = make_win();
-        w.scroll_top = 5;
-        w.pin(100);
-        w.apply_pin(103, 20);
-        assert_eq!(w.scroll_top, 5);
-        assert_eq!(w.pinned_last_total, Some(103));
-    }
-
-    #[test]
-    fn apply_pin_clamps_on_shrinkage() {
-        let mut w = make_win();
-        w.scroll_top = 85;
-        w.pin(100);
-        w.apply_pin(97, 20);
+        w.scroll_top = 80;
+        w.follow_tail = true;
+        w.scroll_view_by(-3, 100, 20);
         assert_eq!(w.scroll_top, 77);
-        assert_eq!(w.pinned_last_total, Some(97));
+        assert!(!w.follow_tail);
     }
 
     #[test]
-    fn apply_pin_clamps_to_zero() {
+    fn scroll_view_by_restickes_at_bottom() {
         let mut w = make_win();
-        w.scroll_top = 2;
-        w.pin(100);
-        w.apply_pin(15, 20);
-        assert_eq!(w.scroll_top, 0);
+        w.scroll_top = 70;
+        w.follow_tail = false;
+        w.scroll_view_by(10, 100, 20);
+        assert_eq!(w.scroll_top, 80);
+        assert!(w.follow_tail);
     }
 
     #[test]
-    fn apply_pin_noop_when_unpinned() {
+    fn scroll_to_bottom_sets_follow_tail() {
         let mut w = make_win();
-        w.scroll_top = 5;
-        w.apply_pin(200, 20);
-        assert_eq!(w.scroll_top, 5);
+        w.follow_tail = false;
+        w.scroll_top = 10;
+        w.scroll_to_bottom();
+        assert_eq!(w.scroll_top, u16::MAX);
+        assert!(w.follow_tail);
     }
 
     #[test]
@@ -656,14 +646,8 @@ mod tests {
     }
 
     #[test]
-    fn unpin_stops_tracking() {
-        let mut w = make_win();
-        w.pin(100);
-        assert!(w.is_pinned());
-        w.unpin();
-        assert!(!w.is_pinned());
-        w.scroll_top = 5;
-        w.apply_pin(200, 20);
-        assert_eq!(w.scroll_top, 5);
+    fn follow_tail_default_true() {
+        let w = make_win();
+        assert!(w.follow_tail);
     }
 }

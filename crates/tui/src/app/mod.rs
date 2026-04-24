@@ -847,7 +847,7 @@ impl App {
                 self.set_task_label(slug.clone());
             }
             self.finish_transcript_turn();
-            self.transcript_window.scroll_top = u16::MAX;
+            self.transcript_window.scroll_to_bottom();
         }
         if let Some(message) = self.startup_auth_error.take() {
             self.notify_error(message);

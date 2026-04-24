@@ -135,7 +135,6 @@ impl App {
             };
             if let Some(d) = delta {
                 self.move_content_cursor_by_lines(d);
-                self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
             let buf = self.transcript_window.edit_buf.buf.clone();
@@ -186,7 +185,6 @@ impl App {
                 let rows = self.full_transcript_display_text(self.settings.show_thinking);
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window.resync(&rows, viewport);
-                self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
         }
@@ -228,7 +226,6 @@ impl App {
                     let _ = crate::app::commands::copy_to_clipboard(&copy);
                 }
                 self.snap_transcript_cursor();
-                self.sync_transcript_pin();
                 true
             }
         }

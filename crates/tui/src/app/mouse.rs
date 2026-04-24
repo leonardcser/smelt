@@ -5,12 +5,6 @@ use crossterm::event::{MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 
 impl App {
-    pub(super) fn transcript_dims(&mut self) -> (u16, u16) {
-        let total = self.full_transcript_text(self.settings.show_thinking).len() as u16;
-        let viewport = self.viewport_rows_estimate();
-        (total, viewport)
-    }
-
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
@@ -75,7 +69,6 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.mouse_drag_active = true;
                 self.extend_selection_to(me.row, me.column);
-                self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -102,7 +95,6 @@ impl App {
                 self.drag_anchor_line = None;
                 self.drag_autoscroll_since = None;
                 self.drag_on_scrollbar = None;
-                self.sync_transcript_pin();
                 return EventOutcome::Redraw;
             }
             _ => {}
@@ -510,7 +502,6 @@ impl App {
         self.drag_autoscroll_since
             .get_or_insert_with(std::time::Instant::now);
         self.move_content_cursor_by_lines(delta);
-        self.sync_transcript_pin();
     }
 
     /// Build the transcript's per-line selection ranges (absolute buffer
@@ -612,7 +603,6 @@ impl App {
             let text = self.copy_display_range(s, e, self.settings.show_thinking);
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
-        self.sync_transcript_pin();
     }
 
     /// Triple-click on the content pane: select the source line under
@@ -629,7 +619,6 @@ impl App {
             let text = self.copy_display_range(s, e, self.settings.show_thinking);
             let _ = crate::app::commands::copy_to_clipboard(&text);
         }
-        self.sync_transcript_pin();
     }
 
     /// Finalise a mouse interaction. Only copies when `dragged` is true —
@@ -659,7 +648,6 @@ impl App {
         } else {
             self.transcript_window.win_cursor.clear_anchor();
         }
-        self.sync_transcript_pin();
     }
 
     /// Snap the viewport so the scrollbar thumb lands at screen row
@@ -746,6 +734,9 @@ impl App {
                         self.transcript_window.scroll_top = from_top;
                         let rows = self.full_transcript_display_text(self.settings.show_thinking);
                         let viewport = self.viewport_rows_estimate();
+                        let max_scroll = (rows.len() as u16).saturating_sub(viewport);
+                        self.transcript_window.follow_tail =
+                            self.transcript_window.scroll_top >= max_scroll;
                         self.transcript_window
                             .reanchor_to_visible_row(&rows, viewport);
                     }
