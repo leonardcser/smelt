@@ -4,7 +4,13 @@
 //! of the most recent yank so successive `yank_pop` calls can rotate through
 //! earlier kills in place.
 
+use std::time::{Duration, Instant};
+
 const KILL_RING_MAX: usize = 32;
+
+/// How long the post-yank highlight flash stays on screen. Matches
+/// nvim's `vim.highlight.on_yank` default.
+pub const YANK_FLASH_DURATION: Duration = Duration::from_millis(200);
 
 /// Emacs-style kill ring with yank-pop support.
 ///
@@ -27,6 +33,11 @@ pub struct KillRing {
     /// Used by the transcript yank path to map back to nav-row coordinates
     /// without the fragile `buf.find(&yanked_text)` search.
     source_range: Option<(usize, usize)>,
+    /// Timestamp of the most recent yank operation (set explicitly by
+    /// `mark_yanked` after vim `y`-family ops complete). Used to drive
+    /// a brief post-yank highlight flash on the source range. Cleared
+    /// implicitly by the flash window expiring.
+    last_yank_at: Option<Instant>,
 }
 
 impl Default for KillRing {
@@ -44,6 +55,7 @@ impl KillRing {
             pop_idx: 0,
             linewise: false,
             source_range: None,
+            last_yank_at: None,
         }
     }
 
@@ -118,10 +130,14 @@ impl KillRing {
     }
 
     /// Set the current kill text with linewise flag and source byte range.
+    /// Clears `last_yank_at` so a delete / change doesn't inherit a prior
+    /// yank's flash window — yank-only sites must call `mark_yanked`
+    /// after this to re-stamp the timestamp.
     pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
         self.current = text;
         self.linewise = linewise;
         self.source_range = Some((start, end));
+        self.last_yank_at = None;
     }
 
     pub fn current(&self) -> &str {
@@ -134,5 +150,72 @@ impl KillRing {
 
     pub fn source_range(&self) -> Option<(usize, usize)> {
         self.source_range
+    }
+
+    /// Mark the most recent kill as a *yank* (vs a delete / change).
+    /// Drives the post-yank highlight flash. Vim yank operations call
+    /// this immediately after `set_with_source`; delete / change do
+    /// not, so the flash only fires on actual copies.
+    pub fn mark_yanked(&mut self) {
+        self.last_yank_at = Some(Instant::now());
+    }
+
+    /// Source range of the most recent yank if its flash window is
+    /// still active. Renderers overlay selection-bg on this range to
+    /// reproduce nvim's `vim.highlight.on_yank` effect.
+    pub fn yank_flash_range(&self, now: Instant) -> Option<(usize, usize)> {
+        let started = self.last_yank_at?;
+        let range = self.source_range?;
+        if now.duration_since(started) < YANK_FLASH_DURATION {
+            Some(range)
+        } else {
+            None
+        }
+    }
+
+    /// Earliest `Instant` at which the flash window expires, if a flash
+    /// is currently active. The render loop uses this to keep ticking
+    /// at frame rate while the flash is visible so it clears promptly.
+    pub fn yank_flash_until(&self) -> Option<Instant> {
+        self.last_yank_at.map(|t| t + YANK_FLASH_DURATION)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flash_range_active_only_after_mark_yanked() {
+        let mut kr = KillRing::new();
+        kr.set_with_source("hello".into(), false, 3, 8);
+        // set_with_source alone (delete / change) must not flash.
+        assert!(kr.yank_flash_range(Instant::now()).is_none());
+        // Yank-only sites mark explicitly.
+        kr.mark_yanked();
+        assert_eq!(kr.yank_flash_range(Instant::now()), Some((3, 8)));
+    }
+
+    #[test]
+    fn flash_range_expires_after_window() {
+        let mut kr = KillRing::new();
+        kr.set_with_source("x".into(), false, 0, 1);
+        kr.mark_yanked();
+        let later = Instant::now() + YANK_FLASH_DURATION + Duration::from_millis(50);
+        assert!(kr.yank_flash_range(later).is_none());
+    }
+
+    #[test]
+    fn delete_after_yank_clears_flash() {
+        // Regression: a delete that piggybacks on `set_with_source`
+        // must not inherit the prior yank's flash timestamp, or the
+        // selection-bg would briefly paint over the deletion target.
+        let mut kr = KillRing::new();
+        kr.set_with_source("first".into(), false, 0, 5);
+        kr.mark_yanked();
+        assert!(kr.yank_flash_range(Instant::now()).is_some());
+        // Subsequent delete-style update — no mark_yanked.
+        kr.set_with_source("second".into(), false, 10, 16);
+        assert!(kr.yank_flash_range(Instant::now()).is_none());
     }
 }

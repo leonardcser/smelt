@@ -130,6 +130,21 @@ impl PromptState {
         self.win.win_cursor.range(self.win.cpos)
     }
 
+    /// Selection range to *render* with the selection-bg style. Falls
+    /// back to the yank-flash range from the kill ring when there's no
+    /// real selection so vim copy ops (`yy`, `yw`, visual `y`, …) get
+    /// the brief post-yank highlight, matching nvim's
+    /// `vim.highlight.on_yank`. Editing logic must keep using
+    /// `selection_range` so the flash never affects mutations.
+    pub fn display_selection_range(&self) -> Option<(usize, usize)> {
+        if let Some(range) = self.selection_range() {
+            return Some(range);
+        }
+        self.win
+            .kill_ring
+            .yank_flash_range(std::time::Instant::now())
+    }
+
     fn has_selection(&self) -> bool {
         self.selection_range().is_some()
     }
