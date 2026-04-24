@@ -21,9 +21,12 @@
 //!   notification on the next tick.
 
 mod api;
+pub mod app_ref;
 mod task;
 mod tasks;
 pub mod ui_ops;
+
+pub use app_ref::{install_app_ptr, try_with_app, with_app, AppPtrGuard};
 
 pub use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
 
@@ -497,6 +500,24 @@ pub(crate) struct LuaShared {
     /// Keeps the reducer's `AppOp` enum free of Lua-task variants; the
     /// Lua module pumps its own inbox each tick.
     pub(crate) task_inbox: Mutex<Vec<TaskEvent>>,
+    /// Pending Lua keymap / event callback invocations. Recorded during
+    /// `ui.handle_key` / `ui.dispatch_event` (where `&mut Ui` is held
+    /// and the Lua body therefore cannot call back into App state),
+    /// drained by App right after the ui call returns so each Lua body
+    /// runs with the TLS app pointer installed and sole access to App.
+    /// Without this deferral, a Lua callback that calls
+    /// `smelt.ui.dialog.open` would collide with the ui borrow.
+    pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
+}
+
+/// A callback invocation recorded by the ui dispatch path while
+/// `&mut Ui` is held. Drained by the host App between ui calls so each
+/// Lua fn body runs with the TLS app pointer installed.
+pub struct PendingInvocation {
+    pub handle: ui::LuaHandle,
+    pub win: ui::WinId,
+    pub payload: ui::Payload,
+    pub panels: Vec<ui::PanelSnapshot>,
 }
 
 /// Events that drive the Lua task runtime. After the D3 dialog + D2b
@@ -536,6 +557,7 @@ impl Default for LuaShared {
             processes: Mutex::new(None),
             agent_snapshots: Mutex::new(None),
             task_inbox: Mutex::new(Vec::new()),
+            pending_invocations: Mutex::new(Vec::new()),
         }
     }
 }

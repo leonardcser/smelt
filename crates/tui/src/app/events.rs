@@ -84,7 +84,7 @@ impl App {
                      win: ui::WinId,
                      payload: &ui::Payload,
                      panels: &[ui::PanelSnapshot]| {
-                        lua.invoke_callback(handle, win, payload, panels);
+                        lua.queue_invocation(handle, win, payload, panels);
                     };
                 let _ = self
                     .ui
@@ -275,7 +275,7 @@ impl App {
                      win: ui::WinId,
                      payload: &ui::Payload,
                      panels: &[ui::PanelSnapshot]| {
-                        lua.invoke_callback(handle, win, payload, panels);
+                        lua.queue_invocation(handle, win, payload, panels);
                     };
                 let result =
                     self.ui
@@ -829,7 +829,7 @@ impl App {
                               win: ui::WinId,
                               payload: &ui::Payload,
                               panels: &[ui::PanelSnapshot]| {
-            lua.invoke_callback(handle, win, payload, panels);
+            lua.queue_invocation(handle, win, payload, panels);
         };
         self.ui.dispatch_event(
             win,
