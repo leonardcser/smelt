@@ -53,7 +53,13 @@ impl App {
         );
         self.refresh_status_bar();
 
-        self.finalize_layer_rects(transcript_rect, prompt_rect, prompt_input_rect, term_w, term_h);
+        self.finalize_layer_rects(
+            transcript_rect,
+            prompt_rect,
+            prompt_input_rect,
+            term_w,
+            term_h,
+        );
 
         self.sync_completer_float(prompt_rect);
         self.sync_notification_float(prompt_rect);

@@ -28,23 +28,37 @@ impl App {
             UiOp::ClearGhostText => {
                 self.input_prediction = None;
             }
-            UiOp::BufCreate { id } => {
+            UiOp::BufCreate { id, format } => {
                 // A BufCreate for an id that already exists means the
                 // allocator aliased into another buffer's id space.
                 // Loud notify instead of silently stomping.
-                if let Err(clash) = self.ui.buf_create_with_id(
+                match self.ui.buf_create_with_id(
                     ui::BufId(id),
                     ui::buffer::BufCreateOpts {
                         buftype: ui::buffer::BufType::Scratch,
                         ..Default::default()
                     },
                 ) {
-                    self.notify_error(format!("buf.create: id {} already in use", clash.0));
+                    Err(clash) => {
+                        self.notify_error(format!("buf.create: id {} already in use", clash.0));
+                    }
+                    Ok(bid) => {
+                        if let Some(fmt) = format {
+                            if let Some(buf) = self.ui.buf_mut(bid) {
+                                buf.set_formatter(fmt.into_formatter());
+                            }
+                        }
+                    }
                 }
             }
             UiOp::BufSetLines { id, lines } => {
                 if let Some(buf) = self.ui.buf_mut(ui::BufId(id)) {
                     buf.set_all_lines(lines);
+                }
+            }
+            UiOp::BufSetSource { id, source } => {
+                if let Some(buf) = self.ui.buf_mut(ui::BufId(id)) {
+                    buf.set_source(source);
                 }
             }
             UiOp::BufAddHighlight {

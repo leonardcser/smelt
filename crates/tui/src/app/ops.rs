@@ -99,10 +99,24 @@ pub enum UiOp {
     ClearGhostText,
     BufCreate {
         id: u64,
+        /// When `Some`, install the formatter on the new buffer and
+        /// leave its source empty until a subsequent `BufSetSource`.
+        /// `None` creates a plain, formatter-less buffer — identical
+        /// to the pre-formatter behaviour.
+        format: Option<crate::format::BufFormat>,
     },
     BufSetLines {
         id: u64,
         lines: Vec<String>,
+    },
+    /// Replace the source driving a formatter-backed buffer.
+    /// The formatter re-renders on the next frame at the panel /
+    /// window's current content width. Plain buffers (created without
+    /// a `mode`) store the source but never render it; callers of
+    /// plain buffers should keep using `BufSetLines`.
+    BufSetSource {
+        id: u64,
+        source: String,
     },
     /// Paint a highlight over `[col_start, col_end)` on `line`. The
     /// plugin side resolves theme role names to `Color` at push time,

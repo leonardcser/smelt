@@ -182,8 +182,7 @@ impl WorkingState {
     /// nothing is animating.
     pub fn spinner_char(&self) -> Option<&'static str> {
         let live = self.live.as_ref()?;
-        let idx = (live.since.elapsed().as_millis() / 150) as usize % SPINNER_FRAMES.len();
-        Some(SPINNER_FRAMES[idx])
+        Some(SPINNER_FRAMES[crate::render::spinner_frame_index(live.since.elapsed())])
     }
 
     pub(crate) fn throbber_spans(&self, show_tps: bool) -> Vec<BarSpan> {
@@ -205,7 +204,9 @@ fn avg(samples: &[f64]) -> Option<f64> {
 }
 
 fn tps_spans(avg_tps: Option<f64>) -> Vec<BarSpan> {
-    let Some(avg) = avg_tps else { return Vec::new() };
+    let Some(avg) = avg_tps else {
+        return Vec::new();
+    };
     vec![
         BarSpan {
             text: "·".into(),
@@ -228,7 +229,7 @@ fn tps_spans(avg_tps: Option<f64>) -> Vec<BarSpan> {
 
 fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
     let elapsed = live.since.elapsed();
-    let idx = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
+    let idx = crate::render::spinner_frame_index(elapsed);
     match live.phase {
         TurnPhase::Compacting => vec![
             BarSpan {

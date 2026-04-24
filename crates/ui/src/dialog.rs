@@ -24,6 +24,20 @@ use crate::window::{ScrollbarState, Window, WindowViewport};
 use crate::BufId;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+/// Mutable buffer lookup shim used by `Dialog::sync_from_bufs_mut` so
+/// dialogs can drive formatter-backed buffers without inlining the
+/// HashMap of the host `Ui`. `FnMut` can't express "returns a borrow
+/// tied to self" — this trait can.
+pub(crate) trait BufferResolver {
+    fn get(&mut self, id: BufId) -> Option<&mut Buffer>;
+}
+
+impl<S: std::hash::BuildHasher> BufferResolver for std::collections::HashMap<BufId, Buffer, S> {
+    fn get(&mut self, id: BufId) -> Option<&mut Buffer> {
+        self.get_mut(&id)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelKind {
     /// Readonly text or preview. Scrollable, selectable via vim.
@@ -398,17 +412,27 @@ impl Dialog {
         widget.as_any_mut().downcast_mut::<T>()
     }
 
-    /// Copy each panel's buffer content into its internal BufferView.
-    /// Called once per frame by `Ui::render` before compositor draw.
-    pub(crate) fn sync_from_bufs<'a, F>(&mut self, resolve: F)
-    where
-        F: Fn(BufId) -> Option<&'a Buffer>,
-    {
+    /// Drive any formatter-backed buffers at the current content width,
+    /// then copy each panel's buffer content into its internal
+    /// `BufferView`. Called once per frame by `Ui::render` before
+    /// compositor draw.
+    ///
+    /// `content_width` is the resolved float width (from
+    /// `resolve_float_rect`), minus the scrollbar column reservation.
+    /// The dialog passes this through to
+    /// [`Buffer::ensure_rendered_at`] so markdown / wrap / syntax
+    /// formatters reflow when the terminal resizes or the source
+    /// changes. `bufs` is a mutable resolver (trait, not `FnMut`,
+    /// because the returned borrow lives longer than any single call)
+    /// so formatters can write the regenerated lines + decorations
+    /// directly into the buffer.
+    pub(crate) fn sync_from_bufs_mut(&mut self, content_width: u16, bufs: &mut dyn BufferResolver) {
         let default_style = self.config.background_style;
         for panel in &mut self.panels {
             match &mut panel.content {
                 DialogPanelContent::Buffer { buf, view, .. } => {
-                    if let Some(b) = resolve(*buf) {
+                    if let Some(b) = bufs.get(*buf) {
+                        b.ensure_rendered_at(content_width);
                         panel.line_count = b.line_count();
                         view.sync_from_buffer(b);
                     }

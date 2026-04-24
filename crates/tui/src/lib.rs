@@ -8,6 +8,7 @@ pub mod completer;
 pub mod config;
 pub mod cursor;
 pub mod custom_commands;
+pub mod format;
 pub mod fuzzy;
 pub mod input;
 pub mod instructions;
