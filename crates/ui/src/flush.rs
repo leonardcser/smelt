@@ -23,7 +23,7 @@ pub fn flush_diff<'a, W: Write>(
         }
         let mut buf = [0u8; 4];
         let s = update.cell.symbol.encode_utf8(&mut buf);
-        w.queue(crossterm::style::Print(s.to_string()))?;
+        w.write_all(s.as_bytes())?;
         cursor_x = update.x + 1;
         cursor_y = update.y;
     }
