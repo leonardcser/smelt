@@ -1,5 +1,6 @@
 use crate::BufId;
 use crossterm::style::Color;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
@@ -111,9 +112,12 @@ impl Default for BufCreateOpts {
 #[derive(Clone)]
 pub struct Buffer {
     pub(crate) id: BufId,
-    lines: Vec<String>,
-    highlights: Vec<Vec<Span>>,
-    decorations: Vec<LineDecoration>,
+    /// `Arc`-wrapped so `Buffer::clone()` and sync-to-view become
+    /// refcount bumps; mutators use `Arc::make_mut` which only deep-
+    /// copies when the Arc is actually shared.
+    lines: Arc<Vec<String>>,
+    highlights: Arc<Vec<Vec<Span>>>,
+    decorations: Arc<Vec<LineDecoration>>,
     modifiable: bool,
     buftype: BufType,
     virtual_text: Vec<VirtualText>,
@@ -125,9 +129,9 @@ impl Buffer {
     pub fn new(id: BufId, opts: BufCreateOpts) -> Self {
         Self {
             id,
-            lines: vec![String::new()],
-            highlights: vec![Vec::new()],
-            decorations: vec![LineDecoration::default()],
+            lines: Arc::new(vec![String::new()]),
+            highlights: Arc::new(vec![Vec::new()]),
+            decorations: Arc::new(vec![LineDecoration::default()]),
             modifiable: opts.modifiable,
             buftype: opts.buftype,
             virtual_text: Vec::new(),
@@ -158,41 +162,46 @@ impl Buffer {
         let end = end.min(self.lines.len());
         let start = start.min(end);
         let new_count = replacement.len();
-        self.lines.splice(start..end, replacement);
+        let lines = Arc::make_mut(&mut self.lines);
+        lines.splice(start..end, replacement);
+        let lines_empty = lines.is_empty();
         let empty_spans: Vec<Vec<Span>> = vec![Vec::new(); new_count];
-        let hl_end = end.min(self.highlights.len());
+        let highlights = Arc::make_mut(&mut self.highlights);
+        let hl_end = end.min(highlights.len());
         let hl_start = start.min(hl_end);
-        self.highlights.splice(hl_start..hl_end, empty_spans);
-        let dec_end = end.min(self.decorations.len());
+        highlights.splice(hl_start..hl_end, empty_spans);
+        let decorations = Arc::make_mut(&mut self.decorations);
+        let dec_end = end.min(decorations.len());
         let dec_start = start.min(dec_end);
-        self.decorations.splice(
+        decorations.splice(
             dec_start..dec_end,
             std::iter::repeat_with(LineDecoration::default).take(new_count),
         );
-        if self.lines.is_empty() {
-            self.lines.push(String::new());
-            self.highlights = vec![Vec::new()];
-            self.decorations = vec![LineDecoration::default()];
+        if lines_empty {
+            lines.push(String::new());
+            *highlights = vec![Vec::new()];
+            *decorations = vec![LineDecoration::default()];
         }
         self.changedtick += 1;
     }
 
     pub fn set_all_lines(&mut self, lines: Vec<String>) {
-        let count = lines.len().max(1);
-        self.lines = if lines.is_empty() {
-            vec![String::new()]
+        let (new_lines, count) = if lines.is_empty() {
+            (vec![String::new()], 1)
         } else {
-            lines
+            let n = lines.len();
+            (lines, n)
         };
-        self.highlights = vec![Vec::new(); count];
-        self.decorations = vec![LineDecoration::default(); count];
+        self.lines = Arc::new(new_lines);
+        self.highlights = Arc::new(vec![Vec::new(); count]);
+        self.decorations = Arc::new(vec![LineDecoration::default(); count]);
         self.changedtick += 1;
     }
 
     pub fn append_line(&mut self, line: String) {
-        self.lines.push(line);
-        self.highlights.push(Vec::new());
-        self.decorations.push(LineDecoration::default());
+        Arc::make_mut(&mut self.lines).push(line);
+        Arc::make_mut(&mut self.highlights).push(Vec::new());
+        Arc::make_mut(&mut self.decorations).push(LineDecoration::default());
         self.changedtick += 1;
     }
 
@@ -266,10 +275,11 @@ impl Buffer {
         style: SpanStyle,
         meta: SpanMeta,
     ) {
-        if line >= self.highlights.len() {
-            self.highlights.resize_with(line + 1, Vec::new);
+        let highlights = Arc::make_mut(&mut self.highlights);
+        if line >= highlights.len() {
+            highlights.resize_with(line + 1, Vec::new);
         }
-        self.highlights[line].push(Span {
+        highlights[line].push(Span {
             col_start,
             col_end,
             style,
@@ -278,9 +288,10 @@ impl Buffer {
     }
 
     pub fn clear_highlights(&mut self, start_line: usize, end_line: usize) {
-        let end = end_line.min(self.highlights.len());
-        for line in start_line..end {
-            self.highlights[line].clear();
+        let highlights = Arc::make_mut(&mut self.highlights);
+        let end = end_line.min(highlights.len());
+        for spans in highlights.iter_mut().take(end).skip(start_line) {
+            spans.clear();
         }
     }
 
@@ -288,12 +299,26 @@ impl Buffer {
         self.highlights.get(line).map_or(&[], |v| v.as_slice())
     }
 
+    /// Shared handle to the full highlights vec — used by views that
+    /// want to `Arc::clone` instead of rebuilding their own copy.
+    pub fn highlights_arc(&self) -> &Arc<Vec<Vec<Span>>> {
+        &self.highlights
+    }
+
+    pub fn lines_arc(&self) -> &Arc<Vec<String>> {
+        &self.lines
+    }
+
+    pub fn decorations_arc(&self) -> &Arc<Vec<LineDecoration>> {
+        &self.decorations
+    }
+
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
-        if line >= self.decorations.len() {
-            self.decorations
-                .resize_with(line + 1, LineDecoration::default);
+        let decorations = Arc::make_mut(&mut self.decorations);
+        if line >= decorations.len() {
+            decorations.resize_with(line + 1, LineDecoration::default);
         }
-        self.decorations[line] = decoration;
+        decorations[line] = decoration;
     }
 
     pub fn decoration_at(&self, line: usize) -> &LineDecoration {
