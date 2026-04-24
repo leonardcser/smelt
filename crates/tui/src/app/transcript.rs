@@ -731,6 +731,86 @@ impl App {
         }
     }
 
+    /// Build the transcript's per-line selection ranges (absolute
+    /// buffer line index, col_start, col_end) in display-cell units.
+    /// Used by the per-frame sync to overlay selection-bg on top of
+    /// the projected buffer's text highlights. Cheap no-op when no
+    /// vim visual, cursor anchor, or yank-flash is active.
+    pub(crate) fn transcript_selection_highlights(
+        &mut self,
+        scroll_top: u16,
+        viewport_rows: u16,
+    ) -> Vec<(usize, u16, u16)> {
+        let vim_visual = matches!(
+            self.transcript_window.vim.as_ref().map(|v| v.mode()),
+            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
+        );
+        let anchor_set = self.transcript_window.win_cursor.anchor().is_some();
+        let yank_flash = self
+            .transcript_window
+            .kill_ring
+            .yank_flash_range(std::time::Instant::now())
+            .is_some();
+        if !vim_visual && !anchor_set && !yank_flash {
+            return Vec::new();
+        }
+
+        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let buf = rows.join("\n");
+        let cpos = self.transcript_window.compute_cpos(&rows);
+        let active_selection = if let Some(vim) = self.transcript_window.vim.as_ref() {
+            match vim.mode() {
+                crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine => {
+                    vim.visual_range(&buf, cpos)
+                }
+                _ => self.transcript_window.win_cursor.range(cpos),
+            }
+        } else {
+            self.transcript_window.win_cursor.range(cpos)
+        };
+        // Fall back to the yank-flash range so the selection bg
+        // briefly paints over the yanked text after `y`-family vim ops
+        // (mirrors nvim's `vim.highlight.on_yank`).
+        let (s, e) = match active_selection.or_else(|| {
+            self.transcript_window
+                .kill_ring
+                .yank_flash_range(std::time::Instant::now())
+        }) {
+            Some(range) => range,
+            None => return Vec::new(),
+        };
+        if s >= e {
+            return Vec::new();
+        }
+        let first = scroll_top as usize;
+        let last = (first + viewport_rows as usize).min(rows.len());
+        let mut line_start = rows[..first].iter().map(|r| r.len() + 1).sum::<usize>();
+        let mut out = Vec::new();
+        for (idx, row) in rows.iter().enumerate().take(last).skip(first) {
+            let line_end = line_start + row.len();
+            if e > line_start && s <= line_end {
+                let clip_s = s.saturating_sub(line_start).min(row.len());
+                let clip_e = e.saturating_sub(line_start).min(row.len());
+                let start_cell = crate::text_utils::byte_to_cell(row, clip_s) as u16;
+                let end_cell = crate::text_utils::byte_to_cell(row, clip_e) as u16;
+                if end_cell > start_cell {
+                    out.push((idx, start_cell, end_cell));
+                } else if row.is_empty() && s <= line_start && e > line_start {
+                    // Empty line inside the selection: paint a single
+                    // virtual cell so the user can see the line is part
+                    // of the range. Mirrors vim's "$" virtual-space
+                    // behavior on empty lines in v / V mode.
+                    out.push((idx, 0, 1));
+                }
+            }
+            line_start = line_end + 1;
+        }
+        out
+    }
+
     fn has_ephemeral(&self, show_thinking: bool) -> bool {
         self.parser.has_active_thinking() && !show_thinking
     }
