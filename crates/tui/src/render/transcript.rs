@@ -394,10 +394,15 @@ impl TranscriptSnapshot {
         if end_row < start_row || start_row >= self.row_cells.len() {
             return None;
         }
+        // `end_col` is the exclusive upper bound passed to `copy_range`
+        // — use `cells.len()` so the last cell is included in the
+        // `all_selectable_covered` check, letting the `source_text`
+        // shortcut emit the original markdown instead of stripping
+        // inline markup off the last row.
         let end_col = self
             .row_cells
             .get(end_row)
-            .map(|c| c.len().saturating_sub(1))
+            .map(|c| c.len())
             .unwrap_or(0);
         let text = self.copy_range(start_row, 0, end_row, end_col);
         if text.is_empty() {
@@ -829,6 +834,20 @@ mod tests {
         snap.source_text[0] = Some("# Title".into());
         assert_eq!(snap.copy_range(0, 0, 0, 5), "# Title");
         assert_eq!(snap.copy_range(0, 0, 1, 5), "# Title\nhello");
+    }
+
+    #[test]
+    fn block_text_at_includes_last_cell_in_source_text_path() {
+        // Regression: `end_col` used to be `cells.len() - 1`, which
+        // dropped the last selectable cell from the "fully covered"
+        // check and forced the per-cell fallback, silently stripping
+        // inline markup off the last row of every block.
+        let mut snap = make_snapshot(vec![vec![cell('b'), cell('o'), cell('l'), cell('d')]]);
+        snap.source_text[0] = Some("**bold**".into());
+        let bid = BlockId(42);
+        snap.block_of_row = vec![Some(bid)];
+        snap.row_of_block.insert(bid, 0..1);
+        assert_eq!(snap.block_text_at(0).as_deref(), Some("**bold**"));
     }
 
     #[test]

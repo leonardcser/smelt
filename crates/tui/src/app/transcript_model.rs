@@ -182,6 +182,29 @@ impl Block {
         let bytes = serde_json::to_vec(&value).unwrap_or_default();
         seahash::hash(&bytes)
     }
+
+    /// Raw source text for the block, before markdown rendering. Used
+    /// by whole-block yank so copying a rendered markdown block returns
+    /// the original `**bold**`, `` `code` ``, fenced ```` ``` ```` blocks,
+    /// `|` tables, `---` rules, etc. — instead of walking display cells
+    /// (which strips inline markup).
+    ///
+    /// Returns `None` for structured blocks (tool calls, agent headers,
+    /// confirm dialogs) that don't have a single "markdown source"; the
+    /// caller falls back to cell-walking for those.
+    pub fn raw_text(&self) -> Option<String> {
+        match self {
+            Block::User { text, .. } => Some(text.clone()),
+            Block::Text { content }
+            | Block::Thinking { content }
+            | Block::Hint { content }
+            | Block::AgentMessage { content, .. } => Some(content.clone()),
+            Block::Compacted { summary } => Some(summary.clone()),
+            Block::CodeLine { content, .. } => Some(content.clone()),
+            Block::Exec { command, output } => Some(format!("$ {command}\n{output}")),
+            Block::ToolCall { .. } | Block::Confirm { .. } | Block::Agent { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -881,5 +904,75 @@ mod tests {
         assert_eq!(history.order.len(), 2);
         assert_eq!(history.blocks.len(), 2);
         assert_eq!(history.content_hash(a), history.content_hash(b));
+    }
+
+    #[test]
+    fn raw_text_preserves_markdown_markers() {
+        // Whole-block yank must round-trip every inline / block
+        // markdown construct — bold, italic, inline code, fenced code,
+        // tables, horizontal rules — because the cell-walked fallback
+        // strips the markers.
+        let md = concat!(
+            "**bold** and *italic* and `inline code`\n",
+            "\n",
+            "```rust\n",
+            "let x = 1;\n",
+            "```\n",
+            "\n",
+            "| col | val |\n",
+            "| --- | --- |\n",
+            "| a   | 1   |\n",
+            "\n",
+            "---\n",
+        );
+        let block = Block::Text {
+            content: md.into(),
+        };
+        assert_eq!(block.raw_text().as_deref(), Some(md));
+    }
+
+    #[test]
+    fn raw_text_returns_user_text_verbatim() {
+        let block = Block::User {
+            text: "Explain **this** in detail.".into(),
+            image_labels: vec!["[screenshot.png]".into()],
+        };
+        // Image labels are a render-time annotation, not part of the
+        // user's typed message.
+        assert_eq!(
+            block.raw_text().as_deref(),
+            Some("Explain **this** in detail.")
+        );
+    }
+
+    #[test]
+    fn raw_text_is_none_for_structured_blocks() {
+        // Tool / confirm / agent blocks don't have a single markdown
+        // source — yank falls back to cell-walking for them.
+        assert!(Block::ToolCall {
+            call_id: "c1".into(),
+            name: "bash".into(),
+            summary: "ls".into(),
+            args: HashMap::new(),
+        }
+        .raw_text()
+        .is_none());
+        assert!(Block::Confirm {
+            tool: "bash".into(),
+            desc: "run ls".into(),
+            choice: None,
+        }
+        .raw_text()
+        .is_none());
+        assert!(Block::Agent {
+            agent_id: "a1".into(),
+            slug: None,
+            blocking: false,
+            tool_calls: Vec::new(),
+            status: AgentBlockStatus::Running,
+            elapsed: None,
+        }
+        .raw_text()
+        .is_none());
     }
 }
