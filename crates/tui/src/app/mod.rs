@@ -287,6 +287,12 @@ pub struct App {
     /// column. The stored value records which surface's scrollbar owns
     /// the gesture.
     pub drag_on_scrollbar: Option<ScrollbarDragTarget>,
+    /// Prompt vim mode at the start of a mouse-drag. Set on mouse-down
+    /// inside the prompt viewport (only when vim is enabled) before the
+    /// drag enters `Visual`, restored on mouse-up so a drag from Insert
+    /// lands the user back in Insert rather than Normal. `None` outside
+    /// an active prompt drag.
+    pub prompt_drag_return_vim_mode: Option<crate::vim::ViMode>,
     /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
     /// user-registered commands / keymaps / autocmds.
     pub lua: crate::lua::LuaRuntime,
@@ -706,6 +712,7 @@ impl App {
             drag_anchor_line: None,
             drag_autoscroll_since: None,
             drag_on_scrollbar: None,
+            prompt_drag_return_vim_mode: None,
             lua: crate::lua::LuaRuntime::new(),
             extra_instructions: None,
             skill_section: None,
