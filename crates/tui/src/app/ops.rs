@@ -17,7 +17,7 @@
 //!   These reach into the agent loop, persistence, or the Lua runtime.
 //!
 //! Handlers push into the shared queue via `Into<AppOp>`: callers
-//! write `ops.push(UiOp::BufCreate { id })` or `ops.push(DomainOp::
+//! write `ops.push(UiOp::Notify(msg))` or `ops.push(DomainOp::
 //! LoadSession(id))` and the queue stays a single ordered stream so
 //! the reducer can apply ui + domain effects in the exact sequence a
 //! handler emitted them.
@@ -97,109 +97,6 @@ pub enum UiOp {
     SetGhostText(String),
     /// Clear ghost text from the prompt.
     ClearGhostText,
-    BufCreate {
-        id: u64,
-        /// When `Some`, install the formatter on the new buffer and
-        /// leave its source empty until a subsequent `BufSetSource`.
-        /// `None` creates a plain, formatter-less buffer — identical
-        /// to the pre-formatter behaviour.
-        format: Option<crate::format::BufFormat>,
-    },
-    BufSetLines {
-        id: u64,
-        lines: Vec<String>,
-    },
-    /// Replace the source driving a formatter-backed buffer.
-    /// The formatter re-renders on the next frame at the panel /
-    /// window's current content width. Plain buffers (created without
-    /// a `mode`) store the source but never render it; callers of
-    /// plain buffers should keep using `BufSetLines`.
-    BufSetSource {
-        id: u64,
-        source: String,
-    },
-    /// Paint a highlight over `[col_start, col_end)` on `line`. The
-    /// plugin side resolves theme role names to `Color` at push time,
-    /// so the reducer just stitches a `SpanStyle` together. Out-of-
-    /// range line indices are silently dropped — the buffer may have
-    /// shrunk between the plugin's queue and the op's apply.
-    BufAddHighlight {
-        id: u64,
-        line: usize,
-        col_start: u16,
-        col_end: u16,
-        fg: Option<crossterm::style::Color>,
-        bold: bool,
-        italic: bool,
-        dim: bool,
-    },
-    /// Register a Lua fn (previously stashed in `shared.callbacks`
-    /// under `callback_id`) as a `Callback::Lua` keymap on `win`.
-    /// Pushed by `smelt.win.set_keymap`; the reducer does the
-    /// actual `ui.win_set_keymap` call with a `Callback::Lua(LuaHandle
-    /// (callback_id))`.
-    WinBindLuaKeymap {
-        win: ui::WinId,
-        key: ui::KeyBind,
-        callback_id: u64,
-    },
-    /// Register a Lua fn as a `Callback::Lua` lifecycle event handler on
-    /// `win`. Pushed by `smelt.win.on_event`; the reducer calls
-    /// `ui.win_on_event(win, event, Callback::Lua(LuaHandle(id)))`.
-    WinBindLuaEvent {
-        win: ui::WinId,
-        event: ui::WinEvent,
-        callback_id: u64,
-    },
-    /// Remove a keymap binding from `win`. Pushed by
-    /// `smelt.win.clear_keymap`; the reducer calls
-    /// `ui.win_clear_keymap` and drops the displaced Lua callback.
-    WinClearKeymap {
-        win: ui::WinId,
-        key: ui::KeyBind,
-    },
-    /// Remove a specific event callback by its callback id. Pushed by
-    /// `smelt.win.clear_event`; the reducer calls
-    /// `ui.win_clear_event_by_id` and drops the Lua handle.
-    WinClearEvent {
-        win: ui::WinId,
-        event: ui::WinEvent,
-        callback_id: u64,
-    },
-    /// Drive the `ui::Picker` at `win` to a new 0-based `index`. Pushed
-    /// by `smelt.ui.picker.set_selected` from Lua-side nav keymaps in
-    /// `runtime/lua/smelt/picker.lua`; the reducer calls
-    /// `ui.picker_mut(win).set_selected(index)`.
-    PickerSetSelected {
-        win: ui::WinId,
-        index: usize,
-    },
-    /// Replace the item list on a `ui::Picker` float. Pushed by
-    /// `smelt.ui.picker.set_items` so Lua-driven filtering can update
-    /// the visible list live as the user types. Each item carries
-    /// `{label, description?, prefix?}`.
-    PickerSetItems {
-        win: ui::WinId,
-        items: Vec<ui::picker::PickerItem>,
-    },
-    /// Open a Lua-described dialog float. Pushed by
-    /// `smelt.ui.dialog._request_open(task_id, opts)`. The reducer
-    /// runs `lua_dialog::open`, then resolves the parked
-    /// `TaskWait::External(task_id)` with `{win_id = …}` (or `nil` on
-    /// error). Lua code owns all keymap/event wiring in
-    /// `runtime/lua/smelt/dialog.lua`.
-    OpenLuaDialog {
-        task_id: u64,
-        opts: mlua::RegistryKey,
-    },
-    /// Open a free-floating `ui::Picker` (general-purpose, used by
-    /// `smelt.ui.picker.open`). Resolves the caller's task with
-    /// `{win_id}` so Lua can manage selection via `set_items` /
-    /// `set_selected` and close via `smelt.win.close`.
-    OpenLuaPicker {
-        task_id: u64,
-        opts: mlua::RegistryKey,
-    },
     /// Open a prompt-owning arg picker (theme/model/color/settings-style).
     /// Pushed by `smelt.prompt.open_picker(opts)`. The reducer installs
     /// a `Completer` of kind `ArgPicker` onto the active prompt state;
@@ -211,10 +108,6 @@ pub enum UiOp {
         task_id: u64,
         opts: mlua::RegistryKey,
     },
-    /// Replace the prompt buffer's text and move the cursor to the end.
-    /// Pushed by `smelt.prompt.set_text(s)`. Used by the Lua history
-    /// picker to commit a selection back into the prompt.
-    PromptSetText(String),
 }
 
 /// App-state mutations, engine commands, and session/agent/permission

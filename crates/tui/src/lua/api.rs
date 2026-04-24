@@ -816,125 +816,145 @@ impl LuaRuntime {
                     let id = s
                         .next_buf_id
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::BufCreate { id, format });
-                    }
+                    crate::lua::with_app(|app| {
+                        match app.ui.buf_create_with_id(
+                            ui::BufId(id),
+                            ui::buffer::BufCreateOpts {
+                                buftype: ui::buffer::BufType::Scratch,
+                                ..Default::default()
+                            },
+                        ) {
+                            Ok(bid) => {
+                                if let Some(fmt) = format {
+                                    if let Some(buf) = app.ui.buf_mut(bid) {
+                                        buf.set_formatter(fmt.into_formatter());
+                                    }
+                                }
+                            }
+                            Err(clash) => {
+                                app.notify_error(format!(
+                                    "buf.create: id {} already in use",
+                                    clash.0
+                                ));
+                            }
+                        }
+                    });
                     Ok(id)
                 })?,
             )?;
         }
-        {
-            let s = shared.clone();
-            buf_tbl.set(
-                "set_lines",
-                lua.create_function(move |_, (id, lines): (u64, mlua::Table)| {
-                    let lines: Vec<String> = lines
-                        .sequence_values::<String>()
-                        .filter_map(|v| v.ok())
-                        .collect();
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::BufSetLines { id, lines });
+        buf_tbl.set(
+            "set_lines",
+            lua.create_function(|_, (id, lines): (u64, mlua::Table)| {
+                let lines: Vec<String> = lines
+                    .sequence_values::<String>()
+                    .filter_map(|v| v.ok())
+                    .collect();
+                crate::lua::with_app(|app| {
+                    if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                        buf.set_all_lines(lines);
                     }
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let s = shared.clone();
-            buf_tbl.set(
-                "set_source",
-                lua.create_function(move |_, (id, source): (u64, String)| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::BufSetSource { id, source });
+                });
+                Ok(())
+            })?,
+        )?;
+        buf_tbl.set(
+            "set_source",
+            lua.create_function(|_, (id, source): (u64, String)| {
+                crate::lua::with_app(|app| {
+                    if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                        buf.set_source(source);
                     }
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let s = shared.clone();
-            buf_tbl.set(
-                "add_highlight",
-                lua.create_function(
-                    move |_,
-                          (id, line, col_start, col_end, style): (
-                        u64,
-                        u64,
-                        u64,
-                        u64,
-                        Option<mlua::Table>,
-                    )| {
-                        let Some(line0) = line.checked_sub(1) else {
-                            return Ok(());
-                        };
-                        if col_end <= col_start {
-                            return Ok(());
-                        }
-                        let (fg, bold, italic, dim) = match style {
-                            Some(t) => {
-                                let fg = match t.get::<Option<String>>("fg").ok().flatten() {
-                                    Some(role) => Some(theme_role_get(&role).ok_or_else(|| {
-                                        LuaError::RuntimeError(format!(
-                                            "unknown theme role: {role}"
-                                        ))
-                                    })?),
-                                    None => None,
-                                };
-                                (
-                                    fg,
-                                    t.get::<bool>("bold").unwrap_or(false),
-                                    t.get::<bool>("italic").unwrap_or(false),
-                                    t.get::<bool>("dim").unwrap_or(false),
-                                )
-                            }
-                            None => (None, false, false, false),
-                        };
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::BufAddHighlight {
-                                id,
-                                line: line0 as usize,
-                                col_start: col_start.min(u16::MAX as u64) as u16,
-                                col_end: col_end.min(u16::MAX as u64) as u16,
+                });
+                Ok(())
+            })?,
+        )?;
+        buf_tbl.set(
+            "add_highlight",
+            lua.create_function(
+                |_,
+                 (id, line, col_start, col_end, style): (
+                    u64,
+                    u64,
+                    u64,
+                    u64,
+                    Option<mlua::Table>,
+                )| {
+                    let Some(line0) = line.checked_sub(1) else {
+                        return Ok(());
+                    };
+                    if col_end <= col_start {
+                        return Ok(());
+                    }
+                    let (fg, bold, italic, dim) = match style {
+                        Some(t) => {
+                            let fg = match t.get::<Option<String>>("fg").ok().flatten() {
+                                Some(role) => Some(theme_role_get(&role).ok_or_else(|| {
+                                    LuaError::RuntimeError(format!("unknown theme role: {role}"))
+                                })?),
+                                None => None,
+                            };
+                            (
                                 fg,
-                                bold,
-                                italic,
-                                dim,
-                            });
+                                t.get::<bool>("bold").unwrap_or(false),
+                                t.get::<bool>("italic").unwrap_or(false),
+                                t.get::<bool>("dim").unwrap_or(false),
+                            )
                         }
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
-        {
-            let s = shared.clone();
-            buf_tbl.set(
-                "add_dim",
-                lua.create_function(
-                    move |_, (id, line, col_start, col_end): (u64, u64, u64, u64)| {
-                        let Some(line0) = line.checked_sub(1) else {
-                            return Ok(());
-                        };
-                        if col_end <= col_start {
-                            return Ok(());
+                        None => (None, false, false, false),
+                    };
+                    crate::lua::with_app(|app| {
+                        if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                            if (line0 as usize) < buf.line_count() {
+                                buf.add_highlight(
+                                    line0 as usize,
+                                    col_start.min(u16::MAX as u64) as u16,
+                                    col_end.min(u16::MAX as u64) as u16,
+                                    ui::buffer::SpanStyle {
+                                        fg,
+                                        bg: None,
+                                        bold,
+                                        dim,
+                                        italic,
+                                    },
+                                );
+                            }
                         }
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::BufAddHighlight {
-                                id,
-                                line: line0 as usize,
-                                col_start: col_start.min(u16::MAX as u64) as u16,
-                                col_end: col_end.min(u16::MAX as u64) as u16,
-                                fg: None,
-                                bold: false,
-                                italic: false,
-                                dim: true,
-                            });
+                    });
+                    Ok(())
+                },
+            )?,
+        )?;
+        buf_tbl.set(
+            "add_dim",
+            lua.create_function(|_, (id, line, col_start, col_end): (u64, u64, u64, u64)| {
+                let Some(line0) = line.checked_sub(1) else {
+                    return Ok(());
+                };
+                if col_end <= col_start {
+                    return Ok(());
+                }
+                crate::lua::with_app(|app| {
+                    if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                        if (line0 as usize) < buf.line_count() {
+                            buf.add_highlight(
+                                line0 as usize,
+                                col_start.min(u16::MAX as u64) as u16,
+                                col_end.min(u16::MAX as u64) as u16,
+                                ui::buffer::SpanStyle {
+                                    fg: None,
+                                    bg: None,
+                                    bold: false,
+                                    dim: true,
+                                    italic: false,
+                                },
+                            );
                         }
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
+                    }
+                });
+                Ok(())
+            })?,
+        )?;
         smelt.set("buf", buf_tbl)?;
 
         // smelt.win
@@ -950,18 +970,15 @@ impl LuaRuntime {
             "mode",
             snap_read!(lua, shared, |o| o.vim_mode.clone().unwrap_or_default()),
         )?;
-        {
-            let s = shared.clone();
-            win_tbl.set(
-                "close",
-                lua.create_function(move |_, id: u64| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::CloseFloat(ui::WinId(id)));
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
+        win_tbl.set(
+            "close",
+            lua.create_function(|_, id: u64| {
+                crate::lua::with_app(|app| {
+                    app.close_float(ui::WinId(id));
+                });
+                Ok(())
+            })?,
+        )?;
         {
             let s = shared.clone();
             win_tbl.set(
@@ -978,13 +995,17 @@ impl LuaRuntime {
                         if let Ok(mut cbs) = s.callbacks.lock() {
                             cbs.insert(id, LuaHandle { key: registry_key });
                         }
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::WinBindLuaKeymap {
-                                win: ui::WinId(win_id),
-                                key,
-                                callback_id: id,
-                            });
-                        }
+                        crate::lua::with_app(|app| {
+                            if let Some(ui::Callback::Lua(ui::LuaHandle(old))) =
+                                app.ui.win_set_keymap(
+                                    ui::WinId(win_id),
+                                    key,
+                                    ui::Callback::Lua(ui::LuaHandle(id)),
+                                )
+                            {
+                                app.lua.remove_callback(old);
+                            }
+                        });
                         Ok(())
                     },
                 )?,
@@ -1006,61 +1027,55 @@ impl LuaRuntime {
                         if let Ok(mut cbs) = s.callbacks.lock() {
                             cbs.insert(id, LuaHandle { key: registry_key });
                         }
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::WinBindLuaEvent {
-                                win: ui::WinId(win_id),
+                        crate::lua::with_app(|app| {
+                            app.ui.win_on_event(
+                                ui::WinId(win_id),
                                 event,
-                                callback_id: id,
-                            });
-                        }
+                                ui::Callback::Lua(ui::LuaHandle(id)),
+                            );
+                        });
                         Ok(id)
                     },
                 )?,
             )?;
         }
-        {
-            let s = shared.clone();
-            win_tbl.set(
-                "clear_keymap",
-                lua.create_function(move |_, (win_id, key_str): (u64, String)| {
-                    let Some(key) = parse_keybind(&key_str) else {
-                        return Err(mlua::Error::RuntimeError(format!(
-                            "win.clear_keymap: unknown key `{key_str}`"
-                        )));
-                    };
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::WinClearKeymap {
-                            win: ui::WinId(win_id),
-                            key,
-                        });
+        win_tbl.set(
+            "clear_keymap",
+            lua.create_function(|_, (win_id, key_str): (u64, String)| {
+                let Some(key) = parse_keybind(&key_str) else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "win.clear_keymap: unknown key `{key_str}`"
+                    )));
+                };
+                crate::lua::with_app(|app| {
+                    if let Some(ui::Callback::Lua(ui::LuaHandle(old))) =
+                        app.ui.win_clear_keymap(ui::WinId(win_id), key)
+                    {
+                        app.lua.remove_callback(old);
                     }
-                    Ok(())
-                })?,
-            )?;
-        }
-        {
-            let s = shared.clone();
-            win_tbl.set(
-                "clear_event",
-                lua.create_function(
-                    move |_, (win_id, ev_str, callback_id): (u64, String, u64)| {
-                        let Some(event) = parse_win_event(&ev_str) else {
-                            return Err(mlua::Error::RuntimeError(format!(
-                                "win.clear_event: unknown event `{ev_str}`"
-                            )));
-                        };
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::WinClearEvent {
-                                win: ui::WinId(win_id),
-                                event,
-                                callback_id,
-                            });
-                        }
-                        Ok(())
-                    },
-                )?,
-            )?;
-        }
+                });
+                Ok(())
+            })?,
+        )?;
+        win_tbl.set(
+            "clear_event",
+            lua.create_function(|_, (win_id, ev_str, callback_id): (u64, String, u64)| {
+                let Some(event) = parse_win_event(&ev_str) else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "win.clear_event: unknown event `{ev_str}`"
+                    )));
+                };
+                crate::lua::with_app(|app| {
+                    if let Some(ui::Callback::Lua(ui::LuaHandle(old))) = app
+                        .ui
+                        .win_clear_event_by_id(ui::WinId(win_id), event, callback_id)
+                    {
+                        app.lua.remove_callback(old);
+                    }
+                });
+                Ok(())
+            })?,
+        )?;
         smelt.set("win", win_tbl)?;
 
         // smelt.settings — user preference booleans (vim, auto-compact,
@@ -1136,18 +1151,15 @@ impl LuaRuntime {
             "text",
             snap_read!(lua, shared, |o| o.prompt_text.clone().unwrap_or_default()),
         )?;
-        {
-            let s = shared.clone();
-            prompt_tbl.set(
-                "set_text",
-                lua.create_function(move |_, text: String| {
-                    if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::PromptSetText(text));
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
+        prompt_tbl.set(
+            "set_text",
+            lua.create_function(|_, text: String| {
+                crate::lua::with_app(|app| {
+                    crate::api::buf::replace(&mut app.input, text, None);
+                });
+                Ok(())
+            })?,
+        )?;
         {
             let s = shared.clone();
             prompt_tbl.set(
@@ -1351,76 +1363,60 @@ impl LuaRuntime {
         // smelt.ui.picker
         {
             let picker_tbl = lua.create_table()?;
-            {
-                let s = shared.clone();
-                picker_tbl.set(
-                    "set_selected",
-                    lua.create_function(move |_, (win_id, idx): (u64, i64)| {
-                        let index = if idx < 0 { 0 } else { idx as usize };
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::PickerSetSelected {
-                                win: ui::WinId(win_id),
-                                index,
-                            });
+            picker_tbl.set(
+                "set_selected",
+                lua.create_function(|_, (win_id, idx): (u64, i64)| {
+                    let index = if idx < 0 { 0 } else { idx as usize };
+                    crate::lua::with_app(|app| {
+                        if let Some(p) = app.ui.picker_mut(ui::WinId(win_id)) {
+                            p.set_selected(index);
                         }
-                        Ok(())
-                    })?,
-                )?;
-            }
-            {
-                let s = shared.clone();
-                picker_tbl.set(
-                    "_request_open",
-                    lua.create_function(move |lua, (task_id, opts): (u64, mlua::Table)| {
-                        let key = lua.create_registry_value(opts)?;
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::OpenLuaPicker { task_id, opts: key });
+                    });
+                    Ok(())
+                })?,
+            )?;
+            picker_tbl.set(
+                "_open",
+                lua.create_function(|_, opts: mlua::Table| -> LuaResult<u64> {
+                    let win_id =
+                        crate::lua::with_app(|app| crate::lua::ui_ops::open_picker(app, opts))
+                            .map_err(|e| LuaError::RuntimeError(format!("picker.open: {e}")))?;
+                    Ok(win_id.0)
+                })?,
+            )?;
+            picker_tbl.set(
+                "set_items",
+                lua.create_function(|_, (win_id, items_tbl): (u64, mlua::Table)| {
+                    let mut items = Vec::new();
+                    for pair in items_tbl.sequence_values::<mlua::Value>() {
+                        let v = pair?;
+                        let it = crate::lua::ui_ops::parse_picker_item(&v)
+                            .map_err(LuaError::RuntimeError)?;
+                        items.push(it);
+                    }
+                    crate::lua::with_app(|app| {
+                        if let Some(p) = app.ui.picker_mut(ui::WinId(win_id)) {
+                            p.set_items(items);
                         }
-                        Ok(())
-                    })?,
-                )?;
-            }
-            {
-                let s = shared.clone();
-                picker_tbl.set(
-                    "set_items",
-                    lua.create_function(move |_, (win_id, items_tbl): (u64, mlua::Table)| {
-                        let mut items = Vec::new();
-                        for pair in items_tbl.sequence_values::<mlua::Value>() {
-                            let v = pair?;
-                            let it = crate::lua::ui_ops::parse_picker_item(&v)
-                                .map_err(LuaError::RuntimeError)?;
-                            items.push(it);
-                        }
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::PickerSetItems {
-                                win: ui::WinId(win_id),
-                                items,
-                            });
-                        }
-                        Ok(())
-                    })?,
-                )?;
-            }
+                    });
+                    Ok(())
+                })?,
+            )?;
             smelt_ui.set("picker", picker_tbl)?;
         }
 
         // smelt.ui.dialog
         {
             let dialog_tbl = lua.create_table()?;
-            {
-                let s = shared.clone();
-                dialog_tbl.set(
-                    "_request_open",
-                    lua.create_function(move |lua, (task_id, opts): (u64, mlua::Table)| {
-                        let key = lua.create_registry_value(opts)?;
-                        if let Ok(mut o) = s.ops.lock() {
-                            o.push(UiOp::OpenLuaDialog { task_id, opts: key });
-                        }
-                        Ok(())
-                    })?,
-                )?;
-            }
+            dialog_tbl.set(
+                "_open",
+                lua.create_function(|_, opts: mlua::Table| -> LuaResult<u64> {
+                    let win_id =
+                        crate::lua::with_app(|app| crate::lua::ui_ops::open_dialog(app, opts))
+                            .map_err(|e| LuaError::RuntimeError(format!("dialog.open: {e}")))?;
+                    Ok(win_id.0)
+                })?,
+            )?;
             smelt_ui.set("dialog", dialog_tbl)?;
         }
 

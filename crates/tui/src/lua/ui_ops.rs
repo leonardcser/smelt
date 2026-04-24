@@ -28,12 +28,7 @@ use ui::{
 // - `{ kind = "input",    placeholder? = "..." }`
 // - `{ kind = "list",     buf = <id> }`
 
-pub fn open_dialog(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String> {
-    let opts: mlua::Table = app
-        .lua
-        .lua()
-        .registry_value(&opts_key)
-        .map_err(|e| format!("dialog opts: {e}"))?;
+pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
     let title: Option<String> = opts.get("title").ok();
     let panels_tbl: mlua::Table = opts
         .get("panels")
@@ -278,12 +273,7 @@ fn parse_arg_picker_item(v: &mlua::Value) -> Result<CompletionItem, String> {
 
 // ── Picker ───────────────────────────────────────────────────────────
 
-pub fn open_picker(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, String> {
-    let lua = app.lua.lua();
-    let opts: mlua::Table = lua
-        .registry_value(&opts_key)
-        .map_err(|e| format!("picker opts: {e}"))?;
-
+pub fn open_picker(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
     let items_tbl: mlua::Table = opts
         .get("items")
         .map_err(|e| format!("picker items: {e}"))?;

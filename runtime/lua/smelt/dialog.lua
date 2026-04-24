@@ -1,26 +1,10 @@
 -- Lua-side implementation of `smelt.ui.dialog.open(opts)`.
 --
--- Rust still owns float/panel creation (building `PanelSpec` from an
--- `opts` table needs Ui access and render plumbing, and exposing the
--- panel types as userdata is more surface than the shortcut of passing
--- the whole table is worth). Everything else — result building, custom
--- keymaps, `on_select` / `on_change` / `on_tick`, submit/dismiss
--- routing — lives here.
---
--- Protocol (everything rides on `TaskWait::External`; no bespoke
--- dialog-yield variant):
---   1. Alloc an external task id for the open ack, call
---      `smelt.ui.dialog._request_open(open_id, opts)` (queues a
---      `UiOp::OpenLuaDialog`), yield External — reducer opens the
---      float and resolves with `{win_id = <u64>}`.
---   2. Alloc a second id for the final result. Register
---      `smelt.win.on_event(win, "submit"|"dismiss", …)` handlers
---      that build the result, close the float, and resume via
---      `smelt.task.resume(result_id, result)`.
---   3. Register any user-provided keymaps (`opts.keymaps`), the
---      `on_tick` handler, and per-input `on_change` handlers.
---   4. Yield `{__yield = "external", id = result_id}` and return the
---      resumed value.
+-- Rust exposes the low-level `smelt.ui.dialog._open(opts) -> win_id`
+-- which synchronously creates the float + panels. Everything else —
+-- result building, custom keymaps, `on_select` / `on_change` /
+-- `on_tick`, submit/dismiss routing — lives here. The only coroutine
+-- yield is for the final result.
 
 local M = {}
 
@@ -104,22 +88,17 @@ function smelt.ui.dialog.open(opts)
     end
   end
 
-  -- Step 1: queue a dialog-open op and park the task. The reducer
-  -- opens the float + panels and resolves us with `{win_id = <u64>}`.
-  local open_id = smelt.task.alloc()
-  smelt.ui.dialog._request_open(open_id, opts)
-  local opened = coroutine.yield({__yield = "external", id = open_id})
-  if type(opened) ~= "table" or type(opened.win_id) ~= "number" then
+  -- Open the float synchronously. Rust returns the `win_id` directly.
+  local win_id = smelt.ui.dialog._open(opts)
+  if type(win_id) ~= "number" then
     return { action = "dismiss", inputs = {} }
   end
-  local win_id = opened.win_id
 
-  -- Step 2: mint a task id for the final resume.
   local task_id = smelt.task.alloc()
 
-  -- Step 3: Submit handler. Fires when the focused options/list panel
-  -- sees Enter (via `WidgetEvent::Submit` auto-translation) or an
-  -- input panel submits its text. Build the result and resume.
+  -- Submit handler. Fires when the focused options/list panel sees
+  -- Enter (via `WidgetEvent::Submit` auto-translation) or an input
+  -- panel submits its text. Build the result and resume.
   smelt.win.on_event(win_id, "submit", function(raw_ctx)
     local idx1 = nil
     if option_panel_idx then
@@ -149,7 +128,7 @@ function smelt.ui.dialog.open(opts)
     })
   end)
 
-  -- Step 4: Dismiss handler. Fires on Esc or a configured dismiss key.
+  -- Dismiss handler. Fires on Esc or a configured dismiss key.
   smelt.win.on_event(win_id, "dismiss", function(raw_ctx)
     smelt.win.close(win_id)
     smelt.task.resume(task_id, {
@@ -158,7 +137,7 @@ function smelt.ui.dialog.open(opts)
     })
   end)
 
-  -- Step 5: user-provided keymaps. Each fires synchronously with a
+  -- User-provided keymaps. Each fires synchronously with a
   -- legacy-shape ctx; the callback decides whether to `ctx.close()`.
   if type(opts.keymaps) == "table" then
     for _, km in ipairs(opts.keymaps) do
@@ -175,9 +154,9 @@ function smelt.ui.dialog.open(opts)
     end
   end
 
-  -- Step 6: per-input `on_change` hooks. A single TextChanged event
-  -- fires for the whole dialog; fan out to each registered input
-  -- (there's usually one, but the dispatch handles many).
+  -- Per-input `on_change` hooks. A single TextChanged event fires for
+  -- the whole dialog; fan out to each registered input (there's
+  -- usually one, but the dispatch handles many).
   if next(input_on_change) ~= nil then
     smelt.win.on_event(win_id, "text_changed", function(raw_ctx)
       local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
@@ -190,8 +169,8 @@ function smelt.ui.dialog.open(opts)
     end)
   end
 
-  -- Step 7: `on_tick` hook — fires each engine tick for live-refresh
-  -- dialogs (agents list, process registry, session cache).
+  -- `on_tick` hook — fires each engine tick for live-refresh dialogs
+  -- (agents list, process registry, session cache).
   if type(opts.on_tick) == "function" then
     local on_tick = opts.on_tick
     smelt.win.on_event(win_id, "tick", function(raw_ctx)
@@ -203,8 +182,8 @@ function smelt.ui.dialog.open(opts)
     end)
   end
 
-  -- Step 8: park the task until a handler calls `task.resume`.
-  return coroutine.yield({__yield = "external", id = task_id})
+  -- Park the task until a handler calls `task.resume`.
+  return smelt.task.wait(task_id)
 end
 
 return M

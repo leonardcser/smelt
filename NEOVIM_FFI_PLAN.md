@@ -181,4 +181,22 @@ Canonicalization (Ctrl-R and friends):
 
 ## Progress
 
-_(Updated as each step lands.)_
+- **Step 1 — Canonicalize keymap.** Done (`bb3adce`). `smelt.keymap.set`
+  normalizes `mode` + `chord` at registration, raises Lua error on
+  unknown input, `prompt_picker.lua` now tracked.
+- **Step 2 — TLS pointer + deferred callbacks.** Done (`bcf9fc4`).
+  `crates/tui/src/lua/app_ref.rs` (NonNull<App> in TLS,
+  `install_app_ptr`/`with_app`/`try_with_app`), `LuaRuntime` now queues
+  `PendingInvocation`s via `queue_invocation` and drains them via
+  `drain_lua_invocations` with two-phase prepare/call; TLS installed at
+  top of the main loop. No API surface change yet.
+- **Step 3 — Migrate Lua bindings to sync.** Done. `smelt.buf.*`,
+  `smelt.win.*`, `smelt.prompt.set_text`, `smelt.ui.picker.*`, and
+  `smelt.ui.dialog._open` now call `crate::lua::with_app(…)` directly;
+  the nine bridge UiOps (`WinBindLuaKeymap`, `WinBindLuaEvent`,
+  `WinClearKeymap`, `WinClearEvent`, `PickerSetSelected`,
+  `PickerSetItems`, `OpenLuaDialog`, `OpenLuaPicker`, `PromptSetText`)
+  plus the now-unused `BufCreate`, `BufSetLines`, `BufSetSource`,
+  `BufAddHighlight` arms are gone. `dialog.lua` and `picker.lua` shrink
+  to the final-result yield only. `OpenArgPicker` stays until Step 4.
+- **Step 4 — Delete ArgPicker machinery.** Pending.

@@ -806,7 +806,7 @@ impl App {
         }
     }
 
-    pub(super) fn close_float(&mut self, win_id: ui::WinId) {
+    pub(crate) fn close_float(&mut self, win_id: ui::WinId) {
         for id in self.ui.win_close(win_id) {
             self.lua.remove_callback(id);
         }
