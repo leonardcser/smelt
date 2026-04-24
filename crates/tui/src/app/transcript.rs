@@ -15,6 +15,7 @@ use crate::render::layout_out::{LayoutSink, SpanCollector};
 use crate::render::selection::wrap_and_locate_cursor;
 use crate::render::SPINNER_FRAMES;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct TranscriptData {
@@ -202,40 +203,29 @@ impl App {
         !self.transcript.history.is_empty() || self.has_ephemeral(show_thinking)
     }
 
-    pub fn full_transcript_text(&mut self, show_thinking: bool) -> Vec<String> {
+    /// Full transcript as one string per display row. Cheap when there
+    /// are no ephemeral rows (returns an `Arc::clone` of the cached
+    /// snapshot); otherwise clones the vec once to append ephemeral
+    /// rows. Callers treat it as a `&[String]` via deref coercion.
+    pub fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
-        let mut rows = snap.rows.clone();
-        if self.has_ephemeral(show_thinking) {
-            let mut col = SpanCollector::new(tw);
-            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
-            for line in col.finish().lines {
-                let mut s = String::new();
-                for span in &line.spans {
-                    s.push_str(&span.text);
-                }
-                rows.push(s);
-            }
+        if !self.has_ephemeral(show_thinking) {
+            let snap = self.transcript.snapshot(tw, show_thinking);
+            return Arc::clone(&snap.rows);
         }
-        rows
-    }
-
-    pub fn full_transcript_display_text(&mut self, show_thinking: bool) -> Vec<String> {
-        let tw = self.transcript_width() as u16;
+        let mut col = SpanCollector::new(tw);
+        self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
+        let ephemeral_lines = col.finish().lines;
         let snap = self.transcript.snapshot(tw, show_thinking);
-        let mut rows = snap.rows.clone();
-        if self.has_ephemeral(show_thinking) {
-            let mut col = SpanCollector::new(tw);
-            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
-            for line in col.finish().lines {
-                let mut s = String::new();
-                for span in &line.spans {
-                    s.push_str(&span.text);
-                }
-                rows.push(s);
+        let mut rows: Vec<String> = (*snap.rows).clone();
+        for line in ephemeral_lines {
+            let mut s = String::new();
+            for span in &line.spans {
+                s.push_str(&span.text);
             }
+            rows.push(s);
         }
-        rows
+        Arc::new(rows)
     }
 
     /// Byte positions in `rows.join("\n")` of each `\n` separator,

@@ -538,6 +538,24 @@ impl App {
         scroll_top: u16,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
+        // Cheap early-out: called every frame. Touch the transcript rows
+        // only when something actually wants a highlight painted (an
+        // active vim visual, a cursor anchor, or a yank-flash still
+        // within its reveal window).
+        let vim_visual = matches!(
+            self.transcript_window.vim.as_ref().map(|v| v.mode()),
+            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
+        );
+        let anchor_set = self.transcript_window.win_cursor.anchor().is_some();
+        let yank_flash = self
+            .transcript_window
+            .kill_ring
+            .yank_flash_range(std::time::Instant::now())
+            .is_some();
+        if !vim_visual && !anchor_set && !yank_flash {
+            return Vec::new();
+        }
+
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         if rows.is_empty() {
             return Vec::new();

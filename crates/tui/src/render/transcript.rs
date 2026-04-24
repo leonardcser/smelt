@@ -10,6 +10,7 @@ use crate::app::transcript_model::{
 };
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// One display cell in the snapshot, carrying the character and its
 /// copy/selection metadata from the span that produced it.
@@ -26,7 +27,10 @@ pub struct TranscriptSnapshot {
     pub width: u16,
     pub show_thinking: bool,
     /// One entry per row in the full transcript (including gap rows).
-    pub rows: Vec<String>,
+    /// `Arc` so callers that only need to read rows can share the cache
+    /// without a deep clone — only the rare "append ephemeral rows"
+    /// path pays the copy.
+    pub rows: Arc<Vec<String>>,
     /// Per-cell metadata for each row, parallel to `rows`. Each inner
     /// vec has one `SnapshotCell` per display column. Used by
     /// `copy_range` to respect `SpanMeta.selectable` / `copy_as`.
@@ -534,7 +538,7 @@ impl Transcript {
         TranscriptSnapshot {
             width,
             show_thinking,
-            rows,
+            rows: Arc::new(rows),
             row_cells,
             soft_wrapped,
             source_text,
@@ -745,7 +749,7 @@ mod tests {
         TranscriptSnapshot {
             width: 80,
             show_thinking: false,
-            rows,
+            rows: Arc::new(rows),
             row_cells,
             soft_wrapped: vec![false; len],
             source_text: vec![None; len],

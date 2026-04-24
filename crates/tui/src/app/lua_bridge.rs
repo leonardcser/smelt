@@ -7,7 +7,7 @@ use super::*;
 impl App {
     pub(super) fn snapshot_lua_context(&mut self) -> (Option<String>, String) {
         let transcript_text = self
-            .full_transcript_text(self.settings.show_thinking)
+            .full_transcript_display_text(self.settings.show_thinking)
             .join("\n");
         let prompt_text = self.input.win.edit_buf.buf.clone();
         let focused_window = match self.app_focus {
