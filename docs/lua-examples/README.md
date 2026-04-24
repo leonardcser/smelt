@@ -75,7 +75,18 @@ hangs off `smelt.*` — flat namespace, Neovim-style.
 
 ### Buffers / Windows / Tasks / Theme / Fuzzy
 
-- `smelt.buf.{create, set_lines, add_highlight, add_dim, text}`
+- `smelt.buf.{create, set_lines, set_source, add_highlight, add_dim, text}`
+    - `buf.create({ mode = "plain"|"markdown"|"bash"|"file"|"diff", ... })` —
+      installs a formatter that turns the buffer's source into styled,
+      soft-wrapped lines. `mode = "file"` requires `path = "..."`; `mode =
+      "diff"` requires `path = "..."` and takes optional `old = "..."`
+      (treats `set_source` as the post-edit side).
+    - `buf.set_source(buf, text)` — replace the source feeding the formatter.
+      The buffer re-renders at the host panel / window's content width on
+      the next frame; call repeatedly to stream updates (e.g. from
+      `engine.ask`'s `on_response`).
+    - `buf.set_lines(buf, lines)` — still works for plain buffers (no `mode`)
+      when you want raw line control + manual highlights.
 - `smelt.win.{focus, mode, close, set_keymap, on_event}`
 - `smelt.task.{alloc, resume}` — external task ids for Lua coroutine plumbing
 - `smelt.sleep(ms)` — yields the current task

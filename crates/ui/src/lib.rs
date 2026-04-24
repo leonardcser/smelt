@@ -35,7 +35,7 @@ pub type AttachmentId = u64;
 pub type LuaInvoke<'a> =
     dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload, &[dialog::PanelSnapshot]) + 'a;
 
-pub use buffer::{BufType, Buffer, Span, SpanStyle};
+pub use buffer::{BufType, Buffer, BufferFormatter, Span, SpanStyle};
 pub use buffer_view::BufferView;
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
@@ -430,7 +430,15 @@ impl Ui {
         // Pre-sync so `FitContent` sees a populated `line_count` on
         // the first frame — otherwise the dialog lands at the cap
         // height on open, then snaps to fit on the next render.
-        dlg.sync_from_bufs(|bid| self.bufs.get(&bid));
+        //
+        // The float rect's width is independent of `natural_h` (every
+        // `Placement` resolves width from terminal size + its width
+        // constraint, not the content height), so we compute it first
+        // with `natural_h = None` and feed the content width into
+        // formatter-backed buffers before sampling `natural_height`.
+        let pre_rect = resolve_float_rect(&float_config, tw, th, None);
+        let content_width = pre_rect.width.saturating_sub(1);
+        dlg.sync_from_bufs_mut(content_width, &mut self.bufs);
         let natural_h = Some(dlg.natural_height());
         let rect = resolve_float_rect(&float_config, tw, th, natural_h);
 
@@ -761,16 +769,32 @@ impl Ui {
     }
 
     fn sync_float_content(&mut self) {
-        let dialog_layers: Vec<String> = self
+        let (tw, th) = self.terminal_size;
+        // Pair each dialog layer with the content width it should
+        // render at. Width is resolved from `Placement` alone — it
+        // never depends on `natural_h`, so we can compute it before
+        // the formatter runs — then we shave a column for the
+        // potential scrollbar so wrapped content never bleeds under
+        // the thumb.
+        let targets: Vec<(String, u16)> = self
             .wins
             .iter()
             .filter(|(_, w)| w.is_float())
-            .map(|(id, _)| float_layer_id(*id))
+            .map(|(id, w)| {
+                let width = match &w.config {
+                    WinConfig::Float(fc) => resolve_float_rect(fc, tw, th, None).width,
+                    _ => tw,
+                };
+                (float_layer_id(*id), width.saturating_sub(1))
+            })
             .collect();
-        for layer_id in dialog_layers {
+        for (layer_id, content_width) in targets {
+            // Split-borrow: `self.bufs` and `self.compositor` are
+            // disjoint fields, so both mutable borrows coexist.
+            let bufs = &mut self.bufs;
             if let Some(comp) = self.compositor.component_mut(&layer_id) {
                 if let Some(dlg) = comp.as_any_mut().downcast_mut::<dialog::Dialog>() {
-                    dlg.sync_from_bufs(|bid| self.bufs.get(&bid));
+                    dlg.sync_from_bufs_mut(content_width, bufs);
                 }
             }
         }

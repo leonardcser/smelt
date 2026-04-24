@@ -667,6 +667,23 @@ impl LuaRuntime {
         ghost_text_tbl.set("clear", push_op!(lua, shared, || UiOp::ClearGhostText))?;
         smelt_ui.set("ghost_text", ghost_text_tbl)?;
 
+        // smelt.ui.spinner — same glyph set and cadence the status bar
+        // uses for its "working" pill, exposed as primitives so Lua
+        // plugins (e.g. /btw's "thinking" placeholder) can animate in
+        // lockstep with the rest of the UI. Lua drives the animation
+        // via `smelt.defer(period_ms, tick)`; `glyph()` returns the
+        // current frame without any server-side state.
+        let spinner_tbl = lua.create_table()?;
+        spinner_tbl.set(
+            "glyph",
+            lua.create_function(|_, ()| Ok(crate::render::spinner_glyph()))?,
+        )?;
+        spinner_tbl.set(
+            "period_ms",
+            lua.create_function(|_, ()| Ok(crate::render::SPINNER_FRAME_MS))?,
+        )?;
+        smelt_ui.set("spinner", spinner_tbl)?;
+
         // smelt.notify / smelt.notify_error (top-level convenience).
         smelt.set(
             "notify",
@@ -724,12 +741,23 @@ impl LuaRuntime {
             let s = shared.clone();
             buf_tbl.set(
                 "create",
-                lua.create_function(move |_, ()| {
+                lua.create_function(move |_, opts: Option<mlua::Table>| {
+                    let format = match opts.as_ref() {
+                        Some(t) => match t.get::<Option<String>>("mode")? {
+                            Some(mode) => {
+                                Some(crate::format::BufFormat::from_lua_spec(&mode, t).map_err(
+                                    |e| LuaError::RuntimeError(format!("buf.create: {e}")),
+                                )?)
+                            }
+                            None => None,
+                        },
+                        None => None,
+                    };
                     let id = s
                         .next_buf_id
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Ok(mut o) = s.ops.lock() {
-                        o.push(UiOp::BufCreate { id });
+                        o.push(UiOp::BufCreate { id, format });
                     }
                     Ok(id)
                 })?,
@@ -746,6 +774,18 @@ impl LuaRuntime {
                         .collect();
                     if let Ok(mut o) = s.ops.lock() {
                         o.push(UiOp::BufSetLines { id, lines });
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let s = shared.clone();
+            buf_tbl.set(
+                "set_source",
+                lua.create_function(move |_, (id, source): (u64, String)| {
+                    if let Ok(mut o) = s.ops.lock() {
+                        o.push(UiOp::BufSetSource { id, source });
                     }
                     Ok(())
                 })?,

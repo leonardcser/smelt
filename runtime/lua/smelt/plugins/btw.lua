@@ -1,9 +1,13 @@
 -- Built-in /btw (side question) plugin.
 --
 -- Registers the `/btw` command. Opens a dialog, sends the question to
--- the engine via `engine.ask()`, and streams the response into the
--- dialog's buffer. Uses only generic buf/dialog primitives — zero
--- btw-specific Rust code.
+-- the engine via `engine.ask()`, and drives the answer into a
+-- markdown-formatted buffer. The formatter reflows on terminal
+-- resize and re-renders when `set_source` changes the content; the
+-- dialog panel reads its wrapped + highlighted output directly.
+-- While the answer is pending, a spinner pill mirrors the "working"
+-- status the bottom bar shows for the main agent. Uses only generic
+-- buf / dialog / spinner primitives — zero btw-specific Rust code.
 
 local SYSTEM = "You are a helpful assistant. The user is asking a quick side question "
   .. "while working on something else. Answer concisely and directly. "
@@ -17,8 +21,15 @@ smelt.cmd.register("btw", function(args)
   end
 
   smelt.spawn(function()
-    local buf = smelt.buf.create()
-    smelt.buf.set_lines(buf, { "thinking…" })
+    local buf = smelt.buf.create({ mode = "markdown" })
+    local done = false
+
+    local function tick()
+      if done then return end
+      smelt.buf.set_source(buf, smelt.ui.spinner.glyph() .. " working")
+      smelt.defer(smelt.ui.spinner.period_ms(), tick)
+    end
+    tick()
 
     local history = smelt.engine.history()
     local messages = {}
@@ -32,11 +43,8 @@ smelt.cmd.register("btw", function(args)
       messages = messages,
       task = "btw",
       on_response = function(content)
-        local lines = {}
-        for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-          table.insert(lines, line)
-        end
-        smelt.buf.set_lines(buf, lines)
+        done = true
+        smelt.buf.set_source(buf, content)
       end,
     })
 

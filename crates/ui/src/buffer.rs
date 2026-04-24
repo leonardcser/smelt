@@ -2,6 +2,22 @@ use crate::BufId;
 use crossterm::style::Color;
 use std::sync::Arc;
 
+/// Formatter plugged into a `Buffer` to turn a plain-text `source`
+/// into styled lines + decorations at a given terminal width.
+///
+/// Host crates implement this trait for every "content kind" a buffer
+/// can display (markdown, bash, syntax-highlighted file, inline diff,
+/// plain wrap, …). The `ui` crate knows nothing about any specific
+/// format — it just calls `render` when the source or width change.
+///
+/// The formatter's `render` is free to call the usual mutators on
+/// `Buffer` (`set_all_lines`, `add_highlight`, `set_decoration`, …):
+/// the buffer's `source` is read-only from the formatter's point of
+/// view and lives on `Buffer` untouched across renders.
+pub trait BufferFormatter: Send + Sync {
+    fn render(&self, buf: &mut Buffer, source: &str, width: u16);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     pub col_start: u16,
@@ -123,6 +139,14 @@ pub struct Buffer {
     virtual_text: Vec<VirtualText>,
     marks: std::collections::HashMap<String, Mark>,
     changedtick: u64,
+    /// When set, `source` drives the visible lines: the formatter
+    /// re-renders into this buffer lazily when `ensure_rendered_at`
+    /// is called with a different `(source_tick, width)` than the
+    /// last render.
+    formatter: Option<Arc<dyn BufferFormatter>>,
+    source: String,
+    source_tick: u64,
+    last_render: Option<(u64, u16)>,
 }
 
 impl Buffer {
@@ -137,7 +161,65 @@ impl Buffer {
             virtual_text: Vec::new(),
             marks: std::collections::HashMap::new(),
             changedtick: 0,
+            formatter: None,
+            source: String::new(),
+            source_tick: 0,
+            last_render: None,
         }
+    }
+
+    /// Install a formatter. The next `ensure_rendered_at` call
+    /// re-renders from the current `source`. Replaces any prior
+    /// formatter.
+    pub fn set_formatter(&mut self, formatter: Arc<dyn BufferFormatter>) {
+        self.formatter = Some(formatter);
+        self.last_render = None;
+    }
+
+    /// Builder equivalent of `set_formatter`.
+    pub fn with_formatter(mut self, formatter: Arc<dyn BufferFormatter>) -> Self {
+        self.set_formatter(formatter);
+        self
+    }
+
+    pub fn has_formatter(&self) -> bool {
+        self.formatter.is_some()
+    }
+
+    /// Update the source driving the formatter. The next
+    /// `ensure_rendered_at` will re-render; without a formatter
+    /// attached, the source is held but never consulted.
+    pub fn set_source(&mut self, source: String) {
+        if source == self.source {
+            return;
+        }
+        self.source = source;
+        self.source_tick = self.source_tick.wrapping_add(1);
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Re-run the formatter if `(source, width)` differs from the last
+    /// render. No-op without a formatter or when nothing changed.
+    /// Returns `true` when a render actually happened.
+    pub fn ensure_rendered_at(&mut self, width: u16) -> bool {
+        let Some(formatter) = self.formatter.clone() else {
+            return false;
+        };
+        let fresh = match self.last_render {
+            Some((tick, w)) => tick == self.source_tick && w == width,
+            None => false,
+        };
+        if fresh {
+            return false;
+        }
+        let source = std::mem::take(&mut self.source);
+        formatter.render(self, &source, width);
+        self.source = source;
+        self.last_render = Some((self.source_tick, width));
+        true
     }
 
     pub fn id(&self) -> BufId {
@@ -427,5 +509,75 @@ mod tests {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["hello".into(), "world".into()]);
         assert_eq!(buf.text(), "hello\nworld");
+    }
+
+    /// Drives [`Buffer::ensure_rendered_at`] with a stub formatter so
+    /// we can assert the caching + re-render semantics without
+    /// pulling the full markdown pipeline into the ui crate.
+    struct StubFormatter {
+        calls: std::sync::Mutex<Vec<(String, u16)>>,
+    }
+
+    impl StubFormatter {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn call_log(&self) -> Vec<(String, u16)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl BufferFormatter for StubFormatter {
+        fn render(&self, buf: &mut Buffer, source: &str, width: u16) {
+            self.calls.lock().unwrap().push((source.to_string(), width));
+            buf.set_all_lines(vec![format!("{source}@{width}")]);
+        }
+    }
+
+    #[test]
+    fn formatter_runs_once_per_source_width() {
+        let fmt = StubFormatter::new();
+        let mut buf = make_buf().with_formatter(fmt.clone());
+        buf.set_source("x".into());
+        assert!(buf.ensure_rendered_at(10));
+        assert!(!buf.ensure_rendered_at(10));
+        assert!(buf.ensure_rendered_at(20));
+        buf.set_source("y".into());
+        assert!(buf.ensure_rendered_at(20));
+        assert_eq!(
+            fmt.call_log(),
+            vec![
+                ("x".to_string(), 10),
+                ("x".to_string(), 20),
+                ("y".to_string(), 20),
+            ]
+        );
+        assert_eq!(buf.get_line(0), Some("y@20"));
+    }
+
+    #[test]
+    fn setting_same_source_does_not_re_render() {
+        let fmt = StubFormatter::new();
+        let mut buf = make_buf().with_formatter(fmt.clone());
+        buf.set_source("abc".into());
+        buf.ensure_rendered_at(10);
+        buf.set_source("abc".into());
+        assert!(!buf.ensure_rendered_at(10));
+        assert_eq!(fmt.call_log().len(), 1);
+    }
+
+    #[test]
+    fn installing_formatter_invalidates_render_cache() {
+        let first = StubFormatter::new();
+        let mut buf = make_buf().with_formatter(first.clone());
+        buf.set_source("s".into());
+        buf.ensure_rendered_at(10);
+        let second = StubFormatter::new();
+        buf.set_formatter(second.clone());
+        assert!(buf.ensure_rendered_at(10));
+        assert_eq!(second.call_log().len(), 1);
     }
 }

@@ -7,6 +7,7 @@
 //! lives in `runtime/lua/smelt/{dialog,picker}.lua`.
 
 use crate::app::App;
+use crate::format::BufFormat;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
 use ui::{
@@ -17,8 +18,11 @@ use ui::{
 // ── Dialog ───────────────────────────────────────────────────────────
 //
 // Supported panel kinds from `opts.panels[]`:
-// - `{ kind = "content",  text = "..." | buf = <id> }`
-// - `{ kind = "markdown", text = "..." }`  (rendered via `render_markdown_inner`)
+// - `{ kind = "content", buf = <id> }`                       — existing buffer (plain or formatter-backed)
+// - `{ kind = "content", text = "..." }`                     — soft-wrapped plain text
+// - `{ kind = "content", text = "...", mode = "markdown" }`  — formatter-rendered text
+//                                                              (also accepts "bash", "file", "diff")
+// - `{ kind = "markdown", text = "..." }`                    — sugar for the line above with mode = "markdown"
 // - `{ kind = "options",  items = [{label, shortcut?}] }`
 // - `{ kind = "input",    placeholder? = "..." }`
 // - `{ kind = "list",     buf = <id> }`
@@ -46,7 +50,13 @@ pub fn open_dialog(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, 
                     BufId(id)
                 } else {
                     let text: String = panel.get("text").unwrap_or_default();
-                    make_text_buffer(app, &text)
+                    // Inline text panels default to the plain formatter
+                    // so help dialogs / help-style content wrap at the
+                    // current panel width instead of being clipped.
+                    // Callers who want raw unwrapped lines can supply a
+                    // pre-built buffer via `buf = ...`.
+                    let format = parse_panel_mode(&panel)?.or(Some(BufFormat::Plain));
+                    make_content_buffer(app, &text, format)
                 };
                 let focusable: bool = panel.get("focusable").unwrap_or(false);
                 let pad_left: u16 = panel.get("pad_left").unwrap_or(0);
@@ -59,7 +69,7 @@ pub fn open_dialog(app: &mut App, opts_key: mlua::RegistryKey) -> Result<WinId, 
             }
             "markdown" => {
                 let text: String = panel.get("text").unwrap_or_default();
-                let buf = make_markdown_buffer(app, &text);
+                let buf = make_content_buffer(app, &text, Some(BufFormat::Markdown));
                 panel_specs.push(
                     PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
                         .with_initial_focus(initial_focus),
@@ -270,34 +280,44 @@ fn accent_style() -> ui::grid::Style {
     }
 }
 
-fn make_text_buffer(app: &mut App, text: &str) -> BufId {
+/// Build a buffer for a `content` / `markdown` panel. `format = None`
+/// produces a plain buffer with raw lines (no wrapping, no
+/// formatter) — matches the pre-formatter behaviour. `format =
+/// Some(mode)` installs the matching formatter and seeds its source
+/// with `text`; the dialog drives re-rendering at the panel's
+/// content width, so the baked-at-open width=80 trap of the old
+/// markdown path is gone.
+fn make_content_buffer(app: &mut App, text: &str, format: Option<BufFormat>) -> BufId {
     let id = app.ui.buf_create(BufCreateOpts::default());
     if let Some(buf) = app.ui.buf_mut(id) {
-        let lines: Vec<String> = if text.is_empty() {
-            vec![String::new()]
-        } else {
-            text.lines().map(|s| s.to_string()).collect()
-        };
-        buf.set_all_lines(lines);
+        match format {
+            Some(fmt) => {
+                buf.set_formatter(fmt.into_formatter());
+                buf.set_source(text.to_string());
+            }
+            None => {
+                let lines: Vec<String> = if text.is_empty() {
+                    vec![String::new()]
+                } else {
+                    text.lines().map(|s| s.to_string()).collect()
+                };
+                buf.set_all_lines(lines);
+            }
+        }
     }
     id
 }
 
-fn make_markdown_buffer(app: &mut App, text: &str) -> BufId {
-    let id = app.ui.buf_create(BufCreateOpts::default());
-    let theme = crate::theme::snapshot();
-    let width: u16 = 80;
-    if let Some(buf) = app.ui.buf_mut(id) {
-        crate::render::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
-            crate::app::transcript_present::render_markdown_inner(
-                sink,
-                text,
-                width as usize,
-                " ",
-                false,
-                None,
-            );
-        });
+/// Parse an optional `mode = "..."` field off a panel table. Returns
+/// `Ok(None)` when absent, `Ok(Some(fmt))` when a valid mode is
+/// specified, and `Err(msg)` on unknown modes or missing payload
+/// fields (e.g. `mode = "file"` without `path`).
+fn parse_panel_mode(panel: &mlua::Table) -> Result<Option<BufFormat>, String> {
+    match panel
+        .get::<Option<String>>("mode")
+        .map_err(|e| e.to_string())?
+    {
+        Some(mode) => BufFormat::from_lua_spec(&mode, panel).map(Some),
+        None => Ok(None),
     }
-    id
 }

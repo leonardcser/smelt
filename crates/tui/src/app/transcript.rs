@@ -13,7 +13,6 @@ use crate::app::transcript_present::{
 };
 use crate::render::layout_out::{LayoutSink, SpanCollector};
 use crate::render::selection::wrap_and_locate_cursor;
-use crate::render::SPINNER_FRAMES;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -609,7 +608,7 @@ impl App {
         if let (Some(elapsed), Some(prev_frame)) =
             (self.working.elapsed(), self.working.last_spinner_frame())
         {
-            let frame = (elapsed.as_millis() / 150) as usize % SPINNER_FRAMES.len();
+            let frame = crate::render::spinner_frame_index(elapsed);
             if frame != prev_frame {
                 self.working.set_last_spinner_frame(frame);
                 changed = true;
