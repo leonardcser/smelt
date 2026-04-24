@@ -165,8 +165,28 @@ impl App {
                                 vp.content_width,
                             );
                         }
+                        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+                            // Save the pre-drag vim mode so mouse-up
+                            // can restore it (a drag from Insert should
+                            // not land the user in Normal). Applies to
+                            // both single-click drag and double-click
+                            // word-select, since both enter Visual.
+                            if let Some(vim) = self.input.win.vim.as_ref() {
+                                self.prompt_drag_return_vim_mode = Some(vim.mode());
+                            }
+                        }
                         if double {
                             self.select_and_copy_word_in_prompt();
+                        } else if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+                            // Anchor a vim Visual selection at the click so
+                            // a drag grows inclusive of the anchor char,
+                            // matching keyboard `v` behaviour.
+                            let anchor = self.input.win.cpos;
+                            if let Some(vim) = self.input.win.vim.as_mut() {
+                                vim.begin_visual(crate::vim::ViMode::Visual, anchor);
+                            } else {
+                                self.input.win.win_cursor.set_anchor(Some(anchor));
+                            }
                         }
                         return EventOutcome::Redraw;
                     }
@@ -370,7 +390,6 @@ impl App {
                 }
             }
             crate::app::AppFocus::Prompt => {
-                self.input.win.win_cursor.extend(self.input.win.cpos);
                 if let Some(vp) = self.prompt_viewport {
                     if let Some(render::ViewportHit::Content { row: r, col: c }) = vp.hit(row, col)
                     {
@@ -381,6 +400,12 @@ impl App {
                             vp.content_width,
                         );
                     }
+                }
+                // Vim Visual mode reads cpos directly for `visual_range`
+                // — no separate anchor to extend. Only the non-vim path
+                // needs the explicit win_cursor extend.
+                if self.input.win.vim.is_none() {
+                    self.input.win.win_cursor.extend(self.input.win.cpos);
                 }
             }
         }
@@ -571,11 +596,19 @@ impl App {
 
     /// Finalise a prompt drag-select: copy any non-empty selection to
     /// the clipboard and clear the anchor. A bare click (no drag) has
-    /// anchor == cpos, so this is a no-op in that case.
+    /// anchor == cpos, so this is a no-op in that case. When vim drove
+    /// the selection via `Visual` mode, restore whatever mode the user
+    /// was in before the drag started (Normal / Insert) so a drag from
+    /// Insert doesn't leave them stranded in Normal.
     fn copy_prompt_selection_on_release(&mut self) {
         if let Some((s, e)) = self.input.selection_range() {
             let text: String = self.input.win.edit_buf.buf[s..e].to_string();
             let _ = crate::app::commands::copy_to_clipboard(&text);
+        }
+        if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
+            if let Some(vim) = self.input.win.vim.as_mut() {
+                vim.set_mode(prev);
+            }
         }
         self.input.win.win_cursor.clear_anchor();
     }
