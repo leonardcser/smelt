@@ -1625,52 +1625,15 @@ mod tests {
     }
 
     #[test]
-    fn dialog_request_open_queues_ui_op_and_parks_task() {
-        // `smelt.ui.dialog.open` is a thick Lua wrapper in
-        // `runtime/lua/smelt/dialog.lua` that allocs an external task
-        // id, calls `_request_open`, and parks on External. End-to-end
-        // resolution requires the App-level reducer (which actually
-        // opens the float and resolves the task), so this test just
-        // verifies the foundation: calling `_request_open` queues a
-        // `UiOp::OpenLuaDialog` and the subsequent External yield
-        // parks the task.
-        let rt = LuaRuntime::new();
-        rt.lua
-            .load(
-                r#"
-                smelt.tools.register({
-                  name = "confirm_raw_yield",
-                  description = "",
-                  parameters = { type = "object", properties = {} },
-                  execute = function()
-                    local id = smelt.task.alloc()
-                    smelt.ui.dialog._request_open(id, {
-                      panels = {
-                        { kind = "content", text = "please confirm" },
-                      },
-                    })
-                    local r = coroutine.yield({__yield = "external", id = id})
-                    return tostring(r and r.win_id or "nil")
-                  end,
-                })
-                "#,
-            )
-            .exec()
-            .unwrap();
-        let args = std::collections::HashMap::new();
-        assert!(matches!(
-            rt.execute_plugin_tool("confirm_raw_yield", &args, 1, "c"),
-            ToolExecResult::Pending
-        ));
-        let ops = rt.drain_ops();
-        assert!(ops
-            .iter()
-            .any(|op| matches!(op, AppOp::Ui(UiOp::OpenLuaDialog { .. }))));
-    }
-
-    #[test]
     fn dialog_open_outside_task_errors() {
-        let rt = LuaRuntime::new();
+        // Calling `smelt.ui.dialog.open` outside a yieldable coroutine
+        // (the runtime file's first guard) must raise. With plugins
+        // loaded the Lua wrapper is in place; `isyieldable()` is false
+        // at the top level, so the call errors before reaching the
+        // Rust `_open` binding.
+        let mut rt = LuaRuntime::new();
+        rt.load_plugins();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let res: LuaResult<()> = rt.lua.load("smelt.ui.dialog.open({panels = {}})").exec();
         assert!(res.is_err());
     }
