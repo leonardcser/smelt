@@ -238,6 +238,52 @@ impl App {
         rows
     }
 
+    /// Byte positions in `rows.join("\n")` of each `\n` separator,
+    /// partitioned into soft-wrap continuations and real line breaks.
+    /// Soft-wrap positions are "transparent" to word-select; hard
+    /// positions are the boundaries used by line-select. Ephemeral
+    /// rows (appended after the snapshot) are treated as hard breaks.
+    pub fn transcript_line_breaks(&mut self, show_thinking: bool) -> (Vec<usize>, Vec<usize>) {
+        let tw = self.transcript_width() as u16;
+        let snap = self.transcript.snapshot(tw, show_thinking);
+        let rows = snap.rows.clone();
+        let mut soft = Vec::new();
+        let mut hard = Vec::new();
+        let mut pos = 0usize;
+        for (i, row) in rows.iter().enumerate() {
+            pos += row.len();
+            if i + 1 < rows.len() {
+                let next_is_soft = snap.soft_wrapped.get(i + 1).copied().unwrap_or(false);
+                if next_is_soft {
+                    soft.push(pos);
+                } else {
+                    hard.push(pos);
+                }
+                pos += 1;
+            }
+        }
+        // Every boundary between the snapshot's last row and subsequent
+        // ephemeral rows (and between ephemeral rows themselves) is a
+        // hard break.
+        let snap_row_count = rows.len();
+        if self.has_ephemeral(show_thinking) {
+            let mut col = SpanCollector::new(tw);
+            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
+            let mut first_ephemeral = true;
+            for line in col.finish().lines {
+                if !first_ephemeral || snap_row_count > 0 {
+                    hard.push(pos);
+                    pos += 1;
+                }
+                first_ephemeral = false;
+                for span in &line.spans {
+                    pos += span.text.len();
+                }
+            }
+        }
+        (soft, hard)
+    }
+
     pub fn full_transcript_nav_text(&mut self, show_thinking: bool) -> Vec<String> {
         let tw = self.transcript_width() as u16;
         let snap = self.transcript.snapshot(tw, show_thinking);
