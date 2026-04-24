@@ -924,6 +924,15 @@ impl App {
                 self.discard_turn(true);
                 break 'main;
             }
+            // Install the TLS app pointer for the whole tick. Any Lua
+            // binding firing during this iteration can reach `&mut App`
+            // via `crate::lua::with_app`. Guard drops at end of the
+            // iteration scope and restores the previous slot (usually
+            // None). The pointer is the Neovim-equivalent to Vim's
+            // globals — Rust code itself never reads it; only Lua
+            // bindings do, and only when their enclosing &Rust borrow
+            // is field-disjoint from whatever the binding writes.
+            let _app_guard = crate::lua::install_app_ptr(self);
             // ── Lua timer + notification pump ────────────────────────────
             self.snapshot_engine_context(self.agent.is_some());
             self.lua.tick_timers();
@@ -943,7 +952,7 @@ impl App {
                      win: ui::WinId,
                      payload: &ui::Payload,
                      panels: &[ui::PanelSnapshot]| {
-                        lua.invoke_callback(handle, win, payload, panels);
+                        lua.queue_invocation(handle, win, payload, panels);
                     };
                 self.ui.dispatch_tick(&mut lua_invoke);
             }

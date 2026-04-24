@@ -156,7 +156,7 @@ impl App {
                               win: ui::WinId,
                               payload: &ui::Payload,
                               panels: &[ui::PanelSnapshot]| {
-            lua.invoke_callback(handle, win, payload, panels);
+            lua.queue_invocation(handle, win, payload, panels);
         };
         self.ui.dispatch_event(
             ui::PROMPT_WIN,
@@ -174,10 +174,63 @@ impl App {
     /// (dialog resolutions etc.) so resumption side-effects become ops.
     /// Call after any Lua handler dispatch.
     pub(super) fn apply_lua_ops(&mut self) {
+        self.drain_lua_invocations();
         let extra = self.lua.pump_task_events();
         self.apply_ops(extra);
         let ops = self.lua.drain_ops();
         self.apply_ops(ops);
+    }
+
+    /// Drain the pending-invocation queue built up during
+    /// `ui.handle_key` / `ui.dispatch_event`. Each Lua callback fires
+    /// under an `install_app_ptr` scope so its body can reach `&mut App`
+    /// through `crate::lua::with_app`. Until a binding uses it, this is
+    /// behaviour-neutral: callbacks just fire after the ui borrow
+    /// releases instead of during it.
+    ///
+    /// Two-phase to keep `&mut App` aliasing clean: phase 1 uses the
+    /// `&mut self` borrow to prepare mlua Function + payload handles
+    /// (these own internal refs to the Lua state, independent of Rust
+    /// borrows on self); phase 2 installs the TLS pointer and calls
+    /// each function with no Rust-level borrow on self alive — so a
+    /// Lua body that reaches back via `with_app` gets the sole `&mut
+    /// App` reborrow.
+    pub(super) fn drain_lua_invocations(&mut self) {
+        loop {
+            let pending = self.lua.drain_invocations();
+            if pending.is_empty() {
+                return;
+            }
+            // Phase 1: collect (func, payload_table, handle_id) tuples.
+            // Uses the `&mut self` borrow on self.lua.
+            let prepared: Vec<(mlua::Function, mlua::Table, u64)> = pending
+                .into_iter()
+                .filter_map(|inv| {
+                    let (func, payload) = self.lua.prepare_invocation(
+                        inv.handle,
+                        inv.win,
+                        &inv.payload,
+                        &inv.panels,
+                    )?;
+                    Some((func, payload, inv.handle.0))
+                })
+                .collect();
+            // Phase 2: install TLS app pointer and call each. After
+            // install_app_ptr returns, no &mut self use remains on any
+            // control-flow path, so NLL kills the borrow — Lua bodies
+            // that reach back via `with_app` get the sole reborrow.
+            let _guard = crate::lua::install_app_ptr(self);
+            for (func, payload, handle_id) in prepared {
+                if let Err(e) = func.call::<()>(payload) {
+                    crate::lua::try_with_app(|app| {
+                        app.lua.record_callback_error(handle_id, e);
+                    });
+                }
+            }
+            // Loop: a callback body may itself queue further invocations
+            // (e.g. a text_changed handler dispatches a submit inside
+            // the same frame). Drain them in the same tick.
+        }
     }
 
     /// Drive the `LuaTask` runtime and act on its outputs. Errors are
