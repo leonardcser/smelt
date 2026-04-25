@@ -4,7 +4,7 @@ impl App {
     /// Send a permission decision — either to a child agent (via socket reply)
     /// or to the local engine. This is the single routing point for all
     /// permission verdicts.
-    pub(super) fn send_permission_decision(
+    pub(crate) fn send_permission_decision(
         &mut self,
         request_id: u64,
         approved: bool,
@@ -275,7 +275,7 @@ impl App {
     /// Lightweight cancel: stop the engine turn without saving session,
     /// generating titles, or triggering auto-compact. Used before rewind/clear
     /// where the history will be mutated immediately after.
-    pub(super) fn cancel_agent(&mut self) {
+    pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.engine.send(UiCommand::Cancel);
         {
@@ -294,7 +294,7 @@ impl App {
         }
     }
 
-    pub(super) fn finish_turn(&mut self, cancelled: bool) {
+    pub(crate) fn finish_turn(&mut self, cancelled: bool) {
         self.sleep_inhibit.release();
         if cancelled {
             self.engine.send(UiCommand::Cancel);
@@ -1130,7 +1130,7 @@ impl App {
         entries
     }
 
-    pub(super) fn sync_permissions(
+    pub(crate) fn sync_permissions(
         &mut self,
         session_entries: Vec<PermissionEntry>,
         workspace_rules: Vec<crate::workspace_permissions::Rule>,
@@ -1171,7 +1171,7 @@ impl App {
 
     /// Resolve a completed confirm dialog choice.
     /// Returns `true` if the agent should be cancelled.
-    pub(super) fn resolve_confirm(
+    pub(crate) fn resolve_confirm(
         &mut self,
         (choice, message): (ConfirmChoice, Option<String>),
         call_id: &str,
