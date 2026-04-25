@@ -257,15 +257,15 @@ impl App {
         if let Event::Mouse(me) = *ev {
             return Some(self.handle_mouse(me));
         }
-        // Prompt-scoped ("buffer-local") Lua keymaps win over global
-        // ones — matches nvim's buffer-local > global priority. Fires
-        // only when the prompt owns focus and no float is up. Used by
+        // Split-scoped ("buffer-local") Lua keymaps win over global
+        // ones — matches nvim's buffer-local > global priority. The
+        // focused split (prompt_input / transcript) is resolved inside
+        // `handle_key_with_lua` via the registered split layer-id map,
+        // the same dispatch path floats use. Used by
         // `smelt.prompt.open_picker` to capture Enter / Esc / arrows
         // while a picker is active.
         if let Event::Key(k) = *ev {
-            if matches!(self.app_focus, crate::app::AppFocus::Prompt)
-                && self.ui.focused_float().is_none()
-            {
+            if self.ui.focused_float().is_none() {
                 let KeyEvent {
                     code, modifiers, ..
                 } = k;
@@ -277,9 +277,9 @@ impl App {
                      panels: &[ui::PanelSnapshot]| {
                         lua.queue_invocation(handle, win, payload, panels);
                     };
-                let result =
-                    self.ui
-                        .try_window_keymap(ui::PROMPT_WIN, code, modifiers, &mut lua_invoke);
+                let result = self
+                    .ui
+                    .handle_key_with_lua(code, modifiers, &mut lua_invoke);
                 if matches!(result, ui::KeyResult::Consumed) {
                     self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
