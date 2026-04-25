@@ -370,17 +370,14 @@ fn populate_payload_table(table: &mlua::Table, payload: &ui::Payload) -> mlua::R
 }
 
 /// Build a Lua sequence describing a dialog window's panels at
-/// callback-fire time. Each entry is `{ kind = "content" | "list" |
-/// "input", selected = <1-based | nil>, text = "…" }`.
+/// callback-fire time. Each entry is `{ selected = <1-based | nil>,
+/// text = "…" }`. List panels have a 1-based selection; input panels
+/// have non-empty text — plugins disambiguate by which field is
+/// populated, since they configured the panel layout at open time.
 fn build_panels_table(lua: &Lua, panels: &[ui::PanelSnapshot]) -> mlua::Result<mlua::Table> {
     let out = lua.create_table()?;
     for (i, p) in panels.iter().enumerate() {
         let entry = lua.create_table()?;
-        let kind = match p.kind {
-            ui::PanelKind::Content => "content",
-            ui::PanelKind::List { .. } => "list",
-        };
-        entry.set("kind", kind)?;
         if let Some(sel) = p.selected {
             entry.set("selected", sel + 1)?;
         }

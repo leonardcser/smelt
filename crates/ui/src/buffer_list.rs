@@ -300,6 +300,19 @@ impl PanelWidget for BufferList {
         self.view.set_scroll(from_top as usize);
         true
     }
+    fn scroll_by(&mut self, delta: isize) -> isize {
+        let rows = self.last_area.height as isize;
+        let total = self.line_count as isize;
+        let max_scroll = (total - rows).max(0);
+        let cur = self.scroll_top as isize;
+        let new = (cur + delta).clamp(0, max_scroll);
+        if new == cur {
+            return 0;
+        }
+        self.scroll_top = new as u16;
+        self.view.set_scroll(new as usize);
+        new - cur
+    }
 }
 
 impl ListWidget for BufferList {

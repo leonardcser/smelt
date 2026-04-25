@@ -1301,17 +1301,14 @@ mod tests {
         let id = rt.register_callback(func).unwrap();
         let panels = vec![
             ui::PanelSnapshot {
-                kind: ui::PanelKind::Content,
                 selected: None,
                 text: String::new(),
             },
             ui::PanelSnapshot {
-                kind: ui::PanelKind::List { multi: false },
                 selected: Some(3),
                 text: String::new(),
             },
             ui::PanelSnapshot {
-                kind: ui::PanelKind::Content,
                 selected: None,
                 text: "hello".into(),
             },

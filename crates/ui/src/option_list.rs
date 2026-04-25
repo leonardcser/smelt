@@ -1,9 +1,10 @@
-//! `OptionList` — a `PanelWidget` for selectable lists.
+//! `OptionList` — a `PanelWidget` for selectable in-memory lists.
 //!
-//! Covers the cases where a `PanelKind::List` (static buffer with
-//! cursor) isn't enough: multi-select with checkboxes, per-item
-//! shortcut keys (Confirm's `a` / `n` / `e` / `l`), and
-//! widget-managed cursor state.
+//! For lists driven by a `Buffer` (resume picker, agents picker) see
+//! `BufferList`. `OptionList` covers the cases where in-memory items
+//! are enough but the structure goes beyond plain rows: multi-select
+//! with checkboxes, per-item shortcut keys (Confirm's `a` / `n` / `e`
+//! / `l`), and widget-managed cursor state.
 
 use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::dialog::{ListWidget, PanelWidget};

@@ -6,13 +6,15 @@
 //! `╌` separators between panels, a `StatusBar` hints row at the
 //! bottom, a solid background fill, and no side or bottom edges.
 //!
-//! Every panel is a real `ui::Window` backed by a `ui::Buffer`. The
-//! panel's window holds its cursor, scroll, selection anchor — all the
-//! interaction state a terminal window has. Keys and mouse route to
-//! the focused panel's window; scrollbar, cursor overlay, and
-//! line-decoration-based selection highlight fall out of the buffer
-//! and window models. The dialog component itself only draws chrome
-//! and orchestrates focus.
+//! Each panel is either a buffer (read-only content like preview /
+//! header text — the dialog owns a `ui::Window` + `BufferView` for it
+//! and handles scroll + scrollbar drag itself) or a `PanelWidget`
+//! (`TextInput`, `OptionList`, `BufferList`, custom — the widget owns
+//! draw + key + mouse). The dialog only draws chrome (top rule,
+//! separators, hints), routes events to the focused panel, and
+//! resolves cross-panel fall-through (e.g. typing in a list-focused
+//! dialog flows to the input above; arrow keys in an input-focused
+//! dialog flow to the list below).
 
 use crate::buffer::{Buffer, LineDecoration};
 use crate::buffer_view::BufferView;
@@ -36,15 +38,6 @@ impl<S: std::hash::BuildHasher> BufferResolver for std::collections::HashMap<Buf
     fn get(&mut self, id: BufId) -> Option<&mut Buffer> {
         self.get_mut(&id)
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelKind {
-    /// Readonly text or preview. Scrollable, selectable via vim.
-    Content,
-    /// Selectable rows. Cursor line = current selection. Enter
-    /// returns `select:{idx}` from `handle_key`.
-    List { multi: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,13 +104,23 @@ pub trait PanelWidget: Component + Send {
     fn apply_scrollbar_drag(&mut self, _thumb_top: u16) -> bool {
         false
     }
+    /// Apply a signed scroll delta in rows (negative = up). Used for
+    /// programmatic scrolls like wheel + half-page keys, where the
+    /// caller has already resolved the magnitude. Returns the actual
+    /// delta applied (0 if clamped or no-op). Default no-op.
+    fn scroll_by(&mut self, _delta: isize) -> isize {
+        0
+    }
 }
 
-/// Selectable-list contract that buffer-backed lists (future
-/// `BufferList`) and item-backed lists (`OptionList`) both satisfy.
-/// Lets callers route uniform list operations — click-to-select,
-/// keyboard nav, scroll — without knowing the backing store. Widgets
-/// expose themselves through `PanelWidget::as_list_widget`.
+/// Selectable-list contract that buffer-mirroring lists (`BufferList`)
+/// and item-backed lists (`OptionList`) both satisfy. Lets callers
+/// route uniform list operations — click-to-select, keyboard nav,
+/// scroll — without knowing the backing store. Widgets expose
+/// themselves through `PanelWidget::as_list_widget`. The dialog uses
+/// `as_list_widget().is_some()` as the source of truth for "is this
+/// panel a list?" — fzf-style click routing, cross-panel key
+/// fall-through, and selection snapshot all branch on it.
 pub trait ListWidget {
     fn row_count(&self) -> usize;
     fn selected(&self) -> Option<usize>;
@@ -143,14 +146,13 @@ pub trait ListWidget {
 /// [`crate::Ui::snapshot_dialog_panels`] at keymap / event / tick
 /// dispatch so Lua callbacks can pull-read the current selection and
 /// input text without a bidirectional channel back into Ui.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PanelSnapshot {
-    pub kind: PanelKind,
-    /// 0-based cursor / selection index. `None` for panels without a
-    /// selection (`Content`, `Input`, plain `Content`-widget panels).
+    /// 0-based cursor / selection index. `Some(_)` when the panel is a
+    /// list widget (`OptionList`, `BufferList`); `None` otherwise.
     pub selected: Option<usize>,
-    /// Current text for `Input` panels and `TextInput` widgets. Empty
-    /// for others — callers inspect `kind` to disambiguate.
+    /// Current text for input widgets (`TextInput`). Empty string for
+    /// non-input panels.
     pub text: String,
 }
 
@@ -166,7 +168,6 @@ pub enum PanelContent {
 /// stays in the Ui registry.
 pub struct PanelSpec {
     pub content: PanelContent,
-    pub kind: PanelKind,
     pub height: PanelHeight,
     pub separator_above: Option<SeparatorStyle>,
     /// Left content padding inside the panel's rect.
@@ -182,10 +183,11 @@ pub struct PanelSpec {
 }
 
 impl PanelSpec {
+    /// Buffer-backed read-only content (preview, header, body text).
+    /// Defaults to non-focusable; flip with [`PanelSpec::focusable`].
     pub fn content(buf: BufId, height: PanelHeight) -> Self {
         Self {
             content: PanelContent::Buffer(buf),
-            kind: PanelKind::Content,
             height,
             separator_above: None,
             pad_left: 1,
@@ -195,46 +197,18 @@ impl PanelSpec {
         }
     }
 
-    pub fn list(buf: BufId, height: PanelHeight) -> Self {
-        Self {
-            content: PanelContent::Buffer(buf),
-            kind: PanelKind::List { multi: false },
-            height,
-            separator_above: None,
-            pad_left: 2,
-            focusable: true,
-            focus_initial: false,
-            collapse_when_empty: false,
-        }
-    }
-
-    /// Widget-backed panel. The widget owns its own draw + key
-    /// handling; the dialog only places it in the panel layout.
+    /// Widget-backed panel (`TextInput`, `OptionList`, `BufferList`,
+    /// custom). The widget owns its own draw + key handling; the
+    /// dialog only places it in the panel layout. Defaults match the
+    /// inputs/selection widgets — focusable with pad_left=1; lists
+    /// that want the legacy 2-column gutter override via
+    /// [`PanelSpec::with_pad_left`].
     pub fn widget(widget: Box<dyn PanelWidget>, height: PanelHeight) -> Self {
         Self {
             content: PanelContent::Widget(widget),
-            kind: PanelKind::Content,
             height,
             separator_above: None,
             pad_left: 1,
-            focusable: true,
-            focus_initial: false,
-            collapse_when_empty: false,
-        }
-    }
-
-    /// Widget-backed list panel. Same as [`PanelSpec::widget`] but
-    /// pre-tagged as `PanelKind::List` and with `pad_left` matching the
-    /// legacy buffer-backed [`PanelSpec::list`]. Use this for
-    /// `BufferList` and other selection-shaped widgets so the dialog's
-    /// fzf-style mouse routing and snapshot wiring kick in.
-    pub fn list_widget(widget: Box<dyn PanelWidget>, height: PanelHeight) -> Self {
-        Self {
-            content: PanelContent::Widget(widget),
-            kind: PanelKind::List { multi: false },
-            height,
-            separator_above: None,
-            pad_left: 2,
             focusable: true,
             focus_initial: false,
             collapse_when_empty: false,
@@ -281,11 +255,10 @@ pub struct DialogConfig {
 }
 
 /// Internal panel state held by `Dialog`. For buffer-backed panels
-/// the dialog owns a `Window` (cursor, scroll, selection anchor) and
-/// a `BufferView` snapshot synced each frame. Widget-backed panels
-/// manage their own state.
+/// the dialog owns a `Window` (scroll anchor) and a `BufferView`
+/// snapshot synced each frame. Widget-backed panels manage their own
+/// state.
 pub(crate) struct DialogPanel {
-    pub kind: PanelKind,
     pub height: PanelHeight,
     pub separator_above: Option<SeparatorStyle>,
     pub pad_left: u16,
@@ -296,17 +269,10 @@ pub(crate) struct DialogPanel {
     /// Rows the content wants to render. For buffers, `buf.line_count`
     /// at last sync. For widgets, `widget.content_rows()`.
     pub line_count: usize,
-    /// Absolute selection row for `PanelKind::List`. Decoupled from the
-    /// viewport: wheel / scrollbar drag scrolls the buffer but leaves
-    /// this alone, so the selected item stays put even when scrolled
-    /// out of view. `win.cursor_line` is re-derived from this on each
-    /// scroll or nav (it's always the viewport-relative render row, or
-    /// a sentinel > viewport_rows when the selection is off-screen).
-    pub selection_abs: u16,
     /// Resolved rect within the dialog, recomputed each frame.
     rect: Rect,
     /// Resolved viewport (rect + scrollbar geometry) recomputed each
-    /// frame. `None` for widget panels.
+    /// frame. `None` for widget panels (widgets own their viewport).
     viewport: Option<WindowViewport>,
 }
 
@@ -321,13 +287,6 @@ pub(crate) enum DialogPanelContent {
 }
 
 impl DialogPanel {
-    pub(crate) fn win_mut(&mut self) -> Option<&mut Window> {
-        match &mut self.content {
-            DialogPanelContent::Buffer { win, .. } => Some(win),
-            DialogPanelContent::Widget(_) => None,
-        }
-    }
-
     pub(crate) fn win(&self) -> Option<&Window> {
         match &self.content {
             DialogPanelContent::Buffer { win, .. } => Some(win),
@@ -451,9 +410,6 @@ impl Dialog {
         let from_top = bar.scroll_from_top_for_thumb(thumb_top);
         win.scroll_top = from_top;
         view.set_scroll(from_top as usize);
-        if matches!(panel.kind, PanelKind::List { .. }) {
-            Self::sync_cursor_line(panel);
-        }
         true
     }
 
@@ -717,9 +673,6 @@ impl Dialog {
             match &panel.content {
                 DialogPanelContent::Buffer { view, .. } => {
                     view.draw(content_rect, &mut content_slice, ctx);
-                    if let PanelKind::List { .. } = panel.kind {
-                        self.paint_list_selection(panel, &mut content_slice);
-                    }
                 }
                 DialogPanelContent::Widget(widget) => {
                     widget.draw(content_rect, &mut content_slice, ctx);
@@ -732,27 +685,6 @@ impl Dialog {
             if let Some(bar) = viewport.scrollbar {
                 self.draw_scrollbar(panel, viewport, bar, &mut slice);
             }
-        }
-    }
-
-    fn paint_list_selection(&self, panel: &DialogPanel, slice: &mut GridSlice<'_>) {
-        let Some(viewport) = panel.viewport else {
-            return;
-        };
-        let Some(win) = panel.win() else { return };
-        let cursor_line = win.cursor_line;
-        if cursor_line >= viewport.rect.height {
-            return;
-        }
-        let accent_fg = self.config.accent_style.fg;
-        let w = slice.width();
-        for col in 0..w {
-            let cell = slice.cell(col, cursor_line);
-            let style = Style {
-                fg: accent_fg.or(cell.style.fg),
-                ..cell.style
-            };
-            slice.set_style(col, cursor_line, style);
         }
     }
 
@@ -819,170 +751,36 @@ impl Dialog {
         self.panel_scroll_by(self.focused, delta);
     }
 
-    fn move_selection(&mut self, delta: isize) {
-        self.move_selection_at(self.focused, delta);
-    }
-
-    /// Move the selection of the List panel at `panel_idx` by `delta`
-    /// rows. Updates `selection_abs` (the source of truth) and scrolls
-    /// the viewport only as much as needed to keep the selection
-    /// visible — the tmux/less "keyboard re-anchors the viewport"
-    /// half of the split wheel/keyboard model.
-    fn move_selection_at(&mut self, panel_idx: usize, delta: isize) {
-        let Some(panel) = self.panels.get_mut(panel_idx) else {
-            return;
-        };
-        if !matches!(panel.kind, PanelKind::List { .. }) {
-            return;
-        }
-        let total = panel.line_count as isize;
-        if total == 0 {
-            return;
-        }
-        match &mut panel.content {
-            DialogPanelContent::Widget(w) => {
-                if let Some(lw) = w.as_list_widget() {
-                    let cur = lw.selected().unwrap_or(0) as isize;
-                    let new = (cur + delta).clamp(0, total - 1) as usize;
-                    lw.set_selected(new);
-                }
-            }
-            DialogPanelContent::Buffer { .. } => {
-                let new = ((panel.selection_abs as isize) + delta).clamp(0, total - 1);
-                panel.selection_abs = new as u16;
-                Self::ensure_selection_visible(panel);
-            }
-        }
-    }
-
-    /// Re-anchor a list panel's viewport and render cursor to its
-    /// current `selection_abs`. Called after selection changes
-    /// (`move_selection_at`, `set_selected_index`) and after pure
-    /// viewport scrolls (`panel_scroll_by`, scrollbar drag) so
-    /// `win.cursor_line` is always either the correct viewport-relative
-    /// row or `u16::MAX` (render path treats this as "off-screen, skip
-    /// the highlight").
-    fn ensure_selection_visible(panel: &mut DialogPanel) {
-        let rows = panel.rect.height as isize;
-        let abs = panel.selection_abs as isize;
-        let Some(win) = panel.win_mut() else { return };
-        // Move scroll_top just far enough to include the selection.
-        if rows > 0 {
-            let scroll = win.scroll_top as isize;
-            if abs < scroll {
-                win.scroll_top = abs as u16;
-            } else if abs >= scroll + rows {
-                win.scroll_top = (abs - rows + 1).max(0) as u16;
-            }
-        }
-        Self::sync_cursor_line(panel);
-    }
-
-    /// Derive `win.cursor_line` from `selection_abs` and the current
-    /// `scroll_top`. Called after any mutation that might change either.
-    /// `u16::MAX` signals off-screen — the render path in `draw_panel`
-    /// already short-circuits on `cursor_line >= viewport.rect.height`,
-    /// so painting the cursor highlight is skipped automatically.
-    fn sync_cursor_line(panel: &mut DialogPanel) {
-        let rows = panel.rect.height as i64;
-        let abs = panel.selection_abs as i64;
-        let Some(win) = panel.win_mut() else { return };
-        let rel = abs - win.scroll_top as i64;
-        win.cursor_line = if rel < 0 || rel >= rows {
-            u16::MAX
-        } else {
-            rel as u16
-        };
-    }
-
-    /// Scroll a buffer-backed panel's viewport by `delta` rows without
-    /// moving `selection_abs`. Used for mouse-wheel and scrollbar drag.
-    /// If the selection would fall outside the new viewport, the
-    /// highlight is hidden (`cursor_line = u16::MAX`); `Enter` still
-    /// submits the same item.
+    /// Scroll a panel's viewport by `delta` rows. For buffer-backed
+    /// panels this moves `win.scroll_top`; for widget panels it
+    /// delegates to `PanelWidget::scroll_by`. Used by mouse-wheel
+    /// routing and half-page key scrolls. Returns the actual delta
+    /// applied (0 if already clamped or no-op).
     pub fn panel_scroll_by(&mut self, panel_idx: usize, delta: isize) -> isize {
         let Some(panel) = self.panels.get_mut(panel_idx) else {
             return 0;
         };
-        let total = panel.line_count as isize;
-        let rows = panel.rect.height as isize;
-        let max_scroll = (total - rows).max(0);
-        let Some(win) = panel.win_mut() else { return 0 };
-        let cur = win.scroll_top as isize;
-        let new = (cur + delta).clamp(0, max_scroll);
-        if new == cur {
-            return 0;
-        }
-        win.scroll_top = new as u16;
-        if matches!(panel.kind, PanelKind::List { .. }) {
-            Self::sync_cursor_line(panel);
-        }
-        new - cur
-    }
-
-    /// Handle a navigation key against the List panel at `panel_idx`.
-    /// Mirrors the keys the `PanelKind::List` arm accepts in
-    /// `handle_key`, but scoped to an arbitrary panel — used to route
-    /// Up/Down/Enter through to a list when the focused widget panel
-    /// (TextInput) ignores them.
-    fn list_nav_on(&mut self, panel_idx: usize, code: KeyCode, mods: KeyModifiers) -> KeyResult {
-        let height = self
-            .panels
-            .get(panel_idx)
-            .map(|p| p.rect.height.max(1) as isize)
-            .unwrap_or(1);
-        match (code, mods) {
-            (KeyCode::Up, _) => {
-                self.move_selection_at(panel_idx, -1);
-                KeyResult::Consumed
+        match &mut panel.content {
+            DialogPanelContent::Widget(w) => w.scroll_by(delta),
+            DialogPanelContent::Buffer { win, view, .. } => {
+                let total = panel.line_count as isize;
+                let rows = panel.rect.height as isize;
+                let max_scroll = (total - rows).max(0);
+                let cur = win.scroll_top as isize;
+                let new = (cur + delta).clamp(0, max_scroll);
+                if new == cur {
+                    return 0;
+                }
+                win.scroll_top = new as u16;
+                view.set_scroll(new as usize);
+                new - cur
             }
-            (KeyCode::Down, _) => {
-                self.move_selection_at(panel_idx, 1);
-                KeyResult::Consumed
-            }
-            (KeyCode::PageUp, _) => {
-                self.move_selection_at(panel_idx, -(height / 2));
-                KeyResult::Consumed
-            }
-            (KeyCode::PageDown, _) => {
-                self.move_selection_at(panel_idx, height / 2);
-                KeyResult::Consumed
-            }
-            (KeyCode::Home, _) => {
-                self.move_selection_at(panel_idx, isize::MIN / 2);
-                KeyResult::Consumed
-            }
-            (KeyCode::End, _) => {
-                self.move_selection_at(panel_idx, isize::MAX / 2);
-                KeyResult::Consumed
-            }
-            (KeyCode::Enter, _) => self
-                .selected_index_at(panel_idx)
-                .map(|idx| KeyResult::Action(WidgetEvent::Select(idx)))
-                .unwrap_or(KeyResult::Ignored),
-            _ => KeyResult::Ignored,
         }
     }
 
+    /// 0-based selection index for the list widget in `panel_idx`.
+    /// `None` for non-list panels (buffer content, plain widgets).
     pub fn selected_index_at(&self, panel_idx: usize) -> Option<usize> {
-        let panel = self.panels.get(panel_idx)?;
-        if !matches!(panel.kind, PanelKind::List { .. }) {
-            return None;
-        }
-        match &panel.content {
-            DialogPanelContent::Widget(w) => w.selected_index(),
-            DialogPanelContent::Buffer { .. } => Some(panel.selection_abs as usize),
-        }
-    }
-
-    pub fn panel_kind_at(&self, panel_idx: usize) -> Option<PanelKind> {
-        self.panels.get(panel_idx).map(|p| p.kind)
-    }
-
-    /// 0-based selection index for the widget in `panel_idx`, if the
-    /// widget exposes one (e.g. `OptionList`). `None` for buffer-backed
-    /// panels or widgets without a selection concept.
-    pub fn panel_widget_selected(&self, panel_idx: usize) -> Option<usize> {
         let panel = self.panels.get(panel_idx)?;
         match &panel.content {
             DialogPanelContent::Widget(w) => w.selected_index(),
@@ -1010,47 +808,54 @@ impl Dialog {
             .unwrap_or(0)
     }
 
-    /// Move the List selection to an absolute index. Out-of-range
-    /// values clamp to the last valid row.
+    /// Move the focused list widget's selection to an absolute index.
+    /// No-op if the focused panel is not a list widget. Out-of-range
+    /// indices clamp to the last valid row.
     pub fn set_selected_index(&mut self, idx: usize) {
         let Some(panel) = self.panels.get_mut(self.focused) else {
             return;
         };
-        if !matches!(panel.kind, PanelKind::List { .. }) {
-            return;
-        }
         let total = panel.line_count;
         if total == 0 {
             return;
         }
-        match &mut panel.content {
-            DialogPanelContent::Widget(w) => {
-                if let Some(lw) = w.as_list_widget() {
-                    lw.set_selected(idx.min(total - 1));
-                }
-            }
-            DialogPanelContent::Buffer { .. } => {
-                let clamped = idx.min(total - 1) as u16;
-                panel.selection_abs = clamped;
-                Self::ensure_selection_visible(panel);
+        if let DialogPanelContent::Widget(w) = &mut panel.content {
+            if let Some(lw) = w.as_list_widget() {
+                lw.set_selected(idx.min(total - 1));
             }
         }
     }
 
+    /// "What would Enter pick?" — the focused panel's selection if
+    /// it's a list, otherwise the first sibling list panel's
+    /// selection. Lets `Submit` from an input panel resolve to the
+    /// list row underneath it without the caller knowing the layout.
     pub fn selected_index(&self) -> Option<usize> {
-        // Prefer the focused panel's selection. If the focused panel
-        // isn't a list (e.g. a search-style input above a results
-        // list), fall back to the first list panel's selection so the
-        // user's "what would Enter pick" intent is preserved across
-        // focus.
         if let Some(idx) = self.selected_index_at(self.focused) {
             return Some(idx);
         }
-        let list_idx = self
-            .panels
-            .iter()
-            .position(|p| matches!(p.kind, PanelKind::List { .. }))?;
+        let list_idx = self.first_list_panel()?;
         self.selected_index_at(list_idx)
+    }
+
+    /// Index of the first panel whose widget is a `ListWidget`. Used
+    /// for cross-panel routing — e.g. `Submit` on an input panel
+    /// resolves to a `Select` against the list panel below.
+    fn first_list_panel(&self) -> Option<usize> {
+        // `as_list_widget` is `&mut`, so this needs a mutable hop —
+        // but we can avoid it by remembering: only widget panels can
+        // be lists. Walk widget panels and ask each. Since the
+        // function is read-only at the API level we fall back to
+        // iterating with raw indices and a const cast through a
+        // helper that doesn't actually mutate.
+        for (i, p) in self.panels.iter().enumerate() {
+            if let DialogPanelContent::Widget(w) = &p.content {
+                if w.selected_index().is_some() {
+                    return Some(i);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1135,10 +940,10 @@ impl Component for Dialog {
         }
 
         // Widget panels: route directly to widget. If the widget
-        // doesn't handle it (e.g. TextInput ignores Up/Down, BufferList
-        // ignores chars), fall through to a sibling panel — fzf-style:
-        // the list keeps nav focus while typing flows to the input, or
-        // vice-versa.
+        // doesn't handle it (e.g. TextInput ignores Up/Down,
+        // BufferList ignores chars), fall through to sibling widget
+        // panels — fzf-style: the list keeps nav focus while typing
+        // flows to the input, or vice-versa.
         let focused_is_widget = self
             .panels
             .get(self.focused)
@@ -1152,37 +957,25 @@ impl Component for Dialog {
             } else {
                 KeyResult::Ignored
             };
-            let list_idx = self
-                .panels
-                .iter()
-                .position(|p| matches!(p.kind, PanelKind::List { .. }));
-            // Rewrite a non-list widget's `Submit` into
-            // `Select(list_row)` so Enter on an input panel picks the
+            // Rewrite a non-list widget's `Submit` (TextInput Enter)
+            // into `Select(list_row)` so the input commits to the
             // currently-selected list row.
-            if let (KeyResult::Action(WidgetEvent::Submit), Some(list_idx)) = (&r, list_idx) {
-                if let Some(idx) = self.selected_index_at(list_idx) {
+            if matches!(r, KeyResult::Action(WidgetEvent::Submit)) {
+                if let Some(idx) = self.selected_index() {
                     return KeyResult::Action(WidgetEvent::Select(idx));
                 }
             }
             if !matches!(r, KeyResult::Ignored) {
                 return r;
             }
-            // Cross-panel fall-through: try the other panels in order.
-            // Widget panels get `handle_key`; legacy buffer-backed list
-            // panels get `list_nav_on` for nav keys.
+            // Cross-panel fall-through: try every other widget panel
+            // in order, returning the first non-Ignored result.
             for i in 0..self.panels.len() {
                 if i == focused_idx {
                     continue;
                 }
-                if matches!(self.panels[i].content, DialogPanelContent::Widget(_)) {
-                    if let DialogPanelContent::Widget(w) = &mut self.panels[i].content {
-                        let r2 = w.handle_key(code, mods);
-                        if !matches!(r2, KeyResult::Ignored) {
-                            return r2;
-                        }
-                    }
-                } else if matches!(self.panels[i].kind, PanelKind::List { .. }) {
-                    let r2 = self.list_nav_on(i, code, mods);
+                if let DialogPanelContent::Widget(w) = &mut self.panels[i].content {
+                    let r2 = w.handle_key(code, mods);
                     if !matches!(r2, KeyResult::Ignored) {
                         return r2;
                     }
@@ -1191,102 +984,32 @@ impl Component for Dialog {
             return r;
         }
 
-        // Focused-panel-specific routing.
-        let (focused_kind, focused_height) = {
-            let Some(panel) = self.panels.get(self.focused) else {
-                return KeyResult::Ignored;
-            };
-            (panel.kind, panel.rect.height)
-        };
-        match focused_kind {
-            PanelKind::List { .. } => {
-                let nav = match (code, mods) {
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        self.move_selection(-1);
-                        Some(KeyResult::Consumed)
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        self.move_selection(1);
-                        Some(KeyResult::Consumed)
-                    }
-                    (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                        let page = focused_height.max(1) as isize / 2;
-                        self.move_selection(-page);
-                        Some(KeyResult::Consumed)
-                    }
-                    (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                        let page = focused_height.max(1) as isize / 2;
-                        self.move_selection(page);
-                        Some(KeyResult::Consumed)
-                    }
-                    (KeyCode::Home, _) | (KeyCode::Char('g'), KeyModifiers::NONE) => {
-                        self.move_selection(isize::MIN / 2);
-                        Some(KeyResult::Consumed)
-                    }
-                    (KeyCode::End, _) => {
-                        self.move_selection(isize::MAX / 2);
-                        Some(KeyResult::Consumed)
-                    }
-                    (KeyCode::Enter, _) => Some(
-                        self.selected_index()
-                            .map(|idx| KeyResult::Action(WidgetEvent::Select(idx)))
-                            .unwrap_or(KeyResult::Ignored),
-                    ),
-                    _ => None,
-                };
-                if let Some(r) = nav {
-                    return r;
-                }
-                // Picker-style fall-through: any key the list didn't
-                // claim gets forwarded to the first sibling Widget
-                // panel — for a dialog with `TextInput` above the
-                // list, this lets typing update a live filter while
-                // the list keeps nav focus (fzf UX).
-                let widget_idx = self
-                    .panels
-                    .iter()
-                    .position(|p| matches!(p.content, DialogPanelContent::Widget(_)));
-                if let Some(idx) = widget_idx {
-                    if let Some(panel) = self.panels.get_mut(idx) {
-                        if let DialogPanelContent::Widget(w) = &mut panel.content {
-                            let r = w.handle_key(code, mods);
-                            if !matches!(r, KeyResult::Ignored) {
-                                return r;
-                            }
-                        }
-                    }
-                }
-                // No typing sink: preserve the digit-shortcut for
-                // options-style list dialogs.
-                if let (KeyCode::Char(c), KeyModifiers::NONE) = (code, mods) {
-                    if c.is_ascii_digit() {
-                        let idx = (c as u8 - b'1') as usize;
-                        return KeyResult::Action(WidgetEvent::Select(idx));
-                    }
-                }
-                KeyResult::Ignored
+        // Buffer-backed content panel: cursor-style scroll keys.
+        let focused_height = self
+            .panels
+            .get(self.focused)
+            .map(|p| p.rect.height)
+            .unwrap_or(0);
+        match (code, mods) {
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                self.scroll_focused(-1);
+                KeyResult::Consumed
             }
-            PanelKind::Content => match (code, mods) {
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                    self.scroll_focused(-1);
-                    KeyResult::Consumed
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                    self.scroll_focused(1);
-                    KeyResult::Consumed
-                }
-                (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                    let page = focused_height.max(1) as isize / 2;
-                    self.scroll_focused(-page);
-                    KeyResult::Consumed
-                }
-                (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                    let page = focused_height.max(1) as isize / 2;
-                    self.scroll_focused(page);
-                    KeyResult::Consumed
-                }
-                _ => KeyResult::Ignored,
-            },
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                self.scroll_focused(1);
+                KeyResult::Consumed
+            }
+            (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                let page = focused_height.max(1) as isize / 2;
+                self.scroll_focused(-page);
+                KeyResult::Consumed
+            }
+            (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                let page = focused_height.max(1) as isize / 2;
+                self.scroll_focused(page);
+                KeyResult::Consumed
+            }
+            _ => KeyResult::Ignored,
         }
     }
 
@@ -1312,69 +1035,27 @@ impl Component for Dialog {
                     // beneath, but do nothing.
                     return KeyResult::Consumed;
                 };
-                let kind = self.panels[panel_idx].kind;
-                let is_widget = matches!(
-                    self.panels[panel_idx].content,
-                    DialogPanelContent::Widget(_)
-                );
-
-                match (is_widget, kind) {
-                    (true, _) => {
-                        // List-shaped widgets (`BufferList`, `OptionList`)
-                        // get fzf-style click: forward the event but
-                        // leave keyboard focus alone, so the input above
-                        // keeps receiving keystrokes. Other widgets
-                        // (`TextInput`, content) take focus on click.
-                        let is_list_widget = self
-                            .panels
-                            .get_mut(panel_idx)
-                            .and_then(|p| {
-                                if let DialogPanelContent::Widget(w) = &mut p.content {
-                                    Some(w.as_list_widget().is_some())
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(false);
-                        if !is_list_widget {
-                            self.focus_panel(panel_idx);
-                        }
-                        if let Some(panel) = self.panels.get_mut(panel_idx) {
-                            if let DialogPanelContent::Widget(w) = &mut panel.content {
-                                let r = w.handle_mouse(event);
-                                if !matches!(r, KeyResult::Ignored) {
-                                    return r;
-                                }
-                            }
-                        }
-                        KeyResult::Consumed
-                    }
-                    (false, PanelKind::List { .. }) => {
-                        // fzf-style: clicking a list row updates the
-                        // selection but does NOT change keyboard focus
-                        // — keymaps stay on the input above (if any).
-                        let panel = &self.panels[panel_idx];
-                        let scroll_top = panel.win().map(|w| w.scroll_top).unwrap_or(0) as isize;
-                        let rel = (row as isize) - (panel.rect.top as isize);
-                        if rel < 0 || rel >= panel.rect.height as isize {
-                            return KeyResult::Consumed;
-                        }
-                        let target = scroll_top + rel;
-                        let cur = panel.selection_abs as isize;
-                        let delta = target - cur;
-                        if delta != 0 {
-                            self.move_selection_at(panel_idx, delta);
-                        }
-                        KeyResult::Consumed
-                    }
-                    (false, PanelKind::Content) => {
-                        // Buffer-backed content panel: click focuses it
-                        // (no-op for non-focusable title/preview panels)
-                        // so subsequent j/k scrolls the right panel.
+                if let DialogPanelContent::Widget(w) = &mut self.panels[panel_idx].content {
+                    // List-shaped widgets (`BufferList`, `OptionList`)
+                    // get fzf-style click: forward the event but leave
+                    // keyboard focus alone, so the input above keeps
+                    // receiving keystrokes. Other widgets (`TextInput`)
+                    // take focus on click.
+                    let is_list_widget = w.as_list_widget().is_some();
+                    let r = w.handle_mouse(event);
+                    if !is_list_widget {
                         self.focus_panel(panel_idx);
-                        KeyResult::Consumed
                     }
+                    if !matches!(r, KeyResult::Ignored) {
+                        return r;
+                    }
+                    return KeyResult::Consumed;
                 }
+                // Buffer-backed content panel: click focuses it (no-op
+                // for non-focusable title/preview panels) so subsequent
+                // j/k scrolls the right panel.
+                self.focus_panel(panel_idx);
+                KeyResult::Consumed
             }
             _ => KeyResult::Ignored,
         }
@@ -1470,7 +1151,6 @@ pub(crate) fn build_panels(
             };
             let _ = LineDecoration::default();
             DialogPanel {
-                kind: spec.kind,
                 height: spec.height,
                 separator_above: spec.separator_above,
                 pad_left: spec.pad_left,
@@ -1479,7 +1159,6 @@ pub(crate) fn build_panels(
                 collapse_when_empty: spec.collapse_when_empty,
                 content,
                 line_count,
-                selection_abs: 0,
                 rect: Rect::new(0, 0, 0, 0),
                 viewport: None,
             }
@@ -1513,22 +1192,21 @@ mod tests {
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["title"]));
         bufs.insert(BufId(2), make_buf(2, &["line"; 40]));
-        bufs.insert(BufId(3), make_buf(3, &["a", "b", "c"]));
         let panels = build_panels(
             vec![
                 PanelSpec::content(BufId(1), PanelHeight::Fixed(1)),
                 PanelSpec::content(BufId(2), PanelHeight::Fill),
-                PanelSpec::list(BufId(3), PanelHeight::Fit),
+                PanelSpec::content(BufId(1), PanelHeight::Fit),
             ],
             &bufs,
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         let area = Rect::new(0, 0, 40, 20);
         dlg.resolve_panel_rects(area);
-        // top rule: 1 row; remaining 19 rows split across fixed(1)+fill+fit(3) = 1+15+3
+        // top rule: 1 row; remaining 19 rows split across fixed(1)+fill+fit(1) = 1+17+1
         assert_eq!(dlg.panels[0].rect.height, 1);
-        assert_eq!(dlg.panels[1].rect.height, 15);
-        assert_eq!(dlg.panels[2].rect.height, 3);
+        assert_eq!(dlg.panels[1].rect.height, 17);
+        assert_eq!(dlg.panels[2].rect.height, 1);
     }
 
     #[test]
@@ -1594,12 +1272,20 @@ mod tests {
 
     #[test]
     fn list_enter_returns_select() {
+        use crate::buffer_list::BufferList;
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
-        let panels = build_panels(vec![PanelSpec::list(BufId(1), PanelHeight::Fit)], &bufs);
+        let panels = build_panels(
+            vec![PanelSpec::widget(
+                Box::new(BufferList::new(BufId(1))),
+                PanelHeight::Fit,
+            )
+            .with_initial_focus(true)],
+            &bufs,
+        );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
-        dlg.move_selection(1);
+        dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
+        dlg.set_selected_index(1);
         let r = dlg.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(r, KeyResult::Action(WidgetEvent::Select(1)));
     }
@@ -1627,39 +1313,58 @@ mod tests {
 
     #[test]
     fn list_panel_renders_items_with_bg() {
+        use crate::buffer_list::BufferList;
         use crossterm::style::Color;
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["apple", "banana", "cherry"]));
+        let bg = Style::bg(Color::Black);
         let panels = build_panels(
-            vec![PanelSpec::list(BufId(1), PanelHeight::Fill).with_pad_left(0)],
+            vec![PanelSpec::widget(
+                Box::new(BufferList::new(BufId(1)).with_bg_style(bg)),
+                PanelHeight::Fill,
+            )
+            .with_pad_left(0)],
             &bufs,
         );
         let mut dlg = Dialog::new(
             DialogConfig {
-                background_style: Style::bg(Color::Black),
+                background_style: bg,
                 ..DialogConfig::default()
             },
             panels,
         );
         let area = Rect::new(0, 0, 20, 5);
         let mut grid = Grid::new(20, 5);
-        dlg.resolve_panel_rects(area);
+        dlg.prepare(area, &ctx(20, 5));
         let mut slice = grid.slice_mut(area);
         dlg.draw(area, &mut slice, &ctx(20, 5));
         // Content 'apple' should be on row 1.
         assert_eq!(grid.cell(0, 1).symbol, 'a');
         assert_eq!(grid.cell(4, 1).symbol, 'e');
-        // And each content cell should keep the dialog's bg fill.
         assert_eq!(grid.cell(0, 1).style.bg, Some(Color::Black));
     }
 
     #[test]
-    fn numeric_digit_selects_row() {
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
-        let panels = build_panels(vec![PanelSpec::list(BufId(1), PanelHeight::Fit)], &bufs);
+    fn option_list_digit_selects_row() {
+        // OptionList answers digit shortcuts directly via its
+        // `handle_key` — used by Confirm-style dialogs (1 = Yes,
+        // 2 = No, etc.). Verifies the widget receives chars when
+        // focused as the only panel.
+        use crate::option_list::{OptionItem, OptionList};
+        let panels = build_panels(
+            vec![PanelSpec::widget(
+                Box::new(OptionList::new(vec![
+                    OptionItem::new("a"),
+                    OptionItem::new("b"),
+                    OptionItem::new("c"),
+                ])),
+                PanelHeight::Fit,
+            )
+            .with_initial_focus(true)],
+            &std::collections::HashMap::new(),
+        );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
+        dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
         let r = dlg.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(r, KeyResult::Action(WidgetEvent::Select(1)));
     }
@@ -1764,60 +1469,30 @@ mod tests {
     }
 
     #[test]
-    fn click_on_list_row_updates_selection_without_focus_change() {
-        use crate::text_input::TextInput;
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c", "d"]));
-        // fzf-style: input on top is focused, list below is the
-        // passive picker. Click on a list row should move selection
-        // but keep focus on the input so typing keeps filtering.
-        let panels = build_panels(
-            vec![
-                PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
-                    .with_initial_focus(true),
-                PanelSpec::list(BufId(1), PanelHeight::Fill).with_pad_left(0),
-            ],
-            &bufs,
-        );
-        let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        let area = Rect::new(0, 0, 20, 10);
-        let ctx = ctx(20, 10);
-        dlg.prepare(area, &ctx);
-        let initial_focus = dlg.focused_panel();
-        // Top rule row 0; input row 1; list rows 2..end. Click row 4
-        // (list row index 2 = item "c").
-        let r = dlg.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            4,
-            5,
-        ));
-        assert_eq!(r, KeyResult::Consumed);
-        assert_eq!(dlg.selected_index_at(1), Some(2));
-        // Focus stays on the input panel (fzf-style).
-        assert_eq!(dlg.focused_panel(), initial_focus);
-    }
-
-    #[test]
-    fn click_on_widget_panel_focuses_it_and_forwards() {
+    fn click_on_text_input_panel_focuses_and_repositions_cursor() {
+        use crate::buffer_list::BufferList;
         use crate::text_input::TextInput;
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
         let mut ti = TextInput::new();
         ti.set_text("hello");
+        // List on top (initial focus), input below. Click on the
+        // input panel should hand it focus and reposition the cursor.
         let panels = build_panels(
             vec![
-                PanelSpec::list(BufId(1), PanelHeight::Fixed(3))
-                    .with_pad_left(0)
-                    .with_initial_focus(true),
+                PanelSpec::widget(
+                    Box::new(BufferList::new(BufId(1))),
+                    PanelHeight::Fixed(3),
+                )
+                .with_pad_left(0)
+                .with_initial_focus(true),
                 PanelSpec::widget(Box::new(ti), PanelHeight::Fixed(1)),
             ],
             &bufs,
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        let area = Rect::new(0, 0, 20, 10);
-        let ctx = ctx(20, 10);
-        dlg.prepare(area, &ctx);
-        // Top rule row 0; list rows 1..3; widget row 4. Widget panel
+        dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
+        // Top rule row 0; list rows 1..3; input row 4. Widget panel
         // has the default pad_left=1, so click at column 4 lands on
         // char index 3 ("hello"[3] = 'l').
         dlg.handle_mouse(mouse_event(
@@ -1844,7 +1519,7 @@ mod tests {
             vec![
                 PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
                     .with_initial_focus(true),
-                PanelSpec::list_widget(
+                PanelSpec::widget(
                     Box::new(BufferList::new(BufId(1))),
                     PanelHeight::Fill,
                 )
@@ -1878,7 +1553,7 @@ mod tests {
         let panels = build_panels(
             vec![
                 PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1)),
-                PanelSpec::list_widget(
+                PanelSpec::widget(
                     Box::new(BufferList::new(BufId(1))),
                     PanelHeight::Fill,
                 )
@@ -1904,7 +1579,7 @@ mod tests {
             vec![
                 PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
                     .with_initial_focus(true),
-                PanelSpec::list_widget(
+                PanelSpec::widget(
                     Box::new(BufferList::new(BufId(1))),
                     PanelHeight::Fill,
                 ),
