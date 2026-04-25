@@ -11,8 +11,8 @@ use crate::format::BufFormat;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
 use ui::{
-    BufId, Constraint, FitMax, FloatConfig, OptionItem, OptionList, PanelHeight, PanelSpec,
-    Placement, SeparatorStyle, WinId,
+    BufId, BufferList, Constraint, FitMax, FloatConfig, OptionItem, OptionList, PanelHeight,
+    PanelSpec, Placement, SeparatorStyle, WinId,
 };
 
 // ── Dialog ───────────────────────────────────────────────────────────
@@ -121,8 +121,26 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
             }
             "list" => {
                 let buf_id: u64 = panel.get("buf").map_err(|e| format!("list.buf: {e}"))?;
+                let bg = ui::grid::Style {
+                    bg: Some(crossterm::style::Color::Black),
+                    ..Default::default()
+                };
+                let track = ui::grid::Style {
+                    bg: Some(crate::theme::scrollbar_track()),
+                    ..Default::default()
+                };
+                let thumb = ui::grid::Style {
+                    bg: Some(crate::theme::scrollbar_thumb()),
+                    ..Default::default()
+                };
+                let widget = Box::new(
+                    BufferList::new(BufId(buf_id))
+                        .with_cursor_style(accent_style())
+                        .with_bg_style(bg)
+                        .with_scrollbar_styles(track, thumb),
+                );
                 panel_specs.push(
-                    PanelSpec::list(BufId(buf_id), height.unwrap_or(PanelHeight::Fill))
+                    PanelSpec::list_widget(widget, height.unwrap_or(PanelHeight::Fill))
                         .with_initial_focus(initial_focus),
                 );
             }
