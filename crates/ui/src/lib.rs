@@ -89,6 +89,11 @@ pub struct Ui {
     /// in via [`Ui::set_window_rect`] so `Placement::DockedAbove` can
     /// look them up without knowing layout specifics.
     split_rects: HashMap<WinId, Rect>,
+    /// Compositor layer-id ↔ `WinId` for split windows. Lets the focused
+    /// split's per-window keymap fire from `handle_key_with_lua`, the
+    /// same dispatch path used by floats. Floats use the `"float:N"`
+    /// layer-id prefix instead of this map.
+    splits: HashMap<String, WinId>,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -116,7 +121,19 @@ impl Ui {
             compositor: Compositor::new(80, 24),
             callbacks: Callbacks::new(),
             split_rects: HashMap::new(),
+            splits: HashMap::new(),
         }
+    }
+
+    /// Bind a compositor split-layer id to a `WinId` so the focused
+    /// split flows through [`Ui::handle_key_with_lua`] like floats do.
+    /// Call once per split at startup.
+    pub fn register_split(&mut self, layer_id: impl Into<String>, win_id: WinId) {
+        self.splits.insert(layer_id.into(), win_id);
+    }
+
+    fn layer_to_win(&self, layer_id: &str) -> Option<WinId> {
+        parse_float_layer_id(layer_id).or_else(|| self.splits.get(layer_id).copied())
     }
 
     /// Publish a split window's current rect. Call each frame from the
@@ -692,59 +709,23 @@ impl Ui {
         self.handle_key_with_lua(code, mods, &mut |_, _, _, _| {})
     }
 
-    /// Try to dispatch a key to a specific window's keymap table —
-    /// Neovim-style "buffer-local keymap." Unlike [`handle_key_with_lua`]
-    /// this doesn't require the window to be focused; it's the hook
-    /// that lets callers route keys for non-float windows (e.g. the
-    /// main prompt) through the same Lua keymap registry. Returns
-    /// `KeyResult::Consumed` when a binding fired, `KeyResult::Ignored`
-    /// otherwise.
-    pub fn try_window_keymap(
-        &mut self,
-        win: WinId,
-        code: crossterm::event::KeyCode,
-        mods: crossterm::event::KeyModifiers,
-        lua_invoke: &mut LuaInvoke,
-    ) -> KeyResult {
-        let key = KeyBind::new(code, mods);
-        let Some(mut cb) = self.callbacks.take_keymap(win, key) else {
-            return KeyResult::Ignored;
-        };
-        let result = match &mut cb {
-            Callback::Rust(inner) => {
-                let mut ctx = CallbackCtx {
-                    ui: self,
-                    win,
-                    payload: Payload::Key { code, mods },
-                };
-                match inner(&mut ctx) {
-                    CallbackResult::Consumed => KeyResult::Consumed,
-                    CallbackResult::Pass => KeyResult::Ignored,
-                }
-            }
-            Callback::Lua(handle) => {
-                let payload = Payload::Key { code, mods };
-                let panels = self.snapshot_dialog_panels(win);
-                lua_invoke(*handle, win, &payload, &panels);
-                KeyResult::Consumed
-            }
-        };
-        self.callbacks.restore_keymap(win, key, cb);
-        result
-    }
-
     /// Dispatch a key event through the focused window's keymap
     /// table, falling back to `Component::handle_key` if no binding
-    /// matches. `lua_invoke` is called for each `Callback::Lua` with
-    /// (handle, payload). Side effects (app-level commands, etc.)
-    /// flow through `AppOp` from the host side.
+    /// matches. Floats and registered splits both flow through here —
+    /// the focused layer's `WinId` is resolved via [`Ui::layer_to_win`].
+    /// `lua_invoke` is called for each `Callback::Lua` with (handle,
+    /// payload). Side effects (app-level commands, etc.) flow through
+    /// `AppOp` from the host side.
     pub fn handle_key_with_lua(
         &mut self,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
     ) -> KeyResult {
-        let focused = self.compositor.focused().and_then(parse_float_layer_id);
+        let focused = self
+            .compositor
+            .focused()
+            .and_then(|id| self.layer_to_win(id));
         let Some(win) = focused else {
             return self.compositor.handle_key(code, mods);
         };

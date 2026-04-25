@@ -620,6 +620,8 @@ impl App {
                 ui::Rect::new(h.saturating_sub(1), 0, w, 1),
                 500,
             );
+            ui.register_split("prompt_input", ui::PROMPT_WIN);
+            ui.register_split("transcript", ui::TRANSCRIPT_WIN);
             ui.focus_layer("prompt_input");
             (ui, input_display_buf)
         };
