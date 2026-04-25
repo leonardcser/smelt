@@ -114,10 +114,7 @@ impl PromptState {
     /// click-to-select on the picker float). Returns the picker WinId
     /// the caller must close, plus whether the completer was the
     /// `/command` flavour (caller may want to re-sync after).
-    pub(crate) fn commit_completer_at(
-        &mut self,
-        idx: usize,
-    ) -> Option<(Option<ui::WinId>, bool)> {
+    pub(crate) fn commit_completer_at(&mut self, idx: usize) -> Option<(Option<ui::WinId>, bool)> {
         let mut session = self.completer.take()?;
         if idx < session.completer.results.len() {
             session.completer.selected = idx;

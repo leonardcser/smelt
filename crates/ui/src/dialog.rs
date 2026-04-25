@@ -950,13 +950,12 @@ impl Component for Dialog {
             .is_some_and(|p| matches!(p.content, DialogPanelContent::Widget(_)));
         if focused_is_widget {
             let focused_idx = self.focused;
-            let r = if let DialogPanelContent::Widget(widget) =
-                &mut self.panels[focused_idx].content
-            {
-                widget.handle_key(code, mods)
-            } else {
-                KeyResult::Ignored
-            };
+            let r =
+                if let DialogPanelContent::Widget(widget) = &mut self.panels[focused_idx].content {
+                    widget.handle_key(code, mods)
+                } else {
+                    KeyResult::Ignored
+                };
             // Rewrite a non-list widget's `Submit` (TextInput Enter)
             // into `Select(list_row)` so the input commits to the
             // currently-selected list row.
@@ -1276,11 +1275,10 @@ mod tests {
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
         let panels = build_panels(
-            vec![PanelSpec::widget(
-                Box::new(BufferList::new(BufId(1))),
-                PanelHeight::Fit,
-            )
-            .with_initial_focus(true)],
+            vec![
+                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fit)
+                    .with_initial_focus(true),
+            ],
             &bufs,
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
@@ -1480,12 +1478,9 @@ mod tests {
         // input panel should hand it focus and reposition the cursor.
         let panels = build_panels(
             vec![
-                PanelSpec::widget(
-                    Box::new(BufferList::new(BufId(1))),
-                    PanelHeight::Fixed(3),
-                )
-                .with_pad_left(0)
-                .with_initial_focus(true),
+                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fixed(3))
+                    .with_pad_left(0)
+                    .with_initial_focus(true),
                 PanelSpec::widget(Box::new(ti), PanelHeight::Fixed(1)),
             ],
             &bufs,
@@ -1495,15 +1490,9 @@ mod tests {
         // Top rule row 0; list rows 1..3; input row 4. Widget panel
         // has the default pad_left=1, so click at column 4 lands on
         // char index 3 ("hello"[3] = 'l').
-        dlg.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            4,
-            4,
-        ));
+        dlg.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 4));
         assert_eq!(dlg.focused_panel(), 1);
-        let widget = dlg
-            .panel_widget_mut::<TextInput>(1)
-            .expect("widget panel");
+        let widget = dlg.panel_widget_mut::<TextInput>(1).expect("widget panel");
         assert_eq!(widget.cursor_col(), 3);
     }
 
@@ -1519,11 +1508,8 @@ mod tests {
             vec![
                 PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
                     .with_initial_focus(true),
-                PanelSpec::widget(
-                    Box::new(BufferList::new(BufId(1))),
-                    PanelHeight::Fill,
-                )
-                .with_pad_left(0),
+                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fill)
+                    .with_pad_left(0),
             ],
             &bufs,
         );
@@ -1534,11 +1520,7 @@ mod tests {
         let initial_focus = dlg.focused_panel();
         // Top rule row 0; input row 1; list rows 2..end. Click row 4
         // (list row index 2 = item "c").
-        let r = dlg.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            4,
-            5,
-        ));
+        let r = dlg.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 5));
         assert_eq!(r, KeyResult::Consumed);
         assert_eq!(dlg.selected_index_at(1), Some(2));
         assert_eq!(dlg.focused_panel(), initial_focus);
@@ -1553,11 +1535,8 @@ mod tests {
         let panels = build_panels(
             vec![
                 PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1)),
-                PanelSpec::widget(
-                    Box::new(BufferList::new(BufId(1))),
-                    PanelHeight::Fill,
-                )
-                .with_initial_focus(true),
+                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fill)
+                    .with_initial_focus(true),
             ],
             &bufs,
         );
@@ -1579,10 +1558,7 @@ mod tests {
             vec![
                 PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
                     .with_initial_focus(true),
-                PanelSpec::widget(
-                    Box::new(BufferList::new(BufId(1))),
-                    PanelHeight::Fill,
-                ),
+                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fill),
             ],
             &bufs,
         );

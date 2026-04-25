@@ -97,19 +97,12 @@ impl App {
                         self.drag_on_layer = Some(win);
                         self.mouse_drag_active = true;
                     }
-                    Some((
-                        win,
-                        ui::KeyResult::Action(ui::WidgetEvent::Select(idx)),
-                    )) => {
+                    Some((win, ui::KeyResult::Action(ui::WidgetEvent::Select(idx)))) => {
                         // Completer picker click: commit the click index
                         // through the same path Tab uses (insert label,
                         // close picker, re-sync if /command).
-                        let is_completer_picker = self
-                            .input
-                            .completer
-                            .as_ref()
-                            .and_then(|c| c.picker_win)
-                            == Some(win);
+                        let is_completer_picker =
+                            self.input.completer.as_ref().and_then(|c| c.picker_win) == Some(win);
                         if is_completer_picker {
                             if let Some((Some(pwin), _was_command)) =
                                 self.input.commit_completer_at(idx)
@@ -136,13 +129,12 @@ impl App {
         {
             let win = self.drag_on_layer.unwrap();
             let lua = &self.lua;
-            let mut lua_invoke =
-                |handle: ui::LuaHandle,
-                 win: ui::WinId,
-                 payload: &ui::Payload,
-                 panels: &[ui::PanelSnapshot]| {
-                    lua.queue_invocation(handle, win, payload, panels);
-                };
+            let mut lua_invoke = |handle: ui::LuaHandle,
+                                  win: ui::WinId,
+                                  payload: &ui::Payload,
+                                  panels: &[ui::PanelSnapshot]| {
+                lua.queue_invocation(handle, win, payload, panels);
+            };
             let r = self.ui.handle_mouse_for(win, me, &mut lua_invoke);
             // Layer drag-select on release → copy yanked text to the
             // system clipboard. App owns the clipboard so the ui crate
