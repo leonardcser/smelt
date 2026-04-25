@@ -51,6 +51,11 @@ impl App {
             prediction,
             has_prompt_cursor,
         );
+        // Freeze the live-turn timer + spinner whenever a blocking
+        // dialog (Confirm, Question, …) is up so the user doesn't see
+        // wall-clock seconds tick by while the agent is actually parked
+        // waiting on input.
+        self.working.set_paused(self.focused_float_blocks_agent());
         self.refresh_status_bar();
 
         self.finalize_layer_rects(
