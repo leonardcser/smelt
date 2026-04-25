@@ -169,21 +169,22 @@ Replaces every `_focus_panel`, `_options_set_editing`,
 `_options_is_editing`, `_focused_panel` confirm_ops shim with panel
 methods.
 
-#### 5d — Drop one-off widget flags
+#### ✅ 5d — Drop one-off widget flags
 
-- `OptionList::detail_input` → drop. Reason field becomes a regular
-  `kind = "input"` panel below options with `hide_when_unfocused = true`,
-  Tab focuses it. Same row-spacing as nvim.
-- `OptionList::numbered` (`with_index_prefix`) → drop. Caller pre-formats
-  labels (`"  1. yes"`) or supplies a prefix function.
-- The `interactive` flag stays — it's the unification's primary handle.
+`OptionList::detail_input`, `OptionList::numbered`, `with_index_prefix`
+were stash-only (BufferPane experiment) and never merged into main —
+nothing to drop. The reason input is already a separate
+`kind = "input"` panel; option labels are already caller-formatted.
+The `interactive` flag stays — it's the unification's primary handle.
 
-#### 5e — Plug `interactive_content` into confirm.lua's preview panel
+#### ✅ 5e — Plug `interactive_content` into confirm.lua's preview panel
 
-One-line change in `runtime/lua/smelt/confirm.lua`: the diff/preview panel
-becomes `kind = "content", interactive = true`. User immediately gets
-double/triple click + theme selection bg + drag-extend in tool approval
-dialogs.
+One-line change in `runtime/lua/smelt/confirm.lua`: the diff/preview
+panel is now `kind = "content", interactive = true`. Users get
+double/triple click + theme selection bg + drag-extend in tool
+approval dialogs. Initial focus stays on the options panel (it
+declares `focus = true`, so `focus_initial` wins regardless of which
+other panels are focusable).
 
 Resolution after 5e: every original user complaint addressed end-to-end.
 
