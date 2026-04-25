@@ -380,7 +380,7 @@ impl App {
 
     /// Switch to a model by key, updating all relevant state. Silently does
     /// nothing if the key is not found.
-    pub(super) fn apply_model(&mut self, key: &str) {
+    pub(crate) fn apply_model(&mut self, key: &str) {
         let Some(resolved) = self.available_models.iter().find(|m| m.key == key).cloned() else {
             return;
         };
@@ -425,13 +425,13 @@ impl App {
 
     /// Replace all resolved settings at once (from a settings dialog result),
     /// persisting + propagating to input/screen.
-    pub(super) fn set_settings(&mut self, new: state::ResolvedSettings) {
+    pub(crate) fn set_settings(&mut self, new: state::ResolvedSettings) {
         self.update_settings(|slot| *slot = new);
     }
 
     /// Set the agent mode, persist it, and notify the engine. Marks the
     /// screen dirty so the mode indicator refreshes.
-    pub(super) fn set_mode(&mut self, mode: Mode) {
+    pub(crate) fn set_mode(&mut self, mode: Mode) {
         let old = self.mode;
         self.mode = mode;
         state::set_mode(self.mode);
@@ -458,7 +458,7 @@ impl App {
         });
     }
 
-    pub(super) fn toggle_mode(&mut self) {
+    pub(crate) fn toggle_mode(&mut self) {
         let next = self.mode.cycle_within(&self.mode_cycle);
         self.set_mode(next);
     }
@@ -468,7 +468,7 @@ impl App {
         self.set_reasoning_effort(next);
     }
 
-    pub(super) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.reasoning_effort = effort;
         state::set_reasoning_effort(effort);
         self.engine.send(UiCommand::SetReasoningEffort { effort });

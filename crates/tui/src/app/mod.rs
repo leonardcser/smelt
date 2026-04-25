@@ -146,7 +146,7 @@ pub struct App {
     pub pending_dialog: bool,
     /// Set by reducer handlers (e.g. `DomainOp::RunCommand` dispatching
     /// `/quit`) to request the main loop break out on its next check.
-    pub(super) pending_quit: bool,
+    pub(crate) pending_quit: bool,
     /// Items returned by Lua-registered statusline sources. Appended
     /// after the Rust-side built-in spans each frame; priority /
     /// align_right on each item controls layout.
@@ -210,7 +210,7 @@ pub struct App {
     /// Owned by `App` so reducer handlers (`apply_ops`) can mutate
     /// it directly rather than threading `&mut Option<TurnState>`
     /// through every call chain.
-    pub(super) agent: Option<TurnState>,
+    pub(crate) agent: Option<TurnState>,
     /// Ghost text prediction for the input field.
     pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
