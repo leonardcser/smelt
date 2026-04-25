@@ -153,21 +153,34 @@ Dropped: `_build_title_buf`, `_build_summary_buf`,
 5c/typed panel handles): `_scroll_preview`, `_focus_reason`,
 `_back_tab`, `_resolve`.
 
-#### 5c — Panel handles, not index pokes
+#### ✅ 5c — Panel handles, not index pokes
 
-`smelt.ui.dialog._open(opts)` returns a handle whose `panels` field is a
-name-or-index map of typed panel handles:
+`smelt.ui.dialog.open_handle(opts)` returns a typed dialog handle:
 
 ```lua
-local d = smelt.ui.dialog.open({ panels = { options = {...}, reason = {...} } })
-d.panels.options:selected_index()
-d.panels.reason:text()
+local d = smelt.ui.dialog.open_handle({ panels = {
+  { kind = "options", items = …, name = "options", focus = true },
+  { kind = "input",   placeholder = …, name = "reason" },
+}})
+d.panels.options.idx           -- 1-based index for snapshot lookups
+d.panels.reason:focus()
 d:focus("reason")
+d:close()
 ```
 
-Replaces every `_focus_panel`, `_options_set_editing`,
-`_options_is_editing`, `_focused_panel` confirm_ops shim with panel
-methods.
+Each panel handle exposes identity (`kind`, `idx`, `name`, `buf`) +
+`:focus()`. Scrolling deliberately isn't a panel method — interactive
+content panels are real `Window`s now, so they scroll themselves via
+mouse wheel / vim motions when focused.
+
+Dropped: `smelt.confirm._scroll_preview`, `smelt.confirm._focus_reason`
+(replaced by generic `smelt.ui.dialog._panel_focus`). The PageUp /
+PageDown keymaps in confirm.lua are gone too — click the preview to
+focus, then scroll natively.
+
+`open_handle` is a Lua-side wrapper over `_open` (which still returns
+a bare `win_id`); `runtime/lua/smelt/dialog.lua`'s `make_handle`
+walks `opts.panels` once to assemble the per-panel handles.
 
 #### ✅ 5d — Drop one-off widget flags
 

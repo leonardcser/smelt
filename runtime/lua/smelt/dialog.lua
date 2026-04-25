@@ -1,12 +1,59 @@
--- Lua-side implementation of `smelt.ui.dialog.open(opts)`.
+-- Lua-side implementation of `smelt.ui.dialog.open(opts)` plus the
+-- typed panel-handle factory `smelt.ui.dialog.open_handle(opts)` used
+-- by built-ins (confirm) that drive the dialog lifecycle directly.
 --
 -- Rust exposes the low-level `smelt.ui.dialog._open(opts) -> win_id`
 -- which synchronously creates the float + panels. Everything else —
--- result building, custom keymaps, `on_select` / `on_change` /
--- `on_tick`, submit/dismiss routing — lives here. The only coroutine
--- yield is for the final result.
+-- handle construction, result building, custom keymaps, `on_select`
+-- / `on_change` / `on_tick`, submit/dismiss routing — lives here.
 
 local M = {}
+
+-- Single panel-handle factory: identity fields + `:focus()`. Buffer
+-- panels expose `.buf` so callers can mutate / re-render without
+-- re-walking the spec. Scrolling is the buffer's own job — interactive
+-- content panels handle wheel + vim motions natively when focused.
+local function make_panel(win_id, idx, spec)
+  local self = { kind = spec.kind, idx = idx, name = spec.name, buf = spec.buf }
+  function self:focus() smelt.ui.dialog._panel_focus(win_id, idx) end
+  return self
+end
+
+-- Build the `{ win, panels, focus, close }` handle from a freshly
+-- opened win_id and the original opts. `panels` is keyed by both
+-- 1-based index *and* the optional `name` field on each spec, so
+-- callers can do `d.panels[1]` or `d.panels.preview`.
+local function make_handle(win_id, opts)
+  local panels = {}
+  if type(opts.panels) == "table" then
+    for i, spec in ipairs(opts.panels) do
+      if type(spec) == "table" then
+        local h = make_panel(win_id, i, spec)
+        panels[i] = h
+        if spec.name then panels[spec.name] = h end
+      end
+    end
+  end
+  local self = { win = win_id, panels = panels }
+  function self:focus(name_or_idx)
+    local p = panels[name_or_idx]
+    if p then p:focus() end
+  end
+  function self:close() smelt.win.close(win_id) end
+  return self
+end
+
+-- `smelt.ui.dialog.open_handle(opts)` — synchronous; returns the
+-- typed handle. For coroutine-style use (yield until submit/dismiss),
+-- prefer `smelt.ui.dialog.open(opts)` further down.
+function smelt.ui.dialog.open_handle(opts)
+  if type(opts) ~= "table" then
+    error("smelt.ui.dialog.open_handle: expected table of options", 2)
+  end
+  local win_id = smelt.ui.dialog._open(opts)
+  if type(win_id) ~= "number" then return nil end
+  return make_handle(win_id, opts)
+end
 
 -- Build the keymap-callback ctx table (`{selected_index, inputs,
 -- close, win}`) from a raw callback ctx (`{win, panels, …}`). `opts`
