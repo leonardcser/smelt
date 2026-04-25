@@ -140,7 +140,8 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                         .with_scrollbar_styles(track, thumb),
                 );
                 panel_specs.push(
-                    PanelSpec::list_widget(widget, height.unwrap_or(PanelHeight::Fill))
+                    PanelSpec::widget(widget, height.unwrap_or(PanelHeight::Fill))
+                        .with_pad_left(2)
                         .with_initial_focus(initial_focus),
                 );
             }

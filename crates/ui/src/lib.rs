@@ -47,8 +47,8 @@ pub use cmdline::{Cmdline, CmdlineStyle};
 pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult, WidgetEvent};
 pub use compositor::Compositor;
 pub use dialog::{
-    Dialog, DialogConfig, PanelContent, PanelHeight, PanelKind, PanelSnapshot, PanelSpec,
-    PanelWidget, SeparatorStyle,
+    Dialog, DialogConfig, PanelContent, PanelHeight, PanelSnapshot, PanelSpec, PanelWidget,
+    SeparatorStyle,
 };
 pub use edit_buffer::EditBuffer;
 pub use flush::flush_diff;
@@ -523,26 +523,17 @@ impl Ui {
     }
 
     /// Build a live snapshot of every panel on the `Dialog` at `win_id`
-    /// for Lua pull-read. Empty vec when the window isn't a dialog. For
-    /// each panel: `selected` is the 0-based cursor / selection index
-    /// when applicable, `text` is the current buffer / widget text for
-    /// `Input` kinds.
+    /// for Lua pull-read. Empty vec when the window isn't a dialog.
+    /// `selected` is the 0-based selection index when the panel is a
+    /// list widget; `text` is the current text for input widgets.
     pub fn snapshot_dialog_panels(&self, win_id: WinId) -> Vec<dialog::PanelSnapshot> {
         let Some(dlg) = self.dialog(win_id) else {
             return Vec::new();
         };
         (0..dlg.panel_count())
-            .map(|i| {
-                let kind = dlg.panel_kind_at(i).unwrap_or(dialog::PanelKind::Content);
-                let selected = dlg
-                    .selected_index_at(i)
-                    .or_else(|| dlg.panel_widget_selected(i));
-                let text = dlg.panel_widget_text(i).unwrap_or_default();
-                dialog::PanelSnapshot {
-                    kind,
-                    selected,
-                    text,
-                }
+            .map(|i| dialog::PanelSnapshot {
+                selected: dlg.selected_index_at(i),
+                text: dlg.panel_widget_text(i).unwrap_or_default(),
             })
             .collect()
     }
