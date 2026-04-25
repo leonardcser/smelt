@@ -803,6 +803,10 @@ impl App {
             },
             message: ui::Style::dim(),
             background: ui::Style::default(),
+            selection: ui::Style {
+                bg: Some(crate::theme::selection_bg()),
+                ..Default::default()
+            },
         };
         // Position: one row above the prompt, full width. Rect is
         // refreshed each frame by `sync_notification_float`.
