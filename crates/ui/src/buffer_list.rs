@@ -159,11 +159,7 @@ impl Component for BufferList {
         let scrollbar_col = area.left + area.width.saturating_sub(1);
         let scrollbar = ScrollbarState::new(scrollbar_col, total, viewport_rows);
         self.viewport = Some(WindowViewport::new(
-            area,
-            area.width,
-            total,
-            scroll_top,
-            scrollbar,
+            area, area.width, total, scroll_top, scrollbar,
         ));
         self.view.set_scroll(scroll_top as usize);
     }
@@ -445,7 +441,14 @@ mod tests {
 
     #[test]
     fn scroll_wheel_does_not_move_selection() {
-        let buf = make_buf(&(0..20).map(|i| format!("l{i}")).collect::<Vec<_>>().iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let buf = make_buf(
+            &(0..20)
+                .map(|i| format!("l{i}"))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        );
         let mut list = BufferList::new(BufId(1));
         list.sync_from_buffer(&buf);
         list.prepare(Rect::new(0, 0, 10, 5), &ctx(10, 5));
@@ -458,7 +461,14 @@ mod tests {
 
     #[test]
     fn scrollbar_drag_snaps_scroll() {
-        let buf = make_buf(&(0..20).map(|i| format!("l{i}")).collect::<Vec<_>>().iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let buf = make_buf(
+            &(0..20)
+                .map(|i| format!("l{i}"))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        );
         let mut list = BufferList::new(BufId(1));
         list.sync_from_buffer(&buf);
         list.prepare(Rect::new(0, 0, 10, 5), &ctx(10, 5));

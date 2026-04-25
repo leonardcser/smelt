@@ -341,18 +341,12 @@ impl Component for TextInput {
                 KeyResult::Consumed
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let yank = self.selection_range().map(|(s, e)| {
-                    self.text
-                        .chars()
-                        .skip(s)
-                        .take(e - s)
-                        .collect::<String>()
-                });
+                let yank = self
+                    .selection_range()
+                    .map(|(s, e)| self.text.chars().skip(s).take(e - s).collect::<String>());
                 self.clear_selection();
                 match yank {
-                    Some(text) if !text.is_empty() => {
-                        KeyResult::Action(WidgetEvent::Yank(text))
-                    }
+                    Some(text) if !text.is_empty() => KeyResult::Action(WidgetEvent::Yank(text)),
                     _ => KeyResult::Consumed,
                 }
             }
@@ -490,11 +484,7 @@ mod tests {
         let mut ti = TextInput::new();
         ti.set_text("hello world");
         ti.last_area = Rect::new(2, 5, 20, 1);
-        let r = ti.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            2,
-            8,
-        ));
+        let r = ti.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 8));
         assert_eq!(r, KeyResult::Capture);
         assert_eq!(ti.cursor_col(), 3);
     }
@@ -504,17 +494,9 @@ mod tests {
         let mut ti = TextInput::new();
         ti.set_text("hello world");
         ti.last_area = Rect::new(2, 5, 20, 1);
-        ti.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            2,
-            5,
-        ));
+        ti.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 5));
         // Drag to col 10 → cursor at char 5; anchor pinned at 0.
-        ti.handle_mouse(mouse_event(
-            MouseEventKind::Drag(MouseButton::Left),
-            2,
-            10,
-        ));
+        ti.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 10));
         assert_eq!(ti.selection_range(), Some((0, 5)));
         let r = ti.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 10));
         assert_eq!(r, KeyResult::Action(WidgetEvent::Yank("hello".into())));
