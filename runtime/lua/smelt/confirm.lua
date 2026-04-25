@@ -70,7 +70,7 @@ function smelt.confirm.open(handle_id)
       kind                = "content",
       buf                 = preview_buf,
       height              = "fill",
-      focusable           = false,
+      interactive         = true,
       collapse_when_empty = true,
       separator           = "dashed",
     },
