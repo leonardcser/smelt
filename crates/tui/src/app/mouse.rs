@@ -67,17 +67,12 @@ impl App {
         // click-to-position TextInput cursor, etc. Wheel keeps the
         // direct path above because the focused-float-absorbs-wheel
         // policy needs App-level focus knowledge.
-        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-            if let Some(hit_win) = self.ui.float_at(me.row, me.column) {
+        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.ui.float_at(me.row, me.column).is_some()
+        {
+            {
                 if self.begin_dialog_scrollbar_drag_if_hit(me.row, me.column) {
                     self.mouse_drag_active = true;
-                    return EventOutcome::Redraw;
-                }
-                // Notification toast click-to-dismiss bypasses the
-                // generic dispatch path — there's no widget callback,
-                // App owns the toast lifecycle directly.
-                if self.notification == Some(hit_win) {
-                    self.dismiss_notification();
                     return EventOutcome::Redraw;
                 }
                 let lua = &self.lua;
