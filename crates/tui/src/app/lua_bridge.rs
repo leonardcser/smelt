@@ -5,11 +5,16 @@
 use super::*;
 
 impl App {
-    /// Compute the vim-mode label for the currently focused window —
-    /// the only piece of dispatch context that's still passed to
-    /// `LuaRuntime::run_keymap` (modal keymaps fire only in matching
-    /// modes). Lua reads of `smelt.win.mode()` go live via `with_app`.
+    /// Vim-mode label for the currently focused buffer Window. Asks
+    /// `Ui` for a focused dialog buffer panel first (so a dialog with
+    /// an interactive preview pane reports its own mode); falls back
+    /// to the active split (transcript / prompt). Returns `None` when
+    /// the focused surface is a widget panel or non-interactive
+    /// chrome — same as nvim's "widget windows have no mode."
     pub(super) fn current_vim_mode_label(&self) -> Option<String> {
+        if let Some(win) = self.ui.focused_dialog_buffer_window() {
+            return win.vim.as_ref().map(|v| format!("{:?}", v.mode()));
+        }
         match self.app_focus {
             crate::app::AppFocus::Content => self
                 .transcript_window

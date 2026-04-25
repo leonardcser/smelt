@@ -411,6 +411,22 @@ impl Dialog {
         self.focused
     }
 
+    /// Internal `Window` of the focused panel when that panel is an
+    /// interactive buffer (the only panel kind that drives
+    /// transcript-style cursor/selection/vim mode). `None` for
+    /// non-interactive chrome buffer panels and for widget panels —
+    /// matches nvim's "no mode in widget windows" model.
+    pub fn focused_buffer_window(&self) -> Option<&Window> {
+        let panel = self.panels.get(self.focused)?;
+        if !panel.interactive {
+            return None;
+        }
+        match &panel.content {
+            DialogPanelContent::Buffer { win, .. } => Some(win),
+            DialogPanelContent::Widget(_) => None,
+        }
+    }
+
     /// Panel index whose resolved rect contains `(row, col)`. Rects are
     /// recomputed each `prepare`/`draw`, so this reflects the last
     /// rendered frame.

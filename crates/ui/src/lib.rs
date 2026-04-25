@@ -890,6 +890,19 @@ impl Ui {
         parse_float_layer_id(focused)
     }
 
+    /// Buffer-bearing `Window` driving the user's current view, if any.
+    /// Walks the focused float (a dialog) into its focused panel and
+    /// returns that panel's `Window` when the panel is interactive.
+    /// Falls through to `None` when the focused float is a picker /
+    /// notification / widget panel — the host then decides whether to
+    /// fall back to a split (transcript / prompt) for status purposes.
+    /// Same model nvim uses: a focused float that isn't a "real" buffer
+    /// view contributes no mode to the statusline.
+    pub fn focused_dialog_buffer_window(&self) -> Option<&Window> {
+        let win_id = self.focused_float()?;
+        self.dialog(win_id)?.focused_buffer_window()
+    }
+
     /// Topmost float (by zindex) whose rect contains (row, col). Used
     /// by the host's mouse dispatcher to route wheel / click events
     /// onto the float they actually land on — independent of focus —
