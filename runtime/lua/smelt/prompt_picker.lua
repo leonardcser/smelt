@@ -15,28 +15,13 @@
 -- original `items` table.
 
 local function filter_items(all_items, query)
-  if not query or query == "" then
-    local out = {}
-    for i, it in ipairs(all_items) do out[i] = it end
-    return out
-  end
-  local scored = {}
-  for _, it in ipairs(all_items) do
-    local fields = it.label or ""
-    if it.search_terms then
-      fields = fields .. "\n" .. it.search_terms
-    end
-    local s = smelt.fuzzy.score(fields, query)
-    if s then
-      scored[#scored + 1] = { score = s, idx = it._idx, item = it }
-    end
-  end
-  table.sort(scored, function(a, b)
-    if a.score ~= b.score then return a.score < b.score end
-    return a.idx < b.idx
-  end)
+  -- Defer to smelt.fuzzy.rank — it scores label / description /
+  -- search_terms as separate fields and takes the best, matching the
+  -- old Rust ArgPicker's ranking. Empty query short-circuits to the
+  -- original ordering.
+  local order = smelt.fuzzy.rank(all_items, query)
   local out = {}
-  for i, row in ipairs(scored) do out[i] = row.item end
+  for i, idx in ipairs(order) do out[i] = all_items[idx] end
   return out
 end
 
@@ -47,6 +32,7 @@ local function to_picker_items(list)
       label       = it.label,
       description = it.description,
       ansi_color  = it.ansi_color,
+      prefix      = it.prefix,
     }
   end
   return out
@@ -74,6 +60,7 @@ function smelt.prompt.open_picker(opts)
       label        = it.label,
       description  = it.description,
       ansi_color   = it.ansi_color,
+      prefix       = it.prefix,
       search_terms = it.search_terms,
       _idx         = i,
     }
@@ -106,7 +93,7 @@ function smelt.prompt.open_picker(opts)
   end
   fire_on_select()
 
-  local keys = { "up", "down", "c-p", "c-n", "enter", "tab", "esc" }
+  local keys = { "up", "down", "c-k", "c-j", "c-p", "c-n", "enter", "tab", "esc" }
   local text_changed_id
 
   local function teardown()
@@ -142,10 +129,18 @@ function smelt.prompt.open_picker(opts)
     close_with({ action = action, index = idx, item = original[idx] })
   end
 
-  smelt.win.set_keymap(PROMPT, "up",    function() move(-1) end)
-  smelt.win.set_keymap(PROMPT, "down",  function() move(1)  end)
-  smelt.win.set_keymap(PROMPT, "c-p",   function() move(-1) end)
-  smelt.win.set_keymap(PROMPT, "c-n",   function() move(1)  end)
+  -- The picker is rendered reversed (logical index 0 sits at the
+  -- bottom visual row, closest to the prompt). Pressing Up moves
+  -- toward higher logical indices (worse matches, higher on screen);
+  -- Down moves toward lower indices (better matches, closer to the
+  -- prompt). Mirror that for c-k/c-p (vim/emacs "up") and c-j/c-n
+  -- ("down").
+  smelt.win.set_keymap(PROMPT, "up",    function() move(1)  end)
+  smelt.win.set_keymap(PROMPT, "down",  function() move(-1) end)
+  smelt.win.set_keymap(PROMPT, "c-k",   function() move(1)  end)
+  smelt.win.set_keymap(PROMPT, "c-j",   function() move(-1) end)
+  smelt.win.set_keymap(PROMPT, "c-p",   function() move(1)  end)
+  smelt.win.set_keymap(PROMPT, "c-n",   function() move(-1) end)
   smelt.win.set_keymap(PROMPT, "enter", function() accept("enter") end)
   smelt.win.set_keymap(PROMPT, "tab",   function()
     local picked = current[selected]
