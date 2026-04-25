@@ -72,7 +72,7 @@ its mode.
   non-interactive chrome buffer panel: returns `None`, status bar shows no
   mode (matches nvim).
 
-### ⬜ Step 3 — Switch transcript path to `Window::handle_mouse`
+### ✅ Step 3 — Switch transcript path to `Window::handle_mouse`
 
 Pure code-quality: delete the duplicated cursor/selection/drag logic from
 `App::handle_mouse`.

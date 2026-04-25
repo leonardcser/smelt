@@ -154,31 +154,36 @@ impl App {
         match me.kind {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.mouse_drag_active = true;
-                self.extend_selection_to(me.row, me.column);
+                self.extend_selection_to(me);
                 return EventOutcome::Redraw;
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let dragged = self.mouse_drag_active && self.drag_on_scrollbar.is_none();
-                let had_anchor_span =
-                    self.drag_anchor_word.is_some() || self.drag_anchor_line.is_some();
                 match self.app_focus {
                     crate::app::AppFocus::Content => {
                         // A double/triple-click already copied the
                         // initial word/line; on release we re-copy the
                         // (possibly extended) selection if the user
-                        // dragged OR if there's a word/line anchor
-                        // even without a drag (so the initial copy is
-                        // reasserted).
-                        let should_copy = dragged || had_anchor_span;
-                        self.copy_content_selection_and_clear(should_copy);
+                        // dragged OR if there's a word/line anchor.
+                        let had_anchor_span = self.transcript_window.drag_anchor_word.is_some()
+                            || self.transcript_window.drag_anchor_line.is_some();
+                        if dragged || had_anchor_span {
+                            self.handle_content_mouse(me, 0);
+                        } else {
+                            self.transcript_window.drag_anchor_word = None;
+                            self.transcript_window.drag_anchor_line = None;
+                        }
+                        if let Some(vim) = self.transcript_window.vim.as_mut() {
+                            vim.set_mode(crate::vim::ViMode::Normal);
+                        } else {
+                            self.transcript_window.win_cursor.clear_anchor();
+                        }
                     }
                     crate::app::AppFocus::Prompt => {
                         self.copy_prompt_selection_on_release();
                     }
                 }
                 self.mouse_drag_active = false;
-                self.drag_anchor_word = None;
-                self.drag_anchor_line = None;
                 self.drag_autoscroll_since = None;
                 self.drag_on_scrollbar = None;
                 return EventOutcome::Redraw;
@@ -224,7 +229,6 @@ impl App {
                 };
                 self.last_click = Some((now, me.row, me.column, count));
                 let double = count == 2;
-                let triple = count == 3;
 
                 // First, check if the click lands inside the input text
                 // region — that's the only prompt-area hit we position
@@ -292,12 +296,10 @@ impl App {
                     return EventOutcome::Noop;
                 }
                 self.app_focus = crate::app::AppFocus::Content;
-                // Route the event through the `Viewport`
-                // recorded by the last paint: scrollbar clicks latch a
-                // `ScrollbarDrag` so subsequent drag ticks keep
-                // scrolling with the same thumb-relative offset;
-                // content clicks position the cursor at already-clamped
-                // (row, col).
+                // Route the event through the `Viewport` recorded by
+                // the last paint: scrollbar clicks latch a
+                // `ScrollbarDrag`; content clicks delegate to the
+                // transcript Window's mouse handler.
                 if self.begin_scrollbar_drag_if_hit(
                     me.row,
                     me.column,
@@ -306,37 +308,7 @@ impl App {
                     return EventOutcome::Redraw;
                 }
                 self.drag_on_scrollbar = None;
-                match self
-                    .transcript_viewport
-                    .and_then(|r| r.hit(me.row, me.column))
-                {
-                    Some(content::ViewportHit::Scrollbar) => {
-                        // Unreachable: begin_scrollbar_drag_if_hit above
-                        // handles Scrollbar hits. Kept for exhaustiveness.
-                    }
-                    Some(content::ViewportHit::Content { row, col }) => {
-                        self.position_content_cursor_from_hit(row, col);
-                    }
-                    None => {}
-                }
-                if triple {
-                    self.select_and_copy_line_in_content();
-                    return EventOutcome::Redraw;
-                }
-                if double {
-                    self.select_and_copy_word_in_content();
-                    return EventOutcome::Redraw;
-                }
-                // Anchor the visual selection at the click position, not
-                // wherever the cursor happened to be before — otherwise
-                // a click selects everything between the previous
-                // cursor and the click point.
-                let anchor = self.transcript_window.cpos;
-                if let Some(vim) = self.transcript_window.vim.as_mut() {
-                    vim.begin_visual(crate::vim::ViMode::Visual, anchor);
-                } else {
-                    self.transcript_window.win_cursor.set_anchor(Some(anchor));
-                }
+                self.handle_content_mouse(me, count);
                 EventOutcome::Redraw
             }
             _ => EventOutcome::Noop,
@@ -441,45 +413,24 @@ impl App {
         self.input.win.win_cursor.set_curswant(Some(want));
     }
 
-    /// Extend the content-pane visual selection to the cell under the
-    /// current drag position. Runs while the user holds mouse-1 and
-    /// moves — each update moves the cursor inside vim Visual mode so
-    /// the existing visual range widens or shrinks accordingly. Auto-
-    /// scroll when the cursor is parked at an edge is handled by
-    /// [`tick_drag_autoscroll`] on the frame tick, so holding the mouse
-    /// still at the edge keeps extending the selection.
-    fn extend_selection_to(&mut self, row: u16, col: u16) {
+    /// Extend the active drag selection. Scrollbar drags re-snap the
+    /// thumb; content drags delegate to `transcript_window.handle_mouse`
+    /// (which knows how to grow word/line anchored drags); prompt
+    /// drags still ride the local prompt-side path until Step 4 hands
+    /// the prompt to `Window::handle_mouse` too.
+    fn extend_selection_to(&mut self, me: MouseEvent) {
         if self.drag_on_scrollbar.is_some() {
-            self.apply_scrollbar_drag(row);
+            self.apply_scrollbar_drag(me.row);
             return;
         }
         match self.app_focus {
             crate::app::AppFocus::Content => {
-                if let Some(region) = self.transcript_viewport {
-                    let rel_row = row
-                        .saturating_sub(region.rect.top)
-                        .min(region.rect.height.saturating_sub(1));
-                    let rel_col = col
-                        .saturating_sub(region.rect.left)
-                        .min(region.content_width.saturating_sub(1));
-                    self.position_content_cursor_from_hit(rel_row, rel_col);
-                } else {
-                    self.position_content_cursor_from_hit(row, col);
-                }
-                // Anchored drag extension: if the gesture started with
-                // a word/line selection, grow outward in full-word or
-                // full-line units instead of single cells so the
-                // original unit stays inside the selection regardless
-                // of drag direction.
-                if self.drag_anchor_word.is_some() {
-                    self.extend_word_anchored_drag();
-                } else if self.drag_anchor_line.is_some() {
-                    self.extend_line_anchored_drag();
-                }
+                self.handle_content_mouse(me, 0);
             }
             crate::app::AppFocus::Prompt => {
                 if let Some(vp) = self.prompt_viewport {
-                    if let Some(content::ViewportHit::Content { row: r, col: c }) = vp.hit(row, col)
+                    if let Some(content::ViewportHit::Content { row: r, col: c }) =
+                        vp.hit(me.row, me.column)
                     {
                         self.position_prompt_cursor_from_click(
                             r,
@@ -496,88 +447,6 @@ impl App {
                     self.input.win.win_cursor.extend(self.input.win.cpos);
                 }
             }
-        }
-    }
-
-    /// Anchored word-drag: `drag_anchor_word = (ws, we)`. Move cpos to
-    /// the far side of the word at the current drag position so the
-    /// selection always covers `[ws, we)` plus any words the drag has
-    /// crossed into. Flips the vim visual anchor when the drag goes
-    /// before the original word so the range direction stays correct.
-    fn extend_word_anchored_drag(&mut self) {
-        let Some((ws, we)) = self.drag_anchor_word else {
-            return;
-        };
-        let rows = self.full_transcript_display_text(self.settings.show_thinking);
-        let (soft, _hard) = self.transcript_line_breaks(self.settings.show_thinking);
-        let p = self.transcript_window.compute_cpos(&rows);
-        let (new_cpos, new_anchor) = if p >= we {
-            let far = self
-                .transcript_window
-                .edit_buf
-                .word_range_at_transparent(p, &soft)
-                .map(|(_, e)| e.saturating_sub(1).max(ws))
-                .unwrap_or(p.max(we.saturating_sub(1)));
-            (far, ws)
-        } else if p < ws {
-            let near = self
-                .transcript_window
-                .edit_buf
-                .word_range_at_transparent(p, &soft)
-                .map(|(s, _)| s)
-                .unwrap_or(p);
-            (near, we.saturating_sub(1).max(ws))
-        } else {
-            (we.saturating_sub(1).max(ws), ws)
-        };
-        self.transcript_window.cpos = new_cpos;
-        if let Some(vim) = self.transcript_window.vim.as_mut() {
-            vim.begin_visual(crate::vim::ViMode::Visual, new_anchor);
-        } else {
-            self.transcript_window
-                .win_cursor
-                .set_anchor(Some(new_anchor));
-        }
-    }
-
-    /// Anchored line-drag: `drag_anchor_line = (ls, le)`. Expand the
-    /// selection to cover the source line at the drag position plus
-    /// the originally-selected line, whichever direction the drag
-    /// went. Flips the vim visual anchor across the original line
-    /// as needed.
-    fn extend_line_anchored_drag(&mut self) {
-        let Some((ls, le)) = self.drag_anchor_line else {
-            return;
-        };
-        let rows = self.full_transcript_display_text(self.settings.show_thinking);
-        let (_soft, hard) = self.transcript_line_breaks(self.settings.show_thinking);
-        let p = self.transcript_window.compute_cpos(&rows);
-        let (new_cpos, new_anchor) = if p >= le {
-            let far = self
-                .transcript_window
-                .edit_buf
-                .line_range_at(p, &hard)
-                .map(|(_, e)| e.saturating_sub(1).max(ls))
-                .unwrap_or(p.max(le.saturating_sub(1)));
-            (far, ls)
-        } else if p < ls {
-            let near = self
-                .transcript_window
-                .edit_buf
-                .line_range_at(p, &hard)
-                .map(|(s, _)| s)
-                .unwrap_or(p);
-            (near, le.saturating_sub(1).max(ls))
-        } else {
-            (le.saturating_sub(1).max(ls), ls)
-        };
-        self.transcript_window.cpos = new_cpos;
-        if let Some(vim) = self.transcript_window.vim.as_mut() {
-            vim.begin_visual(crate::vim::ViMode::Visual, new_anchor);
-        } else {
-            self.transcript_window
-                .win_cursor
-                .set_anchor(Some(new_anchor));
         }
     }
 
@@ -651,87 +520,90 @@ impl App {
         }
     }
 
-    /// Double-click on the content pane: enter vim Visual over the
-    /// "WORD" (vim `W`, whitespace-delimited) under the cursor and
-    /// copy it. Punctuation is part of the WORD so e.g. `foo.bar(baz)`
-    /// selects as one unit. Treats soft-wrap `\n` as transparent so a
-    /// word split by display wrapping still selects as one unit.
-    /// Records the word span so a subsequent drag extends by full-word
-    /// units while keeping the original word inside.
-    fn select_and_copy_word_in_content(&mut self) {
+    /// Drive a transcript-pane mouse event through `Window::handle_mouse`.
+    /// Resolves the projected display rows, soft/hard line breaks and
+    /// painted viewport once, snaps the click column into a selectable
+    /// cell (so hidden-thinking summary rows route to the fold marker
+    /// instead of empty padding), then translates a returned
+    /// `Yank` action through `copy_display_range` so the clipboard
+    /// receives raw markdown rather than rendered display text.
+    fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
-        let (soft, _hard) = self.transcript_line_breaks(self.settings.show_thinking);
-        let cpos = self.transcript_window.compute_cpos(&rows);
-        let viewport = self.viewport_rows_estimate();
-        if let Some((s, e)) = self
-            .transcript_window
-            .select_big_word_at_transparent(cpos, &soft, &rows, viewport)
-        {
-            self.drag_anchor_word = Some((s, e));
-            self.drag_anchor_line = None;
-            let text = self.copy_display_range(s, e, self.settings.show_thinking);
-            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
-                self.transcript_window
-                    .kill_ring
-                    .record_clipboard_write(text);
-            }
+        if rows.is_empty() {
+            return;
+        }
+        let (soft, hard) = self.transcript_line_breaks(self.settings.show_thinking);
+        let Some(viewport) = self.transcript_viewport else {
+            return;
+        };
+        let snapped = self.snap_event_for_selection(me, &rows, viewport);
+        let ctx = ui::MouseCtx {
+            rows: &rows,
+            soft_breaks: &soft,
+            hard_breaks: &hard,
+            viewport,
+            click_count,
+        };
+        let action = self.transcript_window.handle_mouse(snapped, ctx);
+        self.translate_content_yank(action);
+    }
+
+    /// Translate `me`'s screen column into a *selectable* column for the
+    /// clicked display row. In hidden-thinking summary rows some columns
+    /// render padding/glyphs that aren't selectable, so a click past
+    /// them must snap onto the nearest selectable cell — matches what
+    /// `position_content_cursor_from_hit` did before unification.
+    fn snap_event_for_selection(
+        &mut self,
+        me: MouseEvent,
+        rows: &[String],
+        vp: ui::WindowViewport,
+    ) -> MouseEvent {
+        let rel_row = me.row.saturating_sub(vp.rect.top) as usize;
+        let line_idx = (self.transcript_window.scroll_top as usize + rel_row)
+            .min(rows.len().saturating_sub(1));
+        let rel_col = me.column.saturating_sub(vp.rect.left) as usize;
+        let snapped = self.snap_col_to_selectable(line_idx, rel_col, self.settings.show_thinking);
+        MouseEvent {
+            column: vp.rect.left.saturating_add(snapped as u16),
+            ..me
         }
     }
 
-    /// Triple-click on the content pane: select the source line under
-    /// the cursor (spanning soft-wrapped display rows) and copy it.
-    /// Records the line span so a subsequent drag extends by full-line
-    /// units.
-    fn select_and_copy_line_in_content(&mut self) {
-        let rows = self.full_transcript_display_text(self.settings.show_thinking);
-        let (_soft, hard) = self.transcript_line_breaks(self.settings.show_thinking);
-        let cpos = self.transcript_window.compute_cpos(&rows);
-        let viewport = self.viewport_rows_estimate();
-        if let Some((s, e)) = self
-            .transcript_window
-            .select_line_at(cpos, &hard, &rows, viewport)
-        {
-            self.drag_anchor_line = Some((s, e));
-            self.drag_anchor_word = None;
-            let text = self.copy_display_range(s, e, self.settings.show_thinking);
-            if crate::app::commands::copy_to_clipboard(&text).is_ok() {
-                self.transcript_window
-                    .kill_ring
-                    .record_clipboard_write(text);
-            }
+    /// Bridge a `Window::handle_mouse` `Yank` action back to the
+    /// transcript's display→raw mapping. The window yields display-row
+    /// text; the clipboard wants the markdown source. Re-derive the
+    /// `(s, e)` byte range from the window's anchors (set during
+    /// double/triple-click) or its vim/win_cursor selection (after
+    /// drag-up), then run the range through `copy_display_range`.
+    fn translate_content_yank(&mut self, action: ui::MouseAction) {
+        if !matches!(action, ui::MouseAction::Yank(_)) {
+            return;
         }
-    }
-
-    /// Finalise a mouse interaction. Only copies when `dragged` is true —
-    /// a bare click (no drag) exits Visual mode without copying, even
-    /// though vim Visual selects the char under the cursor by default.
-    fn copy_content_selection_and_clear(&mut self, dragged: bool) {
-        if dragged {
+        let (s, e) = if let Some((s, e)) = self.transcript_window.drag_anchor_word {
+            (s, e)
+        } else if let Some((s, e)) = self.transcript_window.drag_anchor_line {
+            (s, e)
+        } else {
             let rows = self.full_transcript_display_text(self.settings.show_thinking);
             let buf = rows.join("\n");
+            let cpos = self.transcript_window.compute_cpos(&rows);
             let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
-                let cpos = self.transcript_window.compute_cpos(&rows);
                 vim.visual_range(&buf, cpos)
             } else {
                 self.transcript_window.selection_range(&rows)
             };
-            if let Some((s, e)) = range {
-                let s = ui::text::snap(&buf, s);
-                let e = ui::text::snap(&buf, e);
-                if s < e {
-                    let copy = self.copy_display_range(s, e, self.settings.show_thinking);
-                    if crate::app::commands::copy_to_clipboard(&copy).is_ok() {
-                        self.transcript_window
-                            .kill_ring
-                            .record_clipboard_write(copy);
-                    }
-                }
-            }
+            let Some((s, e)) = range else { return };
+            (ui::text::snap(&buf, s), ui::text::snap(&buf, e))
+        };
+        if e <= s {
+            return;
         }
-        if let Some(vim) = self.transcript_window.vim.as_mut() {
-            vim.set_mode(crate::vim::ViMode::Normal);
-        } else {
-            self.transcript_window.win_cursor.clear_anchor();
+        let text = self.copy_display_range(s, e, self.settings.show_thinking);
+        if crate::app::commands::copy_to_clipboard(&text).is_ok() {
+            self.transcript_window
+                .kill_ring
+                .record_clipboard_write(text);
         }
     }
 
@@ -853,34 +725,5 @@ impl App {
             crate::app::AppFocus::Content => self.transcript_viewport,
             crate::app::AppFocus::Prompt => self.prompt_viewport,
         }
-    }
-
-    /// Translate a click inside the transcript viewport into a
-    /// (line, col) in the full transcript and jump the content cursor
-    /// there. Reads geometry from the `Viewport` recorded at
-    /// paint time so viewport rows, content width and scroll offset
-    /// all match what the user is actually looking at. Both `rel_row`
-    /// and `rel_col` are relative to the viewport's content area
-    /// (already clamped + gutter-stripped by the caller), matching
-    /// what `Viewport::hit` returns.
-    fn position_content_cursor_from_hit(&mut self, rel_row: u16, rel_col: u16) {
-        let rows = self.full_transcript_display_text(self.settings.show_thinking);
-        if rows.is_empty() {
-            return;
-        }
-        let Some(region) = self.transcript_viewport else {
-            return;
-        };
-        let display_col = rel_col as usize;
-        let viewport_rows = region.rect.height;
-        let total = rows.len().min(u16::MAX as usize) as u16;
-        let geom =
-            content::ViewportGeom::new(total, viewport_rows, self.transcript_window.scroll_top);
-        let line_idx = geom.line_of_row(rel_row).unwrap_or(total.saturating_sub(1)) as usize;
-        let line_idx = line_idx.min(rows.len() - 1);
-        let snapped =
-            self.snap_col_to_selectable(line_idx, display_col, self.settings.show_thinking);
-        self.transcript_window
-            .jump_to_line_col(&rows, line_idx, snapped, viewport_rows);
     }
 }
