@@ -53,7 +53,7 @@ function smelt.confirm.open(handle_id)
     panels           = panels,
     blocks_agent     = true,
     placement        = "dock_bottom",
-    placement_height = 60,
+    placement_height = 100,
   })
   if type(win_id) ~= "number" then return end
 

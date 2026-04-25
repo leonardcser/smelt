@@ -41,6 +41,22 @@ pub struct LiveTurn {
     pub retry_deadline: Option<Instant>,
     pub tps_samples: Vec<f64>,
     pub last_spinner_frame: usize,
+    /// Some(t) while paused (blocking dialog up); the timer + spinner
+    /// freeze and the elapsed gap is added to `pause_total` on resume.
+    pub pause_started: Option<Instant>,
+    pub pause_total: Duration,
+}
+
+impl LiveTurn {
+    /// Wall elapsed minus paused time. Used everywhere the user-facing
+    /// elapsed clock or spinner frame is computed so a paused turn
+    /// looks frozen.
+    pub fn effective_elapsed(&self) -> Duration {
+        let raw = self.since.elapsed();
+        let active_pause = self.pause_started.map(|t| t.elapsed()).unwrap_or_default();
+        raw.saturating_sub(self.pause_total)
+            .saturating_sub(active_pause)
+    }
 }
 
 /// Archived metadata from the last completed turn. Shown in the
@@ -81,6 +97,8 @@ impl WorkingState {
                     retry_deadline,
                     tps_samples: Vec::new(),
                     last_spinner_frame: usize::MAX,
+                    pause_started: None,
+                    pause_total: Duration::ZERO,
                 });
                 self.last = None;
             }
@@ -90,7 +108,7 @@ impl WorkingState {
     /// Archive the live turn's metadata as `last` and clear live.
     pub fn finish(&mut self, outcome: TurnOutcome) {
         let (elapsed, avg_tps) = match self.live.take() {
-            Some(live) => (live.since.elapsed(), avg(&live.tps_samples)),
+            Some(live) => (live.effective_elapsed(), avg(&live.tps_samples)),
             None => (Duration::ZERO, None),
         };
         self.last = Some(LastTurn {
@@ -127,12 +145,30 @@ impl WorkingState {
     }
 
     /// Elapsed time for the display — `since` for a live turn,
-    /// archived `elapsed` otherwise.
+    /// archived `elapsed` otherwise. Live elapsed excludes time
+    /// during which a blocking dialog paused the turn.
     pub fn elapsed(&self) -> Option<Duration> {
         if let Some(live) = self.live.as_ref() {
-            Some(live.since.elapsed())
+            Some(live.effective_elapsed())
         } else {
             self.last.as_ref().map(|l| l.elapsed)
+        }
+    }
+
+    /// Toggle the paused state on the live turn (if any). While paused,
+    /// `effective_elapsed` and the spinner freeze. Idempotent: passing
+    /// the same state twice in a row is a no-op.
+    pub fn set_paused(&mut self, paused: bool) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        match (paused, live.pause_started) {
+            (true, None) => live.pause_started = Some(Instant::now()),
+            (false, Some(t)) => {
+                live.pause_total = live.pause_total.saturating_add(t.elapsed());
+                live.pause_started = None;
+            }
+            _ => {}
         }
     }
 
@@ -149,7 +185,7 @@ impl WorkingState {
     pub fn turn_meta(&self) -> Option<TurnMeta> {
         if let Some(live) = self.live.as_ref() {
             return Some(TurnMeta {
-                elapsed_ms: live.since.elapsed().as_millis() as u64,
+                elapsed_ms: live.effective_elapsed().as_millis() as u64,
                 avg_tps: avg(&live.tps_samples),
                 interrupted: false,
                 tool_elapsed: std::collections::HashMap::new(),
@@ -179,10 +215,12 @@ impl WorkingState {
     }
 
     /// Spinner glyph for the active live turn, or `None` when
-    /// nothing is animating.
+    /// nothing is animating. While paused (blocking dialog), the
+    /// frame index is computed against the frozen `effective_elapsed`,
+    /// so the glyph stays static.
     pub fn spinner_char(&self) -> Option<&'static str> {
         let live = self.live.as_ref()?;
-        Some(SPINNER_FRAMES[crate::content::spinner_frame_index(live.since.elapsed())])
+        Some(SPINNER_FRAMES[crate::content::spinner_frame_index(live.effective_elapsed())])
     }
 
     pub(crate) fn throbber_spans(&self, show_tps: bool) -> Vec<BarSpan> {
@@ -228,7 +266,7 @@ fn tps_spans(avg_tps: Option<f64>) -> Vec<BarSpan> {
 }
 
 fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
-    let elapsed = live.since.elapsed();
+    let elapsed = live.effective_elapsed();
     let idx = crate::content::spinner_frame_index(elapsed);
     match live.phase {
         TurnPhase::Compacting => vec![

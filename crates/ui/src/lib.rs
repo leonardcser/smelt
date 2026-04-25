@@ -1004,7 +1004,15 @@ fn resolve_placement(
             max_height,
         } => {
             let avail_h = term_h.saturating_sub(*above_rows);
-            let h = resolve_constraint_dim(*max_height, avail_h).min(avail_h);
+            let cap = resolve_constraint_dim(*max_height, avail_h).min(avail_h);
+            // Dialogs / pickers report a `natural_h` derived from panel
+            // content; clamp to the cap so the rect grows with content
+            // up to the cap instead of always allocating the cap.
+            // Floats without a natural height (cmdline) keep the cap.
+            let h = match natural_h {
+                Some(n) => n.min(cap),
+                None => cap,
+            };
             let w = if *full_width {
                 term_w
             } else {
@@ -1211,10 +1219,12 @@ mod tests {
         );
         let rect = ui.resolve_float(win).unwrap();
         assert_eq!(rect.width, 80);
-        assert_eq!(rect.height, 6);
+        // Fits content: stub picker has 1 item → natural_height = 1,
+        // capped (but not raised) by the 6-row max.
+        assert_eq!(rect.height, 1);
         assert_eq!(rect.left, 0);
-        // above_rows=1 by default → top = 24 - 1 - 6 = 17
-        assert_eq!(rect.top, 17);
+        // above_rows=1 by default → top = 24 - 1 - 1 = 22
+        assert_eq!(rect.top, 22);
     }
 
     #[test]
