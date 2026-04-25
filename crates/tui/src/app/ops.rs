@@ -1,51 +1,45 @@
-//! Typed effect ops applied by the app reducer.
+//! Deferred-mutation queue.
 //!
-//! `AppOp` is the single funnel for deferred state mutations. Lua
-//! handlers and Rust dialog callbacks both queue ops into the same
-//! channel; the app drains them each tick and dispatches through
-//! `App::apply_ops`. One reducer, one mutation log.
+//! Lua bindings reach `&mut App` directly through
+//! [`crate::lua::with_app`] and don't need this. Rust dialog
+//! callbacks (currently only the Confirm dialog) fire from inside a
+//! `&mut Ui` borrow, so they can't take `&mut App` synchronously —
+//! they push a `Deferred` closure here and the host drains it after
+//! the UI dispatch returns.
 //!
-//! Ops partition into two buckets:
-//!
-//! - **`UiOp`** — pure compositor / buffer / window primitives plus
-//!   ephemeral UI state (notifications, ghost text). No engine calls,
-//!   no app-state mutation beyond the ui layer. Safe to apply in any
-//!   order with respect to domain effects as long as the ui dispatch
-//!   is ordered among itself.
-//! - **`DomainOp`** — app-state mutations, engine commands, session
-//!   lifecycle, permission + agent + process control, tool resolution.
-//!   These reach into the agent loop, persistence, or the Lua runtime.
-//!
-//! Handlers push into the shared queue via `Into<AppOp>`: callers
-//! write `ops.push(UiOp::Notify(msg))` or `ops.push(DomainOp::
-//! LoadSession(id))` and the queue stays a single ordered stream so
-//! the reducer can apply ui + domain effects in the exact sequence a
-//! handler emitted them.
+//! The queue is a simple `Vec<Box<dyn FnOnce(&mut App) + Send +
+//! 'static>>`. There is no enum dispatch; each closure carries its
+//! own logic.
 
 use std::sync::Arc;
 
 use crate::lua::LuaShared;
 
-/// Cloneable push-only handle to the shared `AppOp` queue. Rust
+/// Deferred mutation pushed by a Rust callback that holds `&mut Ui`
+/// at fire time. Drained and applied by the app loop after the
+/// dispatch returns.
+pub type Deferred = Box<dyn FnOnce(&mut crate::app::App) + Send + 'static>;
+
+/// Cloneable push-only handle to the shared deferred queue. Rust
 /// dialog callbacks clone this and call [`OpsHandle::push`] from
-/// inside their closures to request App-level effects. Obtained
-/// via `LuaRuntime::ops_handle()`.
+/// inside their closures to request `&mut App` access. Obtained via
+/// `LuaRuntime::ops_handle()`.
 #[derive(Clone)]
 pub struct OpsHandle(pub(crate) Arc<LuaShared>);
 
 impl OpsHandle {
-    /// Push any op that converts into an `AppOp` — `UiOp`, `DomainOp`,
-    /// or a pre-built `AppOp`.
-    pub fn push<O: Into<AppOp>>(&self, op: O) {
+    /// Queue a closure to run on the next reducer tick with full
+    /// `&mut App` access.
+    pub fn push<F: FnOnce(&mut crate::app::App) + Send + 'static>(&self, f: F) {
         if let Ok(mut o) = self.0.ops.lock() {
-            o.ops.push(op.into());
+            o.deferred.push(Box::new(f));
         }
     }
 
     /// Push a task-runtime event (dialog resolution, keymap-fired
     /// callback, …). These drain through `LuaRuntime::pump_task_events`
-    /// each tick, *not* through the `AppOp` reducer — the reducer
-    /// doesn't need to know about Lua-task lifecycle.
+    /// each tick — they're a separate channel from `Deferred` so the
+    /// task lifecycle stays orthogonal to deferred state mutations.
     pub fn push_task_event(&self, ev: crate::lua::TaskEvent) {
         if let Ok(mut inbox) = self.0.task_inbox.lock() {
             inbox.push(ev);
@@ -60,126 +54,4 @@ impl OpsHandle {
             cbs.remove(&id);
         }
     }
-}
-
-/// Top-level tagged op carried on the shared queue. Handlers almost
-/// never construct this directly — they push a `UiOp` or `DomainOp`
-/// and rely on `Into<AppOp>`. The wrapper exists so the reducer can
-/// dispatch each variant through the correct sub-handler while
-/// preserving handler emission order across buckets.
-pub enum AppOp {
-    Ui(UiOp),
-    Domain(DomainOp),
-}
-
-impl From<UiOp> for AppOp {
-    fn from(op: UiOp) -> Self {
-        AppOp::Ui(op)
-    }
-}
-
-impl From<DomainOp> for AppOp {
-    fn from(op: DomainOp) -> Self {
-        AppOp::Domain(op)
-    }
-}
-
-/// Pure compositor / window / buffer primitives plus UI chrome.
-pub enum UiOp {
-    /// Show a transient notification toast.
-    Notify(String),
-    /// Show a transient error toast (accent-styled).
-    NotifyError(String),
-    /// Close a float. Fires any Lua dismiss callback, removes the
-    /// window from the compositor, deletes the primary buf.
-    CloseFloat(ui::WinId),
-    /// Set ghost text (predicted input) on the prompt.
-    SetGhostText(String),
-    /// Clear ghost text from the prompt.
-    ClearGhostText,
-}
-
-/// App-state mutations, engine commands, and session/agent/permission
-/// control. Anything that reaches past the compositor into the agent
-/// loop, persistence, or the Lua runtime.
-pub enum DomainOp {
-    RunCommand(String),
-    SetMode(String),
-    SetModel(String),
-    SetReasoningEffort(String),
-    /// Flip one of the 10 boolean settings by key (`"vim"`,
-    /// `"auto_compact"`, …). The reducer reads the current
-    /// `SettingsState`, toggles the named field, and persists. Pushed
-    /// by `smelt.settings.toggle(key)`.
-    ToggleSetting(String),
-    Cancel,
-    Compact(Option<String>),
-    Submit(String),
-    SetPromptSection(String, String),
-    RemovePromptSection(String),
-    /// Rewind to a transcript block (Rewind dialog). `block_idx=None`
-    /// means "kept at current"; `restore_vim_insert` re-enters Insert
-    /// mode when the dialog was opened from there.
-    RewindToBlock {
-        block_idx: Option<usize>,
-        restore_vim_insert: bool,
-    },
-    /// Sync the App's permission state with what the Permissions
-    /// dialog has in memory. Fired on dismiss.
-    SyncPermissions {
-        session_entries: Vec<crate::app::transcript_model::PermissionEntry>,
-        workspace_rules: Vec<crate::workspace_permissions::Rule>,
-    },
-    /// Load a saved session by id (Resume dialog, `smelt.session.load`).
-    LoadSession(String),
-    /// Delete a saved session by id (`smelt.session.delete`). No-op
-    /// if the session is the active one.
-    DeleteSession(String),
-    /// Kill a running subagent by PID (`smelt.agent.kill`). Runs
-    /// SIGTERM to the whole subtree, deregisters, and cleans up its
-    /// socket. No-op when the PID isn't in the registry anymore.
-    KillAgent(u32),
-    /// Resolve an open Confirm dialog with the user's choice. Sets
-    /// `pending_agent_cancel` internally when the resolution asks
-    /// the turn to cancel.
-    ResolveConfirm {
-        choice: crate::app::transcript_model::ConfirmChoice,
-        message: Option<String>,
-        request_id: u64,
-        call_id: String,
-        tool_name: String,
-    },
-    /// BackTab pressed on an open Confirm dialog. Toggles the app
-    /// mode and, if the new mode auto-allows the pending tool call,
-    /// sends approval + closes the dialog. Otherwise the dialog stays
-    /// open so the user can still choose manually.
-    ConfirmBackTab {
-        win: ui::WinId,
-        request_id: u64,
-        call_id: String,
-        tool_name: String,
-        args: std::collections::HashMap<String, serde_json::Value>,
-    },
-    /// One-shot LLM call initiated by a Lua plugin
-    /// (`smelt.engine.ask`). Applied by sending a matching
-    /// `UiCommand::EngineAsk` to the engine.
-    EngineAsk {
-        id: u64,
-        system: String,
-        messages: Vec<protocol::Message>,
-        task: protocol::AuxiliaryTask,
-    },
-    /// Send a deferred plugin tool result.
-    ResolveToolResult {
-        request_id: u64,
-        call_id: String,
-        content: String,
-        is_error: bool,
-    },
-    /// Kill a background process by id (e.g. from `/ps`). The actual
-    /// `ProcessRegistry::stop` runs on the tokio runtime, fire-and-forget.
-    KillProcess(String),
-    /// Copy the transcript block under the cursor to the clipboard.
-    /// Notifies success / failure. Used by `/yank-block`.
-    YankBlockAtCursor,
 }

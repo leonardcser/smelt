@@ -380,7 +380,7 @@ pub(crate) fn drop_displaced_lua_handle(
     }
 }
 
-pub use crate::app::ops::{AppOp, DomainOp, OpsHandle, UiOp};
+pub use crate::app::ops::{Deferred, OpsHandle};
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).
 /// Populated by `snapshot_engine_context` in the app loop.
@@ -440,8 +440,12 @@ pub struct LuaOps {
     /// via `smelt.history.entries()` and scored by `smelt.history.search()`.
     /// Refreshed on every submit + at startup.
     pub input_history: Vec<String>,
-    // ── writes (queued mutations) ───────────────────────────────────
-    pub ops: Vec<AppOp>,
+    // ── writes (deferred closures) ──────────────────────────────────
+    /// Closures pushed by Rust dialog callbacks that hold `&mut Ui`
+    /// when they fire and need `&mut App` access after dispatch
+    /// returns. Lua bindings reach App via `with_app` directly and
+    /// don't push here.
+    pub deferred: Vec<Deferred>,
 }
 
 impl LuaOps {
@@ -465,15 +469,8 @@ impl LuaOps {
         self.vim_mode = None;
     }
 
-    pub fn drain(&mut self) -> Vec<AppOp> {
-        std::mem::take(&mut self.ops)
-    }
-
-    /// Queue any op that converts into an `AppOp` — `UiOp`, `DomainOp`,
-    /// or a pre-built `AppOp`. Saves every call site from writing
-    /// `.into()`.
-    pub fn push<O: Into<AppOp>>(&mut self, op: O) {
-        self.ops.push(op.into());
+    pub fn drain(&mut self) -> Vec<Deferred> {
+        std::mem::take(&mut self.deferred)
     }
 }
 
@@ -788,8 +785,9 @@ impl LuaRuntime {
         }
     }
 
-    /// Drain all pending ops queued by Lua handlers.
-    pub fn drain_ops(&self) -> Vec<AppOp> {
+    /// Drain all pending deferred closures queued by Rust dialog
+    /// callbacks (Lua bindings reach `App` directly via `with_app`).
+    pub fn drain_ops(&self) -> Vec<Deferred> {
         let Ok(mut o) = self.shared.ops.lock() else {
             return Vec::new();
         };
@@ -1005,8 +1003,15 @@ impl LuaRuntime {
     }
 
     fn record_error(&self, msg: String) {
-        if let Ok(mut o) = self.shared.ops.lock() {
-            o.push(UiOp::NotifyError(msg));
+        // Route through `smelt.notify_error` so tests that override
+        // it (`install_test_notify`) capture errors emitted by the
+        // runtime itself, not just user `smelt.notify_error(...)`
+        // calls. Production sees the same routing — Lua dispatches
+        // through `with_app` to `App::notify_error`.
+        if let Ok(smelt) = self.lua.globals().get::<mlua::Table>("smelt") {
+            if let Ok(func) = smelt.get::<mlua::Function>("notify_error") {
+                let _ = func.call::<()>(msg);
+            }
         }
     }
 
@@ -1330,16 +1335,19 @@ mod tests {
     }
 
     fn drain_errors(rt: &LuaRuntime) -> Vec<String> {
-        // `record_error` still routes through the AppOp queue (it's
-        // hit from runtime internals, not user-facing Lua), so unit
-        // tests read from the queue here.
-        rt.drain_ops()
-            .into_iter()
-            .filter_map(|op| match op {
-                AppOp::Ui(UiOp::NotifyError(msg)) => Some(msg),
-                _ => None,
-            })
-            .collect()
+        let log: mlua::Table = match rt.lua.globals().get("test_err") {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let out: Vec<String> = log
+            .sequence_values::<String>()
+            .filter_map(|r| r.ok())
+            .collect();
+        let _ = rt
+            .lua
+            .globals()
+            .set("test_err", rt.lua.create_table().unwrap());
+        out
     }
 
 
@@ -2017,6 +2025,7 @@ mod tests {
     #[test]
     fn callback_error_surfaces_without_panic() {
         let rt = LuaRuntime::new();
+        install_test_notify(&rt);
         rt.lua
             .load(
                 r#"
