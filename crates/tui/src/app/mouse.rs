@@ -792,7 +792,8 @@ impl App {
             return false;
         }
         let rel_row = row.saturating_sub(viewport.rect.top);
-        dialog.apply_panel_scrollbar_drag(panel_idx, rel_row);
+        let thumb_top = bar.thumb_top_for_click(rel_row);
+        dialog.apply_panel_scrollbar_drag(panel_idx, thumb_top);
         self.drag_on_scrollbar = Some(crate::app::ScrollbarDragTarget::DialogPanel {
             win,
             panel: panel_idx,
@@ -815,9 +816,8 @@ impl App {
                 let Some(bar) = vp.scrollbar else {
                     return;
                 };
-                let max_thumb = bar.max_thumb_top();
                 let rel_row = row.saturating_sub(vp.rect.top);
-                let thumb_top = rel_row.min(max_thumb);
+                let thumb_top = bar.thumb_top_for_click(rel_row);
                 let from_top = bar.scroll_from_top_for_thumb(thumb_top);
                 match focus {
                     crate::app::AppFocus::Content => {
@@ -842,8 +842,12 @@ impl App {
                 let Some(viewport) = dialog.panel_viewport(panel) else {
                     return;
                 };
+                let Some(bar) = viewport.scrollbar else {
+                    return;
+                };
                 let rel_row = row.saturating_sub(viewport.rect.top);
-                dialog.apply_panel_scrollbar_drag(panel, rel_row);
+                let thumb_top = bar.thumb_top_for_click(rel_row);
+                dialog.apply_panel_scrollbar_drag(panel, thumb_top);
             }
         }
     }

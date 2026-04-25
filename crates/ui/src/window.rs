@@ -43,6 +43,17 @@ impl ScrollbarState {
         self.viewport_rows.saturating_sub(self.thumb_size())
     }
 
+    /// Convert a click row (relative to viewport top) into the thumb
+    /// top such that the thumb is centered on the click — the row the
+    /// pointer is on lands on the middle of the thumb, not its first
+    /// cell. Clamped to `[0, max_thumb_top()]`. Used by both the
+    /// jump-scroll click and the in-flight drag tick so the thumb
+    /// stays under the pointer.
+    pub fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
+        let half = self.thumb_size() / 2;
+        rel_row.saturating_sub(half).min(self.max_thumb_top())
+    }
+
     pub fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> u16 {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
