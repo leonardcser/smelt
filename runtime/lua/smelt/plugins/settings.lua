@@ -30,7 +30,7 @@ local function build_items()
   return items
 end
 
-smelt.cmd.register("settings", nil, {
+smelt.cmd.picker("settings", {
   desc      = "open settings menu",
   items     = build_items,
   on_enter  = function(item) if item._key then smelt.settings.toggle(item._key) end end,
