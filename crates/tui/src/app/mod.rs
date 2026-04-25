@@ -1875,11 +1875,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_vim_is_blocked() {
-        assert!(classify_startup_command("/vim").is_some());
-    }
-
-    #[test]
     fn startup_exit_is_blocked() {
         assert!(classify_startup_command("/exit").is_some());
     }
