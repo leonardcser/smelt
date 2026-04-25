@@ -105,16 +105,6 @@ pub(crate) const RUST_COMMANDS: &[RustCommand] = &[
         handler: cmd_compact,
     },
     RustCommand {
-        name: "vim",
-        desc: Some("toggle vim mode"),
-        handler: cmd_vim,
-    },
-    RustCommand {
-        name: "thinking",
-        desc: Some("toggle thinking blocks"),
-        handler: cmd_thinking,
-    },
-    RustCommand {
         name: "fork",
         desc: Some("fork current session"),
         handler: cmd_fork,
@@ -162,16 +152,6 @@ fn cmd_compact(_: &mut App, arg: Option<String>) -> CommandAction {
     CommandAction::Compact {
         instructions: arg.filter(|s| !s.is_empty()),
     }
-}
-
-fn cmd_vim(app: &mut App, _: Option<String>) -> CommandAction {
-    app.update_settings(|s| s.vim = !s.vim);
-    CommandAction::Continue
-}
-
-fn cmd_thinking(app: &mut App, _: Option<String>) -> CommandAction {
-    app.update_settings(|s| s.show_thinking = !s.show_thinking);
-    CommandAction::Continue
 }
 
 fn cmd_fork(app: &mut App, _: Option<String>) -> CommandAction {

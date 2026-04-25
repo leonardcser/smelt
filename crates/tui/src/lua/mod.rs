@@ -1045,6 +1045,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.history_search",
         include_str!("../../../../runtime/lua/smelt/plugins/history_search.lua"),
     ),
+    (
+        "smelt.plugins.toggles",
+        include_str!("../../../../runtime/lua/smelt/plugins/toggles.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1065,6 +1069,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.model",
     "smelt.plugins.settings",
     "smelt.plugins.history_search",
+    "smelt.plugins.toggles",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
