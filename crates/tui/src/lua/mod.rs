@@ -350,6 +350,36 @@ pub(crate) struct LuaHandle {
     key: mlua::RegistryKey,
 }
 
+/// Stash a Lua callable in `shared.callbacks` under a fresh u64 id.
+/// Used by every `smelt.win.*` binding that takes a callback — pulls
+/// the registry-value + atomic-id + insert dance out of the bindings.
+pub(crate) fn register_callback_handle(
+    shared: &Arc<LuaShared>,
+    lua: &Lua,
+    func: mlua::Function,
+) -> mlua::Result<u64> {
+    let key = lua.create_registry_value(func)?;
+    let id = shared
+        .next_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut cbs) = shared.callbacks.lock() {
+        cbs.insert(id, LuaHandle { key });
+    }
+    Ok(id)
+}
+
+/// Drop the Lua handle id stashed in a displaced `Callback::Lua`, if
+/// the option is one. Used wherever a `win_set_keymap` / `win_clear_*`
+/// returns the callback that was just replaced or removed.
+pub(crate) fn drop_displaced_lua_handle(
+    app: &mut crate::app::App,
+    displaced: Option<ui::Callback>,
+) {
+    if let Some(ui::Callback::Lua(ui::LuaHandle(old))) = displaced {
+        app.lua.remove_callback(old);
+    }
+}
+
 pub use crate::app::ops::{AppOp, DomainOp, OpsHandle, UiOp};
 
 /// Snapshot of engine-level state (model, mode, cost, tokens).

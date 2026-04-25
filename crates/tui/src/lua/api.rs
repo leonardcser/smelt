@@ -990,21 +990,14 @@ impl LuaRuntime {
                                 "win.set_keymap: unknown key `{key_str}`"
                             )));
                         };
-                        let registry_key = lua.create_registry_value(func)?;
-                        let id = s.next_id.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(id, LuaHandle { key: registry_key });
-                        }
+                        let id = crate::lua::register_callback_handle(&s, lua, func)?;
                         crate::lua::with_app(|app| {
-                            if let Some(ui::Callback::Lua(ui::LuaHandle(old))) =
-                                app.ui.win_set_keymap(
-                                    ui::WinId(win_id),
-                                    key,
-                                    ui::Callback::Lua(ui::LuaHandle(id)),
-                                )
-                            {
-                                app.lua.remove_callback(old);
-                            }
+                            let prev = app.ui.win_set_keymap(
+                                ui::WinId(win_id),
+                                key,
+                                ui::Callback::Lua(ui::LuaHandle(id)),
+                            );
+                            crate::lua::drop_displaced_lua_handle(app, prev);
                         });
                         Ok(())
                     },
@@ -1022,11 +1015,7 @@ impl LuaRuntime {
                                 "win.on_event: unknown event `{ev_str}`"
                             )));
                         };
-                        let registry_key = lua.create_registry_value(func)?;
-                        let id = s.next_id.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(mut cbs) = s.callbacks.lock() {
-                            cbs.insert(id, LuaHandle { key: registry_key });
-                        }
+                        let id = crate::lua::register_callback_handle(&s, lua, func)?;
                         crate::lua::with_app(|app| {
                             app.ui.win_on_event(
                                 ui::WinId(win_id),
@@ -1048,11 +1037,8 @@ impl LuaRuntime {
                     )));
                 };
                 crate::lua::with_app(|app| {
-                    if let Some(ui::Callback::Lua(ui::LuaHandle(old))) =
-                        app.ui.win_clear_keymap(ui::WinId(win_id), key)
-                    {
-                        app.lua.remove_callback(old);
-                    }
+                    let prev = app.ui.win_clear_keymap(ui::WinId(win_id), key);
+                    crate::lua::drop_displaced_lua_handle(app, prev);
                 });
                 Ok(())
             })?,
@@ -1066,12 +1052,10 @@ impl LuaRuntime {
                     )));
                 };
                 crate::lua::with_app(|app| {
-                    if let Some(ui::Callback::Lua(ui::LuaHandle(old))) = app
+                    let prev = app
                         .ui
-                        .win_clear_event_by_id(ui::WinId(win_id), event, callback_id)
-                    {
-                        app.lua.remove_callback(old);
-                    }
+                        .win_clear_event_by_id(ui::WinId(win_id), event, callback_id);
+                    crate::lua::drop_displaced_lua_handle(app, prev);
                 });
                 Ok(())
             })?,

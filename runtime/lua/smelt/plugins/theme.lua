@@ -19,7 +19,7 @@ local preset_names = {}
 local items = {}
 for i, p in ipairs(presets) do
   preset_names[i] = p.name
-  items[i] = { label = p.name, description = p.detail, ansi_color = p.ansi }
+  items[i] = { label = p.name, description = p.detail, ansi_color = p.ansi, prefix = "● " }
 end
 
 local original_ansi
