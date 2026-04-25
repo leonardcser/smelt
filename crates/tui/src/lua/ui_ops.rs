@@ -23,7 +23,7 @@ use ui::{
 // - `{ kind = "content", text = "...", mode = "markdown" }`  — formatter-rendered text
 //                                                              (also accepts "bash", "file", "diff")
 // - `{ kind = "markdown", text = "..." }`                    — sugar for the line above with mode = "markdown"
-// - `{ kind = "options",  items = [{label, shortcut?}] }`
+// - `{ kind = "options",  items = [{label, shortcut?}], selected? = <1-based index> }`
 // - `{ kind = "input",    placeholder? = "..." }`
 // - `{ kind = "list",     buf = <id> }`
 
@@ -95,12 +95,16 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     list_items.push(item);
                 }
                 let multi: bool = panel.get("multi").unwrap_or(false);
-                let widget = Box::new(
-                    OptionList::new(list_items)
-                        .multi(multi)
-                        .with_cursor_style(accent_style())
-                        .with_shortcut_style(accent_style()),
-                );
+                let mut option_list = OptionList::new(list_items)
+                    .multi(multi)
+                    .with_cursor_style(accent_style())
+                    .with_shortcut_style(accent_style());
+                if let Ok(selected) = panel.get::<i64>("selected") {
+                    if selected >= 1 {
+                        option_list = option_list.with_cursor((selected - 1) as usize);
+                    }
+                }
+                let widget = Box::new(option_list);
                 panel_specs.push(
                     PanelSpec::widget(widget, PanelHeight::Fit).with_initial_focus(initial_focus),
                 );
