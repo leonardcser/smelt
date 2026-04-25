@@ -385,31 +385,22 @@ impl LuaRuntime {
 
         // smelt.process.*
         let process_tbl = lua.create_table()?;
-        {
-            let s = shared.clone();
-            process_tbl.set(
-                "list",
-                lua.create_function(move |lua, ()| {
-                    let Ok(guard) = s.processes.lock() else {
-                        return lua.create_table();
-                    };
-                    let Some(registry) = guard.as_ref() else {
-                        return lua.create_table();
-                    };
-                    let procs = registry.list();
-                    drop(guard);
-                    let out = lua.create_table()?;
-                    for (i, p) in procs.into_iter().enumerate() {
-                        let row = lua.create_table()?;
-                        row.set("id", p.id)?;
-                        row.set("command", p.command)?;
-                        row.set("elapsed_secs", p.started_at.elapsed().as_secs())?;
-                        out.set(i + 1, row)?;
-                    }
-                    Ok(out)
-                })?,
-            )?;
-        }
+        process_tbl.set(
+            "list",
+            lua.create_function(|lua, ()| {
+                let procs =
+                    crate::lua::try_with_app(|app| app.engine.processes.list()).unwrap_or_default();
+                let out = lua.create_table()?;
+                for (i, p) in procs.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("id", p.id)?;
+                    row.set("command", p.command)?;
+                    row.set("elapsed_secs", p.started_at.elapsed().as_secs())?;
+                    out.set(i + 1, row)?;
+                }
+                Ok(out)
+            })?,
+        )?;
         process_tbl.set(
             "kill",
             lua.create_function(|_, id: String| {
@@ -422,32 +413,24 @@ impl LuaRuntime {
                 Ok(())
             })?,
         )?;
-        {
-            let s = shared.clone();
-            process_tbl.set(
-                "read_output",
-                lua.create_function(move |lua, id: String| {
-                    let Ok(guard) = s.processes.lock() else {
-                        return lua.create_table();
-                    };
-                    let Some(registry) = guard.as_ref() else {
-                        return lua.create_table();
-                    };
-                    match registry.read(&id) {
-                        Ok((text, running, exit_code)) => {
-                            let t = lua.create_table()?;
-                            t.set("text", text)?;
-                            t.set("running", running)?;
-                            if let Some(code) = exit_code {
-                                t.set("exit_code", code)?;
-                            }
-                            Ok(t)
+        process_tbl.set(
+            "read_output",
+            lua.create_function(|lua, id: String| {
+                let read = crate::lua::try_with_app(|app| app.engine.processes.read(&id));
+                match read {
+                    Some(Ok((text, running, exit_code))) => {
+                        let t = lua.create_table()?;
+                        t.set("text", text)?;
+                        t.set("running", running)?;
+                        if let Some(code) = exit_code {
+                            t.set("exit_code", code)?;
                         }
-                        Err(_) => lua.create_table(),
+                        Ok(t)
                     }
-                })?,
-            )?;
-        }
+                    _ => lua.create_table(),
+                }
+            })?,
+        )?;
         smelt.set("process", process_tbl)?;
 
         // smelt.agent.*
@@ -488,57 +471,52 @@ impl LuaRuntime {
                 Ok(())
             })?,
         )?;
-        {
-            let s = shared.clone();
-            agent_tbl.set(
-                "snapshots",
-                lua.create_function(move |lua, ()| {
-                    let snaps = {
-                        let Ok(guard) = s.agent_snapshots.lock() else {
-                            return lua.create_table();
-                        };
-                        let Some(ref shared_snaps) = *guard else {
-                            return lua.create_table();
-                        };
-                        shared_snaps.lock().map(|v| v.clone()).unwrap_or_default()
-                    };
-                    let out = lua.create_table()?;
-                    for (i, snap) in snaps.into_iter().enumerate() {
-                        let row = lua.create_table()?;
-                        row.set("agent_id", snap.agent_id)?;
-                        row.set("prompt", snap.prompt.as_str())?;
-                        row.set("cost_usd", snap.cost_usd)?;
-                        if let Some(t) = snap.context_tokens {
-                            row.set("context_tokens", t)?;
-                        }
-                        let calls = lua.create_table()?;
-                        for (j, call) in snap.tool_calls.into_iter().enumerate() {
-                            let c = lua.create_table()?;
-                            c.set("call_id", call.call_id)?;
-                            c.set("tool_name", call.tool_name)?;
-                            c.set("summary", call.summary)?;
-                            c.set(
-                                "status",
-                                match call.status {
-                                    crate::app::transcript_model::ToolStatus::Pending => "pending",
-                                    crate::app::transcript_model::ToolStatus::Confirm => "confirm",
-                                    crate::app::transcript_model::ToolStatus::Ok => "ok",
-                                    crate::app::transcript_model::ToolStatus::Err => "err",
-                                    crate::app::transcript_model::ToolStatus::Denied => "denied",
-                                },
-                            )?;
-                            if let Some(d) = call.elapsed {
-                                c.set("elapsed_ms", d.as_millis() as u64)?;
-                            }
-                            calls.set(j + 1, c)?;
-                        }
-                        row.set("tool_calls", calls)?;
-                        out.set(i + 1, row)?;
+        agent_tbl.set(
+            "snapshots",
+            lua.create_function(|lua, ()| {
+                let snaps = crate::lua::try_with_app(|app| {
+                    app.agent_snapshots
+                        .lock()
+                        .map(|v| v.clone())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+                let out = lua.create_table()?;
+                for (i, snap) in snaps.into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("agent_id", snap.agent_id)?;
+                    row.set("prompt", snap.prompt.as_str())?;
+                    row.set("cost_usd", snap.cost_usd)?;
+                    if let Some(t) = snap.context_tokens {
+                        row.set("context_tokens", t)?;
                     }
-                    Ok(out)
-                })?,
-            )?;
-        }
+                    let calls = lua.create_table()?;
+                    for (j, call) in snap.tool_calls.into_iter().enumerate() {
+                        let c = lua.create_table()?;
+                        c.set("call_id", call.call_id)?;
+                        c.set("tool_name", call.tool_name)?;
+                        c.set("summary", call.summary)?;
+                        c.set(
+                            "status",
+                            match call.status {
+                                crate::app::transcript_model::ToolStatus::Pending => "pending",
+                                crate::app::transcript_model::ToolStatus::Confirm => "confirm",
+                                crate::app::transcript_model::ToolStatus::Ok => "ok",
+                                crate::app::transcript_model::ToolStatus::Err => "err",
+                                crate::app::transcript_model::ToolStatus::Denied => "denied",
+                            },
+                        )?;
+                        if let Some(d) = call.elapsed {
+                            c.set("elapsed_ms", d.as_millis() as u64)?;
+                        }
+                        calls.set(j + 1, c)?;
+                    }
+                    row.set("tool_calls", calls)?;
+                    out.set(i + 1, row)?;
+                }
+                Ok(out)
+            })?,
+        )?;
 
         agent_tbl.set(
             "peek",

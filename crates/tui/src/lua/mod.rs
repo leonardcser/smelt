@@ -420,13 +420,6 @@ pub(crate) struct LuaShared {
     /// can mint an id without re-entering the same mutex.
     pub(crate) next_external_id: AtomicU64,
     pub(crate) tasks: Mutex<LuaTaskRuntime>,
-    /// Background process registry. Installed by `App::new` so Lua
-    /// plugins (e.g. `/ps`) can enumerate and kill procs.
-    pub(crate) processes: Mutex<Option<engine::tools::ProcessRegistry>>,
-    /// Shared list of subagent snapshots, installed by `App::new` so
-    /// `smelt.agent.snapshots` can return live prompt / tool-call /
-    /// cost data without touching App directly.
-    pub(crate) agent_snapshots: Mutex<Option<crate::app::SharedSnapshots>>,
     /// Task-runtime inbox. Dialog callbacks / other UI events that need
     /// to *resume a Lua coroutine* push here instead of through `ops`.
     /// Keeps the reducer's `AppOp` enum free of Lua-task variants; the
@@ -484,8 +477,6 @@ impl Default for LuaShared {
             next_buf_id: AtomicU64::new(ui::LUA_BUF_ID_BASE),
             next_external_id: AtomicU64::new(1),
             tasks: Mutex::new(LuaTaskRuntime::new()),
-            processes: Mutex::new(None),
-            agent_snapshots: Mutex::new(None),
             task_inbox: Mutex::new(Vec::new()),
             pending_invocations: Mutex::new(Vec::new()),
         }
@@ -600,23 +591,6 @@ impl LuaRuntime {
         let src = std::fs::read_to_string(path)
             .map_err(|e| LuaError::RuntimeError(format!("read init.lua: {e}")))?;
         self.lua.load(&src).set_name("init.lua").exec()
-    }
-
-    /// Install the background process registry so `smelt.process.*`
-    /// primitives can enumerate and kill procs. Called once at App start.
-    pub fn set_process_registry(&self, registry: engine::tools::ProcessRegistry) {
-        if let Ok(mut p) = self.shared.processes.lock() {
-            *p = Some(registry);
-        }
-    }
-
-    /// Install the shared subagent-snapshot list so
-    /// `smelt.agent.snapshots()` can return live prompt /
-    /// tool-call / cost data. Called once at App start.
-    pub fn set_agent_snapshots(&self, snaps: crate::app::SharedSnapshots) {
-        if let Ok(mut s) = self.shared.agent_snapshots.lock() {
-            *s = Some(snaps);
-        }
     }
 
     /// Invoke a registered command by name. Returns `true` when the
