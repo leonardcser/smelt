@@ -80,11 +80,7 @@ impl OptionList {
         let mut row_acc: u16 = 0;
         let mut idx = self.scroll_top;
         while idx < self.items.len() {
-            let span = self
-                .wrapped
-                .get(idx)
-                .map(|w| w.len().max(1))
-                .unwrap_or(1) as u16;
+            let span = self.wrapped.get(idx).map(|w| w.len().max(1)).unwrap_or(1) as u16;
             if rel_row < row_acc + span {
                 return Some(idx);
             }
@@ -108,6 +104,13 @@ impl OptionList {
 
     pub fn multi(mut self, multi: bool) -> Self {
         self.multi = multi;
+        self
+    }
+
+    pub fn with_cursor(mut self, idx: usize) -> Self {
+        if !self.items.is_empty() {
+            self.cursor = idx.min(self.items.len() - 1);
+        }
         self
     }
 

@@ -36,7 +36,7 @@ smelt.cmd.register("rewind", function(args)
     local result = smelt.ui.dialog.open({
       title  = "rewind",
       panels = {
-        { kind = "options", items = options },
+        { kind = "options", items = options, selected = #options },
       },
     })
 
