@@ -5,32 +5,31 @@
 //! execution (`plugin_tool_defs`, `execute_plugin_tool`).
 
 use super::{
-    AppOp, LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult,
+    LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult,
 };
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 impl LuaRuntime {
-    /// Fire the `on_response` callback for a completed `engine.ask()` call.
-    /// Returns any queued ops produced by the callback.
-    pub fn fire_callback(&self, id: u64, content: &str) -> Vec<AppOp> {
+    /// Fire the `on_response` callback for a completed `engine.ask()`
+    /// call. Errors surface as `notify_error` toasts.
+    pub fn fire_callback(&self, id: u64, content: &str) {
         let handle = {
             let Ok(mut cbs) = self.shared.callbacks.lock() else {
-                return vec![];
+                return;
             };
             match cbs.remove(&id) {
                 Some(h) => h,
-                None => return vec![],
+                None => return,
             }
         };
         let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-            return vec![];
+            return;
         };
         if let Err(e) = func.call::<()>(content.to_string()) {
             crate::lua::try_with_app(|app| app.notify_error(format!("ask callback: {e}")));
         }
-        self.drain_ops()
     }
 
     pub fn remove_callback(&self, id: u64) {
@@ -47,17 +46,14 @@ impl LuaRuntime {
         rt.resolve_external(external_id, value)
     }
 
-    /// Drain the task-runtime inbox and apply each event. Returns
-    /// the list of `AppOp`s produced by firing any on-select
-    /// callbacks.
-    pub fn pump_task_events(&self) -> Vec<AppOp> {
+    /// Drain the task-runtime inbox and apply each event.
+    pub fn pump_task_events(&self) {
         let events: Vec<TaskEvent> = {
             let Ok(mut inbox) = self.shared.task_inbox.lock() else {
-                return Vec::new();
+                return;
             };
             std::mem::take(&mut *inbox)
         };
-        let extra_ops: Vec<AppOp> = Vec::new();
         for ev in events {
             match ev {
                 TaskEvent::ExternalResolved { external_id, value } => {
@@ -66,7 +62,6 @@ impl LuaRuntime {
                 }
             }
         }
-        extra_ops
     }
 
     /// Register a Lua callable under a fresh u64 id in

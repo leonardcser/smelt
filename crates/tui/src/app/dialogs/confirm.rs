@@ -25,7 +25,6 @@
 
 use super::super::App;
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
-use crate::app::ops::{DomainOp, UiOp};
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::keymap::hints;
 use crate::render::display::{ColorRole, ColorValue};
@@ -151,8 +150,7 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
     );
 
     // BackTab (shift-tab): toggle app mode and, if the new mode
-    // auto-allows this tool call, approve + close. The reducer runs
-    // the permission check so the closure stays pure.
+    // auto-allows this tool call, approve + close.
     let state_backtab = state.clone();
     let ops_backtab = ops.clone();
     let _ = app.ui.win_set_keymap(
@@ -160,12 +158,13 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         KeyBind::plain(KeyCode::BackTab),
         Callback::Rust(Box::new(move |ctx| {
             let s = state_backtab.borrow();
-            ops_backtab.push(DomainOp::ConfirmBackTab {
-                win: ctx.win,
-                request_id: s.request_id,
-                call_id: s.call_id.clone(),
-                tool_name: s.tool_name.clone(),
-                args: s.args.clone(),
+            let win = ctx.win;
+            let request_id = s.request_id;
+            let call_id = s.call_id.clone();
+            let tool_name = s.tool_name.clone();
+            let args = s.args.clone();
+            ops_backtab.push(move |app: &mut App| {
+                app.handle_confirm_back_tab(win, request_id, &call_id, &tool_name, &args);
             });
             CallbackResult::Consumed
         })),
@@ -187,14 +186,14 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
             let s = state_submit.borrow();
             let choice = s.choices.get(idx).cloned().unwrap_or(ConfirmChoice::No);
             let message = reason_text(ctx.ui, ctx.win);
-            ops_submit.push(DomainOp::ResolveConfirm {
-                choice,
-                message,
-                request_id: s.request_id,
-                call_id: s.call_id.clone(),
-                tool_name: s.tool_name.clone(),
+            let win = ctx.win;
+            let request_id = s.request_id;
+            let call_id = s.call_id.clone();
+            let tool_name = s.tool_name.clone();
+            ops_submit.push(move |app: &mut App| {
+                app.handle_confirm_resolve(choice, message, request_id, &call_id, &tool_name);
+                app.close_float(win);
             });
-            ops_submit.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );
@@ -206,14 +205,20 @@ pub fn open(app: &mut App, req: &ConfirmRequest) {
         WinEvent::Dismiss,
         Callback::Rust(Box::new(move |ctx| {
             let s = state_dismiss.borrow();
-            ops.push(DomainOp::ResolveConfirm {
-                choice: ConfirmChoice::No,
-                message: None,
-                request_id: s.request_id,
-                call_id: s.call_id.clone(),
-                tool_name: s.tool_name.clone(),
+            let win = ctx.win;
+            let request_id = s.request_id;
+            let call_id = s.call_id.clone();
+            let tool_name = s.tool_name.clone();
+            ops.push(move |app: &mut App| {
+                app.handle_confirm_resolve(
+                    ConfirmChoice::No,
+                    None,
+                    request_id,
+                    &call_id,
+                    &tool_name,
+                );
+                app.close_float(win);
             });
-            ops.push(UiOp::CloseFloat(ctx.win));
             CallbackResult::Consumed
         })),
     );

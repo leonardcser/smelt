@@ -3,10 +3,12 @@
 //! invokes as a single semantic action — `/<command>` dispatch,
 //! settings toggle, transcript yank, and so on.
 
-use super::transcript_model::PermissionEntry;
+use super::transcript_model::{ConfirmChoice, PermissionEntry, ToolStatus};
 use super::App;
 use crate::workspace_permissions::Rule;
+use engine::permissions::Decision;
 use protocol::UiCommand;
+use std::collections::HashMap;
 
 impl App {
     /// Run a slash command. Mirrors the user typing `:<line>` into
@@ -143,6 +145,45 @@ impl App {
             messages,
             task,
         });
+    }
+
+    /// BackTab pressed on an open Confirm dialog. Toggles the app
+    /// mode and, if the new mode auto-allows the pending tool call,
+    /// sends approval + closes the dialog. Otherwise the dialog stays
+    /// open so the user can still choose manually.
+    pub(crate) fn handle_confirm_back_tab(
+        &mut self,
+        win: ui::WinId,
+        request_id: u64,
+        call_id: &str,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) {
+        self.toggle_mode();
+        if self.permissions.decide(self.mode, tool_name, args, false) == Decision::Allow {
+            self.close_float(win);
+            self.set_active_status(call_id, ToolStatus::Pending);
+            self.send_permission_decision(request_id, true, None);
+        }
+    }
+
+    /// Resolve an open Confirm dialog with the user's choice. Heavy
+    /// cancel (flush events, kill blocking subagents, drop the active
+    /// turn) when the resolution asks the turn to cancel.
+    pub(crate) fn handle_confirm_resolve(
+        &mut self,
+        choice: ConfirmChoice,
+        message: Option<String>,
+        request_id: u64,
+        call_id: &str,
+        tool_name: &str,
+    ) {
+        let should_cancel =
+            self.resolve_confirm((choice, message), call_id, request_id, tool_name);
+        if should_cancel {
+            self.finish_turn(true);
+            self.agent = None;
+        }
     }
 
     /// Send a deferred plugin tool result to the engine.

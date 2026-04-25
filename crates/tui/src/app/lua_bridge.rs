@@ -118,8 +118,7 @@ impl App {
     /// Call after any Lua handler dispatch.
     pub(super) fn apply_lua_ops(&mut self) {
         self.drain_lua_invocations();
-        let extra = self.lua.pump_task_events();
-        self.apply_ops(extra);
+        self.lua.pump_task_events();
         let ops = self.lua.drain_ops();
         self.apply_ops(ops);
     }
