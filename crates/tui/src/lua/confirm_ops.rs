@@ -12,19 +12,18 @@
 //! - `_render_title(buf_id, handle_id)` — fills the title buffer.
 //!   Stays Rust-side because the title's inline bash-highlight on the
 //!   desc needs span-level composition we don't expose to Lua yet.
-//! - `_scroll_preview` / `_focus_reason` — panel-targeted helpers
-//!   collapsed away in 5c (typed panel handles).
 //! - `_back_tab` — toggles app mode + auto-allows when the new mode
 //!   covers this request.
 //! - `_resolve` — final pick, removes the registry entry.
+//!
+//! Per-panel control (`scroll_by`, `focus`, …) goes through the
+//! generic `smelt.ui.dialog._panel_*` primitives surfaced by the
+//! typed panel handles in `runtime/lua/smelt/dialog.lua`.
 
 use mlua::prelude::*;
 
 use crate::app::dialogs::confirm;
 use crate::app::transcript_model::ConfirmChoice;
-
-const PANEL_PREVIEW: usize = 2;
-const PANEL_REASON: usize = 4;
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
 pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -67,33 +66,6 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     None => return,
                 };
                 confirm::render_title_into_buf(app, ui::BufId(buf_id), &req);
-            });
-            Ok(())
-        })?,
-    )?;
-
-    // smelt.confirm._scroll_preview(win_id, dir).
-    confirm_tbl.set(
-        "_scroll_preview",
-        lua.create_function(|_, (win_id, dir): (u64, i64)| {
-            crate::lua::with_app(|app| {
-                if let Some(dialog) = app.ui.dialog_mut(ui::WinId(win_id)) {
-                    let page = (dialog.panel_rect_height(PANEL_PREVIEW).max(1) as isize) / 2;
-                    dialog.panel_scroll_by(PANEL_PREVIEW, dir as isize * page);
-                }
-            });
-            Ok(())
-        })?,
-    )?;
-
-    // smelt.confirm._focus_reason(win_id).
-    confirm_tbl.set(
-        "_focus_reason",
-        lua.create_function(|_, win_id: u64| {
-            crate::lua::with_app(|app| {
-                if let Some(dialog) = app.ui.dialog_mut(ui::WinId(win_id)) {
-                    dialog.focus_panel(PANEL_REASON);
-                }
             });
             Ok(())
         })?,
