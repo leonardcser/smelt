@@ -150,6 +150,11 @@ pub struct App {
     /// after the Rust-side built-in spans each frame; priority /
     /// align_right on each item controls layout.
     pub custom_status_items: Vec<render::status::StatusItem>,
+    /// Last error message reported per statusline source. Used to
+    /// rate-limit notifications so a perpetually-broken source doesn't
+    /// spam one toast per frame — only re-notify when the message
+    /// changes; clear the entry on a successful tick.
+    statusline_last_errors: HashMap<String, String>,
     /// Open `ui::Notification` float, if one is visible. Dismissed on
     /// any key (see `handle_overlay_keys`). `None` when no toast.
     pub notification: Option<ui::WinId>,
@@ -654,6 +659,7 @@ impl App {
             pending_dialog: false,
             pending_quit: false,
             custom_status_items: Vec::new(),
+            statusline_last_errors: HashMap::new(),
             notification: None,
             cmdline_win: None,
             cmdline_history: Vec::new(),
@@ -888,7 +894,7 @@ impl App {
         // Plugins have now registered their commands — pull every
         // declared `args = {...}` list so the CommandArg picker opens
         // when the user types `/name ` (space).
-        self.input.command_arg_sources = self.lua.command_args();
+        self.input.command_arg_sources = self.lua.list_command_args();
 
         let mut term_events = EventStream::new();
 
@@ -940,7 +946,21 @@ impl App {
             // ── Lua timer + notification pump ────────────────────────────
             self.lua.tick_timers();
             self.drive_lua_tasks();
-            self.custom_status_items = self.lua.tick_statusline();
+            let (items, tick_errors) = self.lua.tick_statusline();
+            self.custom_status_items = items;
+            for (name, msg) in tick_errors {
+                match msg {
+                    Some(new_msg) => {
+                        if self.statusline_last_errors.get(&name) != Some(&new_msg) {
+                            self.notify_error(new_msg.clone());
+                            self.statusline_last_errors.insert(name, new_msg);
+                        }
+                    }
+                    None => {
+                        self.statusline_last_errors.remove(&name);
+                    }
+                }
+            }
             for _id in self.drain_finished_blocks() {
                 self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
             }

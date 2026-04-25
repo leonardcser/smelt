@@ -4,8 +4,8 @@
 //! + panel helpers for dialog callbacks live in `tasks.rs`.
 
 use super::{
-    lua_commands_snapshot, messages_to_lua, parse_keybind, parse_win_event, AutocmdEvent,
-    LuaHandle, LuaRuntime, LuaShared, PluginToolHandles, TaskCompletion, TaskEvent,
+    messages_to_lua, parse_keybind, parse_win_event, AutocmdEvent, LuaHandle, LuaRuntime,
+    LuaShared, PluginToolHandles, TaskCompletion, TaskEvent,
 };
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
@@ -88,12 +88,10 @@ impl LuaRuntime {
                             .unwrap_or_default();
                         let key = lua.create_registry_value(handler)?;
                         if let Ok(mut map) = s.commands.lock() {
-                            map.insert(name.clone(), LuaHandle { key });
-                        }
-                        if let Ok(mut snap) = lua_commands_snapshot().lock() {
-                            snap.insert(
+                            map.insert(
                                 name,
-                                crate::lua::CommandMeta {
+                                crate::lua::RegisteredCommand {
+                                    handle: LuaHandle { key },
                                     description: desc,
                                     args,
                                 },

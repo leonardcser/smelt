@@ -47,64 +47,31 @@ use mlua::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// Metadata a Lua plugin attaches to a `/command` via
-/// `smelt.cmd.register(name, fn, opts)`. `description` powers the
-/// `/`-completer hint; `args` drives the secondary `CommandArg`
-/// completer that opens after the user types `/name ` (space).
-#[derive(Clone, Default)]
-pub struct CommandMeta {
-    pub description: Option<String>,
-    pub args: Vec<String>,
-}
-
-/// Process-global snapshot of Lua-registered `/command` names and their
-/// metadata. Written by `smelt.cmd.register`, read by
-/// `Completer::commands` / `Completer::is_command` and by the
-/// `CommandArg` arg picker — same free-function pattern as
-/// `custom_commands::list` / `builtin_commands::list`.
-///
-/// We keep a separate plain-data snapshot (instead of exposing
-/// `LuaShared` directly) because `LuaHandle` contains `!Send`
-/// `mlua::RegistryKey` and cannot live in a static, and because
-/// completers only need strings.
-fn lua_commands_snapshot() -> &'static Mutex<HashMap<String, CommandMeta>> {
-    static S: OnceLock<Mutex<HashMap<String, CommandMeta>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
+/// One Lua-registered `/command` entry. Lives in `LuaShared.commands`
+/// so completers (`list_commands`, `list_command_args`, `is_lua_command`)
+/// read the same map the dispatcher does — no parallel snapshot.
+pub(crate) struct RegisteredCommand {
+    pub(crate) handle: LuaHandle,
+    pub(crate) description: Option<String>,
+    pub(crate) args: Vec<String>,
 }
 
 /// List all Lua-registered `/commands` as `(name, description)`.
-/// Sorted by name. Used by the `/` completer.
+/// Sorted by name. Used by the `/` completer. Reads live via
+/// `try_with_app`; returns empty when no app pointer is installed
+/// (e.g. early startup).
 pub fn list_commands() -> Vec<(String, Option<String>)> {
-    let mut items: Vec<(String, Option<String>)> = lua_commands_snapshot()
-        .lock()
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), v.description.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    items.sort_by(|a, b| a.0.cmp(&b.0));
-    items
+    try_with_app(|app| app.lua.list_commands_with_desc()).unwrap_or_default()
 }
 
 /// Return every Lua-registered command that declared an `args` list,
 /// as `("/cmd", args)` pairs. Used by `PromptState::command_arg_sources`
 /// to drive the secondary arg picker that opens after `/cmd <space>`.
 pub fn list_command_args() -> Vec<(String, Vec<String>)> {
-    let mut items: Vec<(String, Vec<String>)> = lua_commands_snapshot()
-        .lock()
-        .map(|m| {
-            m.iter()
-                .filter(|(_, v)| !v.args.is_empty())
-                .map(|(k, v)| (format!("/{k}"), v.args.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    items.sort_by(|a, b| a.0.cmp(&b.0));
-    items
+    try_with_app(|app| app.lua.list_command_args()).unwrap_or_default()
 }
 
 /// True if `input` (e.g. `/pick-test` or `/pick-test arg`) matches a
@@ -117,10 +84,7 @@ pub fn is_lua_command(input: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    lua_commands_snapshot()
-        .lock()
-        .map(|m| m.contains_key(name))
-        .unwrap_or(false)
+    try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
 }
 
 /// Event kinds the app emits into the Lua autocmd dispatcher.
@@ -406,7 +370,7 @@ pub(crate) struct StatusSource {
 /// All shared state between Lua closures and the app loop.
 /// One `Arc<LuaShared>` replaces N separate `Arc<Mutex<…>>` fields.
 pub(crate) struct LuaShared {
-    pub(crate) commands: Mutex<HashMap<String, LuaHandle>>,
+    pub(crate) commands: Mutex<HashMap<String, RegisteredCommand>>,
     pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     pub(crate) autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
     pub(crate) timers: Mutex<Vec<(Instant, LuaHandle)>>,
@@ -415,11 +379,6 @@ pub(crate) struct LuaShared {
     /// order plugins called `smelt.statusline.register`. Re-registering
     /// an existing name updates in place without changing position.
     pub(crate) statusline_sources: Mutex<Vec<(String, StatusSource)>>,
-    /// Last error message reported per statusline source. Used to
-    /// rate-limit `notify_error` so a perpetually-broken source doesn't
-    /// spam one toast per frame — only re-notify when the message
-    /// changes; clear the entry on a successful tick.
-    pub(crate) statusline_last_errors: Mutex<HashMap<String, String>>,
     pub(crate) plugin_tools: Mutex<HashMap<String, PluginToolHandles>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
@@ -484,7 +443,6 @@ impl Default for LuaShared {
             autocmds: Mutex::new(HashMap::new()),
             timers: Mutex::new(Vec::new()),
             statusline_sources: Mutex::new(Vec::new()),
-            statusline_last_errors: Mutex::new(HashMap::new()),
             plugin_tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -615,10 +573,10 @@ impl LuaRuntime {
             let Ok(map) = self.shared.commands.lock() else {
                 return false;
             };
-            let Some(handle) = map.get(name) else {
+            let Some(entry) = map.get(name) else {
                 return false;
             };
-            let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+            let Ok(f) = self.lua.registry_value::<mlua::Function>(&entry.handle.key) else {
                 return false;
             };
             f
@@ -752,14 +710,21 @@ impl LuaRuntime {
     /// item list (appended to Rust-side built-ins at the status-bar
     /// layer). Each source returns either a single item table or a list
     /// of items; empty-text items are skipped.
-    pub fn tick_statusline(&self) -> Vec<crate::render::StatusItem> {
+    ///
+    /// The second tuple element is `(source_name, error_msg_or_none)`
+    /// for every source, ordered as registered. The caller dedupes
+    /// against its own per-source error history so a perpetually-broken
+    /// source doesn't spam one toast per frame.
+    pub fn tick_statusline(
+        &self,
+    ) -> (
+        Vec<crate::render::StatusItem>,
+        Vec<(String, Option<String>)>,
+    ) {
         let Ok(sources) = self.shared.statusline_sources.lock() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let mut items = Vec::new();
-        // (source_name, error_msg) pairs from this tick. Compared
-        // against `statusline_last_errors` after the loop so we only
-        // notify on transitions (new error, or message changed).
         let mut tick_errors: Vec<(String, Option<String>)> = Vec::new();
         for (name, source) in sources.iter() {
             let Ok(func) = self
@@ -787,24 +752,7 @@ impl LuaRuntime {
                 }
             }
         }
-        drop(sources);
-        if let Ok(mut last) = self.shared.statusline_last_errors.lock() {
-            for (name, msg) in tick_errors {
-                match msg {
-                    Some(new_msg) => {
-                        let prev = last.get(&name);
-                        if prev != Some(&new_msg) {
-                            self.record_error(new_msg.clone());
-                            last.insert(name, new_msg);
-                        }
-                    }
-                    None => {
-                        last.remove(&name);
-                    }
-                }
-            }
-        }
-        items
+        (items, tick_errors)
     }
 
     /// Fire `smelt.confirm.open(handle_id)`. Called by the agent loop
@@ -854,12 +802,42 @@ impl LuaRuntime {
             .unwrap_or_default()
     }
 
+    /// All Lua-registered `/commands` as `(name, description)`, sorted
+    /// by name. Backs the free-fn `list_commands` reader used by the
+    /// `/`-completer.
+    pub(crate) fn list_commands_with_desc(&self) -> Vec<(String, Option<String>)> {
+        let mut items: Vec<(String, Option<String>)> = self
+            .shared
+            .commands
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.description.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items
+    }
+
     /// `("/cmd", [arg, ...])` pairs for every Lua-registered command that
     /// declared an `args` list via `smelt.cmd.register("name", fn, {args = {...}})`.
     /// Drives the secondary `CommandArg` picker that opens after
     /// `/name <space>`.
-    pub fn command_args(&self) -> Vec<(String, Vec<String>)> {
-        list_command_args()
+    pub fn list_command_args(&self) -> Vec<(String, Vec<String>)> {
+        let mut items: Vec<(String, Vec<String>)> = self
+            .shared
+            .commands
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, v)| !v.args.is_empty())
+                    .map(|(k, v)| (format!("/{k}"), v.args.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items
     }
 }
 
