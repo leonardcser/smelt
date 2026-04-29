@@ -256,7 +256,8 @@ plus `with_gap` / `with_border` / `with_title` / `with_separator`.
 
 - `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
 - `Anchor::{ ScreenCenter | ScreenAt { row, col, corner } |
-  Cursor { corner, row_offset, col_offset } | Win { target, attach } }`.
+  Cursor { corner, row_offset, col_offset } | Win { target, attach } |
+  ScreenBottom { above_rows } }`.
 - Drag = mutate the anchor.
 - `Float`/`FloatId` go away. Overlays have an `OverlayId` for chrome
   hit-testing; `OverlayHitTarget::{ Window(WinId) | Chrome }` is
@@ -264,9 +265,22 @@ plus `with_gap` / `with_border` / `with_title` / `with_separator`.
 
 Data + resolution + focus/hit-test layer + paint pipeline + first
 float migrations + Buffer-backed list/options/input panels landed
-(C.0 → C.8). C.9 deletes `FloatConfig` / `Placement` /
-`PanelWidget` / `dialog.rs` panel multiplexing once every dialog
-flips. See `P1.md` for sub-phase log.
+(C.0 → C.8). C.9 splits across three sessions:
+
+- **C.9a** — `Anchor::ScreenBottom` for dock-bottom positioning;
+  overlay-path `collapse_when_empty` on Buffer-backed leaves; delete
+  the dead `OptionList` `has_shortcut || has_multi` legacy branch
+  (no consumers). Foundation work — no dialog flips yet.
+- **C.9b** — flip `confirm.lua` to overlay path. Remove the legacy
+  `kind = "input"` `collapse_when_empty` widget fallback (TextInput's
+  `content_rows()` was always 1, so the legacy collapse already was
+  a no-op). Use `Anchor::ScreenBottom` for the dock-bottom dialogs.
+- **C.9c** — delete `FloatConfig` / `Placement` / `PanelWidget` /
+  `dialog.rs` panel multiplexing once every dialog flips. The widget
+  trait + `OptionList` + `TextInput` widget shapes go with it (their
+  Lua-recipe replacements landed in C.7.x / C.8).
+
+See `P1.md` for the sub-phase log.
 
 ### P1.d — `Window` as the only interactive unit
 

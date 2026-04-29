@@ -505,18 +505,15 @@ fn register_dialog(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     // (`make_handle`) so the Rust surface stays small.
     dialog_tbl.set(
         "_open",
-        lua.create_function(
-            |lua, opts: mlua::Table| -> LuaResult<(u64, mlua::Table)> {
-                let result =
-                    crate::lua::with_app(|app| crate::lua::ui_ops::open_dialog(app, opts))
-                        .map_err(|e| LuaError::RuntimeError(format!("dialog.open: {e}")))?;
-                let named = lua.create_table()?;
-                for (name, win) in result.named_inputs {
-                    named.set(name, win.0)?;
-                }
-                Ok((result.root.0, named))
-            },
-        )?,
+        lua.create_function(|lua, opts: mlua::Table| -> LuaResult<(u64, mlua::Table)> {
+            let result = crate::lua::with_app(|app| crate::lua::ui_ops::open_dialog(app, opts))
+                .map_err(|e| LuaError::RuntimeError(format!("dialog.open: {e}")))?;
+            let named = lua.create_table()?;
+            for (name, win) in result.named_inputs {
+                named.set(name, win.0)?;
+            }
+            Ok((result.root.0, named))
+        })?,
     )?;
 
     // Generic panel-focus primitive — panel handles built in

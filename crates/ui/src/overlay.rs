@@ -174,6 +174,13 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
             };
             (clamp_axis(r, term_h, h), clamp_axis(c, term_w, w))
         }
+        Anchor::ScreenBottom { above_rows } => {
+            let avail_h = term_h.saturating_sub(*above_rows);
+            let h = h.min(avail_h);
+            let top = avail_h.saturating_sub(h);
+            let left = term_w.saturating_sub(w) / 2;
+            return Some(Rect::new(top, left, w, h));
+        }
     };
     Some(Rect::new(top, left, w, h))
 }
@@ -389,5 +396,48 @@ mod tests {
             &ctx(80, 24, &rects),
         );
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn screen_bottom_docks_full_height_above_statusline() {
+        let rects = HashMap::new();
+        // term 80x24, above_rows=1 (statusline). Layout reports
+        // natural (40, 24) — wants full height. The anchor clamps
+        // height to 23 (term_h - above_rows) and pins it to the
+        // bottom of the available area.
+        let r = resolve_anchor(
+            &Anchor::ScreenBottom { above_rows: 1 },
+            (40, 24),
+            &ctx(80, 24, &rects),
+        )
+        .unwrap();
+        assert_eq!(r, Rect::new(0, 20, 40, 23));
+    }
+
+    #[test]
+    fn screen_bottom_docks_short_layout_at_bottom() {
+        let rects = HashMap::new();
+        // Layout's natural (60, 8) — short content. Anchor sits
+        // it at the bottom of the available area, centered.
+        let r = resolve_anchor(
+            &Anchor::ScreenBottom { above_rows: 1 },
+            (60, 8),
+            &ctx(80, 24, &rects),
+        )
+        .unwrap();
+        // top = (24 - 1) - 8 = 15; left = (80 - 60)/2 = 10.
+        assert_eq!(r, Rect::new(15, 10, 60, 8));
+    }
+
+    #[test]
+    fn screen_bottom_with_no_reserved_rows_uses_full_screen() {
+        let rects = HashMap::new();
+        let r = resolve_anchor(
+            &Anchor::ScreenBottom { above_rows: 0 },
+            (80, 24),
+            &ctx(80, 24, &rects),
+        )
+        .unwrap();
+        assert_eq!(r, Rect::new(0, 0, 80, 24));
     }
 }
