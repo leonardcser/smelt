@@ -11,11 +11,29 @@ local M = {}
 
 -- Single panel-handle factory: identity fields + `:focus()`. Buffer
 -- panels expose `.buf` so callers can mutate / re-render without
--- re-walking the spec. Scrolling is the buffer's own job — interactive
--- content panels handle wheel + vim motions natively when focused.
-local function make_panel(win_id, idx, spec)
-  local self = { kind = spec.kind, idx = idx, name = spec.name, buf = spec.buf }
-  function self:focus() smelt.ui.dialog._panel_focus(win_id, idx) end
+-- re-walking the spec. `kind = "input"` panels also expose `.leaf`
+-- (the buffer-backed Window opened for the input) and a `:text()`
+-- helper reading the live line via `smelt.win.buf` +
+-- `smelt.buf.get_line`. Scrolling is the buffer's own job —
+-- interactive content panels handle wheel + vim motions natively
+-- when focused.
+local function make_panel(win_id, idx, spec, leaf)
+  local self = { kind = spec.kind, idx = idx, name = spec.name, buf = spec.buf, leaf = leaf }
+  function self:focus()
+    if self.leaf then
+      smelt.win.set_focus(self.leaf)
+    else
+      smelt.ui.dialog._panel_focus(win_id, idx)
+    end
+  end
+  if spec.kind == "input" then
+    function self:text()
+      if not self.leaf then return "" end
+      local buf = smelt.win.buf(self.leaf)
+      if not buf then return "" end
+      return smelt.buf.get_line(buf, 1) or ""
+    end
+  end
   return self
 end
 
@@ -23,12 +41,14 @@ end
 -- opened win_id and the original opts. `panels` is keyed by both
 -- 1-based index *and* the optional `name` field on each spec, so
 -- callers can do `d.panels[1]` or `d.panels.preview`.
-local function make_handle(win_id, opts)
+local function make_handle(win_id, opts, named_inputs)
+  named_inputs = named_inputs or {}
   local panels = {}
   if type(opts.panels) == "table" then
     for i, spec in ipairs(opts.panels) do
       if type(spec) == "table" then
-        local h = make_panel(win_id, i, spec)
+        local leaf = spec.name and named_inputs[spec.name] or nil
+        local h = make_panel(win_id, i, spec, leaf)
         panels[i] = h
         if spec.name then panels[spec.name] = h end
       end
@@ -50,28 +70,20 @@ function smelt.ui.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.ui.dialog.open_handle: expected table of options", 2)
   end
-  -- `_open` returns `(win_id, named_inputs)`; open_handle ignores
-  -- the second value (its consumers — confirm.lua — use the legacy
-  -- widget path with collapse_when_empty inputs and read text via
-  -- `raw_ctx.panels[idx].text` directly).
-  local win_id = smelt.ui.dialog._open(opts)
+  local win_id, named_inputs = smelt.ui.dialog._open(opts)
   if type(win_id) ~= "number" then return nil end
-  return make_handle(win_id, opts)
+  return make_handle(win_id, opts, named_inputs)
 end
 
 -- Collect input text for every input panel in `opts.panels`. Used by
--- Submit / Dismiss to assemble the resume table. The legacy widget
--- path populates `raw_ctx.panels[idx].text`; the overlay path
--- exposes per-name leaf WinIds via `named_inputs` and the buffer's
--- line 0 carries the live text.
-local function collect_inputs(raw_ctx, input_panels, named_inputs)
+-- Submit / Dismiss to assemble the resume table. Each input panel's
+-- leaf WinId arrives via `named_inputs` (populated Rust-side); we
+-- read line 0 of the leaf's buffer for the live text.
+local function collect_inputs(_raw_ctx, input_panels, named_inputs)
   local out = {}
-  for name, idx in pairs(input_panels) do
-    local p = raw_ctx.panels and raw_ctx.panels[idx]
-    if p and p.text then
-      out[name] = p.text
-    elseif named_inputs and named_inputs[name] then
-      local leaf = named_inputs[name]
+  for name, _ in pairs(input_panels) do
+    local leaf = named_inputs and named_inputs[name]
+    if leaf then
       local buf = smelt.win.buf(leaf)
       if buf then
         out[name] = smelt.buf.get_line(buf, 1) or ""

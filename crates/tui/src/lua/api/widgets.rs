@@ -323,6 +323,19 @@ fn register_win(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
             Ok(buf)
         })?,
     )?;
+    // `smelt.win.set_focus(win_id)` — give keyboard focus to a Window.
+    // Wraps `Ui::set_focus` so Lua-side dialog orchestration can move
+    // focus between leaves (e.g. confirm.lua's `e` keymap that focuses
+    // the reason input).
+    win_tbl.set(
+        "set_focus",
+        lua.create_function(|_, id: u64| {
+            crate::lua::with_app(|app| {
+                app.ui.set_focus(ui::WinId(id));
+            });
+            Ok(())
+        })?,
+    )?;
     {
         let s = shared.clone();
         win_tbl.set(

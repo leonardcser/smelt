@@ -267,14 +267,19 @@ Data + resolution + focus/hit-test layer + paint pipeline + first
 float migrations + Buffer-backed list/options/input panels landed
 (C.0 → C.8). C.9 splits across three sessions:
 
-- **C.9a** — `Anchor::ScreenBottom` for dock-bottom positioning;
-  overlay-path `collapse_when_empty` on Buffer-backed leaves; delete
-  the dead `OptionList` `has_shortcut || has_multi` legacy branch
-  (no consumers). Foundation work — no dialog flips yet.
-- **C.9b** — flip `confirm.lua` to overlay path. Remove the legacy
-  `kind = "input"` `collapse_when_empty` widget fallback (TextInput's
-  `content_rows()` was always 1, so the legacy collapse already was
-  a no-op). Use `Anchor::ScreenBottom` for the dock-bottom dialogs.
+- **C.9a** (landed) — `Anchor::ScreenBottom` for dock-bottom
+  positioning; overlay-path `collapse_when_empty` on Buffer-backed
+  leaves; delete the dead `OptionList` `has_shortcut || has_multi`
+  legacy branch (no consumers). Foundation work — no dialog flips
+  yet.
+- **C.9b** (landed) — flip `confirm.lua` to overlay path. Drop the
+  `kind = "input"` `collapse_when_empty` widget fallback and the
+  unreachable `dialog_open` call site behind it. Thread
+  `placement = "dock_bottom"` + `placement_height` through to
+  `Anchor::ScreenBottom { above_rows: 1 }` + `Percentage(height_pct)`.
+  Add `Overlay::blocks_agent` so confirm's engine-drain gate
+  survives. List leaves now fire `SelectionChanged` on cursor move
+  so confirm.lua tracks the selection across leaf transitions.
 - **C.9c** — delete `FloatConfig` / `Placement` / `PanelWidget` /
   `dialog.rs` panel multiplexing once every dialog flips. The widget
   trait + `OptionList` + `TextInput` widget shapes go with it (their
