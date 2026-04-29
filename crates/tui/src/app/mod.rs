@@ -185,6 +185,13 @@ pub struct App {
     /// dropped on cmdline close or any text mutation that invalidates
     /// the current selection.
     pub cmdline_completer: Option<crate::completer::Completer>,
+    /// Per-leaf bookkeeping for open picker overlays. Populated by
+    /// `crate::picker::open` and cleaned up by `close_float` when the
+    /// leaf closes. Lookup keyed by leaf `WinId` so `set_items` /
+    /// `set_selected` can resize the overlay's outer height
+    /// constraint and translate logical → visual indices for reversed
+    /// pickers.
+    pub picker_state: HashMap<ui::WinId, crate::picker::PickerState>,
     /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.
@@ -658,6 +665,7 @@ impl App {
             cmdline_history_browse: None,
             cmdline_history_stash: String::new(),
             cmdline_completer: None,
+            picker_state: HashMap::new(),
             term_focused: true,
             working: working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,

@@ -333,9 +333,29 @@ float migrations + Buffer-backed list/options/input panels landed
   every overlay input panel). Global-chord guard in `events.rs` adds
   `cmdline_win.is_none()` so Shift+Tab / Ctrl+T / Ctrl+L don't fire
   while typing a command.
-- **C.9c.4** — migrate picker dropdown to Overlay + Anchor. The prompt
-  `/` completer and cmdline `:` completer pickers become overlay
-  leaves with list semantics; `Ui::picker_open` / `picker_mut` retire.
+- **C.9c.4** (landed) — migrate picker dropdown to Overlay + Anchor.
+  Prompt-docked completer picker becomes a Buffer-backed overlay leaf
+  with `cursor_line_highlight` painting selection (cmdline `:`
+  completer doesn't render a picker — C.9c.3's `cmdline_cycle_completer`
+  applies the selected label directly). New `crates/tui/src/picker.rs`
+  carries `PickerItem` + `PickerPlacement` (`ScreenCenter` /
+  `PromptDocked { max_rows }` / `Cursor` / `ScreenBottom`) and `open` /
+  `set_items` / `set_selected` / `forget` over the overlay primitive.
+  Items render as buffer lines `{indent}{prefix}{label}{padding}{description}`
+  with highlight extmarks for per-item accent (prefix only) and the
+  dim description column. Reversed mode (PromptDocked) writes items
+  in reverse so logical 0 sits on the bottom visual row. App-level
+  `picker_state: HashMap<WinId, PickerState>` tracks overlay id +
+  placement + reversed flag + max_rows so `set_items` can resize the
+  outer height constraint each frame; `close_float` calls
+  `picker::forget` before the overlay cascade. `crates/ui/src/picker.rs`
+  + `Ui::picker_open` / `Ui::picker_mut` + the `Picker` / `PickerItem`
+  / `PickerStyle` re-exports retire. `Window::render` drops the
+  `&& ctx.focused` gate on `cursor_line_highlight` so non-focusable
+  list leaves still paint selection. The legacy float-resolution unit
+  tests in `crates/ui/src/lib.rs` retire with the `Picker` Component
+  they relied on; surviving coverage is the overlay test suite next
+  door.
 - **C.9c.5** — delete the legacy float surface. Once the last
   `FloatConfig` consumer is gone, delete `FloatConfig` + `Placement` +
   the legacy float compositor layer + `WinConfig::Float` + `float_at`
