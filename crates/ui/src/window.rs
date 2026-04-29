@@ -1,4 +1,7 @@
+use crate::buffer::Buffer;
+use crate::component::DrawContext;
 use crate::edit_buffer::EditBuffer;
+use crate::grid::{GridSlice, Style};
 use crate::kill_ring::KillRing;
 use crate::layout::{Border, Constraint, Gutters, Placement, Rect};
 use crate::text::{byte_to_cell, cell_to_byte};
@@ -929,11 +932,44 @@ impl Window {
         let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
         self.follow_tail = self.scroll_top >= max_scroll;
     }
+
+    /// Paint visible buffer lines into `slice`, starting at this
+    /// window's `scroll_top`. Read-only viewer scope: no extmark
+    /// highlights, no transient selection, no scrollbar, no gutters
+    /// or per-line decoration. Each row of the slice maps 1:1 to a
+    /// buffer line; lines longer than `slice.width()` truncate at
+    /// the right edge.
+    ///
+    /// This is the seam Overlay paint walks for each leaf in the
+    /// overlay's `LayoutTree`. The richer surface (extmarks +
+    /// scrollbar + gutters + selection) folds in alongside the
+    /// `BufferView` deletion in P1.d.
+    pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
+        let width = slice.width();
+        let height = slice.height();
+        let scroll = self.scroll_top as usize;
+        let line_count = buf.line_count();
+        for row in 0..height {
+            let idx = scroll + row as usize;
+            if idx >= line_count {
+                break;
+            }
+            let Some(line) = buf.get_line(idx) else {
+                break;
+            };
+            for (col, ch) in line.chars().take(width as usize).enumerate() {
+                slice.set(col as u16, row, ch, Style::default());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::BufCreateOpts;
+    use crate::grid::Grid;
+    use crate::theme::Theme;
     use crate::BufId;
 
     fn make_win() -> Window {
@@ -949,6 +985,15 @@ mod tests {
 
     fn sample_rows(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("line {i}")).collect()
+    }
+
+    fn ctx() -> DrawContext {
+        DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            theme: Theme::default(),
+        }
     }
 
     #[test]
@@ -1076,5 +1121,51 @@ mod tests {
     fn follow_tail_default_true() {
         let w = make_win();
         assert!(w.follow_tail);
+    }
+
+    #[test]
+    fn render_paints_visible_lines_from_scroll_top() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec![
+            "alpha".into(),
+            "bravo".into(),
+            "charlie".into(),
+            "delta".into(),
+        ]);
+        let mut w = make_win();
+        w.scroll_top = 1;
+        let mut grid = Grid::new(10, 2);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
+        w.render(&buf, &mut slice, &ctx());
+        assert_eq!(grid.cell(0, 0).symbol, 'b');
+        assert_eq!(grid.cell(4, 0).symbol, 'o');
+        assert_eq!(grid.cell(0, 1).symbol, 'c');
+        assert_eq!(grid.cell(6, 1).symbol, 'e');
+    }
+
+    #[test]
+    fn render_truncates_at_slice_width() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["abcdefghij".into()]);
+        let w = make_win();
+        let mut grid = Grid::new(5, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 5, 1));
+        w.render(&buf, &mut slice, &ctx());
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(4, 0).symbol, 'e');
+    }
+
+    #[test]
+    fn render_stops_when_buffer_runs_short() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["only".into()]);
+        let w = make_win();
+        let mut grid = Grid::new(8, 4);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 8, 4));
+        w.render(&buf, &mut slice, &ctx());
+        assert_eq!(grid.cell(0, 0).symbol, 'o');
+        // Rows 1..3 stay empty.
+        assert_eq!(grid.cell(0, 1).symbol, ' ');
+        assert_eq!(grid.cell(0, 3).symbol, ' ');
     }
 }
