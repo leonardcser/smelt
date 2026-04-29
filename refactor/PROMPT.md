@@ -6,8 +6,14 @@ binding — read them once, then act.
 
 ## Orient
 
+Run these two commands first and read their output — git log is your
+primary source of truth for what just landed; do not skip it:
+
 1. `git log --oneline -20` — see what just landed.
 2. `refactor/check.sh` — must be green; fix red before advancing.
+
+Then read:
+
 3. `refactor/REFACTOR.md` — find the next un-landed sub-phase under the
    active phase. That sub-phase is your scope for this session.
 4. The active `refactor/P<n>.md` — see the latest decisions, deferrals,
@@ -32,9 +38,15 @@ binding — read them once, then act.
 Per `refactor/README.md` § Stopping rule:
 
 1. Sub-phase landed (tree green, docs synced, commit on HEAD) — exit.
-2. Blocked on ambiguity / external dep — record in `P<n>.md` "Open
+2. Real external blocker (missing credentials, environment broken,
+   user action genuinely required) — record in `P<n>.md` "Open
    questions", exit.
 3. Two consecutive failed attempts to land — exit, human looks.
+
+**Never stop to ask the user.** If a decision is clear, pick the better
+option and log it. If a big decision ripples and no winner is clear,
+defer the dependent sub-phases, record the question in `P<n>.md`, and
+move on to independent work.
 
 If the sub-phase is larger than fits one session, split it in
 `REFACTOR.md` (`C.8` → `C.8a`/`C.8b`), land `a`, exit.
