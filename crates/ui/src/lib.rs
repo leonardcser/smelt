@@ -109,6 +109,14 @@ pub struct Ui {
     /// migration is incremental (C.4+).
     overlays: HashMap<OverlayId, Overlay>,
     next_overlay_id: u32,
+    /// Stack of prior focused windows. `set_focus` pushes the
+    /// outgoing focus here; the compositor / overlay close paths
+    /// (later) walk back through it for the most recent
+    /// still-existing focusable window. The current focus is held
+    /// by the compositor as a layer id; this list is a parallel
+    /// view in `WinId` terms so the focus model speaks the same
+    /// language as the public `set_focus`/`focus` API.
+    focus_history: Vec<WinId>,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -140,6 +148,7 @@ impl Ui {
             theme: Theme::new(),
             overlays: HashMap::new(),
             next_overlay_id: 1,
+            focus_history: Vec::new(),
         }
     }
 
@@ -795,6 +804,63 @@ impl Ui {
         }
         if let Some(p) = comp.as_any().downcast_ref::<picker::Picker>() {
             return Some(p.natural_height());
+        }
+        None
+    }
+
+    // ── Focus (canonical Win-typed API) ──────────────────────────
+
+    /// Currently focused window, if any. Reads through the
+    /// compositor's focused layer and translates back to the
+    /// `WinId` it represents (split via `register_split`, float via
+    /// the `"float:N"` layer-id prefix).
+    pub fn focus(&self) -> Option<WinId> {
+        self.compositor.focused().and_then(|id| self.layer_to_win(id))
+    }
+
+    /// Focus a specific window. Returns `false` when `win` doesn't
+    /// resolve to a focusable layer (window unknown, or no
+    /// compositor layer registered for it). On success, the prior
+    /// focus is appended to `focus_history` so close paths can pop
+    /// back to the previous focus target. Re-focusing the
+    /// already-focused window is a no-op (no history push).
+    pub fn set_focus(&mut self, win: WinId) -> bool {
+        let Some(layer_id) = self.layer_id_for_win(win) else {
+            return false;
+        };
+        let prior = self.focus();
+        if prior == Some(win) {
+            return true;
+        }
+        if let Some(p) = prior {
+            self.focus_history.push(p);
+        }
+        self.compositor.focus(layer_id);
+        true
+    }
+
+    /// Read-only view of the focus history (oldest first; the most
+    /// recent prior focus is at the back). Test + introspection
+    /// helper; production callers should reach through `set_focus`.
+    pub fn focus_history(&self) -> &[WinId] {
+        &self.focus_history
+    }
+
+    /// Resolve a `WinId` to its current compositor layer id. Splits
+    /// register their layer-id explicitly via `register_split`;
+    /// floats use the `"float:N"` prefix and only count when an
+    /// actual layer is registered (a freshly-created `WinId` with no
+    /// layer is unfocusable).
+    fn layer_id_for_win(&self, win: WinId) -> Option<String> {
+        // Splits: invert the layer-id → WinId map.
+        if let Some((layer_id, _)) = self.splits.iter().find(|(_, w)| **w == win) {
+            return Some(layer_id.clone());
+        }
+        // Floats: WinId is associated with a `float:N` layer only
+        // when the compositor knows that layer.
+        let candidate = float_layer_id(win);
+        if self.compositor.component(&candidate).is_some() {
+            return Some(candidate);
         }
         None
     }
@@ -1621,6 +1687,70 @@ mod tests {
         // Closing the topmost modal falls back to the next.
         ui.overlay_close(m_mid);
         assert_eq!(ui.active_modal(), Some(m_low));
+    }
+
+    #[test]
+    fn focus_returns_none_on_fresh_ui() {
+        let ui = make_ui();
+        assert_eq!(ui.focus(), None);
+        assert!(ui.focus_history().is_empty());
+    }
+
+    #[test]
+    fn set_focus_unknown_win_returns_false() {
+        let mut ui = make_ui();
+        assert!(!ui.set_focus(WinId(999)));
+        assert_eq!(ui.focus(), None);
+    }
+
+    #[test]
+    fn set_focus_on_registered_split_focuses_the_win() {
+        let mut ui = make_ui();
+        let win = WinId(7);
+        ui.register_split("transcript", win);
+        assert!(ui.set_focus(win));
+        assert_eq!(ui.focus(), Some(win));
+        assert!(ui.focus_history().is_empty());
+    }
+
+    #[test]
+    fn set_focus_pushes_prior_focus_to_history() {
+        let mut ui = make_ui();
+        let a = WinId(7);
+        let b = WinId(8);
+        ui.register_split("a", a);
+        ui.register_split("b", b);
+        ui.set_focus(a);
+        ui.set_focus(b);
+        assert_eq!(ui.focus(), Some(b));
+        assert_eq!(ui.focus_history(), &[a]);
+    }
+
+    #[test]
+    fn set_focus_same_win_is_noop() {
+        let mut ui = make_ui();
+        let win = WinId(7);
+        ui.register_split("a", win);
+        ui.set_focus(win);
+        assert!(ui.set_focus(win));
+        assert!(ui.focus_history().is_empty());
+    }
+
+    #[test]
+    fn set_focus_chain_builds_history_in_order() {
+        let mut ui = make_ui();
+        for n in 1..=4 {
+            ui.register_split(format!("split:{n}"), WinId(n));
+        }
+        ui.set_focus(WinId(1));
+        ui.set_focus(WinId(2));
+        ui.set_focus(WinId(3));
+        ui.set_focus(WinId(4));
+        assert_eq!(ui.focus(), Some(WinId(4)));
+        assert_eq!(
+            ui.focus_history(),
+            &[WinId(1), WinId(2), WinId(3)]
+        );
     }
 
     #[test]
