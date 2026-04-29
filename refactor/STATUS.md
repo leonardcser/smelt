@@ -22,26 +22,25 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — nine foundation commits landed
+**P1.c in progress** — ten foundation commits landed
 (`40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
-`434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`):
-target types + `resolve_anchor` (9 tests); `Ui::overlay_*` API
-+ storage (4 tests); per-frame resolution
-(`LayoutTree::natural_size` + `Ui::resolve_overlays(cursor)`,
-13 tests); `SeparatorStyle` on `Chrome` + dedup of dialog enum
-(5 tests); focus + hit-testing primitives
-(`Ui::active_modal`, `OverlayHitTarget::{Window | Chrome}`,
-`Ui::overlay_hit_test`, modal-aware, 9 tests); canonical
-Win-typed focus API (`Ui::focus`, `set_focus`, `focus_history`
-slice; 6 tests); overlay/focus structural glue
-(`LayoutTree::contains_leaf`, `Ui::overlay_focused`,
-`focused_window` / `focused_window_mut`, `overlay_close`
-implements ARCHITECTURE's pop-focus_history contract +
-`Compositor::clear_focus`, 9 tests). The whole P1.c data +
-resolution + focus + hit layer is in place — callers can ask
-"where does this overlay draw, what's modal, what was clicked,
-who's focused, which overlay owns focus, what happens on close?"
-without touching the compositor for paint.
+`434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
+`dcb0e8b`): target types + `resolve_anchor`; `Ui::overlay_*`
+API + storage; per-frame resolution (`natural_size` +
+`resolve_overlays(cursor)`); `SeparatorStyle` on `Chrome` +
+dialog-side dedup; focus + hit-testing primitives
+(`active_modal`, `OverlayHitTarget`, `overlay_hit_test`,
+modal-aware); canonical Win-typed focus API (`focus`,
+`set_focus`, `focus_history`); overlay/focus structural glue
+(`contains_leaf`, `focused_overlay`, `focused_window`/`_mut`,
+`overlay_close` pops focus_history); unified `Ui::hit_test`
++ `HitTarget::{ Window | Scrollbar | Chrome }` enum
+(Scrollbar reserved for P1.d). The whole P1.c data +
+resolution + focus + hit-test layer matches the spec API
+list from ARCHITECTURE.md — only `focus_next/focus_prev`
+(modal-aware Tab cycling) and the eventual paint integration
+remain on the data side. 56 P1.c-data unit tests total,
+co-located with the code they cover.
 
 **Next in P1.c (open design point):** C.5 — first float migration
 to Overlay — has a render-shape question that needs deciding
@@ -87,10 +86,10 @@ Until that shape is decided, C.5 doesn't ship code. C.6+ (delete
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 998 passed
-(9 new since focus API: `contains_leaf` × 2, `overlay_focused`
-× 3, `focused_window` × 1, `overlay_close` close-pop × 3).
-`cargo clippy --workspace --all-targets -- -D warnings` clean.
+**Tree:** green. `cargo nextest run --workspace` — 1001 passed
+(3 new since C.4-tail₄: `hit_test` overlay-leaf / overlay-chrome
+/ no-cover). `cargo clippy --workspace --all-targets -- -D
+warnings` clean.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
