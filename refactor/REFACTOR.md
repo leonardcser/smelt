@@ -298,15 +298,35 @@ float migrations + Buffer-backed list/options/input panels landed
   every panel kind (Rust `_open` returns leaves parallel-indexed to
   `opts.panels`). `FloatConfig` / `Placement` stay alive — picker /
   cmdline / notification still consume them.
-- **C.9c.2** — migrate cmdline + notification + picker dropdown to
-  Overlay + Anchor. Once the last `FloatConfig` consumer is gone,
-  delete `FloatConfig` + `Placement` + the legacy float compositor
-  layer + `WinConfig::Float` + `Ui::picker_open` /
-  `cmdline_open` / `notification_open` / `float_config` /
-  `float_at` / `focused_float`. The `WidgetEvent` enum + `Component`
-  trait can finally retire when their last consumers (Picker,
-  Cmdline, StatusBar, BufferView, Notification, WindowView) move
-  into the overlay-leaf model in P1.d.
+- **C.9c.2** — migrate notification to Overlay + Anchor. Replace
+  `Ui::notification_open` / `notification_mut` / the `Notification`
+  `Component` widget with a Buffer-backed overlay leaf positioned via
+  `Anchor::Win { target: PROMPT_WIN, attach: NW, row_offset: -1,
+  col_offset: 0 }` (extends `Anchor::Win` with offset support, mirroring
+  `Anchor::Cursor`). `App::open_notification` builds the toast as a
+  Buffer with `Bold` / `Dim` highlight extmarks for label / message;
+  `App::dismiss_notification` calls `close_float(win)` which cascades
+  through `overlay_close`. Drop `sync_notification_float`; the anchor
+  handles positioning. `crates/ui/src/notification.rs` deletes;
+  `Notification` / `NotificationLevel` / `NotificationStyle` retire
+  (level becomes a `bool is_error` param to `open_notification`).
+  `App::notification` keeps its leaf `WinId` shape — closing the leaf
+  cascades through `Ui::win_close` → `overlay_close`.
+- **C.9c.3** — migrate cmdline to Overlay + Anchor.
+  `Ui::cmdline_open` / `cmdline_mut` / the `Cmdline` widget retire;
+  `:` cmdline becomes a Buffer-backed input leaf in an overlay docked
+  above the statusline.
+- **C.9c.4** — migrate picker dropdown to Overlay + Anchor. The prompt
+  `/` completer and cmdline `:` completer pickers become overlay
+  leaves with list semantics; `Ui::picker_open` / `picker_mut` retire.
+- **C.9c.5** — delete the legacy float surface. Once the last
+  `FloatConfig` consumer is gone, delete `FloatConfig` + `Placement` +
+  the legacy float compositor layer + `WinConfig::Float` + `float_at`
+  / `float_config` / `float_config_mut` / `focused_float` /
+  `focused_float_blocks_agent`'s `FloatConfig` fallback. The
+  `WidgetEvent` enum + `Component` trait can finally retire when their
+  last consumers (StatusBar, BufferView, WindowView) move into the
+  overlay-leaf model in P1.d.
 
 See `P1.md` for the sub-phase log.
 

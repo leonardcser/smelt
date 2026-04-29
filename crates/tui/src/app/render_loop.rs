@@ -71,7 +71,6 @@ impl App {
         );
 
         self.sync_completer_float();
-        self.sync_notification_float(prompt_rect);
 
         let mut stdout = std::io::stdout();
         let _ = self.ui.render(&mut stdout);
@@ -407,40 +406,6 @@ impl App {
 
         if let Some(session) = self.input.completer.as_mut() {
             session.picker_win = open_win;
-        }
-    }
-
-    // ── Notification float ─────────────────────────────────────────
-    //
-    // The `ui::Notification` float (if open) is positioned one row
-    // above the prompt rect. Called each frame alongside
-    // `sync_completer_float`. Open/close is driven by `notify` /
-    // `notify_error` / `dismiss_notification`; this just keeps the
-    // rect current across terminal resizes.
-    fn sync_notification_float(&mut self, prompt_rect: ui::Rect) {
-        let Some(win) = self.notification else {
-            return;
-        };
-        let (tw, _th) = self.ui.terminal_size();
-        let desired_top = prompt_rect.top.saturating_sub(1) as i32;
-
-        let needs_update = match self.ui.float_config(win).map(|c| c.placement) {
-            Some(ui::Placement::Manual { row, width: w, .. }) => {
-                row != desired_top || !matches!(w, ui::Constraint::Length(v) if v == tw)
-            }
-            _ => true,
-        };
-
-        if needs_update {
-            if let Some(cfg) = self.ui.float_config_mut(win) {
-                cfg.placement = ui::Placement::Manual {
-                    anchor: ui::Corner::NW,
-                    row: desired_top,
-                    col: 0,
-                    width: ui::Constraint::Length(tw),
-                    height: ui::Constraint::Length(1),
-                };
-            }
         }
     }
 }

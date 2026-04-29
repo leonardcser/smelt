@@ -167,7 +167,12 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
             };
             (clamp_axis(r, term_h, h), clamp_axis(c, term_w, w))
         }
-        Anchor::Win { target, attach } => {
+        Anchor::Win {
+            target,
+            attach,
+            row_offset,
+            col_offset,
+        } => {
             let target_rect = ctx.win_rects.get(target)?;
             let (r, c) = match attach {
                 Corner::NW => (target_rect.top as i32, target_rect.left as i32),
@@ -184,6 +189,8 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
                     target_rect.right() as i32 - w as i32,
                 ),
             };
+            let r = r + row_offset;
+            let c = c + col_offset;
             (clamp_axis(r, term_h, h), clamp_axis(c, term_w, w))
         }
         Anchor::ScreenBottom { above_rows } => {
@@ -254,6 +261,8 @@ mod tests {
             Anchor::Win {
                 target: WinId(7),
                 attach: Corner::NW,
+                row_offset: 0,
+                col_offset: 0,
             },
         )
         .with_z(100)
@@ -370,6 +379,8 @@ mod tests {
             &Anchor::Win {
                 target: WinId(7),
                 attach: Corner::NW,
+                row_offset: 0,
+                col_offset: 0,
             },
             (15, 5),
             &ctx(80, 24, &rects),
@@ -388,6 +399,8 @@ mod tests {
             &Anchor::Win {
                 target: WinId(7),
                 attach: Corner::SE,
+                row_offset: 0,
+                col_offset: 0,
             },
             (10, 4),
             &ctx(80, 24, &rects),
@@ -403,11 +416,32 @@ mod tests {
             &Anchor::Win {
                 target: WinId(999),
                 attach: Corner::NW,
+                row_offset: 0,
+                col_offset: 0,
             },
             (10, 4),
             &ctx(80, 24, &rects),
         );
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn win_anchor_offsets_shift_position() {
+        let mut rects = HashMap::new();
+        rects.insert(WinId(7), Rect::new(10, 20, 40, 8));
+        // NW corner at (10, 20) shifted up 1, right 3 → (9, 23).
+        let r = resolve_anchor(
+            &Anchor::Win {
+                target: WinId(7),
+                attach: Corner::NW,
+                row_offset: -1,
+                col_offset: 3,
+            },
+            (15, 5),
+            &ctx(80, 24, &rects),
+        )
+        .unwrap();
+        assert_eq!(r, Rect::new(9, 23, 15, 5));
     }
 
     #[test]

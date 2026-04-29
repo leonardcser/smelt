@@ -11,7 +11,6 @@ pub mod flush;
 pub mod grid;
 pub mod kill_ring;
 pub mod layout;
-pub mod notification;
 pub mod overlay;
 pub mod picker;
 pub mod status_bar;
@@ -51,7 +50,6 @@ pub use layout::{
     Anchor, Border, Constraint, Corner, FitMax, FloatRelative, Gutters, LayoutTree, Placement,
     Rect, SeparatorStyle,
 };
-pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
 pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
@@ -514,58 +512,6 @@ impl Ui {
         let layer_id = float_layer_id(win_id);
         let comp = self.compositor.component_mut(&layer_id)?;
         comp.as_any_mut().downcast_mut::<picker::Picker>()
-    }
-
-    // ── Notification ─────────────────────────────────────────────────
-    //
-    // Non-focusable ephemeral toast. Sibling to `Picker` in the named-
-    // components family. Caller controls lifecycle (open / update /
-    // dismiss on key → `win_close`).
-
-    pub fn notification_open(
-        &mut self,
-        config: FloatConfig,
-        message: impl Into<String>,
-        level: notification::NotificationLevel,
-        style: notification::NotificationStyle,
-    ) -> Option<WinId> {
-        let id = WinId(self.next_win_id);
-        self.next_win_id += 1;
-
-        let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th, None, &self.split_rects);
-        let zindex = config.zindex;
-
-        let n = notification::Notification::new(message, level).with_style(style);
-
-        let placeholder_buf = BufId(0);
-        let focusable = config.focusable;
-        let mut win = Window::new(id, placeholder_buf, WinConfig::Float(config));
-        win.focusable = focusable;
-        self.wins.insert(id, win);
-
-        let layer_id = float_layer_id(id);
-        // Toast: non-focusable, sits below dialogs by design. Click
-        // dispatches `Dismiss` (handled by App), so suppress focus +
-        // raise so the click doesn't bump the toast above a real modal.
-        let opts = compositor::LayerOpts {
-            focus_on_click: false,
-            raise_on_click: false,
-        };
-        self.compositor
-            .add_with_opts(&layer_id, Box::new(n), rect, zindex, opts);
-        if focusable {
-            self.compositor.focus(&layer_id);
-        }
-
-        Some(id)
-    }
-
-    pub fn notification_mut(&mut self, win_id: WinId) -> Option<&mut notification::Notification> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component_mut(&layer_id)?;
-        comp.as_any_mut()
-            .downcast_mut::<notification::Notification>()
     }
 
     // ── Cmdline ──────────────────────────────────────────────────────
@@ -1779,6 +1725,8 @@ mod tests {
             layout::Anchor::Win {
                 target: WinId(999),
                 attach: Corner::NW,
+                row_offset: 0,
+                col_offset: 0,
             },
         ));
         assert!(ui.resolve_overlays(None).is_empty());
