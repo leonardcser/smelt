@@ -70,9 +70,7 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                 spec = spec
                     .focusable(focusable || interactive)
                     .with_initial_focus(initial_focus);
-                if let Some(sep) = parse_separator(&panel)? {
-                    spec = spec.with_separator(sep);
-                }
+                spec = spec.with_separator(parse_separator(&panel)?);
                 if panel.get::<bool>("collapse_when_empty").unwrap_or(false) {
                     spec.collapse_when_empty = true;
                 }
@@ -196,14 +194,14 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
     Ok(win_id)
 }
 
-fn parse_separator(panel: &mlua::Table) -> Result<Option<SeparatorStyle>, String> {
+fn parse_separator(panel: &mlua::Table) -> Result<SeparatorStyle, String> {
     match panel.get::<String>("separator").ok().as_deref() {
-        Some("dashed") => Ok(Some(SeparatorStyle::Dashed)),
-        Some("solid") => Ok(Some(SeparatorStyle::Solid)),
+        Some("dashed") => Ok(SeparatorStyle::Dashed),
+        Some("solid") => Ok(SeparatorStyle::Solid),
         Some(other) => Err(format!(
             "panel.separator: unknown style {other:?} (expected \"dashed\" or \"solid\")"
         )),
-        None => Ok(None),
+        None => Ok(SeparatorStyle::None),
     }
 }
 

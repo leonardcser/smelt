@@ -20,7 +20,7 @@ use crate::buffer::{Buffer, LineDecoration};
 use crate::buffer_view::BufferView;
 use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
 use crate::grid::{GridSlice, Style};
-use crate::layout::Rect;
+use crate::layout::{Rect, SeparatorStyle};
 use crate::status_bar::StatusBar;
 use crate::window::{ScrollbarState, Window, WindowViewport};
 use crate::BufId;
@@ -48,15 +48,6 @@ pub enum PanelHeight {
     Fit,
     /// Consume whatever remains after Fixed/Fit panels are allocated.
     Fill,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SeparatorStyle {
-    /// `╌` — weak, between-sections.
-    Dashed,
-    /// `─` — strong (rarely used between panels; reserved for top
-    /// rule).
-    Solid,
 }
 
 /// A self-contained panel renderer with its own interaction state.
@@ -168,7 +159,7 @@ pub enum PanelContent {
 pub struct PanelSpec {
     pub content: PanelContent,
     pub height: PanelHeight,
-    pub separator_above: Option<SeparatorStyle>,
+    pub separator_above: SeparatorStyle,
     /// Left content padding inside the panel's rect.
     pub pad_left: u16,
     /// Whether this panel participates in focus cycling. Title/summary
@@ -195,7 +186,7 @@ impl PanelSpec {
         Self {
             content: PanelContent::Buffer(buf),
             height,
-            separator_above: None,
+            separator_above: SeparatorStyle::None,
             pad_left: 1,
             focusable: false,
             focus_initial: false,
@@ -213,7 +204,7 @@ impl PanelSpec {
         Self {
             content: PanelContent::Buffer(buf),
             height,
-            separator_above: None,
+            separator_above: SeparatorStyle::None,
             pad_left: 1,
             focusable: true,
             focus_initial: false,
@@ -232,7 +223,7 @@ impl PanelSpec {
         Self {
             content: PanelContent::Widget(widget),
             height,
-            separator_above: None,
+            separator_above: SeparatorStyle::None,
             pad_left: 1,
             focusable: true,
             focus_initial: false,
@@ -242,7 +233,7 @@ impl PanelSpec {
     }
 
     pub fn with_separator(mut self, sep: SeparatorStyle) -> Self {
-        self.separator_above = Some(sep);
+        self.separator_above = sep;
         self
     }
 
@@ -286,7 +277,7 @@ pub struct DialogConfig {
 /// state.
 pub(crate) struct DialogPanel {
     pub height: PanelHeight,
-    pub separator_above: Option<SeparatorStyle>,
+    pub separator_above: SeparatorStyle,
     pub pad_left: u16,
     pub focusable: bool,
     pub focus_initial: bool,
@@ -384,7 +375,7 @@ impl Dialog {
         let sep_rows: u16 = self
             .panels
             .iter()
-            .map(|p| if p.separator_above.is_some() { 1 } else { 0 })
+            .map(|p| if p.separator_above != SeparatorStyle::None { 1 } else { 0 })
             .sum();
         let content_rows: u16 = self
             .panels
@@ -592,7 +583,7 @@ impl Dialog {
             .iter()
             .map(|p| {
                 let hidden = p.collapse_when_empty && p.line_count == 0;
-                if p.separator_above.is_some() && !hidden {
+                if p.separator_above != SeparatorStyle::None && !hidden {
                     1
                 } else {
                     0
@@ -664,7 +655,7 @@ impl Dialog {
         // Pass 2: assign rects top-down.
         let mut y = content_top;
         for (i, panel) in self.panels.iter_mut().enumerate() {
-            if panel.separator_above.is_some() && sep_cost[i] > 0 {
+            if panel.separator_above != SeparatorStyle::None && sep_cost[i] > 0 {
                 y = y.saturating_add(1);
             }
             let h = heights[i].unwrap_or(0);
@@ -1068,14 +1059,13 @@ impl Component for Dialog {
             if panel.rect.height == 0 {
                 continue;
             }
-            if let Some(sep) = panel.separator_above {
-                let sep_row = panel.rect.top.saturating_sub(area.top).saturating_sub(1);
-                if sep_row < h {
-                    match sep {
-                        SeparatorStyle::Dashed => self.draw_separator(sep_row, grid),
-                        SeparatorStyle::Solid => {
-                            self.draw_top_rule(Rect::new(sep_row, 0, w, 1), grid)
-                        }
+            let sep_row = panel.rect.top.saturating_sub(area.top).saturating_sub(1);
+            if sep_row < h {
+                match panel.separator_above {
+                    SeparatorStyle::None => {}
+                    SeparatorStyle::Dashed => self.draw_separator(sep_row, grid),
+                    SeparatorStyle::Solid => {
+                        self.draw_top_rule(Rect::new(sep_row, 0, w, 1), grid)
                     }
                 }
             }
