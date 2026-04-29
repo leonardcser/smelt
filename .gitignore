@@ -2,3 +2,7 @@ target/
 docs/site/
 # samply / local CPU profile captures
 *.json.gz
+# RALPH loop sentinels — written by the agent at the end of an iteration,
+# read by refactor/ralph.sh, never committed.
+refactor/.ralph-done
+refactor/.ralph-needs-input

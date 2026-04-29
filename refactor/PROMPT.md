@@ -48,6 +48,33 @@ option and log it. If a big decision ripples and no winner is clear,
 defer the dependent sub-phases, record the question in `P<n>.md`, and
 move on to independent work.
 
+## Loop sentinels
+
+Two files signal the loop driver to exit cleanly. Write at most one,
+only when its precondition is genuinely true.
+
+### `refactor/.ralph-done` — plan complete
+
+Write this when every phase in `REFACTOR.md` is `Status: done`, no
+`P<n>.md` has open sub-phases, and no `P<n>.md` "Open questions"
+section has unresolved entries. Contents: a one-line summary
+(e.g. `P7 landed; full refactor green`).
+
+### `refactor/.ralph-needs-input` — your turn
+
+Write this when **every un-landed sub-phase across all phases** is
+deferred on an open question recorded in some `P<n>.md`. That is:
+there is no independent work left for a fresh agent to attempt — every
+remaining path needs a user decision before it can move. Contents: a
+one-line summary pointing at the deciding questions (e.g.
+`P3.b naming + P5.b dispatcher wiring blocked on user`).
+
+**Do not write either file** in any other situation. Partial
+completion, deferrals with independent work still available, "I think
+we're close", or "I tried and failed" all stay implicit — leave no
+sentinel and let the no-commit branch surface as `stuck`. Writing the
+wrong sentinel ends the loop prematurely.
+
 If the sub-phase is larger than fits one session, split it in
 `REFACTOR.md` (`C.8` → `C.8a`/`C.8b`), land `a`, exit.
 
