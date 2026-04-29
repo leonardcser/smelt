@@ -18,8 +18,15 @@ file fates (`INVENTORY.md`), parity (`FEATURES.md`), test strategy
 
 - **Take the better path.** Don't follow the doc when a better way is plain.
   Update the affected docs in the same change. Log the decision in `P<n>.md`.
-- **Stop and ask** when the friction wants a user-visible behavior change you
-  didn't agree to, or when two designs are equally defensible.
+- **Never stop to ask the user.** The user may not be at the keyboard.
+  Decisions resolve in one of two ways:
+  1. **A clearly better option exists** — pick it, log the choice in `P<n>.md`,
+     keep going. Don't deliberate.
+  2. **A big decision ripples through many sub-phases and no winner is clear** —
+     defer the dependent sub-phases. Move on to independent ones in the
+     phase (or earlier in the next phase if nothing in the active phase is
+     unblocked). Record the open question in `P<n>.md` "Open questions"
+     so the user can resolve it later. Do not block the loop on it.
 
 ## Granularity
 
@@ -47,9 +54,16 @@ Stop when one of:
 1. The active sub-phase landed: tree green at HEAD, `cargo nextest` green,
    `refactor/check.sh` green, `P<n>.md` updated, the sub-phase entry in
    `REFACTOR.md` marked landed.
-2. Blocked on ambiguity, missing decision, or external dependency. Record the
-   question in `P<n>.md` "Open questions" and exit.
-3. Two consecutive failed attempts to land the sub-phase. Exit, human looks.
+2. **Real external blocker** — missing credentials, broken environment, an
+   action that genuinely requires the user to do something at their machine
+   (e.g. interactive `gh auth login`). Record what's needed in `P<n>.md`
+   "Open questions" and exit.
+3. Two consecutive failed attempts to land the active sub-phase. Exit,
+   human looks.
+
+**Ambiguity is not a stop reason** — see "The plan is not final" above. A
+clear better option means you pick it; a rippling unresolved decision means
+you defer the dependent sub-phases and move on to independent ones.
 
 Do **not** stop just because a single commit landed — keep going within the
 sub-phase. Do **not** start a new sub-phase in the same session.
@@ -111,6 +125,9 @@ what happened.
 | `TESTING.md`                      | Three-layer testing strategy.                    |
 | `check.sh`                        | Drift-detection invariants.                      |
 | `PROMPT.md`                       | RALPH loop entry prompt — what each session does.|
+| `ralph.sh`                        | RALPH loop driver. Spawns a tmux window running `claude -p` per iteration. |
+| `hooks/post_doc_edit.sh`          | PostToolUse hook. Yells when a `refactor/*.md` file exceeds its line cap. |
+| `hooks/stop_gate.sh`              | Stop hook. Blocks "done" if `refactor/check.sh` is red. |
 
 ## `P<n>.md` template
 

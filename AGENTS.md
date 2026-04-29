@@ -24,6 +24,7 @@ operating rules.
 @refactor/README.md
 @refactor/REFACTOR.md
 @refactor/ARCHITECTURE.md
+@refactor/tui-ui-architecture-target.puml
 @refactor/INVENTORY.md
 @refactor/FEATURES.md
 @refactor/DECISIONS.md
