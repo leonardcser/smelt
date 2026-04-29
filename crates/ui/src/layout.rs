@@ -484,6 +484,60 @@ pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<crate::WinId, Re
     result
 }
 
+/// Paint a container's chrome (border + title) into `grid` at `area`.
+/// `Border::None` is a no-op — pads `gap` and `separator` are
+/// layout-side and consume cells that the content fills, so they're
+/// rendered by the children, not chrome paint. Title sits in the top
+/// border row, after the top-left corner glyph; truncates at the
+/// pre-corner column.
+pub fn paint_chrome(
+    grid: &mut crate::grid::Grid,
+    area: Rect,
+    chrome: &Chrome,
+    _theme: &crate::theme::Theme,
+) {
+    let Some(border) = chrome.border else {
+        return;
+    };
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let (h, v, tl, tr, bl, br) = match border {
+        Border::None => return,
+        Border::Single => ('─', '│', '┌', '┐', '└', '┘'),
+        Border::Double => ('═', '║', '╔', '╗', '╚', '╝'),
+        Border::Rounded => ('─', '│', '╭', '╮', '╰', '╯'),
+    };
+    let style = crate::grid::Style::default();
+    let right = area.left + area.width - 1;
+    let bottom = area.top + area.height - 1;
+
+    grid.set(area.left, area.top, tl, style);
+    for col in (area.left + 1)..right {
+        grid.set(col, area.top, h, style);
+    }
+    grid.set(right, area.top, tr, style);
+
+    for row in (area.top + 1)..bottom {
+        grid.set(area.left, row, v, style);
+        grid.set(right, row, v, style);
+    }
+
+    grid.set(area.left, bottom, bl, style);
+    for col in (area.left + 1)..right {
+        grid.set(col, bottom, h, style);
+    }
+    grid.set(right, bottom, br, style);
+
+    if let Some(title) = chrome.title.as_deref() {
+        let max_title_cols = area.width.saturating_sub(2);
+        if max_title_cols > 0 {
+            let truncated: String = title.chars().take(max_title_cols as usize).collect();
+            grid.put_str(area.left + 1, area.top, &truncated, style);
+        }
+    }
+}
+
 fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<crate::WinId, Rect>) {
     match node {
         LayoutTree::Leaf(win) => {
@@ -535,7 +589,7 @@ fn resolve_box(
     }
 }
 
-fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
+pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
     let mut sizes = vec![0u16; items.len()];
     let mut remaining = total;
 
@@ -1010,5 +1064,82 @@ mod tests {
         // Outer: 5 (length) + 2 (border) = 7 height; inner Hbox width
         // 30 + 2 (outer border) = 32.
         assert_eq!(tree.natural_size((80, 24)), (32, 7));
+    }
+
+    #[test]
+    fn paint_chrome_no_border_is_noop() {
+        let mut grid = crate::grid::Grid::new(10, 5);
+        let chrome = Chrome::default();
+        paint_chrome(
+            &mut grid,
+            Rect::new(0, 0, 10, 5),
+            &chrome,
+            &crate::theme::Theme::default(),
+        );
+        assert_eq!(grid.cell(0, 0).symbol, ' ');
+    }
+
+    #[test]
+    fn paint_chrome_single_border_draws_corners_and_edges() {
+        let mut grid = crate::grid::Grid::new(10, 5);
+        let chrome = Chrome {
+            border: Some(Border::Single),
+            ..Chrome::default()
+        };
+        paint_chrome(
+            &mut grid,
+            Rect::new(0, 0, 10, 5),
+            &chrome,
+            &crate::theme::Theme::default(),
+        );
+        assert_eq!(grid.cell(0, 0).symbol, '┌');
+        assert_eq!(grid.cell(9, 0).symbol, '┐');
+        assert_eq!(grid.cell(0, 4).symbol, '└');
+        assert_eq!(grid.cell(9, 4).symbol, '┘');
+        assert_eq!(grid.cell(5, 0).symbol, '─');
+        assert_eq!(grid.cell(0, 2).symbol, '│');
+    }
+
+    #[test]
+    fn paint_chrome_title_lands_on_top_border() {
+        let mut grid = crate::grid::Grid::new(20, 5);
+        let chrome = Chrome {
+            border: Some(Border::Rounded),
+            title: Some("hello".into()),
+            ..Chrome::default()
+        };
+        paint_chrome(
+            &mut grid,
+            Rect::new(0, 0, 20, 5),
+            &chrome,
+            &crate::theme::Theme::default(),
+        );
+        assert_eq!(grid.cell(0, 0).symbol, '╭');
+        assert_eq!(grid.cell(1, 0).symbol, 'h');
+        assert_eq!(grid.cell(5, 0).symbol, 'o');
+        // Beyond the title, the top edge resumes the border glyph.
+        assert_eq!(grid.cell(6, 0).symbol, '─');
+    }
+
+    #[test]
+    fn paint_chrome_truncates_title_to_inner_width() {
+        let mut grid = crate::grid::Grid::new(8, 3);
+        let chrome = Chrome {
+            border: Some(Border::Single),
+            title: Some("muchtoolong".into()),
+            ..Chrome::default()
+        };
+        paint_chrome(
+            &mut grid,
+            Rect::new(0, 0, 8, 3),
+            &chrome,
+            &crate::theme::Theme::default(),
+        );
+        assert_eq!(grid.cell(0, 0).symbol, '┌');
+        assert_eq!(grid.cell(1, 0).symbol, 'm');
+        assert_eq!(grid.cell(6, 0).symbol, 'o');
+        // Last cell before the corner — overwritten by the title's 6th
+        // char (max_title_cols = 6 = area.width − 2).
+        assert_eq!(grid.cell(7, 0).symbol, '┐');
     }
 }
