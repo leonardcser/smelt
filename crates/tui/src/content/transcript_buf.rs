@@ -25,6 +25,10 @@ impl TranscriptProjection {
         &self.buf
     }
 
+    pub(crate) fn buf_mut(&mut self) -> &mut Buffer {
+        &mut self.buf
+    }
+
     pub(crate) fn total_lines(&self) -> usize {
         self.buf.line_count()
     }

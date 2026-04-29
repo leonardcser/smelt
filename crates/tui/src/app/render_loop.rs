@@ -158,7 +158,7 @@ impl App {
             .layer_mut::<content::window_view::WindowView>("transcript")
         {
             tv.sync_from_buffer(
-                self.transcript_projection.buf(),
+                self.transcript_projection.buf_mut(),
                 tdata.clamped_scroll as usize,
             );
             for (line, col_start, col_end) in &transcript_selection {
@@ -266,7 +266,7 @@ impl App {
         let viewport = self.prompt_viewport;
         let input_buf_id = self.input_display_buf;
         let buf_snapshot = self.ui.buf(input_buf_id).cloned();
-        if let (Some(pv), Some(buf)) = (
+        if let (Some(pv), Some(mut buf)) = (
             self.ui
                 .layer_mut::<content::window_view::WindowView>("prompt_input"),
             buf_snapshot,
@@ -278,7 +278,7 @@ impl App {
             // render empty rows — the buffer offset must be 0, while
             // the *viewport* above still carries the real scroll so
             // the scrollbar tracks correctly.
-            pv.sync_from_buffer(&buf, 0);
+            pv.sync_from_buffer(&mut buf, 0);
             pv.set_viewport(viewport);
             pv.set_cursor(cursor, cursor_style);
         }

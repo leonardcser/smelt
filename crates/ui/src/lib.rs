@@ -503,7 +503,7 @@ impl Ui {
             })
             .unwrap_or(BufId(0));
 
-        let panel_structs = dialog::build_panels(panels, &self.bufs);
+        let panel_structs = dialog::build_panels(panels, &mut self.bufs);
         let mut dlg = dialog::Dialog::new(dialog_config, panel_structs);
         // Pre-sync so `FitContent` sees a populated `line_count` on
         // the first frame — otherwise the dialog lands at the cap

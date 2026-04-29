@@ -1,5 +1,21 @@
+//! Buffer — lines + namespaced extmarks.
+//!
+//! The data layer mirrors `nvim_buf_set_extmark`: a `Buffer` is a
+//! sequence of text lines plus a single store of `Extmark`s grouped
+//! into `Namespace`s. Highlight spans, line decorations, virtual text,
+//! and named marks are all extmarks tagged by namespace — one storage
+//! shape, queried per-line at render time.
+//!
+//! The convenience methods `add_highlight`, `set_decoration`,
+//! `set_virtual_text`, `set_mark` create extmarks in well-known
+//! namespaces (`Buffer::NS_HIGHLIGHTS`, `NS_DECORATIONS`,
+//! `NS_VIRT_TEXT`, `NS_MARKS`). Code that wants nvim's full extmark
+//! ergonomics (custom namespace, `clear_namespace`, IDs) calls
+//! `create_namespace` + `set_extmark` directly.
+
 use crate::BufId;
 use crossterm::style::Color;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Formatter plugged into a `Buffer` to turn a plain-text `source`
@@ -18,13 +34,15 @@ pub trait BufferFormatter: Send + Sync {
     fn render(&self, buf: &mut Buffer, source: &str, width: u16);
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Span {
-    pub col_start: u16,
-    pub col_end: u16,
-    pub style: SpanStyle,
-    pub meta: SpanMeta,
-}
+/// Identifier returned by `Buffer::create_namespace`. Stable for the
+/// lifetime of the Buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NsId(pub u32);
+
+/// Identifier returned by `Buffer::set_extmark`. Unique within a
+/// namespace; can be reused after `del_extmark`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExtmarkId(pub u32);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpanMeta {
@@ -89,14 +107,21 @@ impl SpanStyle {
     }
 }
 
+/// Materialized highlight span for one line. Derived on demand from
+/// extmarks in `NS_HIGHLIGHTS` (or any namespace whose payload is
+/// `ExtmarkPayload::Highlight`); split at line boundaries when an
+/// extmark spans multiple rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BufType {
-    Normal,
-    Nofile,
-    Prompt,
-    Scratch,
+pub struct Span {
+    pub col_start: u16,
+    pub col_end: u16,
+    pub style: SpanStyle,
+    pub meta: SpanMeta,
 }
 
+/// One-line virtual text overlay. Derived on demand from extmarks in
+/// `NS_VIRT_TEXT` (or any namespace whose payload is
+/// `ExtmarkPayload::VirtText`).
 #[derive(Clone, Debug)]
 pub struct VirtualText {
     pub line: usize,
@@ -105,10 +130,19 @@ pub struct VirtualText {
     pub hl_group: Option<String>,
 }
 
+/// Named position mark.
 #[derive(Clone, Debug)]
 pub struct Mark {
     pub line: usize,
     pub col: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BufType {
+    Normal,
+    Nofile,
+    Prompt,
+    Scratch,
 }
 
 pub struct BufCreateOpts {
@@ -125,6 +159,143 @@ impl Default for BufCreateOpts {
     }
 }
 
+// ─── Extmark model ─────────────────────────────────────────────────
+
+/// One extmark — a positional anchor with a payload. Lives in a
+/// namespace; addressable by `(NsId, ExtmarkId)`.
+#[derive(Clone, Debug)]
+pub struct Extmark {
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+    pub payload: ExtmarkPayload,
+}
+
+/// Payload carried by an extmark. Each variant maps onto one of the
+/// public per-line getters (`highlights_at`, `decoration_at`,
+/// `virtual_text_at`, `get_mark`).
+#[derive(Clone, Debug)]
+pub enum ExtmarkPayload {
+    Highlight {
+        style: SpanStyle,
+        meta: SpanMeta,
+    },
+    Decoration(LineDecoration),
+    VirtText {
+        text: String,
+        hl_group: Option<String>,
+    },
+    /// Named position mark. The `name` is the user-facing key; lookup
+    /// is via `get_mark(name)`.
+    NamedMark {
+        name: String,
+    },
+}
+
+/// `set_extmark` opts. `end_row`/`end_col` default to the start
+/// position (a point mark); supply both to span a range.
+#[derive(Clone, Debug)]
+pub struct ExtmarkOpts {
+    pub end_row: Option<usize>,
+    pub end_col: Option<usize>,
+    pub payload: ExtmarkPayload,
+}
+
+impl ExtmarkOpts {
+    pub fn highlight(end_col: usize, style: SpanStyle, meta: SpanMeta) -> Self {
+        Self {
+            end_row: None,
+            end_col: Some(end_col),
+            payload: ExtmarkPayload::Highlight { style, meta },
+        }
+    }
+
+    pub fn decoration(dec: LineDecoration) -> Self {
+        Self {
+            end_row: None,
+            end_col: None,
+            payload: ExtmarkPayload::Decoration(dec),
+        }
+    }
+
+    pub fn virt_text(text: String, hl_group: Option<String>) -> Self {
+        Self {
+            end_row: None,
+            end_col: None,
+            payload: ExtmarkPayload::VirtText { text, hl_group },
+        }
+    }
+
+    pub fn named_mark(name: String) -> Self {
+        Self {
+            end_row: None,
+            end_col: None,
+            payload: ExtmarkPayload::NamedMark { name },
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct NamespaceState {
+    extmarks: BTreeMap<ExtmarkId, Extmark>,
+    next_id: u32,
+}
+
+#[derive(Default, Clone)]
+struct ExtmarkStore {
+    namespaces: HashMap<NsId, NamespaceState>,
+    name_to_id: HashMap<String, NsId>,
+    next_ns: u32,
+}
+
+impl ExtmarkStore {
+    fn create_namespace(&mut self, name: &str) -> NsId {
+        if let Some(id) = self.name_to_id.get(name) {
+            return *id;
+        }
+        let id = NsId(self.next_ns);
+        self.next_ns += 1;
+        self.namespaces.insert(id, NamespaceState::default());
+        self.name_to_id.insert(name.to_string(), id);
+        id
+    }
+
+    fn ns_mut(&mut self, ns: NsId) -> &mut NamespaceState {
+        self.namespaces.entry(ns).or_default()
+    }
+
+    fn ns(&self, ns: NsId) -> Option<&NamespaceState> {
+        self.namespaces.get(&ns)
+    }
+
+    fn set_extmark(&mut self, ns: NsId, mark: Extmark) -> ExtmarkId {
+        let state = self.ns_mut(ns);
+        let id = ExtmarkId(state.next_id);
+        state.next_id += 1;
+        state.extmarks.insert(id, mark);
+        id
+    }
+
+    fn del_extmark(&mut self, ns: NsId, id: ExtmarkId) -> Option<Extmark> {
+        self.namespaces.get_mut(&ns)?.extmarks.remove(&id)
+    }
+
+    fn clear_namespace(&mut self, ns: NsId, line_start: usize, line_end: usize) {
+        let Some(state) = self.namespaces.get_mut(&ns) else {
+            return;
+        };
+        state
+            .extmarks
+            .retain(|_, m| !overlaps_lines(m, line_start, line_end));
+    }
+}
+
+fn overlaps_lines(m: &Extmark, line_start: usize, line_end: usize) -> bool {
+    let m_end = m.end_row.max(m.start_row);
+    m.start_row < line_end && m_end >= line_start
+}
+
 #[derive(Clone)]
 pub struct Buffer {
     pub(crate) id: BufId,
@@ -132,13 +303,29 @@ pub struct Buffer {
     /// refcount bumps; mutators use `Arc::make_mut` which only deep-
     /// copies when the Arc is actually shared.
     lines: Arc<Vec<String>>,
-    highlights: Arc<Vec<Vec<Span>>>,
-    decorations: Arc<Vec<LineDecoration>>,
+    extmarks: ExtmarkStore,
+    /// Cached per-line `Span` slices, derived from `extmarks`. Keyed
+    /// off `(content_tick, marks_tick)`; rebuilt by
+    /// `materialized_highlights` / `materialized_decorations` when the
+    /// inputs change. The `Arc` lets `BufferView::sync_from_buffer`
+    /// refcount-bump instead of cloning.
+    cached_highlights: Arc<Vec<Vec<Span>>>,
+    cached_decorations: Arc<Vec<LineDecoration>>,
+    cache_tick: u64,
     modifiable: bool,
     buftype: BufType,
-    virtual_text: Vec<VirtualText>,
-    marks: std::collections::HashMap<String, Mark>,
+    /// Bumped on lines mutation.
     changedtick: u64,
+    /// Bumped on extmark mutation. Rendering only reacts to the sum;
+    /// kept distinct to make cache invalidation precise.
+    marks_tick: u64,
+    /// Well-known namespace ids — interned at construction so the
+    /// convenience methods (`add_highlight`, `set_decoration`, …)
+    /// don't pay a hashmap lookup per call.
+    ns_highlights: NsId,
+    ns_decorations: NsId,
+    ns_virt_text: NsId,
+    ns_marks: NsId,
     /// When set, `source` drives the visible lines: the formatter
     /// re-renders into this buffer lazily when `ensure_rendered_at`
     /// is called with a different `(source_tick, width)` than the
@@ -150,17 +337,39 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// Default namespace name for highlight extmarks created via
+    /// `add_highlight` / `add_highlight_with_meta`.
+    pub const NS_HIGHLIGHTS: &'static str = "buffer.highlights";
+    /// Default namespace name for line decorations created via
+    /// `set_decoration`.
+    pub const NS_DECORATIONS: &'static str = "buffer.decorations";
+    /// Default namespace name for virtual text created via
+    /// `set_virtual_text`.
+    pub const NS_VIRT_TEXT: &'static str = "buffer.virt_text";
+    /// Default namespace name for named marks created via `set_mark`.
+    pub const NS_MARKS: &'static str = "buffer.marks";
+
     pub fn new(id: BufId, opts: BufCreateOpts) -> Self {
+        let mut extmarks = ExtmarkStore::default();
+        let ns_highlights = extmarks.create_namespace(Self::NS_HIGHLIGHTS);
+        let ns_decorations = extmarks.create_namespace(Self::NS_DECORATIONS);
+        let ns_virt_text = extmarks.create_namespace(Self::NS_VIRT_TEXT);
+        let ns_marks = extmarks.create_namespace(Self::NS_MARKS);
         Self {
             id,
             lines: Arc::new(vec![String::new()]),
-            highlights: Arc::new(vec![Vec::new()]),
-            decorations: Arc::new(vec![LineDecoration::default()]),
+            extmarks,
+            cached_highlights: Arc::new(vec![Vec::new()]),
+            cached_decorations: Arc::new(vec![LineDecoration::default()]),
+            cache_tick: u64::MAX,
             modifiable: opts.modifiable,
             buftype: opts.buftype,
-            virtual_text: Vec::new(),
-            marks: std::collections::HashMap::new(),
             changedtick: 0,
+            marks_tick: 0,
+            ns_highlights,
+            ns_decorations,
+            ns_virt_text,
+            ns_marks,
             formatter: None,
             source: String::new(),
             source_tick: 0,
@@ -243,47 +452,51 @@ impl Buffer {
     pub fn set_lines(&mut self, start: usize, end: usize, replacement: Vec<String>) {
         let end = end.min(self.lines.len());
         let start = start.min(end);
-        let new_count = replacement.len();
         let lines = Arc::make_mut(&mut self.lines);
         lines.splice(start..end, replacement);
-        let lines_empty = lines.is_empty();
-        let empty_spans: Vec<Vec<Span>> = vec![Vec::new(); new_count];
-        let highlights = Arc::make_mut(&mut self.highlights);
-        let hl_end = end.min(highlights.len());
-        let hl_start = start.min(hl_end);
-        highlights.splice(hl_start..hl_end, empty_spans);
-        let decorations = Arc::make_mut(&mut self.decorations);
-        let dec_end = end.min(decorations.len());
-        let dec_start = start.min(dec_end);
-        decorations.splice(
-            dec_start..dec_end,
-            std::iter::repeat_with(LineDecoration::default).take(new_count),
-        );
-        if lines_empty {
+        if lines.is_empty() {
             lines.push(String::new());
-            *highlights = vec![Vec::new()];
-            *decorations = vec![LineDecoration::default()];
+        }
+        // Clear extmarks whose anchor falls in the replaced range.
+        // Mirrors nvim's behavior: marks track edits, but a wholesale
+        // line replacement is treated as "everything in this slice
+        // is gone."
+        for ns in [
+            self.ns_highlights,
+            self.ns_decorations,
+            self.ns_virt_text,
+            self.ns_marks,
+        ] {
+            self.extmarks.clear_namespace(ns, start, end);
         }
         self.changedtick += 1;
+        self.marks_tick += 1;
     }
 
     pub fn set_all_lines(&mut self, lines: Vec<String>) {
-        let (new_lines, count) = if lines.is_empty() {
-            (vec![String::new()], 1)
+        let new_lines = if lines.is_empty() {
+            vec![String::new()]
         } else {
-            let n = lines.len();
-            (lines, n)
+            lines
         };
         self.lines = Arc::new(new_lines);
-        self.highlights = Arc::new(vec![Vec::new(); count]);
-        self.decorations = Arc::new(vec![LineDecoration::default(); count]);
+        // Wholesale replacement: drop every extmark in the well-known
+        // namespaces. (Custom namespaces persist; their owners decide
+        // when to clear.)
+        for ns in [
+            self.ns_highlights,
+            self.ns_decorations,
+            self.ns_virt_text,
+            self.ns_marks,
+        ] {
+            self.extmarks.clear_namespace(ns, 0, usize::MAX);
+        }
         self.changedtick += 1;
+        self.marks_tick += 1;
     }
 
     pub fn append_line(&mut self, line: String) {
         Arc::make_mut(&mut self.lines).push(line);
-        Arc::make_mut(&mut self.highlights).push(Vec::new());
-        Arc::make_mut(&mut self.decorations).push(LineDecoration::default());
         self.changedtick += 1;
     }
 
@@ -311,39 +524,61 @@ impl Buffer {
         self.changedtick
     }
 
-    pub fn set_virtual_text(&mut self, line: usize, text: String, hl_group: Option<String>) {
-        self.virtual_text.retain(|vt| vt.line != line);
-        self.virtual_text.push(VirtualText {
-            line,
-            col: 0,
-            text,
-            hl_group,
-        });
+    // ── Extmark API (the primary surface) ──────────────────────────
+
+    /// Get-or-create a namespace by name. Same `name` always returns
+    /// the same `NsId` for the lifetime of the Buffer.
+    pub fn create_namespace(&mut self, name: &str) -> NsId {
+        self.extmarks.create_namespace(name)
     }
 
-    pub fn clear_virtual_text(&mut self, line: usize) {
-        self.virtual_text.retain(|vt| vt.line != line);
+    /// Place an extmark in `ns`. Returns the new mark's id.
+    pub fn set_extmark(
+        &mut self,
+        ns: NsId,
+        line: usize,
+        col: usize,
+        opts: ExtmarkOpts,
+    ) -> ExtmarkId {
+        let mark = Extmark {
+            start_row: line,
+            start_col: col,
+            end_row: opts.end_row.unwrap_or(line),
+            end_col: opts.end_col.unwrap_or(col),
+            payload: opts.payload,
+        };
+        let id = self.extmarks.set_extmark(ns, mark);
+        self.marks_tick += 1;
+        id
     }
 
-    pub fn virtual_text_at(&self, line: usize) -> Option<&VirtualText> {
-        self.virtual_text.iter().find(|vt| vt.line == line)
+    /// Remove a previously-placed extmark. Returns the removed mark
+    /// or `None` if nothing matched.
+    pub fn del_extmark(&mut self, ns: NsId, id: ExtmarkId) -> Option<Extmark> {
+        let removed = self.extmarks.del_extmark(ns, id);
+        if removed.is_some() {
+            self.marks_tick += 1;
+        }
+        removed
     }
 
-    pub fn virtual_text(&self) -> &[VirtualText] {
-        &self.virtual_text
+    /// Clear every extmark in `ns` whose anchor lies within
+    /// `[line_start, line_end)`. Pass `0..usize::MAX` to clear the
+    /// whole namespace.
+    pub fn clear_namespace(&mut self, ns: NsId, line_start: usize, line_end: usize) {
+        self.extmarks.clear_namespace(ns, line_start, line_end);
+        self.marks_tick += 1;
     }
 
-    pub fn set_mark(&mut self, name: String, line: usize, col: usize) {
-        self.marks.insert(name, Mark { line, col });
+    /// Iterate every extmark in `ns`, in insertion order.
+    pub fn extmarks(&self, ns: NsId) -> Vec<(ExtmarkId, &Extmark)> {
+        match self.extmarks.ns(ns) {
+            Some(state) => state.extmarks.iter().map(|(id, m)| (*id, m)).collect(),
+            None => Vec::new(),
+        }
     }
 
-    pub fn get_mark(&self, name: &str) -> Option<&Mark> {
-        self.marks.get(name)
-    }
-
-    pub fn delete_mark(&mut self, name: &str) {
-        self.marks.remove(name);
-    }
+    // ── Convenience wrappers (highlights / decorations / virt_text / marks) ─
 
     pub fn add_highlight(&mut self, line: usize, col_start: u16, col_end: u16, style: SpanStyle) {
         self.add_highlight_with_meta(line, col_start, col_end, style, SpanMeta::default());
@@ -357,50 +592,58 @@ impl Buffer {
         style: SpanStyle,
         meta: SpanMeta,
     ) {
-        let highlights = Arc::make_mut(&mut self.highlights);
-        if line >= highlights.len() {
-            highlights.resize_with(line + 1, Vec::new);
-        }
-        highlights[line].push(Span {
-            col_start,
-            col_end,
-            style,
-            meta,
-        });
+        self.set_extmark(
+            self.ns_highlights,
+            line,
+            col_start as usize,
+            ExtmarkOpts::highlight(col_end as usize, style, meta),
+        );
     }
 
     pub fn clear_highlights(&mut self, start_line: usize, end_line: usize) {
-        let highlights = Arc::make_mut(&mut self.highlights);
-        let end = end_line.min(highlights.len());
-        for spans in highlights.iter_mut().take(end).skip(start_line) {
-            spans.clear();
+        let ns = self.ns_highlights;
+        self.clear_namespace(ns, start_line, end_line);
+    }
+
+    pub fn highlights_at(&self, line: usize) -> Vec<Span> {
+        let Some(state) = self.extmarks.ns(self.ns_highlights) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for mark in state.extmarks.values() {
+            if mark.start_row != line {
+                // Highlight extmarks today are single-row (matching
+                // the nvim convention where line-spanning highlights
+                // are emitted per-row by the parser). End-row is
+                // recorded but not yet split here.
+                continue;
+            }
+            if let ExtmarkPayload::Highlight { style, meta } = &mark.payload {
+                out.push(Span {
+                    col_start: mark.start_col as u16,
+                    col_end: mark.end_col as u16,
+                    style: style.clone(),
+                    meta: meta.clone(),
+                });
+            }
         }
-    }
-
-    pub fn highlights_at(&self, line: usize) -> &[Span] {
-        self.highlights.get(line).map_or(&[], |v| v.as_slice())
-    }
-
-    /// Shared handle to the full highlights vec — used by views that
-    /// want to `Arc::clone` instead of rebuilding their own copy.
-    pub fn highlights_arc(&self) -> &Arc<Vec<Vec<Span>>> {
-        &self.highlights
-    }
-
-    pub fn lines_arc(&self) -> &Arc<Vec<String>> {
-        &self.lines
-    }
-
-    pub fn decorations_arc(&self) -> &Arc<Vec<LineDecoration>> {
-        &self.decorations
+        out
     }
 
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
-        let decorations = Arc::make_mut(&mut self.decorations);
-        if line >= decorations.len() {
-            decorations.resize_with(line + 1, LineDecoration::default);
+        // One decoration per line: clear any prior at this row before
+        // writing the new one.
+        let ns = self.ns_decorations;
+        let to_remove: Vec<ExtmarkId> = self
+            .extmarks(ns)
+            .into_iter()
+            .filter(|(_, m)| m.start_row == line)
+            .map(|(id, _)| id)
+            .collect();
+        for id in to_remove {
+            self.extmarks.del_extmark(ns, id);
         }
-        decorations[line] = decoration;
+        self.set_extmark(ns, line, 0, ExtmarkOpts::decoration(decoration));
     }
 
     pub fn decoration_at(&self, line: usize) -> &LineDecoration {
@@ -411,11 +654,198 @@ impl Buffer {
             soft_wrapped: false,
             source_text: None,
         };
-        self.decorations.get(line).unwrap_or(&DEFAULT)
+        let Some(state) = self.extmarks.ns(self.ns_decorations) else {
+            return &DEFAULT;
+        };
+        for mark in state.extmarks.values() {
+            if mark.start_row != line {
+                continue;
+            }
+            if let ExtmarkPayload::Decoration(dec) = &mark.payload {
+                return dec;
+            }
+        }
+        &DEFAULT
     }
 
-    pub fn decorations(&self) -> &[LineDecoration] {
-        &self.decorations
+    pub fn set_virtual_text(&mut self, line: usize, text: String, hl_group: Option<String>) {
+        // One virt_text per line in the convenience namespace.
+        let ns = self.ns_virt_text;
+        let to_remove: Vec<ExtmarkId> = self
+            .extmarks(ns)
+            .into_iter()
+            .filter(|(_, m)| m.start_row == line)
+            .map(|(id, _)| id)
+            .collect();
+        for id in to_remove {
+            self.extmarks.del_extmark(ns, id);
+        }
+        self.set_extmark(ns, line, 0, ExtmarkOpts::virt_text(text, hl_group));
+    }
+
+    pub fn clear_virtual_text(&mut self, line: usize) {
+        let ns = self.ns_virt_text;
+        let to_remove: Vec<ExtmarkId> = self
+            .extmarks(ns)
+            .into_iter()
+            .filter(|(_, m)| m.start_row == line)
+            .map(|(id, _)| id)
+            .collect();
+        for id in to_remove {
+            self.del_extmark(ns, id);
+        }
+    }
+
+    pub fn virtual_text_at(&self, line: usize) -> Option<VirtualText> {
+        let state = self.extmarks.ns(self.ns_virt_text)?;
+        for mark in state.extmarks.values() {
+            if mark.start_row != line {
+                continue;
+            }
+            if let ExtmarkPayload::VirtText { text, hl_group } = &mark.payload {
+                return Some(VirtualText {
+                    line: mark.start_row,
+                    col: mark.start_col,
+                    text: text.clone(),
+                    hl_group: hl_group.clone(),
+                });
+            }
+        }
+        None
+    }
+
+    pub fn virtual_text(&self) -> Vec<VirtualText> {
+        let Some(state) = self.extmarks.ns(self.ns_virt_text) else {
+            return Vec::new();
+        };
+        state
+            .extmarks
+            .values()
+            .filter_map(|m| match &m.payload {
+                ExtmarkPayload::VirtText { text, hl_group } => Some(VirtualText {
+                    line: m.start_row,
+                    col: m.start_col,
+                    text: text.clone(),
+                    hl_group: hl_group.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn set_mark(&mut self, name: String, line: usize, col: usize) {
+        let ns = self.ns_marks;
+        let to_remove: Vec<ExtmarkId> = self
+            .extmarks(ns)
+            .into_iter()
+            .filter(|(_, m)| match &m.payload {
+                ExtmarkPayload::NamedMark { name: n } => n == &name,
+                _ => false,
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for id in to_remove {
+            self.extmarks.del_extmark(ns, id);
+        }
+        self.set_extmark(ns, line, col, ExtmarkOpts::named_mark(name));
+    }
+
+    pub fn get_mark(&self, name: &str) -> Option<Mark> {
+        let state = self.extmarks.ns(self.ns_marks)?;
+        for mark in state.extmarks.values() {
+            if let ExtmarkPayload::NamedMark { name: n } = &mark.payload {
+                if n == name {
+                    return Some(Mark {
+                        line: mark.start_row,
+                        col: mark.start_col,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    pub fn delete_mark(&mut self, name: &str) {
+        let ns = self.ns_marks;
+        let to_remove: Vec<ExtmarkId> = self
+            .extmarks(ns)
+            .into_iter()
+            .filter(|(_, m)| match &m.payload {
+                ExtmarkPayload::NamedMark { name: n } => n == name,
+                _ => false,
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for id in to_remove {
+            self.del_extmark(ns, id);
+        }
+    }
+
+    // ── Materialized accessors for BufferView Arc-clone path ───────
+
+    fn rebuild_caches(&mut self) {
+        let n = self.lines.len();
+        let mut hl: Vec<Vec<Span>> = vec![Vec::new(); n];
+        let mut dec: Vec<LineDecoration> = vec![LineDecoration::default(); n];
+        if let Some(state) = self.extmarks.ns(self.ns_highlights) {
+            for mark in state.extmarks.values() {
+                let row = mark.start_row;
+                if row >= n {
+                    continue;
+                }
+                if let ExtmarkPayload::Highlight { style, meta } = &mark.payload {
+                    hl[row].push(Span {
+                        col_start: mark.start_col as u16,
+                        col_end: mark.end_col as u16,
+                        style: style.clone(),
+                        meta: meta.clone(),
+                    });
+                }
+            }
+        }
+        if let Some(state) = self.extmarks.ns(self.ns_decorations) {
+            for mark in state.extmarks.values() {
+                let row = mark.start_row;
+                if row >= n {
+                    continue;
+                }
+                if let ExtmarkPayload::Decoration(d) = &mark.payload {
+                    dec[row] = d.clone();
+                }
+            }
+        }
+        self.cached_highlights = Arc::new(hl);
+        self.cached_decorations = Arc::new(dec);
+        self.cache_tick = self.changedtick.wrapping_add(self.marks_tick);
+    }
+
+    fn ensure_caches(&mut self) {
+        let want = self.changedtick.wrapping_add(self.marks_tick);
+        if self.cache_tick != want {
+            self.rebuild_caches();
+        }
+    }
+
+    /// Shared handle to the per-line highlight vec — used by views
+    /// that want to `Arc::clone` instead of rebuilding their own copy.
+    /// Materialized lazily from the extmark store.
+    pub fn highlights_arc(&mut self) -> &Arc<Vec<Vec<Span>>> {
+        self.ensure_caches();
+        &self.cached_highlights
+    }
+
+    pub fn lines_arc(&self) -> &Arc<Vec<String>> {
+        &self.lines
+    }
+
+    pub fn decorations_arc(&mut self) -> &Arc<Vec<LineDecoration>> {
+        self.ensure_caches();
+        &self.cached_decorations
+    }
+
+    pub fn decorations(&mut self) -> &[LineDecoration] {
+        self.ensure_caches();
+        &self.cached_decorations
     }
 }
 
@@ -509,6 +939,143 @@ mod tests {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["hello".into(), "world".into()]);
         assert_eq!(buf.text(), "hello\nworld");
+    }
+
+    #[test]
+    fn add_highlight_round_trips_via_extmark() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["hello world".into()]);
+        buf.add_highlight(0, 0, 5, SpanStyle::bold());
+        let spans = buf.highlights_at(0);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].col_start, 0);
+        assert_eq!(spans[0].col_end, 5);
+        assert!(spans[0].style.bold);
+    }
+
+    #[test]
+    fn set_decoration_round_trips_via_extmark() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["a".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                fill_bg: Some(Color::Blue),
+                ..LineDecoration::default()
+            },
+        );
+        assert_eq!(buf.decoration_at(0).fill_bg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn set_decoration_replaces_prior() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["a".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                fill_bg: Some(Color::Red),
+                ..LineDecoration::default()
+            },
+        );
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                fill_bg: Some(Color::Blue),
+                ..LineDecoration::default()
+            },
+        );
+        assert_eq!(buf.decoration_at(0).fill_bg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn clear_highlights_only_clears_range() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["a".into(), "b".into(), "c".into()]);
+        buf.add_highlight(0, 0, 1, SpanStyle::bold());
+        buf.add_highlight(1, 0, 1, SpanStyle::bold());
+        buf.add_highlight(2, 0, 1, SpanStyle::bold());
+        buf.clear_highlights(1, 2);
+        assert_eq!(buf.highlights_at(0).len(), 1);
+        assert_eq!(buf.highlights_at(1).len(), 0);
+        assert_eq!(buf.highlights_at(2).len(), 1);
+    }
+
+    #[test]
+    fn set_all_lines_clears_extmarks() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["a".into(), "b".into()]);
+        buf.add_highlight(0, 0, 1, SpanStyle::bold());
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                fill_bg: Some(Color::Blue),
+                ..LineDecoration::default()
+            },
+        );
+        buf.set_all_lines(vec!["x".into()]);
+        assert_eq!(buf.highlights_at(0).len(), 0);
+        assert_eq!(buf.decoration_at(0).fill_bg, None);
+    }
+
+    #[test]
+    fn custom_namespace_isolates_marks() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["text".into()]);
+        let ns = buf.create_namespace("syntax");
+        let id = buf.set_extmark(
+            ns,
+            0,
+            0,
+            ExtmarkOpts::highlight(4, SpanStyle::fg(Color::Red), SpanMeta::default()),
+        );
+        // The convenience getter only sees `NS_HIGHLIGHTS`; custom
+        // namespaces are read via `extmarks(ns)`.
+        assert_eq!(buf.highlights_at(0).len(), 0);
+        assert_eq!(buf.extmarks(ns).len(), 1);
+        buf.del_extmark(ns, id);
+        assert_eq!(buf.extmarks(ns).len(), 0);
+    }
+
+    #[test]
+    fn clear_namespace_only_clears_target() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["a".into()]);
+        let ns_a = buf.create_namespace("a");
+        let ns_b = buf.create_namespace("b");
+        buf.set_extmark(
+            ns_a,
+            0,
+            0,
+            ExtmarkOpts::highlight(1, SpanStyle::bold(), SpanMeta::default()),
+        );
+        buf.set_extmark(
+            ns_b,
+            0,
+            0,
+            ExtmarkOpts::highlight(1, SpanStyle::bold(), SpanMeta::default()),
+        );
+        buf.clear_namespace(ns_a, 0, usize::MAX);
+        assert_eq!(buf.extmarks(ns_a).len(), 0);
+        assert_eq!(buf.extmarks(ns_b).len(), 1);
+    }
+
+    #[test]
+    fn highlights_arc_is_materialized_from_extmarks() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["abc".into()]);
+        buf.add_highlight(0, 0, 3, SpanStyle::bold());
+        let arc = buf.highlights_arc().clone();
+        assert_eq!(arc[0].len(), 1);
+        assert_eq!(arc[0][0].col_start, 0);
+        // Re-reading without mutation reuses the same Arc.
+        let arc2 = buf.highlights_arc().clone();
+        assert!(Arc::ptr_eq(&arc, &arc2));
+        // After a mutation, a new Arc is materialized.
+        buf.add_highlight(0, 0, 1, SpanStyle::dim());
+        let arc3 = buf.highlights_arc().clone();
+        assert!(!Arc::ptr_eq(&arc, &arc3));
+        assert_eq!(arc3[0].len(), 2);
     }
 
     /// Drives [`Buffer::ensure_rendered_at`] with a stub formatter so

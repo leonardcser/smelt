@@ -55,7 +55,7 @@ impl WindowView {
         }
     }
 
-    pub fn sync_from_buffer(&mut self, buf: &Buffer, scroll_offset: usize) {
+    pub fn sync_from_buffer(&mut self, buf: &mut Buffer, scroll_offset: usize) {
         self.buffer_view.sync_from_buffer(buf);
         self.buffer_view.set_scroll(scroll_offset);
         self.content = WindowContent::Buffer;
@@ -261,9 +261,9 @@ mod tests {
 
     #[test]
     fn renders_buffer_lines() {
-        let buf = make_buf(&["hello", "world"]);
+        let mut buf = make_buf(&["hello", "world"]);
         let mut view = WindowView::new();
-        view.sync_from_buffer(&buf, 0);
+        view.sync_from_buffer(&mut buf, 0);
 
         let mut grid = Grid::new(20, 5);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 5));
@@ -276,9 +276,9 @@ mod tests {
 
     #[test]
     fn renders_with_scroll_offset() {
-        let buf = make_buf(&["line0", "line1", "line2", "line3"]);
+        let mut buf = make_buf(&["line0", "line1", "line2", "line3"]);
         let mut view = WindowView::new();
-        view.sync_from_buffer(&buf, 2);
+        view.sync_from_buffer(&mut buf, 2);
 
         let mut grid = Grid::new(20, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 2));
@@ -295,7 +295,7 @@ mod tests {
         buf.add_highlight(0, 0, 7, SpanStyle::fg(Color::Red));
 
         let mut view = WindowView::new();
-        view.sync_from_buffer(&buf, 0);
+        view.sync_from_buffer(&mut buf, 0);
 
         let mut grid = Grid::new(20, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));

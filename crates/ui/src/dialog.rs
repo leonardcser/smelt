@@ -1351,7 +1351,7 @@ impl Component for Dialog {
 
 pub(crate) fn build_panels(
     specs: Vec<PanelSpec>,
-    bufs: &std::collections::HashMap<BufId, Buffer>,
+    bufs: &mut dyn BufferResolver,
 ) -> Vec<DialogPanel> {
     use crate::{
         window::{FloatConfig, WinConfig},
@@ -1363,9 +1363,9 @@ pub(crate) fn build_panels(
         .map(|(i, spec)| {
             let (content, line_count) = match spec.content {
                 PanelContent::Buffer(buf_id) => {
-                    let line_count = bufs.get(&buf_id).map(|b| b.line_count()).unwrap_or(0);
+                    let line_count = bufs.get(buf_id).map(|b| b.line_count()).unwrap_or(0);
                     let mut view = BufferView::new();
-                    let rows = match bufs.get(&buf_id) {
+                    let rows = match bufs.get(buf_id) {
                         Some(buf) => {
                             view.sync_from_buffer(buf);
                             std::sync::Arc::clone(buf.lines_arc())
@@ -1394,7 +1394,7 @@ pub(crate) fn build_panels(
                     // at zero height until the next sync).
                     let buf_id = widget.as_list_widget().and_then(|lw| lw.buf_id());
                     if let Some(buf_id) = buf_id {
-                        if let Some(buf) = bufs.get(&buf_id) {
+                        if let Some(buf) = bufs.get(buf_id) {
                             if let Some(lw) = widget.as_list_widget() {
                                 lw.sync_from_buffer(buf);
                             }
@@ -1455,7 +1455,7 @@ mod tests {
                 PanelSpec::content(BufId(2), PanelHeight::Fill),
                 PanelSpec::content(BufId(1), PanelHeight::Fit),
             ],
-            &bufs,
+            &mut bufs,
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         let area = Rect::new(0, 0, 40, 20);
@@ -1471,7 +1471,7 @@ mod tests {
         use crossterm::style::Color;
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["hello"]));
-        let panels = build_panels(vec![PanelSpec::content(BufId(1), PanelHeight::Fill)], &bufs);
+        let panels = build_panels(vec![PanelSpec::content(BufId(1), PanelHeight::Fill)], &mut bufs);
         let mut dlg = Dialog::new(
             DialogConfig {
                 accent_style: Style::fg(Color::Red),
@@ -1500,7 +1500,7 @@ mod tests {
                 PanelSpec::content(BufId(2), PanelHeight::Fill)
                     .with_separator(SeparatorStyle::Dashed),
             ],
-            &bufs,
+            &mut bufs,
         );
         let mut dlg = Dialog::new(
             DialogConfig {
@@ -1521,7 +1521,7 @@ mod tests {
 
     #[test]
     fn esc_returns_dismiss() {
-        let panels = build_panels(vec![], &std::collections::HashMap::new());
+        let panels = build_panels(vec![], &mut std::collections::HashMap::new());
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         let r = dlg.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(r, KeyResult::Action(WidgetEvent::Dismiss));
@@ -1533,7 +1533,7 @@ mod tests {
         bufs.insert(BufId(1), make_buf(1, &["hello world", "second line"]));
         let panels = build_panels(
             vec![PanelSpec::content(BufId(1), PanelHeight::Fill).with_pad_left(0)],
-            &bufs,
+            &mut bufs,
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         let area = Rect::new(0, 0, 20, 5);
@@ -1565,7 +1565,7 @@ mod tests {
                 PanelHeight::Fit,
             )
             .with_initial_focus(true)],
-            &std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
@@ -1581,7 +1581,7 @@ mod tests {
                 Box::new(TextInput::new()),
                 PanelHeight::Fixed(1),
             )],
-            &std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         let area = Rect::new(0, 0, 20, 3);
@@ -1618,7 +1618,7 @@ mod tests {
                 PanelSpec::content(BufId(1), PanelHeight::Fixed(1)),
                 PanelSpec::content(BufId(2), PanelHeight::Fill),
             ],
-            &bufs,
+            &mut bufs,
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
@@ -1633,7 +1633,7 @@ mod tests {
     fn apply_panel_scrollbar_drag_moves_scroll_top() {
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["row"; 40]));
-        let panels = build_panels(vec![PanelSpec::content(BufId(1), PanelHeight::Fill)], &bufs);
+        let panels = build_panels(vec![PanelSpec::content(BufId(1), PanelHeight::Fill)], &mut bufs);
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
         let vp = dlg.panel_viewport(0).expect("panel has viewport");
@@ -1656,7 +1656,7 @@ mod tests {
                 Box::new(TextInput::new()),
                 PanelHeight::Fixed(1),
             )],
-            &std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 3));
@@ -1678,7 +1678,7 @@ mod tests {
         bufs.insert(BufId(1), make_buf(1, &["row"; 40]));
         let panels = build_panels(
             vec![PanelSpec::content(BufId(1), PanelHeight::Fill).with_pad_left(0)],
-            &bufs,
+            &mut bufs,
         );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         let area = Rect::new(0, 0, 20, 10);
