@@ -204,7 +204,12 @@ impl Ui {
         }
         let buf = Buffer::new(id, opts);
         self.bufs.insert(id, buf);
-        if id.0 >= self.next_buf_id {
+        // Only advance the Rust-side allocator when the explicit id
+        // sits inside Rust's own range. Lua-minted ids live above
+        // `LUA_BUF_ID_BASE` and have their own atomic counter; pulling
+        // `next_buf_id` past the base would make subsequent
+        // `buf_create()` calls collide with the next Lua allocation.
+        if id.0 < LUA_BUF_ID_BASE && id.0 >= self.next_buf_id {
             self.next_buf_id = id.0 + 1;
         }
         Ok(id)
@@ -1678,6 +1683,17 @@ mod tests {
         // Default placement: Centered 80%x50%.
         assert_eq!(rect.width, 64);
         assert_eq!(rect.height, 12);
+    }
+
+    #[test]
+    fn buf_create_with_id_lua_range_does_not_advance_rust_allocator() {
+        let mut ui = make_ui();
+        let rust_first = ui.buf_create(buffer::BufCreateOpts::default());
+        ui.buf_create_with_id(BufId(LUA_BUF_ID_BASE), buffer::BufCreateOpts::default())
+            .unwrap();
+        let rust_second = ui.buf_create(buffer::BufCreateOpts::default());
+        assert_eq!(rust_second.0, rust_first.0 + 1);
+        assert!(rust_second.0 < LUA_BUF_ID_BASE);
     }
 
     #[test]
