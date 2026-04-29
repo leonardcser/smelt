@@ -780,9 +780,8 @@ impl App {
                 ..Default::default()
             },
             error_label: ui::Style {
-                fg: Some(crate::theme::ERROR),
                 bold: true,
-                ..Default::default()
+                ..self.ui.theme().get("ErrorMsg")
             },
             message: ui::Style::dim(),
             background: ui::Style::default(),

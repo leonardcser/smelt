@@ -293,7 +293,7 @@ impl App {
             spans.push(item.to_span(status_bg));
         }
 
-        let (left, right) = spans_to_segments(&mut spans, width, status_bg);
+        let (left, right) = spans_to_segments(&mut spans, width, status_bg, theme_muted_fg);
         if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
             *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
             bar.set_left(left);
