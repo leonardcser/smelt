@@ -312,10 +312,27 @@ float migrations + Buffer-backed list/options/input panels landed
   (level becomes a `bool is_error` param to `open_notification`).
   `App::notification` keeps its leaf `WinId` shape — closing the leaf
   cascades through `Ui::win_close` → `overlay_close`.
-- **C.9c.3** — migrate cmdline to Overlay + Anchor.
-  `Ui::cmdline_open` / `cmdline_mut` / the `Cmdline` widget retire;
-  `:` cmdline becomes a Buffer-backed input leaf in an overlay docked
-  above the statusline.
+- **C.9c.3** (landed) — migrate cmdline to Overlay + Anchor.
+  `Ui::cmdline_open` / `cmdline_mut` / `Ui::cmdline` and the `Cmdline`
+  widget (`crates/ui/src/cmdline.rs`) retire. The `:` cmdline becomes
+  a Buffer-backed input leaf inside a single-row modal overlay
+  anchored via `Anchor::ScreenBottom { above_rows: 1 }` so the status
+  bar stays visible. The leaf carries no Window-level keymap recipe;
+  `App::cmdline_handle_key` runs ahead of compositor dispatch and
+  owns every key (text edit, Backspace-on-empty dismiss, Up/Down
+  history nav, Tab/BackTab/Ctrl+JNKP completer cycling, Ctrl+W word
+  delete, Ctrl+U clear, Esc/Ctrl+C dismiss, Enter submit). Buffer
+  line 0 carries a literal `:` prefix (cursor clamps to columns
+  `>= 1`); submit strips the prefix before dispatch. `WidgetEvent::
+  {SubmitText, TextChanged}` retire (last emitter was the cmdline
+  widget). Overlay paint now `grid.clear`s the overlay rect first
+  so single-glyph modal lines (cmdline `:`) don't leak prompt /
+  statusline content. `Ui::render` resolves the focused-overlay-leaf
+  cursor through a new `compositor.render_with` closure return so
+  the cmdline draws a visible caret (also fixes invisible-cursor in
+  every overlay input panel). Global-chord guard in `events.rs` adds
+  `cmdline_win.is_none()` so Shift+Tab / Ctrl+T / Ctrl+L don't fire
+  while typing a command.
 - **C.9c.4** — migrate picker dropdown to Overlay + Anchor. The prompt
   `/` completer and cmdline `:` completer pickers become overlay
   leaves with list semantics; `Ui::picker_open` / `picker_mut` retire.
