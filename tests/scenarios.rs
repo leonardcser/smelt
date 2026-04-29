@@ -70,6 +70,69 @@ async fn plain_turn() {
     });
 }
 
+/// Provider streams the same response across two text deltas (split
+/// mid-word). Engine must concatenate them into a single assistant
+/// content string. Pins the SSE buffer-and-split logic.
+#[tokio::test]
+async fn streaming_concat_across_deltas() {
+    let h = Harness::new().await;
+    h.write_config("anthropic", "claude-test");
+    h.write_init_lua("");
+    h.mount_anthropic_sse(&[
+        serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": { "input_tokens": 4, "output_tokens": 0 }
+            }
+        }),
+        serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "hel" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "lo wor" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "ld" }
+        }),
+        serde_json::json!({
+            "type": "content_block_stop",
+            "index": 0
+        }),
+        serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "output_tokens": 2 }
+        }),
+        serde_json::json!({ "type": "message_stop" }),
+    ])
+    .await;
+
+    let out = h.run("hi", "test/claude-test");
+    insta::assert_json_snapshot!(out.events, {
+        "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
+        "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
+        "[].TokenUsage.tokens_per_sec" => "[tps]",
+    });
+}
+
 /// Provider returns 401 Unauthorized. Engine maps to a non-retryable
 /// `Auth` error; the JSONL event stream still ends with `TurnComplete`
 /// (no assistant message). The auth failure surfaces through stderr,
