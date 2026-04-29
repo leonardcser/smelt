@@ -154,6 +154,12 @@ function smelt.ui.dialog.open(opts)
         idx1 = p.selected
       end
     end
+    -- Overlay path: list/options leaves fire Submit with
+    -- `Payload::Selection { index }`, surfaced as `raw_ctx.index`
+    -- (1-based). No `panels` array is built for overlays.
+    if idx1 == nil and raw_ctx.index then
+      idx1 = raw_ctx.index
+    end
     local action = "select"
     local on_select_fn = nil
     if idx1 and options_meta[idx1] then
