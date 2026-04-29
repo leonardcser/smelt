@@ -6,17 +6,15 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** P1.0 theme registry landed end-to-end. P1.a in progress:
-extmark + namespace model landed in `ui::Buffer` as the primary
-storage; `YankSubst` extmark field + `Buffer::yank_text_for_range`
-helper added; soft-wrap cache (`Buffer::wrap_at`) keyed by
-`(changedtick, width)` added. Per-line `add_highlight` /
-`set_decoration` / `set_virtual_text` / `set_mark` are now thin
-wrappers over `set_extmark` in well-known namespaces. Foundation
-commit 1 of the `Buffer::attach(spec)` parser-hook migration landed:
-`BufferFormatter` → `BufferParser` rename + `on_attach` lifecycle
-hook + builder API renamed to `Buffer::attach(parser)` /
-`set_parser`. The `edit_buffer.rs` merge is still pending in P1.a.
+**Phase:** P1.a closed as **foundation laid**. Extmark + namespace
+model + YankSubst + wrap_at + BufferParser rename are in place; the
+remaining structural work (transcript-pipeline migration onto
+`BufferParser` + `transcript_cache.rs` deletion + `edit_buffer.rs`
+merge) is gated on the transcript renderers moving onto Buffer
+first, which is itself a multi-session keystone. Rather than block
+P1 on that, deferred to a dedicated P1.a-tail effort and moved on
+to **P1.b — LayoutTree** which is independent and unblocks parallel
+overlay (P1.c) and window (P1.d) work.
 
 **Tree:** green. `cargo nextest run --workspace` — 930 passed (914
 from prior boundary + 16 new tests covering extmark CRUD, yank
@@ -123,62 +121,68 @@ before declaring anything done.
 
 ## What's next
 
-`Buffer::attach(spec)` parser-hook migration is in progress —
-commit 1 (rename + `on_attach`) landed at `385e9d0`. The remaining
-commits in this series are each a meaningful slice on their own
-and can be tackled independently:
+**P1.b — `LayoutTree`** is the active phase. Target shape from
+`REFACTOR.md` § P1.b:
 
-1. **Commit 2 — `on_change(buf, line_range)` hook.** Add the
-   incremental-edit hook to `BufferParser`; default implementation
-   delegates to a fresh `parse(&source, width)`. No consumer needs
-   to change immediately, but the hook unblocks streaming-parse
-   parsers down the line. ~1 hour.
-2. **Commit 3 — `on_render(buf, width)` hook.** Move the
-   width-dependent half of `parse` into a separate hook so parsers
-   can short-circuit when only the width changed. Lets the
-   markdown / syntect parsers cache the width-independent IR
-   (replaces what `transcript_cache.rs` does today). ~Half-day; the
-   IR cache split lives here.
-3. **Commit 4 — Delete `transcript_cache.rs`.** Once `on_render`
-   exists, the IR cache becomes per-parser state inside the
-   markdown / inline-diff parsers. The persisted layout cache stays
-   (separate concern). Cascades through the engine bridge and
-   resume path. ~1 day.
+- `Vbox { gap, separator, border, title, items } | Hbox { ... } |
+  Leaf(WinId)`.
+- `Item = (Constraint, LayoutTree)`.
+- Constraints: `Length / Percentage / Ratio / Min / Max / Fill / Fit`.
+- Container nodes carry chrome: `gap: u16`, `separator:
+  SeparatorStyle`, `border: Option<Border>`, `title: Option<String>`.
 
-Two other P1.a items, independent of the parser-hook series:
+Today's `crates/ui/src/layout.rs` has:
 
-- **Edit history merge**. Roll `edit_buffer.rs` (`EditBuffer` +
-  per-buffer history + word/line range helpers) into `Buffer`.
-  Cascades through `PromptState`, `Window`, every `input/buffer.rs`
-  site that reaches `self.win.edit_buf.buf`. ~250 references; ~2
-  days.
-- **Drop `BufferView` `Arc::clone` of materialized vecs**. Blocked
-  on `Component::draw` not having `&Buffer` access — defer to P1.d
-  when `BufferView` is deleted outright.
+- `LayoutTree::{ Leaf { name: String, constraint }, Split { direction,
+  children } }` (no chrome on containers; leaves identified by name
+  string, not `WinId`).
+- `Constraint::{ Fixed, Pct, Fill }` (3 of 7 target variants).
 
-Migrate-on-demand consumers (each surfaces hidden coupling, see
-P1.a notes):
-- Hidden-thinking blocks → `YankSubst::Empty` requires re-rooting
-  `TranscriptSnapshot` in a Buffer; not 1 file.
-- Prompt attachment sigils → `YankSubst::Static` is a wrong fit:
-  attachments substitute on submit, not on copy.
-- WindowView wrap → `Buffer::wrap_at` is a wrong fit: rendering
-  pre-wraps via `DisplayLine`s before the buffer; `wrap_at`
-  operates after the fact.
+Sub-commits planned:
 
-Subsequent P1 sub-phases (after P1.a closes):
-- **P1.b — `LayoutTree`** (`Vbox`/`Hbox`/`Leaf(WinId)` + constraints).
-- **P1.c — `Overlay` replacing `Float`** (deletes `PanelWidget` +
-  `dialog.rs` multiplexing).
-- **P1.d — `Window` as only interactive unit** (deletes `Component`
-  trait + `BufferView`; vim/completer state machines decompose).
+1. **B.1 — Constraint enum expansion.** Add `Min(u16)`, `Max(u16)`,
+   `Ratio(u16, u16)`, `Fit` with proper resolution semantics in
+   `resolve_constraints`. Rename `Fixed → Length`, `Pct →
+   Percentage`. Update 8 consumer files. ~Half-day.
+2. **B.2 — `Vbox`/`Hbox` variants with chrome.** Add the new
+   container shapes alongside `Split`; `Split` becomes a thin shim
+   that translates to `Vbox`/`Hbox`. Add `gap`, `separator`,
+   `border`, `title` resolution. ~1 day.
+3. **B.3 — `Leaf(WinId)` migration.** Switch `Leaf` from
+   `name: String` to `WinId`; rewrite `resolve_layout` to return
+   `HashMap<WinId, Rect>`. Cascades through `app/mod.rs`,
+   `content/layout.rs`, `render_loop.rs`. The biggest semantic
+   shift; gates B.4. ~1.5 days.
+4. **B.4 — Delete `Split`.** All consumers on `Vbox`/`Hbox`. Single
+   shape. ~Half-day.
 
-Subsequent P1 sub-phases (after P1.a closes):
-- **P1.b — `LayoutTree`** (`Vbox`/`Hbox`/`Leaf(WinId)` + constraints).
-- **P1.c — `Overlay` replacing `Float`** (deletes `PanelWidget` +
-  `dialog.rs` multiplexing).
-- **P1.d — `Window` as only interactive unit** (deletes `Component`
-  trait + `BufferView`; vim/completer state machines decompose).
+Once P1.b closes, P1.c (Overlay replacing Float) becomes
+unblocked.
+
+## Deferred to P1.a-tail (after the transcript migration)
+
+- Transcript-pipeline migration onto `BufferParser` (each `Block`
+  kind becomes its own parser; `BlockArtifact` becomes per-block
+  Buffer; `TranscriptSnapshot` composes from per-block Buffers).
+- Then: `BufferParser::on_render` / `on_change` hooks gain
+  consumers and stop being dead API.
+- Then: `transcript_cache.rs` deletion.
+- Edit history merge (`edit_buffer.rs` into `Buffer`): independent
+  of the transcript track but multi-day on its own. Schedule
+  alongside P1.d when vim state machine decomposes (the merge
+  naturally pairs with the per-buffer history move described in
+  P1.d).
+- Drop `BufferView` `Arc::clone`: blocked on `BufferView` deletion
+  in P1.d.
+
+## Closed as "wrong fit" (don't revisit without restructuring)
+
+- Hidden-thinking → `YankSubst::Empty`: requires re-rooting
+  `TranscriptSnapshot` in a Buffer.
+- Prompt attachment → `YankSubst::Static`: substitution happens at
+  submit, not on copy.
+- `WindowView` wrap → `Buffer::wrap_at`: rendering pre-wraps via
+  `DisplayLine`s before the buffer.
 
 Recently shipped: theme registry + plumbing + atomic-on-Theme
 collapse + 42 call site migrations + Snapshot elimination + ColorRole
