@@ -6,15 +6,15 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** P1.0 in progress. Theme registry foundation landed; call
-site migration pending.
+**Phase:** P1.0 renderer-side migration complete. Atomic state
+migration pending (deletion of `crates/tui/src/theme.rs`).
 
 **Tree:** green. `cargo nextest run --workspace` — 908 passed (901
 from P0 boundary + 7 new theme registry tests). `cargo nextest run
 --test scenarios` — 6 baseline scenarios green.
 
-**Last update:** 2026-04-29. P1.0 theme registry landing across 10
-commits (`decb0ab`..`1786716`):
+**Last update:** 2026-04-29. P1.0 theme registry landing across 11
+commits (`decb0ab`..`16beb71`):
 
 - `decb0ab` — `ui::Theme` registry type (HashMap groups + links).
 - `177ac4c` — plumbed through `DrawContext`; `Ui` owns it.
@@ -29,8 +29,15 @@ commits (`decb0ab`..`1786716`):
   the entire render pipeline; deleted the snapshot type.
 - `1786716` — added `ColorRole::Agent / Success / ErrorMsg`; migrated
   `transcript_present/*` renderers off the const colors.
+- `16beb71` — threaded `&ui::Theme` through `compute_prompt` /
+  `reasoning_color` / `WindowView::draw_scrollbar`; migrated
+  `confirm_preview` notebook title; added `ColorRole::Apply / Plan /
+  Exec / Heading / ReasonLow / ReasonMed / ReasonHigh / ReasonMax`.
+- `7aadcd2` — threaded `&ui::Theme` through
+  `WindowView::set_soft_cursor` (last renderer-side `theme::is_light`
+  caller).
 
-Migration tally: 28 of 50 `crate::theme::*` call sites converted; 22
+Migration tally: ~42 of 50 `crate::theme::*` call sites converted; ~8
 remain. The remaining sites are essential host-module surface that
 the registry depends on, not migration targets per se:
 
@@ -68,18 +75,19 @@ before declaring anything done.
 
 ## What's next
 
-In order:
+Two natural next moves; needs user direction:
 
-1. **Move atomic theme state onto `ui::Theme`**. `ACCENT_VALUE`,
-   `SLUG_COLOR_VALUE`, `LIGHT_THEME` atomics in `crate::theme::*`
-   become methods on `ui::Theme` (e.g. `set_accent(u8)` rebuilds the
-   relevant Style entries; `is_light()` reads a flag). Once that
-   lands, `populate_ui_theme()` no longer reads from atomics — it
-   reads from Theme itself. The host module shrinks to: light/dark
-   detection (one-shot at startup), the `PRESETS` const list, and
-   the headless ANSI helpers. `Snapshot` is already gone.
-2. **Other P1.0 pairings** (`BufferView`, `PanelWidget`/`Component`,
-   `Placement`) per their target sub-phases (P1.a..P1.d).
+1. **Finish atomic theme state migration.** Move `ACCENT_VALUE`,
+   `SLUG_COLOR_VALUE`, `LIGHT_THEME` onto `ui::Theme`; refactor
+   `lua/api/widgets.rs` + `lua/api/mod.rs` theme functions to read
+   through App's theme (touches Lua plugin surface but stays
+   compatible). Then `crates/tui/src/theme.rs` shrinks to just
+   light/dark detection (`detect_background`) + `PRESETS` list +
+   headless ANSI helpers, or moves entirely into other modules.
+2. **Move to next P1 sub-phase** (P1.a Buffer rewrite, P1.b
+   LayoutTree, P1.c Overlay, or P1.d Window-as-only-interactive).
+   Each is a much bigger rewrite than P1.0; pick based on which
+   downstream surgery to start first.
 
 Recently shipped: theme registry + plumbing + host bridge + 28
 call site migrations + Snapshot elimination + ColorRole expansion.
