@@ -11,8 +11,8 @@ use crate::format::BufFormat;
 use ui::buffer::BufCreateOpts;
 use ui::text_input::TextInput;
 use ui::{
-    BufId, BufferList, Constraint, FitMax, FloatConfig, OptionItem, OptionList, PanelHeight,
-    PanelSpec, Placement, SeparatorStyle, WinId,
+    BufId, Constraint, FitMax, FloatConfig, OptionItem, OptionList, PanelHeight, PanelSpec,
+    Placement, SeparatorStyle, WinId,
 };
 
 // ── Dialog ───────────────────────────────────────────────────────────
@@ -25,7 +25,6 @@ use ui::{
 // - `{ kind = "markdown", text = "..." }`                    — sugar for the line above with mode = "markdown"
 // - `{ kind = "options",  items = [{label, shortcut?}], selected? = <1-based index> }`
 // - `{ kind = "input",    placeholder? = "..." }`
-// - `{ kind = "list",     buf = <id> }`
 
 pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
     let title: Option<String> = opts.get("title").ok();
@@ -133,32 +132,6 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     spec.collapse_when_empty = true;
                 }
                 panel_specs.push(spec);
-            }
-            "list" => {
-                let buf_id: u64 = panel.get("buf").map_err(|e| format!("list.buf: {e}"))?;
-                let bg = ui::grid::Style {
-                    bg: Some(crossterm::style::Color::Black),
-                    ..Default::default()
-                };
-                let track = ui::grid::Style {
-                    bg: Some(crate::theme::scrollbar_track()),
-                    ..Default::default()
-                };
-                let thumb = ui::grid::Style {
-                    bg: Some(crate::theme::scrollbar_thumb()),
-                    ..Default::default()
-                };
-                let widget = Box::new(
-                    BufferList::new(BufId(buf_id))
-                        .with_cursor_style(accent_style())
-                        .with_bg_style(bg)
-                        .with_scrollbar_styles(track, thumb),
-                );
-                panel_specs.push(
-                    PanelSpec::widget(widget, height.unwrap_or(PanelHeight::Fill))
-                        .with_pad_left(2)
-                        .with_initial_focus(initial_focus),
-                );
             }
             other => return Err(format!("unknown panel kind: {other}")),
         }
