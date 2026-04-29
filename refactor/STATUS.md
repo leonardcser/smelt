@@ -140,21 +140,25 @@ Today's `crates/ui/src/layout.rs` has:
 
 Sub-commits planned:
 
-1. **B.1 — Constraint enum expansion.** Add `Min(u16)`, `Max(u16)`,
-   `Ratio(u16, u16)`, `Fit` with proper resolution semantics in
-   `resolve_constraints`. Rename `Fixed → Length`, `Pct →
-   Percentage`. Update 8 consumer files. ~Half-day.
-2. **B.2 — `Vbox`/`Hbox` variants with chrome.** Add the new
-   container shapes alongside `Split`; `Split` becomes a thin shim
-   that translates to `Vbox`/`Hbox`. Add `gap`, `separator`,
-   `border`, `title` resolution. ~1 day.
-3. **B.3 — `Leaf(WinId)` migration.** Switch `Leaf` from
+1. ✅ **B.1 — Constraint enum expansion** (landed at `70ad2e0`).
+   Added `Min(u16)`, `Max(u16)`, `Ratio(u16, u16)`, `Fit` with
+   proper resolution semantics in `resolve_constraints`. Renamed
+   `Fixed → Length`, `Pct → Percentage`. Updated 8 consumer files.
+   936 tests pass (6 new), clippy clean.
+2. **B.2 — Container chrome on `Split`.** Add `gap: u16`,
+   `border: Option<Border>`, `title: Option<String>` to
+   `LayoutTree::Split`; account for them in `resolve_node` so
+   children get a smaller area. Defer `SeparatorStyle` (needs new
+   enum) to B.2.1. ~Half-day. Doesn't restructure Items tuple yet.
+3. **B.3 — Items tuple + `Leaf(WinId)`.** Hoist constraint from
+   `Leaf` onto a `(Constraint, LayoutTree)` tuple stored in a new
+   `items` field on containers; switch `Leaf` from
    `name: String` to `WinId`; rewrite `resolve_layout` to return
    `HashMap<WinId, Rect>`. Cascades through `app/mod.rs`,
    `content/layout.rs`, `render_loop.rs`. The biggest semantic
    shift; gates B.4. ~1.5 days.
-4. **B.4 — Delete `Split`.** All consumers on `Vbox`/`Hbox`. Single
-   shape. ~Half-day.
+4. **B.4 — Replace `Split` with `Vbox`/`Hbox`.** All consumers on
+   the new shape; delete the unified `Split` variant. ~Half-day.
 
 Once P1.b closes, P1.c (Overlay replacing Float) becomes
 unblocked.

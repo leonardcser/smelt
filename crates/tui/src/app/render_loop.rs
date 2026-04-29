@@ -377,7 +377,7 @@ impl App {
                 let config = ui::FloatConfig {
                     placement: ui::Placement::DockedAbove {
                         target: ui::PROMPT_WIN,
-                        max_height: ui::Constraint::Fixed(max_rows as u16),
+                        max_height: ui::Constraint::Length(max_rows as u16),
                     },
                     border: ui::Border::None,
                     title: None,
@@ -426,7 +426,7 @@ impl App {
 
         let needs_update = match self.ui.float_config(win).map(|c| c.placement) {
             Some(ui::Placement::Manual { row, width: w, .. }) => {
-                row != desired_top || !matches!(w, ui::Constraint::Fixed(v) if v == tw)
+                row != desired_top || !matches!(w, ui::Constraint::Length(v) if v == tw)
             }
             _ => true,
         };
@@ -437,8 +437,8 @@ impl App {
                     anchor: ui::Anchor::NW,
                     row: desired_top,
                     col: 0,
-                    width: ui::Constraint::Fixed(tw),
-                    height: ui::Constraint::Fixed(1),
+                    width: ui::Constraint::Length(tw),
+                    height: ui::Constraint::Length(1),
                 };
             }
         }

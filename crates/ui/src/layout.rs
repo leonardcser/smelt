@@ -41,11 +41,40 @@ pub enum Direction {
     Horizontal,
 }
 
+/// Sizing constraint for a layout child along the parent's primary
+/// axis. Resolved by `resolve_constraints` against the parent's total
+/// size, in declaration order:
+///
+/// 1. Hard sizes first (`Length`, `Percentage`, `Ratio`, `Max`)
+///    consume their exact share of the available space.
+/// 2. `Min(n)` reserves at least `n` cells, then competes with
+///    `Fill` for the remainder.
+/// 3. `Fill` (and any unsatisfied `Min`) splits whatever remains
+///    evenly.
+///
+/// `Fit` is reserved for content-natural sizing — currently behaves
+/// like `Fill`; gains true content awareness in P1.b.3 when leaves
+/// carry `WinId` and can be queried for natural size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Constraint {
-    Fixed(u16),
-    Pct(u16),
+    /// Exactly `n` cells along the axis.
+    Length(u16),
+    /// `p` percent of the parent's total size, clamped to remaining.
+    Percentage(u16),
+    /// Proportional share `num / denom` of the parent. Multiple
+    /// `Ratio` siblings split proportionally to one another.
+    Ratio(u16, u16),
+    /// At least `n` cells; competes with `Fill` for the remainder
+    /// once the minimum is satisfied.
+    Min(u16),
+    /// At most `n` cells. Acts like `Length(n)` when the parent has
+    /// at least `n` available; smaller parents shrink it.
+    Max(u16),
+    /// Fill the remaining space; siblings split evenly.
     Fill,
+    /// Size to the leaf's natural content. Falls back to `Fill`
+    /// until leaves carry `WinId` (P1.b.3).
+    Fit,
 }
 
 /// Upper bound on `Placement::FitContent`. Keeps pathologically tall
@@ -218,30 +247,64 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<String, Rect>) 
 fn resolve_constraints(children: &[LayoutTree], total: u16) -> Vec<u16> {
     let mut sizes = vec![0u16; children.len()];
     let mut remaining = total;
-    let mut fill_count = 0u16;
 
+    // Pass 1: hard-sized constraints consume their share.
     for (i, child) in children.iter().enumerate() {
         match constraint_of(child) {
-            Constraint::Fixed(n) => {
+            Constraint::Length(n) | Constraint::Max(n) => {
                 let n = n.min(remaining);
                 sizes[i] = n;
                 remaining -= n;
             }
-            Constraint::Pct(pct) => {
+            Constraint::Percentage(pct) => {
                 let n = ((total as u32 * pct as u32) / 100).min(remaining as u32) as u16;
                 sizes[i] = n;
                 remaining -= n;
             }
-            Constraint::Fill => {
-                fill_count += 1;
+            Constraint::Min(n) => {
+                let n = n.min(remaining);
+                sizes[i] = n;
+                remaining -= n;
             }
+            _ => {}
         }
     }
 
+    // Pass 2: `Ratio` splits its slice of the remaining proportionally
+    // to its siblings' (num, denom) pairs.
+    let ratio_total: u32 = children
+        .iter()
+        .filter_map(|c| match constraint_of(c) {
+            Constraint::Ratio(num, _) => Some(num as u32),
+            _ => None,
+        })
+        .sum();
+    let ratio_pool = remaining;
+    let mut consumed = 0u16;
+    for (i, child) in children.iter().enumerate() {
+        if let Constraint::Ratio(num, _) = constraint_of(child) {
+            let n = (ratio_pool as u32 * num as u32)
+                .checked_div(ratio_total)
+                .unwrap_or(0) as u16;
+            sizes[i] = n;
+            consumed += n;
+        }
+    }
+    remaining -= consumed.min(remaining);
+
+    // Pass 3: `Fill` and `Fit` split the remainder evenly. (`Fit`
+    // behaves like `Fill` until B.3 wires content size.)
+    let fill_count = children
+        .iter()
+        .filter(|c| matches!(constraint_of(c), Constraint::Fill | Constraint::Fit))
+        .count() as u16;
     if let Some(per_fill) = remaining.checked_div(fill_count) {
         let mut extra = remaining % fill_count;
         for (i, child) in children.iter().enumerate() {
-            if matches!(constraint_of(child), Constraint::Fill) {
+            if matches!(
+                constraint_of(child),
+                Constraint::Fill | Constraint::Fit
+            ) {
                 sizes[i] = per_fill + u16::from(extra > 0);
                 extra = extra.saturating_sub(1);
             }
@@ -283,7 +346,7 @@ mod tests {
                 },
                 LayoutTree::Leaf {
                     name: "bottom".into(),
-                    constraint: Constraint::Fixed(5),
+                    constraint: Constraint::Length(5),
                 },
             ],
         };
@@ -303,7 +366,7 @@ mod tests {
                 },
                 LayoutTree::Leaf {
                     name: "prompt".into(),
-                    constraint: Constraint::Pct(25),
+                    constraint: Constraint::Percentage(25),
                 },
             ],
         };
@@ -319,7 +382,7 @@ mod tests {
             children: vec![
                 LayoutTree::Leaf {
                     name: "left".into(),
-                    constraint: Constraint::Fixed(20),
+                    constraint: Constraint::Length(20),
                 },
                 LayoutTree::Leaf {
                     name: "right".into(),
@@ -381,7 +444,7 @@ mod tests {
                 },
                 LayoutTree::Leaf {
                     name: "bottom".into(),
-                    constraint: Constraint::Fixed(4),
+                    constraint: Constraint::Length(4),
                 },
             ],
         };
@@ -392,13 +455,132 @@ mod tests {
     }
 
     #[test]
+    fn min_reserves_floor_then_competes_with_fill() {
+        let tree = LayoutTree::Split {
+            direction: Direction::Vertical,
+            children: vec![
+                LayoutTree::Leaf {
+                    name: "header".into(),
+                    constraint: Constraint::Min(3),
+                },
+                LayoutTree::Leaf {
+                    name: "body".into(),
+                    constraint: Constraint::Fill,
+                },
+            ],
+        };
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result["header"].height, 3);
+        assert_eq!(result["body"].height, 21);
+    }
+
+    #[test]
+    fn max_caps_at_ceiling_when_parent_has_room() {
+        let tree = LayoutTree::Split {
+            direction: Direction::Vertical,
+            children: vec![
+                LayoutTree::Leaf {
+                    name: "capped".into(),
+                    constraint: Constraint::Max(5),
+                },
+                LayoutTree::Leaf {
+                    name: "rest".into(),
+                    constraint: Constraint::Fill,
+                },
+            ],
+        };
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result["capped"].height, 5);
+        assert_eq!(result["rest"].height, 19);
+    }
+
+    #[test]
+    fn max_shrinks_when_parent_smaller_than_ceiling() {
+        let tree = LayoutTree::Split {
+            direction: Direction::Vertical,
+            children: vec![LayoutTree::Leaf {
+                name: "capped".into(),
+                constraint: Constraint::Max(50),
+            }],
+        };
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result["capped"].height, 24);
+    }
+
+    #[test]
+    fn ratio_splits_remaining_proportionally() {
+        let tree = LayoutTree::Split {
+            direction: Direction::Horizontal,
+            children: vec![
+                LayoutTree::Leaf {
+                    name: "a".into(),
+                    constraint: Constraint::Ratio(1, 3),
+                },
+                LayoutTree::Leaf {
+                    name: "b".into(),
+                    constraint: Constraint::Ratio(2, 3),
+                },
+            ],
+        };
+        let result = resolve_layout(&tree, Rect::new(0, 0, 90, 24));
+        assert_eq!(result["a"].width, 30);
+        assert_eq!(result["b"].width, 60);
+    }
+
+    #[test]
+    fn ratio_competes_with_length_for_remaining() {
+        let tree = LayoutTree::Split {
+            direction: Direction::Horizontal,
+            children: vec![
+                LayoutTree::Leaf {
+                    name: "fixed".into(),
+                    constraint: Constraint::Length(20),
+                },
+                LayoutTree::Leaf {
+                    name: "a".into(),
+                    constraint: Constraint::Ratio(1, 2),
+                },
+                LayoutTree::Leaf {
+                    name: "b".into(),
+                    constraint: Constraint::Ratio(1, 2),
+                },
+            ],
+        };
+        // 80 total - 20 fixed = 60 to split: 30/30 by ratio.
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result["fixed"].width, 20);
+        assert_eq!(result["a"].width, 30);
+        assert_eq!(result["b"].width, 30);
+    }
+
+    #[test]
+    fn fit_falls_back_to_fill_for_now() {
+        let tree = LayoutTree::Split {
+            direction: Direction::Vertical,
+            children: vec![
+                LayoutTree::Leaf {
+                    name: "a".into(),
+                    constraint: Constraint::Fit,
+                },
+                LayoutTree::Leaf {
+                    name: "b".into(),
+                    constraint: Constraint::Fill,
+                },
+            ],
+        };
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
+        assert_eq!(result["a"].height, 12);
+        assert_eq!(result["b"].height, 12);
+    }
+
+    #[test]
     fn zero_height_produces_empty_rects() {
         let tree = LayoutTree::Split {
             direction: Direction::Vertical,
             children: vec![
                 LayoutTree::Leaf {
                     name: "a".into(),
-                    constraint: Constraint::Fixed(30),
+                    constraint: Constraint::Length(30),
                 },
                 LayoutTree::Leaf {
                     name: "b".into(),

@@ -33,11 +33,11 @@ impl LayoutState {
                 },
                 ui::LayoutTree::Leaf {
                     name: "gap".into(),
-                    constraint: ui::Constraint::Fixed(1),
+                    constraint: ui::Constraint::Length(1),
                 },
                 ui::LayoutTree::Leaf {
                     name: "prompt".into(),
-                    constraint: ui::Constraint::Fixed(prompt_height),
+                    constraint: ui::Constraint::Length(prompt_height),
                 },
             ],
         };

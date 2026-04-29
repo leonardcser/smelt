@@ -949,9 +949,16 @@ impl Ui {
 
 fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {
     match c {
-        Constraint::Fixed(n) => n.min(total),
-        Constraint::Pct(pct) => ((total as u32 * pct as u32) / 100) as u16,
-        Constraint::Fill => total,
+        Constraint::Length(n) | Constraint::Min(n) | Constraint::Max(n) => n.min(total),
+        Constraint::Percentage(pct) => ((total as u32 * pct as u32) / 100) as u16,
+        Constraint::Ratio(num, denom) => {
+            if denom == 0 {
+                0
+            } else {
+                ((total as u32 * num as u32) / denom as u32) as u16
+            }
+        }
+        Constraint::Fill | Constraint::Fit => total,
     }
 }
 
@@ -1132,8 +1139,8 @@ mod tests {
                     anchor: Anchor::NW,
                     row: 4,
                     col: 10,
-                    width: Constraint::Fixed(60),
-                    height: Constraint::Fixed(16),
+                    width: Constraint::Length(60),
+                    height: Constraint::Length(16),
                 },
                 ..Default::default()
             },
@@ -1152,8 +1159,8 @@ mod tests {
                     anchor: Anchor::SE,
                     row: 24,
                     col: 80,
-                    width: Constraint::Fixed(40),
-                    height: Constraint::Fixed(10),
+                    width: Constraint::Length(40),
+                    height: Constraint::Length(10),
                 },
                 ..Default::default()
             },
@@ -1172,8 +1179,8 @@ mod tests {
                     anchor: Anchor::NW,
                     row: 20,
                     col: 70,
-                    width: Constraint::Fixed(30),
-                    height: Constraint::Fixed(10),
+                    width: Constraint::Length(30),
+                    height: Constraint::Length(10),
                 },
                 ..Default::default()
             },
@@ -1189,7 +1196,7 @@ mod tests {
         let win = open_stub_float(
             &mut ui,
             FloatConfig {
-                placement: Placement::dock_bottom_full_width(Constraint::Fixed(6)),
+                placement: Placement::dock_bottom_full_width(Constraint::Length(6)),
                 ..Default::default()
             },
         );
@@ -1276,8 +1283,8 @@ mod tests {
                     placement: Placement::DockBottom {
                         above_rows: 0,
                         full_width: true,
-                        max_width: Constraint::Pct(100),
-                        max_height: Constraint::Pct(100),
+                        max_width: Constraint::Percentage(100),
+                        max_height: Constraint::Percentage(100),
                     },
                     ..Default::default()
                 },
@@ -1316,8 +1323,8 @@ mod tests {
                     placement: Placement::DockBottom {
                         above_rows: 0,
                         full_width: true,
-                        max_width: Constraint::Pct(100),
-                        max_height: Constraint::Pct(100),
+                        max_width: Constraint::Percentage(100),
+                        max_height: Constraint::Percentage(100),
                     },
                     ..Default::default()
                 },

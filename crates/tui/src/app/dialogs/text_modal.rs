@@ -34,8 +34,8 @@ pub fn open(app: &mut App, title: impl Into<String>, body: &str) {
         ui::FloatConfig {
             title: Some(title.into()),
             placement: Placement::Centered {
-                width: Constraint::Pct(70),
-                height: Constraint::Pct(60),
+                width: Constraint::Percentage(70),
+                height: Constraint::Percentage(60),
             },
             ..Default::default()
         },
