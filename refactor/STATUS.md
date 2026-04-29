@@ -22,28 +22,26 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — eight foundation commits landed
+**P1.c in progress** — nine foundation commits landed
 (`40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
-`434eee8`/`16ca777`, `7cee24c`, `d94d12c`): `Corner` rename;
-target `Anchor` + `Overlay` + `OverlayId` types in a new
-`overlay` module; pure `resolve_anchor` function with 9 tests;
-`Ui::overlay_open / close / overlay / overlay_mut /
-overlays_in_z_order` API + storage with 4 tests; per-frame
-resolution layer (`LayoutTree::natural_size((cap))` + 9 tests;
-`Ui::resolve_overlays(cursor)` returning z-ordered
-`Vec<(OverlayId, Rect, &Overlay)>` + 4 tests); `SeparatorStyle`
-on `Chrome` (None/Solid/Dashed; `with_separator` auto-inflates
-gap from 0→1) + dedup of the dialog-side enum (one definition
-in `layout`, used everywhere); focus + hit-testing primitives
-(`Ui::active_modal()`, `OverlayHitTarget::{Window | Chrome}`,
-`Ui::overlay_hit_test(row, col, cursor)` — modal-aware,
-topmost-first) + 9 tests; canonical Win-typed focus API
-(`Ui::focus()`, `set_focus(WinId) -> bool`, `focus_history`
-slice; pushes prior focus on switch, no-op on same-win) + 6
-tests. The whole P1.c data + resolution + focus/hit layer is
-in place — callers can ask "where does this overlay draw,
-what's modal, what was clicked, who's focused?" without touching
-the compositor.
+`434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`):
+target types + `resolve_anchor` (9 tests); `Ui::overlay_*` API
++ storage (4 tests); per-frame resolution
+(`LayoutTree::natural_size` + `Ui::resolve_overlays(cursor)`,
+13 tests); `SeparatorStyle` on `Chrome` + dedup of dialog enum
+(5 tests); focus + hit-testing primitives
+(`Ui::active_modal`, `OverlayHitTarget::{Window | Chrome}`,
+`Ui::overlay_hit_test`, modal-aware, 9 tests); canonical
+Win-typed focus API (`Ui::focus`, `set_focus`, `focus_history`
+slice; 6 tests); overlay/focus structural glue
+(`LayoutTree::contains_leaf`, `Ui::overlay_focused`,
+`focused_window` / `focused_window_mut`, `overlay_close`
+implements ARCHITECTURE's pop-focus_history contract +
+`Compositor::clear_focus`, 9 tests). The whole P1.c data +
+resolution + focus + hit layer is in place — callers can ask
+"where does this overlay draw, what's modal, what was clicked,
+who's focused, which overlay owns focus, what happens on close?"
+without touching the compositor for paint.
 
 **Next in P1.c (open design point):** C.5 — first float migration
 to Overlay — has a render-shape question that needs deciding
@@ -89,11 +87,10 @@ Until that shape is decided, C.5 doesn't ship code. C.6+ (delete
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 989 passed
-(6 new since C.4-tail₂: focus / set_focus / focus_history
-covering fresh-Ui / unknown-win / registered-split / prior
-push / same-win no-op / 4-step chain). `cargo clippy
---workspace --all-targets -- -D warnings` clean.
+**Tree:** green. `cargo nextest run --workspace` — 998 passed
+(9 new since focus API: `contains_leaf` × 2, `overlay_focused`
+× 3, `focused_window` × 1, `overlay_close` close-pop × 3).
+`cargo clippy --workspace --all-targets -- -D warnings` clean.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
