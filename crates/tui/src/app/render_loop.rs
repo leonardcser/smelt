@@ -313,16 +313,16 @@ impl App {
 
     // ── Completer float ────────────────────────────────────────────
     //
-    // Mirrors the active `CompleterSession` into a `ui::Picker`
-    // compositor float. The session (`PromptState.completer`) holds both
-    // the matcher model *and* the `picker_win: Option<WinId>` — one
-    // owner, one lifecycle. Matches the shape a future Lua completer
-    // plugin would hold in its own local state.
+    // Mirrors the active `CompleterSession` into a Buffer-backed
+    // picker overlay. The session (`PromptState.completer`) holds both
+    // the matcher model *and* the picker leaf `WinId` — one owner,
+    // one lifecycle. Matches the shape a future Lua completer plugin
+    // would hold in its own local state.
     //
-    // `focusable = false` ensures keys keep flowing to the prompt,
+    // The leaf is non-focusable so keys keep flowing to the prompt,
     // driving `completer_bridge::handle_completer_event`.
     fn sync_completer_float(&mut self) {
-        // Drain any Picker floats that were orphaned when their session
+        // Drain any picker leaves that were orphaned when their session
         // ended (session held the WinId; when it dropped, it queued the
         // WinId here for out-of-band close).
         for win in std::mem::take(&mut self.input.pending_picker_close) {
@@ -336,7 +336,7 @@ impl App {
                     crate::completer::CompleterKind::File => "./",
                     crate::completer::CompleterKind::CommandArg => "",
                 };
-                let items: Vec<ui::PickerItem> = session
+                let items: Vec<crate::picker::PickerItem> = session
                     .results
                     .iter()
                     .map(|r| {
@@ -345,7 +345,8 @@ impl App {
                         } else {
                             prefix
                         };
-                        let mut it = ui::PickerItem::new(r.label.clone()).with_prefix(item_prefix);
+                        let mut it = crate::picker::PickerItem::new(r.label.clone())
+                            .with_prefix(item_prefix);
                         if let Some(desc) = r.description.as_deref() {
                             it = it.with_description(desc);
                         }
@@ -356,7 +357,7 @@ impl App {
                     })
                     .collect();
                 (
-                    session.max_visible_rows(),
+                    session.max_visible_rows() as u16,
                     session.selected,
                     items,
                     session.picker_win,
@@ -365,44 +366,28 @@ impl App {
             None => return,
         };
 
-        // Open once and reuse — `Placement::DockedAbove(PROMPT_WIN)` resizes
-        // the picker's rect in-place each frame from the picker's
-        // `natural_height()` (clamped by `max_height`). Closing and
-        // reopening the float on every filter change forces a full-screen
-        // redraw, which makes the cursor visibly jump around.
+        // Open once and reuse — the overlay's anchor + outer height
+        // constraint resize in-place from the picker's item count
+        // each frame. Closing and reopening the overlay on every
+        // filter change forces a full-screen redraw, which makes the
+        // cursor visibly jump around.
         let open_win = match existing_win {
-            Some(win) => Some(win),
-            None => {
-                let config = ui::FloatConfig {
-                    placement: ui::Placement::DockedAbove {
-                        target: ui::PROMPT_WIN,
-                        max_height: ui::Constraint::Length(max_rows as u16),
-                    },
-                    border: ui::Border::None,
-                    title: None,
-                    // Below the default float zindex (50) so dialogs (help,
-                    // confirm, …) overlay the completer picker.
-                    zindex: 30,
-                    focusable: false,
-                    blocks_agent: false,
-                };
-                let style = ui::PickerStyle {
-                    selected_fg: self.ui.theme().get("SmeltAccent"),
-                    unselected_fg: ui::Style::dim(),
-                    description_fg: ui::Style::dim(),
-                    background: ui::Style::default(),
-                };
-                self.ui
-                    .picker_open(config, items.clone(), selected, style, true)
+            Some(win) => {
+                crate::picker::set_items(self, win, items, selected);
+                Some(win)
             }
+            None => crate::picker::open(
+                self,
+                items,
+                selected,
+                crate::picker::PickerPlacement::PromptDocked { max_rows },
+                false,
+                false,
+                // Below the default overlay z (50) so dialogs (help,
+                // confirm, …) overlay the completer picker.
+                30,
+            ),
         };
-
-        if let Some(win) = open_win {
-            if let Some(p) = self.ui.picker_mut(win) {
-                p.set_items(items);
-                p.set_selected(selected);
-            }
-        }
 
         if let Some(session) = self.input.completer.as_mut() {
             session.picker_win = open_win;

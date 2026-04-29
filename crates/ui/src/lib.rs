@@ -11,7 +11,6 @@ pub mod grid;
 pub mod kill_ring;
 pub mod layout;
 pub mod overlay;
-pub mod picker;
 pub mod status_bar;
 pub mod style;
 pub mod text;
@@ -49,7 +48,6 @@ pub use layout::{
     Rect, SeparatorStyle,
 };
 pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
-pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
 pub use theme::Theme;
@@ -442,76 +440,6 @@ impl Ui {
         lua_ids
     }
 
-    // ── Picker ───────────────────────────────────────────────────────
-    //
-    // Non-focusable dropdown component. One primitive reused by the
-    // prompt `/` completer, the cmdline `:` completer, and Lua
-    // `smelt.ui.picker.open`. Mirrors Neovim's `pum_grid`: caller drives
-    // selection, component paints.
-
-    /// Open a `Picker` float. Accepts any `FloatConfig`; typically
-    /// callers pass `focusable: false` and a manually-positioned
-    /// `Placement`. `reversed` paints logical index 0 on the bottom
-    /// visual row — used by pickers that dock *above* the prompt
-    /// (completer `/`, cmdline `:`) so the best match is closest to
-    /// where the user is typing. Returns the new `WinId` for later
-    /// updates via `picker_mut` and eventual `win_close`.
-    pub fn picker_open(
-        &mut self,
-        config: FloatConfig,
-        items: Vec<picker::PickerItem>,
-        selected: usize,
-        style: picker::PickerStyle,
-        reversed: bool,
-    ) -> Option<WinId> {
-        let id = WinId(self.next_win_id);
-        self.next_win_id += 1;
-
-        let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th, None, &self.split_rects);
-        let zindex = config.zindex;
-
-        let mut p = picker::Picker::new()
-            .with_style(style)
-            .with_reversed(reversed);
-        p.set_items(items);
-        p.set_selected(selected);
-
-        // Pickers don't own a buffer; they render from internal state.
-        // Still register a placeholder window so focus / close / keymap
-        // paths stay uniform with other floats.
-        let placeholder_buf = BufId(0);
-        let focusable = config.focusable;
-        let mut win = Window::new(id, placeholder_buf, WinConfig::Float(config));
-        win.focusable = focusable;
-        self.wins.insert(id, win);
-
-        let layer_id = float_layer_id(id);
-        // Pickers are non-focusable in the keymap sense; mouse clicks
-        // should not promote them to focused or raise their zindex
-        // (they sit beneath dialogs/cmdline by design).
-        let opts = compositor::LayerOpts {
-            focus_on_click: focusable,
-            raise_on_click: focusable,
-        };
-        self.compositor
-            .add_with_opts(&layer_id, Box::new(p), rect, zindex, opts);
-        if focusable {
-            self.compositor.focus(&layer_id);
-        }
-
-        Some(id)
-    }
-
-    /// Mutable access to an open `Picker` component. Used to update
-    /// items and selection as the caller's filter/selection state
-    /// changes.
-    pub fn picker_mut(&mut self, win_id: WinId) -> Option<&mut picker::Picker> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component_mut(&layer_id)?;
-        comp.as_any_mut().downcast_mut::<picker::Picker>()
-    }
-
     // ── Callbacks ────────────────────────────────────────────────────
     //
     // Per-window keymap + event callbacks. The registry is the single
@@ -687,16 +615,11 @@ impl Ui {
             .collect()
     }
 
-    /// Peek at a float layer's natural height for placement. Pickers
-    /// clamp item-count to `max_visible_rows` (used by `DockedAbove`).
-    /// Returns `None` for other layer kinds — placement variants that
-    /// don't consult natural height treat this as "use the max cap."
-    fn natural_layer_height(&self, win_id: WinId) -> Option<u16> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component(&layer_id)?;
-        if let Some(p) = comp.as_any().downcast_ref::<picker::Picker>() {
-            return Some(p.natural_height());
-        }
+    /// Peek at a float layer's natural height for placement.
+    /// Returns `None` — no remaining float kind exposes a natural
+    /// size. The hook stays as a stub until `Placement::DockedAbove`
+    /// retires alongside the rest of `FloatConfig` in C.9c.5.
+    fn natural_layer_height(&self, _win_id: WinId) -> Option<u16> {
         None
     }
 
@@ -1427,27 +1350,6 @@ mod tests {
         ui
     }
 
-    fn open_stub_float(ui: &mut Ui, config: FloatConfig) -> WinId {
-        ui.picker_open(
-            config,
-            vec![picker::PickerItem::new("stub")],
-            0,
-            picker::PickerStyle::default(),
-            false,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn float_default_config() {
-        let mut ui = make_ui();
-        let win = open_stub_float(&mut ui, FloatConfig::default());
-        let rect = ui.resolve_float(win).unwrap();
-        // Default placement: Centered 80%x50%.
-        assert_eq!(rect.width, 64);
-        assert_eq!(rect.height, 12);
-    }
-
     #[test]
     fn buf_create_with_id_lua_range_does_not_advance_rust_allocator() {
         let mut ui = make_ui();
@@ -1457,138 +1359,6 @@ mod tests {
         let rust_second = ui.buf_create(buffer::BufCreateOpts::default());
         assert_eq!(rust_second.0, rust_first.0 + 1);
         assert!(rust_second.0 < LUA_BUF_ID_BASE);
-    }
-
-    #[test]
-    fn float_manual_placement() {
-        let mut ui = make_ui();
-        let win = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                placement: Placement::Manual {
-                    anchor: Corner::NW,
-                    row: 4,
-                    col: 10,
-                    width: Constraint::Length(60),
-                    height: Constraint::Length(16),
-                },
-                ..Default::default()
-            },
-        );
-        let rect = ui.resolve_float(win).unwrap();
-        assert_eq!(rect, Rect::new(4, 10, 60, 16));
-    }
-
-    #[test]
-    fn float_se_anchor() {
-        let mut ui = make_ui();
-        let win = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                placement: Placement::Manual {
-                    anchor: Corner::SE,
-                    row: 24,
-                    col: 80,
-                    width: Constraint::Length(40),
-                    height: Constraint::Length(10),
-                },
-                ..Default::default()
-            },
-        );
-        let rect = ui.resolve_float(win).unwrap();
-        assert_eq!(rect, Rect::new(14, 40, 40, 10));
-    }
-
-    #[test]
-    fn float_clamped_to_terminal() {
-        let mut ui = make_ui();
-        let win = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                placement: Placement::Manual {
-                    anchor: Corner::NW,
-                    row: 20,
-                    col: 70,
-                    width: Constraint::Length(30),
-                    height: Constraint::Length(10),
-                },
-                ..Default::default()
-            },
-        );
-        let rect = ui.resolve_float(win).unwrap();
-        assert_eq!(rect.width, 10);
-        assert_eq!(rect.height, 4);
-    }
-
-    #[test]
-    fn dock_bottom_full_width() {
-        let mut ui = make_ui();
-        let win = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                placement: Placement::dock_bottom_full_width(Constraint::Length(6)),
-                ..Default::default()
-            },
-        );
-        let rect = ui.resolve_float(win).unwrap();
-        assert_eq!(rect.width, 80);
-        // Fits content: stub picker has 1 item → natural_height = 1,
-        // capped (but not raised) by the 6-row max.
-        assert_eq!(rect.height, 1);
-        assert_eq!(rect.left, 0);
-        // above_rows=1 by default → top = 24 - 1 - 1 = 22
-        assert_eq!(rect.top, 22);
-    }
-
-    #[test]
-    fn floats_z_ordered_returns_sorted() {
-        let mut ui = make_ui();
-        let w1 = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                zindex: 100,
-                ..Default::default()
-            },
-        );
-        let w2 = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                zindex: 10,
-                ..Default::default()
-            },
-        );
-        let w3 = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                zindex: 50,
-                ..Default::default()
-            },
-        );
-        let ordered = ui.floats_z_ordered();
-        assert_eq!(ordered, vec![w2, w3, w1]);
-    }
-
-    #[test]
-    fn resolve_float_rects_matches_z_order() {
-        let mut ui = make_ui();
-        let w1 = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                zindex: 100,
-                ..Default::default()
-            },
-        );
-        let w2 = open_stub_float(
-            &mut ui,
-            FloatConfig {
-                zindex: 10,
-                ..Default::default()
-            },
-        );
-        let rects = ui.resolve_float_rects();
-        assert_eq!(rects.len(), 2);
-        assert_eq!(rects[0].0, w2);
-        assert_eq!(rects[1].0, w1);
     }
 
     // ── Overlay API (P1.c) ───────────────────────────────────────────

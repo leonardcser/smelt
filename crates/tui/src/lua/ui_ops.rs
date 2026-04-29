@@ -12,8 +12,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
 use ui::{
-    Border, BufId, Callback, CallbackResult, Constraint, FloatConfig, KeyBind, LayoutTree, Overlay,
-    PanelHeight, PanelSpec, Payload, Placement, SplitConfig, WinEvent, WinId,
+    Border, BufId, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, PanelHeight,
+    PanelSpec, Payload, SplitConfig, WinEvent, WinId,
 };
 
 /// What shape an overlay leaf takes when the dialog is content-only.
@@ -697,7 +697,7 @@ pub fn open_picker(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
     let items_tbl: mlua::Table = opts
         .get("items")
         .map_err(|e| format!("picker items: {e}"))?;
-    let mut items: Vec<ui::picker::PickerItem> = Vec::new();
+    let mut items: Vec<crate::picker::PickerItem> = Vec::new();
     for pair in items_tbl.sequence_values::<mlua::Value>() {
         let v = pair.map_err(|e| format!("picker item: {e}"))?;
         items.push(parse_picker_item(&v)?);
@@ -710,42 +710,24 @@ pub fn open_picker(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
         .get("placement")
         .ok()
         .unwrap_or_else(|| "center".to_string());
-    let prompt_docked = placement_str == "prompt_docked";
-    let placement = parse_picker_placement(&opts);
-    let title: Option<String> = opts.get("title").ok();
-
-    // `prompt_docked`: no border, non-focusable, reversed (best match
-    // closest to the prompt). Placement::DockedAbove handles rect +
-    // natural-height resolution in the ui crate — no TUI sync loop.
-    let (border, focusable, reversed) = if prompt_docked {
-        (ui::Border::None, false, true)
-    } else {
-        (ui::Border::Rounded, true, false)
+    let placement = match placement_str.as_str() {
+        "bottom" => crate::picker::PickerPlacement::ScreenBottom,
+        "cursor" => crate::picker::PickerPlacement::Cursor,
+        "prompt_docked" => crate::picker::PickerPlacement::PromptDocked { max_rows: 7 },
+        _ => crate::picker::PickerPlacement::ScreenCenter,
     };
-    let zindex = if prompt_docked { 60 } else { 50 };
-    let float_config = FloatConfig {
-        title,
-        border,
-        placement,
-        focusable,
-        blocks_agent: false,
-        zindex,
+    // `prompt_docked` is non-focusable so keys keep flowing to the
+    // prompt; every other placement is focusable so the picker can
+    // own arrow / enter / esc dispatch via Lua keymaps. Z values
+    // mirror the legacy split: prompt-docked sits below dialogs, the
+    // other placements ride at the default overlay z.
+    let (focusable, z) = match placement {
+        crate::picker::PickerPlacement::PromptDocked { .. } => (false, 30),
+        _ => (true, 50),
     };
 
-    let style = if prompt_docked {
-        ui::PickerStyle {
-            selected_fg: app.ui.theme().get("SmeltAccent"),
-            unselected_fg: ui::grid::Style::dim(),
-            description_fg: ui::grid::Style::dim(),
-            background: ui::grid::Style::default(),
-        }
-    } else {
-        Default::default()
-    };
-
-    app.ui
-        .picker_open(float_config, items, 0, style, reversed)
-        .ok_or_else(|| "picker.open: failed to create float".to_string())
+    crate::picker::open(app, items, 0, placement, focusable, false, z)
+        .ok_or_else(|| "picker.open: failed to create overlay".to_string())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -768,14 +750,16 @@ fn parse_panel_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String
     }
 }
 
-pub fn parse_picker_item(v: &mlua::Value) -> Result<ui::picker::PickerItem, String> {
+pub fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::PickerItem, String> {
     match v {
-        mlua::Value::String(s) => Ok(ui::picker::PickerItem::new(s.to_string_lossy().to_string())),
+        mlua::Value::String(s) => Ok(crate::picker::PickerItem::new(
+            s.to_string_lossy().to_string(),
+        )),
         mlua::Value::Table(t) => {
             let label: String = t
                 .get("label")
                 .map_err(|e| format!("picker item.label: {e}"))?;
-            let mut item = ui::picker::PickerItem::new(label);
+            let mut item = crate::picker::PickerItem::new(label);
             if let Ok(desc) = t.get::<String>("description") {
                 item = item.with_description(desc);
             }
@@ -791,24 +775,6 @@ pub fn parse_picker_item(v: &mlua::Value) -> Result<ui::picker::PickerItem, Stri
             "picker item: expected string or table, got {}",
             other.type_name()
         )),
-    }
-}
-
-fn parse_picker_placement(opts: &mlua::Table) -> Placement {
-    let mode: String = opts
-        .get("placement")
-        .ok()
-        .unwrap_or_else(|| "center".to_string());
-    match mode.as_str() {
-        "bottom" => Placement::dock_bottom_full_width(Constraint::Percentage(40)),
-        "cursor" => Placement::AnchorCursor {
-            row_offset: 1,
-            col_offset: 0,
-            width: Constraint::Length(48),
-            height: Constraint::Percentage(40),
-        },
-        "prompt_docked" => Placement::docked_above(ui::PROMPT_WIN, Constraint::Length(7)),
-        _ => Placement::centered(Constraint::Percentage(60), Constraint::Percentage(50)),
     }
 }
 

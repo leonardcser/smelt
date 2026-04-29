@@ -752,6 +752,7 @@ impl App {
     }
 
     pub(crate) fn close_float(&mut self, win_id: ui::WinId) {
+        crate::picker::forget(self, win_id);
         for id in self.ui.win_close(win_id) {
             self.lua.remove_callback(id);
         }

@@ -948,13 +948,15 @@ impl Window {
     /// buffer line; lines longer than `slice.width()` truncate at
     /// the right edge.
     ///
-    /// When `cursor_line_highlight` is on AND the window is
-    /// focused, the cursor row (`cursor_line` viewport offset) gets
-    /// a `CursorLine` theme-driven background — the seam list-shaped
-    /// Buffer Windows use for "selected item" highlighting, before
-    /// extmark-based per-row decoration lands in P1.d. The flag is
-    /// off by default so generic content viewers (transcript,
-    /// /help, /btw) stay clean; list-shaped Windows opt in.
+    /// When `cursor_line_highlight` is on, the cursor row
+    /// (`cursor_line` viewport offset) gets a `CursorLine`
+    /// theme-driven background — the seam list-shaped Buffer Windows
+    /// use for "selected item" highlighting, before extmark-based
+    /// per-row decoration lands in P1.d. The flag is off by default
+    /// so generic content viewers (transcript, /help, /btw) stay
+    /// clean; list-shaped Windows opt in. Selection paints regardless
+    /// of focus so non-focusable list leaves (picker overlays) still
+    /// show their selection while keys flow elsewhere.
     ///
     /// This is the seam Overlay paint walks for each leaf in the
     /// overlay's `LayoutTree`. The richer surface (extmarks +
@@ -965,7 +967,7 @@ impl Window {
         let height = slice.height();
         let scroll = self.scroll_top as usize;
         let line_count = buf.line_count();
-        let cursor_row = if self.cursor_line_highlight && ctx.focused {
+        let cursor_row = if self.cursor_line_highlight {
             Some(self.cursor_line)
         } else {
             None
@@ -1351,8 +1353,10 @@ mod tests {
     }
 
     #[test]
-    fn render_skips_cursor_highlight_when_unfocused() {
-        // Opt-in window but unfocused: no highlight.
+    fn render_paints_cursor_highlight_unfocused() {
+        // List-shaped windows (`cursor_line_highlight = true`) keep
+        // selection painted regardless of focus — picker overlays are
+        // non-focusable yet still need to show the selected row.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
         let mut w = make_win();
@@ -1369,6 +1373,6 @@ mod tests {
         let mut grid = Grid::new(10, 2);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
         w.render(&buf, &mut slice, &ctx);
-        assert_ne!(grid.cell(0, 0).style.bg, bg.bg);
+        assert_eq!(grid.cell(0, 0).style.bg, bg.bg);
     }
 }
