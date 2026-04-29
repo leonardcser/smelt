@@ -629,7 +629,7 @@ impl App {
     ) -> TranscriptData {
         let gutters = crate::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
-        let theme = crate::theme::snapshot();
+        let theme = self.ui.theme().clone();
 
         let ephemeral_lines: Vec<crate::content::display::DisplayLine> =
             if self.has_ephemeral(show_thinking) {

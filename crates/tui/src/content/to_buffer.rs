@@ -6,29 +6,35 @@
 
 use super::display::{ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
-use crate::theme::Snapshot;
 use crossterm::style::Color;
 use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
+use ui::Theme;
 
-/// Resolve a `ColorValue` against a theme snapshot. The `Snapshot` is
-/// captured once per render so cached layouts survive theme changes
-/// without invalidation.
+/// Resolve a `ColorValue` against a theme registry. The theme is
+/// borrowed for the render so a single redraw is theme-consistent.
 #[inline]
-fn resolve(c: ColorValue, theme: &Snapshot) -> Color {
+fn resolve(c: ColorValue, theme: &Theme) -> Color {
     match c {
         ColorValue::Rgb(r, g, b) => Color::Rgb { r, g, b },
         ColorValue::Ansi(v) => Color::AnsiValue(v),
         ColorValue::Named(n) => Color::from(n),
-        ColorValue::Role(role) => match role {
-            ColorRole::Accent => theme.accent,
-            ColorRole::Slug => theme.slug,
-            ColorRole::UserBg => theme.user_bg,
-            ColorRole::CodeBlockBg => theme.code_block_bg,
-            ColorRole::Bar => theme.bar,
-            ColorRole::ToolPending => theme.tool_pending,
-            ColorRole::ReasonOff => theme.reason_off,
-            ColorRole::Muted => theme.muted,
-        },
+        ColorValue::Role(role) => {
+            let group = match role {
+                ColorRole::Accent => "SmeltAccent",
+                ColorRole::Slug => "SmeltSlug",
+                ColorRole::UserBg => "SmeltUserBg",
+                ColorRole::CodeBlockBg => "SmeltCodeBlockBg",
+                ColorRole::Bar => "SmeltBar",
+                ColorRole::ToolPending => "SmeltToolPending",
+                ColorRole::ReasonOff => "SmeltReasonOff",
+                ColorRole::Muted => "Comment",
+            };
+            let style = theme.get(group);
+            // Roles whose conventional slot is bg (Slug, UserBg,
+            // CodeBlockBg, Bar) populate `Style::bg`; others populate
+            // `fg`. Try fg first, fall back to bg.
+            style.fg.or(style.bg).unwrap_or(Color::Reset)
+        }
     }
 }
 
@@ -41,7 +47,7 @@ fn resolve(c: ColorValue, theme: &Snapshot) -> Color {
 pub(crate) fn render_into_buffer(
     buf: &mut Buffer,
     width: u16,
-    theme: &Snapshot,
+    theme: &Theme,
     fill: impl FnOnce(&mut SpanCollector),
 ) {
     let mut collector = SpanCollector::new(width);
@@ -62,7 +68,7 @@ pub(crate) struct ProjectedLine {
     pub decoration: LineDecoration,
 }
 
-pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Snapshot) -> ProjectedLine {
+pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Theme) -> ProjectedLine {
     let mut text = String::new();
     let mut highlights = Vec::new();
     let mut char_offset: u16 = 0;
@@ -105,7 +111,7 @@ pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Snapshot) -> Pro
     }
 }
 
-fn resolve_span_style(span: &DisplaySpanStyle, theme: &Snapshot) -> SpanStyle {
+fn resolve_span_style(span: &DisplaySpanStyle, theme: &Theme) -> SpanStyle {
     SpanStyle {
         fg: span.fg.map(|c| resolve(c, theme)),
         bg: span.bg.map(|c| resolve(c, theme)),
@@ -148,8 +154,10 @@ mod tests {
     use ui::buffer::BufCreateOpts;
     use ui::BufId;
 
-    fn test_theme() -> Snapshot {
-        crate::theme::snapshot()
+    fn test_theme() -> Theme {
+        let mut t = Theme::new();
+        crate::theme::populate_ui_theme(&mut t);
+        t
     }
 
     fn make_buf() -> Buffer {

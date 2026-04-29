@@ -14,7 +14,6 @@ use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 
 use crate::content::to_buffer::render_into_buffer;
-use crate::theme;
 use ui::BufId;
 
 /// Wire `smelt.{diff,syntax,bash,notebook}.*`.
@@ -35,7 +34,7 @@ fn register_diff(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
             let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
             crate::lua::with_app(|app| {
-                let theme_snap = theme::snapshot();
+                let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
                 if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
@@ -58,7 +57,7 @@ fn register_syntax(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();
             let path: String = opts.get::<Option<String>>("path")?.unwrap_or_default();
             crate::lua::with_app(|app| {
-                let theme_snap = theme::snapshot();
+                let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
                 if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
@@ -79,7 +78,7 @@ fn register_bash(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "render",
         lua.create_function(|_, (buf_id, command): (u64, String)| {
             crate::lua::with_app(|app| {
-                let theme_snap = theme::snapshot();
+                let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
                 if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
@@ -107,7 +106,7 @@ fn register_notebook(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let args = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.render: {e}")))?;
             crate::lua::with_app(|app| {
-                let theme_snap = theme::snapshot();
+                let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
                 let preview = ConfirmPreview::from_tool("edit_notebook", "", &args);
                 if !preview.is_some() {

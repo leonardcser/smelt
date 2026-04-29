@@ -98,7 +98,8 @@ struct ModeFormatter {
 
 impl BufferFormatter for ModeFormatter {
     fn render(&self, buf: &mut Buffer, source: &str, width: u16) {
-        let theme = crate::theme::snapshot();
+        let mut theme = ui::Theme::new();
+        crate::theme::populate_ui_theme(&mut theme);
         let width = width.max(1);
         match &self.mode {
             BufFormat::Plain => {
