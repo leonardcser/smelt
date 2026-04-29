@@ -87,7 +87,7 @@ impl ConfirmPreview {
         &self,
         buf: &mut ui::buffer::Buffer,
         width: u16,
-        theme: &crate::theme::Theme,
+        theme: &crate::theme::Snapshot,
     ) {
         use crate::content::to_buffer::render_into_buffer;
         render_into_buffer(buf, width, theme, |sink| match self {

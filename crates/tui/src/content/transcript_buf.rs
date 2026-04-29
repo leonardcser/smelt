@@ -1,7 +1,7 @@
 use super::display::DisplayLine;
 use super::to_buffer::{apply_to_buffer, project_display_line, ProjectedLine};
 use crate::app::transcript_model::{BlockHistory, LayoutKey, ViewState};
-use crate::theme::Theme;
+use crate::theme::Snapshot;
 use ui::buffer::Buffer;
 
 pub(crate) struct TranscriptProjection {
@@ -34,7 +34,7 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
-        theme: &Theme,
+        theme: &Snapshot,
         ephemeral_lines: &[DisplayLine],
     ) {
         let gen = history.generation();

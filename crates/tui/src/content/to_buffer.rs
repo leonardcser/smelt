@@ -6,15 +6,15 @@
 
 use super::display::{ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
-use crate::theme::Theme;
+use crate::theme::Snapshot;
 use crossterm::style::Color;
 use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 
-/// Resolve a `ColorValue` against a theme snapshot. The `Theme` is
+/// Resolve a `ColorValue` against a theme snapshot. The `Snapshot` is
 /// captured once per render so cached layouts survive theme changes
 /// without invalidation.
 #[inline]
-fn resolve(c: ColorValue, theme: &Theme) -> Color {
+fn resolve(c: ColorValue, theme: &Snapshot) -> Color {
     match c {
         ColorValue::Rgb(r, g, b) => Color::Rgb { r, g, b },
         ColorValue::Ansi(v) => Color::AnsiValue(v),
@@ -41,7 +41,7 @@ fn resolve(c: ColorValue, theme: &Theme) -> Color {
 pub(crate) fn render_into_buffer(
     buf: &mut Buffer,
     width: u16,
-    theme: &Theme,
+    theme: &Snapshot,
     fill: impl FnOnce(&mut SpanCollector),
 ) {
     let mut collector = SpanCollector::new(width);
@@ -62,7 +62,7 @@ pub(crate) struct ProjectedLine {
     pub decoration: LineDecoration,
 }
 
-pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Theme) -> ProjectedLine {
+pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Snapshot) -> ProjectedLine {
     let mut text = String::new();
     let mut highlights = Vec::new();
     let mut char_offset: u16 = 0;
@@ -105,7 +105,7 @@ pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Theme) -> Projec
     }
 }
 
-fn resolve_span_style(span: &DisplaySpanStyle, theme: &Theme) -> SpanStyle {
+fn resolve_span_style(span: &DisplaySpanStyle, theme: &Snapshot) -> SpanStyle {
     SpanStyle {
         fg: span.fg.map(|c| resolve(c, theme)),
         bg: span.bg.map(|c| resolve(c, theme)),
@@ -148,7 +148,7 @@ mod tests {
     use ui::buffer::BufCreateOpts;
     use ui::BufId;
 
-    fn test_theme() -> Theme {
+    fn test_theme() -> Snapshot {
         crate::theme::snapshot()
     }
 

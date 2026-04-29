@@ -4,8 +4,12 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 /// Immutable snapshot of the theme atomics taken at the start of a paint
 /// pass. Resolved span colors look up roles in this snapshot instead of
 /// reading the global atomics, so a single redraw is theme-consistent.
+///
+/// Distinct from `ui::Theme`, which is the registry of named highlight
+/// groups. Eventually consumers migrate to read `ui::Theme.get(name)`
+/// and this snapshot type goes away.
 #[derive(Debug, Clone, Copy)]
-pub struct Theme {
+pub struct Snapshot {
     pub accent: Color,
     pub slug: Color,
     pub user_bg: Color,
@@ -17,8 +21,8 @@ pub struct Theme {
     pub is_light: bool,
 }
 
-pub fn snapshot() -> Theme {
-    Theme {
+pub fn snapshot() -> Snapshot {
+    Snapshot {
         accent: accent(),
         slug: slug_color(),
         user_bg: user_bg(),
