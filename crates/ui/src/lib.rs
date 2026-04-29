@@ -666,6 +666,11 @@ impl Ui {
     /// `lua_invoke` is called for each `Callback::Lua` with
     /// (handle, payload). Side effects flow through the `AppOp` queue
     /// that Rust callbacks have via `shared.ops` — no return channel.
+    ///
+    /// Overlay leaves redirect to the overlay's root leaf (first in
+    /// declaration order). `dialog.lua` registers handlers on the
+    /// `win_id` returned from `_open` (which is the root); events
+    /// fired on any leaf bubble up so mixed dialogs hear them.
     pub fn dispatch_event(
         &mut self,
         win: WinId,
@@ -673,7 +678,8 @@ impl Ui {
         payload: Payload,
         lua_invoke: &mut LuaInvoke,
     ) {
-        let Some(mut cbs) = self.callbacks.take_event(win, ev) else {
+        let target = self.overlay_root_for_leaf(win).unwrap_or(win);
+        let Some(mut cbs) = self.callbacks.take_event(target, ev) else {
             return;
         };
         for cb in cbs.iter_mut() {
@@ -681,18 +687,18 @@ impl Ui {
                 Callback::Rust(inner) => {
                     let mut ctx = CallbackCtx {
                         ui: self,
-                        win,
+                        win: target,
                         payload: payload.clone(),
                     };
                     let _ = inner(&mut ctx);
                 }
                 Callback::Lua(handle) => {
-                    let panels = self.snapshot_dialog_panels(win);
-                    lua_invoke(*handle, win, &payload, &panels);
+                    let panels = self.snapshot_dialog_panels(target);
+                    lua_invoke(*handle, target, &payload, &panels);
                 }
             }
         }
-        self.callbacks.restore_event(win, ev, cbs);
+        self.callbacks.restore_event(target, ev, cbs);
     }
 
     /// Open a multi-panel `Dialog` as a compositor float layer.
@@ -977,6 +983,22 @@ impl Ui {
         None
     }
 
+    /// Return the "root" leaf of the overlay containing `win`: the
+    /// first leaf in the layout tree's declaration order. This is
+    /// the WinId returned to dialog.lua at open time, and the one
+    /// it registers WinEvent callbacks against. `None` when `win`
+    /// isn't part of any open overlay.
+    ///
+    /// `dispatch_event` redirects to this root so handlers fire
+    /// regardless of which leaf the user actually interacted with
+    /// — necessary for mixed dialogs where multiple leaves are
+    /// interactive (e.g. options + input).
+    pub fn overlay_root_for_leaf(&self, win: WinId) -> Option<WinId> {
+        let id = self.overlay_for_leaf(win)?;
+        let ov = self.overlays.get(&id)?;
+        ov.layout.leaves_in_order().first().copied()
+    }
+
     /// Read-only view of the focus history (oldest first; the most
     /// recent prior focus is at the back). Test + introspection
     /// helper; production callers should reach through `set_focus`.
@@ -1143,9 +1165,11 @@ impl Ui {
         // Modal overlay built-in: bare Esc on an active modal closes
         // the topmost modal. Universal dismiss is fundamental
         // behaviour, not user-customisable. Before closing, fires
-        // `WinEvent::Dismiss` on every leaf of the modal so
-        // dialog-side `on_event("dismiss", …)` handlers can flush
-        // pending state (e.g. unsubmitted input text). Leaves can
+        // `WinEvent::Dismiss` on the modal's root leaf so dialog-side
+        // `on_event("dismiss", …)` handlers can flush pending state
+        // (e.g. unsubmitted input text). `dispatch_event` already
+        // redirects leaf events to the root, so a single dispatch
+        // suffices regardless of which leaf has focus. Leaves can
         // register their own callbacks for `q` / `Ctrl+C` / Submit
         // etc. through the regular `Callbacks` registry — see the
         // `focus()`-routed dispatch below.
@@ -1153,12 +1177,11 @@ impl Ui {
             && mods == crossterm::event::KeyModifiers::NONE
         {
             if let Some(modal) = self.active_modal() {
-                let leaves: Vec<WinId> = self
+                if let Some(root) = self
                     .overlay(modal)
-                    .map(|o| o.layout.leaves_in_order())
-                    .unwrap_or_default();
-                for leaf in &leaves {
-                    self.dispatch_event(*leaf, WinEvent::Dismiss, Payload::None, lua_invoke);
+                    .and_then(|o| o.layout.leaves_in_order().first().copied())
+                {
+                    self.dispatch_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
                 }
                 // The Lua dismiss handler may have already called
                 // `smelt.win.close(...)` (which routes through
@@ -2543,35 +2566,63 @@ mod tests {
     }
 
     #[test]
-    fn modal_esc_fires_dismiss_on_every_leaf_before_closing() {
-        // Multi-panel overlay: Lua dialogs register `on_event("dismiss",
-        // …)` per-leaf to flush input state before the overlay
-        // disappears. Esc must walk every leaf so a multi-input dialog
-        // doesn't lose state on the unfocused panels.
+    fn modal_esc_fires_dismiss_once_on_overlay_root() {
+        // Multi-panel overlay: dialog.lua registers
+        // `on_event("dismiss", …)` on the dialog's root WinId (the
+        // first leaf in declaration order, returned from `_open`).
+        // Esc must fire Dismiss exactly once on the root — not
+        // once per leaf — so dialog.lua's single handler runs once
+        // and the parked task resumes once. Non-root leaves with
+        // their own Dismiss callbacks are addressed via root
+        // redirect inside `dispatch_event`.
         let mut ui = make_ui();
         let a = WinId(60);
         let b = WinId(61);
         let c = WinId(62);
         let id = ui.overlay_open(modal_overlay_with_leaves(a, b, c));
         let count = std::sync::Arc::new(std::sync::Mutex::new(0u32));
-        for leaf in [a, b, c] {
-            let count_cb = count.clone();
-            ui.win_on_event(
-                leaf,
-                WinEvent::Dismiss,
-                Callback::Rust(Box::new(move |_| {
-                    *count_cb.lock().unwrap() += 1;
-                    CallbackResult::Consumed
-                })),
-            );
-        }
+        // Only the root (a) gets a callback — like dialog.lua does.
+        let count_cb = count.clone();
+        ui.win_on_event(
+            a,
+            WinEvent::Dismiss,
+            Callback::Rust(Box::new(move |_| {
+                *count_cb.lock().unwrap() += 1;
+                CallbackResult::Consumed
+            })),
+        );
         let result = ui.handle_key(
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         );
         assert_eq!(result, KeyResult::Consumed);
-        assert_eq!(*count.lock().unwrap(), 3);
+        assert_eq!(*count.lock().unwrap(), 1);
         assert!(ui.overlay(id).is_none());
+    }
+
+    #[test]
+    fn dispatch_event_on_non_root_leaf_redirects_to_root() {
+        // When a callback fires `WinEvent::Submit` on a non-root
+        // leaf (e.g. an input panel below an options panel),
+        // `dispatch_event` redirects to the overlay's root so the
+        // dialog.lua handler registered on the root sees it.
+        let mut ui = make_ui();
+        let a = WinId(70);
+        let b = WinId(71);
+        let _id = ui.overlay_open(modal_overlay_with_leaves(a, b, WinId(72)));
+        let saw = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let saw_cb = saw.clone();
+        ui.win_on_event(
+            a,
+            WinEvent::Submit,
+            Callback::Rust(Box::new(move |_| {
+                *saw_cb.lock().unwrap() = true;
+                CallbackResult::Consumed
+            })),
+        );
+        // Fire Submit on the NON-root leaf; root's callback should fire.
+        ui.dispatch_event(b, WinEvent::Submit, Payload::None, &mut |_, _, _, _| {});
+        assert!(*saw.lock().unwrap());
     }
 
     #[test]

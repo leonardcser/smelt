@@ -364,7 +364,16 @@ fn open_dialog_via_overlay(
         return Err("dialog must have at least one panel".into());
     }
 
-    let primary = focus_target.unwrap_or(leaf_wins[0]);
+    // The "root" leaf is always the first declared leaf — that's
+    // the WinId returned to dialog.lua as the dialog's identity.
+    // `Ui::dispatch_event` redirects WinEvents fired on any leaf
+    // up to this root, so dialog.lua's single registration hears
+    // events from every interactive leaf in mixed dialogs. Focus
+    // is independent: it lands on `focus_target` (the first
+    // explicitly-focused leaf, falling back to the first list/
+    // input leaf, falling back to the root).
+    let root = leaf_wins[0];
+    let initial_focus = focus_target.unwrap_or(root);
 
     let inner = LayoutTree::vbox(leaf_items);
     let layout = LayoutTree::vbox(vec![(
@@ -376,13 +385,13 @@ fn open_dialog_via_overlay(
 
     app.ui
         .overlay_open(Overlay::new(layout, Anchor::ScreenCenter).modal(true));
-    app.ui.set_focus(primary);
+    app.ui.set_focus(initial_focus);
 
     for (leaf, initial_cursor) in list_leaves {
         configure_list_leaf(app, leaf, initial_cursor);
     }
 
-    Ok(primary)
+    Ok(root)
 }
 
 /// Wire up the built-in list keymap on a leaf Window: cursor row
