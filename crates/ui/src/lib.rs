@@ -1016,7 +1016,20 @@ impl Ui {
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         self.sync_float_content();
         self.sync_float_rects();
-        self.compositor.render(&self.theme, w)
+        let resolved = self.resolve_overlays(None);
+        let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
+            .into_iter()
+            .map(|(id, rect, ov)| (id, rect, ov.clone()))
+            .collect();
+        let wins = &self.wins;
+        let bufs = &self.bufs;
+        let term_size = self.terminal_size;
+        self.compositor
+            .render_with(&self.theme, w, |grid, theme| {
+                for (_id, rect, overlay) in &resolved {
+                    paint_overlay(grid, theme, *rect, overlay, wins, bufs, term_size);
+                }
+            })
     }
 
     pub fn theme(&self) -> &Theme {
@@ -1406,6 +1419,86 @@ fn parse_float_layer_id(id: &str) -> Option<WinId> {
 impl Default for Ui {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Paint one resolved overlay into `grid`. Walks the overlay's layout
+/// tree depth-first: containers paint chrome at their own rect, then
+/// recurse into children at their resolved rects; leaves slice into
+/// the grid and call `Window::render`. Missing windows / buffers are
+/// silently skipped — the paint pass is best-effort, not authoritative
+/// over registry state.
+fn paint_overlay(
+    grid: &mut Grid,
+    theme: &Theme,
+    area: Rect,
+    overlay: &Overlay,
+    wins: &HashMap<WinId, Window>,
+    bufs: &HashMap<BufId, Buffer>,
+    term_size: (u16, u16),
+) {
+    paint_layout_node(grid, theme, &overlay.layout, area, wins, bufs, term_size);
+}
+
+fn paint_layout_node(
+    grid: &mut Grid,
+    theme: &Theme,
+    node: &LayoutTree,
+    area: Rect,
+    wins: &HashMap<WinId, Window>,
+    bufs: &HashMap<BufId, Buffer>,
+    term_size: (u16, u16),
+) {
+    match node {
+        LayoutTree::Leaf(win_id) => {
+            let Some(win) = wins.get(win_id) else {
+                return;
+            };
+            let Some(buf) = bufs.get(&win.buf) else {
+                return;
+            };
+            let mut slice = grid.slice_mut(area);
+            let ctx = DrawContext {
+                terminal_width: term_size.0,
+                terminal_height: term_size.1,
+                focused: false,
+                theme: theme.clone(),
+            };
+            win.render(buf, &mut slice, &ctx);
+        }
+        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
+            layout::paint_chrome(grid, area, chrome, theme);
+            let vertical = matches!(node, LayoutTree::Vbox { .. });
+            let inner = if chrome.border.is_some() {
+                Rect::new(
+                    area.top + 1,
+                    area.left + 1,
+                    area.width.saturating_sub(2),
+                    area.height.saturating_sub(2),
+                )
+            } else {
+                area
+            };
+            let primary_total = if vertical { inner.height } else { inner.width };
+            let total_gap = chrome
+                .gap
+                .saturating_mul(items.len().saturating_sub(1) as u16);
+            let available = primary_total.saturating_sub(total_gap);
+            let sizes = layout::resolve_constraints(items, available);
+            let mut offset = 0u16;
+            for (i, ((_, child), &size)) in items.iter().zip(sizes.iter()).enumerate() {
+                let child_area = if vertical {
+                    Rect::new(inner.top + offset, inner.left, inner.width, size)
+                } else {
+                    Rect::new(inner.top, inner.left + offset, size, inner.height)
+                };
+                paint_layout_node(grid, theme, child, child_area, wins, bufs, term_size);
+                offset += size;
+                if i + 1 < items.len() {
+                    offset += chrome.gap;
+                }
+            }
+        }
     }
 }
 
@@ -2166,5 +2259,42 @@ mod tests {
         let resolved = ui.resolve_overlays(None);
         let ids: Vec<OverlayId> = resolved.iter().map(|(id, _, _)| *id).collect();
         assert_eq!(ids, vec![low, high]);
+    }
+
+    #[test]
+    fn render_paints_overlay_leaf_buffer() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines(vec!["overlay-text".into()]);
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(
+            Constraint::Length(3),
+            LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
+        )])
+        .with_border(Border::Single)
+        .with_title("title");
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        // Borrow Compositor's previous grid (post-flush swap) for assertions.
+        let frame = ui.compositor.previous_for_test();
+        // Centered (term 80x24, overlay natural 42 wide × 5 tall →
+        // top=9 left=19). Title sits in the top border row at col=20.
+        assert_eq!(frame.cell(19, 9).symbol, '┌');
+        assert_eq!(frame.cell(20, 9).symbol, 't');
+        assert_eq!(frame.cell(24, 9).symbol, 'e');
+        // Leaf paints inside the border at (top+1, left+1) = (10, 20).
+        assert_eq!(frame.cell(20, 10).symbol, 'o');
+        assert_eq!(frame.cell(31, 10).symbol, 't');
     }
 }

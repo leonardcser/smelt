@@ -135,6 +135,15 @@ impl Compositor {
         self.focused = None;
     }
 
+    /// Read the most recently flushed grid. Used by in-crate tests
+    /// that drive `Ui::render` and want to assert on what landed on
+    /// the terminal-bound surface (post-swap, so `previous` carries
+    /// the just-rendered frame).
+    #[cfg(test)]
+    pub(crate) fn previous_for_test(&self) -> &Grid {
+        &self.previous
+    }
+
     pub fn focused(&self) -> Option<&str> {
         self.focused.as_deref()
     }
