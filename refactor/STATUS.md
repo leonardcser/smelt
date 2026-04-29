@@ -12,14 +12,17 @@ storage; `YankSubst` extmark field + `Buffer::yank_text_for_range`
 helper added; soft-wrap cache (`Buffer::wrap_at`) keyed by
 `(changedtick, width)` added. Per-line `add_highlight` /
 `set_decoration` / `set_virtual_text` / `set_mark` are now thin
-wrappers over `set_extmark` in well-known namespaces. `Buffer::attach(spec)`
-parser hooks (replacing `BufferFormatter`) and the `edit_buffer.rs`
-merge are still pending in P1.a.
+wrappers over `set_extmark` in well-known namespaces. Foundation
+commit 1 of the `Buffer::attach(spec)` parser-hook migration landed:
+`BufferFormatter` → `BufferParser` rename + `on_attach` lifecycle
+hook + builder API renamed to `Buffer::attach(parser)` /
+`set_parser`. The `edit_buffer.rs` merge is still pending in P1.a.
 
 **Tree:** green. `cargo nextest run --workspace` — 930 passed (914
 from prior boundary + 16 new tests covering extmark CRUD, yank
-substitution, and wrap caching). `cargo nextest run --test scenarios`
-— 6 baseline scenarios green. `cargo clippy` clean.
+substitution, and wrap caching; renamed-tests preserved). `cargo
+nextest run --test scenarios` — 6 baseline scenarios green. `cargo
+clippy` clean.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
@@ -81,6 +84,18 @@ commits (`decb0ab`..`e489a79`):
   Cache invalidates on any line mutation. No callers yet — wrap
   state today still lives in WindowView; migration is downstream
   P1.a work.
+- `385e9d0` — **`Buffer::attach(spec)` foundation commit 1**:
+  `BufferFormatter` trait → `BufferParser`; `render` method →
+  `parse`; `with_formatter` builder → `attach`; `set_formatter` →
+  `set_parser`. New `BufferParser::on_attach(&mut Buffer)`
+  lifecycle hook (default no-op) fires once when the parser is
+  installed — entry point for parsers to register custom
+  namespaces and seed initial state. Tests + 4 call sites updated
+  (`format.rs` ModeFormatter → ModeParser, `lua/api/widgets.rs`,
+  `lua/ui_ops.rs`). Pure rename + one new hook; no behavior
+  change. Sets up the API shape for the deeper parser-hook surgery
+  (incremental `on_change` / `on_render` hooks) without committing
+  to the full restructure.
 
 `crate::theme::*` is now narrow:
 - `populate_ui_theme(&mut Theme)` — initializes `Smelt*` highlight
@@ -108,32 +123,48 @@ before declaring anything done.
 
 ## What's next
 
-Three substantial P1.a items remain — each is multi-day. Pick one:
+`Buffer::attach(spec)` parser-hook migration is in progress —
+commit 1 (rename + `on_attach`) landed at `385e9d0`. The remaining
+commits in this series are each a meaningful slice on their own
+and can be tackled independently:
 
-1. **`Buffer::attach(spec)` parser hook system**. Replaces the
-   `BufferFormatter` trait + `transcript_cache.rs` IR cache.
-   Parser registers namespaces and an `on_block` callback fired at
-   semantic boundaries. Cascades through `format.rs`, `transcript_cache`,
-   the renderer pipeline, and the persisted layout cache. Highest
-   architectural payoff but the deepest surgery.
-2. **Edit history merge**. Roll `edit_buffer.rs` (`EditBuffer` +
-   per-buffer history + word/line range helpers) into `Buffer`.
-   Cascades through `PromptState`, `Window`, every `input/buffer.rs`
-   site that reaches `self.win.edit_buf.buf`. Contained but
-   high-volume.
-3. **Drop `BufferView` `Arc::clone` of materialized vecs**. Make
-   `BufferView::sync_from_buffer` read extmarks directly per render;
-   delete `cached_highlights` / `cached_decorations` in `Buffer`.
-   Contained to ui crate but threads through every render path.
+1. **Commit 2 — `on_change(buf, line_range)` hook.** Add the
+   incremental-edit hook to `BufferParser`; default implementation
+   delegates to a fresh `parse(&source, width)`. No consumer needs
+   to change immediately, but the hook unblocks streaming-parse
+   parsers down the line. ~1 hour.
+2. **Commit 3 — `on_render(buf, width)` hook.** Move the
+   width-dependent half of `parse` into a separate hook so parsers
+   can short-circuit when only the width changed. Lets the
+   markdown / syntect parsers cache the width-independent IR
+   (replaces what `transcript_cache.rs` does today). ~Half-day; the
+   IR cache split lives here.
+3. **Commit 4 — Delete `transcript_cache.rs`.** Once `on_render`
+   exists, the IR cache becomes per-parser state inside the
+   markdown / inline-diff parsers. The persisted layout cache stays
+   (separate concern). Cascades through the engine bridge and
+   resume path. ~1 day.
 
-Migrate-on-demand consumers (build directly on what just landed,
-each ~1 file):
-4. Migrate hidden-thinking blocks to `YankSubst::Empty` extmarks (so
-   the transcript copy path round-trips without the per-cell `copy_as`).
-5. Migrate prompt attachment sigils to `YankSubst::Static(path)`
-   extmarks.
-6. Migrate `WindowView` wrap state to `Buffer::wrap_at` (the cache
-   gains a real consumer).
+Two other P1.a items, independent of the parser-hook series:
+
+- **Edit history merge**. Roll `edit_buffer.rs` (`EditBuffer` +
+  per-buffer history + word/line range helpers) into `Buffer`.
+  Cascades through `PromptState`, `Window`, every `input/buffer.rs`
+  site that reaches `self.win.edit_buf.buf`. ~250 references; ~2
+  days.
+- **Drop `BufferView` `Arc::clone` of materialized vecs**. Blocked
+  on `Component::draw` not having `&Buffer` access — defer to P1.d
+  when `BufferView` is deleted outright.
+
+Migrate-on-demand consumers (each surfaces hidden coupling, see
+P1.a notes):
+- Hidden-thinking blocks → `YankSubst::Empty` requires re-rooting
+  `TranscriptSnapshot` in a Buffer; not 1 file.
+- Prompt attachment sigils → `YankSubst::Static` is a wrong fit:
+  attachments substitute on submit, not on copy.
+- WindowView wrap → `Buffer::wrap_at` is a wrong fit: rendering
+  pre-wraps via `DisplayLine`s before the buffer; `wrap_at`
+  operates after the fact.
 
 Subsequent P1 sub-phases (after P1.a closes):
 - **P1.b — `LayoutTree`** (`Vbox`/`Hbox`/`Leaf(WinId)` + constraints).

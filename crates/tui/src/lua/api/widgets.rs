@@ -125,7 +125,7 @@ fn register_buf(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
                         Ok(bid) => {
                             if let Some(fmt) = format {
                                 if let Some(buf) = app.ui.buf_mut(bid) {
-                                    buf.set_formatter(fmt.into_formatter());
+                                    buf.set_parser(fmt.into_parser());
                                 }
                             }
                         }
