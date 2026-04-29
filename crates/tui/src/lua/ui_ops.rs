@@ -232,13 +232,7 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
         .all(|p| matches!(p.content, PanelContent::Buffer(_)));
     let blocks_agent_pre: bool = opts.get("blocks_agent").unwrap_or(false);
     if content_only {
-        return open_dialog_via_overlay(
-            app,
-            title,
-            panel_specs,
-            leaf_shapes,
-            blocks_agent_pre,
-        );
+        return open_dialog_via_overlay(app, title, panel_specs, leaf_shapes, blocks_agent_pre);
     }
 
     // Collect footer hints from top-level `opts.keymaps[].hint`. The Lua
@@ -451,7 +445,10 @@ fn configure_list_leaf(app: &mut App, leaf: WinId, initial_cursor: u16) {
             KeyBind::new(KeyCode::Home, KeyModifiers::NONE),
             isize::MIN / 2,
         ),
-        (KeyBind::new(KeyCode::Char('g'), KeyModifiers::NONE), isize::MIN / 2),
+        (
+            KeyBind::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            isize::MIN / 2,
+        ),
         (
             KeyBind::new(KeyCode::End, KeyModifiers::NONE),
             isize::MAX / 2,
@@ -470,10 +467,7 @@ fn configure_list_leaf(app: &mut App, leaf: WinId, initial_cursor: u16) {
             .win(ctx.win)
             .map(|w| w.scroll_top as usize + w.cursor_line as usize)
             .unwrap_or(0);
-        CallbackResult::Event(
-            WinEvent::Submit,
-            Payload::Selection { index: abs },
-        )
+        CallbackResult::Event(WinEvent::Submit, Payload::Selection { index: abs })
     }));
     let _ = app.ui.win_set_keymap(
         leaf,
