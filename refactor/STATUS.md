@@ -22,34 +22,70 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — five foundation commits landed (`40f0c82`,
-`702305a`, `8fa6760`, `d3c4a83`, `44fe779`): `Corner` rename;
-target `Anchor` + `Overlay` + `OverlayId` types in a new
-`overlay` module; pure `resolve_anchor` function with 9 tests;
-`Ui::overlay_open / close / overlay / overlay_mut /
+**P1.c in progress** — six foundation commits landed (`40f0c82`,
+`702305a`, `8fa6760`, `d3c4a83`, `44fe779`, `434eee8`/`16ca777`):
+`Corner` rename; target `Anchor` + `Overlay` + `OverlayId` types
+in a new `overlay` module; pure `resolve_anchor` function with 9
+tests; `Ui::overlay_open / close / overlay / overlay_mut /
 overlays_in_z_order` API + storage with 4 tests; per-frame
 resolution layer (`LayoutTree::natural_size((cap))` + 9 tests;
 `Ui::resolve_overlays(cursor)` returning z-ordered
-`Vec<(OverlayId, Rect, &Overlay)>` + 4 tests). The whole P1.c
-resolution layer is in place — given an Overlay and the current
-frame state, callers can ask "where does this draw?" without any
-compositor wiring yet.
+`Vec<(OverlayId, Rect, &Overlay)>` + 4 tests); `SeparatorStyle`
+on `Chrome` (None/Solid/Dashed; `with_separator` auto-inflates
+gap from 0→1) + dedup of the dialog-side enum (one definition
+in `layout`, used everywhere). The whole P1.c data + resolution
+layer is in place — callers can ask "where does this overlay
+draw, with which chrome?" without touching the compositor.
 
-**Next in P1.c:** C.5 migrates one float (cmdline or text_modal)
-to Overlay end-to-end — first real consumer of `resolve_overlays`,
-proves the storage + resolution layers work for a live surface
-and decides the compositor wiring shape (overlay-as-component vs
-direct paint into the grid). C.6+ migrates remaining floats and
-deletes `FloatConfig` / `PanelWidget` / `Placement`.
+**Next in P1.c (open design point):** C.5 — first float migration
+to Overlay — has a render-shape question that needs deciding
+before code lands. Current state:
+
+- Overlay storage holds `LayoutTree<WinId>`. `resolve_overlays`
+  yields `(OverlayId, Rect, &Overlay)` per frame. ✅
+- `Window::render(buf, grid)` doesn't exist yet — paint flows
+  through `BufferView::draw(rect, slice, ctx)` invoked from
+  `Dialog::draw` for buffer panels and from compositor layers
+  (`Component::draw`) for floats. P1.d is the phase that flips
+  Window into the unified render unit.
+- `Compositor` owns `current` / `previous` grids privately;
+  external callers can't paint into the active frame.
+
+Three plausible paths, none clean today:
+
+1. **Pull a minimal `Window::render(buf, slice, ctx)` helper
+   forward from P1.d** scoped to read-only viewer Windows.
+   Lets text_modal land as Overlay { layout: vbox(border+title,
+   leaf(WinId)), anchor: ScreenCenter }. Overlay paint walks
+   `resolve_layout`, paints chrome on container nodes, calls the
+   helper on each leaf. Still needs Compositor to expose its
+   `current` grid (small API addition).
+2. **Add a temporary `Overlay::Component` carrier variant** that
+   stores `Box<dyn Component>` alongside the `LayoutTree`. text_modal
+   passes a Dialog Component; Overlay holds the existing-shape
+   wrapper. Forbidden by meta-rules (parallel implementations).
+3. **Defer C.5 to land paired with P1.f** (`Ui` facade rewrite —
+   when overlays paint as peers of splits in a unified render
+   pass owned by Ui). Delays float deletion but avoids
+   scaffolding.
+
+Recommendation: **path 1**, with the Window-render helper extracted
+deliberately as a P1.c → P1.d hand-off. The helper is small (sync
+buffer view + paint visible lines + scrollbar — most of the work
+is already in `BufferView::draw`); landing it in C.5 turns it into
+the first concrete pin for P1.d.
+
+Until that shape is decided, C.5 doesn't ship code. C.6+ (delete
+`FloatConfig` / `PanelWidget` / `Placement`) is gated on C.5.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 969 passed
-(13 new this commit: 9 `LayoutTree::natural_size` axis +
-chrome + cap tests, 4 `Ui::resolve_overlays` resolution / skip
-/ z-order tests). `cargo clippy --workspace --all-targets -- -D
-warnings` clean.
+**Tree:** green. `cargo nextest run --workspace` — 974 passed
+(5 new since C.4: 5 `SeparatorStyle` field/builder/inflation/
+no-render-effect tests; dialog-side `SeparatorStyle` dedup
+preserved test count). `cargo clippy --workspace --all-targets
+-- -D warnings` clean.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):

@@ -48,7 +48,6 @@ pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult, 
 pub use compositor::Compositor;
 pub use dialog::{
     Dialog, DialogConfig, PanelContent, PanelHeight, PanelSnapshot, PanelSpec, PanelWidget,
-    SeparatorStyle,
 };
 pub use edit_buffer::EditBuffer;
 pub use flush::flush_diff;
@@ -57,7 +56,7 @@ pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
 pub use layout::{
     Anchor, Border, Constraint, Corner, FitMax, FloatRelative, Gutters, LayoutTree, Placement,
-    Rect,
+    Rect, SeparatorStyle,
 };
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
