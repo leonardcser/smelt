@@ -117,6 +117,15 @@ pub struct Ui {
     /// view in `WinId` terms so the focus model speaks the same
     /// language as the public `set_focus`/`focus` API.
     focus_history: Vec<WinId>,
+    /// Currently focused overlay leaf, if any. Overlay leaves are
+    /// not compositor layers — they live inside an `Overlay`'s
+    /// `LayoutTree` — so focus-on-overlay-leaf can't be expressed
+    /// via `compositor.focus(layer_id)`. When set, this takes
+    /// precedence over `compositor.focused()` in the public
+    /// `focus()` accessor and routes key events to the leaf's
+    /// callback registry. Cleared when the containing overlay
+    /// closes.
+    overlay_focus: Option<WinId>,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -149,6 +158,7 @@ impl Ui {
             overlays: HashMap::new(),
             next_overlay_id: 1,
             focus_history: Vec::new(),
+            overlay_focus: None,
         }
     }
 
@@ -222,7 +232,14 @@ impl Ui {
     pub fn overlay_open(&mut self, overlay: Overlay) -> OverlayId {
         let id = OverlayId(self.next_overlay_id);
         self.next_overlay_id += 1;
+        let modal = overlay.modal;
+        let first_leaf = overlay.layout.leaves_in_order().into_iter().next();
         self.overlays.insert(id, overlay);
+        if modal {
+            if let Some(leaf) = first_leaf {
+                self.set_focus(leaf);
+            }
+        }
         id
     }
 
@@ -239,7 +256,13 @@ impl Ui {
         let removed = self.overlays.remove(&id)?;
         if let Some(focused) = self.focus() {
             if removed.layout.contains_leaf(focused) {
+                self.overlay_focus = None;
                 while let Some(prior) = self.focus_history.pop() {
+                    if self.overlay_for_leaf(prior).is_some() {
+                        self.overlay_focus = Some(prior);
+                        self.compositor.clear_focus();
+                        return Some(removed);
+                    }
                     if let Some(layer_id) = self.layer_id_for_win(prior) {
                         self.compositor.focus(layer_id);
                         return Some(removed);
@@ -868,11 +891,16 @@ impl Ui {
 
     // ── Focus (canonical Win-typed API) ──────────────────────────
 
-    /// Currently focused window, if any. Reads through the
-    /// compositor's focused layer and translates back to the
-    /// `WinId` it represents (split via `register_split`, float via
-    /// the `"float:N"` layer-id prefix).
+    /// Currently focused window, if any. Overlay-leaf focus wins
+    /// over compositor focus (a modal overlay's input claim
+    /// suppresses split / float dispatch). Falls back to the
+    /// compositor's focused layer translated to its `WinId` (split
+    /// via `register_split`, float via the `"float:N"` layer-id
+    /// prefix).
     pub fn focus(&self) -> Option<WinId> {
+        if let Some(win) = self.overlay_focus {
+            return Some(win);
+        }
         self.compositor.focused().and_then(|id| self.layer_to_win(id))
     }
 
@@ -891,25 +919,48 @@ impl Ui {
         self.wins.get_mut(&id)
     }
 
-    /// Focus a specific window. Returns `false` when `win` doesn't
-    /// resolve to a focusable layer (window unknown, or no
-    /// compositor layer registered for it). On success, the prior
-    /// focus is appended to `focus_history` so close paths can pop
-    /// back to the previous focus target. Re-focusing the
-    /// already-focused window is a no-op (no history push).
+    /// Focus a specific window. Accepts splits, floats (via their
+    /// compositor layer id), and overlay leaves (any leaf reachable
+    /// in an open overlay's `LayoutTree`). Returns `false` when `win`
+    /// is none of those. On success, the prior focus is appended to
+    /// `focus_history` so close paths can pop back to the previous
+    /// focus target. Re-focusing the already-focused window is a
+    /// no-op (no history push).
     pub fn set_focus(&mut self, win: WinId) -> bool {
-        let Some(layer_id) = self.layer_id_for_win(win) else {
-            return false;
-        };
         let prior = self.focus();
         if prior == Some(win) {
             return true;
         }
-        if let Some(p) = prior {
-            self.focus_history.push(p);
+        if let Some(layer_id) = self.layer_id_for_win(win) {
+            if let Some(p) = prior {
+                self.focus_history.push(p);
+            }
+            self.overlay_focus = None;
+            self.compositor.focus(layer_id);
+            return true;
         }
-        self.compositor.focus(layer_id);
-        true
+        if self.overlay_for_leaf(win).is_some() {
+            if let Some(p) = prior {
+                self.focus_history.push(p);
+            }
+            self.overlay_focus = Some(win);
+            self.compositor.clear_focus();
+            return true;
+        }
+        false
+    }
+
+    /// Return the `OverlayId` of an open overlay whose `LayoutTree`
+    /// contains `win` as a leaf. `None` when `win` isn't a leaf of
+    /// any open overlay. Used by leaf callbacks that need to close
+    /// or otherwise manipulate the containing overlay.
+    pub fn overlay_for_leaf(&self, win: WinId) -> Option<OverlayId> {
+        for (id, ov) in &self.overlays {
+            if ov.layout.contains_leaf(win) {
+                return Some(*id);
+            }
+        }
+        None
     }
 
     /// Read-only view of the focus history (oldest first; the most
@@ -946,7 +997,9 @@ impl Ui {
             .layout
             .leaves_in_order()
             .into_iter()
-            .filter(|w| self.layer_id_for_win(*w).is_some())
+            .filter(|w| {
+                self.layer_id_for_win(*w).is_some() || self.wins.contains_key(w)
+            })
             .collect();
         if leaves.is_empty() {
             return false;
@@ -1061,12 +1114,12 @@ impl Ui {
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
     ) -> KeyResult {
-        // Modal overlay built-in: Esc on any active modal closes the
-        // topmost modal. Universal dismiss is fundamental behaviour,
-        // not user-customisable. Richer leaf-level event routing
-        // (q, Ctrl+C, Submit, etc.) lands with the Window event-handler
-        // refactor in P1.d/P1.e; until then, modal overlays only
-        // accept Esc.
+        // Modal overlay built-in: bare Esc on an active modal closes
+        // the topmost modal. Universal dismiss is fundamental
+        // behaviour, not user-customisable. Leaves can register
+        // their own callbacks for `q` / `Ctrl+C` / `Submit` etc.
+        // through the regular `Callbacks` registry — see the
+        // `focus()`-routed dispatch below.
         if matches!(code, crossterm::event::KeyCode::Esc)
             && mods == crossterm::event::KeyModifiers::NONE
         {
@@ -1075,10 +1128,7 @@ impl Ui {
                 return KeyResult::Consumed;
             }
         }
-        let focused = self
-            .compositor
-            .focused()
-            .and_then(|id| self.layer_to_win(id));
+        let focused = self.focus();
         let Some(win) = focused else {
             return self.compositor.handle_key(code, mods);
         };
@@ -2273,6 +2323,80 @@ mod tests {
         let resolved = ui.resolve_overlays(None);
         let ids: Vec<OverlayId> = resolved.iter().map(|(id, _, _)| *id).collect();
         assert_eq!(ids, vec![low, high]);
+    }
+
+    #[test]
+    fn overlay_open_modal_focuses_first_leaf() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "t".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+        assert_eq!(ui.focus(), Some(win));
+    }
+
+    #[test]
+    fn set_focus_accepts_overlay_leaf() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "t".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter)); // not modal
+        assert!(ui.set_focus(win));
+        assert_eq!(ui.focus(), Some(win));
+    }
+
+    #[test]
+    fn handle_key_routes_to_overlay_leaf_callback() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "t".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
+        let oid = ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+        let cb: Callback = Callback::Rust(Box::new(move |ctx| {
+            if let Some(o) = ctx.ui.overlay_for_leaf(ctx.win) {
+                let _ = ctx.ui.overlay_close(o);
+            }
+            CallbackResult::Consumed
+        }));
+        let _ = ui.win_set_keymap(
+            win,
+            KeyBind::new(
+                crossterm::event::KeyCode::Char('q'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            cb,
+        );
+        let result = ui.handle_key(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(ui.overlay(oid).is_none());
     }
 
     #[test]
