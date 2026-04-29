@@ -26,9 +26,9 @@ impl LayoutState {
 
         let tree = ui::LayoutTree::vbox(vec![
             ui::LayoutTree::leaf("transcript", ui::Constraint::Fill),
-            ui::LayoutTree::leaf("gap", ui::Constraint::Length(1)),
             ui::LayoutTree::leaf("prompt", ui::Constraint::Length(prompt_height)),
-        ]);
+        ])
+        .with_gap(1);
 
         let area = Rect::new(0, 0, term_width, term_height);
         let regions = ui::layout::resolve_layout(&tree, area);
