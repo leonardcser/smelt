@@ -22,10 +22,12 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — twenty-two commits landed (foundation
+**P1.c in progress** — twenty-four commits landed (foundation
 + paint pipeline + first float migration + leaf event
 routing + content-only Lua dialog migration + Buffer-backed
-list leaves + options-panel migration). Foundation:
+list leaves + options-panel migration + extmark painting in
+Window::render + overlay-leaf WinEvent root redirect).
+Foundation:
 `40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
 `434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
 `dcb0e8b`, `f80d1d0` (target types + `resolve_anchor`;
@@ -148,30 +150,49 @@ to `raw_ctx.index` (1-based, populated from
 current consumer exercises it). New helper
 `make_options_buffer(app, &[label])`.
 
-**C.7.3 — remaining float migrations + deletions:** still
-ahead. The residual `OptionList` surface (multi-select
-checkbox prefix, shortcut keys 1-9, padded meta column,
-dim styling) lives behind the legacy guard until a
-real consumer surfaces (or the move to delete becomes
-simpler). `TextInput` rewrite (single editable line
-buffer + cursor + keymap recipe) follows. Once every
-dialog flips, `FloatConfig` / `PanelWidget` / `Placement`
-and `dialog.rs`'s panel multiplexing all delete
-together.
+**C.7.4 / C.7.5 — Window highlight painting + overlay root
+redirect.** `d2b2c7e` adds layered extmark-highlight painting
+to `Window::render` (forward-pulled from P1.d's render surface,
+scoped to highlights only). `de7e681` adds overlay-leaf →
+overlay-root WinEvent redirection: dialog.lua registers
+handlers on the root WinId returned by `_open`, and `Ui::
+dispatch_event` walks `overlay_root_for_leaf(win)` so
+events fired from any leaf bubble to the root. Together
+these are the building blocks C.8 needs:
+
+- Highlight painting → placeholder dim styling renders.
+- Root redirect → mixed dialogs (input + options/list)
+  hear submit/dismiss/text_changed events from any leaf
+  on the single registration point.
+
+**C.7.6+ — remaining float migrations + deletions:** still
+ahead. C.8 (`TextInput` migration to Buffer-backed leaf)
+is now unblocked but needs one more piece: per-panel
+WinId surface to dialog.lua so `collect_inputs(name)` can
+read text from the input leaf's Buffer. The residual
+`OptionList` surface (multi-select checkbox prefix,
+shortcut keys 1-9, padded meta column, dim styling)
+lives behind the legacy guard until a real consumer
+surfaces. Once every dialog flips, `FloatConfig` /
+`PanelWidget` / `Placement` and `dialog.rs`'s panel
+multiplexing all delete together.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 1028 passed
-(21 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
+**Tree:** green. `cargo nextest run --workspace` — 1031 passed
+(24 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
 1 `render_with_paints_after_layers`, 1 `render_paints_overlay_leaf_buffer`,
 1 `render_drives_ensure_rendered_at_for_each_overlay_leaf`,
-2 `handle_key_esc_*` modal-dismiss, 1 `modal_esc_fires_dismiss_on_every_leaf_before_closing`,
+2 `handle_key_esc_*` modal-dismiss, 1 `modal_esc_fires_dismiss_once_on_overlay_root`,
 1 `win_close_on_overlay_leaf_closes_overlay_and_clears_all_leaves`,
 3 `overlay_open_modal_focuses_*` / `set_focus_accepts_overlay_leaf` /
 `handle_key_routes_to_overlay_leaf_callback`,
 3 `render_highlights_cursor_row_*` / `render_skips_cursor_highlight_*`,
-1 `callback_result_event_dispatches_winevent_after_keymap`).
+1 `callback_result_event_dispatches_winevent_after_keymap`,
+2 `render_paints_highlight_extmarks_*` /
+`render_layers_highlight_attributes_on_cursor_row_bg`,
+1 `dispatch_event_on_non_root_leaf_redirects_to_root`).
 `cargo clippy --workspace --all-targets -- -D warnings` clean. Manual
 TUI parity walk: `/stats`, `/cost`, `/help`, `/btw` open as
 bordered+titled centered modals; Esc / q / Ctrl+C dismiss as
@@ -293,16 +314,22 @@ above for the running narrative. Target shape from
   deleted at C.9 once every dialog flips.
 
 **Next sub-phase: C.8 — `TextInput` as Buffer-backed
-Window.** With C.7.2 having migrated the options surface,
-the only remaining widget kind blocking the
-content-only-vs-mixed branch in `open_dialog` is `kind =
-"input"` (currently `PanelContent::Widget(TextInput)`).
-The path is to build a single-line editable Buffer +
-Window with a recipe binding insert keys + Enter →
-`Submit { Text { content } }`. Once that lands,
-mixed-input dialogs (`/resume` workspace + filter,
-`/confirm` rejection-message, `/btw` follow-up question)
-all flip to overlay. C.9 then deletes
+Window.** With C.7.4 + C.7.5 building blocks in place
+(highlight painting + root redirect), the input migration
+needs one more piece: per-panel WinId exposure to
+dialog.lua. Today `_open` returns a single root WinId;
+`dialog.lua`'s `collect_inputs(name)` reads
+`raw_ctx.panels[idx].text` (legacy path) and that array
+isn't populated for overlay dialogs. The fix is to
+return a `panels = { name → win_id }` table from
+`_open` (or expose `smelt.win.panel_buf(root, name)`),
+so `collect_inputs` can read the input leaf's buffer
+text directly via `smelt.buf.get_line(buf, 0)`. Once
+that lands, the actual `kind = "input"` migration is
+~120 LOC of `configure_input_leaf` (printable-char
+key fallback, Backspace/Left/Right/Home/End specific
+keymaps, Enter → Submit) plus `make_input_buffer` (line
++ dim placeholder extmark). C.9 then deletes
 `FloatConfig` / `PanelWidget` / `Placement` /
 `dialog.rs` panel multiplexing.
 
