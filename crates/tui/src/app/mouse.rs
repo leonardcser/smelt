@@ -25,27 +25,11 @@ impl App {
                 | MouseEventKind::ScrollLeft
                 | MouseEventKind::ScrollRight
         );
-        if is_scroll {
-            let target = self
-                .ui
-                .focused_float()
-                .or_else(|| self.ui.float_at(me.row, me.column));
-            if let Some(win) = target {
-                let delta: isize = match me.kind {
-                    MouseEventKind::ScrollUp => -3,
-                    MouseEventKind::ScrollDown => 3,
-                    _ => 0,
-                };
-                if delta != 0 {
-                    if let Some(dlg) = self.ui.dialog_mut(win) {
-                        let panel_idx = dlg
-                            .panel_at(me.row, me.column)
-                            .unwrap_or_else(|| dlg.focused_panel());
-                        dlg.panel_scroll_by(panel_idx, delta);
-                    }
-                }
-                return EventOutcome::Redraw;
-            }
+        if is_scroll && self.ui.focused_float().is_some() {
+            // A focused float (picker / cmdline / notification)
+            // absorbs wheel events so scrolling inside it doesn't
+            // bleed through to the transcript behind.
+            return EventOutcome::Redraw;
         }
 
         // Modal gate. With a focused float up, clicks / drags outside
@@ -58,21 +42,6 @@ impl App {
             if !inside_focused {
                 return EventOutcome::Noop;
             }
-        }
-
-        // Down inside a float: scrollbar drag still pre-empts (App
-        // owns the latching state machine), but anything else routes
-        // through the compositor so each layer's `handle_mouse` runs
-        // — click-to-focus widget panels, click-to-select list rows,
-        // click-to-position TextInput cursor, etc. Wheel keeps the
-        // direct path above because the focused-float-absorbs-wheel
-        // policy needs App-level focus knowledge.
-        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.ui.float_at(me.row, me.column).is_some()
-            && self.begin_dialog_scrollbar_drag_if_hit(me.row, me.column)
-        {
-            self.mouse_drag_active = true;
-            return EventOutcome::Redraw;
         }
 
         if self.drag_on_layer.is_some()
@@ -133,15 +102,6 @@ impl App {
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
-                // Dialog-panel scrollbar grabs the gesture ahead of any
-                // focus-aware handling — clicks on a float's thumb or
-                // track jump-scroll and latch the drag.
-                if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
-                    && self.begin_dialog_scrollbar_drag_if_hit(me.row, me.column)
-                {
-                    self.mouse_drag_active = true;
-                    return EventOutcome::Redraw;
-                }
                 // Click-count tracking: successive primary-button Downs
                 // on the same cell within 400ms increment the count.
                 // 2 → word-select + copy, 3 → line-select + copy. After
@@ -472,38 +432,6 @@ impl App {
         true
     }
 
-    /// If `(row, col)` lands on the scrollbar of a dialog panel owned by
-    /// a compositor float, latch a `DialogPanel` drag and snap the
-    /// thumb to the pointer. Returns `true` when the event was consumed.
-    fn begin_dialog_scrollbar_drag_if_hit(&mut self, row: u16, col: u16) -> bool {
-        let Some(win) = self.ui.float_at(row, col) else {
-            return false;
-        };
-        let Some(dialog) = self.ui.dialog_mut(win) else {
-            return false;
-        };
-        let Some(panel_idx) = dialog.panel_at(row, col) else {
-            return false;
-        };
-        let Some(viewport) = dialog.panel_viewport(panel_idx) else {
-            return false;
-        };
-        let Some(bar) = viewport.scrollbar else {
-            return false;
-        };
-        if !bar.contains(viewport.rect, row, col) {
-            return false;
-        }
-        let rel_row = row.saturating_sub(viewport.rect.top);
-        let thumb_top = bar.thumb_top_for_click(rel_row);
-        dialog.apply_panel_scrollbar_drag(panel_idx, thumb_top);
-        self.drag_on_scrollbar = Some(crate::app::ScrollbarDragTarget::DialogPanel {
-            win,
-            panel: panel_idx,
-        });
-        true
-    }
-
     /// Apply an in-flight `ScrollbarDrag` to the current pointer row:
     /// translate the thumb-relative anchor back into a thumb-top, then
     /// into a buffer scroll offset via the region's proportional map.
@@ -537,20 +465,6 @@ impl App {
                         self.input.win.scroll_top = from_top;
                     }
                 }
-            }
-            crate::app::ScrollbarDragTarget::DialogPanel { win, panel } => {
-                let Some(dialog) = self.ui.dialog_mut(win) else {
-                    return;
-                };
-                let Some(viewport) = dialog.panel_viewport(panel) else {
-                    return;
-                };
-                let Some(bar) = viewport.scrollbar else {
-                    return;
-                };
-                let rel_row = row.saturating_sub(viewport.rect.top);
-                let thumb_top = bar.thumb_top_for_click(rel_row);
-                dialog.apply_panel_scrollbar_drag(panel, thumb_top);
             }
         }
     }

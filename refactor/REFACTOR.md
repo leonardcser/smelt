@@ -280,10 +280,33 @@ float migrations + Buffer-backed list/options/input panels landed
   Add `Overlay::blocks_agent` so confirm's engine-drain gate
   survives. List leaves now fire `SelectionChanged` on cursor move
   so confirm.lua tracks the selection across leaf transitions.
-- **C.9c** — delete `FloatConfig` / `Placement` / `PanelWidget` /
-  `dialog.rs` panel multiplexing once every dialog flips. The widget
-  trait + `OptionList` + `TextInput` widget shapes go with it (their
-  Lua-recipe replacements landed in C.7.x / C.8).
+- **C.9c.1** — delete the `dialog.rs` panel-multiplexing path now that
+  every dialog flipped to overlays in C.9b. `Dialog` widget +
+  `DialogConfig` + `PanelWidget` trait + `ListWidget` trait +
+  `PanelContent::Widget` variant + `PanelSnapshot` + `Ui::dialog_open`
+  / `dialog_mut` / `dialog` / `snapshot_dialog_panels` /
+  `focused_dialog_buffer_window` / `sync_float_content` go away. The
+  legacy widget shapes (`crates/ui/src/text_input.rs`,
+  `option_list.rs`) delete with them — their Lua-recipe replacements
+  landed in C.7.x / C.8. `WidgetEvent::{Submit, Cancel, SelectDefault}`
+  drop (no remaining emitters). `LuaInvoke`'s `&[PanelSnapshot]`
+  parameter goes; lua callbacks no longer pull-read panel state.
+  `PanelSpec` / `PanelHeight` / `PanelContent::Buffer` survive in
+  slimmed-down `dialog.rs` (still used by the overlay translator in
+  `tui::lua::ui_ops`). `_panel_focus` Lua FFI dies; `dialog.lua`
+  routes panel `:focus()` through `smelt.win.set_focus(leaf)` for
+  every panel kind (Rust `_open` returns leaves parallel-indexed to
+  `opts.panels`). `FloatConfig` / `Placement` stay alive — picker /
+  cmdline / notification still consume them.
+- **C.9c.2** — migrate cmdline + notification + picker dropdown to
+  Overlay + Anchor. Once the last `FloatConfig` consumer is gone,
+  delete `FloatConfig` + `Placement` + the legacy float compositor
+  layer + `WinConfig::Float` + `Ui::picker_open` /
+  `cmdline_open` / `notification_open` / `float_config` /
+  `float_at` / `focused_float`. The `WidgetEvent` enum + `Component`
+  trait can finally retire when their last consumers (Picker,
+  Cmdline, StatusBar, BufferView, Notification, WindowView) move
+  into the overlay-leaf model in P1.d.
 
 See `P1.md` for the sub-phase log.
 

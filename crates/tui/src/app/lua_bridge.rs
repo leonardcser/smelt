@@ -5,15 +5,17 @@
 use super::*;
 
 impl App {
-    /// Vim-mode label for the currently focused buffer Window. Asks
-    /// `Ui` for a focused dialog buffer panel first (so a dialog with
-    /// an interactive preview pane reports its own mode); falls back
-    /// to the active split (transcript / prompt). Returns `None` when
-    /// the focused surface is a widget panel or non-interactive
-    /// chrome — same as nvim's "widget windows have no mode."
+    /// Vim-mode label for the currently focused buffer Window. An
+    /// overlay-leaf Window with vim enabled (interactive preview
+    /// panes) reports its own mode; otherwise fall back to the active
+    /// split (transcript / prompt). Returns `None` when the focused
+    /// surface has no vim state — same as nvim's "no mode in widget
+    /// windows."
     pub(super) fn current_vim_mode_label(&self) -> Option<String> {
-        if let Some(win) = self.ui.focused_dialog_buffer_window() {
-            return win.vim.as_ref().map(|v| format!("{:?}", v.mode()));
+        if let Some(win) = self.ui.focused_window() {
+            if let Some(v) = win.vim.as_ref() {
+                return Some(format!("{:?}", v.mode()));
+            }
         }
         match self.app_focus {
             crate::app::AppFocus::Content => self
@@ -38,11 +40,8 @@ impl App {
         }
         self.last_prompt_text = current_text.clone();
         let lua = &self.lua;
-        let mut lua_invoke = |handle: ui::LuaHandle,
-                              win: ui::WinId,
-                              payload: &ui::Payload,
-                              panels: &[ui::PanelSnapshot]| {
-            lua.queue_invocation(handle, win, payload, panels);
+        let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
+            lua.queue_invocation(handle, win, payload);
         };
         self.ui.dispatch_event(
             ui::PROMPT_WIN,
@@ -87,12 +86,9 @@ impl App {
             let prepared: Vec<(mlua::Function, mlua::Table, u64)> = pending
                 .into_iter()
                 .filter_map(|inv| {
-                    let (func, payload) = self.lua.prepare_invocation(
-                        inv.handle,
-                        inv.win,
-                        &inv.payload,
-                        &inv.panels,
-                    )?;
+                    let (func, payload) =
+                        self.lua
+                            .prepare_invocation(inv.handle, inv.win, &inv.payload)?;
                     Some((func, payload, inv.handle.0))
                 })
                 .collect();

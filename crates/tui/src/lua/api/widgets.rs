@@ -508,43 +508,22 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
 fn register_dialog(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let dialog_tbl = lua.create_table()?;
 
-    // smelt.ui.dialog._open(opts) → (win_id, named_inputs).
-    // `named_inputs` is `{ name → leaf_win_id }` for overlay-routed
-    // input panels (empty for legacy widget paths). dialog.lua
-    // reads it at submit/dismiss time to resolve each named input
-    // panel's leaf and read its text via `smelt.win.buf` +
-    // `smelt.buf.get_line`. The richer `{ win, panels = {…} }`
-    // handle is still built Lua-side in `runtime/lua/smelt/dialog.lua`
-    // (`make_handle`) so the Rust surface stays small.
+    // smelt.ui.dialog._open(opts) → (win_id, leaves).
+    // `leaves` is a sequence parallel to `opts.panels`, holding the
+    // leaf WinId opened for each panel. `dialog.lua`'s `make_handle`
+    // pairs each spec with its leaf so panel handles can drive
+    // focus + per-panel queries (e.g. input `:text()`) through the
+    // standard `smelt.win.*` / `smelt.buf.*` surface.
     dialog_tbl.set(
         "_open",
         lua.create_function(|lua, opts: mlua::Table| -> LuaResult<(u64, mlua::Table)> {
             let result = crate::lua::with_app(|app| crate::lua::ui_ops::open_dialog(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("dialog.open: {e}")))?;
-            let named = lua.create_table()?;
-            for (name, win) in result.named_inputs {
-                named.set(name, win.0)?;
+            let leaves = lua.create_table()?;
+            for (i, win) in result.leaves.iter().enumerate() {
+                leaves.set(i + 1, win.0)?;
             }
-            Ok((result.root.0, named))
-        })?,
-    )?;
-
-    // Generic panel-focus primitive — panel handles built in
-    // `dialog.lua` close over `(win_id, panel_idx)` and call this
-    // when their `:focus()` method runs. Replaces confirm-specific
-    // shims like `_focus_reason` that used to hardcode panel indices.
-    // Scrolling deliberately isn't here: interactive content panels
-    // are full `Window`s now, so they scroll themselves via mouse
-    // wheel / vim motions when focused.
-    dialog_tbl.set(
-        "_panel_focus",
-        lua.create_function(|_, (win_id, panel_idx): (u64, usize)| {
-            crate::lua::with_app(|app| {
-                if let Some(dialog) = app.ui.dialog_mut(ui::WinId(win_id)) {
-                    dialog.focus_panel(panel_idx);
-                }
-            });
-            Ok(())
+            Ok((result.root.0, leaves))
         })?,
     )?;
 

@@ -2,29 +2,27 @@
 -- typed panel-handle factory `smelt.ui.dialog.open_handle(opts)` used
 -- by built-ins (confirm) that drive the dialog lifecycle directly.
 --
--- Rust exposes the low-level `smelt.ui.dialog._open(opts) -> win_id`
--- which synchronously creates the float + panels. Everything else —
--- handle construction, result building, custom keymaps, `on_select`
--- / `on_change` / `on_tick`, submit/dismiss routing — lives here.
+-- Rust exposes the low-level
+-- `smelt.ui.dialog._open(opts) -> (win_id, leaves)`. `leaves` is a
+-- 1-based sequence parallel to `opts.panels`, holding the leaf WinId
+-- opened for each panel. Everything else — handle construction,
+-- result building, custom keymaps, `on_select` / `on_change` /
+-- `on_tick`, submit/dismiss routing — lives here.
 
 local M = {}
 
 -- Single panel-handle factory: identity fields + `:focus()`. Buffer
 -- panels expose `.buf` so callers can mutate / re-render without
--- re-walking the spec. `kind = "input"` panels also expose `.leaf`
--- (the buffer-backed Window opened for the input) and a `:text()`
--- helper reading the live line via `smelt.win.buf` +
+-- re-walking the spec; every panel exposes `.leaf` (the buffer-backed
+-- Window opened for it). `kind = "input"` panels also expose a
+-- `:text()` helper reading the live line via `smelt.win.buf` +
 -- `smelt.buf.get_line`. Scrolling is the buffer's own job —
 -- interactive content panels handle wheel + vim motions natively
 -- when focused.
-local function make_panel(win_id, idx, spec, leaf)
-  local self = { kind = spec.kind, idx = idx, name = spec.name, buf = spec.buf, leaf = leaf }
+local function make_panel(spec, leaf)
+  local self = { kind = spec.kind, name = spec.name, buf = spec.buf, leaf = leaf }
   function self:focus()
-    if self.leaf then
-      smelt.win.set_focus(self.leaf)
-    else
-      smelt.ui.dialog._panel_focus(win_id, idx)
-    end
+    if self.leaf then smelt.win.set_focus(self.leaf) end
   end
   if spec.kind == "input" then
     function self:text()
@@ -38,17 +36,17 @@ local function make_panel(win_id, idx, spec, leaf)
 end
 
 -- Build the `{ win, panels, focus, close }` handle from a freshly
--- opened win_id and the original opts. `panels` is keyed by both
--- 1-based index *and* the optional `name` field on each spec, so
--- callers can do `d.panels[1]` or `d.panels.preview`.
-local function make_handle(win_id, opts, named_inputs)
-  named_inputs = named_inputs or {}
+-- opened win_id, the original opts, and the parallel `leaves`
+-- sequence returned by Rust. `panels` is keyed by both 1-based index
+-- *and* the optional `name` field on each spec, so callers can do
+-- `d.panels[1]` or `d.panels.preview`.
+local function make_handle(win_id, opts, leaves)
+  leaves = leaves or {}
   local panels = {}
   if type(opts.panels) == "table" then
     for i, spec in ipairs(opts.panels) do
       if type(spec) == "table" then
-        local leaf = spec.name and named_inputs[spec.name] or nil
-        local h = make_panel(win_id, i, spec, leaf)
+        local h = make_panel(spec, leaves[i])
         panels[i] = h
         if spec.name then panels[spec.name] = h end
       end
@@ -70,46 +68,30 @@ function smelt.ui.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.ui.dialog.open_handle: expected table of options", 2)
   end
-  local win_id, named_inputs = smelt.ui.dialog._open(opts)
+  local win_id, leaves = smelt.ui.dialog._open(opts)
   if type(win_id) ~= "number" then return nil end
-  return make_handle(win_id, opts, named_inputs)
+  return make_handle(win_id, opts, leaves)
 end
 
 -- Collect input text for every input panel in `opts.panels`. Used by
--- Submit / Dismiss to assemble the resume table. Each input panel's
--- leaf WinId arrives via `named_inputs` (populated Rust-side); we
--- read line 0 of the leaf's buffer for the live text.
-local function collect_inputs(_raw_ctx, input_panels, named_inputs)
+-- Submit / Dismiss to assemble the resume table. `input_leaves` is
+-- `name → leaf_win_id` (built once at open time). We read line 0 of
+-- each leaf's buffer for the live text.
+local function collect_inputs(input_leaves)
   local out = {}
-  for name, _ in pairs(input_panels) do
-    local leaf = named_inputs and named_inputs[name]
-    if leaf then
-      local buf = smelt.win.buf(leaf)
-      if buf then
-        out[name] = smelt.buf.get_line(buf, 1) or ""
-      else
-        out[name] = ""
-      end
-    else
-      out[name] = ""
-    end
+  for name, leaf in pairs(input_leaves) do
+    local buf = smelt.win.buf(leaf)
+    out[name] = (buf and smelt.buf.get_line(buf, 1)) or ""
   end
   return out
 end
 
 -- Build the keymap-callback ctx table (`{selected_index, inputs,
--- close, win}`) from a raw callback ctx (`{win, panels, …}`). `opts`
--- is the original `dialog.open` opts so we can walk panel metadata;
--- `win_id` is captured in the closing function.
-local function build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
+-- close, win}`) from a raw callback ctx (`{win, …}`).
+local function build_ctx(raw_ctx, win_id, task_id, selected_idx, input_leaves)
   local ctx = { win = raw_ctx.win }
-  if option_panel_idx then
-    local p = raw_ctx.panels and raw_ctx.panels[option_panel_idx]
-    if p and p.selected then
-      ctx.selected_index = p.selected
-    end
-  end
-  ctx.inputs = collect_inputs(raw_ctx, input_panels, named_inputs)
+  if selected_idx then ctx.selected_index = selected_idx end
+  ctx.inputs = collect_inputs(input_leaves)
   ctx.close = function()
     smelt.win.close(win_id)
     smelt.task.resume(task_id, {
@@ -128,13 +110,13 @@ function smelt.ui.dialog.open(opts)
     error("smelt.ui.dialog.open: expected table of options", 2)
   end
 
-  -- Walk panels once to find the (first) options panel and map input
-  -- names → panel indices. Done before opening so closure captures are
+  -- Walk panels once to find the (first) options panel and collect
+  -- input metadata. Done before opening so closure captures are
   -- ready when callbacks register.
   local option_panel_idx = nil
-  local input_panels = {}   -- name → 1-based panel index
-  local options_meta = {}   -- 1-based option index → {action, on_select}
+  local options_meta = {}    -- 1-based option index → {action, on_select}
   local input_on_change = {} -- panel index → on_change fn
+  local input_names = {}     -- 1-based panel index → name (for name lookup)
   if type(opts.panels) == "table" then
     for i, p in ipairs(opts.panels) do
       if type(p) == "table" then
@@ -151,7 +133,7 @@ function smelt.ui.dialog.open(opts)
         elseif p.kind == "list" and not option_panel_idx then
           option_panel_idx = i
         elseif p.kind == "input" then
-          input_panels[p.name or ("input_" .. i)] = i
+          input_names[i] = p.name or ("input_" .. i)
           if type(p.on_change) == "function" then
             input_on_change[i] = p.on_change
           end
@@ -160,40 +142,36 @@ function smelt.ui.dialog.open(opts)
     end
   end
 
-  -- Open the float synchronously. Rust returns
-  -- `(win_id, named_inputs)`; `named_inputs` is `{ name → leaf_win }`
-  -- for overlay-routed input panels (empty for legacy paths).
-  local win_id, named_inputs = smelt.ui.dialog._open(opts)
+  -- Open the float synchronously. `leaves` is parallel-indexed to
+  -- `opts.panels`.
+  local win_id, leaves = smelt.ui.dialog._open(opts)
   if type(win_id) ~= "number" then
     return { action = "dismiss", inputs = {} }
   end
 
+  -- Map input names → their leaf WinId so submit/dismiss can read the
+  -- live text without re-walking the panels.
+  local input_leaves = {}
+  for i, name in pairs(input_names) do
+    local leaf = leaves and leaves[i]
+    if leaf then input_leaves[name] = leaf end
+  end
+
   local task_id = smelt.task.alloc()
 
-  -- Submit handler. Fires when the focused options/list panel sees
-  -- Enter (via `WidgetEvent::Submit` auto-translation) or an input
-  -- panel submits its text. Build the result and resume.
+  -- Submit handler. Fires when the focused options/list/input leaf
+  -- sees Enter and bubbles `WinEvent::Submit` up to the root.
   smelt.win.on_event(win_id, "submit", function(raw_ctx)
-    local idx1 = nil
-    if option_panel_idx then
-      local p = raw_ctx.panels and raw_ctx.panels[option_panel_idx]
-      if p and p.selected then
-        idx1 = p.selected
-      end
-    end
-    -- Overlay path: list/options leaves fire Submit with
-    -- `Payload::Selection { index }`, surfaced as `raw_ctx.index`
-    -- (1-based). No `panels` array is built for overlays.
-    if idx1 == nil and raw_ctx.index then
-      idx1 = raw_ctx.index
-    end
+    -- List/options leaves fire Submit with `Payload::Selection`,
+    -- surfaced as `raw_ctx.index` (1-based).
+    local idx1 = raw_ctx.index
     local action = "select"
     local on_select_fn = nil
     if idx1 and options_meta[idx1] then
       action = options_meta[idx1].action
       on_select_fn = options_meta[idx1].on_select
     end
-    local inputs = collect_inputs(raw_ctx, input_panels, named_inputs)
+    local inputs = collect_inputs(input_leaves)
     if type(on_select_fn) == "function" then
       local ok, err = pcall(on_select_fn)
       if not ok then
@@ -209,11 +187,11 @@ function smelt.ui.dialog.open(opts)
   end)
 
   -- Dismiss handler. Fires on Esc or a configured dismiss key.
-  smelt.win.on_event(win_id, "dismiss", function(raw_ctx)
+  smelt.win.on_event(win_id, "dismiss", function()
     smelt.win.close(win_id)
     smelt.task.resume(task_id, {
       action = "dismiss",
-      inputs = collect_inputs(raw_ctx, input_panels, named_inputs),
+      inputs = collect_inputs(input_leaves),
     })
   end)
 
@@ -224,7 +202,7 @@ function smelt.ui.dialog.open(opts)
       if type(km) == "table" and km.key and type(km.on_press) == "function" then
         local on_press = km.on_press
         smelt.win.set_keymap(win_id, km.key, function(raw_ctx)
-          local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
+          local ctx = build_ctx(raw_ctx, win_id, task_id, nil, input_leaves)
           local ok, err = pcall(on_press, ctx)
           if not ok then
             smelt.notify_error("dialog keymap: " .. tostring(err))
@@ -235,11 +213,10 @@ function smelt.ui.dialog.open(opts)
   end
 
   -- Per-input `on_change` hooks. A single TextChanged event fires for
-  -- the whole dialog; fan out to each registered input (there's
-  -- usually one, but the dispatch handles many).
+  -- the whole dialog; fan out to each registered input.
   if next(input_on_change) ~= nil then
     smelt.win.on_event(win_id, "text_changed", function(raw_ctx)
-      local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
+      local ctx = build_ctx(raw_ctx, win_id, task_id, nil, input_leaves)
       for _, fn in pairs(input_on_change) do
         local ok, err = pcall(fn, ctx)
         if not ok then
@@ -254,7 +231,7 @@ function smelt.ui.dialog.open(opts)
   if type(opts.on_tick) == "function" then
     local on_tick = opts.on_tick
     smelt.win.on_event(win_id, "tick", function(raw_ctx)
-      local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
+      local ctx = build_ctx(raw_ctx, win_id, task_id, nil, input_leaves)
       local ok, err = pcall(on_tick, ctx)
       if not ok then
         smelt.notify_error("dialog on_tick: " .. tostring(err))

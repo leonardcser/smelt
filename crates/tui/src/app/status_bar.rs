@@ -119,14 +119,18 @@ impl App {
         }
 
         // Vim mode. Resolve the source Window with the same precedence
-        // as the keymap dispatcher: a focused dialog's interactive
-        // buffer panel wins, then the split under `app_focus`. If
-        // some other float (picker, notification, widget-only dialog)
-        // has focus, no mode shows — those windows have no buffer
-        // cursor, same model nvim uses.
-        let (vim_enabled, vim_mode) = if let Some(win) = self.ui.focused_dialog_buffer_window() {
-            (win.vim.is_some(), win.vim.as_ref().map(|v| v.mode()))
-        } else if self.ui.focused_float().is_some() {
+        // as the keymap dispatcher: a focused overlay-leaf Window with
+        // vim enabled wins, then the split under `app_focus`. If
+        // some other float (picker, notification) has focus or the
+        // focused overlay leaf has no vim, no mode shows — those
+        // windows have no buffer cursor, same model nvim uses.
+        let focused_window_with_vim = self
+            .ui
+            .focused_window()
+            .and_then(|w| w.vim.as_ref().map(|v| v.mode()));
+        let (vim_enabled, vim_mode) = if let Some(mode) = focused_window_with_vim {
+            (true, Some(mode))
+        } else if self.ui.focused_float().is_some() || self.ui.focused_overlay().is_some() {
             (false, None)
         } else {
             match self.app_focus {
