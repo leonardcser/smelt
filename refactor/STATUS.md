@@ -6,51 +6,48 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** pre-P0 (test baseline harness landing; demolition not
-started).
+**Phase:** P0 landed (orthogonal deletions). Five structural deletions
+deferred to P1.0, paired with their replacements.
 
-**Tree:** green. All features working. Two integration scenarios
-landed (`plain_turn`, `thinking_then_text`) — both green and
-deterministic. ~3 to 8 more scenarios still want to land before P0.
+**Tree:** green. `cargo nextest run --workspace` — 901 passed.
+`cargo nextest run --test scenarios` — 6 baseline scenarios green
+(5 regression gates + smoke).
 
-**Last update:** 2026-04-29. Testing strategy doc + harness
-scaffolding committed (`dd86689`). First two scenarios committed
-(`22e3d74`): wiremock'd Anthropic SSE → headless smelt → `insta`
-snapshot of the JSONL event stream. Determinism handled via
-redactions on `elapsed_ms` / `avg_tps` / `tokens_per_sec`.
+**Last update:** 2026-04-29. P0 landed across three commits: yank /
+mouse-with-lua removal earlier, `selection_style` fields (`4a2e368`),
+`BufferList` (`60db49f`). Strategy shifted mid-phase: original plan
+ended P0 red, but the four remaining structural deletions
+(`BufferView`, theme constants, `PanelWidget` multiplexing, `Component`
+trait, `Placement` enum) couldn't land without their P1 replacements
+existing. Rather than burn the green-tree baseline, those moved to a
+new P1.0 sub-phase that pairs each deletion with its replacement in
+the same commit. See `P0.md` "Decisions made while coding".
 
 **Note for next session:** puml + SVG are in sync. If the puml is
 edited, regenerate via `plantuml -tsvg
 refactor/tui-ui-architecture-target.puml`. Run `refactor/check.sh`
-before declaring anything done. Re-run snapshot tests with
-`cargo nextest run --test scenarios` and review diffs by inspecting
-`tests/snapshots/*.snap.new` (no `cargo-insta` binary installed in
-this worktree — bless by `mv` or install it).
+before declaring anything done.
 
 ## What's next
 
 In order:
 
-1. **Finish the baseline scenario set.** `plain_turn` and
-   `thinking_then_text` are in. Still want roughly: incomplete stream,
-   provider error path, plugin tool happy-path (Lua tool + hook,
-   tests the dispatch round-trip), permission deny, mode change.
-   Goal is 5–10 scenarios that lock the behaviours most likely to
-   silently shift during demolition. Stop when coverage feels
-   adequate, not when a fixed count is hit.
-2. **Start P0** — clear the deck. Delete BufferView, Component,
-   PanelWidget, the 6-variant Placement, theme constants, scattered
-   selection_style, MouseAction::Yank, etc. End state: red tree, clean
-   bones. Write `refactor/P0.md`.
+1. **Start P1.0** — pair each deferred structural deletion with its
+   replacement. First commit is the smallest: `ui::Theme` registry +
+   `crates/tui/src/theme.rs` constants module deletion in one go
+   (tracked task `20260426-083607`). Then P1.a..P1.d absorb the
+   remaining four deletions as part of their primitive landings.
+2. **P1.a (`Buffer` rewrite)**, **P1.b (`LayoutTree`)**, **P1.c
+   (`Overlay`)**, **P1.d (`Window` as the only interactive unit)**
+   per `REFACTOR.md` § P1.
 
-Recently shipped: `TRACE.md` (vertical-slice walk-through, also
-serves as the concrete `init.lua` + `bash.lua` API example). Five
-small design holes the trace surfaced got fixed in the canonical docs
-in the same commit. `TESTING.md` (three-layer testing strategy:
-marker DSL for model state / headless+wiremock for engine integration
-/ grid render + Pilot for rendering) added as the canonical testing
-reference. Test harness + first two scenarios (`plain_turn`,
-`thinking_then_text`) landed; goldens are deterministic across runs.
+Recently shipped: P0 orthogonal deletions
+(`selection_style`/`set_selection_bg` shim, `handle_mouse_with_lua` +
+`classify_widget_action`, `MouseAction::Yank`/`WidgetEvent::Yank`,
+`BufferList`). `TESTING.md` (three-layer testing strategy). Test
+harness + 5 baseline scenarios (`plain_turn`, `thinking_then_text`,
+`incomplete_stream`, `provider_auth_error`, `streaming_concat_across_deltas`).
+`TRACE.md` vertical-slice walk-through.
 
 ## Open questions / blocked
 
@@ -77,7 +74,9 @@ None of these block the start of P0 or P1.
 (Phases as they complete. Newest first. One line each, link to the
 P-log.)
 
-- _(no phases landed yet)_
+- **P0 — Clear the deck (orthogonal half).** 4 of 9 deletions
+  shipped; 5 structural deletions deferred to P1.0. Tree green; 901
+  workspace tests + 6 baseline scenarios passing. See `P0.md`.
 
 ## How to keep this file current
 

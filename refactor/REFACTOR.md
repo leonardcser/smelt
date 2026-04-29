@@ -111,27 +111,25 @@ on disk under `crates/tui/tests/snapshots/`.
 
 ## P0 — Clear the deck
 
-**Goal:** delete the things the target architecture removes, before we
-build their replacements. This is intentionally destructive. Tree is red
-at the end — that's fine.
+**Goal:** delete the noise that the target architecture removes, while
+the rest of the tree still compiles. Originally framed as "delete
+everything, leave the tree red"; the working reality is that the
+load-bearing structural items (BufferView, theme constants, PanelWidget
+multiplexing, Component trait, Placement enum) cannot be deleted without
+their P1 replacements existing — call sites have nothing to point at.
 
-- Delete `crates/ui/src/buffer_view.rs` and every `BufferView::new(...)`
-  call site. Window will read `Buffer` directly after P1.
-- Delete `crates/ui/src/component.rs` (`Component` trait, `WidgetEvent`).
-  Window is the only interactive unit in the target.
-- Delete `PanelWidget` trait and the panel-widget multiplexing inside
-  `crates/ui/src/dialog.rs`. Dialogs become "Overlay + LayoutTree + N
-  Windows" in P1.
-- Delete the 6-variant `Placement` enum and the `add_layer` /
-  `register_split` / `set_layer_rect` / `focus_layer` stringly-typed
-  layer plumbing. Replaced by `splits: LayoutTree` + `overlays:
-  Vec<Overlay>` in P1.
-- Delete `crates/tui/src/theme.rs` constants module (tracked task
-  `20260426-083607`). The theme registry replaces it.
+P0 lands the orthogonal deletions that don't need a replacement. The
+structural deletions move to P1's opening sub-phase (P1.0) where each
+demolition is paired with the new primitive that replaces it, in the
+same commit.
+
+P0 deletions (orthogonal — green tree throughout):
+
 - Delete the per-widget `selection_style` fields on `TextInput`,
   `NotificationStyle`, `DialogConfig`, `DrawContext`, `Compositor`,
-  and the `Ui::set_selection_bg` / `Ui::selection_style()` shim. All
-  selection styling reads `theme.get("Visual")` after P1.
+  and the `Ui::set_selection_bg` / `Ui::selection_style()` shim.
+  Selection paint disappears from these widgets entirely — re-added in
+  P1 via `theme.get("Visual")`.
 - Delete `Ui::handle_mouse_with_lua` / `Ui::handle_mouse_for` /
   `classify_widget_action`. Mouse dispatch moves to App via `Host`
   in P1.
@@ -141,8 +139,23 @@ at the end — that's fine.
   list-of-buffers view in the new model builds it as N Windows in an
   Overlay during P4 — no separate widget type.
 
-End of P0: `ui` doesn't compile. `tui` doesn't compile. The bones of
-the target are visible because the noise is gone.
+Deferred to P1.0 (structural — paired with their replacements):
+
+- `crates/ui/src/buffer_view.rs` + every `BufferView::new(...)` call
+  site. Pairs with Window absorbing rendering responsibility.
+- `crates/tui/src/theme.rs` constants module. Pairs with the
+  `ui::Theme` registry (tracked task `20260426-083607`).
+- `PanelWidget` trait + panel-widget multiplexing in `dialog.rs`.
+  Pairs with the "Overlay + LayoutTree + N Windows" dialog rebuild.
+- `crates/ui/src/component.rs` (`Component` trait, `WidgetEvent`).
+  Pairs with Window becoming the only interactive unit.
+- 6-variant `Placement` enum + `add_layer` / `register_split` /
+  `set_layer_rect` / `focus_layer` plumbing. Pairs with `splits:
+  LayoutTree` + `overlays: Vec<Overlay>`.
+
+End of P0: tree still green. The 5 baseline scenarios still run. The
+noise that doesn't need a replacement is gone; the structural debt
+walks into P1 with its replacement next to it.
 
 ---
 
@@ -153,6 +166,25 @@ the target are visible because the noise is gone.
 theme registry. Everything downstream of `ui` rides on this.
 
 Sub-phases below can interleave but each must end at a coherent boundary.
+
+### P1.0 — Structural deletions deferred from P0
+
+Each item below is paired: delete the legacy primitive in the same
+commit that introduces its target replacement. Tree may flicker red
+mid-sub-phase but each commit ends green.
+
+- `BufferView` deletion paired with `Window::render(buf, grid)` taking
+  on rendering responsibility (P1.d).
+- `crates/tui/src/theme.rs` constants module deletion paired with the
+  `ui::Theme` registry landing (tracked task `20260426-083607`).
+- `PanelWidget` trait + `dialog.rs` panel-widget multiplexing deletion
+  paired with the "Overlay + LayoutTree + N Windows" dialog rebuild
+  (P1.c).
+- `Component` trait + remaining `WidgetEvent` deletion paired with
+  Window becoming the only interactive unit (P1.d).
+- `Placement` enum + `add_layer` / `register_split` / `set_layer_rect`
+  / `focus_layer` plumbing deletion paired with `splits: LayoutTree` +
+  `overlays: Vec<Overlay>` (P1.b + P1.c).
 
 ### P1.a — `Buffer` rewrite
 
