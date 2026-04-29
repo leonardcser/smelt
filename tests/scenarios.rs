@@ -70,6 +70,78 @@ async fn plain_turn() {
     });
 }
 
+/// Provider returns 401 Unauthorized. Engine maps to a non-retryable
+/// `Auth` error; the JSONL event stream still ends with `TurnComplete`
+/// (no assistant message). The auth failure surfaces through stderr,
+/// not through an `EngineEvent::TurnError`. Worth pinning so we notice
+/// if the refactor moves the error onto the event stream.
+#[tokio::test]
+async fn provider_auth_error() {
+    let h = Harness::new().await;
+    h.write_config("anthropic", "claude-test");
+    h.write_init_lua("");
+    h.mount_http_error(
+        401,
+        serde_json::json!({
+            "error": { "type": "authentication_error", "message": "invalid api key" }
+        }),
+    )
+    .await;
+
+    let out = h.run("hi", "test/claude-test");
+    insta::assert_json_snapshot!(out.events, {
+        "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
+        "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
+        "[].TokenUsage.tokens_per_sec" => "[tps]",
+    });
+}
+
+/// Incomplete stream: provider sends a `text_delta` then closes the
+/// connection without `content_block_stop` / `message_delta` /
+/// `message_stop`. Engine treats EOF as the end of the turn and emits
+/// a normal `TurnComplete` with the partial text. Token usage is
+/// missing the `completion_tokens` field (no `message_delta` carried
+/// it).
+#[tokio::test]
+async fn incomplete_stream() {
+    let h = Harness::new().await;
+    h.write_config("anthropic", "claude-test");
+    h.write_init_lua("");
+    h.mount_anthropic_sse(&[
+        serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": { "input_tokens": 4, "output_tokens": 0 }
+            }
+        }),
+        serde_json::json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "partial" }
+        }),
+    ])
+    .await;
+
+    let out = h.run("hi", "test/claude-test");
+    insta::assert_json_snapshot!(out.events, {
+        "[].TurnComplete.meta.elapsed_ms" => "[elapsed_ms]",
+        "[].TurnComplete.meta.avg_tps" => "[avg_tps]",
+        "[].TokenUsage.tokens_per_sec" => "[tps]",
+    });
+}
+
 /// Thinking + text: provider streams a `thinking_delta` then a
 /// `text_delta`. Engine emits ThinkingDelta, then TextDelta, then
 /// Messages with the assistant content (thinking is dropped from the
