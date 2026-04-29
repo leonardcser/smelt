@@ -69,73 +69,21 @@ impl App {
         // policy needs App-level focus knowledge.
         if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
             && self.ui.float_at(me.row, me.column).is_some()
+            && self.begin_dialog_scrollbar_drag_if_hit(me.row, me.column)
         {
-            {
-                if self.begin_dialog_scrollbar_drag_if_hit(me.row, me.column) {
-                    self.mouse_drag_active = true;
-                    return EventOutcome::Redraw;
-                }
-                let lua = &self.lua;
-                let mut lua_invoke =
-                    |handle: ui::LuaHandle,
-                     win: ui::WinId,
-                     payload: &ui::Payload,
-                     panels: &[ui::PanelSnapshot]| {
-                        lua.queue_invocation(handle, win, payload, panels);
-                    };
-                let result = self.ui.handle_mouse_with_lua(me, &mut lua_invoke);
-                match result {
-                    Some((win, ui::KeyResult::Capture)) => {
-                        // Component asked for drag capture (e.g. TextInput
-                        // text-select). Subsequent `Drag` / `Up` route to
-                        // the same layer regardless of pointer position.
-                        self.drag_on_layer = Some(win);
-                        self.mouse_drag_active = true;
-                    }
-                    Some((win, ui::KeyResult::Action(ui::WidgetEvent::Select(idx)))) => {
-                        // Completer picker click: commit the click index
-                        // through the same path Tab uses (insert label,
-                        // close picker, re-sync if /command).
-                        let is_completer_picker =
-                            self.input.completer.as_ref().and_then(|c| c.picker_win) == Some(win);
-                        if is_completer_picker {
-                            if let Some((Some(pwin), _was_command)) =
-                                self.input.commit_completer_at(idx)
-                            {
-                                self.input.pending_picker_close.push(pwin);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                self.flush_lua_callbacks();
-                return EventOutcome::Redraw;
-            }
+            self.mouse_drag_active = true;
+            return EventOutcome::Redraw;
         }
 
-        // Drag / Up while a layer holds capture: route directly to that
-        // layer, bypassing pane drag-select logic. Same model as the
-        // existing scrollbar drag above.
         if self.drag_on_layer.is_some()
             && matches!(
                 me.kind,
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             )
+            && matches!(me.kind, MouseEventKind::Up(MouseButton::Left))
         {
-            let win = self.drag_on_layer.unwrap();
-            let lua = &self.lua;
-            let mut lua_invoke = |handle: ui::LuaHandle,
-                                  win: ui::WinId,
-                                  payload: &ui::Payload,
-                                  panels: &[ui::PanelSnapshot]| {
-                lua.queue_invocation(handle, win, payload, panels);
-            };
-            let _ = self.ui.handle_mouse_for(win, me, &mut lua_invoke);
-            if matches!(me.kind, MouseEventKind::Up(MouseButton::Left)) {
-                self.drag_on_layer = None;
-                self.mouse_drag_active = false;
-            }
-            self.flush_lua_callbacks();
+            self.drag_on_layer = None;
+            self.mouse_drag_active = false;
             return EventOutcome::Redraw;
         }
 

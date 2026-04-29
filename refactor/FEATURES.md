@@ -181,7 +181,7 @@ to invoke_ the feature.
 | Cancel (Ctrl+C)                                 | `app/events.rs` + `engine/cancel.rs`    | P6                                               | working |
 | Double-Esc (cancel + drain queue)               | `app/events.rs`                         | P6 (Esc chain)                                   | working |
 | Mouse wheel scroll                              | `app/mouse.rs`                          | P1/P2                                            | working |
-| Mouse click focus                               | `app/mouse.rs`                          | P1.f (HitTarget + Host)                          | working |
+| Mouse click focus                               | `app/mouse.rs`                          | P1.f (HitTarget + Host)                          | offline-P0 |
 | Mouse click position cursor                     | `app/mouse.rs` + `ui/window.rs`         | P1.d                                             | working |
 | Drag-extend selection (auto-copy on release)    | `ui/window.rs` + `app/mouse.rs`         | P1 (host.clipboard from Window::handle)          | offline-P0 |
 | Double-click WORD yank (vim W: whitespace-delimited, punctuation in) | `ui/window.rs` (`select_big_word_at_transparent`) | P1 (host.clipboard)                              | offline-P0 |
