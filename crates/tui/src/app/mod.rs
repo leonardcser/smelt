@@ -158,8 +158,10 @@ pub struct App {
     /// spam one toast per frame — only re-notify when the message
     /// changes; clear the entry on a successful tick.
     statusline_last_errors: HashMap<String, String>,
-    /// Open `ui::Notification` float, if one is visible. Dismissed on
-    /// any key (see `handle_overlay_keys`). `None` when no toast.
+    /// Leaf `WinId` of the open notification overlay, if one is
+    /// visible. Dismissed on any key (see `handle_overlay_keys`).
+    /// `None` when no toast. Closing the leaf via `close_float`
+    /// cascades through `overlay_close` to remove the overlay.
     pub notification: Option<ui::WinId>,
     /// Nvim-style `:` command line as a compositor float. `Some(win)`
     /// while the prompt is active; the `ui::Cmdline` component on that
@@ -753,50 +755,100 @@ impl App {
     }
 
     pub fn notify(&mut self, message: String) {
-        self.open_notification(message, ui::NotificationLevel::Info);
+        self.open_notification(message, false);
     }
 
     pub fn notify_error(&mut self, message: String) {
-        self.open_notification(message, ui::NotificationLevel::Error);
+        self.open_notification(message, true);
     }
 
-    fn open_notification(&mut self, message: String, level: ui::NotificationLevel) {
+    fn open_notification(&mut self, message: String, is_error: bool) {
         // Replace any existing toast — one at a time.
         if let Some(win) = self.notification.take() {
             self.close_float(win);
         }
-        let style = ui::NotificationStyle {
-            info_label: ui::Style {
-                bold: true,
-                ..Default::default()
-            },
-            error_label: ui::Style {
-                bold: true,
-                ..self.ui.theme().get("ErrorMsg")
-            },
-            message: ui::Style::dim(),
-            background: ui::Style::default(),
+
+        let label = if is_error { "error" } else { "info" };
+        let indent = " ";
+        let gap = "  ";
+        let line = format!("{indent}{label}{gap}{message}");
+
+        let buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
+            modifiable: false,
+            ..Default::default()
+        });
+
+        let label_start = indent.len() as u16;
+        let label_end = label_start + label.len() as u16;
+        let msg_start = label_end + gap.len() as u16;
+        let msg_end = msg_start + message.chars().count() as u16;
+
+        let label_color = if is_error {
+            self.ui.theme().get("ErrorMsg").fg
+        } else {
+            None
         };
-        // Position: one row above the prompt, full width. Rect is
-        // refreshed each frame by `sync_notification_float`.
-        let (tw, _th) = self.ui.terminal_size();
-        let config = ui::FloatConfig {
-            placement: ui::Placement::Manual {
-                anchor: ui::Corner::NW,
-                row: 0,
-                col: 0,
-                width: ui::Constraint::Length(tw),
-                height: ui::Constraint::Length(1),
+        if let Some(b) = self.ui.buf_mut(buf) {
+            b.set_all_lines(vec![line]);
+            b.add_highlight(
+                0,
+                label_start,
+                label_end,
+                ui::buffer::SpanStyle {
+                    fg: label_color,
+                    bold: true,
+                    ..Default::default()
+                },
+            );
+            b.add_highlight(
+                0,
+                msg_start,
+                msg_end,
+                ui::buffer::SpanStyle {
+                    dim: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let Some(win) = self.ui.win_open_split(
+            buf,
+            ui::SplitConfig {
+                region: "notification".into(),
+                gutters: Default::default(),
             },
-            border: ui::Border::None,
-            title: None,
-            // Sits below dialogs (default float zindex 50) so a toast
+        ) else {
+            return;
+        };
+        if let Some(w) = self.ui.win_mut(win) {
+            w.focusable = false;
+        }
+
+        // One row above the prompt, full screen width. Inner Hbox uses
+        // `Percentage(100)` so the layout's natural width follows the
+        // terminal cap each frame; outer Vbox fixes height at 1 row.
+        let layout = ui::LayoutTree::vbox(vec![(
+            ui::Constraint::Length(1),
+            ui::LayoutTree::hbox(vec![(
+                ui::Constraint::Percentage(100),
+                ui::LayoutTree::leaf(win),
+            )]),
+        )]);
+        let _overlay_id = self.ui.overlay_open(
+            ui::Overlay::new(
+                layout,
+                ui::layout::Anchor::Win {
+                    target: ui::PROMPT_WIN,
+                    attach: ui::Corner::NW,
+                    row_offset: -1,
+                    col_offset: 0,
+                },
+            )
+            // Sits below dialogs (default overlay z 50) so a toast
             // never obscures a modal asking for input.
-            zindex: 40,
-            focusable: false,
-            blocks_agent: false,
-        };
-        self.notification = self.ui.notification_open(config, message, level, style);
+            .with_z(40),
+        );
+        self.notification = Some(win);
     }
 
     pub fn dismiss_notification(&mut self) {

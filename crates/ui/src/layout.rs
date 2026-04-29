@@ -398,8 +398,8 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
 }
 
 /// Which corner of a rectangle is its anchor point. Used by
-/// `Placement::Manual` and by `Anchor::Win { target, attach }` to
-/// specify which corner of the target window the overlay attaches
+/// `Placement::Manual` and by `Anchor::Win { target, attach, .. }`
+/// to specify which corner of the target window the overlay attaches
 /// to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Corner {
@@ -433,12 +433,16 @@ pub enum Anchor {
         col_offset: i32,
     },
     /// Anchored to another window. The overlay's `attach` corner
-    /// sits on the corresponding edge of the target window's rect.
-    /// Used for prompt-anchored pickers (completers, history search,
-    /// command palette).
+    /// sits on the corresponding edge of the target window's rect,
+    /// shifted by `(row_offset, col_offset)`. Negative offsets pull
+    /// the overlay above / left of the target — e.g. a one-line
+    /// notification one row above the prompt is `attach: NW,
+    /// row_offset: -1, col_offset: 0`.
     Win {
         target: crate::WinId,
         attach: Corner,
+        row_offset: i32,
+        col_offset: i32,
     },
     /// Docked to the bottom of the screen. The overlay's natural
     /// height clamps to `term_h - above_rows` (reserve room for the
