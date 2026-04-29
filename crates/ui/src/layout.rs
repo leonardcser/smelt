@@ -295,6 +295,26 @@ impl LayoutTree {
         }
     }
 
+    /// Leaf `WinId`s in document (depth-first, declaration) order.
+    /// Used by Tab cycling to walk focusable windows in a stable
+    /// sequence the user can predict.
+    pub fn leaves_in_order(&self) -> Vec<crate::WinId> {
+        let mut out = Vec::new();
+        self.collect_leaves(&mut out);
+        out
+    }
+
+    fn collect_leaves(&self, out: &mut Vec<crate::WinId>) {
+        match self {
+            LayoutTree::Leaf(w) => out.push(*w),
+            LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
+                for (_, child) in items {
+                    child.collect_leaves(out);
+                }
+            }
+        }
+    }
+
     /// Natural `(width, height)` of this tree given an outer cap. Used
     /// by overlay sizing: `Length` / `Percentage` / `Ratio` / `Min` /
     /// `Max` contribute their resolved sizes along the parent axis;
@@ -932,6 +952,27 @@ mod tests {
             with_sep.natural_size((80, 24)),
             plain.natural_size((80, 24)),
         );
+    }
+
+    #[test]
+    fn leaves_in_order_walks_depth_first() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Fill, LayoutTree::leaf(A)),
+            (
+                Constraint::Length(5),
+                LayoutTree::hbox(vec![
+                    (Constraint::Fill, LayoutTree::leaf(B)),
+                    (Constraint::Fill, LayoutTree::leaf(C)),
+                ]),
+            ),
+        ]);
+        assert_eq!(tree.leaves_in_order(), vec![A, B, C]);
+    }
+
+    #[test]
+    fn leaves_in_order_single_leaf() {
+        let tree = LayoutTree::leaf(A);
+        assert_eq!(tree.leaves_in_order(), vec![A]);
     }
 
     #[test]
