@@ -6,15 +6,18 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** P1.0 renderer-side migration complete. Atomic state
-migration pending (deletion of `crates/tui/src/theme.rs`).
+**Phase:** P1.0 theme registry landed end-to-end. Atomic state
+collapsed into `ui::Theme`; `crate::theme::*` is now a small
+smelt-specific init module (`populate_ui_theme` + `detect_background`
++ `PRESETS`).
 
-**Tree:** green. `cargo nextest run --workspace` — 908 passed (901
-from P0 boundary + 7 new theme registry tests). `cargo nextest run
---test scenarios` — 6 baseline scenarios green.
+**Tree:** green. `cargo nextest run --workspace` — 914 passed (908
+from prior boundary + 6 new tests for atomic-on-Theme + helper-
+function direct coverage). `cargo nextest run --test scenarios` — 6
+baseline scenarios green.
 
-**Last update:** 2026-04-29. P1.0 theme registry landing across 11
-commits (`decb0ab`..`16beb71`):
+**Last update:** 2026-04-29. P1.0 theme registry landing across 12
+commits (`decb0ab`..`e489a79`):
 
 - `decb0ab` — `ui::Theme` registry type (HashMap groups + links).
 - `177ac4c` — plumbed through `DrawContext`; `Ui` owns it.
@@ -36,37 +39,35 @@ commits (`decb0ab`..`16beb71`):
 - `7aadcd2` — threaded `&ui::Theme` through
   `WindowView::set_soft_cursor` (last renderer-side `theme::is_light`
   caller).
+- `e489a79` — collapsed atomics into `ui::Theme`. `accent`, `slug`,
+  `is_light` live as fields with proper accessors; the per-frame
+  `populate_ui_theme()` reads them and rewrites the `Smelt*` groups.
+  Lua API closures access theme via `with_app(|app| app.ui.theme())`
+  — no global state on either side. Inline ANSI helpers in
+  `headless.rs` use literal `Color::Red` / `Color::AnsiValue(77)`
+  rather than const aliases. Syntect's light/dark hint moved into
+  `content/highlight/mod.rs` as a self-contained mirror updated by
+  `populate_ui_theme()` (avoids threading `&Theme` through 14 syntax
+  call sites for one branch).
 
-Migration tally: ~42 of 50 `crate::theme::*` call sites converted; ~8
-remain. The remaining sites are essential host-module surface that
-the registry depends on, not migration targets per se:
-
-- **Atomic plumbing** (5): `populate_ui_theme()` calls in
-  `format.rs:102`, `to_buffer.rs:159` (test fixture),
-  `app/mod.rs:841`, `app/render_loop.rs:13`; `detect_background()` in
-  `app/mod.rs:840`. These keep registry and atomics coherent each
-  frame.
-- **Atomic mutators** (7): `accent_value`/`set_accent` at startup
-  (`app/mod.rs:535,537`), in Lua bindings (`lua/api/mod.rs:189`,
-  `lua/api/widgets.rs:35`), and 4 test sites in `lua/mod.rs`.
-- **Light/dark metadata** (5): `is_light()` reads in
-  `transcript.rs:505,544`, `content/highlight/mod.rs:32`,
-  `lua/api/widgets.rs:64`, `status_bar.rs:74` slug fallback.
-- **Preset list** (2): `lua/api/mod.rs:139` `preset_by_name`,
-  `lua/api/widgets.rs:73` PRESETS iter — both legitimate uses of
-  static config data.
-- **Headless logs** (3): `app/headless.rs:122,125,145` — ANSI escape
-  sequences for stderr logs; no Ui access; pure const colors.
-
-Truly deleting `crates/tui/src/theme.rs` requires moving the atomic
-state (accent/slug/light) into `ui::Theme` itself, which is a
-separate sub-phase of P1.0. For now, the host module's role is
-narrowed: it's the atomic state holder + light/dark detector +
-preset list; the registry is the lookup surface every renderer reads
-through.
+`crate::theme::*` is now narrow:
+- `populate_ui_theme(&mut Theme)` — initializes `Smelt*` highlight
+  groups from `theme.is_light()` + `theme.accent()` + `theme.slug()`.
+- `detect_background(&mut Theme)` — OS-level OSC 11 / `$COLORFGBG`
+  probe; sets `theme.set_light(...)` if successful.
+- `PRESETS` — preset accent picker list (12 colors).
+- `preset_by_name(&str) -> Option<u8>` — Lua API helper.
+- `DEFAULT_ACCENT` re-export from `ui::theme::DEFAULT_ACCENT`.
 
 P0 closed: 4 of 9 deletions shipped (orthogonal); 5 structural
-deletions deferred to P1.0 sub-phase (paired with replacements).
+deletions still deferred to later P1 sub-phases (paired with
+replacements):
+- `BufferView` deletion paired with `Window::render(buf, grid)` —
+  P1.d.
+- `PanelWidget` trait + dialog.rs panel multiplexing — P1.c.
+- `Component` trait + remaining `WidgetEvent` — P1.d.
+- `Placement` enum + `add_layer`/`register_split` plumbing — P1.b +
+  P1.c.
 
 **Note for next session:** puml + SVG are in sync. If the puml is
 edited, regenerate via `plantuml -tsvg
@@ -75,22 +76,24 @@ before declaring anything done.
 
 ## What's next
 
-Two natural next moves; needs user direction:
+Pick a P1 sub-phase to tackle. Each is a substantial rewrite:
 
-1. **Finish atomic theme state migration.** Move `ACCENT_VALUE`,
-   `SLUG_COLOR_VALUE`, `LIGHT_THEME` onto `ui::Theme`; refactor
-   `lua/api/widgets.rs` + `lua/api/mod.rs` theme functions to read
-   through App's theme (touches Lua plugin surface but stays
-   compatible). Then `crates/tui/src/theme.rs` shrinks to just
-   light/dark detection (`detect_background`) + `PRESETS` list +
-   headless ANSI helpers, or moves entirely into other modules.
-2. **Move to next P1 sub-phase** (P1.a Buffer rewrite, P1.b
-   LayoutTree, P1.c Overlay, or P1.d Window-as-only-interactive).
-   Each is a much bigger rewrite than P1.0; pick based on which
-   downstream surgery to start first.
+1. **P1.a — `Buffer` rewrite** (extmarks + namespaces + `Buffer::attach`
+   parser hooks). Mirrors `nvim_buf_set_extmark`. This is the
+   foundation everything else rides on.
+2. **P1.b — `LayoutTree`**. `Vbox`/`Hbox`/`Leaf(WinId)` with
+   constraints; container chrome (border/title/separator/gap).
+3. **P1.c — `Overlay` replacing `Float`**. Single overlay primitive
+   with anchors; deletes `PanelWidget` + `dialog.rs` multiplexing.
+4. **P1.d — `Window` as only interactive unit**. Cursor/scroll/
+   selection/keymap on one struct; vim/completer state machines
+   decompose; deletes `Component` trait + `BufferView`.
 
-Recently shipped: theme registry + plumbing + host bridge + 28
-call site migrations + Snapshot elimination + ColorRole expansion.
+P1.a is the natural starting point — buffers underlie everything.
+
+Recently shipped: theme registry + plumbing + atomic-on-Theme
+collapse + 42 call site migrations + Snapshot elimination + ColorRole
+expansion.
 P0 orthogonal deletions
 (`selection_style`/`set_selection_bg` shim, `handle_mouse_with_lua` +
 `classify_widget_action`, `MouseAction::Yank`/`WidgetEvent::Yank`,
