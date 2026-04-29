@@ -35,12 +35,6 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    Vertical,
-    Horizontal,
-}
-
 /// Sizing constraint for a layout child along the parent's primary
 /// axis. Resolved by `resolve_constraints` against the parent's total
 /// size, in declaration order:
@@ -167,28 +161,40 @@ impl Placement {
 }
 
 /// One child of a container: a sizing `Constraint` paired with the
-/// subtree it applies to. Used by `LayoutTree::Split.items`.
+/// subtree it applies to. Used by `LayoutTree::Vbox` and
+/// `LayoutTree::Hbox` items.
 pub type Item = (Constraint, LayoutTree);
+
+/// Container chrome shared by `Vbox` and `Hbox`.
+#[derive(Clone, Debug, Default)]
+pub struct Chrome {
+    /// Cells inserted between adjacent children along the primary
+    /// axis. `0` packs children flush.
+    pub gap: u16,
+    /// Optional frame drawn around the container; subtracts 2 from
+    /// the inner area on each axis so children render inside the
+    /// border. `None` = no frame, no inset.
+    pub border: Option<Border>,
+    /// Optional title displayed in the top border row. Doesn't
+    /// consume layout space (lives in the border row); requires
+    /// `border = Some(_)` to render.
+    pub title: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub enum LayoutTree {
     /// Terminal node identifying a single window. The constraint
     /// governing its size lives in its parent's `items`.
     Leaf(crate::WinId),
-    Split {
-        direction: Direction,
+    /// Vertical container; children stack top-to-bottom.
+    Vbox {
         items: Vec<Item>,
-        /// Cells inserted between adjacent children along the primary
-        /// axis. `0` packs children flush.
-        gap: u16,
-        /// Optional frame drawn around the container; subtracts 2 from
-        /// the inner area on each axis so children render inside the
-        /// border. `None` = no frame, no inset.
-        border: Option<Border>,
-        /// Optional title displayed in the top border row. Doesn't
-        /// consume layout space (lives in the border row); requires
-        /// `border = Some(_)` to actually render.
-        title: Option<String>,
+        chrome: Chrome,
+    },
+    /// Horizontal container; children pack left-to-right.
+    Hbox {
+        items: Vec<Item>,
+        chrome: Chrome,
     },
 }
 
@@ -196,23 +202,17 @@ impl LayoutTree {
     /// Vertical container with no chrome. Children stack top-to-bottom.
     /// Use `.with_gap` / `.with_border` / `.with_title` to add chrome.
     pub fn vbox(items: Vec<Item>) -> Self {
-        Self::Split {
-            direction: Direction::Vertical,
+        Self::Vbox {
             items,
-            gap: 0,
-            border: None,
-            title: None,
+            chrome: Chrome::default(),
         }
     }
 
     /// Horizontal container with no chrome. Children pack left-to-right.
     pub fn hbox(items: Vec<Item>) -> Self {
-        Self::Split {
-            direction: Direction::Horizontal,
+        Self::Hbox {
             items,
-            gap: 0,
-            border: None,
-            title: None,
+            chrome: Chrome::default(),
         }
     }
 
@@ -221,23 +221,30 @@ impl LayoutTree {
         Self::Leaf(win)
     }
 
+    fn chrome_mut(&mut self) -> Option<&mut Chrome> {
+        match self {
+            Self::Vbox { chrome, .. } | Self::Hbox { chrome, .. } => Some(chrome),
+            Self::Leaf(_) => None,
+        }
+    }
+
     pub fn with_gap(mut self, g: u16) -> Self {
-        if let Self::Split { gap, .. } = &mut self {
-            *gap = g;
+        if let Some(c) = self.chrome_mut() {
+            c.gap = g;
         }
         self
     }
 
     pub fn with_border(mut self, b: Border) -> Self {
-        if let Self::Split { border, .. } = &mut self {
-            *border = Some(b);
+        if let Some(c) = self.chrome_mut() {
+            c.border = Some(b);
         }
         self
     }
 
     pub fn with_title(mut self, t: impl Into<String>) -> Self {
-        if let Self::Split { title, .. } = &mut self {
-            *title = Some(t.into());
+        if let Some(c) = self.chrome_mut() {
+            c.title = Some(t.into());
         }
         self
     }
@@ -284,45 +291,48 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<crate::WinId, R
         LayoutTree::Leaf(win) => {
             out.insert(*win, area);
         }
-        LayoutTree::Split {
-            direction,
-            items,
-            gap,
-            border,
-            ..
-        } => {
-            let inner = match border {
-                Some(_) => Rect::new(
-                    area.top + 1,
-                    area.left + 1,
-                    area.width.saturating_sub(2),
-                    area.height.saturating_sub(2),
-                ),
-                None => area,
-            };
-            let primary_total = match direction {
-                Direction::Vertical => inner.height,
-                Direction::Horizontal => inner.width,
-            };
-            let total_gap = gap.saturating_mul(items.len().saturating_sub(1) as u16);
-            let available = primary_total.saturating_sub(total_gap);
-            let sizes = resolve_constraints(items, available);
-            let mut offset = 0u16;
-            for (i, ((_, child), &size)) in items.iter().zip(sizes.iter()).enumerate() {
-                let child_area = match direction {
-                    Direction::Vertical => {
-                        Rect::new(inner.top + offset, inner.left, inner.width, size)
-                    }
-                    Direction::Horizontal => {
-                        Rect::new(inner.top, inner.left + offset, size, inner.height)
-                    }
-                };
-                resolve_node(child, child_area, out);
-                offset += size;
-                if i + 1 < items.len() {
-                    offset += *gap;
-                }
-            }
+        LayoutTree::Vbox { items, chrome } => {
+            resolve_box(items, chrome, area, true, out);
+        }
+        LayoutTree::Hbox { items, chrome } => {
+            resolve_box(items, chrome, area, false, out);
+        }
+    }
+}
+
+fn resolve_box(
+    items: &[Item],
+    chrome: &Chrome,
+    area: Rect,
+    vertical: bool,
+    out: &mut HashMap<crate::WinId, Rect>,
+) {
+    let inner = match chrome.border {
+        Some(_) => Rect::new(
+            area.top + 1,
+            area.left + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        ),
+        None => area,
+    };
+    let primary_total = if vertical { inner.height } else { inner.width };
+    let total_gap = chrome
+        .gap
+        .saturating_mul(items.len().saturating_sub(1) as u16);
+    let available = primary_total.saturating_sub(total_gap);
+    let sizes = resolve_constraints(items, available);
+    let mut offset = 0u16;
+    for (i, ((_, child), &size)) in items.iter().zip(sizes.iter()).enumerate() {
+        let child_area = if vertical {
+            Rect::new(inner.top + offset, inner.left, inner.width, size)
+        } else {
+            Rect::new(inner.top, inner.left + offset, size, inner.height)
+        };
+        resolve_node(child, child_area, out);
+        offset += size;
+        if i + 1 < items.len() {
+            offset += chrome.gap;
         }
     }
 }
