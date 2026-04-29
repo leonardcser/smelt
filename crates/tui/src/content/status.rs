@@ -123,6 +123,7 @@ pub(crate) fn spans_to_segments(
     spans: &mut Vec<StatusSpan>,
     width: usize,
     fill_bg: Color,
+    sep_fg: Option<Color>,
 ) -> (Vec<ui::StatusSegment>, Vec<ui::StatusSegment>) {
     const RIGHT_EDGE_GAP: usize = 1;
 
@@ -165,7 +166,7 @@ pub(crate) fn spans_to_segments(
     }
 
     let sep_style = ui::grid::Style {
-        fg: Some(crate::theme::muted()),
+        fg: sep_fg,
         bg: Some(fill_bg),
         dim: true,
         ..ui::grid::Style::default()
