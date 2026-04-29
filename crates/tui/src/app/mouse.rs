@@ -8,13 +8,10 @@ impl App {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
-        // Wheel routing over a float. The focused float claims vertical
-        // scroll outright so a pointer that drifts off its rect doesn't
-        // bleed wheel events into the transcript. With no focused float,
-        // wheel still routes onto whatever float is under the pointer
-        // (unfocused dropdowns — completer, etc.). Horizontal scroll is
-        // absorbed (no natural analogue in a vertical list) but not
-        // forwarded.
+        // Wheel routing over an overlay. A focused overlay (picker /
+        // cmdline / dialog) absorbs vertical scroll outright so a
+        // pointer that drifts off its rect doesn't bleed wheel events
+        // into the transcript behind it.
         //
         // Under this model wheel moves the viewport only (scroll_top)
         // and never the selection — `panel_scroll_by` is the primitive.
@@ -25,21 +22,21 @@ impl App {
                 | MouseEventKind::ScrollLeft
                 | MouseEventKind::ScrollRight
         );
-        if is_scroll && self.ui.focused_float().is_some() {
-            // A focused float (picker / cmdline / notification)
-            // absorbs wheel events so scrolling inside it doesn't
-            // bleed through to the transcript behind.
+        if is_scroll && self.ui.focused_overlay().is_some() {
             return EventOutcome::Redraw;
         }
 
-        // Modal gate. With a focused float up, clicks / drags outside
-        // the float's rect are absorbed (no selection extension, no
-        // cursor repositioning in the transcript behind). Clicks inside
-        // the float continue to the normal path below so the scrollbar
-        // drag hit-test and float-aware handlers run.
-        if let Some(focused) = self.ui.focused_float() {
-            let inside_focused = self.ui.float_at(me.row, me.column) == Some(focused);
-            if !inside_focused {
+        // Modal gate. With an active modal overlay up, clicks / drags
+        // outside its rect are absorbed (no selection extension, no
+        // cursor repositioning in the transcript behind). Clicks
+        // inside the overlay continue to the normal path below so
+        // scrollbar-drag hit-test and overlay-aware handlers run.
+        if let Some(modal_id) = self.ui.active_modal() {
+            let inside = self
+                .ui
+                .overlay_hit_test(me.row, me.column, None)
+                .is_some_and(|(id, _)| id == modal_id);
+            if !inside {
                 return EventOutcome::Noop;
             }
         }

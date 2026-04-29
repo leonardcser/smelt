@@ -160,13 +160,13 @@ pub struct App {
     statusline_last_errors: HashMap<String, String>,
     /// Leaf `WinId` of the open notification overlay, if one is
     /// visible. Dismissed on any key (see `handle_overlay_keys`).
-    /// `None` when no toast. Closing the leaf via `close_float`
+    /// `None` when no toast. Closing the leaf via `close_overlay_leaf`
     /// cascades through `overlay_close` to remove the overlay.
     pub notification: Option<ui::WinId>,
     /// Leaf `WinId` of the open `:` cmdline overlay, if visible.
     /// `cmdline_handle_key` mutates the leaf's buffer + cursor
     /// directly through `&mut self`. Closing the leaf via
-    /// `close_float` cascades through `overlay_close` to remove the
+    /// `close_overlay_leaf` cascades through `overlay_close` to remove the
     /// overlay.
     pub cmdline_win: Option<ui::WinId>,
     /// Persistent `:` history across open/close cycles. Most-recent
@@ -186,7 +186,7 @@ pub struct App {
     /// the current selection.
     pub cmdline_completer: Option<crate::completer::Completer>,
     /// Per-leaf bookkeeping for open picker overlays. Populated by
-    /// `crate::picker::open` and cleaned up by `close_float` when the
+    /// `crate::picker::open` and cleaned up by `close_overlay_leaf` when the
     /// leaf closes. Lookup keyed by leaf `WinId` so `set_items` /
     /// `set_selected` can resize the overlay's outer height
     /// constraint and translate logical → visual indices for reversed
@@ -302,8 +302,8 @@ pub struct App {
     /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
     /// up the longer the cursor stays at the edge.
     pub drag_autoscroll_since: Option<std::time::Instant>,
-    /// When the initial mouse-down landed on a scrollbar (prompt,
-    /// transcript, or a dialog-panel float), every subsequent drag tick
+    /// When the initial mouse-down landed on a scrollbar (prompt or
+    /// transcript), every subsequent drag tick
     /// re-maps the pointer row to a scroll offset instead of extending
     /// a visual selection — even if the pointer wanders off the track
     /// column. The stored value records which surface's scrollbar owns
@@ -605,9 +605,9 @@ impl App {
                 ui::Rect::new(0, 0, w, 1),
                 2,
             );
-            // Status bar rides above all floats (default float zindex = 50;
-            // completer float uses 30, notification 40, cmdline 600). Picking
-            // 500 leaves headroom for any future always-above-status overlay.
+            // Status bar rides above all overlays (default overlay z = 50;
+            // completer 30, notification 40, cmdline 600). Picking 500
+            // leaves headroom for any future always-above-status overlay.
             ui.add_layer(
                 "status",
                 Box::new(status_bar),
@@ -718,10 +718,10 @@ impl App {
                 let mut w = ui::Window::new(
                     ui::TRANSCRIPT_WIN,
                     ui::BufId(0),
-                    ui::WinConfig::Split(ui::SplitConfig {
+                    ui::SplitConfig {
                         region: "transcript".into(),
                         gutters: ui::Gutters::default(),
-                    }),
+                    },
                 );
                 w.set_vim_enabled(vim_enabled);
                 w
@@ -783,7 +783,7 @@ impl App {
     fn open_notification(&mut self, message: String, is_error: bool) {
         // Replace any existing toast — one at a time.
         if let Some(win) = self.notification.take() {
-            self.close_float(win);
+            self.close_overlay_leaf(win);
         }
 
         let label = if is_error { "error" } else { "info" };
@@ -871,7 +871,7 @@ impl App {
 
     pub fn dismiss_notification(&mut self) {
         if let Some(win) = self.notification.take() {
-            self.close_float(win);
+            self.close_overlay_leaf(win);
         }
     }
 
@@ -1036,7 +1036,7 @@ impl App {
             }
 
             // ── Drain engine events (paused only for Confirm) ──
-            if !self.focused_float_blocks_agent() {
+            if !self.focused_overlay_blocks_agent() {
                 loop {
                     let ev = match self.engine.try_recv() {
                         Ok(ev) => ev,
@@ -1160,7 +1160,7 @@ impl App {
             // Re-dispatch queued dialogs.  Each goes through dispatch_control
             // so auto-approval checks re-run ("always allow" → auto-approve rest).
             if !pending_dialogs.is_empty()
-                && !self.focused_float_blocks_agent()
+                && !self.focused_overlay_blocks_agent()
                 && self.agent.is_some()
             {
                 let idle = t
@@ -1169,7 +1169,7 @@ impl App {
                     .unwrap_or(true);
                 while idle
                     && !pending_dialogs.is_empty()
-                    && !self.focused_float_blocks_agent()
+                    && !self.focused_overlay_blocks_agent()
                     && self.agent.is_some()
                 {
                     let deferred = pending_dialogs.pop_front().unwrap();
@@ -1212,7 +1212,7 @@ impl App {
                     .kill_ring
                     .yank_flash_until()
                     .is_some_and(|t| t > now);
-            let has_animation = self.ui.focused_float().is_some()
+            let has_animation = self.ui.focused_overlay().is_some()
                 || self.has_active_exec()
                 || self.working.is_animating()
                 || yank_flash_active
@@ -1232,12 +1232,12 @@ impl App {
                     // screen and the terminal can't keep up, making
                     // fast scrolling feel laggy or frozen.
                     //
-                    // The coalescer only fires when there's no focused
-                    // float. With a dialog up, wheel events need to
+                    // The coalescer only fires when no overlay is
+                    // focused. With a dialog up, wheel events need to
                     // reach `dispatch_terminal_event` → `handle_mouse`
-                    // so they route into the float instead of bleeding
-                    // past it into the transcript behind.
-                    let coalesce_scroll = self.ui.focused_float().is_none();
+                    // so they route into the overlay instead of
+                    // bleeding past it into the transcript behind.
+                    let coalesce_scroll = self.ui.focused_overlay().is_none();
                     let mut scroll_delta: isize = 0;
                     let mut scroll_row: u16 = 0;
                     let absorb = |ev: event::Event,
@@ -1290,7 +1290,7 @@ impl App {
                     self.render_normal(self.agent.is_some());
                 }
 
-                Some(ev) = self.engine.recv(), if !self.focused_float_blocks_agent() => {
+                Some(ev) = self.engine.recv(), if !self.focused_overlay_blocks_agent() => {
                     if let Some(mut ag) = self.agent.take() {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(

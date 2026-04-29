@@ -42,9 +42,9 @@ pub struct PromptState {
     pub win: ui::Window,
     pub store: AttachmentStore,
     pub completer: Option<CompleterSession>,
-    /// Picker float IDs from closed completer sessions, waiting for the
-    /// next frame to drain and `win_close`. `PromptState` doesn't hold a
-    /// `&mut ui::Ui`, so closing has to happen out-of-band.
+    /// Picker leaf WinIds from closed completer sessions, waiting for
+    /// the next frame to drain and `win_close`. `PromptState` doesn't
+    /// hold a `&mut ui::Ui`, so closing has to happen out-of-band.
     pub pending_picker_close: Vec<ui::WinId>,
     pub stash: Option<InputSnapshot>,
     /// Tracks whether the current buffer content originated from a paste.
@@ -89,10 +89,10 @@ impl PromptState {
         let mut win = ui::Window::new(
             ui::PROMPT_WIN,
             ui::BufId(0),
-            ui::WinConfig::Split(ui::SplitConfig {
+            ui::SplitConfig {
                 region: "prompt".into(),
                 gutters: ui::Gutters::default(),
-            }),
+            },
         );
         win.edit_buf = ui::EditBuffer::new();
         Self {
@@ -143,9 +143,9 @@ impl PromptState {
         self.win.win_cursor.clear_anchor();
     }
 
-    /// End the active completer session, queueing its Picker float for
-    /// close on the next frame. Replaces bare `self.completer = None`
-    /// so the associated `ui::WinId` doesn't leak.
+    /// End the active completer session, queueing its picker overlay
+    /// leaf for close on the next frame. Replaces bare `self.completer
+    /// = None` so the associated `ui::WinId` doesn't leak.
     pub fn close_completer(&mut self) {
         if let Some(session) = self.completer.take() {
             if let Some(win) = session.picker_win {
@@ -154,10 +154,11 @@ impl PromptState {
         }
     }
 
-    /// Install a fresh completer, retiring any previous session's picker
-    /// float. Every site that creates a new `CompleterSession` must go
-    /// through this — bare `self.completer = Some(...)` orphans the old
-    /// `ui::WinId` and leaves a stale picker painted above the prompt.
+    /// Install a fresh completer, retiring any previous session's
+    /// picker overlay. Every site that creates a new
+    /// `CompleterSession` must go through this — bare `self.completer
+    /// = Some(...)` orphans the old `ui::WinId` and leaves a stale
+    /// picker painted above the prompt.
     pub fn set_completer(&mut self, comp: crate::completer::Completer) {
         self.close_completer();
         self.completer = Some(CompleterSession::new(comp));

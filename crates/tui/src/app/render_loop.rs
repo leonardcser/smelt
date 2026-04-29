@@ -1,5 +1,5 @@
 //! Per-frame render loop: projects transcript/prompt/status into the
-//! compositor layers and syncs overlay floats (completer, notifications).
+//! compositor layers and syncs the prompt-docked completer overlay.
 
 use super::*;
 
@@ -59,7 +59,7 @@ impl App {
         // dialog (Confirm, Question, …) is up so the user doesn't see
         // wall-clock seconds tick by while the agent is actually parked
         // waiting on input.
-        self.working.set_paused(self.focused_float_blocks_agent());
+        self.working.set_paused(self.focused_overlay_blocks_agent());
         self.refresh_status_bar();
 
         self.finalize_layer_rects(
@@ -70,7 +70,7 @@ impl App {
             term_h,
         );
 
-        self.sync_completer_float();
+        self.sync_completer_overlay();
 
         let mut stdout = std::io::stdout();
         let _ = self.ui.render(&mut stdout);
@@ -298,12 +298,13 @@ impl App {
         self.ui.set_layer_rect("prompt", prompt_rect);
         self.ui.set_layer_rect("prompt_input", prompt_input_rect);
         self.ui.set_layer_rect("status", status_rect);
-        // Publish split-window rects so `Placement::DockedAbove(WinId)`
-        // floats (prompt-docked pickers) can resolve their anchor.
+        // Publish split-window rects so overlay anchors targeting a
+        // window (e.g. notification toasts, prompt-docked pickers)
+        // can resolve.
         self.ui.set_window_rect(ui::PROMPT_WIN, prompt_rect);
         self.ui.set_window_rect(ui::TRANSCRIPT_WIN, transcript_rect);
 
-        if self.ui.focused_float().is_none() {
+        if self.ui.focused_overlay().is_none() {
             match self.app_focus {
                 crate::app::AppFocus::Prompt => self.ui.focus_layer("prompt_input"),
                 crate::app::AppFocus::Content => self.ui.focus_layer("transcript"),
@@ -311,7 +312,7 @@ impl App {
         }
     }
 
-    // ── Completer float ────────────────────────────────────────────
+    // ── Completer overlay ──────────────────────────────────────────
     //
     // Mirrors the active `CompleterSession` into a Buffer-backed
     // picker overlay. The session (`PromptState.completer`) holds both
@@ -321,12 +322,12 @@ impl App {
     //
     // The leaf is non-focusable so keys keep flowing to the prompt,
     // driving `completer_bridge::handle_completer_event`.
-    fn sync_completer_float(&mut self) {
+    fn sync_completer_overlay(&mut self) {
         // Drain any picker leaves that were orphaned when their session
         // ended (session held the WinId; when it dropped, it queued the
         // WinId here for out-of-band close).
         for win in std::mem::take(&mut self.input.pending_picker_close) {
-            self.close_float(win);
+            self.close_overlay_leaf(win);
         }
 
         let (max_rows, selected, items, existing_win) = match self.input.completer.as_ref() {

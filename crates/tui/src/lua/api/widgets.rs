@@ -1,5 +1,5 @@
 //! UI primitives — theme colors, buffer / window manipulation, ui.*
-//! float surfaces (ghost_text, spinner, picker, dialog), the prompt
+//! overlay surfaces (ghost_text, spinner, picker, dialog), the prompt
 //! input, and user-preference settings.
 
 use super::{
@@ -307,7 +307,7 @@ fn register_win(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
         "close",
         lua.create_function(|_, id: u64| {
             crate::lua::with_app(|app| {
-                app.close_float(ui::WinId(id));
+                app.close_overlay_leaf(ui::WinId(id));
             });
             Ok(())
         })?,

@@ -23,17 +23,17 @@ impl App {
         }
 
         // Global chord layer: these keys fire in every focus context
-        // (prompt, content, or any float). Intercepted before
+        // (prompt, content, or any overlay leaf). Intercepted before
         // focus-specific routing so no handler below can swallow them.
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = &ev
         {
-            // Global shortcuts only fire when no float is focused
-            // and no cmdline overlay is open — otherwise the float's
+            // Global shortcuts only fire when no overlay is focused
+            // and no cmdline overlay is open — otherwise the dialog's
             // keymap (e.g. Confirm's BackTab handler) or the cmdline's
             // text-edit recipe gets first dibs.
-            if self.ui.focused_float().is_none() && self.cmdline_win.is_none() {
+            if self.ui.focused_overlay().is_none() && self.cmdline_win.is_none() {
                 let ctx = self.input.key_context(self.agent.is_some(), false);
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
@@ -53,14 +53,14 @@ impl App {
             }
         }
 
-        // Compositor float: when a float window is focused, route keys
-        // through the compositor. The Callbacks registry handles
-        // per-window keymaps, auto-dispatches widget actions into
-        // `WinEvent::Submit/Dismiss`, and any Rust callbacks queue
-        // `AppOp`s drained below. Mouse events fall through so the
-        // regular `handle_mouse` path can run wheel/scrollbar logic
-        // over the float's rect.
-        if self.ui.focused_float().is_some() || self.ui.active_modal().is_some() {
+        // Overlay focus: when an overlay leaf is focused (or a modal
+        // overlay is active), route keys through the compositor.
+        // The Callbacks registry handles per-window keymaps,
+        // auto-dispatches widget actions into `WinEvent::Submit/Dismiss`,
+        // and any Rust callbacks queue `AppOp`s drained below. Mouse
+        // events fall through so the regular `handle_mouse` path can
+        // run wheel/scrollbar logic over the overlay's rect.
+        if self.ui.focused_overlay().is_some() || self.ui.active_modal().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
                 return false;
@@ -100,7 +100,7 @@ impl App {
                 return false;
             }
             // Fallthrough: mouse events go to the regular dispatch
-            // below so wheel + scrollbar drag work on floats.
+            // below so wheel + scrollbar drag work on overlays.
         }
 
         // Ctrl+C while exec is running → kill it.
@@ -220,7 +220,7 @@ impl App {
                     }
                 }
                 // Restore stash unless a dialog was opened (it will restore on close).
-                if self.ui.focused_float().is_none() {
+                if self.ui.focused_overlay().is_none() {
                     self.input.restore_stash();
                 }
                 false
@@ -264,12 +264,12 @@ impl App {
         // Split-scoped ("buffer-local") Lua keymaps win over global
         // ones — matches nvim's buffer-local > global priority. The
         // focused split (prompt_input / transcript) is resolved inside
-        // `handle_key_with_lua` via the registered split layer-id map,
-        // the same dispatch path floats use. Used by
-        // `smelt.prompt.open_picker` to capture Enter / Esc / arrows
-        // while a picker is active.
+        // `handle_key_with_lua` via the registered split layer-id map.
+        // Used by `smelt.prompt.open_picker` to capture Enter / Esc /
+        // arrows while a picker is active. Skipped when an overlay
+        // owns focus — overlay-leaf dispatch happens upstream.
         if let Event::Key(k) = *ev {
-            if self.ui.focused_float().is_none() {
+            if self.ui.focused_overlay().is_none() {
                 let KeyEvent {
                     code, modifiers, ..
                 } = k;
@@ -751,31 +751,43 @@ impl App {
         self.layout.viewport_rows().max(1)
     }
 
-    pub(crate) fn close_float(&mut self, win_id: ui::WinId) {
+    /// Close an overlay leaf and clean up its picker / Lua-callback
+    /// registrations. The leaf id is whatever was returned from the
+    /// overlay's open path (picker / cmdline / notification / dialog);
+    /// `Ui::win_close` cascades to overlay close when the leaf belongs
+    /// to one.
+    pub(crate) fn close_overlay_leaf(&mut self, win_id: ui::WinId) {
         crate::picker::forget(self, win_id);
         for id in self.ui.win_close(win_id) {
             self.lua.remove_callback(id);
         }
     }
 
-    /// Close the focused float if it doesn't block the agent (e.g. Ps,
-    /// Permissions, Resume). Used before opening a blocking dialog so
-    /// only one float is visible at a time. Fires `WinEvent::Dismiss`
-    /// so the dialog's callbacks can flush any pending state (e.g.
-    /// Permissions syncs its edits before close).
-    pub(super) fn close_focused_non_blocking_float(&mut self) {
-        let Some(win) = self.ui.focused_float() else {
+    /// Close the focused overlay if it doesn't block the agent (e.g.
+    /// Ps, Permissions, Resume). Used before opening a blocking
+    /// dialog so only one is visible at a time. Fires
+    /// `WinEvent::Dismiss` on the overlay's root leaf so the dialog's
+    /// callbacks can flush any pending state (e.g. Permissions syncs
+    /// its edits before close).
+    pub(super) fn close_focused_non_blocking_overlay(&mut self) {
+        let Some(overlay_id) = self.ui.focused_overlay() else {
             return;
         };
-        if self.ui.float_config(win).is_some_and(|c| c.blocks_agent) {
+        let Some(overlay) = self.ui.overlay(overlay_id) else {
+            return;
+        };
+        if overlay.blocks_agent {
             return;
         }
+        let Some(root) = overlay.layout.leaves_in_order().into_iter().next() else {
+            return;
+        };
         let lua = &self.lua;
         let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
         self.ui.dispatch_event(
-            win,
+            root,
             ui::WinEvent::Dismiss,
             ui::Payload::None,
             &mut lua_invoke,
@@ -783,22 +795,13 @@ impl App {
         self.flush_lua_callbacks();
     }
 
-    /// True when the focused dialog pauses engine-event drain
-    /// (Confirm / Question / Lua dialogs gate a pending tool call).
-    /// Checks both the overlay path (Lua dialogs flipped to overlay
-    /// surfaces in P1.c) and the legacy float path (picker /
-    /// notification — both retire alongside the rest of `FloatConfig`
-    /// in C.9c.5).
-    pub(super) fn focused_float_blocks_agent(&self) -> bool {
-        if let Some(id) = self.ui.focused_overlay() {
-            if self.ui.overlay(id).is_some_and(|o| o.blocks_agent) {
-                return true;
-            }
-        }
-        let Some(win) = self.ui.focused_float() else {
-            return false;
-        };
-        self.ui.float_config(win).is_some_and(|c| c.blocks_agent)
+    /// True when the focused overlay pauses engine-event drain
+    /// (Confirm / Question / Lua dialogs gating a pending tool call).
+    pub(super) fn focused_overlay_blocks_agent(&self) -> bool {
+        self.ui
+            .focused_overlay()
+            .and_then(|id| self.ui.overlay(id))
+            .is_some_and(|o| o.blocks_agent)
     }
 
     /// Snap the transcript cursor to the nearest selectable cell.

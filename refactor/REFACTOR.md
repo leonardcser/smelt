@@ -356,14 +356,22 @@ float migrations + Buffer-backed list/options/input panels landed
   tests in `crates/ui/src/lib.rs` retire with the `Picker` Component
   they relied on; surviving coverage is the overlay test suite next
   door.
-- **C.9c.5** — delete the legacy float surface. Once the last
-  `FloatConfig` consumer is gone, delete `FloatConfig` + `Placement` +
-  the legacy float compositor layer + `WinConfig::Float` + `float_at`
-  / `float_config` / `float_config_mut` / `focused_float` /
-  `focused_float_blocks_agent`'s `FloatConfig` fallback. The
-  `WidgetEvent` enum + `Component` trait can finally retire when their
-  last consumers (StatusBar, BufferView, WindowView) move into the
-  overlay-leaf model in P1.d.
+- **C.9c.5** (landed) — delete the legacy float surface. `FloatConfig`
+  + `WinConfig::Float` + `Placement` (with `FitMax` / `FloatRelative`)
+  retire along with `Ui::focused_float` / `float_at` / `float_ids` /
+  `float_config{,_mut}` / `floats_z_ordered` / `resolve_float{,_rects}`
+  / `sync_float_rects` / `natural_layer_height` / `float_layer_id` /
+  `parse_float_layer_id`. `WinConfig` collapses to `SplitConfig`
+  directly; `Window::is_float` / `is_split` / `zindex` go with it.
+  Tui-side renames: `focused_float_blocks_agent` →
+  `focused_overlay_blocks_agent`, `close_focused_non_blocking_float` →
+  `close_focused_non_blocking_overlay`, `close_float` →
+  `close_overlay_leaf`, `sync_completer_float` →
+  `sync_completer_overlay`. `app/mouse.rs` swaps `focused_float` /
+  `float_at` for `focused_overlay` + `overlay_hit_test` against the
+  active modal. The `WidgetEvent` enum + `Component` trait deletion
+  defers to P1.d when their last consumers (StatusBar, BufferView,
+  WindowView) move into the overlay-leaf model.
 
 See `P1.md` for the sub-phase log.
 

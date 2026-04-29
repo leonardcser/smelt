@@ -71,95 +71,6 @@ pub enum Constraint {
     Fit,
 }
 
-/// Upper bound on `Placement::FitContent`. Keeps pathologically tall
-/// content (long permission lists, agent logs) from eating the whole
-/// screen while still giving short content a snug fit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FitMax {
-    /// Cap at half the terminal height.
-    HalfScreen,
-    /// Cap at (nearly) the full terminal height — keeps `above_rows`
-    /// reserved so the status bar / prompt remains visible.
-    FullScreen,
-}
-
-/// High-level dialog / float placement inside the terminal. Chosen over
-/// raw anchor+row+col to keep per-dialog call sites free of rect math.
-#[derive(Clone, Copy, Debug)]
-pub enum Placement {
-    /// Docked at the terminal bottom. Reserves `above_rows` for surfaces
-    /// that must stay visible (status bar). `full_width = true` spans
-    /// the full terminal width and ignores `max_width`.
-    DockBottom {
-        above_rows: u16,
-        full_width: bool,
-        max_width: Constraint,
-        max_height: Constraint,
-    },
-    /// Like `DockBottom` but height tracks the dialog's content: the
-    /// renderer asks the dialog for its natural height (sum of panel
-    /// `line_count`s + chrome) and clamps to `max`. Short dialogs
-    /// shrink, long dialogs cap and scroll internally. Always
-    /// full-width; reserves 1 row above for the status bar.
-    FitContent { max: FitMax },
-    /// Centered in the terminal.
-    Centered {
-        width: Constraint,
-        height: Constraint,
-    },
-    /// Positioned relative to the caret (completer / hover).
-    /// `row_offset` is added to the anchor row, `col_offset` to the
-    /// anchor column. If the dialog would overflow, the framework
-    /// flips to render above/left of the anchor.
-    AnchorCursor {
-        row_offset: i32,
-        col_offset: i32,
-        width: Constraint,
-        height: Constraint,
-    },
-    /// Escape hatch for absolute positioning. Prefer one of the above
-    /// when possible.
-    Manual {
-        anchor: Corner,
-        row: i32,
-        col: i32,
-        width: Constraint,
-        height: Constraint,
-    },
-    /// Docked directly above another window. Width matches the target's
-    /// rect; height tracks the float's natural height (picker item count,
-    /// etc.) clamped by `max_height`. The float grows upward from the
-    /// target's top edge — the canonical placement for prompt-anchored
-    /// pickers (completers, `/theme`, history search).
-    DockedAbove {
-        target: crate::WinId,
-        max_height: Constraint,
-    },
-}
-
-impl Placement {
-    pub fn dock_bottom_full_width(max_height: Constraint) -> Self {
-        Placement::DockBottom {
-            above_rows: 1,
-            full_width: true,
-            max_width: Constraint::Fill,
-            max_height,
-        }
-    }
-
-    pub fn centered(width: Constraint, height: Constraint) -> Self {
-        Placement::Centered { width, height }
-    }
-
-    pub fn fit_content(max: FitMax) -> Self {
-        Placement::FitContent { max }
-    }
-
-    pub fn docked_above(target: crate::WinId, max_height: Constraint) -> Self {
-        Placement::DockedAbove { target, max_height }
-    }
-}
-
 /// One child of a container: a sizing `Constraint` paired with the
 /// subtree it applies to. Used by `LayoutTree::Vbox` and
 /// `LayoutTree::Hbox` items.
@@ -398,9 +309,8 @@ fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool)
 }
 
 /// Which corner of a rectangle is its anchor point. Used by
-/// `Placement::Manual` and by `Anchor::Win { target, attach, .. }`
-/// to specify which corner of the target window the overlay attaches
-/// to.
+/// `Anchor::Win { target, attach, .. }` to specify which corner of
+/// the target window the overlay attaches to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Corner {
     NW,
@@ -412,10 +322,8 @@ pub enum Corner {
 /// Where an `Overlay` is positioned on screen. Drag = mutate the
 /// anchor; the renderer recomputes the overlay's rect each frame
 /// from the anchor + the overlay's natural / configured size.
-///
-/// Replaces the legacy multi-variant `Placement` enum (which mixed
-/// positioning, sizing, and chrome). Sizing now lives on `Overlay`'s
-/// `layout: LayoutTree` instead.
+/// Sizing lives on the overlay's `layout: LayoutTree`; this enum
+/// only carries position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Anchor {
     /// Centered on screen along both axes.
@@ -452,12 +360,6 @@ pub enum Anchor {
     /// so the rect spans the whole terminal. Used by tool-approval
     /// dialogs that want a sticky bottom-edge presence.
     ScreenBottom { above_rows: u16 },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FloatRelative {
-    Editor,
-    Cursor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

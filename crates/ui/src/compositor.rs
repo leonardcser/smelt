@@ -22,10 +22,9 @@ struct Layer {
 }
 
 /// Per-layer interaction policy passed to `Compositor::add_with_opts`.
-/// Defaults to focus + raise on click, which is what every interactive
-/// float (Dialog, Picker focused-mode) wants. Notifications and
-/// status overlays should opt out with `focus_on_click = false` and
-/// `raise_on_click = false`.
+/// Defaults to focus + raise on click, which is what an interactive
+/// split layer wants. Read-only or non-focusable layers should opt
+/// out with `focus_on_click = false` and `raise_on_click = false`.
 #[derive(Clone, Copy, Debug)]
 pub struct LayerOpts {
     pub focus_on_click: bool,
@@ -179,8 +178,8 @@ impl Compositor {
     /// Render variant that lets the caller paint into the in-flight
     /// `current` grid after layer paint and before cursor placement /
     /// flush. Used by `Ui::render` to paint overlays as a peer pass on
-    /// top of split + float layers without making overlays know about
-    /// the layer registry. The closure receives a mutable reference to
+    /// top of split layers without making overlays know about the
+    /// layer registry. The closure receives a mutable reference to
     /// the grid plus a borrowed theme so it can resolve highlight ids,
     /// and returns an optional absolute `(col, row)` hardware cursor
     /// position that takes precedence over the focused layer's cursor.

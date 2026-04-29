@@ -161,7 +161,7 @@ impl Completer {
     }
 }
 
-/// Couples a `Completer` model with its `ui::Picker` float WinId.
+/// Couples a `Completer` model with its picker-overlay leaf WinId.
 /// One owner, one lifecycle: created when a completer opens, destroyed
 /// when it closes.
 pub struct CompleterSession {

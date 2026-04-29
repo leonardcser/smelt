@@ -3,7 +3,7 @@ use crate::component::DrawContext;
 use crate::edit_buffer::EditBuffer;
 use crate::grid::{GridSlice, Style};
 use crate::kill_ring::KillRing;
-use crate::layout::{Border, Constraint, Gutters, Placement, Rect};
+use crate::layout::{Gutters, Rect};
 use crate::text::{byte_to_cell, cell_to_byte};
 use crate::vim::{Action, ViMode, Vim, VimContext};
 use crate::window_cursor::WindowCursor;
@@ -171,50 +171,10 @@ pub struct SplitConfig {
     pub gutters: Gutters,
 }
 
-#[derive(Clone, Debug)]
-pub struct FloatConfig {
-    pub placement: Placement,
-    pub border: Border,
-    pub title: Option<String>,
-    pub zindex: u16,
-    /// Whether `<C-w>` window cycling and programmatic focus can land
-    /// here. `false` for popups (completer, notification) that should
-    /// never steal cursor. Modeled on Neovim's `WinConfig.focusable`.
-    pub focusable: bool,
-    /// Whether the host should pause engine-event drain while this
-    /// float is focused. True for modal permission prompts (Confirm,
-    /// Question, Lua dialogs gating a parked task); false for
-    /// read-only viewers (Help, Ps, Resume) that can coexist with a
-    /// running turn.
-    pub blocks_agent: bool,
-}
-
-impl Default for FloatConfig {
-    fn default() -> Self {
-        Self {
-            placement: Placement::Centered {
-                width: Constraint::Percentage(80),
-                height: Constraint::Percentage(50),
-            },
-            border: Border::Single,
-            title: None,
-            zindex: 50,
-            focusable: true,
-            blocks_agent: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum WinConfig {
-    Split(SplitConfig),
-    Float(FloatConfig),
-}
-
 pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,
-    pub config: WinConfig,
+    pub config: SplitConfig,
     pub focusable: bool,
     /// Opt-in flag: paint a `CursorLine`-themed background under
     /// the visible cursor row when the window is focused. Defaults
@@ -259,7 +219,7 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(id: WinId, buf: BufId, config: WinConfig) -> Self {
+    pub fn new(id: WinId, buf: BufId, config: SplitConfig) -> Self {
         Self {
             id,
             buf,
@@ -285,21 +245,6 @@ impl Window {
 
     pub fn id(&self) -> WinId {
         self.id
-    }
-
-    pub fn is_float(&self) -> bool {
-        matches!(self.config, WinConfig::Float(_))
-    }
-
-    pub fn is_split(&self) -> bool {
-        matches!(self.config, WinConfig::Split(_))
-    }
-
-    pub fn zindex(&self) -> u16 {
-        match &self.config {
-            WinConfig::Float(f) => f.zindex,
-            WinConfig::Split(_) => 0,
-        }
     }
 
     // ── Vim ────────────────────────────────────────────────────────────
@@ -1045,10 +990,10 @@ mod tests {
         Window::new(
             WinId(1),
             BufId(1),
-            WinConfig::Split(SplitConfig {
+            SplitConfig {
                 region: "test".into(),
                 gutters: Gutters::default(),
-            }),
+            },
         )
     }
 

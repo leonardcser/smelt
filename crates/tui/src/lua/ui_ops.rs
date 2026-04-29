@@ -1,10 +1,10 @@
 //! Lua → ui translators for `smelt.ui.dialog.open` and
 //! `smelt.ui.picker.open`. These parse the plugin-supplied `opts`
 //! tables into the typed `PanelSpec` / `PickerItem` shapes that the
-//! `ui` crate consumes, create the compositor float, and hand the new
-//! `WinId` back to the parked Lua task. Everything else — keymap
-//! callbacks, submit / dismiss routing, selection tracking —
-//! lives in `runtime/lua/smelt/{dialog,picker}.lua`.
+//! `ui` crate consumes, open the overlay, and hand the new `WinId`
+//! back to the parked Lua task. Everything else — keymap callbacks,
+//! submit / dismiss routing, selection tracking — lives in
+//! `runtime/lua/smelt/{dialog,picker}.lua`.
 
 use crate::app::App;
 use crate::format::BufFormat;
