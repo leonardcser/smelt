@@ -338,6 +338,15 @@ pub struct App {
     /// Populated each frame by `compute_prompt` and read by the
     /// `prompt_input` WindowView layer.
     pub(super) input_display_buf: ui::BufId,
+    /// `WinId` of the status-line Window. The status line is a
+    /// Buffer-backed Window registered as a painted split — `Ui::render`
+    /// paints it via `Window::render` from the post-layer closure, no
+    /// compositor `Component` layer involved. `refresh_status_bar`
+    /// rewrites the buffer's single line + highlight extmarks each frame.
+    pub(super) status_win: ui::WinId,
+    /// `BufId` for the status-line Buffer. One line; never modifiable
+    /// from outside `refresh_status_bar`.
+    pub(super) status_buf: ui::BufId,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -562,7 +571,7 @@ impl App {
         // Load workspace rules from disk into them at startup.
         let runtime_approvals = engine.runtime_approvals();
 
-        let (ui, input_display_buf) = {
+        let (ui, input_display_buf, status_win, status_buf) = {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = ui::Ui::new();
             ui.set_terminal_size(w, h);
@@ -586,7 +595,6 @@ impl App {
             let transcript_view = crate::content::window_view::WindowView::new();
             let prompt_chrome_view = crate::content::window_view::WindowView::new();
             let prompt_input_view = crate::content::window_view::WindowView::new();
-            let status_bar = ui::StatusBar::new();
             ui.add_layer(
                 "transcript",
                 Box::new(transcript_view),
@@ -605,19 +613,33 @@ impl App {
                 ui::Rect::new(0, 0, w, 1),
                 2,
             );
-            // Status bar rides above all overlays (default overlay z = 50;
-            // completer 30, notification 40, cmdline 600). Picking 500
-            // leaves headroom for any future always-above-status overlay.
-            ui.add_layer(
-                "status",
-                Box::new(status_bar),
-                ui::Rect::new(h.saturating_sub(1), 0, w, 1),
-                500,
-            );
             ui.register_split("prompt_input", ui::PROMPT_WIN);
             ui.register_split("transcript", ui::TRANSCRIPT_WIN);
             ui.focus_layer("prompt_input");
-            (ui, input_display_buf)
+            // Status line: Buffer-backed Window painted directly via
+            // `Window::render` from `Ui::render`'s post-layer closure.
+            // No compositor `Component` layer — the buffer carries the
+            // text + highlight extmarks `refresh_status_bar` writes
+            // each frame.
+            let status_buf = ui.buf_create(ui::buffer::BufCreateOpts {
+                modifiable: true,
+                buftype: ui::buffer::BufType::Nofile,
+            });
+            let status_win = ui
+                .win_open_split(
+                    status_buf,
+                    ui::SplitConfig {
+                        region: "status".into(),
+                        gutters: ui::Gutters::default(),
+                    },
+                )
+                .expect("status buffer was just created");
+            if let Some(win) = ui.win_mut(status_win) {
+                win.focusable = false;
+            }
+            ui.set_window_rect(status_win, ui::Rect::new(h.saturating_sub(1), 0, w, 1));
+            ui.register_painted_split(status_win);
+            (ui, input_display_buf, status_win, status_buf)
         };
 
         Self {
@@ -740,6 +762,8 @@ impl App {
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             input_display_buf,
+            status_win,
+            status_buf,
         }
     }
 

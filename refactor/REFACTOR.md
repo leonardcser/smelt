@@ -377,30 +377,89 @@ See `P1.md` for the sub-phase log.
 
 ### P1.d — `Window` as the only interactive unit
 
-- Cursor, scroll, selection, keymap recipe id, focusable flag,
-  gutters.
-- `render(buf, grid)`. `handle(event, ctx, host) -> Status`. No
-  multiple traits, no `Component`/`PanelWidget`.
-- **Vim state machine decomposes**, `crates/ui/src/vim/` and
-  `window_cursor.rs` are deleted:
-  - `VimMode` (`Normal/Insert/Visual/VisualLine`) lives on **App**
-    as a single global field. Lua: `smelt.vim.mode`.
-  - Registers, dot-repeat, undo → **Buffer** (per-buffer edit
-    history).
-  - Cursor / scroll / selection / Visual anchor → **Window**.
-  - Kill ring → `Clipboard` subsystem (reached via `Host`).
-- **Completer state machine decomposes**:
-  - Ghost text → extmark in a `"completer"` namespace on the prompt
-    Buffer.
-  - Picker dropdown → an `Overlay` over a list Window.
-  - Behaviour → keymap recipe on the prompt Window.
-  - Existing `crates/tui/src/completer/` and
-    `crates/tui/src/attachment/` collapse along these axes.
-- **Tests (L1):** as the vim state machine breaks open, the existing vim
-  unit tests rewrite to the Helix-style marker DSL — `(input, keys, output)`
+P1.d takes the surface registered with the compositor (today three
+`Component` impls: `StatusBar`, `BufferView`, `WindowView`) and folds
+it into `Window::render(buf, slice, ctx)` — the same paint path
+overlay leaves use today via `paint_overlay`. The `Component` trait,
+`WidgetEvent::{Dismiss, Select}`, `BufferView`, `StatusBar`, and
+`WindowView` retire as their last consumers move. Vim and completer
+decompose alongside. Sub-phases land independently, each green at
+the boundary.
+
+#### P1.d.1 — Buffer-backed status line
+
+Smallest wedge: migrate the `"status"` compositor layer onto a
+Buffer-backed Window painted directly from `Ui::render`'s
+post-layer pass. Lays the `painted_splits` mechanism (split-shaped
+windows that paint via `Window::render` from the closure, no
+`Component` layer) that subsequent sub-phases reuse for the prompt
+and transcript views. The `tui::app::status_bar::refresh_status_bar`
+composer rewrites to populate the status buffer with a single line +
+highlight extmarks instead of pushing `StatusSegment` into
+`ui::StatusBar`. Deletes `crates/ui/src/status_bar.rs` (StatusBar
+widget + StatusSegment) and the `ui::layer_mut::<ui::StatusBar>`
+call site. `Component` / remaining `WidgetEvent` variants stay
+alive — transcript / prompt still consume them.
+
+#### P1.d.2 — Prompt input onto Window::render
+
+Migrate the `"prompt"` and `"prompt_input"` compositor layers onto
+the `painted_splits` path. Selection paint, soft cursor, ghost
+text, and gutters move from `WindowView` / `BufferView` onto
+`Window::render` (extmarks in `"selection"` / `"completer"` /
+`"gutter"` namespaces). The prompt's wrapped display becomes a
+projection step that writes the prompt source into a render-only
+Buffer with extmarks for wrap, cursor, and selection.
+
+#### P1.d.3 — Transcript onto Window::render
+
+Migrate the `"transcript"` compositor layer onto the
+`painted_splits` path. Scrollbar paint and selection move onto
+`Window::render` extmarks; soft-wrap state lives on
+`Buffer::wrap_at` (already shipped as P1.a foundation but unused
+today). Transcript projection rewrites to populate the
+transcript Buffer + extmarks instead of `WindowView::set_rows`.
+
+#### P1.d.4 — Retire `Component` + `WidgetEvent::{Dismiss, Select}`
+
+With every consumer migrated, delete the trait + the two surviving
+event variants. `crates/ui/src/buffer_view.rs` /
+`crates/ui/src/component.rs` retire; `crates/tui/src/content/window_view.rs`
+retires. The compositor becomes overlay-aware only — no
+`Box<dyn Component>` storage.
+
+#### P1.d.5 — Vim state machine decomposes
+
+`crates/ui/src/vim/` and `window_cursor.rs` are deleted:
+
+- `VimMode` (`Normal/Insert/Visual/VisualLine`) lives on **App**
+  as a single global field. Lua: `smelt.vim.mode`.
+- Registers, dot-repeat, undo → **Buffer** (per-buffer edit
+  history).
+- Cursor / scroll / selection / Visual anchor → **Window**.
+- Kill ring → `Clipboard` subsystem (reached via `Host`).
+
+#### P1.d.6 — Completer state machine decomposes
+
+- Ghost text → extmark in a `"completer"` namespace on the prompt
+  Buffer.
+- Picker dropdown → an `Overlay` over a list Window (already shipped
+  in C.9c.4; this sub-phase folds the sync logic into a Lua-shaped
+  recipe).
+- Behaviour → keymap recipe on the prompt Window.
+- Existing `crates/tui/src/completer/` and
+  `crates/tui/src/attachment/` collapse along these axes.
+
+`Window` ends with: cursor, scroll, selection, keymap recipe id,
+focusable flag, gutters; `render(buf, grid)`,
+`handle(event, ctx, host) -> Status`; no multiple traits, no
+`Component`/`PanelWidget`.
+
+- **Tests (L1):** as the vim state machine breaks open (P1.d.5), the existing
+  vim unit tests rewrite to the Helix-style marker DSL — `(input, keys, output)`
   3-tuples with `#[primary|]#` selection markers — added next to Buffer /
   Window / vim-recipe code under `#[cfg(test)] mod tests`. The marker-DSL
-  parser (~100 LOC) lands here. See `TESTING.md` § L1.
+  parser (~100 LOC) lands there. See `TESTING.md` § L1.
 
 ### P1.e — `UiHost` trait + `Status` + event types
 

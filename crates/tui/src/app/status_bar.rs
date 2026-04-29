@@ -49,9 +49,9 @@ impl App {
     }
 
     pub(super) fn refresh_status_bar(&mut self) {
-        use content::status::{spans_to_segments, StatusSpan};
+        use content::status::{spans_to_buffer_line, StatusSpan};
         use crossterm::style::Color;
-        use ui::grid::Style;
+        use ui::buffer::SpanStyle;
 
         let (term_w, _) = self.ui.terminal_size();
         let width = term_w as usize;
@@ -299,11 +299,21 @@ impl App {
             spans.push(item.to_span(status_bg));
         }
 
-        let (left, right) = spans_to_segments(&mut spans, width, status_bg, theme_muted_fg);
-        if let Some(bar) = self.ui.layer_mut::<ui::StatusBar>("status") {
-            *bar = ui::StatusBar::new().with_bg(Style::bg(status_bg));
-            bar.set_left(left);
-            bar.set_right(right);
+        let line = spans_to_buffer_line(&mut spans, width, status_bg, theme_muted_fg);
+        let status_buf = self.status_buf;
+        if let Some(buf) = self.ui.buf_mut(status_buf) {
+            buf.set_all_lines(vec![line.text]);
+            buf.clear_highlights(0, 1);
+            for span in line.spans {
+                let style = SpanStyle {
+                    fg: span.style.fg,
+                    bg: span.style.bg,
+                    bold: span.style.bold,
+                    dim: span.style.dim,
+                    italic: span.style.italic,
+                };
+                buf.add_highlight(0, span.col_start, span.col_end, style);
+            }
         }
     }
 }

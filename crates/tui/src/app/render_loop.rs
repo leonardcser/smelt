@@ -297,12 +297,13 @@ impl App {
         self.ui.set_layer_rect("transcript", transcript_rect);
         self.ui.set_layer_rect("prompt", prompt_rect);
         self.ui.set_layer_rect("prompt_input", prompt_input_rect);
-        self.ui.set_layer_rect("status", status_rect);
         // Publish split-window rects so overlay anchors targeting a
         // window (e.g. notification toasts, prompt-docked pickers)
-        // can resolve.
+        // can resolve. The status line's rect lives here too — it's
+        // a painted split (no compositor layer).
         self.ui.set_window_rect(ui::PROMPT_WIN, prompt_rect);
         self.ui.set_window_rect(ui::TRANSCRIPT_WIN, transcript_rect);
+        self.ui.set_window_rect(self.status_win, status_rect);
 
         if self.ui.focused_overlay().is_none() {
             match self.app_focus {
