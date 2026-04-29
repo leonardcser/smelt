@@ -54,11 +54,17 @@ pub struct Overlay {
     /// Stacking order. Higher draws on top. Same `z` falls back to
     /// insertion order.
     pub z: u16,
-    /// When `true`, the host pauses engine-event drain while focus
-    /// is inside this overlay (permission prompts, lua dialogs
-    /// gating a parked task). When `false`, the overlay coexists
-    /// with a running turn (read-only viewers, completers).
+    /// When `true`, focus + Tab cycling stay inside this overlay and
+    /// Esc on the focused leaf fires `WinEvent::Dismiss` on every
+    /// leaf before closing. Independent of [`Self::blocks_agent`] —
+    /// passive viewers (`/help`, `/btw`) are modal but do not pause
+    /// the engine.
     pub modal: bool,
+    /// When `true`, the host pauses engine-event drain and queues
+    /// new user input while focus is inside this overlay. Set on
+    /// permission prompts and other dialogs that gate a pending tool
+    /// call.
+    pub blocks_agent: bool,
 }
 
 impl Overlay {
@@ -68,6 +74,7 @@ impl Overlay {
             anchor,
             z: 50,
             modal: false,
+            blocks_agent: false,
         }
     }
 
@@ -78,6 +85,11 @@ impl Overlay {
 
     pub fn modal(mut self, modal: bool) -> Self {
         self.modal = modal;
+        self
+    }
+
+    pub fn blocks_agent(mut self, b: bool) -> Self {
+        self.blocks_agent = b;
         self
     }
 }

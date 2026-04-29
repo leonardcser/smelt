@@ -750,46 +750,6 @@ impl App {
         self.layout.viewport_rows().max(1)
     }
 
-    /// Snapshot app state into the Lua ops context and return the
-    /// vim_mode + focused_window for callers that need them locally.
-    /// Build the common `DialogConfig` used by all built-in dialogs
-    /// (accent top rule, bar background, scrollbar colors, hints row).
-    pub(crate) fn builtin_dialog_config(
-        &self,
-        hint_text: Option<String>,
-        dismiss_keys: Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
-    ) -> ui::DialogConfig {
-        let theme = self.ui.theme();
-        let accent = theme.get("SmeltAccent");
-        let bg = ui::grid::Style {
-            bg: Some(crossterm::style::Color::Black),
-            ..Default::default()
-        };
-        let separator = ui::grid::Style {
-            fg: theme.get("SmeltBar").bg,
-            ..Default::default()
-        };
-        let scrollbar_track_style = theme.get("SmeltScrollbarTrack");
-        let scrollbar_thumb_style = theme.get("SmeltScrollbarThumb");
-        let hints = hint_text.map(|text| {
-            let mut sb = ui::StatusBar::new().with_bg(bg);
-            sb.set_left(vec![ui::StatusSegment::styled(
-                text,
-                ui::grid::Style { dim: true, ..bg },
-            )]);
-            sb
-        });
-        ui::DialogConfig {
-            accent_style: accent,
-            separator_style: separator,
-            background_style: bg,
-            scrollbar_track_style,
-            scrollbar_thumb_style,
-            dismiss_keys,
-            hints,
-        }
-    }
-
     pub(crate) fn close_float(&mut self, win_id: ui::WinId) {
         for id in self.ui.win_close(win_id) {
             self.lua.remove_callback(id);
@@ -824,9 +784,17 @@ impl App {
         self.flush_lua_callbacks();
     }
 
-    /// True when the focused float pauses engine-event drain
+    /// True when the focused dialog pauses engine-event drain
     /// (Confirm / Question / Lua dialogs gate a pending tool call).
+    /// Checks both the overlay path (Lua dialogs flipped to overlay
+    /// surfaces in P1.c) and the legacy float path (cmdline + the
+    /// few internal Rust dialogs that still build a `FloatConfig`).
     pub(super) fn focused_float_blocks_agent(&self) -> bool {
+        if let Some(id) = self.ui.focused_overlay() {
+            if self.ui.overlay(id).is_some_and(|o| o.blocks_agent) {
+                return true;
+            }
+        }
         let Some(win) = self.ui.focused_float() else {
             return false;
         };

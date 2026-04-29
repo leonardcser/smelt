@@ -87,6 +87,15 @@ function smelt.confirm.open(handle_id)
   if not d then return end
 
   local resolved = false
+  -- Track the options panel's current selection (list leaves fire
+  -- `selection_changed { index = 1-based }` on cursor move) and
+  -- whether the reason input has any user-typed text. Both flags
+  -- are needed so a Submit from either leaf can resolve with the
+  -- right option + the right reason: ctx.index is only present when
+  -- Submit comes from the options leaf; the placeholder-vs-typed
+  -- distinction can't be made from the buffer alone.
+  local selected_idx = 1
+  local typed_reason = false
   local function close_with(idx, message)
     if resolved then return end
     resolved = true
@@ -102,13 +111,21 @@ function smelt.confirm.open(handle_id)
     end
   end)
 
+  smelt.win.on_event(d.win, "selection_changed", function(ctx)
+    if ctx.index then selected_idx = ctx.index end
+  end)
+
+  smelt.win.on_event(d.win, "text_changed", function()
+    typed_reason = true
+  end)
+
   smelt.win.on_event(d.win, "submit", function(ctx)
-    local panels_snap = ctx.panels or {}
-    local options_panel = panels_snap[d.panels.options.idx] or {}
-    local idx = options_panel.selected or 1
-    local reason_panel = panels_snap[d.panels.reason.idx] or {}
-    local message = reason_panel.text
-    if message == "" then message = nil end
+    local idx = ctx.index or selected_idx
+    local message = nil
+    if typed_reason and d.panels.reason then
+      message = d.panels.reason:text()
+      if message == "" then message = nil end
+    end
     close_with(idx, message)
   end)
 

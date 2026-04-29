@@ -11,10 +11,9 @@ use crate::format::BufFormat;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
-use ui::text_input::TextInput;
 use ui::{
-    Border, BufId, Callback, CallbackResult, Constraint, FitMax, FloatConfig, KeyBind, LayoutTree,
-    Overlay, PanelContent, PanelHeight, PanelSpec, Payload, Placement, SeparatorStyle, SplitConfig,
+    Border, BufId, Callback, CallbackResult, Constraint, FloatConfig, KeyBind, LayoutTree, Overlay,
+    PanelContent, PanelHeight, PanelSpec, Payload, Placement, SeparatorStyle, SplitConfig,
     WinEvent, WinId,
 };
 
@@ -167,43 +166,23 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
                 leaf_shapes.push(LeafShape::List { initial_cursor });
             }
             "input" => {
+                // Buffer-backed editable single-line leaf. The
+                // placeholder lives as initial line text + a dim
+                // highlight extmark covering it; the input recipe
+                // clears both on first keystroke. `collapse_when_empty`
+                // is parsed but inert for inputs — TextInput's legacy
+                // `content_rows()` was always 1 too, so the collapse
+                // never fired in practice.
                 let placeholder: Option<String> = panel.get("placeholder").ok();
-                let collapse_when_empty: bool = panel.get("collapse_when_empty").unwrap_or(false);
                 let name: Option<String> = panel.get("name").ok();
-
-                if collapse_when_empty {
-                    // Legacy widget path: collapse-when-empty needs
-                    // the panel framework's height-collapse logic
-                    // (Buffer-backed leaves don't yet collapse to 0
-                    // rows when empty). Migrate when height-collapse
-                    // moves onto the leaf side.
-                    let mut ti = TextInput::new();
-                    if let Some(p) = placeholder {
-                        ti = ti.with_placeholder(p);
-                    }
-                    let widget = Box::new(ti);
-                    let mut spec = PanelSpec::widget(widget, PanelHeight::Fit)
-                        .with_initial_focus(initial_focus);
-                    spec.collapse_when_empty = true;
-                    panel_specs.push(spec);
-                    // Placeholder keeps leaf_shapes index-aligned;
-                    // legacy widget panels never reach the overlay
-                    // path.
-                    leaf_shapes.push(LeafShape::Content);
-                } else {
-                    // Migrated path: Buffer-backed editable single-
-                    // line leaf. The placeholder lives as initial
-                    // line text + a dim highlight extmark covering
-                    // it; the recipe clears both on first keystroke.
-                    let buf = make_input_buffer(app, placeholder.as_deref());
-                    let spec = PanelSpec::content(buf, PanelHeight::Fixed(1))
-                        .focusable(true)
-                        .with_initial_focus(initial_focus);
-                    panel_specs.push(spec);
-                    leaf_shapes.push(LeafShape::Input {
-                        name: name.unwrap_or_default(),
-                    });
-                }
+                let buf = make_input_buffer(app, placeholder.as_deref());
+                let spec = PanelSpec::content(buf, PanelHeight::Fixed(1))
+                    .focusable(true)
+                    .with_initial_focus(initial_focus);
+                panel_specs.push(spec);
+                leaf_shapes.push(LeafShape::Input {
+                    name: name.unwrap_or_default(),
+                });
             }
             other => return Err(format!("unknown panel kind: {other}")),
         }
@@ -213,75 +192,21 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
         return Err("dialog must have at least one panel".into());
     }
 
-    // Buffer-only dialogs ride the Overlay path: a centered modal
-    // with a vbox of buffer-backed Windows under the unified
-    // `Window::render` paint pipeline. Dialogs that still spec a
-    // legacy widget panel (today: `kind = "input"` with
-    // `collapse_when_empty`, the only remaining widget escape) fall
-    // through to the legacy `dialog_open`.
-    let content_only = panel_specs
-        .iter()
-        .all(|p| matches!(p.content, PanelContent::Buffer(_)));
-    let blocks_agent_pre: bool = opts.get("blocks_agent").unwrap_or(false);
-    if content_only {
-        return open_dialog_via_overlay(app, title, panel_specs, leaf_shapes, blocks_agent_pre);
-    }
-
-    // Collect footer hints from top-level `opts.keymaps[].hint`. The Lua
-    // side handles the actual keymap registration; Rust only needs the
-    // hint strings to build the footer.
-    let mut extra_hints: Vec<String> = Vec::new();
-    if let Ok(km_tbl) = opts.get::<mlua::Table>("keymaps") {
-        for entry_res in km_tbl.sequence_values::<mlua::Table>() {
-            let entry = entry_res.map_err(|e| format!("keymap entry: {e}"))?;
-            if let Ok(hint) = entry.get::<String>("hint") {
-                if !hint.is_empty() {
-                    extra_hints.push(hint);
-                }
-            }
-        }
-    }
-
-    let mut hint_parts: Vec<&str> =
-        vec![crate::keymap::hints::CONFIRM, crate::keymap::hints::CANCEL];
-    for h in &extra_hints {
-        hint_parts.push(h.as_str());
-    }
-    let dialog_config =
-        app.builtin_dialog_config(Some(crate::keymap::hints::join(&hint_parts)), vec![]);
-
-    // `blocks_agent` gates engine-event drain + queues new user input. Only
-    // dialogs that gate an agent decision (permission prompts,
-    // `ask_user_question`, `exit_plan_mode`) should opt in — passive viewers
-    // like `/help`, `/btw`, `/ps` must let engine responses flow through.
+    // `blocks_agent` gates engine-event drain + queues new user
+    // input while focus is inside the overlay. Only dialogs that gate
+    // a pending agent decision (permission prompts,
+    // `ask_user_question`, `exit_plan_mode`) opt in — passive viewers
+    // (`/help`, `/btw`, `/ps`) leave engine responses flowing.
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
-    let placement = parse_dialog_placement(&opts);
-
-    let vim_enabled = app.input.vim_enabled();
-    let win_id = app
-        .ui
-        .dialog_open(
-            FloatConfig {
-                title,
-                border: ui::Border::None,
-                placement,
-                blocks_agent,
-                ..Default::default()
-            },
-            dialog_config,
-            panel_specs,
-        )
-        .ok_or_else(|| "failed to open dialog window".to_string())?;
-    // Mirror the transcript's selection model on interactive buffer
-    // panels — vim Visual gives inclusive selection so dragging
-    // "hello" yanks all five chars, not "hell".
-    if let Some(dialog) = app.ui.dialog_mut(win_id) {
-        dialog.set_vim_enabled_on_interactive(vim_enabled);
-    }
-    Ok(DialogOpenResult {
-        root: win_id,
-        named_inputs: Vec::new(),
-    })
+    let placement = parse_overlay_placement(&opts);
+    open_dialog_via_overlay(
+        app,
+        title,
+        panel_specs,
+        leaf_shapes,
+        blocks_agent,
+        placement,
+    )
 }
 
 /// Open a centered modal Overlay carrying one Window per buffer panel.
@@ -312,7 +237,8 @@ fn open_dialog_via_overlay(
     title: Option<String>,
     panels: Vec<PanelSpec>,
     leaf_shapes: Vec<LeafShape>,
-    _blocks_agent: bool,
+    blocks_agent: bool,
+    placement: OverlayPlacement,
 ) -> Result<DialogOpenResult, String> {
     let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::with_capacity(panels.len());
     let mut leaf_wins: Vec<WinId> = Vec::with_capacity(panels.len());
@@ -320,6 +246,7 @@ fn open_dialog_via_overlay(
     // Leaves needing post-overlay configuration.
     let mut list_leaves: Vec<(WinId, u16)> = Vec::new();
     let mut input_leaves: Vec<WinId> = Vec::new();
+    let mut interactive_leaves: Vec<WinId> = Vec::new();
     let mut named_inputs: Vec<(String, WinId)> = Vec::new();
 
     for (spec, shape) in panels.into_iter().zip(leaf_shapes) {
@@ -360,6 +287,9 @@ fn open_dialog_via_overlay(
         };
         leaf_items.push((constraint, LayoutTree::leaf(win)));
         leaf_wins.push(win);
+        if spec.interactive {
+            interactive_leaves.push(win);
+        }
         match &shape {
             LeafShape::List { initial_cursor } => {
                 list_leaves.push((win, *initial_cursor));
@@ -404,15 +334,36 @@ fn open_dialog_via_overlay(
     let initial_focus = focus_target.unwrap_or(root);
 
     let inner = LayoutTree::vbox(leaf_items);
-    let layout = LayoutTree::vbox(vec![(
-        Constraint::Percentage(60),
-        LayoutTree::hbox(vec![(Constraint::Percentage(70), inner)]),
-    )])
-    .with_border(Border::Single)
-    .with_title(title.unwrap_or_default());
+    let (anchor, layout) = match placement {
+        OverlayPlacement::ScreenCenter => {
+            let layout = LayoutTree::vbox(vec![(
+                Constraint::Percentage(60),
+                LayoutTree::hbox(vec![(Constraint::Percentage(70), inner)]),
+            )])
+            .with_border(Border::Single)
+            .with_title(title.unwrap_or_default());
+            (Anchor::ScreenCenter, layout)
+        }
+        OverlayPlacement::DockBottom { height_pct } => {
+            // Full-width across the terminal; height % drives the
+            // outer vbox so `Anchor::ScreenBottom` reads the layout's
+            // natural size and pins to the bottom edge with one row
+            // reserved above for the status bar.
+            let layout = LayoutTree::vbox(vec![(
+                Constraint::Percentage(height_pct),
+                LayoutTree::hbox(vec![(Constraint::Percentage(100), inner)]),
+            )])
+            .with_border(Border::Single)
+            .with_title(title.unwrap_or_default());
+            (Anchor::ScreenBottom { above_rows: 1 }, layout)
+        }
+    };
 
-    app.ui
-        .overlay_open(Overlay::new(layout, Anchor::ScreenCenter).modal(true));
+    app.ui.overlay_open(
+        Overlay::new(layout, anchor)
+            .modal(true)
+            .blocks_agent(blocks_agent),
+    );
     app.ui.set_focus(initial_focus);
 
     for (leaf, initial_cursor) in list_leaves {
@@ -421,8 +372,41 @@ fn open_dialog_via_overlay(
     for leaf in input_leaves {
         configure_input_leaf(app, leaf);
     }
+    // Mirror the transcript's selection model on interactive buffer
+    // panels — vim Visual gives inclusive selection so dragging
+    // "hello" yanks all five chars, not "hell".
+    let vim_enabled = app.input.vim_enabled();
+    for leaf in interactive_leaves {
+        if let Some(win) = app.ui.win_mut(leaf) {
+            win.set_vim_enabled(vim_enabled);
+        }
+    }
 
     Ok(DialogOpenResult { root, named_inputs })
+}
+
+/// Where the dialog's overlay anchors. Parsed from `opts.placement` on
+/// the Lua side: absent or `"center"` → `ScreenCenter`; `"dock_bottom"`
+/// → `DockBottom` reading `placement_height` (default 60).
+#[derive(Clone, Copy)]
+enum OverlayPlacement {
+    ScreenCenter,
+    DockBottom { height_pct: u16 },
+}
+
+/// Top-level `placement` option on `smelt.ui.dialog._open`. Defaults to
+/// centered. `"dock_bottom"` docks full-width at the terminal bottom
+/// (1 row reserved above for the status bar); an optional
+/// `placement_height = <pct>` controls the dialog height as a fraction
+/// of available height.
+fn parse_overlay_placement(opts: &mlua::Table) -> OverlayPlacement {
+    match opts.get::<String>("placement").ok().as_deref() {
+        Some("dock_bottom") => {
+            let height_pct: u16 = opts.get("placement_height").unwrap_or(60);
+            OverlayPlacement::DockBottom { height_pct }
+        }
+        _ => OverlayPlacement::ScreenCenter,
+    }
 }
 
 /// Wire up the built-in list keymap on a leaf Window: cursor row
@@ -452,26 +436,37 @@ fn configure_list_leaf(app: &mut App, leaf: WinId, initial_cursor: u16) {
         if line_count == 0 {
             return CallbackResult::Consumed;
         }
+        let mut new_abs: Option<usize> = None;
         if let Some(win) = ctx.ui.win_mut(ctx.win) {
             let abs = win.scroll_top as usize + win.cursor_line as usize;
             let max = line_count.saturating_sub(1);
-            let new_abs = (abs as isize + delta).clamp(0, max as isize) as usize;
+            let target = (abs as isize + delta).clamp(0, max as isize) as usize;
+            if target == abs {
+                return CallbackResult::Consumed;
+            }
             // Keep cursor visible: simple model — adjust scroll_top so
             // cursor_line stays in [0, viewport_rows). Without the
             // exact viewport here, fall back to nudging scroll_top so
             // the abs row is reachable. List dialogs are short
             // overall; full scroll resolution lands in P1.d.
-            if (new_abs as u16) < win.scroll_top {
-                win.scroll_top = new_abs as u16;
+            if (target as u16) < win.scroll_top {
+                win.scroll_top = target as u16;
                 win.cursor_line = 0;
             } else {
-                let rel = new_abs as isize - win.scroll_top as isize;
+                let rel = target as isize - win.scroll_top as isize;
                 if rel >= 0 {
                     win.cursor_line = rel as u16;
                 }
             }
+            new_abs = Some(target);
         }
-        CallbackResult::Consumed
+        match new_abs {
+            Some(abs) => CallbackResult::Event(
+                WinEvent::SelectionChanged,
+                Payload::Selection { index: abs },
+            ),
+            None => CallbackResult::Consumed,
+        }
     }
 
     let bindings: &[(KeyBind, isize)] = &[
@@ -722,20 +717,6 @@ fn parse_separator(panel: &mlua::Table) -> Result<SeparatorStyle, String> {
             "panel.separator: unknown style {other:?} (expected \"dashed\" or \"solid\")"
         )),
         None => Ok(SeparatorStyle::None),
-    }
-}
-
-/// Top-level `placement` option on `smelt.ui.dialog._open`. Defaults
-/// to `fit_content(HalfScreen)` (compact center-floating dialog).
-/// `"dock_bottom"` docks full-width at the bottom; an optional
-/// `placement_height = <pct>` caps it (e.g. `60` → `Pct(60)`).
-fn parse_dialog_placement(opts: &mlua::Table) -> Placement {
-    match opts.get::<String>("placement").ok().as_deref() {
-        Some("dock_bottom") => {
-            let pct: u16 = opts.get("placement_height").unwrap_or(60);
-            Placement::dock_bottom_full_width(Constraint::Percentage(pct))
-        }
-        _ => Placement::fit_content(FitMax::HalfScreen),
     }
 }
 
