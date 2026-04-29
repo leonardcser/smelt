@@ -22,77 +22,64 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — eleven foundation commits landed
-(`40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
+**P1.c in progress** — fifteen commits landed (foundation
++ paint pipeline + first float migration). Foundation:
+`40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
 `434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
-`dcb0e8b`, `f80d1d0`): target types + `resolve_anchor`;
-`Ui::overlay_*` API + storage; per-frame resolution
-(`natural_size` + `resolve_overlays(cursor)`); `SeparatorStyle`
-on `Chrome` + dialog-side dedup; focus + hit-testing primitives
-(`active_modal`, `OverlayHitTarget`, `overlay_hit_test`,
-modal-aware); canonical Win-typed focus API (`focus`,
-`set_focus`, `focus_history`); overlay/focus structural glue
-(`contains_leaf`, `focused_overlay`, `focused_window`/`_mut`,
-`overlay_close` pops focus_history); unified `Ui::hit_test`
-+ `HitTarget::{ Window | Scrollbar | Chrome }` enum
-(Scrollbar reserved for P1.d); modal-aware Tab cycling
-(`focus_next` / `focus_prev` + `LayoutTree::leaves_in_order`).
-The full P1.c data + resolution + focus + hit-test layer
-matches the spec API list from ARCHITECTURE.md — only the
-eventual paint integration remains on the data side.
-60 P1.c-data unit tests total, co-located with the code
-they cover.
+`dcb0e8b`, `f80d1d0` (target types + `resolve_anchor`;
+`Ui::overlay_*` API + storage; per-frame resolution; chrome
+`SeparatorStyle`; focus + hit-test primitives; canonical
+Win-typed focus API; overlay/focus structural glue; unified
+`Ui::hit_test`; modal-aware Tab cycling). Paint pipeline +
+first migration: `5a467d5`, `0836ae1`, `41432a8`, `d77d513`
+(`Compositor::render_with` overlay paint hook; minimal
+`Window::render(buf, slice, ctx)`; `paint_chrome` +
+`Ui::render` walks resolved overlays after layer paint;
+text_modal migrated to Overlay + modal-Esc-dismiss built-in).
+The P1.c data + resolution + focus + hit-test + paint layer
+is operational end-to-end — `/stats` and `/cost` already
+render through Overlay rather than `dialog_open`. 65 P1.c
+unit tests total, co-located with the code they cover.
 
-**Next in P1.c (open design point):** C.5 — first float migration
-to Overlay — has a render-shape question that needs deciding
-before code lands. Current state:
+**C.5 first migration shipped.** text_modal (used by `/stats`
+and `/cost`) is now an Overlay { layout: vbox(border+title,
+hbox(leaf)), anchor: ScreenCenter, modal: true }. Esc dismiss
+is wired via a built-in modal-Esc-dismiss in `Ui::handle_key`
+(universal dismiss is fundamental behaviour, not user-
+customisable). Lost in the migration: `q` and `Ctrl+C`
+dismiss keys (text_modal-specific in the old dialog config).
+Restored when leaf-level overlay event routing lands in
+P1.d/P1.e. Recorded as a documented regression in FEATURES.md
+parity walk.
 
-- Overlay storage holds `LayoutTree<WinId>`. `resolve_overlays`
-  yields `(OverlayId, Rect, &Overlay)` per frame. ✅
-- `Window::render(buf, grid)` doesn't exist yet — paint flows
-  through `BufferView::draw(rect, slice, ctx)` invoked from
-  `Dialog::draw` for buffer panels and from compositor layers
-  (`Component::draw`) for floats. P1.d is the phase that flips
-  Window into the unified render unit.
-- `Compositor` owns `current` / `previous` grids privately;
-  external callers can't paint into the active frame.
+**Window::render scope.** The pulled-forward helper is
+read-only viewer scope: paints visible buffer lines from
+`scroll_top` into a slice, no extmark highlights / no
+transient selection / no scrollbar / no gutters. The full
+surface (extmark layered paint + scrollbar + gutters +
+selection paint) folds in alongside the `BufferView`
+deletion in P1.d; the helper exists today as the first
+concrete pin for that phase.
 
-Three plausible paths, none clean today:
-
-1. **Pull a minimal `Window::render(buf, slice, ctx)` helper
-   forward from P1.d** scoped to read-only viewer Windows.
-   Lets text_modal land as Overlay { layout: vbox(border+title,
-   leaf(WinId)), anchor: ScreenCenter }. Overlay paint walks
-   `resolve_layout`, paints chrome on container nodes, calls the
-   helper on each leaf. Still needs Compositor to expose its
-   `current` grid (small API addition).
-2. **Add a temporary `Overlay::Component` carrier variant** that
-   stores `Box<dyn Component>` alongside the `LayoutTree`. text_modal
-   passes a Dialog Component; Overlay holds the existing-shape
-   wrapper. Forbidden by meta-rules (parallel implementations).
-3. **Defer C.5 to land paired with P1.f** (`Ui` facade rewrite —
-   when overlays paint as peers of splits in a unified render
-   pass owned by Ui). Delays float deletion but avoids
-   scaffolding.
-
-Recommendation: **path 1**, with the Window-render helper extracted
-deliberately as a P1.c → P1.d hand-off. The helper is small (sync
-buffer view + paint visible lines + scrollbar — most of the work
-is already in `BufferView::draw`); landing it in C.5 turns it into
-the first concrete pin for P1.d.
-
-Until that shape is decided, C.5 doesn't ship code. C.6+ (delete
-`FloatConfig` / `PanelWidget` / `Placement`) is gated on C.5.
+**C.6+ — remaining float migrations + deletions:** still
+ahead. The paint pipeline can take more migrations now —
+each remaining float (`/help`, `/ps`, `/resume`, `/agents`,
+notification, picker, completer) needs its dialog
+config + dismiss keys converted to Overlay shape, and
+event routing for non-Esc keys is the gating piece.
+`FloatConfig` / `PanelWidget` / `Placement` deletions
+follow once every dialog flips.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 1007 passed
-(6 new since C.4-tail₅: `leaves_in_order_walks_depth_first`,
-`leaves_in_order_single_leaf`, `focus_next_returns_false_outside_modal`,
-`focus_next_cycles_modal_leaves`, `focus_prev_walks_backwards_with_wrap`,
-`focus_next_skips_unregistered_leaves`). `cargo clippy --workspace
---all-targets -- -D warnings` clean.
+**Tree:** green. `cargo nextest run --workspace` — 1018 passed
+(11 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
+1 `render_with_paints_after_layers`, 1 `render_paints_overlay_leaf_buffer`,
+2 `handle_key_esc_*` modal-dismiss). `cargo clippy --workspace
+--all-targets -- -D warnings` clean. Manual TUI parity walk:
+`/stats` and `/cost` open as bordered+titled centered modals,
+Esc dismisses, focus restores to prompt.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):

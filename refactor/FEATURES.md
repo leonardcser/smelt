@@ -108,8 +108,8 @@ to invoke_ the feature.
 | `/settings`                                       | `plugins/settings.lua`            | P4.e                             | working |
 | `/theme [name]`                                   | `plugins/theme.lua`               | P4.e + `colorschemes/`           | working |
 | `/color [name]`                                   | `plugins/color.lua`               | P4.e                             | working |
-| `/stats`                                          | `app/commands.rs::cmd_stats`      | P4.e                             | working |
-| `/cost`                                           | `app/commands.rs::cmd_cost`       | P4.e                             | working |
+| `/stats`                                          | `app/commands.rs::cmd_stats`      | P4.e                             | working — Esc dismiss; `q`/`Ctrl+C` regress until P1.d/e leaf-event routing |
+| `/cost`                                           | `app/commands.rs::cmd_cost`       | P4.e                             | working — same as `/stats` |
 | `/export`                                         | `plugins/export.lua`              | P4.e                             | working |
 | `/vim`                                            | `plugins/toggles.lua`             | P4.e                             | working |
 | `/thinking`                                       | `plugins/toggles.lua`             | P4.e                             | working |
