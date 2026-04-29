@@ -65,6 +65,21 @@ impl Harness {
             .await;
     }
 
+    /// Mount a `POST /messages` stub returning an HTTP error with a
+    /// JSON error body. Useful for pinning the error path (401, 429,
+    /// 500, etc.).
+    pub async fn mount_http_error(&self, status: u16, body: Value) {
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(body),
+            )
+            .mount(&self.mock)
+            .await;
+    }
+
     /// Run `smelt --headless --format=json -p <message>` and return the
     /// parsed JSONL events from stdout. Stderr is discarded. Events are
     /// returned as `serde_json::Value` so snapshots own the structural
