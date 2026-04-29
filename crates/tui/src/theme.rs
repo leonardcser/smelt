@@ -225,6 +225,11 @@ pub fn populate_ui_theme(theme: &mut ui::Theme) {
     } else {
         Color::AnsiValue(243)
     };
+    let cursor_line_bg = if is_light {
+        Color::AnsiValue(253)
+    } else {
+        Color::AnsiValue(237)
+    };
     let tool_pending = if is_light {
         Color::AnsiValue(250)
     } else {
@@ -237,6 +242,7 @@ pub fn populate_ui_theme(theme: &mut ui::Theme) {
     };
 
     theme.set("Visual", Style::bg(selection_bg));
+    theme.set("CursorLine", Style::bg(cursor_line_bg));
     theme.set("Comment", Style::fg(muted));
     theme.set("ErrorMsg", Style::fg(Color::Red));
 

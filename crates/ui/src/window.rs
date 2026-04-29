@@ -216,6 +216,13 @@ pub struct Window {
     pub buf: BufId,
     pub config: WinConfig,
     pub focusable: bool,
+    /// Opt-in flag: paint a `CursorLine`-themed background under
+    /// the visible cursor row when the window is focused. Defaults
+    /// to `false` so generic content viewers (transcript, /help,
+    /// /btw) stay clean. List-shaped Windows (option panels,
+    /// `kind="list"` dialog leaves) flip this on so the selected
+    /// row reads at a glance.
+    pub cursor_line_highlight: bool,
 
     pub edit_buf: EditBuffer,
     pub cpos: usize,
@@ -258,6 +265,7 @@ impl Window {
             buf,
             config,
             focusable: true,
+            cursor_line_highlight: false,
             edit_buf: EditBuffer::readonly(),
             cpos: 0,
             vim: None,
@@ -940,25 +948,52 @@ impl Window {
     /// buffer line; lines longer than `slice.width()` truncate at
     /// the right edge.
     ///
+    /// When `cursor_line_highlight` is on AND the window is
+    /// focused, the cursor row (`cursor_line` viewport offset) gets
+    /// a `CursorLine` theme-driven background — the seam list-shaped
+    /// Buffer Windows use for "selected item" highlighting, before
+    /// extmark-based per-row decoration lands in P1.d. The flag is
+    /// off by default so generic content viewers (transcript,
+    /// /help, /btw) stay clean; list-shaped Windows opt in.
+    ///
     /// This is the seam Overlay paint walks for each leaf in the
     /// overlay's `LayoutTree`. The richer surface (extmarks +
     /// scrollbar + gutters + selection) folds in alongside the
     /// `BufferView` deletion in P1.d.
-    pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
+    pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
         let width = slice.width();
         let height = slice.height();
         let scroll = self.scroll_top as usize;
         let line_count = buf.line_count();
+        let cursor_row = if self.cursor_line_highlight && ctx.focused {
+            Some(self.cursor_line)
+        } else {
+            None
+        };
+        let cursor_style = ctx.theme.get("CursorLine");
         for row in 0..height {
+            let row_style = if cursor_row == Some(row) {
+                cursor_style
+            } else {
+                Style::default()
+            };
+            // Paint the row background first so trailing space
+            // beyond the line content also picks up the cursor
+            // highlight.
+            if cursor_row == Some(row) {
+                for col in 0..width {
+                    slice.set(col, row, ' ', row_style);
+                }
+            }
             let idx = scroll + row as usize;
             if idx >= line_count {
-                break;
+                continue;
             }
             let Some(line) = buf.get_line(idx) else {
-                break;
+                continue;
             };
             for (col, ch) in line.chars().take(width as usize).enumerate() {
-                slice.set(col as u16, row, ch, Style::default());
+                slice.set(col as u16, row, ch, row_style);
             }
         }
     }
@@ -1167,5 +1202,82 @@ mod tests {
         // Rows 1..3 stay empty.
         assert_eq!(grid.cell(0, 1).symbol, ' ');
         assert_eq!(grid.cell(0, 3).symbol, ' ');
+    }
+
+    #[test]
+    fn render_highlights_cursor_row_when_opted_in_and_focused() {
+        // List-shaped Window with `cursor_line_highlight = true`:
+        // the row at `cursor_line` (relative to the viewport) gets
+        // the `CursorLine` theme bg.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), "bravo".into(), "charlie".into()]);
+        let mut w = make_win();
+        w.cursor_line_highlight = true;
+        w.cursor_line = 1; // second visible row
+        let mut theme = Theme::default();
+        let bg = crate::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        theme.set("CursorLine", bg);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: true,
+            theme,
+        };
+        let mut grid = Grid::new(10, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
+        w.render(&buf, &mut slice, &ctx);
+        // Cursor row text picks up the highlight bg.
+        assert_eq!(grid.cell(0, 1).symbol, 'b');
+        assert_eq!(grid.cell(0, 1).style.bg, bg.bg);
+        // Trailing cells of the cursor row also pick up the bg.
+        assert_eq!(grid.cell(9, 1).style.bg, bg.bg);
+        // Non-cursor rows stay default.
+        assert_ne!(grid.cell(0, 0).style.bg, bg.bg);
+        assert_ne!(grid.cell(0, 2).style.bg, bg.bg);
+    }
+
+    #[test]
+    fn render_skips_cursor_highlight_without_opt_in() {
+        // Default `cursor_line_highlight = false` — focused content
+        // viewers (transcript, /help, /btw) stay clean.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
+        let w = make_win();
+        let mut theme = Theme::default();
+        let bg = crate::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        theme.set("CursorLine", bg);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: true,
+            theme,
+        };
+        let mut grid = Grid::new(10, 2);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
+        w.render(&buf, &mut slice, &ctx);
+        // No cursor highlight even when focused, because opt-in flag is off.
+        assert_ne!(grid.cell(0, 0).style.bg, bg.bg);
+    }
+
+    #[test]
+    fn render_skips_cursor_highlight_when_unfocused() {
+        // Opt-in window but unfocused: no highlight.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
+        let mut w = make_win();
+        w.cursor_line_highlight = true;
+        let mut theme = Theme::default();
+        let bg = crate::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        theme.set("CursorLine", bg);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            theme,
+        };
+        let mut grid = Grid::new(10, 2);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
+        w.render(&buf, &mut slice, &ctx);
+        assert_ne!(grid.cell(0, 0).style.bg, bg.bg);
     }
 }
