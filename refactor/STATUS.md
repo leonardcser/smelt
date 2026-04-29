@@ -22,30 +22,39 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — sixteen commits landed (foundation
+**P1.c in progress** — eighteen commits landed (foundation
 + paint pipeline + first float migration + leaf event
-routing). Foundation: `40f0c82`, `702305a`, `8fa6760`,
-`d3c4a83`, `44fe779`, `434eee8`/`16ca777`, `7cee24c`,
-`d94d12c`, `2713f01`/`50e2ba5`, `dcb0e8b`, `f80d1d0`
-(target types + `resolve_anchor`; `Ui::overlay_*` API +
-storage; per-frame resolution; chrome `SeparatorStyle`;
-focus + hit-test primitives; canonical Win-typed focus
-API; overlay/focus structural glue; unified `Ui::hit_test`;
-modal-aware Tab cycling). Paint pipeline + first migration
-+ leaf-event routing: `5a467d5`, `0836ae1`, `41432a8`,
-`d77d513`, `0922dd0` (`Compositor::render_with` overlay
-paint hook; minimal `Window::render(buf, slice, ctx)`;
-`paint_chrome` + `Ui::render` walks resolved overlays after
-layer paint; text_modal migrated to Overlay; modal-Esc-
-dismiss built-in; `Ui::overlay_focus` field +
-`overlay_for_leaf` helper + `set_focus` accepts overlay
-leaves + `handle_key_with_lua` routes via `focus()`; q +
-Ctrl+C dismiss restored on text_modal via leaf callbacks).
-The P1.c data + resolution + focus + hit-test + paint +
-event-routing layer is operational end-to-end — `/stats`
-and `/cost` render as Overlays with full Esc/q/Ctrl+C
-dismiss parity vs the old DialogConfig path. 68 P1.c unit
-tests total, co-located with the code they cover.
+routing + content-only Lua dialog migration). Foundation:
+`40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
+`434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
+`dcb0e8b`, `f80d1d0` (target types + `resolve_anchor`;
+`Ui::overlay_*` API + storage; per-frame resolution; chrome
+`SeparatorStyle`; focus + hit-test primitives; canonical
+Win-typed focus API; overlay/focus structural glue;
+unified `Ui::hit_test`; modal-aware Tab cycling). Paint
+pipeline + first migration + leaf-event routing:
+`5a467d5`, `0836ae1`, `41432a8`, `d77d513`, `0922dd0`
+(`Compositor::render_with` overlay paint hook; minimal
+`Window::render(buf, slice, ctx)`; `paint_chrome` +
+`Ui::render` walks resolved overlays after layer paint;
+text_modal migrated to Overlay; modal-Esc-dismiss built-in;
+`Ui::overlay_focus` field + `overlay_for_leaf` helper +
+`set_focus` accepts overlay leaves + `handle_key_with_lua`
+routes via `focus()`; q + Ctrl+C dismiss restored on
+text_modal via leaf callbacks). Content-only Lua dialog
+migration: `0f829ce`, `7330088` (`win_close` routes to
+`overlay_close` on overlay leaves; modal-Esc fires
+`WinEvent::Dismiss` on every leaf before closing;
+content-only `smelt.ui.dialog._open` panel sets route to a
+new `open_dialog_via_overlay` path; `Ui::render` pre-pass
+drives `Buffer::ensure_rendered_at(leaf_width)` so parsers
+populate lines before the immutable paint walk reads
+them). The P1.c data + resolution + focus + hit-test +
+paint + event-routing layer is operational end-to-end —
+`/stats`, `/cost`, `/help`, `/btw` all render as Overlays
+with full Esc dismiss parity vs the old DialogConfig path.
+71 P1.c unit tests total, co-located with the code they
+cover.
 
 **C.5 first migration shipped + parity restored.**
 text_modal lives as `Overlay { layout: vbox(border+title,
@@ -75,27 +84,45 @@ selection paint) folds in alongside the `BufferView`
 deletion in P1.d; the helper exists today as the first
 concrete pin for that phase.
 
-**C.6+ — remaining float migrations + deletions:** still
-ahead. The paint pipeline can take more migrations now —
-each remaining float (`/help`, `/ps`, `/resume`, `/agents`,
-notification, picker, completer) needs its dialog
-config + dismiss keys converted to Overlay shape, and
-event routing for non-Esc keys is the gating piece.
-`FloatConfig` / `PanelWidget` / `Placement` deletions
-follow once every dialog flips.
+**C.6 content-only Lua dialogs migrated.** `/help` and
+`/btw` (and any future Lua dialog whose panel set is
+exclusively `kind="content"` / `kind="markdown"` buffer
+panels) now route through `open_dialog_via_overlay` →
+`Overlay { vbox(border+title, vbox(leaves)), ScreenCenter,
+modal: true }`. The `dialog.lua` Lua API surface is
+unchanged: callers still get a `win_id` they register
+`on_event("dismiss"|"submit"|"text_changed"|"tick")` and
+keymap callbacks against. Modal-Esc fires `Dismiss` on every
+leaf so `dialog.lua`'s `on_event("dismiss", …)` flushes the
+parked task. `smelt.win.close(win_id)` on any overlay leaf
+closes the whole overlay (not just one panel). Mixed
+dialogs with `kind="options"` / `kind="input"` / `kind="list"`
+keep the legacy `dialog_open` path until widgets get their
+Buffer-backed rewrites in C.7+.
+
+**C.7+ — remaining float migrations + deletions:** still
+ahead. Mixed-content dialogs need their widgets
+(`OptionList`, `TextInput`) rewritten as Buffer-backed
+Windows so they fit the unified Overlay model. The picker
+and notification surfaces follow. `FloatConfig` /
+`PanelWidget` / `Placement` deletions land once every
+dialog flips.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 1021 passed
-(14 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
+**Tree:** green. `cargo nextest run --workspace` — 1024 passed
+(17 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
 1 `render_with_paints_after_layers`, 1 `render_paints_overlay_leaf_buffer`,
-2 `handle_key_esc_*` modal-dismiss, 3 `overlay_open_modal_focuses_*` /
-`set_focus_accepts_overlay_leaf` / `handle_key_routes_to_overlay_leaf_callback`).
+1 `render_drives_ensure_rendered_at_for_each_overlay_leaf`,
+2 `handle_key_esc_*` modal-dismiss, 1 `modal_esc_fires_dismiss_on_every_leaf_before_closing`,
+1 `win_close_on_overlay_leaf_closes_overlay_and_clears_all_leaves`,
+3 `overlay_open_modal_focuses_*` / `set_focus_accepts_overlay_leaf` /
+`handle_key_routes_to_overlay_leaf_callback`).
 `cargo clippy --workspace --all-targets -- -D warnings` clean. Manual
-TUI parity walk: `/stats` and `/cost` open as bordered+titled
-centered modals; Esc, q, and Ctrl+C all dismiss; focus restores
-to prompt.
+TUI parity walk: `/stats`, `/cost`, `/help`, `/btw` open as
+bordered+titled centered modals; Esc / q / Ctrl+C dismiss as
+appropriate per dialog; focus restores to prompt.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
@@ -197,10 +224,10 @@ before declaring anything done.
 ## What's next
 
 **Active phase:** P1.c — `Overlay` replacing `Float`. The
-data + resolution + focus/hit-test layer is in place
-(C.0–C.4 + tails); see "Where we are" above for the running
-narrative and the open C.5 design point. Target shape from
-`REFACTOR.md` § P1.c (for reference):
+data + resolution + focus/hit-test + paint + first-migration
++ content-only Lua dialog migration are all in place
+(C.0–C.6); see "Where we are" above for the running narrative.
+Target shape from `REFACTOR.md` § P1.c (for reference):
 
 - `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
 - `Anchor::{ ScreenCenter | ScreenAt { row, col, corner } |
@@ -208,7 +235,25 @@ narrative and the open C.5 design point. Target shape from
 - Drag = mutate the anchor.
 - `Float` / `FloatId` / `FloatConfig` / `Placement` /
   `PanelWidget` trait / `dialog.rs` panel multiplexing — all
-  deleted at C.6+ once C.5 lands.
+  deleted at C.9 once every dialog flips.
+
+**Next sub-phase: C.7 — `OptionList` as Buffer-backed
+Window.** The blocker for migrating mixed dialogs (confirm,
+permissions, agents, rewind, resume, model picker, …) is
+that today's option-list panel is a `PanelWidget`, not a
+Window. The rewrite splits the list into:
+
+- A read-only Buffer holding one row per item (label + meta
+  cols formatted as plain text).
+- A Window over that Buffer with cursor-row driving
+  selection and a keymap recipe binding `j/k/Enter`.
+- Selection rendering via extmarks in a `"options"`
+  namespace (highlight on the cursor row).
+
+Once that lands, `kind="options"` panels build a Window
+just like content panels and the content-only-vs-mixed
+branch in `open_dialog` collapses. C.8 does the same for
+`TextInput`. C.9 deletes the legacy types.
 
 ## Deferred to P1.a-tail (after the transcript migration)
 
