@@ -4,15 +4,11 @@
 //! float. Shows a single-row message with a leading level label
 //! (info/error). Caller controls lifecycle (open → close via
 //! `win_close`); the toast stays put until replaced.
-//!
-//! Mouse drag-selects the message body the same way `TextInput` does:
-//! `Down` anchors a char index, `Drag` extends, `Up` emits
-//! `Action(Yank(text))` so the host can copy to the clipboard.
 
 use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationLevel {
@@ -52,13 +48,6 @@ pub struct Notification {
     message: String,
     level: NotificationLevel,
     style: NotificationStyle,
-    /// Char-index anchor (set on mouse Down inside the message body)
-    /// and cursor (extended by Drag). `None` outside an active drag.
-    anchor: Option<usize>,
-    cursor_col: usize,
-    /// Last drawn rect — handle_mouse needs the absolute origin to
-    /// translate `event.column` into a char index.
-    last_area: Rect,
 }
 
 impl Notification {
@@ -67,9 +56,6 @@ impl Notification {
             message: message.into(),
             level,
             style: NotificationStyle::default(),
-            anchor: None,
-            cursor_col: 0,
-            last_area: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -80,8 +66,6 @@ impl Notification {
 
     pub fn set_message(&mut self, message: impl Into<String>) {
         self.message = message.into();
-        self.anchor = None;
-        self.cursor_col = 0;
     }
 
     pub fn set_level(&mut self, level: NotificationLevel) {
@@ -95,54 +79,10 @@ impl Notification {
     pub fn level(&self) -> NotificationLevel {
         self.level
     }
-
-    /// `(start, end)` char indices of the active selection in
-    /// `message`, normalized so `start <= end`. `None` when no drag
-    /// is active or anchor == cursor.
-    fn selection_range(&self) -> Option<(usize, usize)> {
-        let anchor = self.anchor?;
-        if anchor == self.cursor_col {
-            return None;
-        }
-        Some(if anchor < self.cursor_col {
-            (anchor, self.cursor_col)
-        } else {
-            (self.cursor_col, anchor)
-        })
-    }
-
-    /// First column where the message body starts (after indent +
-    /// level label + gap). Mirrors the layout used by `draw`.
-    fn text_start_col(&self) -> u16 {
-        let indent: u16 = 1;
-        let gap: u16 = 2;
-        let label_len = match self.level {
-            NotificationLevel::Info => 4,
-            NotificationLevel::Error => 5,
-        };
-        indent + label_len + gap
-    }
-
-    /// Translate a column relative to `last_area` into a char index in
-    /// `message`, clamped to the message length. Columns left of the
-    /// message body clamp to 0; columns past the end clamp to the
-    /// last index.
-    fn char_index_at_local_col(&self, local_col: u16) -> usize {
-        let text_start = self.text_start_col();
-        if local_col < text_start {
-            return 0;
-        }
-        let offset = (local_col - text_start) as usize;
-        offset.min(self.message.chars().count())
-    }
 }
 
 impl Component for Notification {
-    fn prepare(&mut self, area: Rect, _ctx: &DrawContext) {
-        self.last_area = area;
-    }
-
-    fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
+    fn draw(&self, _area: Rect, slice: &mut GridSlice<'_>, _ctx: &DrawContext) {
         let w = slice.width();
         let h = slice.height();
         if w == 0 || h == 0 {
@@ -168,61 +108,18 @@ impl Component for Notification {
         }
         col = col.saturating_add(gap);
 
-        let selection = self.selection_range();
         let budget = w.saturating_sub(col) as usize;
-        for (i, ch) in self.message.chars().enumerate().take(budget) {
+        for ch in self.message.chars().take(budget) {
             if col >= w {
                 break;
             }
-            let is_selected = selection.is_some_and(|(s, e)| i >= s && i < e);
-            let style = if is_selected {
-                Style {
-                    bg: ctx.selection_style.bg,
-                    ..self.style.message
-                }
-            } else {
-                self.style.message
-            };
-            slice.set(col, 0, ch, style);
+            slice.set(col, 0, ch, self.style.message);
             col = col.saturating_add(1);
         }
     }
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {
         KeyResult::Ignored
-    }
-
-    fn handle_mouse(&mut self, event: MouseEvent) -> KeyResult {
-        let rect = self.last_area;
-        if rect.width == 0 || !rect.contains(event.row, event.column) {
-            return KeyResult::Ignored;
-        }
-        let local_col = event.column - rect.left;
-        match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                let idx = self.char_index_at_local_col(local_col);
-                self.anchor = Some(idx);
-                self.cursor_col = idx;
-                // Capture so subsequent Drag/Up route here even when
-                // the pointer leaves the toast row.
-                KeyResult::Capture
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.anchor.is_some() {
-                    self.cursor_col = self.char_index_at_local_col(local_col);
-                    KeyResult::Consumed
-                } else {
-                    KeyResult::Ignored
-                }
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                // Selection survives the release so the user can see
-                // what they grabbed; cleared on the next Down. Clipboard
-                // side effects belong to the host.
-                KeyResult::Consumed
-            }
-            _ => KeyResult::Ignored,
-        }
     }
 
     fn cursor(&self) -> Option<CursorInfo> {
@@ -249,7 +146,6 @@ mod tests {
             terminal_width: w,
             terminal_height: h,
             focused: false,
-            selection_style: Default::default(),
         }
     }
 

@@ -283,7 +283,6 @@ mod tests {
             terminal_width: 10,
             terminal_height: 3,
             focused: false,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 3));
         view.draw(Rect::new(0, 0, 10, 3), &mut slice, &ctx);
@@ -301,7 +300,6 @@ mod tests {
             terminal_width: 10,
             terminal_height: 2,
             focused: false,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
         view.draw(Rect::new(0, 0, 10, 2), &mut slice, &ctx);
@@ -319,7 +317,6 @@ mod tests {
             terminal_width: 12,
             terminal_height: 3,
             focused: false,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 12, 3));
         view.draw(Rect::new(0, 0, 12, 3), &mut slice, &ctx);
@@ -339,7 +336,6 @@ mod tests {
             terminal_width: 20,
             terminal_height: 1,
             focused: false,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
         view.draw(Rect::new(0, 0, 20, 1), &mut slice, &ctx);
@@ -366,7 +362,6 @@ mod tests {
             terminal_width: 10,
             terminal_height: 1,
             focused: false,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         view.draw(Rect::new(0, 0, 10, 1), &mut slice, &ctx);
@@ -394,7 +389,6 @@ mod tests {
             terminal_width: 10,
             terminal_height: 1,
             focused: false,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         view.draw(Rect::new(0, 0, 10, 1), &mut slice, &ctx);
@@ -460,7 +454,6 @@ mod tests {
             terminal_width: 20,
             terminal_height: 1,
             focused: false,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
         view.draw(Rect::new(0, 0, 20, 1), &mut slice, &ctx);

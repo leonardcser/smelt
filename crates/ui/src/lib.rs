@@ -95,12 +95,6 @@ pub struct Ui {
     /// same dispatch path used by floats. Floats use the `"float:N"`
     /// layer-id prefix instead of this map.
     splits: HashMap<String, WinId>,
-    /// Theme-resolved background color used by every `Window`-driven
-    /// selection overlay (transcript, prompt, dialog content panels).
-    /// Populated by the host once at startup; one source of truth so
-    /// the look stays consistent across surfaces. `None` falls back to
-    /// `DarkGrey` at the call site.
-    selection_bg: Option<crossterm::style::Color>,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -129,30 +123,6 @@ impl Ui {
             callbacks: Callbacks::new(),
             split_rects: HashMap::new(),
             splits: HashMap::new(),
-            selection_bg: None,
-        }
-    }
-
-    /// Set the background color used for selection overlays across
-    /// every `Window`-backed surface. Call once at host startup with
-    /// `theme::selection_bg()`; future theme overrides flow through
-    /// the same slot.
-    pub fn set_selection_bg(&mut self, color: crossterm::style::Color) {
-        self.selection_bg = Some(color);
-        let style = self.selection_style();
-        self.compositor.set_selection_style(style);
-    }
-
-    /// Selection overlay background as a `Style` ready to feed into
-    /// `BufferView::add_highlight`. Falls back to `DarkGrey` if the
-    /// host never set one.
-    pub fn selection_style(&self) -> grid::Style {
-        grid::Style {
-            bg: Some(
-                self.selection_bg
-                    .unwrap_or(crossterm::style::Color::DarkGrey),
-            ),
-            ..grid::Style::default()
         }
     }
 
@@ -500,7 +470,7 @@ impl Ui {
     pub fn dialog_open(
         &mut self,
         float_config: FloatConfig,
-        mut dialog_config: dialog::DialogConfig,
+        dialog_config: dialog::DialogConfig,
         panels: Vec<dialog::PanelSpec>,
     ) -> Option<WinId> {
         let all_bufs_registered = panels.iter().all(|p| match &p.content {
@@ -509,12 +479,6 @@ impl Ui {
         });
         if !all_bufs_registered {
             return None;
-        }
-        // Inherit the host's selection style so interactive buffer
-        // panels paint their highlight with the same bg the transcript
-        // and prompt use.
-        if dialog_config.selection_style == grid::Style::default() {
-            dialog_config.selection_style = self.selection_style();
         }
         let id = WinId(self.next_win_id);
         self.next_win_id += 1;

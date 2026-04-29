@@ -46,11 +46,6 @@ pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub focused: bool,
-    /// Selection overlay style for `Window`-driven surfaces and inline
-    /// drag-select widgets (TextInput, Notification). Populated by the
-    /// compositor from the host's `Ui::set_selection_bg` slot, so every
-    /// widget paints the same color without carrying its own field.
-    pub selection_style: Style,
 }
 
 #[derive(Debug, Clone)]
