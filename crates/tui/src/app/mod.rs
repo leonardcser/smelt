@@ -163,19 +163,27 @@ pub struct App {
     /// `None` when no toast. Closing the leaf via `close_float`
     /// cascades through `overlay_close` to remove the overlay.
     pub notification: Option<ui::WinId>,
-    /// Nvim-style `:` command line as a compositor float. `Some(win)`
-    /// while the prompt is active; the `ui::Cmdline` component on that
-    /// window owns all edit / history state. Events.rs pre-dispatches
-    /// Enter / Esc / Tab while the cmdline is focused and drives the
-    /// shared `cmdline_completer` + `cmdline_history` below.
+    /// Leaf `WinId` of the open `:` cmdline overlay, if visible.
+    /// `cmdline_handle_key` mutates the leaf's buffer + cursor
+    /// directly through `&mut self`. Closing the leaf via
+    /// `close_float` cascades through `overlay_close` to remove the
+    /// overlay.
     pub cmdline_win: Option<ui::WinId>,
-    /// Persistent `:` history across open/close cycles. The component
-    /// only sees this as a snapshot at open time; on close / submit we
-    /// merge the component's working history back in.
+    /// Persistent `:` history across open/close cycles. Most-recent
+    /// at the back; submit appends (dedup'd against the previous
+    /// entry).
     pub cmdline_history: Vec<String>,
+    /// Index into `cmdline_history` while the user is browsing with
+    /// Up/Down. `None` when not browsing.
+    pub cmdline_history_browse: Option<usize>,
+    /// Snapshot of the cmdline payload at the moment the user started
+    /// history browsing. Restored when Down past the most-recent
+    /// entry returns to "live" input.
+    pub cmdline_history_stash: String,
     /// Shared completer instance for `:` command completion. Lazily
     /// constructed on first Tab press (it queries Lua command names),
-    /// dropped on cmdline close.
+    /// dropped on cmdline close or any text mutation that invalidates
+    /// the current selection.
     pub cmdline_completer: Option<crate::completer::Completer>,
     /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
     /// when the terminal isn't focused, so input from other apps
@@ -647,6 +655,8 @@ impl App {
             notification: None,
             cmdline_win: None,
             cmdline_history: Vec::new(),
+            cmdline_history_browse: None,
+            cmdline_history_stash: String::new(),
             cmdline_completer: None,
             term_focused: true,
             working: working::WorkingState::new(),
