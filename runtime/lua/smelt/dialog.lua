@@ -50,16 +50,46 @@ function smelt.ui.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.ui.dialog.open_handle: expected table of options", 2)
   end
+  -- `_open` returns `(win_id, named_inputs)`; open_handle ignores
+  -- the second value (its consumers — confirm.lua — use the legacy
+  -- widget path with collapse_when_empty inputs and read text via
+  -- `raw_ctx.panels[idx].text` directly).
   local win_id = smelt.ui.dialog._open(opts)
   if type(win_id) ~= "number" then return nil end
   return make_handle(win_id, opts)
+end
+
+-- Collect input text for every input panel in `opts.panels`. Used by
+-- Submit / Dismiss to assemble the resume table. The legacy widget
+-- path populates `raw_ctx.panels[idx].text`; the overlay path
+-- exposes per-name leaf WinIds via `named_inputs` and the buffer's
+-- line 0 carries the live text.
+local function collect_inputs(raw_ctx, input_panels, named_inputs)
+  local out = {}
+  for name, idx in pairs(input_panels) do
+    local p = raw_ctx.panels and raw_ctx.panels[idx]
+    if p and p.text then
+      out[name] = p.text
+    elseif named_inputs and named_inputs[name] then
+      local leaf = named_inputs[name]
+      local buf = smelt.win.buf(leaf)
+      if buf then
+        out[name] = smelt.buf.get_line(buf, 1) or ""
+      else
+        out[name] = ""
+      end
+    else
+      out[name] = ""
+    end
+  end
+  return out
 end
 
 -- Build the keymap-callback ctx table (`{selected_index, inputs,
 -- close, win}`) from a raw callback ctx (`{win, panels, …}`). `opts`
 -- is the original `dialog.open` opts so we can walk panel metadata;
 -- `win_id` is captured in the closing function.
-local function build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
+local function build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
   local ctx = { win = raw_ctx.win }
   if option_panel_idx then
     local p = raw_ctx.panels and raw_ctx.panels[option_panel_idx]
@@ -67,13 +97,7 @@ local function build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input
       ctx.selected_index = p.selected
     end
   end
-  ctx.inputs = {}
-  for name, idx in pairs(input_panels) do
-    local p = raw_ctx.panels and raw_ctx.panels[idx]
-    if p then
-      ctx.inputs[name] = p.text or ""
-    end
-  end
+  ctx.inputs = collect_inputs(raw_ctx, input_panels, named_inputs)
   ctx.close = function()
     smelt.win.close(win_id)
     smelt.task.resume(task_id, {
@@ -82,17 +106,6 @@ local function build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input
     })
   end
   return ctx
-end
-
--- Collect input text for every input panel in `opts.panels`. Used by
--- Submit / Dismiss to assemble the resume table.
-local function collect_inputs(raw_ctx, input_panels)
-  local out = {}
-  for name, idx in pairs(input_panels) do
-    local p = raw_ctx.panels and raw_ctx.panels[idx]
-    out[name] = p and p.text or ""
-  end
-  return out
 end
 
 function smelt.ui.dialog.open(opts)
@@ -135,8 +148,10 @@ function smelt.ui.dialog.open(opts)
     end
   end
 
-  -- Open the float synchronously. Rust returns the `win_id` directly.
-  local win_id = smelt.ui.dialog._open(opts)
+  -- Open the float synchronously. Rust returns
+  -- `(win_id, named_inputs)`; `named_inputs` is `{ name → leaf_win }`
+  -- for overlay-routed input panels (empty for legacy paths).
+  local win_id, named_inputs = smelt.ui.dialog._open(opts)
   if type(win_id) ~= "number" then
     return { action = "dismiss", inputs = {} }
   end
@@ -166,7 +181,7 @@ function smelt.ui.dialog.open(opts)
       action = options_meta[idx1].action
       on_select_fn = options_meta[idx1].on_select
     end
-    local inputs = collect_inputs(raw_ctx, input_panels)
+    local inputs = collect_inputs(raw_ctx, input_panels, named_inputs)
     if type(on_select_fn) == "function" then
       local ok, err = pcall(on_select_fn)
       if not ok then
@@ -186,7 +201,7 @@ function smelt.ui.dialog.open(opts)
     smelt.win.close(win_id)
     smelt.task.resume(task_id, {
       action = "dismiss",
-      inputs = collect_inputs(raw_ctx, input_panels),
+      inputs = collect_inputs(raw_ctx, input_panels, named_inputs),
     })
   end)
 
@@ -197,7 +212,7 @@ function smelt.ui.dialog.open(opts)
       if type(km) == "table" and km.key and type(km.on_press) == "function" then
         local on_press = km.on_press
         smelt.win.set_keymap(win_id, km.key, function(raw_ctx)
-          local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
+          local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
           local ok, err = pcall(on_press, ctx)
           if not ok then
             smelt.notify_error("dialog keymap: " .. tostring(err))
@@ -212,7 +227,7 @@ function smelt.ui.dialog.open(opts)
   -- usually one, but the dispatch handles many).
   if next(input_on_change) ~= nil then
     smelt.win.on_event(win_id, "text_changed", function(raw_ctx)
-      local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
+      local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
       for _, fn in pairs(input_on_change) do
         local ok, err = pcall(fn, ctx)
         if not ok then
@@ -227,7 +242,7 @@ function smelt.ui.dialog.open(opts)
   if type(opts.on_tick) == "function" then
     local on_tick = opts.on_tick
     smelt.win.on_event(win_id, "tick", function(raw_ctx)
-      local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels)
+      local ctx = build_ctx(raw_ctx, opts, win_id, task_id, option_panel_idx, input_panels, named_inputs)
       local ok, err = pcall(on_tick, ctx)
       if not ok then
         smelt.notify_error("dialog on_tick: " .. tostring(err))

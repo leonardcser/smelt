@@ -22,11 +22,12 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — twenty-four commits landed (foundation
+**P1.c in progress** — twenty-seven commits landed (foundation
 + paint pipeline + first float migration + leaf event
 routing + content-only Lua dialog migration + Buffer-backed
 list leaves + options-panel migration + extmark painting in
-Window::render + overlay-leaf WinEvent root redirect).
+Window::render + overlay-leaf WinEvent root redirect +
+input-panel migration + buf-id allocator fix).
 Foundation:
 `40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
 `434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
@@ -165,23 +166,59 @@ these are the building blocks C.8 needs:
   hear submit/dismiss/text_changed events from any leaf
   on the single registration point.
 
-**C.7.6+ — remaining float migrations + deletions:** still
-ahead. C.8 (`TextInput` migration to Buffer-backed leaf)
-is now unblocked but needs one more piece: per-panel
-WinId surface to dialog.lua so `collect_inputs(name)` can
-read text from the input leaf's Buffer. The residual
-`OptionList` surface (multi-select checkbox prefix,
-shortcut keys 1-9, padded meta column, dim styling)
-lives behind the legacy guard until a real consumer
-surfaces. Once every dialog flips, `FloatConfig` /
-`PanelWidget` / `Placement` and `dialog.rs`'s panel
-multiplexing all delete together.
+**C.7.6 / C.8 — input-panel migration shipped.** `80b1dc2`
+adds the Lua primitives `smelt.win.buf(win)` (buffer id of a
+Window) + `smelt.buf.get_line(buf, line_idx)` (1-based;
+returns `nil` out of range) so dialog.lua can read text
+out of an input leaf's Buffer. `a1f88f6` lifts every
+non-`collapse_when_empty` `kind = "input"` panel onto the
+Overlay path. New `LeafShape::Input { name }` variant +
+`make_input_buffer(app, placeholder)` (seeds row 0 with a
+dim-highlighted placeholder; the C.7.4 highlight painter
+makes this render dim) + `configure_input_leaf(app, leaf)`
+(~150 LOC: Backspace/Left/Right/Home/End/Enter keymaps +
+printable-char fallback under `KeyModifiers::NONE | SHIFT`).
+Insert/backspace fire `WinEvent::TextChanged` via
+`CallbackResult::Event`; Enter fires `Submit { Text { content } }`.
+Placeholder detection is "row 0 has highlights and is non-empty"
+— the first keystroke `set_lines`-replaces row 0, dropping
+well-known namespace marks, so the placeholder can never
+re-appear without an explicit reset. `_open` now returns
+`(win_id, named_inputs)`; dialog.lua's `collect_inputs`
+falls back to `smelt.win.buf(leaf)` →
+`smelt.buf.get_line(buf, 1)` for overlay-routed inputs and
+keeps the legacy `raw_ctx.panels[idx].text` path for
+`collapse_when_empty` rows (only `confirm.lua` today).
+Live-tested `/resume` (input + list mixed dialog) — typing
+into the filter narrows the list reactively via the
+overlay-root WinEvent fan-out from C.7.5. `56a5104`
+(`fix(ui): keep buf_create_with_id from advancing Rust
+allocator past Lua range`) fell out of the migration:
+`make_input_buffer` calls `Ui::buf_create()` while Lua
+side calls `buf_create_with_id` with ids ≥
+`LUA_BUF_ID_BASE`; the old code advanced
+`Ui::next_buf_id` past the Lua range whenever a Lua
+buffer landed, which then collided on the next
+`buf_create()` from any Rust caller.
+
+**Pending:** C.9 — every dialog flips; delete `FloatConfig` /
+`PanelWidget` trait / `Placement` enum / `dialog.rs` panel
+multiplexing. The last legacy-path consumer is
+`confirm.lua`'s `collapse_when_empty` input row; once
+that ports (or `TextInput`'s collapse-to-zero-height
+behavior is reproduced on the Buffer-backed path), C.9
+can land. The residual `OptionList` surface (multi-select
+checkbox prefix, shortcut keys 1-9, padded meta column,
+dim styling) still lives behind the
+`has_shortcut || has_multi` guard from C.7.2 — same
+condition: migrate when a real consumer surfaces or
+when deleting the legacy path becomes the simpler move.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 1031 passed
-(24 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
+**Tree:** green. `cargo nextest run --workspace` — 1032 passed
+(25 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
 1 `render_with_paints_after_layers`, 1 `render_paints_overlay_leaf_buffer`,
 1 `render_drives_ensure_rendered_at_for_each_overlay_leaf`,
 2 `handle_key_esc_*` modal-dismiss, 1 `modal_esc_fires_dismiss_once_on_overlay_root`,
@@ -192,14 +229,50 @@ made while coding, and per-section file/type changes.
 1 `callback_result_event_dispatches_winevent_after_keymap`,
 2 `render_paints_highlight_extmarks_*` /
 `render_layers_highlight_attributes_on_cursor_row_bg`,
-1 `dispatch_event_on_non_root_leaf_redirects_to_root`).
+1 `dispatch_event_on_non_root_leaf_redirects_to_root`,
+1 `buf_create_with_id_lua_range_does_not_advance_rust_allocator`).
 `cargo clippy --workspace --all-targets -- -D warnings` clean. Manual
 TUI parity walk: `/stats`, `/cost`, `/help`, `/btw` open as
 bordered+titled centered modals; Esc / q / Ctrl+C dismiss as
 appropriate per dialog; focus restores to prompt; `/resume`
-opens (was broken with "unknown panel kind: list").
+opens with input + list, typing into filter narrows the list
+reactively via overlay-root WinEvent fan-out.
 
-**Last update:** 2026-04-29. P1.0 theme registry landing across 12
+**Last update:** 2026-04-29. C.7.6 + C.8 + buf-id allocator
+fix landed in three commits (`80b1dc2`, `a1f88f6`,
+`56a5104`):
+
+- `80b1dc2` — `smelt.win.buf(win)` returns the buffer id of
+  the Window (`win.buf`), and `smelt.buf.get_line(buf,
+  line_idx)` reads a single line out of any Buffer (1-based
+  index; `nil` out of range). Building blocks for C.8.
+- `a1f88f6` — `kind = "input"` panels migrated. New
+  `LeafShape::Input { name }` variant; `make_input_buffer`
+  seeds row 0 with a dim placeholder (rendered via the
+  C.7.4 highlight painter); `configure_input_leaf` registers
+  Backspace / Left / Right / Home / End / Enter callbacks
+  and a printable-char fallback under
+  `KeyModifiers::NONE | SHIFT`. `_open` now multi-returns
+  `(win_id, named_inputs)` where `named_inputs[name] =
+  leaf_win_id`; `dialog.lua`'s `collect_inputs` falls back
+  to `smelt.win.buf(leaf)` → `smelt.buf.get_line(buf, 1)`
+  for overlay-routed inputs. `confirm.lua`'s
+  `collapse_when_empty` row stays on the legacy widget
+  path until C.9 ports the collapse-to-zero-height
+  behavior to the Buffer-backed leaf.
+- `56a5104` — `Ui::buf_create_with_id` no longer advances
+  `next_buf_id` past `LUA_BUF_ID_BASE` when the explicit
+  id sits in Lua's range. Bug surfaced by C.8:
+  `make_input_buffer` calls `buf_create()` (Rust-side
+  sequential) while `smelt.buf.create()` calls
+  `buf_create_with_id` with ids ≥ `LUA_BUF_ID_BASE`; the
+  old code dragged the Rust counter into Lua range
+  whenever a Lua buffer landed first, then sequential
+  Rust allocations collided with the next Lua atomic.
+  Regression test
+  (`buf_create_with_id_lua_range_does_not_advance_rust_allocator`).
+
+Earlier this session: P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
 
 - `decb0ab` — `ui::Theme` registry type (HashMap groups + links).
@@ -301,9 +374,10 @@ before declaring anything done.
 **Active phase:** P1.c — `Overlay` replacing `Float`. The
 data + resolution + focus/hit-test + paint + first-migration
 + content-only Lua dialog migration + Buffer-backed list
-leaves are all in place (C.0–C.7.1); see "Where we are"
-above for the running narrative. Target shape from
-`REFACTOR.md` § P1.c (for reference):
+leaves + options-panel migration + input-panel migration
+are all in place (C.0 → C.8); see "Where we are" above for
+the running narrative. Target shape from `REFACTOR.md` §
+P1.c (for reference):
 
 - `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
 - `Anchor::{ ScreenCenter | ScreenAt { row, col, corner } |
@@ -313,25 +387,31 @@ above for the running narrative. Target shape from
   `PanelWidget` trait / `dialog.rs` panel multiplexing — all
   deleted at C.9 once every dialog flips.
 
-**Next sub-phase: C.8 — `TextInput` as Buffer-backed
-Window.** With C.7.4 + C.7.5 building blocks in place
-(highlight painting + root redirect), the input migration
-needs one more piece: per-panel WinId exposure to
-dialog.lua. Today `_open` returns a single root WinId;
-`dialog.lua`'s `collect_inputs(name)` reads
-`raw_ctx.panels[idx].text` (legacy path) and that array
-isn't populated for overlay dialogs. The fix is to
-return a `panels = { name → win_id }` table from
-`_open` (or expose `smelt.win.panel_buf(root, name)`),
-so `collect_inputs` can read the input leaf's buffer
-text directly via `smelt.buf.get_line(buf, 0)`. Once
-that lands, the actual `kind = "input"` migration is
-~120 LOC of `configure_input_leaf` (printable-char
-key fallback, Backspace/Left/Right/Home/End specific
-keymaps, Enter → Submit) plus `make_input_buffer` (line
-+ dim placeholder extmark). C.9 then deletes
-`FloatConfig` / `PanelWidget` / `Placement` /
-`dialog.rs` panel multiplexing.
+**Next sub-phase: C.9 — delete the legacy multiplexing
+machinery.** With every panel kind (`content` / `markdown`
+/ `list` / `options` / `input` non-collapse) routing through
+`open_dialog_via_overlay`, the legacy `dialog_open` path is
+exercised only by `confirm.lua`'s `collapse_when_empty`
+input row. Two paths to C.9:
+
+1. **Reproduce `collapse_when_empty` on the Buffer-backed
+   leaf** — the dialog row hides itself (height 0) until
+   the user starts typing. Most natural shape: track
+   `is_empty()` on the input buffer and toggle the leaf's
+   layout constraint between `Length(0)` and `Length(1)`
+   from the leaf's `text_changed` callback.
+2. **Migrate `confirm.lua` away from collapse-when-empty**
+   — show the input field always (or only when the user
+   asks for the "add a message" mode via Tab). This is
+   the simpler move and matches the rest of the dialog
+   library's behavior.
+
+Once one of those lands, `FloatConfig` / `PanelWidget`
+trait / `Placement` enum / `dialog.rs` panel multiplexing
+all delete in one commit. The residual `OptionList`
+surface (multi-select / shortcut keys / meta column) gets
+its hold-out exemption — same `has_shortcut || has_multi`
+guard that's been in place since C.7.2.
 
 ## Deferred to P1.a-tail (after the transcript migration)
 

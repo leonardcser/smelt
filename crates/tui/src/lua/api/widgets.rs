@@ -495,17 +495,28 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
 fn register_dialog(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     let dialog_tbl = lua.create_table()?;
 
-    // smelt.ui.dialog._open(opts) → win_id. The richer
-    // `{ win, panels = {…} }` handle is built Lua-side in
-    // `runtime/lua/smelt/dialog.lua` (`make_handle`) so the Rust
-    // surface stays small and we can iterate panel methods in Lua.
+    // smelt.ui.dialog._open(opts) → (win_id, named_inputs).
+    // `named_inputs` is `{ name → leaf_win_id }` for overlay-routed
+    // input panels (empty for legacy widget paths). dialog.lua
+    // reads it at submit/dismiss time to resolve each named input
+    // panel's leaf and read its text via `smelt.win.buf` +
+    // `smelt.buf.get_line`. The richer `{ win, panels = {…} }`
+    // handle is still built Lua-side in `runtime/lua/smelt/dialog.lua`
+    // (`make_handle`) so the Rust surface stays small.
     dialog_tbl.set(
         "_open",
-        lua.create_function(|_, opts: mlua::Table| -> LuaResult<u64> {
-            let win_id = crate::lua::with_app(|app| crate::lua::ui_ops::open_dialog(app, opts))
-                .map_err(|e| LuaError::RuntimeError(format!("dialog.open: {e}")))?;
-            Ok(win_id.0)
-        })?,
+        lua.create_function(
+            |lua, opts: mlua::Table| -> LuaResult<(u64, mlua::Table)> {
+                let result =
+                    crate::lua::with_app(|app| crate::lua::ui_ops::open_dialog(app, opts))
+                        .map_err(|e| LuaError::RuntimeError(format!("dialog.open: {e}")))?;
+                let named = lua.create_table()?;
+                for (name, win) in result.named_inputs {
+                    named.set(name, win.0)?;
+                }
+                Ok((result.root.0, named))
+            },
+        )?,
     )?;
 
     // Generic panel-focus primitive — panel handles built in
