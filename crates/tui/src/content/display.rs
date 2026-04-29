@@ -107,9 +107,8 @@ pub enum ColorValue {
     Role(ColorRole),
 }
 
-/// Theme-dependent semantic colors. Resolved by `paint_block` against
-/// the current `Theme` snapshot. Keep this set small — only colors that
-/// genuinely depend on theme atomics belong here.
+/// Theme-dependent semantic colors. Resolved by `to_buffer::resolve`
+/// against the active `ui::Theme` registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColorRole {
     Accent,
@@ -120,6 +119,9 @@ pub enum ColorRole {
     ToolPending,
     ReasonOff,
     Muted,
+    Agent,
+    Success,
+    ErrorMsg,
 }
 
 /// Mirror of crossterm's named colors. We can't store crossterm::Color

@@ -15,7 +15,7 @@ pub(super) fn render_agent_block(
 
     // Header: " + agent_id · slug [✓/✗] [elapsed]"
     out.push_style(SpanStyle {
-        fg: Some(crate::theme::AGENT.into()),
+        fg: Some(ColorValue::Role(ColorRole::Agent)),
         bold: true,
         ..Default::default()
     });
@@ -38,12 +38,12 @@ pub(super) fn render_agent_block(
 
     match status {
         AgentBlockStatus::Done => {
-            out.push_fg(crate::theme::SUCCESS.into());
+            out.push_fg(ColorValue::Role(ColorRole::Success));
             out.print(" \u{2713}"); // ✓
             out.pop_style();
         }
         AgentBlockStatus::Error => {
-            out.push_fg(crate::theme::ERROR.into());
+            out.push_fg(ColorValue::Role(ColorRole::ErrorMsg));
             out.print(" \u{2717}"); // ✗
             out.pop_style();
         }
@@ -73,7 +73,7 @@ pub(super) fn render_agent_block(
     // Blocking: show last 3 tool calls with left border.
     let visible = tool_calls.iter().rev().take(3).collect::<Vec<_>>();
     for entry in visible.iter().rev() {
-        out.push_fg(crate::theme::AGENT.into());
+        out.push_fg(ColorValue::Role(ColorRole::Agent));
         out.print_gutter("\u{2502} "); // │
         out.pop_style();
 
@@ -108,7 +108,7 @@ pub(super) fn render_agent_block(
 
     // Bottom border
     let border_w = width.saturating_sub(1);
-    out.push_fg(crate::theme::AGENT.into());
+    out.push_fg(ColorValue::Role(ColorRole::Agent));
     out.print_gutter(&format!("\u{2570}{}", "\u{2500}".repeat(border_w)));
     out.pop_style();
     out.newline();
