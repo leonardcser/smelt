@@ -9,10 +9,11 @@
 use crate::app::App;
 use crate::format::BufFormat;
 use ui::buffer::BufCreateOpts;
+use ui::layout::Anchor;
 use ui::text_input::TextInput;
 use ui::{
-    BufId, Constraint, FitMax, FloatConfig, OptionItem, OptionList, PanelHeight, PanelSpec,
-    Placement, SeparatorStyle, WinId,
+    Border, BufId, Constraint, FitMax, FloatConfig, LayoutTree, OptionItem, OptionList, Overlay,
+    PanelContent, PanelHeight, PanelSpec, Placement, SeparatorStyle, SplitConfig, WinId,
 };
 
 // ── Dialog ───────────────────────────────────────────────────────────
@@ -140,6 +141,19 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
         return Err("dialog must have at least one panel".into());
     }
 
+    // Content-only dialogs (no `options` / `input` panels) ride the
+    // Overlay path: a centered modal with a vbox of buffer-backed
+    // Windows under the unified `Window::render` paint pipeline. Mixed
+    // dialogs still go through the legacy `dialog_open` until widgets
+    // (OptionList, TextInput) get their Buffer-backed rewrites.
+    let content_only = panel_specs
+        .iter()
+        .all(|p| matches!(p.content, PanelContent::Buffer(_)));
+    let blocks_agent_pre: bool = opts.get("blocks_agent").unwrap_or(false);
+    if content_only {
+        return open_dialog_via_overlay(app, title, panel_specs, blocks_agent_pre);
+    }
+
     // Collect footer hints from top-level `opts.keymaps[].hint`. The Lua
     // side handles the actual keymap registration; Rust only needs the
     // hint strings to build the footer.
@@ -192,6 +206,77 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
         dialog.set_vim_enabled_on_interactive(vim_enabled);
     }
     Ok(win_id)
+}
+
+/// Open a centered modal Overlay carrying one Window per buffer panel.
+/// The first focusable leaf (or the first leaf if none focusable) is
+/// returned to Lua as the dialog's primary `WinId` — `dialog.lua`
+/// registers `on_event("dismiss"|"submit"|"text_changed"|"tick")` and
+/// keymap callbacks against that id.
+///
+/// Modal-Esc dismissal is built in (the `Ui` fires `WinEvent::Dismiss`
+/// on every leaf before closing). The Lua side's `on_event("dismiss",
+/// …)` handler calls `smelt.win.close(win_id)`, which routes through
+/// `Ui::win_close → Ui::overlay_close` and clears every leaf's
+/// callbacks atomically.
+///
+/// Heights:  `Fixed(n)` → `Constraint::Length(n)`; `Fit` and `Fill` →
+/// `Constraint::Fill` (every panel shares the inner space). Per-panel
+/// natural-size resolution lands when the leaf gains a content-rows
+/// hint (P1.d).
+fn open_dialog_via_overlay(
+    app: &mut App,
+    title: Option<String>,
+    panels: Vec<PanelSpec>,
+    _blocks_agent: bool,
+) -> Result<WinId, String> {
+    let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::with_capacity(panels.len());
+    let mut leaf_wins: Vec<WinId> = Vec::with_capacity(panels.len());
+    let mut focus_target: Option<WinId> = None;
+
+    for spec in panels {
+        let PanelContent::Buffer(buf) = spec.content else {
+            return Err("open_dialog_via_overlay: non-buffer panel".into());
+        };
+        let win = app
+            .ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "dialog_overlay".into(),
+                    gutters: Default::default(),
+                },
+            )
+            .ok_or_else(|| "failed to allocate dialog window".to_string())?;
+        let constraint = match spec.height {
+            PanelHeight::Fixed(n) => Constraint::Length(n),
+            PanelHeight::Fit | PanelHeight::Fill => Constraint::Fill,
+        };
+        leaf_items.push((constraint, LayoutTree::leaf(win)));
+        leaf_wins.push(win);
+        if spec.focus_initial && focus_target.is_none() {
+            focus_target = Some(win);
+        }
+    }
+
+    if leaf_wins.is_empty() {
+        return Err("dialog must have at least one panel".into());
+    }
+
+    let primary = focus_target.unwrap_or(leaf_wins[0]);
+
+    let inner = LayoutTree::vbox(leaf_items);
+    let layout = LayoutTree::vbox(vec![(
+        Constraint::Percentage(60),
+        LayoutTree::hbox(vec![(Constraint::Percentage(70), inner)]),
+    )])
+    .with_border(Border::Single)
+    .with_title(title.unwrap_or_default());
+
+    app.ui
+        .overlay_open(Overlay::new(layout, Anchor::ScreenCenter).modal(true));
+    app.ui.set_focus(primary);
+    Ok(primary)
 }
 
 fn parse_separator(panel: &mlua::Table) -> Result<SeparatorStyle, String> {

@@ -116,8 +116,8 @@ to invoke_ the feature.
 | `/permissions`                                    | `plugins/permissions.lua`         | P4.d → `dialogs/permissions.lua` | working |
 | `/ps`                                             | `plugins/background_commands.lua` | P4.e                             | working |
 | `/agents`                                         | `plugins/agents.lua`              | P4.d → `dialogs/agents.lua`      | working |
-| `/btw <q>`                                        | `plugins/btw.lua`                 | P4.e                             | working |
-| `/help`                                           | `plugins/help.lua`                | P4.e                             | working |
+| `/btw <q>`                                        | `plugins/btw.lua`                 | P4.e                             | working — Overlay (P1.c C.6) |
+| `/help`                                           | `plugins/help.lua`                | P4.e                             | working — Overlay (P1.c C.6) |
 | `/history`                                        | `plugins/history_search.lua`      | P4.e                             | working |
 | `/yank-block` (opt-in)                            | `plugins/yank_block.lua`          | P4                               | working |
 | `/reflect`                                        | `builtin_commands.rs`             | P4.e                             | working |
@@ -141,8 +141,8 @@ to invoke_ the feature.
 | Settings menu                                      | `plugins/settings.lua`                                          | P4.d/e                          | working |
 | ask_user_question dialog (1-4 options)             | `plugins/ask_user_question.lua`                                 | P5.b                            | working |
 | Export dialog (clipboard / file)                   | `plugins/export.lua`                                            | P4.e                            | working |
-| Help dialog                                        | `plugins/help.lua`                                              | P4.e                            | working |
-| `/btw` streaming-answer dialog                     | `plugins/btw.lua` (`smelt.ui.dialog.open` + spinner-driven content buf) | P4.e                  | working |
+| Help dialog                                        | `plugins/help.lua`                                              | P4.e                            | working — Overlay (P1.c C.6); Esc dismisses |
+| `/btw` streaming-answer dialog                     | `plugins/btw.lua` (`smelt.ui.dialog.open` + spinner-driven content buf) | P4.e                  | working — Overlay (P1.c C.6); Esc dismisses |
 | Process picker (`/ps`)                             | `plugins/background_commands.lua`                               | P4.e                            | working |
 | History search picker (Ctrl+R)                     | `plugins/history_search.lua`                                    | P4.e                            | working |
 | Cmdline (`:` prompt) with completer                | `app/cmdline.rs` + `completer/*`                                | P4 → `widgets/cmdline.lua`      | working |

@@ -929,13 +929,8 @@ mod tests {
 
     #[test]
     fn styled_char_segments_with_cursor() {
-        let segs = styled_char_segments(
-            "hello",
-            &[SpanKind::Plain; 5],
-            None,
-            Some(2),
-            &test_theme(),
-        );
+        let segs =
+            styled_char_segments("hello", &[SpanKind::Plain; 5], None, Some(2), &test_theme());
         // Before cursor, cursor char, after cursor
         assert!(segs.len() >= 3);
         // The cursor char should have inverted colors
@@ -946,8 +941,7 @@ mod tests {
 
     #[test]
     fn styled_char_segments_cursor_at_end() {
-        let segs =
-            styled_char_segments("hi", &[SpanKind::Plain; 2], None, Some(2), &test_theme());
+        let segs = styled_char_segments("hi", &[SpanKind::Plain; 2], None, Some(2), &test_theme());
         let last = segs.last().unwrap();
         assert_eq!(last.text, " ");
         assert!(last.style.bg.is_some());

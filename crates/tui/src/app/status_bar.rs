@@ -184,9 +184,10 @@ impl App {
         });
 
         // Throbber spans (timer, tok/s, etc.).
-        let throbber_spans = self
-            .working
-            .throbber_spans(self.settings.show_tps, theme_muted_fg.unwrap_or(Color::Reset));
+        let throbber_spans = self.working.throbber_spans(
+            self.settings.show_tps,
+            theme_muted_fg.unwrap_or(Color::Reset),
+        );
         // Live-turn spans lead with the spinner glyph (already included
         // as a separate left-aligned span via `spinner_char`); skip it
         // here to avoid duplicating the glyph in the right-aligned area.

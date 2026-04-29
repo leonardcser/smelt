@@ -208,15 +208,9 @@ pub enum LayoutTree {
     /// governing its size lives in its parent's `items`.
     Leaf(crate::WinId),
     /// Vertical container; children stack top-to-bottom.
-    Vbox {
-        items: Vec<Item>,
-        chrome: Chrome,
-    },
+    Vbox { items: Vec<Item>, chrome: Chrome },
     /// Horizontal container; children pack left-to-right.
-    Hbox {
-        items: Vec<Item>,
-        chrome: Chrome,
-    },
+    Hbox { items: Vec<Item>, chrome: Chrome },
 }
 
 impl LayoutTree {
@@ -331,12 +325,8 @@ impl LayoutTree {
             // sizing waits for windows to expose Buffer dimensions.
             // Callers wrap them in containers with explicit sizing.
             LayoutTree::Leaf(_) => (0, 0),
-            LayoutTree::Vbox { items, chrome } => {
-                natural_box(items, chrome, cap, true)
-            }
-            LayoutTree::Hbox { items, chrome } => {
-                natural_box(items, chrome, cap, false)
-            }
+            LayoutTree::Vbox { items, chrome } => natural_box(items, chrome, cap, true),
+            LayoutTree::Hbox { items, chrome } => natural_box(items, chrome, cap, false),
         }
     }
 }
@@ -432,11 +422,7 @@ pub enum Anchor {
     ScreenCenter,
     /// Absolute screen position. The overlay's `corner` is placed at
     /// `(row, col)` (terminal cell coordinates, top-left = 0,0).
-    ScreenAt {
-        row: i32,
-        col: i32,
-        corner: Corner,
-    },
+    ScreenAt { row: i32, col: i32, corner: Corner },
     /// Anchored to the text cursor. The overlay's `corner` touches
     /// the cursor cell, offset by `(row_offset, col_offset)`. If
     /// the overlay would overflow the screen, the renderer flips to
