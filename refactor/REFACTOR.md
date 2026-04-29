@@ -167,55 +167,88 @@ theme registry. Everything downstream of `ui` rides on this.
 
 Sub-phases below can interleave but each must end at a coherent boundary.
 
-### P1.0 — Structural deletions deferred from P0
+### P1.0 — Theme registry + paired structural deletions ✅ landed
 
-Each item below is paired: delete the legacy primitive in the same
-commit that introduces its target replacement. Tree may flicker red
-mid-sub-phase but each commit ends green.
+Each item below pairs a legacy primitive deletion with its target
+replacement in the same commit. Tree may flicker red mid-sub-phase
+but each commit ends green.
 
-- `BufferView` deletion paired with `Window::render(buf, grid)` taking
-  on rendering responsibility (P1.d).
-- `crates/tui/src/theme.rs` constants module deletion paired with the
-  `ui::Theme` registry landing (tracked task `20260426-083607`).
-- `PanelWidget` trait + `dialog.rs` panel-widget multiplexing deletion
-  paired with the "Overlay + LayoutTree + N Windows" dialog rebuild
-  (P1.c).
+Shipped:
+- `crates/tui/src/theme.rs` constants module deletion paired with
+  the `ui::Theme` registry landing. **Theme registry is P1.0**, not
+  a deferred sub-phase — it absorbed what an earlier plan called
+  "P1.e" (now folded here since the registry was already in motion
+  when P0 closed). `Theme { groups, links }` with `get`/`set`/`link`;
+  buffer extmarks reference highlight ids, never raw colors;
+  selection bg = `theme.get("Visual")`. One source of truth on
+  `ui::Ui`, threaded through `DrawContext`. Atomic state on
+  `tui::theme` collapsed onto `ui::Theme` itself; Lua mutations
+  flow through `with_app(|app| app.ui.theme())`.
+
+Still deferred from P0 (paired with their replacements in later P1
+sub-phases):
+- `BufferView` deletion paired with `Window::render(buf, grid)`
+  taking on rendering responsibility (P1.d).
+- `PanelWidget` trait + `dialog.rs` panel-widget multiplexing
+  deletion paired with the "Overlay + LayoutTree + N Windows"
+  dialog rebuild (P1.c).
 - `Component` trait + remaining `WidgetEvent` deletion paired with
   Window becoming the only interactive unit (P1.d).
-- `Placement` enum + `add_layer` / `register_split` / `set_layer_rect`
-  / `focus_layer` plumbing deletion paired with `splits: LayoutTree` +
-  `overlays: Vec<Overlay>` (P1.b + P1.c).
+- `Placement` enum + `add_layer` / `register_split` /
+  `set_layer_rect` / `focus_layer` plumbing deletion paired with
+  `splits: LayoutTree` (P1.b — landed) + `overlays: Vec<Overlay>`
+  (P1.c).
 
-### P1.a — `Buffer` rewrite
+### P1.a — `Buffer` rewrite (foundation ✅; tail deferred)
 
+Foundation shipped:
 - Lines + namespaces + extmarks. Mirrors `nvim_buf_set_extmark`.
 - `modifiable: bool` is the data-layer guard.
-- `Buffer::attach(spec)` registers a parser (`markdown`/`diff`/`syntax`)
-  with namespaces and an `on_block` callback fired at semantic
-  boundaries (not per-chunk).
 - `Extmark` gains `yank: Option<YankSubst>` where
-  `enum YankSubst { Empty, Static(String) }`. `Empty` elides bytes the
-  extmark covers; `Static(s)` substitutes them.
+  `enum YankSubst { Empty, Static(String) }`. `Empty` elides bytes
+  the extmark covers; `Static(s)` substitutes them.
 - `Buffer::yank_text_for_range(range)` is a pure helper that walks
-  extmarks intersecting the range and applies their `YankSubst` (absent
-  = literal source bytes). No buffer-level translator hook, no App-side
-  branching. Hidden-thinking blocks attach `YankSubst::Empty`; prompt
-  attachment sigils attach `YankSubst::Static(expanded_path)`.
-- Soft-wrap state lives on Buffer keyed by `(content_tick, width)`.
+  extmarks intersecting the range and applies their `YankSubst`
+  (absent = literal source bytes).
+- Soft-wrap state on Buffer keyed by `(changedtick, width)`.
   Multiple Windows on the same Buffer share the wrap result.
-- Parsed metadata (LCS for diffs, syntect tokens for code) lives as
+- `BufferFormatter` trait → `BufferParser` (rename + `on_attach`
+  hook foundation for the deeper `Buffer::attach(spec)` system).
+
+Tail deferred (gated on transcript-pipeline migration onto
+`BufferParser`, itself a multi-session keystone):
+- `Buffer::attach(spec)` parser-hook system replacing `BufferFormatter`
+  trait + the `transcript_cache.rs` IR cache file.
+- Transcript renderers (`transcript_present/*.rs`) onto `BufferParser`
+  — each `Block` kind becomes its own parser; `BlockArtifact` becomes
+  per-block Buffer; `TranscriptSnapshot` composes from per-block
+  Buffers.
+- `transcript_cache.rs` deletion (per-parser IR caches replace it).
+  Parsed metadata (LCS for diffs, syntect tokens for code) lives as
   extmarks in dedicated namespaces. No separate IR cache file.
+- `edit_buffer.rs` merge into `Buffer` (~250 references; pairs
+  naturally with P1.d when vim state machine decomposes).
+- `YankSubst` consumers — original picks (hidden-thinking elision,
+  prompt attachment expansion) turned out to be wrong fits;
+  consumers come with the transcript migration.
+- `Buffer::wrap_at` consumers — same situation; pre-wrapping in
+  `DisplayLine` is removed when transcript moves onto Buffer.
 
-### P1.b — `LayoutTree`
+### P1.b — `LayoutTree` ✅ landed
 
-- `Vbox { gap, separator, border, title, items } | Hbox { ... } |
-  Leaf(WinId)`.
-- `Item = (Constraint, LayoutTree)`. Constraints: `Length / Percentage
-  / Ratio / Min / Max / Fill / Fit`.
-- Container nodes carry chrome: `gap: u16`, `separator:
-  SeparatorStyle`, `border: Option<Border>`, `title: Option<String>`.
-- Type system allows chrome on any container; convention restricts it
-  to overlays.
+- `Vbox { items, chrome } | Hbox { items, chrome } | Leaf(WinId)`.
+- `Item = (Constraint, LayoutTree)`. Constraints: `Length /
+  Percentage / Ratio / Min / Max / Fill / Fit` (`Fit` stubbed to
+  `Fill` until leaves expose natural size).
+- `Chrome { gap: u16, border: Option<Border>, title: Option<String> }`
+  shared by `Vbox`/`Hbox`. `SeparatorStyle` deferred to P1.c (needs
+  new enum + render-time wiring; lands alongside Overlay chrome).
+- Type system allows chrome on any container; convention restricts
+  it to overlays.
+
+Builders: `LayoutTree::vbox(items)` / `hbox(items)` / `leaf(win)`
+plus `with_gap` / `with_border` / `with_title`. `resolve_layout`
+returns `HashMap<WinId, Rect>` (not `String`-keyed).
 
 ### P1.c — `Overlay` replacing `Float`
 
@@ -253,13 +286,7 @@ mid-sub-phase but each commit ends green.
   Window / vim-recipe code under `#[cfg(test)] mod tests`. The marker-DSL
   parser (~100 LOC) lands here. See `TESTING.md` § L1.
 
-### P1.e — `Theme` registry
-
-- `Theme { groups, links }` with `get`/`set`/`link`.
-- Buffer extmarks reference highlight ids, never raw colors.
-- Selection bg = `theme.get("Visual")`. One source of truth.
-
-### P1.f — `UiHost` trait + `Status` + event types
+### P1.e — `UiHost` trait + `Status` + event types
 
 `Host` itself is defined in `tui` (see P2.b) — it's the Ui-agnostic
 trait. `ui` only needs the Ui-shaped subset:
@@ -281,7 +308,7 @@ The `Host` super-trait lives in `tui` (alongside `Core`); `ui` declares
 agnostic of the `Host` body while letting handlers reach `lua()` /
 `engine()` through the supertrait when they need to.
 
-### P1.g — `Ui` facade
+### P1.f — `Ui` facade
 
 - `bufs: Map<BufId, Buffer>`, `wins: Map<WinId, Window>`,
   `splits: LayoutTree`, `overlays: Vec<Overlay>`,
@@ -915,7 +942,7 @@ stacking).
 ## What we are deliberately not solving here
 
 - **Theme content.** A pretty default theme is its own task once the
-  registry exists (P1.e). It is not in this refactor's path.
+  registry exists (P1.0 ✅). It is not in this refactor's path.
 - **Plugin marketplace / install / discovery.** Plugins are
   Lua under `runtime/lua/smelt/plugins/` plus the user's
   `~/.config/smelt/init.lua`. Anything fancier comes after.
