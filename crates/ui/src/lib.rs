@@ -423,11 +423,29 @@ impl Ui {
         Some(id)
     }
 
-    /// Close a float window. Returns the Lua callback IDs that were
+    /// Close a window. Returns the Lua callback IDs that were
     /// attached (keymaps, events, fallback) so the caller can drop
-    /// them from the Lua-side registry.
+    /// them from the Lua-side registry. When `id` is a leaf of an
+    /// open overlay, closes the overlay and clears callbacks for
+    /// every leaf in that overlay's tree (a single dialog typically
+    /// renders as one leaf today; multi-panel overlays keep each
+    /// leaf's bindings independent so close clears all of them
+    /// atomically).
     #[must_use]
     pub fn win_close(&mut self, id: WinId) -> Vec<u64> {
+        if let Some(overlay_id) = self.overlay_for_leaf(id) {
+            let mut all_ids = Vec::new();
+            if let Some(removed) = self.overlay_close(overlay_id) {
+                for leaf in removed.layout.leaves_in_order() {
+                    all_ids.extend(self.callbacks.clear_all(leaf));
+                    self.wins.remove(&leaf);
+                    if self.current_win == Some(leaf) {
+                        self.current_win = self.wins.keys().next().copied();
+                    }
+                }
+            }
+            return all_ids;
+        }
         let layer_id = float_layer_id(id);
         self.compositor.remove(&layer_id);
         self.wins.remove(&id);
@@ -1116,15 +1134,31 @@ impl Ui {
     ) -> KeyResult {
         // Modal overlay built-in: bare Esc on an active modal closes
         // the topmost modal. Universal dismiss is fundamental
-        // behaviour, not user-customisable. Leaves can register
-        // their own callbacks for `q` / `Ctrl+C` / `Submit` etc.
-        // through the regular `Callbacks` registry — see the
+        // behaviour, not user-customisable. Before closing, fires
+        // `WinEvent::Dismiss` on every leaf of the modal so
+        // dialog-side `on_event("dismiss", …)` handlers can flush
+        // pending state (e.g. unsubmitted input text). Leaves can
+        // register their own callbacks for `q` / `Ctrl+C` / Submit
+        // etc. through the regular `Callbacks` registry — see the
         // `focus()`-routed dispatch below.
         if matches!(code, crossterm::event::KeyCode::Esc)
             && mods == crossterm::event::KeyModifiers::NONE
         {
             if let Some(modal) = self.active_modal() {
-                let _ = self.overlay_close(modal);
+                let leaves: Vec<WinId> = self
+                    .overlay(modal)
+                    .map(|o| o.layout.leaves_in_order())
+                    .unwrap_or_default();
+                for leaf in &leaves {
+                    self.dispatch_event(*leaf, WinEvent::Dismiss, Payload::None, lua_invoke);
+                }
+                // The Lua dismiss handler may have already called
+                // `smelt.win.close(...)` (which routes through
+                // `Ui::win_close` → `overlay_close`). Re-check before
+                // closing so we don't double-pop focus_history.
+                if self.overlay(modal).is_some() {
+                    let _ = self.overlay_close(modal);
+                }
                 return KeyResult::Consumed;
             }
         }
@@ -2423,6 +2457,85 @@ mod tests {
             crossterm::event::KeyModifiers::SHIFT,
         );
         assert_eq!(ui.active_modal(), Some(id));
+    }
+
+    #[test]
+    fn modal_esc_fires_dismiss_on_every_leaf_before_closing() {
+        // Multi-panel overlay: Lua dialogs register `on_event("dismiss",
+        // …)` per-leaf to flush input state before the overlay
+        // disappears. Esc must walk every leaf so a multi-input dialog
+        // doesn't lose state on the unfocused panels.
+        let mut ui = make_ui();
+        let a = WinId(60);
+        let b = WinId(61);
+        let c = WinId(62);
+        let id = ui.overlay_open(modal_overlay_with_leaves(a, b, c));
+        let count = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        for leaf in [a, b, c] {
+            let count_cb = count.clone();
+            ui.win_on_event(
+                leaf,
+                WinEvent::Dismiss,
+                Callback::Rust(Box::new(move |_| {
+                    *count_cb.lock().unwrap() += 1;
+                    CallbackResult::Consumed
+                })),
+            );
+        }
+        let result = ui.handle_key(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(*count.lock().unwrap(), 3);
+        assert!(ui.overlay(id).is_none());
+    }
+
+    #[test]
+    fn win_close_on_overlay_leaf_closes_overlay_and_clears_all_leaves() {
+        // Lua flow: `smelt.win.close(win_id)` is the canonical way for
+        // a dialog to dismiss itself. When `win_id` is a leaf of an
+        // open overlay the call must close the whole overlay (not just
+        // detach one panel) and clear callbacks for every leaf so the
+        // Lua-side registry drops them in lockstep.
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win_a = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "a".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let win_b = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "b".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![
+            (Constraint::Length(3), LayoutTree::leaf(win_a)),
+            (Constraint::Length(3), LayoutTree::leaf(win_b)),
+        ]);
+        let oid = ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+        let cb_noop: Callback = Callback::Rust(Box::new(|_| CallbackResult::Consumed));
+        ui.win_on_event(win_a, WinEvent::Dismiss, cb_noop);
+        let cb_noop2: Callback = Callback::Rust(Box::new(|_| CallbackResult::Consumed));
+        ui.win_on_event(win_b, WinEvent::Dismiss, cb_noop2);
+
+        let _ = ui.win_close(win_a);
+
+        assert!(ui.overlay(oid).is_none());
+        // Both leaves' Window entries gone from the registry.
+        assert!(ui.win(win_a).is_none());
+        assert!(ui.win(win_b).is_none());
+        // Closing again is a no-op — overlay is already gone.
+        assert_eq!(ui.win_close(win_a), Vec::<u64>::new());
     }
 
     #[test]
