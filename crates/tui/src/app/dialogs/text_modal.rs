@@ -1,13 +1,13 @@
-//! Simple read-only text dialog. One content panel, Esc / q dismiss.
-//! Used by `/stats` and `/cost` — popovers that just show static text.
+//! Simple read-only text dialog. One viewer Window inside a centered
+//! Overlay; Esc dismisses.
 
 use super::super::App;
-use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
-use ui::{Constraint, PanelHeight, PanelSpec, Placement};
+use ui::layout::Anchor;
+use ui::{Border, Constraint, LayoutTree, Overlay, SplitConfig};
 
-/// Open a dialog with one scrollable content panel showing `body`.
-/// Dismisses on Esc, q, or Ctrl+C.
+/// Open a centered modal overlay showing `body`. Esc dismisses
+/// (handled by the modal-Esc-dismiss built-in in `Ui::handle_key`).
 pub fn open(app: &mut App, title: impl Into<String>, body: &str) {
     let buf = app.ui.buf_create(BufCreateOpts::default());
     if let Some(b) = app.ui.buf_mut(buf) {
@@ -19,27 +19,23 @@ pub fn open(app: &mut App, title: impl Into<String>, body: &str) {
         b.set_all_lines(lines);
     }
 
-    let dialog_config = app.builtin_dialog_config(
-        None,
-        vec![
-            (KeyCode::Esc, KeyModifiers::NONE),
-            (KeyCode::Char('q'), KeyModifiers::NONE),
-            (KeyCode::Char('c'), KeyModifiers::CONTROL),
-        ],
-    );
-
-    let panels = vec![PanelSpec::content(buf, PanelHeight::Fill).focusable(false)];
-
-    let _ = app.ui.dialog_open(
-        ui::FloatConfig {
-            title: Some(title.into()),
-            placement: Placement::Centered {
-                width: Constraint::Percentage(70),
-                height: Constraint::Percentage(60),
-            },
-            ..Default::default()
+    let Some(win) = app.ui.win_open_split(
+        buf,
+        SplitConfig {
+            region: "text_modal".into(),
+            gutters: Default::default(),
         },
-        dialog_config,
-        panels,
-    );
+    ) else {
+        return;
+    };
+
+    let layout = LayoutTree::vbox(vec![(
+        Constraint::Percentage(60),
+        LayoutTree::hbox(vec![(Constraint::Percentage(70), LayoutTree::leaf(win))]),
+    )])
+    .with_border(Border::Single)
+    .with_title(title.into());
+
+    app.ui
+        .overlay_open(Overlay::new(layout, Anchor::ScreenCenter).modal(true));
 }
