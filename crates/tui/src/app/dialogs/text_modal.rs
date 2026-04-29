@@ -5,9 +5,7 @@ use super::super::App;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
-use ui::{
-    Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, SplitConfig,
-};
+use ui::{Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, SplitConfig};
 
 /// Open a centered modal overlay showing `body`. Esc dismisses via
 /// the `Ui` built-in; `q` and `Ctrl+C` dismiss via leaf-callbacks

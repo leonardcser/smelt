@@ -375,7 +375,13 @@ impl Dialog {
         let sep_rows: u16 = self
             .panels
             .iter()
-            .map(|p| if p.separator_above != SeparatorStyle::None { 1 } else { 0 })
+            .map(|p| {
+                if p.separator_above != SeparatorStyle::None {
+                    1
+                } else {
+                    0
+                }
+            })
             .sum();
         let content_rows: u16 = self
             .panels
@@ -522,10 +528,7 @@ impl Dialog {
         for panel in &mut self.panels {
             match &mut panel.content {
                 DialogPanelContent::Buffer {
-                    buf,
-                    view,
-                    rows,
-                    ..
+                    buf, view, rows, ..
                 } => {
                     if let Some(b) = bufs.get(*buf) {
                         b.ensure_rendered_at(content_width);
@@ -1064,9 +1067,7 @@ impl Component for Dialog {
                 match panel.separator_above {
                     SeparatorStyle::None => {}
                     SeparatorStyle::Dashed => self.draw_separator(sep_row, grid),
-                    SeparatorStyle::Solid => {
-                        self.draw_top_rule(Rect::new(sep_row, 0, w, 1), grid)
-                    }
+                    SeparatorStyle::Solid => self.draw_top_rule(Rect::new(sep_row, 0, w, 1), grid),
                 }
             }
             self.draw_panel(panel, area, grid, ctx);
@@ -1461,7 +1462,10 @@ mod tests {
         use crossterm::style::Color;
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["hello"]));
-        let panels = build_panels(vec![PanelSpec::content(BufId(1), PanelHeight::Fill)], &mut bufs);
+        let panels = build_panels(
+            vec![PanelSpec::content(BufId(1), PanelHeight::Fill)],
+            &mut bufs,
+        );
         let mut dlg = Dialog::new(
             DialogConfig {
                 accent_style: Style::fg(Color::Red),
@@ -1623,7 +1627,10 @@ mod tests {
     fn apply_panel_scrollbar_drag_moves_scroll_top() {
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["row"; 40]));
-        let panels = build_panels(vec![PanelSpec::content(BufId(1), PanelHeight::Fill)], &mut bufs);
+        let panels = build_panels(
+            vec![PanelSpec::content(BufId(1), PanelHeight::Fill)],
+            &mut bufs,
+        );
         let mut dlg = Dialog::new(DialogConfig::default(), panels);
         dlg.resolve_panel_rects(Rect::new(0, 0, 20, 10));
         let vp = dlg.panel_viewport(0).expect("panel has viewport");

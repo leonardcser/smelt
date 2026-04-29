@@ -25,7 +25,10 @@ impl LayoutState {
         let prompt_height = prompt_height.min(max_prompt);
 
         let tree = ui::LayoutTree::vbox(vec![
-            (ui::Constraint::Fill, ui::LayoutTree::leaf(ui::TRANSCRIPT_WIN)),
+            (
+                ui::Constraint::Fill,
+                ui::LayoutTree::leaf(ui::TRANSCRIPT_WIN),
+            ),
             (
                 ui::Constraint::Length(prompt_height),
                 ui::LayoutTree::leaf(ui::PROMPT_WIN),
@@ -36,7 +39,10 @@ impl LayoutState {
         let area = Rect::new(0, 0, term_width, term_height);
         let regions = ui::layout::resolve_layout(&tree, area);
 
-        let transcript = regions.get(&ui::TRANSCRIPT_WIN).copied().unwrap_or_default();
+        let transcript = regions
+            .get(&ui::TRANSCRIPT_WIN)
+            .copied()
+            .unwrap_or_default();
         let prompt = regions.get(&ui::PROMPT_WIN).copied().unwrap_or_default();
 
         LayoutState { transcript, prompt }

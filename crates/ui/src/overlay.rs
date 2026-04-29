@@ -104,21 +104,14 @@ pub struct AnchorContext<'a> {
 /// Cursor anchors flip to the opposite corner if the natural
 /// placement would overflow (canonical popup behavior). Win
 /// anchors return `None` when the target window has no rect (yet).
-pub fn resolve_anchor(
-    anchor: &Anchor,
-    size: (u16, u16),
-    ctx: &AnchorContext<'_>,
-) -> Option<Rect> {
+pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>) -> Option<Rect> {
     let (w, h) = size;
     let term_w = ctx.term_width;
     let term_h = ctx.term_height;
     let w = w.min(term_w);
     let h = h.min(term_h);
     let (top, left) = match anchor {
-        Anchor::ScreenCenter => (
-            term_h.saturating_sub(h) / 2,
-            term_w.saturating_sub(w) / 2,
-        ),
+        Anchor::ScreenCenter => (term_h.saturating_sub(h) / 2, term_w.saturating_sub(w) / 2),
         Anchor::ScreenAt { row, col, corner } => {
             let (r, c) = corner_to_topleft(*corner, *row, *col, w, h);
             (clamp_axis(r, term_h, h), clamp_axis(c, term_w, w))
@@ -136,14 +129,26 @@ pub fn resolve_anchor(
             // to the opposite corner relative to the cursor.
             let r = if r + h as i32 > term_h as i32 || r < 0 {
                 let opposite = flip_vert(*corner);
-                let (r2, _) = corner_to_topleft(opposite, cy as i32 + row_offset, cx as i32 + col_offset, w, h);
+                let (r2, _) = corner_to_topleft(
+                    opposite,
+                    cy as i32 + row_offset,
+                    cx as i32 + col_offset,
+                    w,
+                    h,
+                );
                 r2
             } else {
                 r
             };
             let c = if c + w as i32 > term_w as i32 || c < 0 {
                 let opposite = flip_horiz(*corner);
-                let (_, c2) = corner_to_topleft(opposite, cy as i32 + row_offset, cx as i32 + col_offset, w, h);
+                let (_, c2) = corner_to_topleft(
+                    opposite,
+                    cy as i32 + row_offset,
+                    cx as i32 + col_offset,
+                    w,
+                    h,
+                );
                 c2
             } else {
                 c
@@ -215,8 +220,7 @@ mod tests {
 
     #[test]
     fn overlay_defaults_are_sensible() {
-        let layout =
-            LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(42)))]);
+        let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(42)))]);
         let ov = Overlay::new(layout, Anchor::ScreenCenter);
         assert_eq!(ov.z, 50);
         assert!(!ov.modal);
@@ -225,8 +229,7 @@ mod tests {
 
     #[test]
     fn overlay_builders_compose() {
-        let layout =
-            LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(42)))]);
+        let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(42)))]);
         let ov = Overlay::new(
             layout,
             Anchor::Win {

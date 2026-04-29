@@ -325,12 +325,7 @@ impl Ui {
     /// `Scrollbar` results are reserved for P1.d when Window
     /// publishes its scrollbar rect; this method never returns
     /// `Scrollbar` yet.
-    pub fn hit_test(
-        &self,
-        row: u16,
-        col: u16,
-        cursor: Option<(u16, u16)>,
-    ) -> Option<HitTarget> {
+    pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
                 OverlayHitTarget::Window(w) => HitTarget::Window(w),
@@ -357,7 +352,9 @@ impl Ui {
         col: u16,
         cursor: Option<(u16, u16)>,
     ) -> Option<(OverlayId, OverlayHitTarget)> {
-        let modal_z = self.active_modal().and_then(|id| self.overlays.get(&id).map(|o| o.z));
+        let modal_z = self
+            .active_modal()
+            .and_then(|id| self.overlays.get(&id).map(|o| o.z));
         // Topmost first.
         let mut resolved = self.resolve_overlays(cursor);
         resolved.reverse();
@@ -388,10 +385,7 @@ impl Ui {
     /// `cursor`, or whose `Anchor::Win` target is absent from
     /// `split_rects`, are skipped silently. The caller (compositor
     /// integration in C.5+) feeds the cursor it knows from focus.
-    pub fn resolve_overlays(
-        &self,
-        cursor: Option<(u16, u16)>,
-    ) -> Vec<(OverlayId, Rect, &Overlay)> {
+    pub fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
         let (term_w, term_h) = self.terminal_size;
         let ctx = overlay::AnchorContext {
             term_width: term_w,
@@ -919,7 +913,9 @@ impl Ui {
         if let Some(win) = self.overlay_focus {
             return Some(win);
         }
-        self.compositor.focused().and_then(|id| self.layer_to_win(id))
+        self.compositor
+            .focused()
+            .and_then(|id| self.layer_to_win(id))
     }
 
     /// Currently focused `Window`, if its id is registered in
@@ -1015,9 +1011,7 @@ impl Ui {
             .layout
             .leaves_in_order()
             .into_iter()
-            .filter(|w| {
-                self.layer_id_for_win(*w).is_some() || self.wins.contains_key(w)
-            })
+            .filter(|w| self.layer_id_for_win(*w).is_some() || self.wins.contains_key(w))
             .collect();
         if leaves.is_empty() {
             return false;
@@ -1110,12 +1104,11 @@ impl Ui {
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.terminal_size;
-        self.compositor
-            .render_with(&self.theme, w, |grid, theme| {
-                for (_id, rect, overlay) in &resolved {
-                    paint_overlay(grid, theme, *rect, overlay, wins, bufs, term_size);
-                }
-            })
+        self.compositor.render_with(&self.theme, w, |grid, theme| {
+            for (_id, rect, overlay) in &resolved {
+                paint_overlay(grid, theme, *rect, overlay, wins, bufs, term_size);
+            }
+        })
     }
 
     pub fn theme(&self) -> &Theme {
@@ -1870,8 +1863,7 @@ mod tests {
     // ── Overlay API (P1.c) ───────────────────────────────────────────
 
     fn stub_overlay() -> Overlay {
-        let layout =
-            LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(99)))]);
+        let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(99)))]);
         Overlay::new(layout, layout::Anchor::ScreenCenter)
     }
 
@@ -1906,7 +1898,11 @@ mod tests {
         };
         assert!(matches!(
             ui.overlay(id).unwrap().anchor,
-            layout::Anchor::ScreenAt { row: 5, col: 10, .. }
+            layout::Anchor::ScreenAt {
+                row: 5,
+                col: 10,
+                ..
+            }
         ));
     }
 
@@ -1932,7 +1928,10 @@ mod tests {
         // composition.
         let layout = LayoutTree::hbox(vec![(
             Constraint::Length(width),
-            LayoutTree::vbox(vec![(Constraint::Length(height), LayoutTree::leaf(WinId(99)))]),
+            LayoutTree::vbox(vec![(
+                Constraint::Length(height),
+                LayoutTree::leaf(WinId(99)),
+            )]),
         )]);
         Overlay::new(layout, anchor)
     }
@@ -2172,10 +2171,7 @@ mod tests {
         ui.set_focus(WinId(3));
         ui.set_focus(WinId(4));
         assert_eq!(ui.focus(), Some(WinId(4)));
-        assert_eq!(
-            ui.focus_history(),
-            &[WinId(1), WinId(2), WinId(3)]
-        );
+        assert_eq!(ui.focus_history(), &[WinId(1), WinId(2), WinId(3)]);
     }
 
     #[test]
@@ -2231,7 +2227,8 @@ mod tests {
     fn overlay_hit_test_modal_blocks_lower_z() {
         let mut ui = make_ui();
         // Lower-z overlay covering (7,20)..(17,60).
-        let _under = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
+        let _under =
+            ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
         // Higher-z modal at same anchor, smaller (10x4 → centered (10,35)..(14,45)).
         let modal_id = ui.overlay_open(
             sized_overlay(10, 4, layout::Anchor::ScreenCenter)
@@ -2334,16 +2331,14 @@ mod tests {
     #[test]
     fn hit_test_returns_chrome_with_overlay_owner() {
         let mut ui = make_ui();
-        let id = ui.overlay_open(
-            Overlay::new(
-                LayoutTree::vbox(vec![(
-                    Constraint::Length(8),
-                    LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
-                )])
-                .with_border(layout::Border::Single),
-                layout::Anchor::ScreenCenter,
-            ),
-        );
+        let id = ui.overlay_open(Overlay::new(
+            LayoutTree::vbox(vec![(
+                Constraint::Length(8),
+                LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
+            )])
+            .with_border(layout::Border::Single),
+            layout::Anchor::ScreenCenter,
+        ));
         let hit = ui.hit_test(7, 30, None).unwrap();
         assert_eq!(hit, HitTarget::Chrome { owner: id });
     }
