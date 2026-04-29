@@ -190,8 +190,8 @@ impl Default for FloatConfig {
     fn default() -> Self {
         Self {
             placement: Placement::Centered {
-                width: Constraint::Pct(80),
-                height: Constraint::Pct(50),
+                width: Constraint::Percentage(80),
+                height: Constraint::Percentage(50),
             },
             border: Border::Single,
             title: None,

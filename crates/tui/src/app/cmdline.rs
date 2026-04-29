@@ -44,7 +44,7 @@ impl App {
                 above_rows: 0,
                 full_width: true,
                 max_width: ui::Constraint::Fill,
-                max_height: ui::Constraint::Fixed(1),
+                max_height: ui::Constraint::Length(1),
             },
             zindex: 600,
             focusable: true,

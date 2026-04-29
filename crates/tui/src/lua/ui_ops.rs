@@ -215,7 +215,7 @@ fn parse_dialog_placement(opts: &mlua::Table) -> Placement {
     match opts.get::<String>("placement").ok().as_deref() {
         Some("dock_bottom") => {
             let pct: u16 = opts.get("placement_height").unwrap_or(60);
-            Placement::dock_bottom_full_width(Constraint::Pct(pct))
+            Placement::dock_bottom_full_width(Constraint::Percentage(pct))
         }
         _ => Placement::fit_content(FitMax::HalfScreen),
     }
@@ -330,15 +330,15 @@ fn parse_picker_placement(opts: &mlua::Table) -> Placement {
         .ok()
         .unwrap_or_else(|| "center".to_string());
     match mode.as_str() {
-        "bottom" => Placement::dock_bottom_full_width(Constraint::Pct(40)),
+        "bottom" => Placement::dock_bottom_full_width(Constraint::Percentage(40)),
         "cursor" => Placement::AnchorCursor {
             row_offset: 1,
             col_offset: 0,
-            width: Constraint::Fixed(48),
-            height: Constraint::Pct(40),
+            width: Constraint::Length(48),
+            height: Constraint::Percentage(40),
         },
-        "prompt_docked" => Placement::docked_above(ui::PROMPT_WIN, Constraint::Fixed(7)),
-        _ => Placement::centered(Constraint::Pct(60), Constraint::Pct(50)),
+        "prompt_docked" => Placement::docked_above(ui::PROMPT_WIN, Constraint::Length(7)),
+        _ => Placement::centered(Constraint::Percentage(60), Constraint::Percentage(50)),
     }
 }
 

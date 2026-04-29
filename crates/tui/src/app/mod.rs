@@ -564,7 +564,7 @@ impl App {
                     },
                     ui::LayoutTree::Leaf {
                         name: "prompt".into(),
-                        constraint: ui::Constraint::Pct(25),
+                        constraint: ui::Constraint::Percentage(25),
                     },
                 ],
             });
@@ -791,8 +791,8 @@ impl App {
                 anchor: ui::Anchor::NW,
                 row: 0,
                 col: 0,
-                width: ui::Constraint::Fixed(tw),
-                height: ui::Constraint::Fixed(1),
+                width: ui::Constraint::Length(tw),
+                height: ui::Constraint::Length(1),
             },
             border: ui::Border::None,
             title: None,
