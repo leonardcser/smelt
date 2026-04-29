@@ -283,6 +283,18 @@ impl LayoutTree {
         self
     }
 
+    /// Whether this tree contains `win` as one of its leaves
+    /// (depth-first). Pure structural check — no rect math, no
+    /// dependency on terminal size.
+    pub fn contains_leaf(&self, win: crate::WinId) -> bool {
+        match self {
+            LayoutTree::Leaf(w) => *w == win,
+            LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
+                items.iter().any(|(_, child)| child.contains_leaf(win))
+            }
+        }
+    }
+
     /// Natural `(width, height)` of this tree given an outer cap. Used
     /// by overlay sizing: `Length` / `Percentage` / `Ratio` / `Min` /
     /// `Max` contribute their resolved sizes along the parent axis;
@@ -920,6 +932,27 @@ mod tests {
             with_sep.natural_size((80, 24)),
             plain.natural_size((80, 24)),
         );
+    }
+
+    #[test]
+    fn contains_leaf_finds_direct_leaf() {
+        let tree = LayoutTree::leaf(A);
+        assert!(tree.contains_leaf(A));
+        assert!(!tree.contains_leaf(B));
+    }
+
+    #[test]
+    fn contains_leaf_walks_nested_containers() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Fill, LayoutTree::leaf(A)),
+            (
+                Constraint::Length(5),
+                LayoutTree::hbox(vec![(Constraint::Fill, LayoutTree::leaf(B))]),
+            ),
+        ]);
+        assert!(tree.contains_leaf(A));
+        assert!(tree.contains_leaf(B));
+        assert!(!tree.contains_leaf(C));
     }
 
     #[test]
