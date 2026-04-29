@@ -181,14 +181,14 @@ to invoke_ the feature.
 | Cancel (Ctrl+C)                                 | `app/events.rs` + `engine/cancel.rs`    | P6                                               | working |
 | Double-Esc (cancel + drain queue)               | `app/events.rs`                         | P6 (Esc chain)                                   | working |
 | Mouse wheel scroll                              | `app/mouse.rs`                          | P1/P2                                            | working |
-| Mouse click focus                               | `app/mouse.rs`                          | P1.f (HitTarget + Host)                          | offline-P0 |
+| Mouse click focus                               | `app/mouse.rs`                          | P1.e (HitTarget + Host)                          | offline-P0 |
 | Mouse click position cursor                     | `app/mouse.rs` + `ui/window.rs`         | P1.d                                             | working |
 | Drag-extend selection (auto-copy on release)    | `ui/window.rs` + `app/mouse.rs`         | P1 (host.clipboard from Window::handle)          | offline-P0 |
 | Double-click WORD yank (vim W: whitespace-delimited, punctuation in) | `ui/window.rs` (`select_big_word_at_transparent`) | P1 (host.clipboard)                              | offline-P0 |
 | Triple-click line yank                          | `ui/window.rs` (`select_line_at`)       | P1 (host.clipboard)                              | offline-P0 |
-| Scrollbar drag                                  | `app/mouse.rs` + `content/scrollbar.rs` | P1.f (HitTarget::Scrollbar)                      | working |
+| Scrollbar drag                                  | `app/mouse.rs` + `content/scrollbar.rs` | P1.e (HitTarget::Scrollbar)                      | working |
 | Edge autoscroll on drag                         | `app/mouse.rs`                          | P2 (Timers)                                      | working |
-| Tab cycles focus (modal-aware)                  | `app/pane_focus.rs`                     | P1.g (`focus_next` modal-aware)                  | working |
+| Tab cycles focus (modal-aware)                  | `app/pane_focus.rs`                     | P1.f (`focus_next` modal-aware)                  | working |
 | Esc chain (clear sel → dismiss → cancel)        | `app/events.rs` + `dialog.rs`           | P6                                               | working |
 | Picker navigation (↑/↓/j/k/Ctrl+P/N, PgUp/PgDn) | `ui/picker.rs` + `option_list.rs`       | P4 (`widgets/picker.lua`, `widgets/options.lua`) | working |
 | Picker filter typing                            | `ui/picker.rs`                          | P4                                               | working |
@@ -198,8 +198,8 @@ to invoke_ the feature.
 
 | Feature                                               | Source today                      | Restored by                 | Status  |
 | ----------------------------------------------------- | --------------------------------- | --------------------------- | ------- |
-| Theme accent presets (12 colors: ember, coral, rose, gold, ice, sky, blue, lavender, lilac, mint, sage, silver) | `plugins/theme.lua` + `theme.rs::PRESETS` | P1.e + P4 (`colorschemes/`) | working |
-| Custom ANSI accent (0-255)                            | `theme.rs`                        | P1.e (registry)             | working |
+| Theme accent presets (12 colors: ember, coral, rose, gold, ice, sky, blue, lavender, lilac, mint, sage, silver) | `plugins/theme.lua` + `theme.rs::PRESETS` | P1.0 + P4 (`colorschemes/`) | working |
+| Custom ANSI accent (0-255)                            | `theme.rs`                        | P1.0 (registry)             | working |
 | Task slug accent                                      | `plugins/color.lua`               | P4                          | working |
 | `show_tokens` setting                                 | `state.rs::ResolvedSettings`      | P2.a (AppConfig)            | working |
 | `show_cost` setting                                   | settings                          | P2.a                        | working |
@@ -306,7 +306,7 @@ to invoke_ the feature.
 | Config: defaults        | `model`, `mode`, `mode_cycle`, `reasoning_effort`, `reasoning_cycle`                                                                       | config                                    | n/a         | working |
 | Config: auxiliary       | `model`, `use_for: { title, ... }`                                                                                                         | config                                    | n/a         | working |
 | Config: settings        | (see Theming + Persistence sections above)                                                                                                 | `state.rs`                                | P2.a        | working |
-| Config: theme           | `accent` (preset or 0-255)                                                                                                                 | config + `theme.rs`                       | P1.e        | working |
+| Config: theme           | `accent` (preset or 0-255)                                                                                                                 | config + `theme.rs`                       | P1.0        | working |
 | Config: mcp             | `command`, `type`, `env`, `timeout`, `enabled`                                                                                             | `engine/mcp/`                             | n/a         | working |
 | Config: skills          | `paths`                                                                                                                                    | `engine/skills.rs`                        | n/a         | working |
 | Config: permissions     | per-tool/per-mode allow/ask/deny                                                                                                           | `engine/permissions/`                     | P5.c        | working |
