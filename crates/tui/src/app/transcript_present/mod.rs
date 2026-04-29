@@ -451,7 +451,7 @@ pub(super) fn render_block(
         } => {
             let header = format!("➜ {from_id}");
             out.push_style(SpanStyle {
-                fg: Some(crate::theme::AGENT.into()),
+                fg: Some(ColorValue::Role(ColorRole::Agent)),
                 bold: true,
                 ..Default::default()
             });
@@ -461,7 +461,7 @@ pub(super) fn render_block(
             let bctx = crate::content::BoxContext {
                 left: "\u{2502} ",
                 right: "",
-                color: crate::theme::AGENT.into(),
+                color: ColorValue::Role(ColorRole::Agent),
                 inner_w: width.saturating_sub(3),
             };
             1 + render_markdown_inner(out, content, width, bctx.left, true, Some(&bctx))
