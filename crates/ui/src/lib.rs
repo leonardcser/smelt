@@ -60,7 +60,7 @@ pub use layout::{
 };
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
-pub use overlay::{Overlay, OverlayId};
+pub use overlay::{Overlay, OverlayHitTarget, OverlayId};
 pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
@@ -239,6 +239,57 @@ impl Ui {
             self.overlays.iter().map(|(id, o)| (*id, o)).collect();
         entries.sort_by_key(|(id, o)| (o.z, id.0));
         entries
+    }
+
+    /// Topmost modal overlay, if any. "Topmost" = highest `z`; ties
+    /// broken by insertion order (later open wins). Engine-drain gating
+    /// (don't pull engine events while a modal is up) and modal-aware
+    /// focus cycling (Tab stays inside the overlay) read this.
+    pub fn active_modal(&self) -> Option<OverlayId> {
+        self.overlays_in_z_order()
+            .into_iter()
+            .rev()
+            .find_map(|(id, ov)| ov.modal.then_some(id))
+    }
+
+    /// Hit-test a screen position against the open overlay set.
+    /// Returns the topmost overlay whose resolved rect contains
+    /// `(row, col)`, plus whether the hit landed on one of its leaf
+    /// `Window`s or its chrome (border, title, gap, padding).
+    /// `None` when no overlay covers the point. When a modal is
+    /// active, only the modal and overlays at or above its `z`
+    /// receive hits — lower-z overlays are blocked even if their
+    /// rect contains the point. `cursor` is forwarded to
+    /// [`Self::resolve_overlays`] for `Anchor::Cursor` resolution.
+    pub fn overlay_hit_test(
+        &self,
+        row: u16,
+        col: u16,
+        cursor: Option<(u16, u16)>,
+    ) -> Option<(OverlayId, OverlayHitTarget)> {
+        let modal_z = self.active_modal().and_then(|id| self.overlays.get(&id).map(|o| o.z));
+        // Topmost first.
+        let mut resolved = self.resolve_overlays(cursor);
+        resolved.reverse();
+        for (id, rect, ov) in resolved {
+            if let Some(min_z) = modal_z {
+                if ov.z < min_z {
+                    continue;
+                }
+            }
+            if !rect.contains(row, col) {
+                continue;
+            }
+            // Inside the overlay rect — is it a leaf or chrome?
+            let leaf_rects = layout::resolve_layout(&ov.layout, rect);
+            for (win_id, leaf_rect) in &leaf_rects {
+                if leaf_rect.contains(row, col) {
+                    return Some((id, OverlayHitTarget::Window(*win_id)));
+                }
+            }
+            return Some((id, OverlayHitTarget::Chrome));
+        }
+        None
     }
 
     /// Resolve every overlay's screen rect for the upcoming frame.
@@ -1544,6 +1595,110 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         let (_, rect, _) = &resolved[0];
         assert_eq!(*rect, Rect::new(5, 10, 10, 5));
+    }
+
+    #[test]
+    fn active_modal_empty_returns_none() {
+        let ui = make_ui();
+        assert_eq!(ui.active_modal(), None);
+    }
+
+    #[test]
+    fn active_modal_skips_non_modal_overlays() {
+        let mut ui = make_ui();
+        ui.overlay_open(stub_overlay()); // non-modal
+        ui.overlay_open(stub_overlay().with_z(100)); // non-modal, higher z
+        assert_eq!(ui.active_modal(), None);
+    }
+
+    #[test]
+    fn active_modal_returns_topmost_modal() {
+        let mut ui = make_ui();
+        let _bg = ui.overlay_open(stub_overlay().with_z(100)); // higher z but non-modal
+        let m_low = ui.overlay_open(stub_overlay().with_z(10).modal(true));
+        let m_mid = ui.overlay_open(stub_overlay().with_z(50).modal(true));
+        assert_eq!(ui.active_modal(), Some(m_mid));
+        // Closing the topmost modal falls back to the next.
+        ui.overlay_close(m_mid);
+        assert_eq!(ui.active_modal(), Some(m_low));
+    }
+
+    #[test]
+    fn overlay_hit_test_returns_none_when_empty() {
+        let ui = make_ui();
+        assert_eq!(ui.overlay_hit_test(10, 30, None), None);
+    }
+
+    #[test]
+    fn overlay_hit_test_window_inside_leaf() {
+        let mut ui = make_ui();
+        // 40x10 overlay centered at (7, 20)..(17, 60); single Leaf.
+        let id = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        let hit = ui.overlay_hit_test(10, 30, None).unwrap();
+        assert_eq!(hit.0, id);
+        assert!(matches!(hit.1, OverlayHitTarget::Window(WinId(99))));
+    }
+
+    #[test]
+    fn overlay_hit_test_chrome_when_inside_overlay_outside_leaves() {
+        let mut ui = make_ui();
+        // Outer Vbox with single-border + inner Hbox of fixed width
+        // gives the overlay a concrete (42, 10) natural size centered
+        // at (7, 19). Border consumes the top/bottom row + left/right
+        // col; leaf occupies rows 8..16, cols 20..60.
+        let bordered = Overlay::new(
+            LayoutTree::vbox(vec![(
+                Constraint::Length(8),
+                LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
+            )])
+            .with_border(layout::Border::Single),
+            layout::Anchor::ScreenCenter,
+        );
+        let id = ui.overlay_open(bordered);
+        // Inside overlay rect (row 7 = top border), outside the leaf.
+        let hit = ui.overlay_hit_test(7, 30, None).unwrap();
+        assert_eq!(hit.0, id);
+        assert_eq!(hit.1, OverlayHitTarget::Chrome);
+        // Inside the leaf → Window.
+        let hit = ui.overlay_hit_test(10, 30, None).unwrap();
+        assert!(matches!(hit.1, OverlayHitTarget::Window(WinId(99))));
+    }
+
+    #[test]
+    fn overlay_hit_test_returns_none_outside_overlay_rect() {
+        let mut ui = make_ui();
+        ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        // (0, 0) is outside the overlay's centered rect.
+        assert_eq!(ui.overlay_hit_test(0, 0, None), None);
+    }
+
+    #[test]
+    fn overlay_hit_test_modal_blocks_lower_z() {
+        let mut ui = make_ui();
+        // Lower-z overlay covering (7,20)..(17,60).
+        let _under = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
+        // Higher-z modal at same anchor, smaller (10x4 → centered (10,35)..(14,45)).
+        let modal_id = ui.overlay_open(
+            sized_overlay(10, 4, layout::Anchor::ScreenCenter)
+                .with_z(100)
+                .modal(true),
+        );
+        // Hit inside the modal → returns the modal.
+        let hit = ui.overlay_hit_test(11, 36, None).unwrap();
+        assert_eq!(hit.0, modal_id);
+        // Hit inside the under overlay but outside the modal → blocked,
+        // returns None (lower-z overlay can't receive the click).
+        assert_eq!(ui.overlay_hit_test(8, 22, None), None);
+    }
+
+    #[test]
+    fn overlay_hit_test_topmost_wins_when_no_modal() {
+        let mut ui = make_ui();
+        let _bottom =
+            ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(10));
+        let top = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter).with_z(50));
+        let hit = ui.overlay_hit_test(10, 30, None).unwrap();
+        assert_eq!(hit.0, top);
     }
 
     #[test]
