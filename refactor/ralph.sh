@@ -44,8 +44,10 @@ while :; do
   before=$(git rev-parse HEAD)
 
   # Fresh tmux window running interactive claude with auto-permission.
+  # `RALPH_ITER=1` tells refactor/hooks/stop_gate.sh to close this window
+  # when the agent stops cleanly, so the loop advances on its own.
   iter_win=$(tmux new-window -n "ralph-$iter" -c "$PWD" -P -F '#{window_id}' \
-    "claude --permission-mode auto")
+    "RALPH_ITER=1 claude --permission-mode auto")
 
   # Wait for claude's TUI to come up before sending input.
   sleep 4
