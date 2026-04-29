@@ -919,6 +919,52 @@ impl Ui {
         &self.focus_history
     }
 
+    /// Move focus to the next focusable window in cycle order.
+    /// Returns `true` if focus changed. Modal-aware: when an
+    /// `active_modal` overlay is open, cycles through that overlay's
+    /// focusable leaves only. Returns `false` outside a modal —
+    /// cross-source (split + float + overlay-leaf) z-order is gated
+    /// on the unified Ui facade in P1.f.
+    pub fn focus_next(&mut self) -> bool {
+        self.focus_step(1)
+    }
+
+    /// Move focus to the previous focusable window. See `focus_next`
+    /// for cycling and modal-awareness rules.
+    pub fn focus_prev(&mut self) -> bool {
+        self.focus_step(-1)
+    }
+
+    fn focus_step(&mut self, dir: i32) -> bool {
+        let Some(modal_id) = self.active_modal() else {
+            return false;
+        };
+        let Some(modal) = self.overlays.get(&modal_id) else {
+            return false;
+        };
+        let leaves: Vec<WinId> = modal
+            .layout
+            .leaves_in_order()
+            .into_iter()
+            .filter(|w| self.layer_id_for_win(*w).is_some())
+            .collect();
+        if leaves.is_empty() {
+            return false;
+        }
+        let current = self.focus();
+        let current_idx = current
+            .and_then(|w| leaves.iter().position(|x| *x == w))
+            .map(|i| i as i32)
+            .unwrap_or(-1);
+        let len = leaves.len() as i32;
+        let next_idx = (current_idx + dir).rem_euclid(len) as usize;
+        let target = leaves[next_idx];
+        if Some(target) == current {
+            return false;
+        }
+        self.set_focus(target)
+    }
+
     /// Resolve a `WinId` to its current compositor layer id. Splits
     /// register their layer-id explicitly via `register_split`;
     /// floats use the `"float:N"` prefix and only count when an
@@ -1992,6 +2038,82 @@ mod tests {
         // Hit inside the under overlay but outside the modal → blocked,
         // returns None (lower-z overlay can't receive the click).
         assert_eq!(ui.overlay_hit_test(8, 22, None), None);
+    }
+
+    fn modal_overlay_with_leaves(a: WinId, b: WinId, c: WinId) -> Overlay {
+        let layout = LayoutTree::vbox(vec![
+            (Constraint::Length(3), LayoutTree::leaf(a)),
+            (
+                Constraint::Length(3),
+                LayoutTree::hbox(vec![
+                    (Constraint::Length(20), LayoutTree::leaf(b)),
+                    (Constraint::Length(20), LayoutTree::leaf(c)),
+                ]),
+            ),
+        ]);
+        Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true)
+    }
+
+    #[test]
+    fn focus_next_returns_false_outside_modal() {
+        let mut ui = make_ui();
+        let win = WinId(50);
+        ui.register_split("a", win);
+        ui.set_focus(win);
+        // No modal open → focus cycling is a no-op (gated on P1.f).
+        assert!(!ui.focus_next());
+        assert_eq!(ui.focus(), Some(win));
+    }
+
+    #[test]
+    fn focus_next_cycles_modal_leaves() {
+        let mut ui = make_ui();
+        let a = WinId(100);
+        let b = WinId(101);
+        let c = WinId(102);
+        for (id, w) in [("a", a), ("b", b), ("c", c)] {
+            ui.register_split(id, w);
+        }
+        ui.overlay_open(modal_overlay_with_leaves(a, b, c));
+        ui.set_focus(a);
+        assert!(ui.focus_next());
+        assert_eq!(ui.focus(), Some(b));
+        assert!(ui.focus_next());
+        assert_eq!(ui.focus(), Some(c));
+        // Wrap.
+        assert!(ui.focus_next());
+        assert_eq!(ui.focus(), Some(a));
+    }
+
+    #[test]
+    fn focus_prev_walks_backwards_with_wrap() {
+        let mut ui = make_ui();
+        let a = WinId(100);
+        let b = WinId(101);
+        let c = WinId(102);
+        for (id, w) in [("a", a), ("b", b), ("c", c)] {
+            ui.register_split(id, w);
+        }
+        ui.overlay_open(modal_overlay_with_leaves(a, b, c));
+        ui.set_focus(a);
+        assert!(ui.focus_prev());
+        assert_eq!(ui.focus(), Some(c));
+        assert!(ui.focus_prev());
+        assert_eq!(ui.focus(), Some(b));
+    }
+
+    #[test]
+    fn focus_next_skips_unregistered_leaves() {
+        let mut ui = make_ui();
+        let a = WinId(100);
+        let c = WinId(102);
+        // b (101) intentionally not registered.
+        ui.register_split("a", a);
+        ui.register_split("c", c);
+        ui.overlay_open(modal_overlay_with_leaves(a, WinId(101), c));
+        ui.set_focus(a);
+        assert!(ui.focus_next());
+        assert_eq!(ui.focus(), Some(c));
     }
 
     #[test]
