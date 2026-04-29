@@ -25,6 +25,9 @@ with proper resolution semantics. `Direction` enum deleted.
 **Next:** P1.c — Overlay replacing Float. Independent of the
 transcript-migration track.
 
+Phase log: see `P1.md` for closed-sub-phase summary, decisions
+made while coding, and per-section file/type changes.
+
 **Tree:** green. `cargo nextest run --workspace` — 930 passed (914
 from prior boundary + 16 new tests covering extmark CRUD, yank
 substitution, and wrap caching; renamed-tests preserved). `cargo
