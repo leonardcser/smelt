@@ -59,7 +59,7 @@ impl App {
         // `AppOp`s drained below. Mouse events fall through so the
         // regular `handle_mouse` path can run wheel/scrollbar logic
         // over the float's rect.
-        if self.ui.focused_float().is_some() {
+        if self.ui.focused_float().is_some() || self.ui.active_modal().is_some() {
             if let Event::Resize(w, h) = ev {
                 self.handle_resize(w, h);
                 return false;

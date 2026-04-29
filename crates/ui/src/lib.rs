@@ -1061,6 +1061,20 @@ impl Ui {
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
     ) -> KeyResult {
+        // Modal overlay built-in: Esc on any active modal closes the
+        // topmost modal. Universal dismiss is fundamental behaviour,
+        // not user-customisable. Richer leaf-level event routing
+        // (q, Ctrl+C, Submit, etc.) lands with the Window event-handler
+        // refactor in P1.d/P1.e; until then, modal overlays only
+        // accept Esc.
+        if matches!(code, crossterm::event::KeyCode::Esc)
+            && mods == crossterm::event::KeyModifiers::NONE
+        {
+            if let Some(modal) = self.active_modal() {
+                let _ = self.overlay_close(modal);
+                return KeyResult::Consumed;
+            }
+        }
         let focused = self
             .compositor
             .focused()
@@ -2259,6 +2273,32 @@ mod tests {
         let resolved = ui.resolve_overlays(None);
         let ids: Vec<OverlayId> = resolved.iter().map(|(id, _, _)| *id).collect();
         assert_eq!(ids, vec![low, high]);
+    }
+
+    #[test]
+    fn handle_key_esc_closes_active_modal() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
+        assert_eq!(ui.active_modal(), Some(id));
+        let result = ui.handle_key(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(ui.active_modal(), None);
+    }
+
+    #[test]
+    fn handle_key_esc_with_modifiers_does_not_dismiss_modal() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
+        // Esc + Shift falls through to normal dispatch — built-in
+        // dismiss is bare Esc only.
+        let _ = ui.handle_key(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+        assert_eq!(ui.active_modal(), Some(id));
     }
 
     #[test]
