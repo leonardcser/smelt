@@ -1,5 +1,4 @@
 use super::scrollbar::Scrollbar;
-use crate::theme;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::Buffer;
 use ui::buffer_view::BufferView;
@@ -89,9 +88,9 @@ impl WindowView {
         });
     }
 
-    pub fn set_soft_cursor(&mut self, cursor: Option<SoftCursor>) {
+    pub fn set_soft_cursor(&mut self, cursor: Option<SoftCursor>, theme: &ui::Theme) {
         self.cursor_info = cursor.map(|c| {
-            let (fg, bg) = if theme::is_light() {
+            let (fg, bg) = if theme.is_light() {
                 (
                     crossterm::style::Color::White,
                     crossterm::style::Color::Black,
@@ -322,11 +321,14 @@ mod tests {
     #[test]
     fn cursor_info_from_soft_cursor() {
         let mut view = WindowView::new();
-        view.set_soft_cursor(Some(SoftCursor {
-            col: 1,
-            row: 0,
-            glyph: 'b',
-        }));
+        view.set_soft_cursor(
+            Some(SoftCursor {
+                col: 1,
+                row: 0,
+                glyph: 'b',
+            }),
+            &ui::Theme::new(),
+        );
 
         let ci = view.cursor().unwrap();
         assert_eq!((ci.col, ci.row), (1, 0));

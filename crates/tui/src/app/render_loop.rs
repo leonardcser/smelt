@@ -151,6 +151,7 @@ impl App {
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
         let visual = self.ui.theme().get("Visual");
+        let theme = self.ui.theme().clone();
 
         if let Some(tv) = self
             .ui
@@ -163,7 +164,7 @@ impl App {
             for (line, col_start, col_end) in &transcript_selection {
                 tv.add_highlight(*line, *col_start, *col_end, visual);
             }
-            tv.set_soft_cursor(tcursor.soft_cursor);
+            tv.set_soft_cursor(tcursor.soft_cursor, &theme);
             tv.set_viewport(Some(transcript_viewport));
         }
 
