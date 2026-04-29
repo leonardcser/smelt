@@ -22,9 +22,10 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — eighteen commits landed (foundation
+**P1.c in progress** — twenty-one commits landed (foundation
 + paint pipeline + first float migration + leaf event
-routing + content-only Lua dialog migration). Foundation:
+routing + content-only Lua dialog migration + Buffer-backed
+list leaves). Foundation:
 `40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
 `434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
 `dcb0e8b`, `f80d1d0` (target types + `resolve_anchor`;
@@ -100,29 +101,62 @@ dialogs with `kind="options"` / `kind="input"` / `kind="list"`
 keep the legacy `dialog_open` path until widgets get their
 Buffer-backed rewrites in C.7+.
 
-**C.7+ — remaining float migrations + deletions:** still
-ahead. Mixed-content dialogs need their widgets
-(`OptionList`, `TextInput`) rewritten as Buffer-backed
-Windows so they fit the unified Overlay model. The picker
-and notification surfaces follow. `FloatConfig` /
-`PanelWidget` / `Placement` deletions land once every
-dialog flips.
+**C.7.0 / C.7.0.5 / C.7.1 — list-shape primitives shipped.**
+The minimum building blocks for a Buffer-backed focusable
+list landed in three commits:
+
+- `affcc48` — `Window::cursor_line_highlight` opt-in field
+  + `CursorLine` theme group. Focused leaves with the opt-in
+  set paint the cursor row's background with the
+  `CursorLine` style during `Window::render`. Defaults to
+  off so existing read-only viewer leaves are unchanged.
+- `280ac6f` — `CallbackResult::Event(WinEvent, Payload)` so
+  Rust keymap callbacks (which can't reach `lua_invoke`)
+  can fire a WinEvent on the same Window after the
+  keypress. `Ui::handle_key_with_lua` captures the
+  follow-up after the keymap dispatch returns and routes it
+  through the existing `dispatch_event` path.
+- `73da0f1` — `kind = "list"` panel kind in `ui_ops.rs`
+  routing through `open_dialog_via_overlay`. Caller-supplied
+  buffer is wrapped in a focusable Window with
+  `cursor_line_highlight = true`. `configure_list_leaf`
+  registers Rust callbacks for j/k/Up/Down/PageDown/PageUp/
+  Home/End/g (cursor moves clamped to the buffer's line
+  count) and Enter (fires `Submit { Selection { abs_row =
+  scroll_top + cursor_line } }` via the C.7.0.5 seam so
+  `dialog.lua`'s `on_event(win, "submit", …)` resumes the
+  parked task with the absolute selected row). Unblocks
+  `/agents` (one-list-only — routes to overlay) and
+  `/resume` (input + list — still legacy `dialog_open`,
+  but the list panel kind no longer crashes the parser).
+
+**C.7.2+ — remaining float migrations + deletions:** still
+ahead. The full `OptionList` surface (multi-select checkbox
+prefix, shortcut keys 1-9, padded meta column, dim styling)
+is the residue not covered by the minimal list leaf.
+`TextInput` rewrite (single editable line buffer + cursor +
+keymap recipe) follows. Once every dialog flips,
+`FloatConfig` / `PanelWidget` / `Placement` and `dialog.rs`'s
+panel multiplexing all delete together.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 1024 passed
-(17 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
+**Tree:** green. `cargo nextest run --workspace` — 1028 passed
+(21 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
 1 `render_with_paints_after_layers`, 1 `render_paints_overlay_leaf_buffer`,
 1 `render_drives_ensure_rendered_at_for_each_overlay_leaf`,
 2 `handle_key_esc_*` modal-dismiss, 1 `modal_esc_fires_dismiss_on_every_leaf_before_closing`,
 1 `win_close_on_overlay_leaf_closes_overlay_and_clears_all_leaves`,
 3 `overlay_open_modal_focuses_*` / `set_focus_accepts_overlay_leaf` /
-`handle_key_routes_to_overlay_leaf_callback`).
+`handle_key_routes_to_overlay_leaf_callback`,
+3 `render_highlights_cursor_row_*` / `render_skips_cursor_highlight_*`,
+1 `callback_result_event_dispatches_winevent_after_keymap`).
 `cargo clippy --workspace --all-targets -- -D warnings` clean. Manual
 TUI parity walk: `/stats`, `/cost`, `/help`, `/btw` open as
 bordered+titled centered modals; Esc / q / Ctrl+C dismiss as
-appropriate per dialog; focus restores to prompt.
+appropriate per dialog; focus restores to prompt; `/resume`
+opens (was broken with "unknown panel kind: list").
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
@@ -225,9 +259,10 @@ before declaring anything done.
 
 **Active phase:** P1.c — `Overlay` replacing `Float`. The
 data + resolution + focus/hit-test + paint + first-migration
-+ content-only Lua dialog migration are all in place
-(C.0–C.6); see "Where we are" above for the running narrative.
-Target shape from `REFACTOR.md` § P1.c (for reference):
++ content-only Lua dialog migration + Buffer-backed list
+leaves are all in place (C.0–C.7.1); see "Where we are"
+above for the running narrative. Target shape from
+`REFACTOR.md` § P1.c (for reference):
 
 - `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
 - `Anchor::{ ScreenCenter | ScreenAt { row, col, corner } |
@@ -237,22 +272,19 @@ Target shape from `REFACTOR.md` § P1.c (for reference):
   `PanelWidget` trait / `dialog.rs` panel multiplexing — all
   deleted at C.9 once every dialog flips.
 
-**Next sub-phase: C.7 — `OptionList` as Buffer-backed
-Window.** The blocker for migrating mixed dialogs (confirm,
-permissions, agents, rewind, resume, model picker, …) is
-that today's option-list panel is a `PanelWidget`, not a
-Window. The rewrite splits the list into:
-
-- A read-only Buffer holding one row per item (label + meta
-  cols formatted as plain text).
-- A Window over that Buffer with cursor-row driving
-  selection and a keymap recipe binding `j/k/Enter`.
-- Selection rendering via extmarks in a `"options"`
-  namespace (highlight on the cursor row).
-
-Once that lands, `kind="options"` panels build a Window
-just like content panels and the content-only-vs-mixed
-branch in `open_dialog` collapses. C.8 does the same for
+**Next sub-phase: C.7.2 — full OptionList migration.** The
+minimum list shape (Buffer-backed cursor-driven leaf with
+j/k/Enter) shipped in C.7.0–C.7.1, but mixed dialogs
+(confirm, permissions, agents, rewind, resume, model
+picker, …) still rely on `OptionList`'s richer surface:
+multi-select checkbox prefix, shortcut keys (1-9), padded
+meta column, dim styling, formatted display. The path is
+to render those ornaments into the buffer's text directly
+(meta as right-aligned trailing spaces, checkbox as
+leading glyph, hl extmarks for dim) so the Window stays a
+pure viewer. Once `kind="options"` panels can build a
+Buffer + Window pair, the content-only-vs-mixed branch in
+`open_dialog` collapses. C.8 does the same for
 `TextInput`. C.9 deletes the legacy types.
 
 ## Deferred to P1.a-tail (after the transcript migration)
