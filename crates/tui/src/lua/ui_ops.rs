@@ -30,7 +30,9 @@ enum LeafShape {
     /// Cursor-driven list: cursor row highlighted, built-in
     /// j/k/Up/Down/Home/End/PgUp/PgDn navigation, Enter fires
     /// `WinEvent::Submit` with `Payload::Selection { index = abs_row }`.
-    List,
+    /// `initial_cursor` is the 0-based row the cursor lands on when
+    /// the leaf opens.
+    List { initial_cursor: u16 },
 }
 
 // ── Dialog ───────────────────────────────────────────────────────────
@@ -71,7 +73,7 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     .focusable(true)
                     .with_initial_focus(initial_focus);
                 panel_specs.push(spec);
-                leaf_shapes.push(LeafShape::List);
+                leaf_shapes.push(LeafShape::List { initial_cursor: 0 });
             }
             "content" => {
                 let buf = if let Ok(id) = panel.get::<u64>("buf") {
@@ -124,7 +126,9 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                 let items_tbl: mlua::Table = panel
                     .get("items")
                     .map_err(|e| format!("options.items: {e}"))?;
-                let mut list_items = Vec::new();
+                let mut labels: Vec<String> = Vec::new();
+                let mut has_shortcut = false;
+                let mut has_multi = false;
                 for it_pair in items_tbl.sequence_values::<mlua::Table>() {
                     let it = it_pair.map_err(|e| format!("option item: {e}"))?;
                     let label: String = it.get("label").unwrap_or_default();
@@ -132,27 +136,66 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                         .get::<String>("shortcut")
                         .ok()
                         .and_then(|s| s.chars().next());
-                    let mut item = OptionItem::new(label);
-                    if let Some(c) = shortcut {
-                        item = item.with_shortcut(c);
+                    if shortcut.is_some() {
+                        has_shortcut = true;
                     }
-                    list_items.push(item);
+                    labels.push(label);
                 }
-                let multi: bool = panel.get("multi").unwrap_or(false);
-                let accent = app.ui.theme().get("SmeltAccent");
-                let mut option_list = OptionList::new(list_items)
-                    .multi(multi)
-                    .with_cursor_style(accent)
-                    .with_shortcut_style(accent);
-                if let Ok(selected) = panel.get::<i64>("selected") {
-                    if selected >= 1 {
-                        option_list = option_list.with_cursor((selected - 1) as usize);
+                if panel.get::<bool>("multi").unwrap_or(false) {
+                    has_multi = true;
+                }
+                let initial_cursor: u16 = panel
+                    .get::<i64>("selected")
+                    .ok()
+                    .filter(|s| *s >= 1)
+                    .map(|s| (s - 1) as u16)
+                    .unwrap_or(0);
+
+                if has_shortcut || has_multi {
+                    // Legacy widget path until the residual surface
+                    // (shortcut keys + multi-select checkboxes) lives
+                    // on the Buffer-backed list leaf. None of today's
+                    // consumers exercise this branch but the data
+                    // shape supports it.
+                    let mut list_items = Vec::new();
+                    for it_pair in items_tbl.sequence_values::<mlua::Table>() {
+                        let it = it_pair.map_err(|e| format!("option item: {e}"))?;
+                        let label: String = it.get("label").unwrap_or_default();
+                        let shortcut: Option<char> = it
+                            .get::<String>("shortcut")
+                            .ok()
+                            .and_then(|s| s.chars().next());
+                        let mut item = OptionItem::new(label);
+                        if let Some(c) = shortcut {
+                            item = item.with_shortcut(c);
+                        }
+                        list_items.push(item);
                     }
+                    let accent = app.ui.theme().get("SmeltAccent");
+                    let option_list = OptionList::new(list_items)
+                        .multi(has_multi)
+                        .with_cursor(initial_cursor as usize)
+                        .with_cursor_style(accent)
+                        .with_shortcut_style(accent);
+                    let widget = Box::new(option_list);
+                    panel_specs.push(
+                        PanelSpec::widget(widget, PanelHeight::Fit)
+                            .with_initial_focus(initial_focus),
+                    );
+                    // Keep leaf_shapes index-aligned with panel_specs;
+                    // widget panels never reach the overlay path so
+                    // the placeholder is unused.
+                    leaf_shapes.push(LeafShape::Content);
+                } else {
+                    // Migrated path: build a Buffer with one line per
+                    // label and ride the Overlay+list leaf shape.
+                    let buf = make_options_buffer(app, &labels);
+                    let spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
+                        .focusable(true)
+                        .with_initial_focus(initial_focus);
+                    panel_specs.push(spec);
+                    leaf_shapes.push(LeafShape::List { initial_cursor });
                 }
-                let widget = Box::new(option_list);
-                panel_specs.push(
-                    PanelSpec::widget(widget, PanelHeight::Fit).with_initial_focus(initial_focus),
-                );
             }
             "input" => {
                 let placeholder: Option<String> = panel.get("placeholder").ok();
@@ -167,6 +210,9 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     spec.collapse_when_empty = true;
                 }
                 panel_specs.push(spec);
+                // input panels are widgets — never reach the overlay
+                // path. Placeholder keeps leaf_shapes index-aligned.
+                leaf_shapes.push(LeafShape::Content);
             }
             other => return Err(format!("unknown panel kind: {other}")),
         }
@@ -283,7 +329,7 @@ fn open_dialog_via_overlay(
     let mut leaf_wins: Vec<WinId> = Vec::with_capacity(panels.len());
     let mut focus_target: Option<WinId> = None;
     // Leaves opened as lists need post-overlay configuration.
-    let mut list_leaves: Vec<WinId> = Vec::new();
+    let mut list_leaves: Vec<(WinId, u16)> = Vec::new();
 
     for (spec, shape) in panels.into_iter().zip(leaf_shapes) {
         let PanelContent::Buffer(buf) = spec.content else {
@@ -305,8 +351,8 @@ fn open_dialog_via_overlay(
         };
         leaf_items.push((constraint, LayoutTree::leaf(win)));
         leaf_wins.push(win);
-        if matches!(shape, LeafShape::List) {
-            list_leaves.push(win);
+        if let LeafShape::List { initial_cursor } = shape {
+            list_leaves.push((win, initial_cursor));
             // Default initial focus to the first list leaf when the
             // dialog has no explicit `focus = true`. Lists are the
             // interactive ones; content viewers above/below are
@@ -338,8 +384,8 @@ fn open_dialog_via_overlay(
         .overlay_open(Overlay::new(layout, Anchor::ScreenCenter).modal(true));
     app.ui.set_focus(primary);
 
-    for leaf in list_leaves {
-        configure_list_leaf(app, leaf);
+    for (leaf, initial_cursor) in list_leaves {
+        configure_list_leaf(app, leaf, initial_cursor);
     }
 
     Ok(primary)
@@ -350,9 +396,17 @@ fn open_dialog_via_overlay(
 /// Enter fires `WinEvent::Submit` with the absolute selected row.
 /// Each binding is a small Rust callback that mutates the Window's
 /// cursor + scroll state directly.
-fn configure_list_leaf(app: &mut App, leaf: WinId) {
+fn configure_list_leaf(app: &mut App, leaf: WinId, initial_cursor: u16) {
+    let line_count = app
+        .ui
+        .win(leaf)
+        .map(|w| w.buf)
+        .and_then(|b| app.ui.buf(b).map(|buf| buf.line_count()))
+        .unwrap_or(0);
     if let Some(win) = app.ui.win_mut(leaf) {
         win.cursor_line_highlight = true;
+        let max = line_count.saturating_sub(1) as u16;
+        win.cursor_line = initial_cursor.min(max);
     }
 
     fn move_cursor(ctx: &mut ui::CallbackCtx<'_>, delta: isize) -> CallbackResult {
@@ -581,6 +635,23 @@ fn parse_picker_placement(opts: &mlua::Table) -> Placement {
 /// with `text`; the dialog drives re-rendering at the panel's
 /// content width, so the baked-at-open width=80 trap of the old
 /// markdown path is gone.
+/// Build a Buffer holding one row per `kind = "options"` item label,
+/// plain-text. The Buffer-backed list leaf takes over selection
+/// rendering via `cursor_line_highlight`, so the buffer needs no
+/// styling — just the labels.
+fn make_options_buffer(app: &mut App, labels: &[String]) -> BufId {
+    let id = app.ui.buf_create(BufCreateOpts::default());
+    if let Some(buf) = app.ui.buf_mut(id) {
+        let lines: Vec<String> = if labels.is_empty() {
+            vec![String::new()]
+        } else {
+            labels.to_vec()
+        };
+        buf.set_all_lines(lines);
+    }
+    id
+}
+
 fn make_content_buffer(app: &mut App, text: &str, format: Option<BufFormat>) -> BufId {
     let id = app.ui.buf_create(BufCreateOpts::default());
     if let Some(buf) = app.ui.buf_mut(id) {
