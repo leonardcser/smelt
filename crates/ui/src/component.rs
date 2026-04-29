@@ -1,5 +1,6 @@
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
+use crate::theme::Theme;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 
 /// Semantic events emitted by widgets when a key resolves into a
@@ -41,11 +42,15 @@ pub enum KeyResult {
     Capture,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub focused: bool,
+    /// Theme registry resolved per-frame from `Ui`. Widgets read named
+    /// highlight groups (`"Visual"`, `"SmeltAccent"`, …) via
+    /// `theme.get(name)`; missing names return `Style::default()`.
+    pub theme: Theme,
 }
 
 #[derive(Debug, Clone)]

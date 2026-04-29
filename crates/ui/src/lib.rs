@@ -95,6 +95,11 @@ pub struct Ui {
     /// same dispatch path used by floats. Floats use the `"float:N"`
     /// layer-id prefix instead of this map.
     splits: HashMap<String, WinId>,
+    /// Theme registry — single source of truth for highlight groups.
+    /// Cloned into every `DrawContext` at frame start so widgets read
+    /// `ctx.theme.get(name)` instead of host-side colour constants. The
+    /// host populates this at startup; users override via Lua.
+    theme: Theme,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -123,6 +128,7 @@ impl Ui {
             callbacks: Callbacks::new(),
             split_rects: HashMap::new(),
             splits: HashMap::new(),
+            theme: Theme::new(),
         }
     }
 
@@ -699,7 +705,15 @@ impl Ui {
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         self.sync_float_content();
         self.sync_float_rects();
-        self.compositor.render(w)
+        self.compositor.render(&self.theme, w)
+    }
+
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    pub fn theme_mut(&mut self) -> &mut Theme {
+        &mut self.theme
     }
 
     pub fn handle_key(
