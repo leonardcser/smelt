@@ -7,6 +7,10 @@ impl App {
     pub(super) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
         self.update_spinner();
+        // Re-populate the theme registry from the host atomics so any
+        // Lua-driven mutation (`smelt.theme.set('accent', …)`) lands
+        // before this frame's draw.
+        crate::theme::populate_ui_theme(self.ui.theme_mut());
 
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
