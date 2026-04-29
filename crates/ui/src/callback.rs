@@ -77,7 +77,7 @@ pub enum WinEvent {
     /// User triggered dismissal (Esc or a configured dismiss key).
     Dismiss,
     /// Fired once per event-loop iteration on each registered window.
-    /// Used by floats that need to refresh their content from live
+    /// Used by overlays that need to refresh their content from live
     /// external state (subagent registry, process list, etc.).
     Tick,
 }
@@ -164,7 +164,7 @@ impl std::fmt::Debug for Callback {
 }
 
 /// Context passed to Rust callbacks. `ui` is full `&mut Ui`;
-/// callbacks can mutate buffers, open/close floats, change focus,
+/// callbacks can mutate buffers, open/close overlays, change focus,
 /// and queue `AppOp`s via the shared ops handle. No return channel
 /// for effect strings — all side effects flow through `AppOp` or
 /// direct `ui::Ui` mutation.

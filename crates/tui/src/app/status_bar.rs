@@ -120,9 +120,8 @@ impl App {
 
         // Vim mode. Resolve the source Window with the same precedence
         // as the keymap dispatcher: a focused overlay-leaf Window with
-        // vim enabled wins, then the split under `app_focus`. If
-        // some other float (picker, notification) has focus or the
-        // focused overlay leaf has no vim, no mode shows — those
+        // vim enabled wins, then the split under `app_focus`. If a
+        // non-vim overlay leaf has focus, no mode shows — those
         // windows have no buffer cursor, same model nvim uses.
         let focused_window_with_vim = self
             .ui
@@ -130,7 +129,7 @@ impl App {
             .and_then(|w| w.vim.as_ref().map(|v| v.mode()));
         let (vim_enabled, vim_mode) = if let Some(mode) = focused_window_with_vim {
             (true, Some(mode))
-        } else if self.ui.focused_float().is_some() || self.ui.focused_overlay().is_some() {
+        } else if self.ui.focused_overlay().is_some() {
             (false, None)
         } else {
             match self.app_focus {
@@ -220,8 +219,8 @@ impl App {
             });
         }
 
-        // Permission pending (no Confirm float is showing yet).
-        if self.pending_dialog && !self.focused_float_blocks_agent() {
+        // Permission pending (no Confirm overlay is showing yet).
+        if self.pending_dialog && !self.focused_overlay_blocks_agent() {
             spans.push(StatusSpan {
                 text: "permission pending".into(),
                 style: content::StyleState {

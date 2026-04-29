@@ -15,7 +15,7 @@
 //!
 //! All callers go through `open` to allocate the overlay and through
 //! `set_items` / `set_selected` to mutate an existing one. Closing the
-//! leaf via `close_float` (or `Ui::win_close`) cascades through
+//! leaf via `close_overlay_leaf` (or `Ui::win_close`) cascades through
 //! `overlay_close` to remove the overlay.
 
 use crate::app::App;
@@ -63,9 +63,7 @@ impl PickerItem {
     }
 }
 
-/// Where the picker overlay anchors on screen. Mirrors the placement
-/// vocabulary the legacy `Placement` enum carried, mapped onto the
-/// overlay anchor system.
+/// Where the picker overlay anchors on screen.
 #[derive(Clone, Copy, Debug)]
 pub enum PickerPlacement {
     /// Centered on screen — used by focusable selector overlays.

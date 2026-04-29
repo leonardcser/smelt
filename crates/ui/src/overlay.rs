@@ -1,4 +1,5 @@
-//! `Overlay` — the P1.c replacement for `Float` / `FloatConfig`.
+//! `Overlay` — z-stacked window groups positioned via an `Anchor`
+//! over a `LayoutTree` of leaves.
 //!
 //! An overlay is a rectangle of windows positioned on top of the
 //! main editor area. Its layout is a regular `LayoutTree` (so an
@@ -37,9 +38,9 @@ pub enum OverlayHitTarget {
 /// Composes `OverlayHitTarget` (overlay paths) with split-window
 /// hits, so callers don't need separate code per surface kind.
 /// `Scrollbar { owner }` is reserved for the eventual split-render
-/// path (P1.d) where Window publishes its scrollbar rect; the
-/// variant exists so callers can pattern-match the full target shape
-/// today, but `Ui::hit_test` doesn't return it yet.
+/// path where Window publishes its scrollbar rect; the variant
+/// exists so callers can pattern-match the full target shape today,
+/// but `Ui::hit_test` doesn't return it yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitTarget {
     Window(crate::WinId),
@@ -101,8 +102,8 @@ pub struct AnchorContext<'a> {
     /// Where the text cursor currently is, in terminal cells.
     /// `None` if the cursor isn't visible / placed.
     pub cursor: Option<(u16, u16)>,
-    /// Per-window rects for split / non-float windows. Looked up
-    /// by `Anchor::Win { target, .. }`.
+    /// Per-window rects for the host's split windows. Looked up by
+    /// `Anchor::Win { target, .. }`.
     pub win_rects: &'a HashMap<WinId, Rect>,
 }
 

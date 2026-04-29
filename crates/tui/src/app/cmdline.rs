@@ -68,7 +68,7 @@ impl App {
 
     fn close_cmdline(&mut self) {
         if let Some(win) = self.cmdline_win.take() {
-            self.close_float(win);
+            self.close_overlay_leaf(win);
         }
         self.cmdline_completer = None;
     }

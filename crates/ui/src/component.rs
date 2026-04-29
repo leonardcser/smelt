@@ -5,11 +5,11 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 
 /// Semantic events emitted by widgets when a key resolves into a
 /// high-level action. Replaces the old stringly-typed
-/// `KeyResult::Action(String)` dispatch. Picker emits `Select`,
-/// notification / read-only floats emit `Dismiss` on Esc.
+/// `KeyResult::Action(String)` dispatch. Picker emits `Select`;
+/// modal overlays dismiss on Esc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetEvent {
-    /// User dismissed the surrounding container (Esc on a float).
+    /// User dismissed the surrounding container (Esc on a modal).
     Dismiss,
     /// User selected a specific row by index.
     Select(usize),

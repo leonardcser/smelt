@@ -1320,10 +1320,10 @@ impl App {
         pending_dialogs: &mut VecDeque<DeferredDialog>,
         last_keypress: Option<Instant>,
     ) -> LoopAction {
-        // Queue dialogs when a blocking float is open or the user is typing.
+        // Queue dialogs when a blocking overlay is open or the user is typing.
         // The queue is drained in the main loop via re-dispatch, so auto-approval
         // checks re-run (handles "always allow" → recheck).
-        let should_queue = self.focused_float_blocks_agent()
+        let should_queue = self.focused_overlay_blocks_agent()
             || (last_keypress
                 .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
                 && !self.input.buf.is_empty());
@@ -1404,8 +1404,8 @@ impl App {
                         .retain(|p| !rt.has_pattern(&req.tool_name, p));
                 }
 
-                // Close any non-blocking float (e.g. Ps) to make room.
-                self.close_focused_non_blocking_float();
+                // Close any non-blocking overlay (e.g. Ps) to make room.
+                self.close_focused_non_blocking_overlay();
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
 
                 // Register the request and fire the Lua dialog. The

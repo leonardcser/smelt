@@ -1,7 +1,7 @@
 //! `smelt.confirm._*` primitives consumed by
 //! `runtime/lua/smelt/confirm.lua`.
 //!
-//! The Lua side owns dialog orchestration (open the float, attach
+//! The Lua side owns dialog orchestration (open the overlay, attach
 //! keymaps, route Submit / Dismiss) and now composes the summary +
 //! preview buffers itself via `smelt.{diff,syntax,bash,notebook}.render`.
 //! Rust exposes:

@@ -43,10 +43,7 @@ pub use flush::flush_diff;
 pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
-pub use layout::{
-    Anchor, Border, Constraint, Corner, FitMax, FloatRelative, Gutters, LayoutTree, Placement,
-    Rect, SeparatorStyle,
-};
+pub use layout::{Anchor, Border, Constraint, Corner, Gutters, LayoutTree, Rect, SeparatorStyle};
 pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
@@ -54,8 +51,7 @@ pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{ViMode, Vim};
 pub use window::{
-    FloatConfig, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, WinConfig,
-    Window, WindowViewport,
+    MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window, WindowViewport,
 };
 pub use window_cursor::WindowCursor;
 
@@ -71,27 +67,25 @@ pub struct Ui {
     terminal_size: (u16, u16),
     compositor: Compositor,
     callbacks: Callbacks,
-    /// Rects for split / non-float windows (PROMPT_WIN, TRANSCRIPT_WIN,
-    /// …). Float rects are computed per-frame from `FloatConfig`; split
-    /// rects are laid out by the host app (TUI render loop) and pushed
-    /// in via [`Ui::set_window_rect`] so `Placement::DockedAbove` can
-    /// look them up without knowing layout specifics.
+    /// Rects for the split windows the host laid out this frame
+    /// (PROMPT_WIN, TRANSCRIPT_WIN, …). Pushed in via
+    /// [`Ui::set_window_rect`] so overlay anchors that target a window
+    /// (e.g. notification toasts above the prompt) can resolve their
+    /// position without knowing layout specifics.
     split_rects: HashMap<WinId, Rect>,
     /// Compositor layer-id ↔ `WinId` for split windows. Lets the focused
-    /// split's per-window keymap fire from `handle_key_with_lua`, the
-    /// same dispatch path used by floats. Floats use the `"float:N"`
-    /// layer-id prefix instead of this map.
+    /// split's per-window keymap fire from `handle_key_with_lua` and
+    /// the focus accessors translate compositor layer ids back to
+    /// `WinId`s.
     splits: HashMap<String, WinId>,
     /// Theme registry — single source of truth for highlight groups.
     /// Cloned into every `DrawContext` at frame start so widgets read
     /// `ctx.theme.get(name)` instead of host-side colour constants. The
     /// host populates this at startup; users override via Lua.
     theme: Theme,
-    /// P1.c overlay storage. Each overlay is a positioned LayoutTree
-    /// of windows; `Ui::overlay_open` returns an `OverlayId` and
+    /// Overlay storage. Each overlay is a positioned LayoutTree of
+    /// windows; `Ui::overlay_open` returns an `OverlayId` and
     /// `resolve_anchor` is the per-frame positioning primitive.
-    /// Today's `FloatConfig` plumbing still drives rendering — the
-    /// migration is incremental (C.4+).
     overlays: HashMap<OverlayId, Overlay>,
     next_overlay_id: u32,
     /// Stack of prior focused windows. `set_focus` pushes the
@@ -148,20 +142,19 @@ impl Ui {
     }
 
     /// Bind a compositor split-layer id to a `WinId` so the focused
-    /// split flows through [`Ui::handle_key_with_lua`] like floats do.
-    /// Call once per split at startup.
+    /// split flows through [`Ui::handle_key_with_lua`]. Call once per
+    /// split at startup.
     pub fn register_split(&mut self, layer_id: impl Into<String>, win_id: WinId) {
         self.splits.insert(layer_id.into(), win_id);
     }
 
     fn layer_to_win(&self, layer_id: &str) -> Option<WinId> {
-        parse_float_layer_id(layer_id).or_else(|| self.splits.get(layer_id).copied())
+        self.splits.get(layer_id).copied()
     }
 
     /// Publish a split window's current rect. Call each frame from the
-    /// host app's layout pass so `Placement::DockedAbove` can resolve
-    /// correctly. Floats don't need this — their rects come from
-    /// `FloatConfig`.
+    /// host app's layout pass so overlay anchors targeting a window
+    /// (e.g. `Anchor::Win { target: PROMPT_WIN, … }`) can resolve.
     pub fn set_window_rect(&mut self, win_id: WinId, rect: Rect) {
         self.split_rects.insert(win_id, rect);
     }
@@ -311,10 +304,9 @@ impl Ui {
     /// window underneath. Overlays are checked first (topmost-z to
     /// lowest, modal-aware — see `overlay_hit_test`); when no
     /// overlay covers the point, falls back to the compositor's
-    /// layer-level lookup which today owns split + float layers.
-    /// `Scrollbar` results are reserved for P1.d when Window
-    /// publishes its scrollbar rect; this method never returns
-    /// `Scrollbar` yet.
+    /// split-layer lookup. `Scrollbar` results are reserved for the
+    /// eventual split-render path where Window publishes its
+    /// scrollbar rect; this method never returns `Scrollbar` yet.
     pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
@@ -399,7 +391,7 @@ impl Ui {
         }
         let id = WinId(self.next_win_id);
         self.next_win_id += 1;
-        let win = Window::new(id, buf, WinConfig::Split(config));
+        let win = Window::new(id, buf, config);
         self.wins.insert(id, win);
         if self.current_win.is_none() {
             self.current_win = Some(id);
@@ -430,8 +422,6 @@ impl Ui {
             }
             return all_ids;
         }
-        let layer_id = float_layer_id(id);
-        self.compositor.remove(&layer_id);
         self.wins.remove(&id);
         let lua_ids = self.callbacks.clear_all(id);
         if self.current_win == Some(id) {
@@ -560,23 +550,6 @@ impl Ui {
         self.layout.as_ref()
     }
 
-    pub fn floats_z_ordered(&self) -> Vec<WinId> {
-        let mut floats: Vec<_> = self
-            .wins
-            .iter()
-            .filter(|(_, w)| matches!(w.config, WinConfig::Float(_)))
-            .map(|(id, w)| {
-                let z = match &w.config {
-                    WinConfig::Float(f) => f.zindex,
-                    _ => 0,
-                };
-                (*id, z)
-            })
-            .collect();
-        floats.sort_by_key(|(_, z)| *z);
-        floats.into_iter().map(|(id, _)| id).collect()
-    }
-
     pub fn resolve_splits(&self) -> HashMap<WinId, Rect> {
         let (w, h) = self.terminal_size;
         match &self.layout {
@@ -585,52 +558,13 @@ impl Ui {
         }
     }
 
-    pub fn resolve_float(&self, win_id: WinId) -> Option<Rect> {
-        let win = self.wins.get(&win_id)?;
-        let fc = match &win.config {
-            WinConfig::Float(f) => f,
-            _ => return None,
-        };
-        let (tw, th) = self.terminal_size;
-        let natural_h = self.natural_layer_height(win_id);
-        Some(resolve_float_rect(fc, tw, th, natural_h, &self.split_rects))
-    }
-
-    pub fn resolve_float_rects(&self) -> Vec<(WinId, Rect)> {
-        let (tw, th) = self.terminal_size;
-        self.floats_z_ordered()
-            .into_iter()
-            .filter_map(|id| {
-                let win = self.wins.get(&id)?;
-                let fc = match &win.config {
-                    WinConfig::Float(f) => f,
-                    _ => return None,
-                };
-                let natural_h = self.natural_layer_height(id);
-                Some((
-                    id,
-                    resolve_float_rect(fc, tw, th, natural_h, &self.split_rects),
-                ))
-            })
-            .collect()
-    }
-
-    /// Peek at a float layer's natural height for placement.
-    /// Returns `None` — no remaining float kind exposes a natural
-    /// size. The hook stays as a stub until `Placement::DockedAbove`
-    /// retires alongside the rest of `FloatConfig` in C.9c.5.
-    fn natural_layer_height(&self, _win_id: WinId) -> Option<u16> {
-        None
-    }
-
     // ── Focus (canonical Win-typed API) ──────────────────────────
 
     /// Currently focused window, if any. Overlay-leaf focus wins
     /// over compositor focus (a modal overlay's input claim
-    /// suppresses split / float dispatch). Falls back to the
-    /// compositor's focused layer translated to its `WinId` (split
-    /// via `register_split`, float via the `"float:N"` layer-id
-    /// prefix).
+    /// suppresses split dispatch). Falls back to the compositor's
+    /// focused layer translated to its `WinId` (split via
+    /// `register_split`).
     pub fn focus(&self) -> Option<WinId> {
         if let Some(win) = self.overlay_focus {
             return Some(win);
@@ -655,10 +589,10 @@ impl Ui {
         self.wins.get_mut(&id)
     }
 
-    /// Focus a specific window. Accepts splits, floats (via their
-    /// compositor layer id), and overlay leaves (any leaf reachable
-    /// in an open overlay's `LayoutTree`). Returns `false` when `win`
-    /// is none of those. On success, the prior focus is appended to
+    /// Focus a specific window. Accepts splits (via their compositor
+    /// layer id) and overlay leaves (any leaf reachable in an open
+    /// overlay's `LayoutTree`). Returns `false` when `win` is
+    /// neither. On success, the prior focus is appended to
     /// `focus_history` so close paths can pop back to the previous
     /// focus target. Re-focusing the already-focused window is a
     /// no-op (no history push).
@@ -726,8 +660,8 @@ impl Ui {
     /// Returns `true` if focus changed. Modal-aware: when an
     /// `active_modal` overlay is open, cycles through that overlay's
     /// focusable leaves only. Returns `false` outside a modal —
-    /// cross-source (split + float + overlay-leaf) z-order is gated
-    /// on the unified Ui facade in P1.f.
+    /// cross-source (split + overlay-leaf) z-order is gated on the
+    /// unified Ui facade.
     pub fn focus_next(&mut self) -> bool {
         self.focus_step(1)
     }
@@ -770,21 +704,13 @@ impl Ui {
 
     /// Resolve a `WinId` to its current compositor layer id. Splits
     /// register their layer-id explicitly via `register_split`;
-    /// floats use the `"float:N"` prefix and only count when an
-    /// actual layer is registered (a freshly-created `WinId` with no
-    /// layer is unfocusable).
+    /// overlay leaves don't carry a compositor layer (their focus
+    /// flows through `overlay_focus`).
     fn layer_id_for_win(&self, win: WinId) -> Option<String> {
-        // Splits: invert the layer-id → WinId map.
-        if let Some((layer_id, _)) = self.splits.iter().find(|(_, w)| **w == win) {
-            return Some(layer_id.clone());
-        }
-        // Floats: WinId is associated with a `float:N` layer only
-        // when the compositor knows that layer.
-        let candidate = float_layer_id(win);
-        if self.compositor.component(&candidate).is_some() {
-            return Some(candidate);
-        }
-        None
+        self.splits
+            .iter()
+            .find(|(_, w)| **w == win)
+            .map(|(layer_id, _)| layer_id.clone())
     }
 
     // ── Layer management ─────────────────────────────────────────
@@ -817,7 +743,6 @@ impl Ui {
     // ── Compositor delegation ──────────────────────────────────────
 
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
-        self.sync_float_rects();
         let resolved = self.resolve_overlays(None);
         let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
             .into_iter()
@@ -900,11 +825,11 @@ impl Ui {
 
     /// Dispatch a key event through the focused window's keymap
     /// table, falling back to `Component::handle_key` if no binding
-    /// matches. Floats and registered splits both flow through here —
-    /// the focused layer's `WinId` is resolved via [`Ui::layer_to_win`].
-    /// `lua_invoke` is called for each `Callback::Lua` with (handle,
-    /// payload). Side effects (app-level commands, etc.) flow through
-    /// `AppOp` from the host side.
+    /// matches. Registered splits and overlay-leaf focus both flow
+    /// through here — the focused `WinId` is resolved via
+    /// [`Ui::focus`]. `lua_invoke` is called for each `Callback::Lua`
+    /// with (handle, payload). Side effects (app-level commands, etc.)
+    /// flow through `AppOp` from the host side.
     pub fn handle_key_with_lua(
         &mut self,
         code: crossterm::event::KeyCode,
@@ -1043,211 +968,9 @@ impl Ui {
         }
     }
 
-    pub fn focused_float(&self) -> Option<WinId> {
-        let focused = self.compositor.focused()?;
-        parse_float_layer_id(focused)
-    }
-
-    /// Buffer-bearing `Window` driving the user's current view, if any.
-    /// Topmost float (by zindex) whose rect contains (row, col). Used
-    /// by the host's mouse dispatcher to route wheel / click events
-    /// onto the float they actually land on — independent of focus —
-    /// so scrolling an unfocused-but-visible float just works.
-    pub fn float_at(&self, row: u16, col: u16) -> Option<WinId> {
-        self.compositor
-            .hit_test(row, col)
-            .and_then(parse_float_layer_id)
-    }
-
-    /// Snapshot of every float window's `WinId`, in HashMap iteration
-    /// order. Callers shouldn't rely on the ordering for painting —
-    /// that's the compositor's job.
-    pub fn float_ids(&self) -> Vec<WinId> {
-        self.wins
-            .iter()
-            .filter_map(|(id, w)| matches!(w.config, WinConfig::Float(_)).then_some(*id))
-            .collect()
-    }
-
-    /// Look up the `FloatConfig` for a window, if it's a float.
-    /// Non-float windows (splits) return `None`.
-    pub fn float_config(&self, win: WinId) -> Option<&FloatConfig> {
-        match &self.wins.get(&win)?.config {
-            WinConfig::Float(cfg) => Some(cfg),
-            WinConfig::Split(_) => None,
-        }
-    }
-
-    /// Mutable access to a float's `FloatConfig`. Used by callers that
-    /// need to reposition a float in response to layout changes (e.g.
-    /// the completer follows the prompt's top row). The next `render`
-    /// call re-resolves the `Placement` automatically.
-    pub fn float_config_mut(&mut self, win: WinId) -> Option<&mut FloatConfig> {
-        match &mut self.wins.get_mut(&win)?.config {
-            WinConfig::Float(cfg) => Some(cfg),
-            WinConfig::Split(_) => None,
-        }
-    }
-
     pub fn force_redraw(&mut self) {
         self.compositor.force_redraw();
     }
-
-    /// Re-resolve every float's rect from its `Placement` against the
-    /// current terminal size and push it into the compositor. Called
-    /// each frame from `render`, so floats track terminal resizes,
-    /// prompt geometry changes, and picker natural-height changes
-    /// without any per-component wiring.
-    fn sync_float_rects(&mut self) {
-        for (id, rect) in self.resolve_float_rects() {
-            self.compositor.set_rect(&float_layer_id(id), rect);
-        }
-    }
-}
-
-fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {
-    match c {
-        Constraint::Length(n) | Constraint::Min(n) | Constraint::Max(n) => n.min(total),
-        Constraint::Percentage(pct) => ((total as u32 * pct as u32) / 100) as u16,
-        Constraint::Ratio(num, denom) => {
-            if denom == 0 {
-                0
-            } else {
-                ((total as u32 * num as u32) / denom as u32) as u16
-            }
-        }
-        Constraint::Fill | Constraint::Fit => total,
-    }
-}
-
-fn resolve_float_rect(
-    fc: &FloatConfig,
-    term_w: u16,
-    term_h: u16,
-    natural_h: Option<u16>,
-    split_rects: &HashMap<WinId, Rect>,
-) -> Rect {
-    resolve_placement(&fc.placement, term_w, term_h, natural_h, split_rects)
-}
-
-fn resolve_placement(
-    p: &layout::Placement,
-    term_w: u16,
-    term_h: u16,
-    natural_h: Option<u16>,
-    split_rects: &HashMap<WinId, Rect>,
-) -> Rect {
-    match p {
-        layout::Placement::DockBottom {
-            above_rows,
-            full_width,
-            max_width,
-            max_height,
-        } => {
-            let avail_h = term_h.saturating_sub(*above_rows);
-            let cap = resolve_constraint_dim(*max_height, avail_h).min(avail_h);
-            // Dialogs / pickers report a `natural_h` derived from panel
-            // content; clamp to the cap so the rect grows with content
-            // up to the cap instead of always allocating the cap.
-            // Floats without a natural height (cmdline) keep the cap.
-            let h = match natural_h {
-                Some(n) => n.min(cap),
-                None => cap,
-            };
-            let w = if *full_width {
-                term_w
-            } else {
-                resolve_constraint_dim(*max_width, term_w).min(term_w)
-            };
-            let left = (term_w.saturating_sub(w)) / 2;
-            let top = term_h.saturating_sub(*above_rows).saturating_sub(h);
-            Rect::new(top, left, w, h)
-        }
-        layout::Placement::FitContent { max } => {
-            // Dock at bottom, full width, 1 status-bar row reserved.
-            // Height = natural_h clamped to the `max` cap; natural_h
-            // comes from `Ui::natural_dialog_height(win_id)` at the
-            // call site. If the caller didn't supply one (rect is
-            // being computed before the dialog registered — first
-            // open), fall back to the cap so the dialog lands somewhere
-            // sensible and the next render corrects it.
-            let above_rows = 1u16;
-            let avail_h = term_h.saturating_sub(above_rows);
-            let cap = match max {
-                layout::FitMax::HalfScreen => avail_h / 2,
-                layout::FitMax::FullScreen => avail_h,
-            };
-            let h = natural_h.unwrap_or(cap).min(cap).min(avail_h).max(1);
-            let top = term_h.saturating_sub(above_rows).saturating_sub(h);
-            Rect::new(top, 0, term_w, h)
-        }
-        layout::Placement::Centered { width, height } => {
-            let w = resolve_constraint_dim(*width, term_w).min(term_w);
-            let h = resolve_constraint_dim(*height, term_h).min(term_h);
-            let top = term_h.saturating_sub(h) / 2;
-            let left = term_w.saturating_sub(w) / 2;
-            Rect::new(top, left, w, h)
-        }
-        layout::Placement::AnchorCursor {
-            row_offset,
-            col_offset,
-            width,
-            height,
-        } => {
-            // Without an explicit caret position in the ui crate, treat
-            // AnchorCursor as an offset from the top-left. The tui layer
-            // sets the layer rect after construction.
-            let w = resolve_constraint_dim(*width, term_w).min(term_w);
-            let h = resolve_constraint_dim(*height, term_h).min(term_h);
-            let top = (*row_offset).max(0) as u16;
-            let left = (*col_offset).max(0) as u16;
-            let w = w.min(term_w.saturating_sub(left));
-            let h = h.min(term_h.saturating_sub(top));
-            Rect::new(top, left, w, h)
-        }
-        layout::Placement::Manual {
-            anchor,
-            row,
-            col,
-            width,
-            height,
-        } => {
-            let w = resolve_constraint_dim(*width, term_w);
-            let h = resolve_constraint_dim(*height, term_h);
-            let (top, left) = match anchor {
-                layout::Corner::NW => (*row, *col),
-                layout::Corner::NE => (*row, *col - w as i32),
-                layout::Corner::SW => (*row - h as i32, *col),
-                layout::Corner::SE => (*row - h as i32, *col - w as i32),
-            };
-            let top = top.max(0) as u16;
-            let left = left.max(0) as u16;
-            let w = w.min(term_w.saturating_sub(left));
-            let h = h.min(term_h.saturating_sub(top));
-            Rect::new(top, left, w, h)
-        }
-        layout::Placement::DockedAbove { target, max_height } => {
-            // Target rect comes from `split_rects` (host app publishes
-            // split-window rects each frame). If missing, fall back to
-            // a centered-ish placement so the float still renders.
-            let anchor_rect = split_rects
-                .get(target)
-                .copied()
-                .unwrap_or_else(|| Rect::new(term_h / 2, 0, term_w, 1));
-            let max_h = resolve_constraint_dim(*max_height, anchor_rect.top).max(1);
-            let h = natural_h.unwrap_or(max_h).min(max_h).max(1);
-            let top = anchor_rect.top.saturating_sub(h);
-            Rect::new(top, anchor_rect.left, anchor_rect.width, h)
-        }
-    }
-}
-
-fn float_layer_id(win_id: WinId) -> String {
-    format!("float:{}", win_id.0)
-}
-
-fn parse_float_layer_id(id: &str) -> Option<WinId> {
-    id.strip_prefix("float:")?.parse::<u64>().ok().map(WinId)
 }
 
 impl Default for Ui {
