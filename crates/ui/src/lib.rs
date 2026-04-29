@@ -1015,9 +1015,6 @@ fn classify_widget_action(ev: &WidgetEvent) -> Option<(WinEvent, Payload)> {
                 content: content.clone(),
             },
         ),
-        // `Yank` is App-side only (clipboard copy) — caller handles it
-        // off the returned `KeyResult::Action`, no dispatch path.
-        Yank(_) => return None,
     })
 }
 

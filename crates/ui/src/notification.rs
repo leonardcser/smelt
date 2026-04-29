@@ -9,7 +9,7 @@
 //! `Down` anchors a char index, `Drag` extends, `Up` emits
 //! `Action(Yank(text))` so the host can copy to the clipboard.
 
-use crate::component::{Component, CursorInfo, DrawContext, KeyResult, WidgetEvent};
+use crate::component::{Component, CursorInfo, DrawContext, KeyResult};
 use crate::grid::{GridSlice, Style};
 use crate::layout::Rect;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -216,16 +216,10 @@ impl Component for Notification {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let yanked = self
-                    .selection_range()
-                    .map(|(s, e)| self.message.chars().skip(s).take(e - s).collect::<String>())
-                    .filter(|s| !s.is_empty());
                 // Selection survives the release so the user can see
-                // what they grabbed; cleared on the next Down.
-                match yanked {
-                    Some(text) => KeyResult::Action(WidgetEvent::Yank(text)),
-                    None => KeyResult::Consumed,
-                }
+                // what they grabbed; cleared on the next Down. Clipboard
+                // side effects belong to the host.
+                KeyResult::Consumed
             }
             _ => KeyResult::Ignored,
         }

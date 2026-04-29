@@ -26,10 +26,6 @@ pub enum WidgetEvent {
     SelectDefault,
     /// Text content changed (per keystroke on TextInput).
     TextChanged,
-    /// Component wants its text payload copied to the system clipboard
-    /// (`TextInput` drag-select on release). Not auto-classified to a
-    /// `WinEvent` — App matches on it directly.
-    Yank(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -183,9 +183,9 @@ to invoke_ the feature.
 | Mouse wheel scroll                              | `app/mouse.rs`                          | P1/P2                                            | working |
 | Mouse click focus                               | `app/mouse.rs`                          | P1.f (HitTarget + Host)                          | working |
 | Mouse click position cursor                     | `app/mouse.rs` + `ui/window.rs`         | P1.d                                             | working |
-| Drag-extend selection (auto-copy on release)    | `ui/window.rs` + `app/mouse.rs`         | P1.d                                             | working |
-| Double-click WORD yank (vim W: whitespace-delimited, punctuation in) | `ui/window.rs` (`select_big_word_at_transparent`) | P1.d                                             | working |
-| Triple-click line yank                          | `ui/window.rs` (`select_line_at`)       | P1.d                                             | working |
+| Drag-extend selection (auto-copy on release)    | `ui/window.rs` + `app/mouse.rs`         | P1 (host.clipboard from Window::handle)          | offline-P0 |
+| Double-click WORD yank (vim W: whitespace-delimited, punctuation in) | `ui/window.rs` (`select_big_word_at_transparent`) | P1 (host.clipboard)                              | offline-P0 |
+| Triple-click line yank                          | `ui/window.rs` (`select_line_at`)       | P1 (host.clipboard)                              | offline-P0 |
 | Scrollbar drag                                  | `app/mouse.rs` + `content/scrollbar.rs` | P1.f (HitTarget::Scrollbar)                      | working |
 | Edge autoscroll on drag                         | `app/mouse.rs`                          | P2 (Timers)                                      | working |
 | Tab cycles focus (modal-aware)                  | `app/pane_focus.rs`                     | P1.g (`focus_next` modal-aware)                  | working |
