@@ -9,7 +9,7 @@
 //! Each panel is either a buffer (read-only content like preview /
 //! header text — the dialog owns a `ui::Window` + `BufferView` for it
 //! and handles scroll + scrollbar drag itself) or a `PanelWidget`
-//! (`TextInput`, `OptionList`, `BufferList`, custom — the widget owns
+//! (`TextInput`, `OptionList`, custom — the widget owns
 //! draw + key + mouse). The dialog only draws chrome (top rule,
 //! separators, hints), routes events to the focused panel, and
 //! resolves cross-panel fall-through (e.g. typing in a list-focused
@@ -113,14 +113,13 @@ pub trait PanelWidget: Component + Send {
     }
 }
 
-/// Selectable-list contract that buffer-mirroring lists (`BufferList`)
-/// and item-backed lists (`OptionList`) both satisfy. Lets callers
-/// route uniform list operations — click-to-select, keyboard nav,
-/// scroll — without knowing the backing store. Widgets expose
-/// themselves through `PanelWidget::as_list_widget`. The dialog uses
-/// `as_list_widget().is_some()` as the source of truth for "is this
-/// panel a list?" — fzf-style click routing, cross-panel key
-/// fall-through, and selection snapshot all branch on it.
+/// Selectable-list contract that item-backed lists (`OptionList`)
+/// satisfy. Lets callers route uniform list operations —
+/// click-to-select, keyboard nav, scroll — without knowing the backing
+/// store. Widgets expose themselves through `PanelWidget::as_list_widget`.
+/// The dialog uses `as_list_widget().is_some()` as the source of truth
+/// for "is this panel a list?" — fzf-style click routing, cross-panel
+/// key fall-through, and selection snapshot all branch on it.
 pub trait ListWidget {
     fn row_count(&self) -> usize;
     fn selected(&self) -> Option<usize>;
@@ -130,9 +129,9 @@ pub trait ListWidget {
     /// Resolve the row index at `rel_row` rows below the widget's draw
     /// area top. Returns `None` if the row is past the last item.
     fn row_at(&self, rel_row: u16) -> Option<usize>;
-    /// Backing buffer when the list mirrors a `Buffer` (`BufferList`).
-    /// `OptionList` and other in-memory lists return `None`. The dialog
-    /// uses this to resolve a `Buffer` from its registry and feed it to
+    /// Backing buffer when the list mirrors a `Buffer`. `OptionList`
+    /// and other in-memory lists return `None`. The dialog uses this to
+    /// resolve a `Buffer` from its registry and feed it to
     /// `sync_from_buffer` each frame.
     fn buf_id(&self) -> Option<BufId> {
         None
@@ -149,7 +148,7 @@ pub trait ListWidget {
 #[derive(Clone, Debug, Default)]
 pub struct PanelSnapshot {
     /// 0-based cursor / selection index. `Some(_)` when the panel is a
-    /// list widget (`OptionList`, `BufferList`); `None` otherwise.
+    /// list widget (`OptionList`); `None` otherwise.
     pub selected: Option<usize>,
     /// Current text for input widgets (`TextInput`). Empty string for
     /// non-input panels.
@@ -223,8 +222,8 @@ impl PanelSpec {
         }
     }
 
-    /// Widget-backed panel (`TextInput`, `OptionList`, `BufferList`,
-    /// custom). The widget owns its own draw + key handling; the
+    /// Widget-backed panel (`TextInput`, `OptionList`, custom).
+    /// The widget owns its own draw + key handling; the
     /// dialog only places it in the panel layout. Defaults match the
     /// inputs/selection widgets — focusable with pad_left=1; lists
     /// that want the legacy 2-column gutter override via
@@ -450,7 +449,7 @@ impl Dialog {
     /// Resolved viewport (rect + scrollbar geometry) for a panel.
     /// Buffer-backed panels keep their viewport on `DialogPanel`;
     /// widget panels delegate to `PanelWidget::viewport` so widgets
-    /// like `BufferList` can expose their own scrollable geometry.
+    /// can expose their own scrollable geometry.
     pub fn panel_viewport(&self, panel_idx: usize) -> Option<WindowViewport> {
         let panel = self.panels.get(panel_idx)?;
         if let DialogPanelContent::Widget(w) = &panel.content {
@@ -555,10 +554,10 @@ impl Dialog {
                     view.set_default_style(default_style);
                 }
                 DialogPanelContent::Widget(widget) => {
-                    // List-shaped widgets that mirror a `Buffer`
-                    // (`BufferList`) need their internal view re-synced
-                    // when the source buffer changes — the `as_list_widget`
-                    // hop is how a Widget panel exposes its `BufId`.
+                    // List-shaped widgets that mirror a `Buffer` need
+                    // their internal view re-synced when the source
+                    // buffer changes — the `as_list_widget` hop is how
+                    // a Widget panel exposes its `BufId`.
                     let buf_id = widget.as_list_widget().and_then(|lw| lw.buf_id());
                     if let Some(buf_id) = buf_id {
                         if let Some(b) = bufs.get(buf_id) {
@@ -1140,7 +1139,7 @@ impl Component for Dialog {
 
         // Widget panels: route directly to widget. If the widget
         // doesn't handle it (e.g. TextInput ignores Up/Down,
-        // BufferList ignores chars), fall through to sibling widget
+        // a list ignores chars), fall through to sibling widget
         // panels — fzf-style: the list keeps nav focus while typing
         // flows to the input, or vice-versa.
         let focused_is_widget = self
@@ -1249,8 +1248,8 @@ impl Component for Dialog {
                     return self.dispatch_buffer_mouse(panel_idx, event, click_count);
                 }
                 if let DialogPanelContent::Widget(w) = &mut self.panels[panel_idx].content {
-                    // List-shaped widgets (`BufferList`, `OptionList`)
-                    // get fzf-style click: forward the event but leave
+                    // List-shaped widgets (`OptionList`) get fzf-style
+                    // click: forward the event but leave
                     // keyboard focus alone, so the input above keeps
                     // receiving keystrokes. Other widgets (`TextInput`)
                     // take focus on click.
@@ -1528,25 +1527,6 @@ mod tests {
     }
 
     #[test]
-    fn list_enter_returns_select() {
-        use crate::buffer_list::BufferList;
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
-        let panels = build_panels(
-            vec![
-                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fit)
-                    .with_initial_focus(true),
-            ],
-            &bufs,
-        );
-        let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
-        dlg.set_selected_index(1);
-        let r = dlg.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Action(WidgetEvent::Select(1)));
-    }
-
-    #[test]
     fn content_panel_renders_buffer_lines() {
         let mut bufs = std::collections::HashMap::new();
         bufs.insert(BufId(1), make_buf(1, &["hello world", "second line"]));
@@ -1565,39 +1545,6 @@ mod tests {
         assert_eq!(grid.cell(4, 1).symbol, 'o');
         assert_eq!(grid.cell(6, 1).symbol, 'w');
         assert_eq!(grid.cell(0, 2).symbol, 's');
-    }
-
-    #[test]
-    fn list_panel_renders_items_with_bg() {
-        use crate::buffer_list::BufferList;
-        use crossterm::style::Color;
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["apple", "banana", "cherry"]));
-        let bg = Style::bg(Color::Black);
-        let panels = build_panels(
-            vec![PanelSpec::widget(
-                Box::new(BufferList::new(BufId(1)).with_bg_style(bg)),
-                PanelHeight::Fill,
-            )
-            .with_pad_left(0)],
-            &bufs,
-        );
-        let mut dlg = Dialog::new(
-            DialogConfig {
-                background_style: bg,
-                ..DialogConfig::default()
-            },
-            panels,
-        );
-        let area = Rect::new(0, 0, 20, 5);
-        let mut grid = Grid::new(20, 5);
-        dlg.prepare(area, &ctx(20, 5));
-        let mut slice = grid.slice_mut(area);
-        dlg.draw(area, &mut slice, &ctx(20, 5));
-        // Content 'apple' should be on row 1.
-        assert_eq!(grid.cell(0, 1).symbol, 'a');
-        assert_eq!(grid.cell(4, 1).symbol, 'e');
-        assert_eq!(grid.cell(0, 1).style.bg, Some(Color::Black));
     }
 
     #[test]
@@ -1722,110 +1669,6 @@ mod tests {
             column: col,
             modifiers: KeyModifiers::NONE,
         }
-    }
-
-    #[test]
-    fn click_on_text_input_panel_focuses_and_repositions_cursor() {
-        use crate::buffer_list::BufferList;
-        use crate::text_input::TextInput;
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
-        let mut ti = TextInput::new();
-        ti.set_text("hello");
-        // List on top (initial focus), input below. Click on the
-        // input panel should hand it focus and reposition the cursor.
-        let panels = build_panels(
-            vec![
-                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fixed(3))
-                    .with_pad_left(0)
-                    .with_initial_focus(true),
-                PanelSpec::widget(Box::new(ti), PanelHeight::Fixed(1)),
-            ],
-            &bufs,
-        );
-        let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
-        // Top rule row 0; list rows 1..3; input row 4. Widget panel
-        // has the default pad_left=1, so click at column 4 lands on
-        // char index 3 ("hello"[3] = 'l').
-        dlg.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 4));
-        assert_eq!(dlg.focused_panel(), 1);
-        let widget = dlg.panel_widget_mut::<TextInput>(1).expect("widget panel");
-        assert_eq!(widget.cursor_col(), 3);
-    }
-
-    #[test]
-    fn click_on_widget_backed_list_updates_selection_without_focus_change() {
-        use crate::buffer_list::BufferList;
-        use crate::text_input::TextInput;
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c", "d"]));
-        // fzf-style with widget-backed list: input focused on top, list
-        // is a passive picker below.
-        let panels = build_panels(
-            vec![
-                PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
-                    .with_initial_focus(true),
-                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fill)
-                    .with_pad_left(0),
-            ],
-            &bufs,
-        );
-        let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        let area = Rect::new(0, 0, 20, 10);
-        let ctx = ctx(20, 10);
-        dlg.prepare(area, &ctx);
-        let initial_focus = dlg.focused_panel();
-        // Top rule row 0; input row 1; list rows 2..end. Click row 4
-        // (list row index 2 = item "c").
-        let r = dlg.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 5));
-        assert_eq!(r, KeyResult::Consumed);
-        assert_eq!(dlg.selected_index_at(1), Some(2));
-        assert_eq!(dlg.focused_panel(), initial_focus);
-    }
-
-    #[test]
-    fn focused_list_widget_forwards_chars_to_sibling_input() {
-        use crate::buffer_list::BufferList;
-        use crate::text_input::TextInput;
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
-        let panels = build_panels(
-            vec![
-                PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1)),
-                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fill)
-                    .with_initial_focus(true),
-            ],
-            &bufs,
-        );
-        let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
-        // BufferList is focused. Typing 'x' should fall through to TextInput.
-        let r = dlg.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert!(!matches!(r, KeyResult::Ignored));
-        assert_eq!(dlg.panel_widget_text(0).as_deref(), Some("x"));
-    }
-
-    #[test]
-    fn focused_input_widget_forwards_nav_to_sibling_list_widget() {
-        use crate::buffer_list::BufferList;
-        use crate::text_input::TextInput;
-        let mut bufs = std::collections::HashMap::new();
-        bufs.insert(BufId(1), make_buf(1, &["a", "b", "c"]));
-        let panels = build_panels(
-            vec![
-                PanelSpec::widget(Box::new(TextInput::new()), PanelHeight::Fixed(1))
-                    .with_initial_focus(true),
-                PanelSpec::widget(Box::new(BufferList::new(BufId(1))), PanelHeight::Fill),
-            ],
-            &bufs,
-        );
-        let mut dlg = Dialog::new(DialogConfig::default(), panels);
-        dlg.prepare(Rect::new(0, 0, 20, 10), &ctx(20, 10));
-        assert_eq!(dlg.selected_index_at(1), Some(0));
-        let r = dlg.handle_key(KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(r, KeyResult::Consumed);
-        assert_eq!(dlg.selected_index_at(1), Some(1));
     }
 
     #[test]
