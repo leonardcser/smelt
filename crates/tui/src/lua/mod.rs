@@ -1335,94 +1335,11 @@ mod tests {
         assert_eq!(txt, "hello");
     }
 
-    #[test]
-    fn theme_accent_round_trip() {
-        let rt = LuaRuntime::new();
-        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let old_accent = crate::theme::accent_value();
-        rt.lua
-            .load("smelt.theme.set('accent', { ansi = 42 })")
-            .exec()
-            .unwrap();
-        let ansi: u8 = rt
-            .lua
-            .load("return smelt.theme.accent().ansi")
-            .eval()
-            .unwrap();
-        assert_eq!(ansi, 42);
-        crate::theme::set_accent(old_accent);
-    }
-
-    #[test]
-    fn theme_preset_sets_accent() {
-        let rt = LuaRuntime::new();
-        let old_accent = crate::theme::accent_value();
-        rt.lua
-            .load("smelt.theme.set('accent', { preset = 'sage' })")
-            .exec()
-            .unwrap();
-        let ansi: u8 = rt
-            .lua
-            .load("return smelt.theme.accent().ansi")
-            .eval()
-            .unwrap();
-        assert_eq!(ansi, 108); // sage
-        crate::theme::set_accent(old_accent);
-    }
-
-    #[test]
-    fn theme_snapshot_lists_all_roles() {
-        let rt = LuaRuntime::new();
-        let names: Vec<String> = rt
-            .lua
-            .load(
-                r#"
-                local snap = smelt.theme.snapshot()
-                local t = {}
-                for k, _ in pairs(snap) do t[#t+1] = k end
-                table.sort(t)
-                return t
-                "#,
-            )
-            .eval::<mlua::Table>()
-            .unwrap()
-            .sequence_values::<String>()
-            .filter_map(|r| r.ok())
-            .collect();
-        for expected in [
-            "accent",
-            "bar",
-            "code_block_bg",
-            "muted",
-            "reason_off",
-            "slug",
-            "tool_pending",
-            "user_bg",
-        ] {
-            assert!(
-                names.iter().any(|n| n == expected),
-                "snapshot missing {expected}: {names:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn theme_unknown_role_is_error() {
-        let rt = LuaRuntime::new();
-        let err = rt.lua.load("smelt.theme.get('bogus')").exec().unwrap_err();
-        assert!(err.to_string().contains("unknown theme role"));
-    }
-
-    #[test]
-    fn theme_read_only_role_set_fails() {
-        let rt = LuaRuntime::new();
-        let err = rt
-            .lua
-            .load("smelt.theme.set('muted', { ansi = 1 })")
-            .exec()
-            .unwrap_err();
-        assert!(err.to_string().contains("read-only"));
-    }
+    // Theme bindings (`smelt.theme.set/get/accent/snapshot`) cross the
+    // `with_app` boundary — they read/write through `App.ui.theme()`.
+    // The Lua-side wiring is exercised by integration scenarios; here
+    // the role-mapping and error logic is covered directly in
+    // `lua::api::tests` against a local `ui::Theme`.
 
     #[test]
     fn runtime_exposes_api_version() {

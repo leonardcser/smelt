@@ -164,33 +164,52 @@ fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * band(r) + 6 * band(g) + band(b)
 }
 
-/// Read a named theme role. Returns `None` for unknown names.
-pub(super) fn theme_role_get(role: &str) -> Option<crossterm::style::Color> {
-    use crate::theme;
+/// Map a Lua-facing role name to its `ui::Theme` highlight group.
+fn role_to_group(role: &str) -> Option<&'static str> {
     Some(match role {
-        "accent" => theme::accent(),
-        "slug" => theme::slug_color(),
-        "user_bg" => theme::user_bg(),
-        "code_block_bg" => theme::code_block_bg(),
-        "bar" => theme::bar(),
-        "tool_pending" => theme::tool_pending(),
-        "reason_off" => theme::reason_off(),
-        "muted" => theme::muted(),
-        "agent" => theme::AGENT,
+        "accent" => "SmeltAccent",
+        "slug" => "SmeltSlug",
+        "user_bg" => "SmeltUserBg",
+        "code_block_bg" => "SmeltCodeBlockBg",
+        "bar" => "SmeltBar",
+        "tool_pending" => "SmeltToolPending",
+        "reason_off" => "SmeltReasonOff",
+        "muted" => "Comment",
+        "agent" => "SmeltAgent",
         _ => return None,
     })
 }
 
-/// Set a writable theme role. Only `accent` and `slug` are mutable.
-pub(super) fn theme_role_set(role: &str, ansi: u8) -> LuaResult<()> {
-    use crate::theme;
+/// Resolved color for a `ui::Theme` highlight group: prefer fg, then
+/// bg, then `Color::Reset`. Matches the convention used by
+/// `to_buffer::resolve` for `ColorRole` lookups.
+fn group_color(theme: &ui::Theme, group: &str) -> crossterm::style::Color {
+    let style = theme.get(group);
+    style
+        .fg
+        .or(style.bg)
+        .unwrap_or(crossterm::style::Color::Reset)
+}
+
+/// Read a named theme role from `theme`. Returns `None` for unknown names.
+pub(super) fn theme_role_get(theme: &ui::Theme, role: &str) -> Option<crossterm::style::Color> {
+    role_to_group(role).map(|g| group_color(theme, g))
+}
+
+/// Set a writable theme role on `theme`. Only `accent` and `slug` are
+/// mutable. Caller must `populate_ui_theme` afterwards (or wait for
+/// the next frame's render-loop bridge) to flush the new value into
+/// the corresponding highlight group.
+pub(super) fn theme_role_set(theme: &mut ui::Theme, role: &str, ansi: u8) -> LuaResult<()> {
     match role {
         "accent" => {
-            theme::set_accent(ansi);
+            theme.set_accent(ansi);
+            crate::theme::populate_ui_theme(theme);
             Ok(())
         }
         "slug" => {
-            theme::set_slug_color(ansi);
+            theme.set_slug(ansi);
+            crate::theme::populate_ui_theme(theme);
             Ok(())
         }
         other => Err(LuaError::RuntimeError(format!(
@@ -200,19 +219,26 @@ pub(super) fn theme_role_set(role: &str, ansi: u8) -> LuaResult<()> {
 }
 
 /// List of (role_name, current_color) pairs for `theme.snapshot()`.
-pub(super) fn theme_snapshot_pairs() -> Vec<(&'static str, crossterm::style::Color)> {
-    use crate::theme;
-    vec![
-        ("accent", theme::accent()),
-        ("slug", theme::slug_color()),
-        ("user_bg", theme::user_bg()),
-        ("code_block_bg", theme::code_block_bg()),
-        ("bar", theme::bar()),
-        ("tool_pending", theme::tool_pending()),
-        ("reason_off", theme::reason_off()),
-        ("muted", theme::muted()),
-        ("agent", theme::AGENT),
+pub(super) fn theme_snapshot_pairs(
+    theme: &ui::Theme,
+) -> Vec<(&'static str, crossterm::style::Color)> {
+    [
+        "accent",
+        "slug",
+        "user_bg",
+        "code_block_bg",
+        "bar",
+        "tool_pending",
+        "reason_off",
+        "muted",
+        "agent",
     ]
+    .into_iter()
+    .map(|role| {
+        let group = role_to_group(role).expect("known role");
+        (role, group_color(theme, group))
+    })
+    .collect()
 }
 
 /// Convert a Lua table to a `serde_json::Value`. Tables with contiguous
@@ -290,4 +316,93 @@ pub(super) fn lua_table_to_args(
         out.insert(key, lua_value_to_json(lua, &v));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme() -> ui::Theme {
+        let mut t = ui::Theme::new();
+        crate::theme::populate_ui_theme(&mut t);
+        t
+    }
+
+    #[test]
+    fn theme_role_get_known_roles() {
+        let t = theme();
+        for role in [
+            "accent",
+            "slug",
+            "user_bg",
+            "code_block_bg",
+            "bar",
+            "tool_pending",
+            "reason_off",
+            "muted",
+            "agent",
+        ] {
+            assert!(
+                theme_role_get(&t, role).is_some(),
+                "expected color for {role}"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_role_get_unknown_returns_none() {
+        let t = theme();
+        assert!(theme_role_get(&t, "bogus").is_none());
+    }
+
+    #[test]
+    fn theme_role_set_accent_round_trips() {
+        let mut t = theme();
+        theme_role_set(&mut t, "accent", 42).unwrap();
+        assert_eq!(t.accent(), 42);
+        // The SmeltAccent group is rebuilt on set.
+        assert_eq!(
+            t.get("SmeltAccent").fg,
+            Some(crossterm::style::Color::AnsiValue(42))
+        );
+    }
+
+    #[test]
+    fn theme_role_set_preset_via_color_decode() {
+        // sage = 108 in PRESETS
+        let v = crate::theme::preset_by_name("sage").unwrap();
+        let mut t = theme();
+        theme_role_set(&mut t, "accent", v).unwrap();
+        assert_eq!(t.accent(), 108);
+    }
+
+    #[test]
+    fn theme_role_set_read_only_errors() {
+        let mut t = theme();
+        let err = theme_role_set(&mut t, "muted", 1).unwrap_err();
+        assert!(err.to_string().contains("read-only"));
+    }
+
+    #[test]
+    fn theme_snapshot_pairs_lists_all_roles() {
+        let t = theme();
+        let pairs = theme_snapshot_pairs(&t);
+        let names: Vec<&str> = pairs.iter().map(|(n, _)| *n).collect();
+        for expected in [
+            "accent",
+            "bar",
+            "code_block_bg",
+            "muted",
+            "reason_off",
+            "slug",
+            "tool_pending",
+            "user_bg",
+            "agent",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "snapshot missing {expected}: {names:?}"
+            );
+        }
+    }
 }

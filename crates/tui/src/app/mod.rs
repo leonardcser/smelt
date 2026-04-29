@@ -531,12 +531,6 @@ impl App {
         // now live in Lua plugins and open real `ui::Picker` windows via
         // `smelt.prompt.open_picker`, so they're not listed here.
         input.command_arg_sources = Vec::new();
-        // Only load accent from state if not already set from config
-        if crate::theme::accent_value() == crate::theme::DEFAULT_ACCENT {
-            if let Some(accent) = saved.accent_color {
-                crate::theme::set_accent(accent);
-            }
-        }
         // Use saved reasoning effort if not set from config
         let reasoning_effort = if reasoning_effort == protocol::ReasoningEffort::Off
             && saved.reasoning_effort != protocol::ReasoningEffort::Off
@@ -558,6 +552,9 @@ impl App {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = ui::Ui::new();
             ui.set_terminal_size(w, h);
+            if let Some(accent) = saved.accent_color {
+                ui.theme_mut().set_accent(accent);
+            }
             ui.set_layout(ui::LayoutTree::Split {
                 direction: ui::layout::Direction::Vertical,
                 children: vec![
@@ -837,7 +834,7 @@ impl App {
         mut ctx_rx: Option<tokio::sync::oneshot::Receiver<Option<u32>>>,
         initial_message: Option<String>,
     ) {
-        crate::theme::detect_background();
+        crate::theme::detect_background(self.ui.theme_mut());
         crate::theme::populate_ui_theme(self.ui.theme_mut());
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnterAlternateScreen);

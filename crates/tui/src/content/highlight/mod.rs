@@ -20,6 +20,19 @@ pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
 pub(super) static THEME_SET: LazyLock<two_face::theme::EmbeddedLazyThemeSet> =
     LazyLock::new(two_face::theme::extra);
 
+/// Light/dark hint for `syntax_theme()`. Mirrored from `ui::Theme`'s
+/// `is_light` flag by `crate::theme::populate_ui_theme()` each frame.
+/// Local to this module since syntect picks pre-loaded themes by index
+/// and the alternative — threading `&ui::Theme` through every
+/// `print_syntax_file` / `print_inline_diff` call site — touches 14+
+/// callers for one branch.
+static SYNTAX_THEME_LIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_syntax_theme_light(light: bool) {
+    SYNTAX_THEME_LIGHT.store(light, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Force eager initialization of the syntect syntax and theme sets. Call
 /// once at startup from a background thread so the first tool render
 /// doesn't pay the ~30ms deserialization cost mid-frame.
@@ -29,7 +42,7 @@ pub fn warm_up_syntect() {
 }
 
 pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
-    if crate::theme::is_light() {
+    if SYNTAX_THEME_LIGHT.load(std::sync::atomic::Ordering::Relaxed) {
         &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtendedLight]
     } else {
         &THEME_SET[two_face::theme::EmbeddedThemeName::MonokaiExtended]
