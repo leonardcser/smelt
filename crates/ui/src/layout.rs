@@ -440,6 +440,14 @@ pub enum Anchor {
         target: crate::WinId,
         attach: Corner,
     },
+    /// Docked to the bottom of the screen. The overlay's natural
+    /// height clamps to `term_h - above_rows` (reserve room for the
+    /// statusline); width and horizontal centering follow the
+    /// overlay's natural width — typically the layout's outer
+    /// container is sized full-width via `Constraint::Percentage(100)`,
+    /// so the rect spans the whole terminal. Used by tool-approval
+    /// dialogs that want a sticky bottom-edge presence.
+    ScreenBottom { above_rows: u16 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

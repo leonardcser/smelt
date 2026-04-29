@@ -14,8 +14,8 @@ use ui::layout::Anchor;
 use ui::text_input::TextInput;
 use ui::{
     Border, BufId, Callback, CallbackResult, Constraint, FitMax, FloatConfig, KeyBind, LayoutTree,
-    OptionItem, OptionList, Overlay, PanelContent, PanelHeight, PanelSpec, Payload, Placement,
-    SeparatorStyle, SplitConfig, WinEvent, WinId,
+    Overlay, PanelContent, PanelHeight, PanelSpec, Payload, Placement, SeparatorStyle, SplitConfig,
+    WinEvent, WinId,
 };
 
 /// What shape an overlay leaf takes when the dialog is content-only.
@@ -63,7 +63,7 @@ pub struct DialogOpenResult {
 // - `{ kind = "content", text = "...", mode = "markdown" }`  — formatter-rendered text
 //                                                              (also accepts "bash", "file", "diff")
 // - `{ kind = "markdown", text = "..." }`                    — sugar for the line above with mode = "markdown"
-// - `{ kind = "options",  items = [{label, shortcut?}], selected? = <1-based index> }`
+// - `{ kind = "options",  items = [{label}], selected? = <1-based index> }`
 // - `{ kind = "input",    placeholder? = "..." }`
 
 pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult, String> {
@@ -147,22 +147,10 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
                     .get("items")
                     .map_err(|e| format!("options.items: {e}"))?;
                 let mut labels: Vec<String> = Vec::new();
-                let mut has_shortcut = false;
-                let mut has_multi = false;
                 for it_pair in items_tbl.sequence_values::<mlua::Table>() {
                     let it = it_pair.map_err(|e| format!("option item: {e}"))?;
                     let label: String = it.get("label").unwrap_or_default();
-                    let shortcut: Option<char> = it
-                        .get::<String>("shortcut")
-                        .ok()
-                        .and_then(|s| s.chars().next());
-                    if shortcut.is_some() {
-                        has_shortcut = true;
-                    }
                     labels.push(label);
-                }
-                if panel.get::<bool>("multi").unwrap_or(false) {
-                    has_multi = true;
                 }
                 let initial_cursor: u16 = panel
                     .get::<i64>("selected")
@@ -171,56 +159,16 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
                     .map(|s| (s - 1) as u16)
                     .unwrap_or(0);
 
-                if has_shortcut || has_multi {
-                    // Legacy widget path until the residual surface
-                    // (shortcut keys + multi-select checkboxes) lives
-                    // on the Buffer-backed list leaf. None of today's
-                    // consumers exercise this branch but the data
-                    // shape supports it.
-                    let mut list_items = Vec::new();
-                    for it_pair in items_tbl.sequence_values::<mlua::Table>() {
-                        let it = it_pair.map_err(|e| format!("option item: {e}"))?;
-                        let label: String = it.get("label").unwrap_or_default();
-                        let shortcut: Option<char> = it
-                            .get::<String>("shortcut")
-                            .ok()
-                            .and_then(|s| s.chars().next());
-                        let mut item = OptionItem::new(label);
-                        if let Some(c) = shortcut {
-                            item = item.with_shortcut(c);
-                        }
-                        list_items.push(item);
-                    }
-                    let accent = app.ui.theme().get("SmeltAccent");
-                    let option_list = OptionList::new(list_items)
-                        .multi(has_multi)
-                        .with_cursor(initial_cursor as usize)
-                        .with_cursor_style(accent)
-                        .with_shortcut_style(accent);
-                    let widget = Box::new(option_list);
-                    panel_specs.push(
-                        PanelSpec::widget(widget, PanelHeight::Fit)
-                            .with_initial_focus(initial_focus),
-                    );
-                    // Keep leaf_shapes index-aligned with panel_specs;
-                    // widget panels never reach the overlay path so
-                    // the placeholder is unused.
-                    leaf_shapes.push(LeafShape::Content);
-                } else {
-                    // Migrated path: build a Buffer with one line per
-                    // label and ride the Overlay+list leaf shape.
-                    let buf = make_options_buffer(app, &labels);
-                    let spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
-                        .focusable(true)
-                        .with_initial_focus(initial_focus);
-                    panel_specs.push(spec);
-                    leaf_shapes.push(LeafShape::List { initial_cursor });
-                }
+                let buf = make_options_buffer(app, &labels);
+                let spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
+                    .focusable(true)
+                    .with_initial_focus(initial_focus);
+                panel_specs.push(spec);
+                leaf_shapes.push(LeafShape::List { initial_cursor });
             }
             "input" => {
                 let placeholder: Option<String> = panel.get("placeholder").ok();
-                let collapse_when_empty: bool =
-                    panel.get("collapse_when_empty").unwrap_or(false);
+                let collapse_when_empty: bool = panel.get("collapse_when_empty").unwrap_or(false);
                 let name: Option<String> = panel.get("name").ok();
 
                 if collapse_when_empty {
@@ -265,11 +213,12 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
         return Err("dialog must have at least one panel".into());
     }
 
-    // Content-only dialogs (no `options` / `input` panels) ride the
-    // Overlay path: a centered modal with a vbox of buffer-backed
-    // Windows under the unified `Window::render` paint pipeline. Mixed
-    // dialogs still go through the legacy `dialog_open` until widgets
-    // (OptionList, TextInput) get their Buffer-backed rewrites.
+    // Buffer-only dialogs ride the Overlay path: a centered modal
+    // with a vbox of buffer-backed Windows under the unified
+    // `Window::render` paint pipeline. Dialogs that still spec a
+    // legacy widget panel (today: `kind = "input"` with
+    // `collapse_when_empty`, the only remaining widget escape) fall
+    // through to the legacy `dialog_open`.
     let content_only = panel_specs
         .iter()
         .all(|p| matches!(p.content, PanelContent::Buffer(_)));
@@ -387,9 +336,27 @@ fn open_dialog_via_overlay(
                 },
             )
             .ok_or_else(|| "failed to allocate dialog window".to_string())?;
-        let constraint = match spec.height {
-            PanelHeight::Fixed(n) => Constraint::Length(n),
-            PanelHeight::Fit | PanelHeight::Fill => Constraint::Fill,
+        // `collapse_when_empty`: zero-height the leaf when the
+        // backing buffer is "empty" (a single blank line counts as
+        // empty — `Buffer::set_all_lines(vec![])` normalises to that
+        // shape). Mirrors the legacy panel-collapse rule so dialogs
+        // ride a hidden summary / preview row without the gap or
+        // separator polluting the layout.
+        let buffer_empty = app
+            .ui
+            .buf(buf)
+            .map(|b| {
+                let n = b.line_count();
+                n == 0 || (n == 1 && b.lines()[0].is_empty())
+            })
+            .unwrap_or(false);
+        let constraint = if spec.collapse_when_empty && buffer_empty {
+            Constraint::Length(0)
+        } else {
+            match spec.height {
+                PanelHeight::Fixed(n) => Constraint::Length(n),
+                PanelHeight::Fit | PanelHeight::Fill => Constraint::Fill,
+            }
         };
         leaf_items.push((constraint, LayoutTree::leaf(win)));
         leaf_wins.push(win);
@@ -455,10 +422,7 @@ fn open_dialog_via_overlay(
         configure_input_leaf(app, leaf);
     }
 
-    Ok(DialogOpenResult {
-        root,
-        named_inputs,
-    })
+    Ok(DialogOpenResult { root, named_inputs })
 }
 
 /// Wire up the built-in list keymap on a leaf Window: cursor row
@@ -617,7 +581,10 @@ fn configure_input_leaf(app: &mut App, leaf: WinId) {
         let cursor = if placeholder_mode {
             0
         } else {
-            ctx.ui.win(ctx.win).map(|w| w.cursor_col as usize).unwrap_or(0)
+            ctx.ui
+                .win(ctx.win)
+                .map(|w| w.cursor_col as usize)
+                .unwrap_or(0)
         };
         let base = if placeholder_mode {
             String::new()
@@ -642,7 +609,11 @@ fn configure_input_leaf(app: &mut App, leaf: WinId) {
             return CallbackResult::Consumed;
         }
         let text = current_line(ctx);
-        let cursor = ctx.ui.win(ctx.win).map(|w| w.cursor_col as usize).unwrap_or(0);
+        let cursor = ctx
+            .ui
+            .win(ctx.win)
+            .map(|w| w.cursor_col as usize)
+            .unwrap_or(0);
         if cursor == 0 {
             return CallbackResult::Consumed;
         }
