@@ -1,159 +1,116 @@
 # refactor/ — start here
 
-Entry point for the smelt rebuild. Short by design. Re-read every few sessions.
-If you're new to this — including future-you in two weeks — this is your map.
+Entry point for the smelt rebuild. Short by design.
 
 ## What this is
 
 A multi-phase rewrite of smelt's Rust + Lua surface to the target shape in
-`tui-ui-architecture-target.puml`. Greenfield: no users, no migration story, no
-backward compatibility. The only artefact that matters is the final shape.
+`tui-ui-architecture-target.puml`. Greenfield: no users, no migration story,
+no backward compatibility. The only artefact that matters is the final shape.
 
 ## The plan is not final
 
-This is the most important rule. **Every `refactor/` doc is a sketch, not a
-contract** — the sequencing in `REFACTOR.md`, the intent in
-`ARCHITECTURE.md`, the structure in the puml diagram (and its rendered SVG),
-the file fates in `INVENTORY.md`, the parity rows in `FEATURES.md`, the test
-strategy in `TESTING.md`, the vertical slice in `TRACE.md`, the historical
-log in `DECISIONS.md`. Reality will push back on all of them. We absolutely
-have not thought of everything. There are decisions in these docs that will
-turn out wrong, sub-phases that need to split or merge, abstractions that
-look elegant on paper and ugly in code, module boundaries that don't draw
-the seam where the seam wants to be, type shapes that need different fields,
-events that need to fire at different points, and better designs you'll see
-only once you have a file open.
+Every `refactor/` doc is a sketch, not a contract — sequencing
+(`REFACTOR.md`), intent (`ARCHITECTURE.md`), structure (the puml + SVG),
+file fates (`INVENTORY.md`), parity (`FEATURES.md`), test strategy
+(`TESTING.md`), the vertical slice (`TRACE.md`), historical decisions
+(`DECISIONS.md`). Reality will push back. When it does:
 
-When that happens:
-
-- **Take the better path.** Don't follow the doc to the letter when a better way
-  is plain. Update the docs in the same change. Log the decision in `P<n>.md`.
-  The diagram and these docs are canonical for _current intent_; both can
-  change.
+- **Take the better path.** Don't follow the doc when a better way is plain.
+  Update the affected docs in the same change. Log the decision in `P<n>.md`.
 - **Stop and ask** when the friction wants a user-visible behavior change you
-  didn't agree to, or when two designs are equally defensible and you can't
-  decide alone.
+  didn't agree to, or when two designs are equally defensible.
 
-Bias toward decisive action when the right answer is plain; toward pausing when
-it isn't. Either path ends with the docs updated.
+## Granularity
 
-## How we work through phases
+**One session = one sub-phase.** Sub-phases are the natural unit
+(`C.7.3`, `C.8`, `C.9`, …). Don't fragment into per-commit sessions; don't
+swallow whole phases in one. If a sub-phase turns out larger than fits one
+session, split it in `REFACTOR.md` (e.g. `C.8` → `C.8a` / `C.8b`), land
+`C.8a`, exit. The split is part of the work.
 
-- **A red tree is fine inside a phase.** No migration shims, no parallel "kept
-  for now" implementations, no compat layers. A larger diff that lands the tree
-  in its final shape beats a chain of small diffs that leave it half-migrated.
-  We require green only at phase boundaries.
-- **No feature gets dropped.** The UX changes shape; it doesn't shrink.
-  `FEATURES.md` is the parity checklist — walk it at each phase boundary. If a
-  phase deletes code and a feature isn't reachable in the new shape, the phase
-  isn't done.
-- **No throwaway scaffolding.** When a step rewrites a thing, the old thing goes
-  in the same change.
-- **Decide while coding.** When two designs feel close, pick one in the diff,
-  don't pre-plan it here. Document what you picked in `P<n>.md` if you'd
-  re-litigate it later.
-- **No step is too big.** If a phase wants to delete 30 files and replace them,
-  that's a phase.
-- **Diagram is the spec for structure.** The puml is canonical for shape;
-  touching it means updating `REFACTOR.md` (and regenerating the SVG) in the
-  same diff. Drift is a bug, not a tiebreaker.
-- **Code stays phase-agnostic.** The code itself never references `P0` /
-  `pre-P0` / `P3.b` / "L2" or any other refactor-stage label — not in
-  comments, not in identifiers, not in test names, not in commit messages
-  beyond the `P<n>.md` log itself. Phase context lives in `P<n>.md`, the
-  `refactor/` docs, and PR descriptions. Source reads as if the new shape
-  was always there. (Same spirit as the global "no traces of what came
-  before" refactor rule.)
-  - **Carve-out for TODOs.** `TODO(P<n>): <action>` is allowed at the
-    call site to mark "blocked until phase Pn lands the prerequisite."
-    Doing the work removes the TODO; no other doc needs touching. Keep
-    the action concrete (`TODO: mount Anthropic SSE cassette`) — never
-    a lament (`TODO: this is broken`).
-  - **No `TODO.md`.** Code-coupled deferrals live as TODOs at the call
-    site. Cross-cutting open questions live in `STATUS.md`; phase-slipped
-    work lives in `P<n>.md` "Deferrals"; per-file fates live in
-    `INVENTORY.md`. A separate TODO list would drift and duplicate.
+## Greenness
 
-## Don't stop until done or blocked
+- **Sessions and phases must end green.** Intermediate commits don't.
+- **Red commits inside a session are encouraged when they avoid scaffolding.**
+  If a final-shape commit can only land by leaving the tree red until the
+  next commit lands the matching change, do that. The alternative — migration
+  shims, parallel "kept for now" implementations, "removed in next commit"
+  comments — is exactly the noise this refactor exists to delete.
+- **No throwaway scaffolding.** When a step rewrites a thing, the old thing
+  goes in the same session.
 
-A green tree + a sub-phase landed isn't a stop point — it's a milestone.
-After landing one piece, immediately pick up the next from `STATUS.md`
-without waiting for confirmation. Auto mode in particular treats "what's
-next?" as the default action, not a question.
+## Stopping rule
 
-Stop only when:
+Stop when one of:
 
-- A design choice is genuinely ambiguous and two paths are equally
-  defensible. Capture the options in `STATUS.md` and ask.
-- The next step would require a user-visible behavior change that wasn't
-  in scope. Confirm first.
-- A real external blocker appears (missing credentials, env mismatches,
-  decisions only the user can make).
+1. The active sub-phase landed: tree green at HEAD, `cargo nextest` green,
+   `refactor/check.sh` green, `P<n>.md` updated, the sub-phase entry in
+   `REFACTOR.md` marked landed.
+2. Blocked on ambiguity, missing decision, or external dependency. Record the
+   question in `P<n>.md` "Open questions" and exit.
+3. Two consecutive failed attempts to land the sub-phase. Exit, human looks.
 
-A "finished task" means: tests pass, clippy clean, `refactor/check.sh`
-green, docs synced (`P<n>.md` / `STATUS.md` / `INVENTORY.md`), and the
-next task on `STATUS.md` picked up. Anything short of that is mid-task.
+Do **not** stop just because a single commit landed — keep going within the
+sub-phase. Do **not** start a new sub-phase in the same session.
 
-## Re-orient on every task
+## Code stays phase-agnostic
 
-Even mid-session, before starting a new task or sub-phase: re-read
-`STATUS.md`, the most recent `P<n>.md`, and any `INVENTORY.md` rows for
-files you'll touch. Files move, rows update, decisions land between
-tasks. The 60 seconds of doc-reading saves an hour of fixing assumptions
-made on stale memory.
+The code never references `P0` / `P3.b` / "L2" or any other refactor-stage
+label — not in comments, identifiers, test names, or commit messages beyond
+the `P<n>.md` log. Source reads as if the new shape was always there.
 
-Same instinct applies after delegating to a subagent: trust but verify
-its summary against the actual files.
+**Carve-out:** `TODO(P<n>): <action>` is allowed at the call site to mark
+"blocked until phase Pn lands the prerequisite." Keep the action concrete
+(`TODO: mount Anthropic SSE cassette`) — never a lament.
+
+## Phase transitions
+
+When the active phase closes:
+
+1. Mark `P<n>.md` `Status: done` and fill `Landed:` with the date.
+2. Create `P<n+1>.md` from the template at the bottom of this file.
+3. In `AGENTS.md`, swap `@refactor/P<n>.md` for `@refactor/P<n+1>.md`.
+   Closed phase files stay on disk but stop auto-loading.
+4. Update `REFACTOR.md` if `P<n+1>`'s shape diverged from what was sketched.
+
+## Doc sync rule
+
+When a decision is made or design shifts, update **every** affected doc in
+the **same change**. Drifted docs are bugs. `check.sh` catches the
+mechanical cases; the human-shaped cases (intent vs structure consistency)
+need attention.
+
+A phase isn't landed until `P<n>.md` is written and companion files reflect
+what happened.
 
 ## Verify when it makes sense
 
 - **At phase boundaries:**
   `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings && cargo nextest run --workspace`.
-- **Whenever a `refactor/*` doc changes:** `refactor/check.sh`. Should be all
-  green; warnings are fine; red `✗` means a doc lies.
+- **Whenever a `refactor/*` doc changes:** `refactor/check.sh`. All green;
+  warnings fine; red `✗` means a doc lies.
 - **For UI changes:** drive the binary in a tmux side-pane (see
-  `ARCHITECTURE.md` → Testing TUI changes).
+  `ARCHITECTURE.md` § Testing TUI changes).
 - **For puml edits:** regenerate the SVG
   (`plantuml -tsvg refactor/tui-ui-architecture-target.puml`).
 
-Don't run all of these on every commit. Run what catches what you just changed.
-
 ## The documents
 
-| File                              | What it is                                          | When to read                                    | When to update                                                    |
-| --------------------------------- | --------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------- |
-| `README.md` (this)                | Meta rules + index.                                 | First. Re-read every few sessions.              | When a meta-rule changes.                                         |
-| `STATUS.md`                       | One-screen "where we are."                          | Every session start. 30 seconds.                | Every session end. After every decision.                          |
-| `REFACTOR.md`                     | Sequencing — phases P0..P7 and their content.       | When you start or plan a phase.                 | When a phase's scope or sequence shifts.                          |
-| `ARCHITECTURE.md`                 | Target intent — decisions, rationale, target rules. | When deciding what shape something should take. | When intent changes.                                              |
-| `tui-ui-architecture-target.puml` | Canonical structure diagram.                        | When you want a structural picture.             | When types / fields / packages move. **Then regenerate the SVG.** |
-| `INVENTORY.md`                    | Per-file ledger: every source file → its fate.      | When you want "what happens to file X."         | When file fates change or files appear/disappear.                 |
-| `FEATURES.md`                     | User-facing parity checklist.                       | At phase boundaries to walk parity.             | When a feature's status shifts (offline / verified / regressed).  |
-| `P<n>.md`                         | Per-phase log of what shipped + decisions made.     | When starting `P<n+1>`.                         | At the end of each phase. Template below.                         |
-| `DECISIONS.md`                    | Pre-P0 architectural decisions log.                 | If you wonder "why is X this way?"              | Frozen once P0 lands. Decisions thereafter live in `P<n>.md`.     |
-| `TRACE.md`                        | One vertical slice walked end-to-end through the target. Concrete `init.lua` + `bash.lua` example. | When you need a reality check on how a flow composes, or when designing a new Lua tool. | Add new slices when a different flow surfaces a design hole. |
-| `TESTING.md`                      | Three-layer testing strategy: model state / engine integration / rendering. | When adding tests or designing test harness. | When a layer's harness changes shape. |
-| `check.sh`                        | Drift-detection invariants.                         | Session start; before declaring a phase done.   | When a new invariant is worth checking.                           |
-
-## Doc sync rule
-
-When a decision is made or the design shifts, update **every** affected doc in
-the **same change**. Drifted docs are bugs. `check.sh` catches the mechanical
-cases; the human-shaped cases (intent vs structure consistency) need attention.
-
-A phase is not "landed" until `P<n>.md` is written and the affected companion
-files are updated.
-
-## Cold-start checklist
-
-1. Read this file.
-2. Run `refactor/check.sh` — should be all green.
-3. Read `STATUS.md` — orient in 30 seconds.
-4. Read the most recent `P<n>.md` to see what just happened.
-5. Skim `INVENTORY.md` rows for the upcoming phase.
-6. `grep -rn 'TODO' crates tests src` — quick read of code-level deferrals.
-   If the count is climbing without phases closing, pause and triage.
-7. If anything feels stale, fix the docs before writing code.
+| File                              | What it is                                       |
+| --------------------------------- | ------------------------------------------------ |
+| `README.md` (this)                | Meta rules + index.                              |
+| `REFACTOR.md`                     | Sequencing — phases P0..P7 and their content.    |
+| `ARCHITECTURE.md`                 | Target intent — decisions, rationale.            |
+| `tui-ui-architecture-target.puml` | Canonical structure diagram.                     |
+| `INVENTORY.md`                    | Per-file ledger: every source file → its fate.   |
+| `FEATURES.md`                     | User-facing parity checklist.                    |
+| `P<n>.md`                         | Per-phase log: what landed + decisions made.     |
+| `DECISIONS.md`                    | Pre-P0 architectural decisions log (frozen).     |
+| `TRACE.md`                        | One vertical slice end-to-end through target.    |
+| `TESTING.md`                      | Three-layer testing strategy.                    |
+| `check.sh`                        | Drift-detection invariants.                      |
+| `PROMPT.md`                       | RALPH loop entry prompt — what each session does.|
 
 ## `P<n>.md` template
 
@@ -161,46 +118,30 @@ files are updated.
 # P<n> — <phase name>
 
 **Status:** in-progress | done **Started:** YYYY-MM-DD **Landed:** YYYY-MM-DD
-(or empty while in-progress)
 
-## What shipped vs what was planned
+## Sub-phases landed
 
-One sentence per sub-phase, with deviations called out. If a sub-phase slipped
-to the next phase, say so and link the row in INVENTORY.md.
+One bullet per sub-phase: `**<id>** (\`<sha>\`) — <one-line summary>.`
+The commit message carries the detail; this file is an index.
 
-## Decisions made while coding
+## Decisions made
 
-For each non-obvious choice:
-
-- **<short title of the decision>**
-  - **Picked:** what we did.
-  - **Alternative considered:** what else was on the table.
-  - **Why this one:** the deciding factor.
-
-The rule: if you would re-litigate this in `P<n+2>`, write it down.
-
-## Files / types / functions changed
-
-Compact diff-shape summary (INVENTORY.md is the source of truth):
-
-- Added: …
-- Deleted: …
-- Renamed / moved: …
-- Restructured: …
+One bullet per non-obvious choice: `**<title>** (\`<sha>\`) — <one line>.`
+If you'd re-litigate this in `P<n+2>`, write it down here. The body of
+the reasoning lives in the commit message, not here.
 
 ## Deferrals
 
-What was supposed to be in this phase but landed in a later one (with the new
-home). Without a clear destination, surface it in STATUS's open questions.
+What slipped to a later phase, with the new home.
 
-## Verification
+## Open questions
 
-- Tree status at end of phase: green | red (with reason).
-- Tests run: `cargo nextest run --workspace` result.
-- FEATURES.md walk: which rows verified, which still offline.
-- Any human parity walk performed.
+Anything blocked. Move resolved items into the relevant decision bullet
+when they unblock.
 
 ## Next phase entry conditions
 
 What must be true before `P<n+1>` starts.
 ```
+
+Body of every entry is one line. Detail lives in `git log` — don't duplicate.
