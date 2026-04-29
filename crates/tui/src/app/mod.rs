@@ -556,8 +556,11 @@ impl App {
                 ui.theme_mut().set_accent(accent);
             }
             ui.set_layout(ui::LayoutTree::vbox(vec![
-                ui::LayoutTree::leaf("transcript", ui::Constraint::Fill),
-                ui::LayoutTree::leaf("prompt", ui::Constraint::Percentage(25)),
+                (ui::Constraint::Fill, ui::LayoutTree::leaf(ui::TRANSCRIPT_WIN)),
+                (
+                    ui::Constraint::Percentage(25),
+                    ui::LayoutTree::leaf(ui::PROMPT_WIN),
+                ),
             ]));
             let input_display_buf = ui.buf_create(ui::buffer::BufCreateOpts {
                 modifiable: true,

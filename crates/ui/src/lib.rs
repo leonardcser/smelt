@@ -618,7 +618,7 @@ impl Ui {
         floats.into_iter().map(|(id, _)| id).collect()
     }
 
-    pub fn resolve_splits(&self) -> HashMap<String, Rect> {
+    pub fn resolve_splits(&self) -> HashMap<WinId, Rect> {
         let (w, h) = self.terminal_size;
         match &self.layout {
             Some(tree) => layout::resolve_layout(tree, Rect::new(0, 0, w, h)),
