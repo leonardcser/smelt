@@ -262,15 +262,11 @@ plus `with_gap` / `with_border` / `with_title` / `with_separator`.
   hit-testing; `OverlayHitTarget::{ Window(WinId) | Chrome }` is
   the per-overlay hit-test split.
 
-Data + resolution + focus/hit-test layer landed (C.0 → C.4 +
-tails): types, `resolve_anchor`, `Ui::overlay_open / close /
-overlay / overlay_mut / overlays_in_z_order`,
-`LayoutTree::natural_size`, `Ui::resolve_overlays(cursor)`,
-`Chrome.separator` + `with_separator`, `Ui::active_modal`,
-`Ui::overlay_hit_test`. C.5 (first float migration) gated on a
-render-shape decision — see `STATUS.md` for the open design point.
-C.6+ deletions (`FloatConfig` / `Placement` / `PanelWidget` /
-`dialog.rs` panel multiplexing) wait on C.5.
+Data + resolution + focus/hit-test layer + paint pipeline + first
+float migrations + Buffer-backed list/options/input panels landed
+(C.0 → C.8). C.9 deletes `FloatConfig` / `Placement` /
+`PanelWidget` / `dialog.rs` panel multiplexing once every dialog
+flips. See `P1.md` for sub-phase log.
 
 ### P1.d — `Window` as the only interactive unit
 

@@ -9,15 +9,14 @@
 # Checks:
 #   1. puml validates (plantuml -checkonly)
 #   2. SVG age vs puml age — warn if puml is newer (regenerate)
-#   3. Every "P0".."P9" referenced in STATUS exists as a header in REFACTOR
+#   3. Every "P0".."P9" referenced in P<n>.md logs exists as a header in REFACTOR
 #   4. Every Rust file path mentioned in INVENTORY exists in the repo, OR the
 #      row's Fate is `deleted` / starts with `to-` / `tui::` (capability
 #      destination)
 #   5. INVENTORY row counts vs `find crates/<crate>/src -name '*.rs' | wc -l`
 #      (warn on drift, don't fail — file moves cause transient mismatch)
-#   6. STATUS "Last update" date — warn if older than 2 weeks
-#   7. No leaked "engine::permissions" / "engine::Permissions" references in
-#      REFACTOR / ARCHITECTURE / STATUS (engine should be policy-free in target)
+#   6. No leaked "engine::permissions" / "engine::Permissions" references in
+#      REFACTOR / ARCHITECTURE (engine should be policy-free in target)
 #
 # Exit code:
 #   0 — all hard checks passed (warnings may be emitted)
@@ -46,7 +45,7 @@ section() { (( QUIET )) || printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 README=refactor/README.md
 REFACTOR=refactor/REFACTOR.md
-STATUS=refactor/STATUS.md
+PROMPT=refactor/PROMPT.md
 INVENTORY=refactor/INVENTORY.md
 FEATURES=refactor/FEATURES.md
 ARCH=refactor/ARCHITECTURE.md
@@ -56,7 +55,7 @@ TESTING=refactor/TESTING.md
 PUML=refactor/tui-ui-architecture-target.puml
 SVG=refactor/tui-ui-architecture-target.svg
 
-for f in "$README" "$REFACTOR" "$STATUS" "$INVENTORY" "$FEATURES" "$ARCH" "$DECISIONS" "$TRACE" "$TESTING" "$PUML"; do
+for f in "$README" "$REFACTOR" "$PROMPT" "$INVENTORY" "$FEATURES" "$ARCH" "$DECISIONS" "$TRACE" "$TESTING" "$PUML"; do
   [[ -f $f ]] || { fail "missing: $f"; exit 1; }
 done
 
@@ -86,20 +85,20 @@ else
   warn "SVG missing — generate: plantuml -tsvg $PUML"
 fi
 
-# ── 3. Phase headers referenced in STATUS exist in REFACTOR ───────────────────
+# ── 3. Phase headers referenced in P<n>.md files exist in REFACTOR ────────────
 section "3. phase headers"
 
-PHASES_IN_STATUS=$(grep -oE '\bP[0-9](\.[a-z])?\b' "$STATUS" | sort -u)
+PHASE_FILES=$(ls refactor/P*.md 2>/dev/null || true)
+PHASES_IN_LOGS=$(echo "$PHASE_FILES" | xargs grep -hoE '\bP[0-9](\.[a-z])?\b' 2>/dev/null | sort -u)
 MISSING=0
-for p in $PHASES_IN_STATUS; do
-  # Strip the sub-phase to check the parent phase header.
+for p in $PHASES_IN_LOGS; do
   parent=${p%%.*}
   if ! grep -qE "^## $parent\b" "$REFACTOR"; then
-    fail "STATUS mentions $p but REFACTOR has no '## $parent' header"
+    fail "P<n>.md mentions $p but REFACTOR has no '## $parent' header"
     MISSING=$((MISSING+1))
   fi
 done
-[[ $MISSING -eq 0 ]] && ok "all referenced phases ($(echo "$PHASES_IN_STATUS" | wc -w | tr -d ' ') unique) have headers in REFACTOR"
+[[ $MISSING -eq 0 ]] && ok "all referenced phases ($(echo "$PHASES_IN_LOGS" | wc -w | tr -d ' ') unique) have headers in REFACTOR"
 
 # ── 4. INVENTORY paths exist (or have a non-existent fate) ────────────────────
 section "4. INVENTORY paths"
@@ -168,42 +167,15 @@ for crate in ui tui engine protocol; do
   fi
 done
 
-# ── 6. STATUS "Last update" freshness ─────────────────────────────────────────
-section "6. STATUS freshness"
+# ── 6. No leaked engine::permissions refs ────────────────────────────────────
+section "6. engine policy-free check"
 
-LAST_LINE=$(grep -m1 -E '^\*\*Last update:\*\*' "$STATUS" || true)
-if [[ -n $LAST_LINE ]]; then
-  # Extract YYYY-MM-DD
-  if [[ $LAST_LINE =~ ([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
-    last_date="${BASH_REMATCH[1]}"
-    if last_epoch=$(date -j -f "%Y-%m-%d" "$last_date" +%s 2>/dev/null) ||
-       last_epoch=$(date -d "$last_date" +%s 2>/dev/null); then
-      now_epoch=$(date +%s)
-      age_days=$(( (now_epoch - last_epoch) / 86400 ))
-      if [[ $age_days -gt 14 ]]; then
-        warn "STATUS last updated $age_days days ago ($last_date) — refresh it"
-      else
-        ok "STATUS updated $age_days days ago ($last_date)"
-      fi
-    else
-      warn "couldn't parse 'Last update' date: $last_date"
-    fi
-  else
-    warn "STATUS '**Last update:**' line present but no YYYY-MM-DD found"
-  fi
-else
-  warn "STATUS missing '**Last update:**' line"
-fi
-
-# ── 7. No leaked engine::permissions refs ────────────────────────────────────
-section "7. engine policy-free check"
-
-LEAKS=$(grep -nE 'engine::permissions|engine::Permissions' "$REFACTOR" "$ARCH" "$STATUS" 2>/dev/null || true)
+LEAKS=$(grep -nE 'engine::permissions|engine::Permissions' "$REFACTOR" "$ARCH" 2>/dev/null || true)
 if [[ -n $LEAKS ]]; then
   fail "leaked engine::permissions references:"
   echo "$LEAKS" | sed 's/^/    /'
 else
-  ok "no engine::permissions references in REFACTOR/ARCH/STATUS"
+  ok "no engine::permissions references in REFACTOR/ARCHITECTURE"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
