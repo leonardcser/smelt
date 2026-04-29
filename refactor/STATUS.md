@@ -22,28 +22,34 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — four foundation commits landed (`40f0c82`,
-`702305a`, `8fa6760`, `d3c4a83`): `Corner` rename; target `Anchor`
-+ `Overlay` + `OverlayId` types in a new `overlay` module; pure
-`resolve_anchor` function with 9 tests; `Ui::overlay_open / close /
-overlay / overlay_mut / overlays_in_z_order` API + storage with 4
-tests. The whole P1.c data layer is in place; only compositor
-integration + consumer migration remain.
+**P1.c in progress** — five foundation commits landed (`40f0c82`,
+`702305a`, `8fa6760`, `d3c4a83`, `44fe779`): `Corner` rename;
+target `Anchor` + `Overlay` + `OverlayId` types in a new
+`overlay` module; pure `resolve_anchor` function with 9 tests;
+`Ui::overlay_open / close / overlay / overlay_mut /
+overlays_in_z_order` API + storage with 4 tests; per-frame
+resolution layer (`LayoutTree::natural_size((cap))` + 9 tests;
+`Ui::resolve_overlays(cursor)` returning z-ordered
+`Vec<(OverlayId, Rect, &Overlay)>` + 4 tests). The whole P1.c
+resolution layer is in place — given an Overlay and the current
+frame state, callers can ask "where does this draw?" without any
+compositor wiring yet.
 
-**Next in P1.c:** C.4 wires compositor integration (per-frame
-anchor resolution → compositor layers + paint); C.5 migrates one
-float (cmdline or text_modal) to Overlay as proof; C.6+ migrates
-remaining floats and deletes `FloatConfig` / `PanelWidget` /
-`Placement`.
+**Next in P1.c:** C.5 migrates one float (cmdline or text_modal)
+to Overlay end-to-end — first real consumer of `resolve_overlays`,
+proves the storage + resolution layers work for a live surface
+and decides the compositor wiring shape (overlay-as-component vs
+direct paint into the grid). C.6+ migrates remaining floats and
+deletes `FloatConfig` / `PanelWidget` / `Placement`.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 930 passed (914
-from prior boundary + 16 new tests covering extmark CRUD, yank
-substitution, and wrap caching; renamed-tests preserved). `cargo
-nextest run --test scenarios` — 6 baseline scenarios green. `cargo
-clippy` clean.
+**Tree:** green. `cargo nextest run --workspace` — 969 passed
+(13 new this commit: 9 `LayoutTree::natural_size` axis +
+chrome + cap tests, 4 `Ui::resolve_overlays` resolution / skip
+/ z-order tests). `cargo clippy --workspace --all-targets -- -D
+warnings` clean.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
