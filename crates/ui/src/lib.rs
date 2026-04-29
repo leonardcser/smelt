@@ -1092,6 +1092,21 @@ impl Ui {
             .into_iter()
             .map(|(id, rect, ov)| (id, rect, ov.clone()))
             .collect();
+        // Pre-pass: drive `Buffer::ensure_rendered_at` on each overlay
+        // leaf at the width its leaf rect resolves to, so parsers
+        // (markdown / plain wrap / diff / syntax) populate their
+        // `lines` vector before the immutable paint walk reads them.
+        for (_id, rect, overlay) in &resolved {
+            let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
+            for (win_id, leaf_rect) in &leaf_rects {
+                let Some(buf_id) = self.wins.get(win_id).map(|w| w.buf) else {
+                    continue;
+                };
+                if let Some(buf) = self.bufs.get_mut(&buf_id) {
+                    buf.ensure_rendered_at(leaf_rect.width);
+                }
+            }
+        }
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.terminal_size;
@@ -2536,6 +2551,59 @@ mod tests {
         assert!(ui.win(win_b).is_none());
         // Closing again is a no-op — overlay is already gone.
         assert_eq!(ui.win_close(win_a), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn render_drives_ensure_rendered_at_for_each_overlay_leaf() {
+        // Plain / markdown / diff parsers populate the buffer's lines
+        // lazily on `ensure_rendered_at(width)`. The overlay paint walk
+        // takes immutable references and can't drive the parser, so
+        // `Ui::render` must do a pre-pass that calls
+        // `ensure_rendered_at` for each leaf at the leaf's resolved
+        // width before paint.
+        use std::sync::{Arc, Mutex};
+        struct WidthRecorder {
+            calls: Arc<Mutex<Vec<u16>>>,
+        }
+        impl buffer::BufferParser for WidthRecorder {
+            fn parse(&self, buf: &mut Buffer, _source: &str, width: u16) {
+                self.calls.lock().unwrap().push(width);
+                buf.set_all_lines(vec![format!("rendered@{width}")]);
+            }
+        }
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let calls = Arc::new(Mutex::new(Vec::<u16>::new()));
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_parser(Arc::new(WidthRecorder {
+                calls: calls.clone(),
+            }));
+            b.set_source("seed".into());
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(
+            Constraint::Length(3),
+            LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
+        )])
+        .with_border(Border::Single);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        // Outer overlay: 42×5 (40 leaf width + 2 border, 3 leaf height +
+        // 2 border). Leaf rect width = 40 ⇒ parser called with 40.
+        let widths = calls.lock().unwrap().clone();
+        assert!(
+            widths.contains(&40),
+            "parser must be invoked at the leaf's resolved width; got {widths:?}"
+        );
     }
 
     #[test]
