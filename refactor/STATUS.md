@@ -22,8 +22,16 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**Next:** P1.c — Overlay replacing Float. Independent of the
-transcript-migration track.
+**P1.c in progress** — three foundation commits landed
+(`40f0c82`, `702305a`, `8fa6760`): `Corner` rename, target `Anchor`
++ `Overlay` types in a new `overlay` module, and pure
+`resolve_anchor` function with 9 tests covering screen / cursor /
+win anchors with proper clamping + cursor-overflow flip.
+
+**Next in P1.c:** C.3 wires `Ui::overlay_open / overlay_close` +
+storage; C.4 migrates one float (cmdline or text_modal) to
+Overlay as proof; C.5+ migrates remaining floats and deletes
+`FloatConfig` / `PanelWidget` / `Placement`.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
