@@ -4,7 +4,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
-use wiremock::MockServer;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub struct Harness {
     pub mock: MockServer,
@@ -40,6 +41,28 @@ impl Harness {
         let smelt_dir = self.smelt_dir();
         std::fs::create_dir_all(&smelt_dir).expect("mkdir");
         std::fs::write(smelt_dir.join("init.lua"), src).expect("write init.lua");
+    }
+
+    /// Mount a `POST /messages` stub returning a canned Anthropic SSE
+    /// stream. Each entry is one SSE event (the JSON object that goes
+    /// after `data: `). The stub is registered for the lifetime of the
+    /// `Harness`.
+    pub async fn mount_anthropic_sse(&self, events: &[Value]) {
+        let mut body = String::new();
+        for ev in events {
+            body.push_str("data: ");
+            body.push_str(&serde_json::to_string(ev).expect("serialize sse event"));
+            body.push_str("\n\n");
+        }
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&self.mock)
+            .await;
     }
 
     /// Run `smelt --headless --format=json -p <message>` and return the
