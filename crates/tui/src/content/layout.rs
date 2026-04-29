@@ -24,23 +24,11 @@ impl LayoutState {
         let max_prompt = (term_height / 2).max(3);
         let prompt_height = prompt_height.min(max_prompt);
 
-        let tree = ui::LayoutTree::Split {
-            direction: ui::layout::Direction::Vertical,
-            children: vec![
-                ui::LayoutTree::Leaf {
-                    name: "transcript".into(),
-                    constraint: ui::Constraint::Fill,
-                },
-                ui::LayoutTree::Leaf {
-                    name: "gap".into(),
-                    constraint: ui::Constraint::Length(1),
-                },
-                ui::LayoutTree::Leaf {
-                    name: "prompt".into(),
-                    constraint: ui::Constraint::Length(prompt_height),
-                },
-            ],
-        };
+        let tree = ui::LayoutTree::vbox(vec![
+            ui::LayoutTree::leaf("transcript", ui::Constraint::Fill),
+            ui::LayoutTree::leaf("gap", ui::Constraint::Length(1)),
+            ui::LayoutTree::leaf("prompt", ui::Constraint::Length(prompt_height)),
+        ]);
 
         let area = Rect::new(0, 0, term_width, term_height);
         let regions = ui::layout::resolve_layout(&tree, area);
