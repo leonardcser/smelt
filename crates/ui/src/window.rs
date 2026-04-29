@@ -995,7 +995,39 @@ impl Window {
             for (col, ch) in line.chars().take(width as usize).enumerate() {
                 slice.set(col as u16, row, ch, row_style);
             }
+            // Layered highlight painting: walk highlight extmarks
+            // anchored on this row and overlay each span's style on
+            // top of `row_style`. Span styles carry resolved colors
+            // (parsers/Lua have already looked up theme groups), so
+            // no theme reads happen here. Cell symbols stay as the
+            // already-painted line glyphs; only attributes change.
+            let line_chars: Vec<char> = line.chars().take(width as usize).collect();
+            for span in buf.highlights_at(idx) {
+                let style = merge_span_style(row_style, &span.style);
+                let start = span.col_start.min(width);
+                let end = span.col_end.min(width);
+                for col in start..end {
+                    let ch = line_chars.get(col as usize).copied().unwrap_or(' ');
+                    slice.set(col, row, ch, style);
+                }
+            }
         }
+    }
+}
+
+/// Layer a `SpanStyle` (extmark highlight) on top of a base `Style`
+/// (row default). `Some` fields on the span override; `None` keeps
+/// the base. Boolean attributes OR together so `bold` / `dim` /
+/// `italic` accumulate across layers.
+fn merge_span_style(base: Style, span: &crate::buffer::SpanStyle) -> Style {
+    Style {
+        fg: span.fg.or(base.fg),
+        bg: span.bg.or(base.bg),
+        bold: base.bold || span.bold,
+        dim: base.dim || span.dim,
+        italic: base.italic || span.italic,
+        underline: base.underline,
+        crossedout: base.crossedout,
     }
 }
 
@@ -1257,6 +1289,65 @@ mod tests {
         w.render(&buf, &mut slice, &ctx);
         // No cursor highlight even when focused, because opt-in flag is off.
         assert_ne!(grid.cell(0, 0).style.bg, bg.bg);
+    }
+
+    #[test]
+    fn render_paints_highlight_extmarks_over_row_style() {
+        // Buffer carries a single highlight extmark on row 0
+        // covering cols 2..5 with `dim`. After render, cells in
+        // that range have `dim = true`; cells outside don't.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["abcdefgh".into()]);
+        buf.add_highlight(0, 2, 5, crate::buffer::SpanStyle::dim());
+        let w = make_win();
+        let theme = Theme::default();
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            theme,
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+        assert_eq!(grid.cell(2, 0).symbol, 'c');
+        assert!(grid.cell(2, 0).style.dim);
+        assert!(grid.cell(4, 0).style.dim);
+        // Cell at col 5 is the exclusive end — not dim.
+        assert!(!grid.cell(5, 0).style.dim);
+        // Cell before the span — not dim.
+        assert!(!grid.cell(1, 0).style.dim);
+    }
+
+    #[test]
+    fn render_layers_highlight_attributes_on_cursor_row_bg() {
+        // When `cursor_line_highlight` paints the cursor row with a
+        // bg, a span's bold attribute layers on top: that cell ends
+        // up bg=cursor and bold=true.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["hello".into()]);
+        buf.add_highlight(0, 0, 3, crate::buffer::SpanStyle::bold());
+        let mut w = make_win();
+        w.cursor_line_highlight = true;
+        w.cursor_line = 0;
+        let mut theme = Theme::default();
+        let bg = crate::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        theme.set("CursorLine", bg);
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: true,
+            theme,
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+        // Span-covered cell: bg from cursor row + bold from span.
+        assert_eq!(grid.cell(0, 0).style.bg, bg.bg);
+        assert!(grid.cell(0, 0).style.bold);
+        // Outside span: bg from cursor row, no bold.
+        assert_eq!(grid.cell(4, 0).style.bg, bg.bg);
+        assert!(!grid.cell(4, 0).style.bold);
     }
 
     #[test]
