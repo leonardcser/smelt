@@ -8,13 +8,30 @@
 
 use crate::app::App;
 use crate::format::BufFormat;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
 use ui::text_input::TextInput;
 use ui::{
-    Border, BufId, Constraint, FitMax, FloatConfig, LayoutTree, OptionItem, OptionList, Overlay,
-    PanelContent, PanelHeight, PanelSpec, Placement, SeparatorStyle, SplitConfig, WinId,
+    Border, BufId, Callback, CallbackResult, Constraint, FitMax, FloatConfig, KeyBind, LayoutTree,
+    OptionItem, OptionList, Overlay, PanelContent, PanelHeight, PanelSpec, Payload, Placement,
+    SeparatorStyle, SplitConfig, WinEvent, WinId,
 };
+
+/// What shape an overlay leaf takes when the dialog is content-only.
+/// Drives whether cursor highlighting + a built-in navigation keymap
+/// are wired up after the leaf's Window is created.
+#[derive(Clone, Copy)]
+enum LeafShape {
+    /// Read-only viewer: no cursor highlight, no built-in keymap.
+    /// Lua-side callers can still register their own keymaps via
+    /// `smelt.win.set_keymap`.
+    Content,
+    /// Cursor-driven list: cursor row highlighted, built-in
+    /// j/k/Up/Down/Home/End/PgUp/PgDn navigation, Enter fires
+    /// `WinEvent::Submit` with `Payload::Selection { index = abs_row }`.
+    List,
+}
 
 // ── Dialog ───────────────────────────────────────────────────────────
 //
@@ -34,12 +51,28 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
         .map_err(|e| format!("dialog panels: {e}"))?;
 
     let mut panel_specs: Vec<PanelSpec> = Vec::new();
+    let mut leaf_shapes: Vec<LeafShape> = Vec::new();
     for pair in panels_tbl.sequence_values::<mlua::Table>() {
         let panel = pair.map_err(|e| format!("dialog panel entry: {e}"))?;
         let kind: String = panel.get("kind").map_err(|e| format!("panel.kind: {e}"))?;
         let height = parse_panel_height(&panel)?;
         let initial_focus: bool = panel.get("focus").unwrap_or(false);
         match kind.as_str() {
+            "list" => {
+                // `kind = "list"` — caller-supplied buffer rendered as
+                // a focusable Buffer-backed Window with cursor-driven
+                // selection. Routed through the Overlay path; legacy
+                // dialog_open never sees this kind.
+                let id: u64 = panel
+                    .get("buf")
+                    .map_err(|e| format!("list.buf is required: {e}"))?;
+                let buf = BufId(id);
+                let spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fill))
+                    .focusable(true)
+                    .with_initial_focus(initial_focus);
+                panel_specs.push(spec);
+                leaf_shapes.push(LeafShape::List);
+            }
             "content" => {
                 let buf = if let Ok(id) = panel.get::<u64>("buf") {
                     BufId(id)
@@ -76,6 +109,7 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     spec.collapse_when_empty = true;
                 }
                 panel_specs.push(spec);
+                leaf_shapes.push(LeafShape::Content);
             }
             "markdown" => {
                 let text: String = panel.get("text").unwrap_or_default();
@@ -84,6 +118,7 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
                         .with_initial_focus(initial_focus),
                 );
+                leaf_shapes.push(LeafShape::Content);
             }
             "options" => {
                 let items_tbl: mlua::Table = panel
@@ -151,7 +186,13 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
         .all(|p| matches!(p.content, PanelContent::Buffer(_)));
     let blocks_agent_pre: bool = opts.get("blocks_agent").unwrap_or(false);
     if content_only {
-        return open_dialog_via_overlay(app, title, panel_specs, blocks_agent_pre);
+        return open_dialog_via_overlay(
+            app,
+            title,
+            panel_specs,
+            leaf_shapes,
+            blocks_agent_pre,
+        );
     }
 
     // Collect footer hints from top-level `opts.keymaps[].hint`. The Lua
@@ -224,17 +265,27 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
 /// `Constraint::Fill` (every panel shares the inner space). Per-panel
 /// natural-size resolution lands when the leaf gains a content-rows
 /// hint (P1.d).
+///
+/// `leaf_shapes` is parallel to `panels` and decides the per-leaf
+/// post-creation wiring: `LeafShape::List` leaves get
+/// `cursor_line_highlight = true` plus a built-in navigation keymap
+/// (j/k/Up/Down/Home/End/PgUp/PgDn) and an Enter binding that fires
+/// `WinEvent::Submit { Selection { abs_row } }` so dialog.lua's
+/// `on_event(win, "submit", …)` handler resumes the parked task.
 fn open_dialog_via_overlay(
     app: &mut App,
     title: Option<String>,
     panels: Vec<PanelSpec>,
+    leaf_shapes: Vec<LeafShape>,
     _blocks_agent: bool,
 ) -> Result<WinId, String> {
     let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::with_capacity(panels.len());
     let mut leaf_wins: Vec<WinId> = Vec::with_capacity(panels.len());
     let mut focus_target: Option<WinId> = None;
+    // Leaves opened as lists need post-overlay configuration.
+    let mut list_leaves: Vec<WinId> = Vec::new();
 
-    for spec in panels {
+    for (spec, shape) in panels.into_iter().zip(leaf_shapes) {
         let PanelContent::Buffer(buf) = spec.content else {
             return Err("open_dialog_via_overlay: non-buffer panel".into());
         };
@@ -254,6 +305,16 @@ fn open_dialog_via_overlay(
         };
         leaf_items.push((constraint, LayoutTree::leaf(win)));
         leaf_wins.push(win);
+        if matches!(shape, LeafShape::List) {
+            list_leaves.push(win);
+            // Default initial focus to the first list leaf when the
+            // dialog has no explicit `focus = true`. Lists are the
+            // interactive ones; content viewers above/below are
+            // typically just headers.
+            if focus_target.is_none() && !spec.focus_initial {
+                focus_target = Some(win);
+            }
+        }
         if spec.focus_initial && focus_target.is_none() {
             focus_target = Some(win);
         }
@@ -276,7 +337,95 @@ fn open_dialog_via_overlay(
     app.ui
         .overlay_open(Overlay::new(layout, Anchor::ScreenCenter).modal(true));
     app.ui.set_focus(primary);
+
+    for leaf in list_leaves {
+        configure_list_leaf(app, leaf);
+    }
+
     Ok(primary)
+}
+
+/// Wire up the built-in list keymap on a leaf Window: cursor row
+/// highlight on, navigation keys for j/k/Up/Down/Home/End/PgUp/PgDn,
+/// Enter fires `WinEvent::Submit` with the absolute selected row.
+/// Each binding is a small Rust callback that mutates the Window's
+/// cursor + scroll state directly.
+fn configure_list_leaf(app: &mut App, leaf: WinId) {
+    if let Some(win) = app.ui.win_mut(leaf) {
+        win.cursor_line_highlight = true;
+    }
+
+    fn move_cursor(ctx: &mut ui::CallbackCtx<'_>, delta: isize) -> CallbackResult {
+        let buf_id = match ctx.ui.win(ctx.win) {
+            Some(w) => w.buf,
+            None => return CallbackResult::Consumed,
+        };
+        let line_count = ctx.ui.buf(buf_id).map(|b| b.line_count()).unwrap_or(0);
+        if line_count == 0 {
+            return CallbackResult::Consumed;
+        }
+        if let Some(win) = ctx.ui.win_mut(ctx.win) {
+            let abs = win.scroll_top as usize + win.cursor_line as usize;
+            let max = line_count.saturating_sub(1);
+            let new_abs = (abs as isize + delta).clamp(0, max as isize) as usize;
+            // Keep cursor visible: simple model — adjust scroll_top so
+            // cursor_line stays in [0, viewport_rows). Without the
+            // exact viewport here, fall back to nudging scroll_top so
+            // the abs row is reachable. List dialogs are short
+            // overall; full scroll resolution lands in P1.d.
+            if (new_abs as u16) < win.scroll_top {
+                win.scroll_top = new_abs as u16;
+                win.cursor_line = 0;
+            } else {
+                let rel = new_abs as isize - win.scroll_top as isize;
+                if rel >= 0 {
+                    win.cursor_line = rel as u16;
+                }
+            }
+        }
+        CallbackResult::Consumed
+    }
+
+    let bindings: &[(KeyBind, isize)] = &[
+        (KeyBind::new(KeyCode::Char('j'), KeyModifiers::NONE), 1),
+        (KeyBind::new(KeyCode::Down, KeyModifiers::NONE), 1),
+        (KeyBind::new(KeyCode::Char('k'), KeyModifiers::NONE), -1),
+        (KeyBind::new(KeyCode::Up, KeyModifiers::NONE), -1),
+        (KeyBind::new(KeyCode::PageDown, KeyModifiers::NONE), 10),
+        (KeyBind::new(KeyCode::PageUp, KeyModifiers::NONE), -10),
+        (
+            KeyBind::new(KeyCode::Home, KeyModifiers::NONE),
+            isize::MIN / 2,
+        ),
+        (KeyBind::new(KeyCode::Char('g'), KeyModifiers::NONE), isize::MIN / 2),
+        (
+            KeyBind::new(KeyCode::End, KeyModifiers::NONE),
+            isize::MAX / 2,
+        ),
+    ];
+    for (key, delta) in bindings {
+        let d = *delta;
+        let cb: Callback = Callback::Rust(Box::new(move |ctx| move_cursor(ctx, d)));
+        let _ = app.ui.win_set_keymap(leaf, *key, cb);
+    }
+
+    // Enter → fire Submit with the absolute selected line index.
+    let submit_cb: Callback = Callback::Rust(Box::new(|ctx| {
+        let abs = ctx
+            .ui
+            .win(ctx.win)
+            .map(|w| w.scroll_top as usize + w.cursor_line as usize)
+            .unwrap_or(0);
+        CallbackResult::Event(
+            WinEvent::Submit,
+            Payload::Selection { index: abs },
+        )
+    }));
+    let _ = app.ui.win_set_keymap(
+        leaf,
+        KeyBind::new(KeyCode::Enter, KeyModifiers::NONE),
+        submit_cb,
+    );
 }
 
 fn parse_separator(panel: &mlua::Table) -> Result<SeparatorStyle, String> {
