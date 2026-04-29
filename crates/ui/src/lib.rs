@@ -2,7 +2,6 @@ pub mod buffer;
 pub mod buffer_view;
 pub mod callback;
 pub mod clipboard;
-pub mod cmdline;
 pub mod component;
 pub mod compositor;
 pub mod dialog;
@@ -37,7 +36,6 @@ pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
     WinEvent,
 };
-pub use cmdline::{Cmdline, CmdlineStyle};
 pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult, WidgetEvent};
 pub use compositor::Compositor;
 pub use dialog::{PanelHeight, PanelSpec};
@@ -514,53 +512,6 @@ impl Ui {
         comp.as_any_mut().downcast_mut::<picker::Picker>()
     }
 
-    // ── Cmdline ──────────────────────────────────────────────────────
-    //
-    // Focusable single-row compositor float for `:` / `/`-style command
-    // entry. Sibling to `Picker` and `Notification`. Callers that want
-    // Tab-complete register per-window keymaps and drive completion via
-    // `Cmdline::{text, set_text}`.
-
-    pub fn cmdline_open(
-        &mut self,
-        config: FloatConfig,
-        cmdline: cmdline::Cmdline,
-    ) -> Option<WinId> {
-        let id = WinId(self.next_win_id);
-        self.next_win_id += 1;
-
-        let (tw, th) = self.terminal_size;
-        let rect = resolve_float_rect(&config, tw, th, None, &self.split_rects);
-        let zindex = config.zindex;
-
-        let placeholder_buf = BufId(0);
-        let focusable = config.focusable;
-        let mut win = Window::new(id, placeholder_buf, WinConfig::Float(config));
-        win.focusable = focusable;
-        self.wins.insert(id, win);
-
-        let layer_id = float_layer_id(id);
-        self.compositor
-            .add(&layer_id, Box::new(cmdline), rect, zindex);
-        if focusable {
-            self.compositor.focus(&layer_id);
-        }
-
-        Some(id)
-    }
-
-    pub fn cmdline_mut(&mut self, win_id: WinId) -> Option<&mut cmdline::Cmdline> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component_mut(&layer_id)?;
-        comp.as_any_mut().downcast_mut::<cmdline::Cmdline>()
-    }
-
-    pub fn cmdline(&self, win_id: WinId) -> Option<&cmdline::Cmdline> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component(&layer_id)?;
-        comp.as_any().downcast_ref::<cmdline::Cmdline>()
-    }
-
     // ── Callbacks ────────────────────────────────────────────────────
     //
     // Per-window keymap + event callbacks. The registry is the single
@@ -964,6 +915,12 @@ impl Ui {
                 }
             }
         }
+        // Resolve the focused overlay leaf's hardware cursor (if any)
+        // so input panels / cmdline draw a visible caret. The
+        // compositor's focused-layer cursor path doesn't see overlay
+        // leaves; we route the cursor through `render_with`'s closure
+        // return.
+        let overlay_cursor = self.focused_overlay_cursor(&resolved);
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.terminal_size;
@@ -971,7 +928,35 @@ impl Ui {
             for (_id, rect, overlay) in &resolved {
                 paint_overlay(grid, theme, *rect, overlay, wins, bufs, term_size);
             }
+            overlay_cursor
         })
+    }
+
+    /// Compute the absolute hardware cursor position for the focused
+    /// overlay leaf, given pre-resolved overlay rects. Returns `None`
+    /// when no overlay leaf is focused or the cursor falls outside the
+    /// leaf's rect. `Window::cursor_line` is viewport-relative so we
+    /// add it directly to the leaf's `top`.
+    fn focused_overlay_cursor(
+        &self,
+        resolved: &[(OverlayId, Rect, Overlay)],
+    ) -> Option<(u16, u16)> {
+        let focus = self.overlay_focus?;
+        for (_id, rect, overlay) in resolved {
+            let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
+            let Some(leaf_rect) = leaf_rects.get(&focus) else {
+                continue;
+            };
+            let win = self.wins.get(&focus)?;
+            let abs_y = leaf_rect.top + win.cursor_line;
+            let abs_x = leaf_rect.left + win.cursor_col;
+            if abs_y < leaf_rect.top + leaf_rect.height && abs_x < leaf_rect.left + leaf_rect.width
+            {
+                return Some((abs_x, abs_y));
+            }
+            return None;
+        }
+        None
     }
 
     pub fn theme(&self) -> &Theme {
@@ -1110,16 +1095,9 @@ impl Ui {
         if let KeyResult::Action(action) = &result {
             let mapped = match action {
                 WidgetEvent::Dismiss => Some((WinEvent::Dismiss, Payload::None)),
-                WidgetEvent::TextChanged => Some((WinEvent::TextChanged, Payload::None)),
                 WidgetEvent::Select(index) => {
                     Some((WinEvent::Submit, Payload::Selection { index: *index }))
                 }
-                WidgetEvent::SubmitText(content) => Some((
-                    WinEvent::Submit,
-                    Payload::Text {
-                        content: content.clone(),
-                    },
-                )),
             };
             if let Some((ev, payload)) = mapped {
                 if self.callbacks.has_event(win, ev) {
@@ -1370,6 +1348,10 @@ fn paint_overlay(
     bufs: &HashMap<BufId, Buffer>,
     term_size: (u16, u16),
 ) {
+    // Overlays are opaque: clear the rect first so layers below
+    // (statusline, prompt borders, transcript content) don't bleed
+    // through gap rows or buffer lines that don't fill the leaf width.
+    grid.clear(area);
     paint_layout_node(grid, theme, &overlay.layout, area, wins, bufs, term_size);
 }
 

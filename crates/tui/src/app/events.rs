@@ -23,16 +23,17 @@ impl App {
         }
 
         // Global chord layer: these keys fire in every focus context
-        // (prompt, content, cmdline, or any float). Intercepted before
+        // (prompt, content, or any float). Intercepted before
         // focus-specific routing so no handler below can swallow them.
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = &ev
         {
-            // Global shortcuts only fire when no float is focused —
-            // otherwise the float's keymap (e.g. Confirm's BackTab
-            // handler) gets first dibs.
-            if self.ui.focused_float().is_none() {
+            // Global shortcuts only fire when no float is focused
+            // and no cmdline overlay is open — otherwise the float's
+            // keymap (e.g. Confirm's BackTab handler) or the cmdline's
+            // text-edit recipe gets first dibs.
+            if self.ui.focused_float().is_none() && self.cmdline_win.is_none() {
                 let ctx = self.input.key_context(self.agent.is_some(), false);
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
@@ -65,15 +66,21 @@ impl App {
                 return false;
             }
             if let Event::Key(k) = ev {
-                // Cmdline needs App access for command execution
-                // (CommandAction::Quit propagation, Lua completer).
-                // Intercept Enter / Esc / Tab / Ctrl+C before the
-                // generic compositor dispatch; everything else flows
-                // into the `ui::Cmdline` component for text editing.
+                // Cmdline owns its keystrokes end-to-end: text edit,
+                // history nav, completer cycling, and command exec
+                // all need `&mut App`, so the overlay leaf has no
+                // recipe and `cmdline_handle_key` runs every key
+                // before the generic compositor dispatch. Returns
+                // `Some(true)` only when the run command resolved to
+                // Quit (propagated as the loop's quit signal).
                 if self.cmdline_is_focused() {
-                    if let Some(quit) = self.cmdline_preintercept(k) {
+                    if let Some(quit) = self.cmdline_handle_key(k) {
                         return quit;
                     }
+                    // Cmdline didn't claim the key — swallow it so
+                    // unrelated split keymaps don't fire on top of an
+                    // open cmdline.
+                    return false;
                 }
                 let KeyEvent {
                     code, modifiers, ..
@@ -778,8 +785,9 @@ impl App {
     /// True when the focused dialog pauses engine-event drain
     /// (Confirm / Question / Lua dialogs gate a pending tool call).
     /// Checks both the overlay path (Lua dialogs flipped to overlay
-    /// surfaces in P1.c) and the legacy float path (cmdline + the
-    /// few internal Rust dialogs that still build a `FloatConfig`).
+    /// surfaces in P1.c) and the legacy float path (picker /
+    /// notification — both retire alongside the rest of `FloatConfig`
+    /// in C.9c.5).
     pub(super) fn focused_float_blocks_agent(&self) -> bool {
         if let Some(id) = self.ui.focused_overlay() {
             if self.ui.overlay(id).is_some_and(|o| o.blocks_agent) {

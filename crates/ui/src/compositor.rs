@@ -173,7 +173,7 @@ impl Compositor {
     }
 
     pub fn render<W: Write>(&mut self, theme: &Theme, w: &mut W) -> std::io::Result<()> {
-        self.render_with(theme, w, |_, _| {})
+        self.render_with(theme, w, |_, _| None)
     }
 
     /// Render variant that lets the caller paint into the in-flight
@@ -181,8 +181,13 @@ impl Compositor {
     /// flush. Used by `Ui::render` to paint overlays as a peer pass on
     /// top of split + float layers without making overlays know about
     /// the layer registry. The closure receives a mutable reference to
-    /// the grid plus a borrowed theme so it can resolve highlight ids.
-    pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme)>(
+    /// the grid plus a borrowed theme so it can resolve highlight ids,
+    /// and returns an optional absolute `(col, row)` hardware cursor
+    /// position that takes precedence over the focused layer's cursor.
+    /// `Ui::render` returns the focused-overlay-leaf's cursor here so a
+    /// modal input leaf draws a visible caret even though the
+    /// compositor's focused-layer slot is empty.
+    pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>>(
         &mut self,
         theme: &Theme,
         w: &mut W,
@@ -213,7 +218,7 @@ impl Compositor {
             layer.component.draw(layer.rect, &mut slice, &ctx);
         }
 
-        after_layers(&mut self.current, theme);
+        let overlay_cursor = after_layers(&mut self.current, theme);
 
         // Paint block cursors from focused layer into the grid (before flush).
         let cursor_info = focused_id.as_deref().and_then(|fid| {
@@ -222,7 +227,7 @@ impl Compositor {
                 .find(|l| l.id == fid)
                 .and_then(|l| l.component.cursor().map(|ci| (l.rect, ci)))
         });
-        let hardware_cursor = cursor_info.as_ref().and_then(|(rect, ci)| {
+        let layer_cursor = cursor_info.as_ref().and_then(|(rect, ci)| {
             let abs_x = rect.left + ci.col;
             let abs_y = rect.top + ci.row;
             if let Some(ref cs) = ci.style {
@@ -232,6 +237,7 @@ impl Compositor {
                 Some((abs_x, abs_y))
             }
         });
+        let hardware_cursor = overlay_cursor.or(layer_cursor);
 
         w.queue(BeginSynchronizedUpdate)?;
 
@@ -486,6 +492,7 @@ mod tests {
             // Overwrite the first cell of the layer's paint to prove
             // the closure runs after layer paint.
             grid.set(0, 0, 'X', Style::default());
+            None
         })
         .unwrap();
         let s = String::from_utf8(out).unwrap();
