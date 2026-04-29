@@ -228,9 +228,29 @@ impl Ui {
 
     /// Close an overlay. Returns the removed `Overlay` for callers
     /// that want to inspect its layout (e.g. to close the contained
-    /// windows individually).
+    /// windows individually). When the currently-focused window is
+    /// a leaf of the closed overlay, walks `focus_history` backward
+    /// to the most recent still-focusable `WinId` and restores
+    /// focus there. If the history is exhausted (or all entries are
+    /// stale), focus is cleared. Focus on a window outside the
+    /// closed overlay is preserved untouched, and `focus_history`
+    /// is left alone.
     pub fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
-        self.overlays.remove(&id)
+        let removed = self.overlays.remove(&id)?;
+        if let Some(focused) = self.focus() {
+            if removed.layout.contains_leaf(focused) {
+                while let Some(prior) = self.focus_history.pop() {
+                    if let Some(layer_id) = self.layer_id_for_win(prior) {
+                        self.compositor.focus(layer_id);
+                        return Some(removed);
+                    }
+                }
+                // History exhausted — clear stale focus so the next
+                // input doesn't dispatch through a vanished layer.
+                self.compositor.clear_focus();
+            }
+        }
+        Some(removed)
     }
 
     pub fn overlay(&self, id: OverlayId) -> Option<&Overlay> {
@@ -828,6 +848,21 @@ impl Ui {
     /// the `"float:N"` layer-id prefix).
     pub fn focus(&self) -> Option<WinId> {
         self.compositor.focused().and_then(|id| self.layer_to_win(id))
+    }
+
+    /// Currently focused `Window`, if its id is registered in
+    /// `wins`. Convenience over `focus()` for callers that need the
+    /// struct (cursor / selection / config). Splits whose `Window`
+    /// hasn't been inserted into `wins` (e.g. the prompt /
+    /// transcript pseudo-windows) return `None` here even when
+    /// focused — `focus()` is the canonical reader.
+    pub fn focused_window(&self) -> Option<&Window> {
+        self.wins.get(&self.focus()?)
+    }
+
+    pub fn focused_window_mut(&mut self) -> Option<&mut Window> {
+        let id = self.focus()?;
+        self.wins.get_mut(&id)
     }
 
     /// Focus a specific window. Returns `false` when `win` doesn't
@@ -1687,6 +1722,79 @@ mod tests {
         ui.overlay_open(stub_overlay()); // non-modal
         ui.overlay_open(stub_overlay().with_z(100)); // non-modal, higher z
         assert_eq!(ui.active_modal(), None);
+    }
+
+    #[test]
+    fn focused_window_returns_window_for_split_with_inserted_win() {
+        let mut ui = make_ui();
+        // wins.get(...) needs a real Window — open a split with a real buf.
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: layout::Gutters::default(),
+                },
+            )
+            .expect("split opens");
+        ui.register_split("a", win);
+        ui.set_focus(win);
+        assert_eq!(ui.focused_window().map(|w| w.id), Some(win));
+    }
+
+    #[test]
+    fn overlay_close_with_focus_inside_pops_to_prior() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let outside = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: layout::Gutters::default(),
+                },
+            )
+            .expect("split opens");
+        ui.register_split("outside", outside);
+        // Inside-the-overlay leaf id (stub_overlay uses WinId(99)).
+        let inside = WinId(99);
+        ui.register_split("inside", inside);
+        let id = ui.overlay_open(stub_overlay());
+
+        ui.set_focus(outside);
+        ui.set_focus(inside);
+        assert_eq!(ui.focus(), Some(inside));
+        assert_eq!(ui.focus_history(), &[outside]);
+
+        ui.overlay_close(id);
+        // Pop walked back to `outside`; history drained.
+        assert_eq!(ui.focus(), Some(outside));
+        assert!(ui.focus_history().is_empty());
+    }
+
+    #[test]
+    fn overlay_close_with_focus_outside_leaves_focus_alone() {
+        let mut ui = make_ui();
+        let outside = WinId(50);
+        ui.register_split("outside", outside);
+        let id = ui.overlay_open(stub_overlay());
+        ui.set_focus(outside);
+        ui.overlay_close(id);
+        assert_eq!(ui.focus(), Some(outside));
+    }
+
+    #[test]
+    fn overlay_close_with_exhausted_history_clears_focus() {
+        let mut ui = make_ui();
+        let inside = WinId(99); // stub_overlay's leaf
+        ui.register_split("inside", inside);
+        let id = ui.overlay_open(stub_overlay());
+        ui.set_focus(inside);
+        // No prior focus — history empty.
+        assert!(ui.focus_history().is_empty());
+        ui.overlay_close(id);
+        assert_eq!(ui.focus(), None);
     }
 
     #[test]

@@ -127,6 +127,14 @@ impl Compositor {
         self.focused = Some(id.into());
     }
 
+    /// Clear keyboard focus. After this, key dispatch returns
+    /// `Ignored` until something is focused again. Used by the
+    /// overlay-close path when the focused window vanishes and no
+    /// prior in `focus_history` is still focusable.
+    pub fn clear_focus(&mut self) {
+        self.focused = None;
+    }
+
     pub fn focused(&self) -> Option<&str> {
         self.focused.as_deref()
     }
