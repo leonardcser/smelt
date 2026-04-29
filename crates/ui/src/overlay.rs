@@ -22,6 +22,17 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OverlayId(pub u32);
 
+/// What inside an overlay a hit landed on. `Window` carries the
+/// specific leaf `WinId`; `Chrome` is anywhere else inside the
+/// overlay's resolved rect (border, title row, gap, padding) — the
+/// host treats chrome hits as drag handles, close-button targets,
+/// or focus-promote on click depending on the overlay's policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayHitTarget {
+    Window(crate::WinId),
+    Chrome,
+}
+
 #[derive(Clone, Debug)]
 pub struct Overlay {
     pub layout: LayoutTree,
