@@ -820,7 +820,25 @@ impl Ui {
         // Auto-translate widget events into typed `WinEvent` callbacks
         // when the focused window has a matching callback registered.
         if let KeyResult::Action(action) = &result {
-            if let Some((ev, payload)) = classify_widget_action(action) {
+            let mapped = match action {
+                WidgetEvent::Dismiss | WidgetEvent::Cancel => {
+                    Some((WinEvent::Dismiss, Payload::None))
+                }
+                WidgetEvent::Submit | WidgetEvent::SelectDefault => {
+                    Some((WinEvent::Submit, Payload::None))
+                }
+                WidgetEvent::TextChanged => Some((WinEvent::TextChanged, Payload::None)),
+                WidgetEvent::Select(index) => {
+                    Some((WinEvent::Submit, Payload::Selection { index: *index }))
+                }
+                WidgetEvent::SubmitText(content) => Some((
+                    WinEvent::Submit,
+                    Payload::Text {
+                        content: content.clone(),
+                    },
+                )),
+            };
+            if let Some((ev, payload)) = mapped {
                 if self.callbacks.has_event(win, ev) {
                     self.dispatch_event(win, ev, payload, lua_invoke);
                     return KeyResult::Consumed;
@@ -828,52 +846,6 @@ impl Ui {
             }
         }
         result
-    }
-
-    /// Dispatch a mouse event through the compositor, then fan widget
-    /// actions out to the dispatched-to window's `WinEvent` callbacks
-    /// (mirrors the keyboard path in `handle_key_with_lua`). Returns
-    /// `(WinId, KeyResult)` for the dispatched-to layer, or `None` when
-    /// no float was hit — the host then routes the event to its own
-    /// pane mouse logic (transcript/prompt drag-select).
-    pub fn handle_mouse_with_lua(
-        &mut self,
-        event: crossterm::event::MouseEvent,
-        lua_invoke: &mut LuaInvoke,
-    ) -> Option<(WinId, KeyResult)> {
-        let (layer_id, result) = self.compositor.handle_mouse(event)?;
-        let win = parse_float_layer_id(&layer_id)?;
-        if let KeyResult::Action(action) = &result {
-            if let Some((ev, payload)) = classify_widget_action(action) {
-                if self.callbacks.has_event(win, ev) {
-                    self.dispatch_event(win, ev, payload, lua_invoke);
-                    return Some((win, KeyResult::Consumed));
-                }
-            }
-        }
-        Some((win, result))
-    }
-
-    /// Dispatch a mouse event directly to `win`'s component, bypassing
-    /// hit-testing. Used while a drag-capture is in flight to deliver
-    /// `Drag` and `Up` events to the same layer that received `Down`.
-    pub fn handle_mouse_for(
-        &mut self,
-        win: WinId,
-        event: crossterm::event::MouseEvent,
-        lua_invoke: &mut LuaInvoke,
-    ) -> Option<KeyResult> {
-        let layer_id = float_layer_id(win);
-        let result = self.compositor.handle_mouse_to(&layer_id, event)?;
-        if let KeyResult::Action(action) = &result {
-            if let Some((ev, payload)) = classify_widget_action(action) {
-                if self.callbacks.has_event(win, ev) {
-                    self.dispatch_event(win, ev, payload, lua_invoke);
-                    return Some(KeyResult::Consumed);
-                }
-            }
-        }
-        Some(result)
     }
 
     /// Fire `WinEvent::Tick` on every window that has a registered
@@ -995,27 +967,6 @@ impl Ui {
             self.compositor.set_rect(&float_layer_id(id), rect);
         }
     }
-}
-
-/// Map a widget-emitted `WidgetEvent` to a `(WinEvent, Payload)` pair
-/// for auto-dispatch. Widgets (`OptionList`, `TextInput`, `Dialog`)
-/// return typed events; this just fans them out to the callback
-/// system's event names.
-fn classify_widget_action(ev: &WidgetEvent) -> Option<(WinEvent, Payload)> {
-    use WidgetEvent::*;
-    Some(match ev {
-        Dismiss => (WinEvent::Dismiss, Payload::None),
-        Cancel => (WinEvent::Dismiss, Payload::None),
-        Submit | SelectDefault => (WinEvent::Submit, Payload::None),
-        TextChanged => (WinEvent::TextChanged, Payload::None),
-        Select(index) => (WinEvent::Submit, Payload::Selection { index: *index }),
-        SubmitText(content) => (
-            WinEvent::Submit,
-            Payload::Text {
-                content: content.clone(),
-            },
-        ),
-    })
 }
 
 fn resolve_constraint_dim(c: Constraint, total: u16) -> u16 {
