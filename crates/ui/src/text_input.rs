@@ -214,7 +214,7 @@ impl Component for TextInput {
         self.last_area = area;
     }
 
-    fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, ctx: &DrawContext) {
+    fn draw(&self, _area: Rect, grid: &mut GridSlice<'_>, _ctx: &DrawContext) {
         let w = grid.width();
         if w == 0 || grid.height() == 0 {
             return;
@@ -230,21 +230,8 @@ impl Component for TextInput {
         let chars: Vec<char> = self.text.chars().collect();
         let visible_start = self.scroll_offset;
         let visible_end = (visible_start + w as usize).min(chars.len());
-        let selection = self.selection_range();
         for (col, &ch) in chars[visible_start..visible_end].iter().enumerate() {
-            let abs_idx = visible_start + col;
-            let in_selection = selection
-                .map(|(s, e)| abs_idx >= s && abs_idx < e)
-                .unwrap_or(false);
-            let style = if in_selection {
-                Style {
-                    bg: ctx.selection_style.bg,
-                    ..self.text_style
-                }
-            } else {
-                self.text_style
-            };
-            grid.set(col as u16, 0, ch, style);
+            grid.set(col as u16, 0, ch, self.text_style);
         }
     }
 
@@ -445,7 +432,6 @@ mod tests {
             terminal_width: 10,
             terminal_height: 1,
             focused: true,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         Component::draw(&ti, Rect::new(0, 0, 10, 1), &mut slice, &ctx);
@@ -506,7 +492,6 @@ mod tests {
             terminal_width: 20,
             terminal_height: 1,
             focused: true,
-            selection_style: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
         Component::draw(&ti, Rect::new(0, 0, 20, 1), &mut slice, &ctx);

@@ -275,11 +275,6 @@ pub struct DialogConfig {
     pub scrollbar_track_style: Style,
     /// Background color for scrollbar thumb.
     pub scrollbar_thumb_style: Style,
-    /// Background applied to chars inside an active selection on
-    /// interactive buffer panels. Sourced from `Ui::selection_style()`
-    /// at dialog open time so the look stays consistent with the
-    /// transcript and prompt.
-    pub selection_style: Style,
     /// Extra keys that dismiss the dialog (beyond Esc).
     pub dismiss_keys: Vec<(KeyCode, KeyModifiers)>,
     /// Hints row content. `None` hides the row.
@@ -539,7 +534,6 @@ impl Dialog {
                 DialogPanelContent::Buffer {
                     buf,
                     view,
-                    win,
                     rows,
                     ..
                 } => {
@@ -559,9 +553,6 @@ impl Dialog {
                         *rows = std::sync::Arc::clone(b.lines_arc());
                     }
                     view.set_default_style(default_style);
-                    if panel.interactive {
-                        paint_selection_overlay(view, win, rows, self.config.selection_style);
-                    }
                 }
                 DialogPanelContent::Widget(widget) => {
                     // List-shaped widgets that mirror a `Buffer`
@@ -1359,34 +1350,6 @@ impl Component for Dialog {
     }
 }
 
-/// Add a transient selection-bg highlight to `view` covering the
-/// window's current `selection_range` against `rows`. Called each
-/// frame after `view.sync_from_buffer` (which clears transients) so
-/// the overlay tracks live cursor + scroll. Pure no-op when the
-/// window has no active selection.
-fn paint_selection_overlay(view: &mut BufferView, win: &Window, rows: &[String], style: Style) {
-    let Some((start, end)) = win.selection_range(rows) else {
-        return;
-    };
-    if start >= end {
-        return;
-    }
-    let mut line_start = 0usize;
-    for (idx, row) in rows.iter().enumerate() {
-        let line_end = line_start + row.len();
-        if end > line_start && start <= line_end {
-            let clip_s = start.saturating_sub(line_start).min(row.len());
-            let clip_e = end.saturating_sub(line_start).min(row.len());
-            let start_cell = crate::text::byte_to_cell(row, clip_s) as u16;
-            let end_cell = crate::text::byte_to_cell(row, clip_e) as u16;
-            if end_cell > start_cell {
-                view.add_highlight(idx, start_cell, end_cell, style);
-            }
-        }
-        line_start = line_end + 1;
-    }
-}
-
 pub(crate) fn build_panels(
     specs: Vec<PanelSpec>,
     bufs: &std::collections::HashMap<BufId, Buffer>,
@@ -1478,7 +1441,6 @@ mod tests {
             terminal_width: w,
             terminal_height: h,
             focused: true,
-            selection_style: Default::default(),
         }
     }
 
