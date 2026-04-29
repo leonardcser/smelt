@@ -133,9 +133,6 @@ pub enum MouseAction {
     /// rect. Returned from `Down(Left)` whenever the click landed on
     /// content.
     Capture,
-    /// Window finalised a selection; host should copy `text` to the
-    /// clipboard (and typically push it onto its kill ring).
-    Yank(String),
 }
 
 /// Per-call context for [`Window::handle_mouse`]. The window itself
@@ -163,20 +160,6 @@ pub struct MouseCtx<'a> {
     /// click cadence can pass `1` and lose word/line click — that's
     /// fine for read-only views.
     pub click_count: u8,
-}
-
-/// Slice `[s, e)` out of `rows.join("\n")` without allocating the
-/// full join. Used by `mouse_down`'s yank path.
-fn slice_rows(rows: &[String], s: usize, e: usize) -> String {
-    let joined = rows.join("\n");
-    let s = s.min(joined.len());
-    let e = e.min(joined.len());
-    if e <= s {
-        return String::new();
-    }
-    let s = crate::text::snap(&joined, s);
-    let e = crate::text::snap(&joined, e);
-    joined[s..e].to_string()
 }
 
 #[derive(Clone, Debug)]
@@ -557,14 +540,12 @@ impl Window {
     /// (rows, soft/hard line breaks, viewport, click count).
     /// Encapsulates the cursor and Visual selection logic that the
     /// transcript pane has used for ages: click-to-position cursor,
-    /// double-click word-select-and-yank, triple-click line-select-
-    /// and-yank, drag extension anchored to the original word/line
-    /// when applicable, and mouse-up yank-on-release.
-    ///
-    /// The caller owns clipboard side effects: a returned [`MouseAction::Yank`]
-    /// asks the host to copy `text` and (typically) record it on the
-    /// kill ring. The window's `drag_anchor_*` fields are managed
-    /// internally so successive `Drag` events extend by the right unit.
+    /// double-click word-select, triple-click line-select, drag
+    /// extension anchored to the original word/line when applicable.
+    /// The window's `drag_anchor_*` fields are managed internally so
+    /// successive `Drag` events extend by the right unit. Clipboard
+    /// side effects are the host's job — Window only mutates its own
+    /// selection state.
     pub fn handle_mouse(&mut self, event: MouseEvent, ctx: MouseCtx) -> MouseAction {
         // Build the joined buffer once and pass it down. Mouse helpers
         // operate on this `&str` instead of `self.edit_buf.buf`, which
@@ -620,7 +601,6 @@ impl Window {
                 ) {
                     self.drag_anchor_word = Some((s, e));
                     self.drag_anchor_line = None;
-                    return MouseAction::Yank(slice_rows(ctx.rows, s, e));
                 }
                 MouseAction::Capture
             }
@@ -630,7 +610,6 @@ impl Window {
                 {
                     self.drag_anchor_line = Some((s, e));
                     self.drag_anchor_word = None;
-                    return MouseAction::Yank(slice_rows(ctx.rows, s, e));
                 }
                 MouseAction::Capture
             }
@@ -681,49 +660,13 @@ impl Window {
         MouseAction::Consumed
     }
 
-    fn mouse_up(&mut self, ctx: MouseCtx, buf: &str) -> MouseAction {
-        // Compute the final selection from rows; yank if non-empty.
-        // A bare click (no drag, no double/triple-click span) leaves
-        // `anchor == cpos`. Vim Visual reports an inclusive single-char
-        // range in that case, so we skip the yank when no actual
-        // selection was made — matches the transcript's pre-7a
-        // App-level guard, but applied here so every consumer gets it.
-        let cpos = self.compute_cpos(ctx.rows);
-        let has_drag_span = self.drag_anchor_word.is_some() || self.drag_anchor_line.is_some();
-        let has_selection = if let Some(vim) = self.vim.as_ref() {
-            match vim.mode() {
-                ViMode::Visual | ViMode::VisualLine => vim.visual_anchor() != Some(cpos),
-                _ => false,
-            }
-        } else {
-            self.win_cursor.anchor().is_some_and(|a| a != cpos)
-        };
-        let range = if has_drag_span || has_selection {
-            if let Some(vim) = self.vim.as_ref() {
-                vim.visual_range(buf, cpos)
-            } else {
-                self.win_cursor.range(cpos)
-            }
-        } else {
-            None
-        };
-        let action = match range {
-            Some((s, e)) if e > s => {
-                let s = crate::text::snap(buf, s);
-                let e = crate::text::snap(buf, e);
-                if e > s {
-                    MouseAction::Yank(buf[s..e].to_string())
-                } else {
-                    MouseAction::Consumed
-                }
-            }
-            _ => MouseAction::Consumed,
-        };
+    fn mouse_up(&mut self, _ctx: MouseCtx, _buf: &str) -> MouseAction {
         // The user's gesture is over: clear all selection state so a
         // fresh click starts a fresh selection. Owning this here means
         // every consumer (transcript, prompt, dialog buffer) gets the
         // same lifecycle for free — no bespoke clear-anchor code in
-        // the host adapters.
+        // the host adapters. Clipboard side effects are the host's
+        // job; Window only owns its selection state.
         if let Some(vim) = self.vim.as_mut() {
             if matches!(vim.mode(), ViMode::Visual | ViMode::VisualLine) {
                 vim.set_mode(ViMode::Normal);
@@ -732,7 +675,7 @@ impl Window {
         self.win_cursor.clear_anchor();
         self.drag_anchor_word = None;
         self.drag_anchor_line = None;
-        action
+        MouseAction::Consumed
     }
 
     /// Word-anchored drag extension: keep the originally-double-clicked
@@ -1127,87 +1070,6 @@ mod tests {
         assert_eq!(w.cursor_line, 1);
         assert_eq!(w.cursor_col, 7);
         assert!(w.win_cursor.anchor().is_some());
-    }
-
-    #[test]
-    fn double_click_yanks_word() {
-        let mut w = make_win();
-        let rows: Vec<String> = vec!["hello world".into()];
-        let rect = Rect::new(0, 0, 20, 5);
-        let ctx = MouseCtx {
-            rows: &rows,
-            soft_breaks: &[],
-            hard_breaks: &hard_breaks(&rows),
-            viewport: viewport_for(&rows, rect),
-            click_count: 2,
-        };
-        let r = w.handle_mouse(
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 8),
-            ctx,
-        );
-        match r {
-            MouseAction::Yank(t) => assert_eq!(t, "world"),
-            other => panic!("expected Yank, got {other:?}"),
-        }
-        assert!(w.drag_anchor_word.is_some());
-    }
-
-    #[test]
-    fn triple_click_yanks_line() {
-        let mut w = make_win();
-        let rows: Vec<String> = vec!["alpha".into(), "beta gamma".into()];
-        let rect = Rect::new(0, 0, 20, 5);
-        let ctx = MouseCtx {
-            rows: &rows,
-            soft_breaks: &[],
-            hard_breaks: &hard_breaks(&rows),
-            viewport: viewport_for(&rows, rect),
-            click_count: 3,
-        };
-        let r = w.handle_mouse(
-            click_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
-            ctx,
-        );
-        match r {
-            MouseAction::Yank(t) => assert_eq!(t, "beta gamma"),
-            other => panic!("expected Yank, got {other:?}"),
-        }
-        assert!(w.drag_anchor_line.is_some());
-    }
-
-    #[test]
-    fn drag_extends_then_release_yanks() {
-        let mut w = make_win();
-        let rows: Vec<String> = vec!["hello world".into()];
-        let rect = Rect::new(0, 0, 20, 5);
-        let breaks = hard_breaks(&rows);
-        let viewport = viewport_for(&rows, rect);
-        let mk_ctx = || MouseCtx {
-            rows: &rows,
-            soft_breaks: &[],
-            hard_breaks: &breaks,
-            viewport,
-            click_count: 1,
-        };
-        // Click at col 0, drag to col 5, release.
-        w.handle_mouse(
-            click_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
-            mk_ctx(),
-        );
-        w.handle_mouse(
-            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 5),
-            mk_ctx(),
-        );
-        let r = w.handle_mouse(
-            click_event(MouseEventKind::Up(MouseButton::Left), 0, 5),
-            mk_ctx(),
-        );
-        match r {
-            MouseAction::Yank(t) => assert_eq!(t, "hello"),
-            other => panic!("expected Yank, got {other:?}"),
-        }
-        assert!(w.drag_anchor_word.is_none());
-        assert!(w.drag_anchor_line.is_none());
     }
 
     #[test]

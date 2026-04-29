@@ -329,14 +329,8 @@ impl Component for TextInput {
                 KeyResult::Consumed
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let yank = self
-                    .selection_range()
-                    .map(|(s, e)| self.text.chars().skip(s).take(e - s).collect::<String>());
                 self.clear_selection();
-                match yank {
-                    Some(text) if !text.is_empty() => KeyResult::Action(WidgetEvent::Yank(text)),
-                    _ => KeyResult::Consumed,
-                }
+                KeyResult::Consumed
             }
             _ => KeyResult::Ignored,
         }
@@ -488,7 +482,7 @@ mod tests {
         ti.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 10));
         assert_eq!(ti.selection_range(), Some((0, 5)));
         let r = ti.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 10));
-        assert_eq!(r, KeyResult::Action(WidgetEvent::Yank("hello".into())));
+        assert_eq!(r, KeyResult::Consumed);
         // Selection clears on release.
         assert_eq!(ti.selection_range(), None);
     }

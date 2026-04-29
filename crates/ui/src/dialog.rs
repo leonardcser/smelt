@@ -1044,7 +1044,6 @@ impl Dialog {
             crate::window::MouseAction::Capture => KeyResult::Capture,
             crate::window::MouseAction::Consumed => KeyResult::Consumed,
             crate::window::MouseAction::Ignored => KeyResult::Ignored,
-            crate::window::MouseAction::Yank(text) => KeyResult::Action(WidgetEvent::Yank(text)),
         }
     }
 }

@@ -130,13 +130,7 @@ impl App {
                                   panels: &[ui::PanelSnapshot]| {
                 lua.queue_invocation(handle, win, payload, panels);
             };
-            let r = self.ui.handle_mouse_for(win, me, &mut lua_invoke);
-            // Layer drag-select on release → copy yanked text to the
-            // system clipboard. App owns the clipboard so the ui crate
-            // stays platform-agnostic.
-            if let Some(ui::KeyResult::Action(ui::WidgetEvent::Yank(text))) = r {
-                let _ = crate::app::commands::copy_to_clipboard(&text);
-            }
+            let _ = self.ui.handle_mouse_for(win, me, &mut lua_invoke);
             if matches!(me.kind, MouseEventKind::Up(MouseButton::Left)) {
                 self.drag_on_layer = None;
                 self.mouse_drag_active = false;
@@ -450,45 +444,15 @@ impl App {
             }
         }
 
-        // If Window yielded a yank, re-slice from source so soft-wrap
-        // `\n`s don't leak into the clipboard. The selection range in
-        // source coordinates is whatever anchor/cpos translated to.
-        if matches!(action, ui::MouseAction::Yank(_)) {
-            if let Some((s, e)) = self.input.selection_range() {
-                if e > s {
-                    let text = self.input.win.edit_buf.buf[s..e].to_string();
-                    if crate::app::commands::copy_to_clipboard(&text).is_ok() {
-                        self.input.win.kill_ring.record_clipboard_write(text);
-                    }
-                }
-            } else {
-                // Word/line selection from double/triple click anchors
-                // the win_cursor at the start and parks cpos at end-1.
-                // Use the drag anchors if win_cursor was already cleared.
-                let range = self
-                    .input
-                    .win
-                    .drag_anchor_word
-                    .or(self.input.win.drag_anchor_line);
-                if let Some((s, e)) = range {
-                    if e > s {
-                        let text = self.input.win.edit_buf.buf[s..e].to_string();
-                        if crate::app::commands::copy_to_clipboard(&text).is_ok() {
-                            self.input.win.kill_ring.record_clipboard_write(text);
-                        }
-                    }
-                }
-            }
-        }
+        let _ = action;
     }
 
     /// Drive a transcript-pane mouse event through `Window::handle_mouse`.
     /// Resolves the projected display rows, soft/hard line breaks and
     /// painted viewport once, snaps the click column into a selectable
     /// cell (so hidden-thinking summary rows route to the fold marker
-    /// instead of empty padding), then translates a returned
-    /// `Yank` action through `copy_display_range` so the clipboard
-    /// receives raw markdown rather than rendered display text.
+    /// instead of empty padding), and lets the window mutate its own
+    /// selection state.
     fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         if rows.is_empty() {
@@ -506,8 +470,7 @@ impl App {
             viewport,
             click_count,
         };
-        let action = self.transcript_window.handle_mouse(snapped, ctx);
-        self.translate_content_yank(action);
+        let _ = self.transcript_window.handle_mouse(snapped, ctx);
     }
 
     /// Translate `me`'s screen column into a *selectable* column for the
@@ -529,43 +492,6 @@ impl App {
         MouseEvent {
             column: vp.rect.left.saturating_add(snapped as u16),
             ..me
-        }
-    }
-
-    /// Bridge a `Window::handle_mouse` `Yank` action back to the
-    /// transcript's display→raw mapping. The window yields display-row
-    /// text; the clipboard wants the markdown source. Re-derive the
-    /// `(s, e)` byte range from the window's anchors (set during
-    /// double/triple-click) or its vim/win_cursor selection (after
-    /// drag-up), then run the range through `copy_display_range`.
-    fn translate_content_yank(&mut self, action: ui::MouseAction) {
-        if !matches!(action, ui::MouseAction::Yank(_)) {
-            return;
-        }
-        let (s, e) = if let Some((s, e)) = self.transcript_window.drag_anchor_word {
-            (s, e)
-        } else if let Some((s, e)) = self.transcript_window.drag_anchor_line {
-            (s, e)
-        } else {
-            let rows = self.full_transcript_display_text(self.settings.show_thinking);
-            let buf = rows.join("\n");
-            let cpos = self.transcript_window.compute_cpos(&rows);
-            let range = if let Some(vim) = self.transcript_window.vim.as_ref() {
-                vim.visual_range(&buf, cpos)
-            } else {
-                self.transcript_window.selection_range(&rows)
-            };
-            let Some((s, e)) = range else { return };
-            (ui::text::snap(&buf, s), ui::text::snap(&buf, e))
-        };
-        if e <= s {
-            return;
-        }
-        let text = self.copy_display_range(s, e, self.settings.show_thinking);
-        if crate::app::commands::copy_to_clipboard(&text).is_ok() {
-            self.transcript_window
-                .kill_ring
-                .record_clipboard_write(text);
         }
     }
 
