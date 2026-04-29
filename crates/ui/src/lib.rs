@@ -1175,6 +1175,12 @@ impl Ui {
             return self.compositor.handle_key(code, mods);
         };
         let key = KeyBind::new(code, mods);
+        // Pending follow-up dispatched after the keymap callback
+        // returns. `CallbackResult::Event` writes here so a Rust
+        // callback can synthesize a `WinEvent` (e.g. a list's Enter
+        // binding firing `Submit`) without needing direct access to
+        // `lua_invoke`.
+        let mut follow_up: Option<(WinEvent, Payload)> = None;
         let result = if let Some(mut cb) = self.callbacks.take_keymap(win, key) {
             let r = match &mut cb {
                 Callback::Rust(inner) => {
@@ -1187,6 +1193,10 @@ impl Ui {
                     match r {
                         CallbackResult::Consumed => KeyResult::Consumed,
                         CallbackResult::Pass => self.compositor.handle_key(code, mods),
+                        CallbackResult::Event(ev, payload) => {
+                            follow_up = Some((ev, payload));
+                            KeyResult::Consumed
+                        }
                     }
                 }
                 Callback::Lua(handle) => {
@@ -1210,6 +1220,10 @@ impl Ui {
                     match r {
                         CallbackResult::Consumed => KeyResult::Consumed,
                         CallbackResult::Pass => self.compositor.handle_key(code, mods),
+                        CallbackResult::Event(ev, payload) => {
+                            follow_up = Some((ev, payload));
+                            KeyResult::Consumed
+                        }
                     }
                 }
                 Callback::Lua(handle) => {
@@ -1224,6 +1238,10 @@ impl Ui {
         } else {
             self.compositor.handle_key(code, mods)
         };
+
+        if let Some((ev, payload)) = follow_up {
+            self.dispatch_event(win, ev, payload, lua_invoke);
+        }
 
         // Auto-translate widget events into typed `WinEvent` callbacks
         // when the focused window has a matching callback registered.
@@ -2441,6 +2459,61 @@ mod tests {
         );
         assert_eq!(result, KeyResult::Consumed);
         assert!(ui.overlay(oid).is_none());
+    }
+
+    #[test]
+    fn callback_result_event_dispatches_winevent_after_keymap() {
+        // A built-in keymap callback (e.g. a list's Enter binding)
+        // returns `CallbackResult::Event(Submit, payload)`. The
+        // dispatcher must follow up with `dispatch_event` so any
+        // registered `on_event(win, "submit", ...)` handler fires.
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "list".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        // Wrap the win in a modal overlay so it becomes a focusable
+        // leaf reachable via `set_focus`.
+        let layout = LayoutTree::vbox(vec![(Constraint::Length(3), LayoutTree::leaf(win))]);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+
+        let submit_cb: Callback = Callback::Rust(Box::new(|_| {
+            CallbackResult::Event(WinEvent::Submit, Payload::Selection { index: 7 })
+        }));
+        let _ = ui.win_set_keymap(
+            win,
+            KeyBind::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            submit_cb,
+        );
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let observed_cb = observed.clone();
+        ui.win_on_event(
+            win,
+            WinEvent::Submit,
+            Callback::Rust(Box::new(move |ctx| {
+                if let Payload::Selection { index } = ctx.payload {
+                    observed_cb.lock().unwrap().push(index);
+                }
+                CallbackResult::Consumed
+            })),
+        );
+
+        let result = ui.handle_key(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(*observed.lock().unwrap(), vec![7]);
     }
 
     #[test]

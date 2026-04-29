@@ -119,13 +119,21 @@ impl Payload {
 }
 
 /// Result returned by a callback.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum CallbackResult {
     /// Callback handled the event; no further routing.
     Consumed,
     /// Callback passes; fall through to `Component::handle_key`
     /// (for keymap callbacks) or do nothing (for event callbacks).
     Pass,
+    /// Consumed, and additionally fire a `WinEvent` on the same
+    /// window with the given payload. The dispatcher translates
+    /// this into a follow-up `Ui::dispatch_event` after the Rust
+    /// callback returns. Lets a built-in keymap callback (e.g. a
+    /// list's Enter binding) trigger the same on-event handlers
+    /// (`smelt.win.on_event(win, "submit", fn)`) that
+    /// Component-emitted `WidgetEvent`s would.
+    Event(WinEvent, Payload),
 }
 
 /// Handle to a Lua callback, opaque to the `ui` crate. The `tui`
