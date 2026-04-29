@@ -119,12 +119,36 @@ pub(crate) struct StatusSpan {
 const STATUS_SEP: &str = " \u{00b7} "; // " · "
 const STATUS_SEP_LEN: usize = 3;
 
-pub(crate) fn spans_to_segments(
+/// One styled run inside a baked status line. `col_start` /  `col_end`
+/// are display-cell offsets into [`StatusLine::text`]; `style` is the
+/// fully-merged `ui::grid::Style` (already includes `fill_bg` for
+/// segments that didn't override it). Non-overlapping; together with
+/// gap fills they cover the whole line width so every painted cell
+/// gets exactly one span.
+#[derive(Clone, Debug)]
+pub(crate) struct StatusSpanOut {
+    pub col_start: u16,
+    pub col_end: u16,
+    pub style: ui::grid::Style,
+}
+
+/// Materialised status line: a flat string padded to terminal width
+/// plus the spans `Buffer::add_highlight` should attach. `text` is
+/// always a single line of length `width` cells; left-aligned spans
+/// pack from column 0, right-aligned spans align to `width - 1` with
+/// one cell of right-edge gap.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StatusLine {
+    pub text: String,
+    pub spans: Vec<StatusSpanOut>,
+}
+
+pub(crate) fn spans_to_buffer_line(
     spans: &mut Vec<StatusSpan>,
     width: usize,
     fill_bg: Color,
     sep_fg: Option<Color>,
-) -> (Vec<ui::StatusSegment>, Vec<ui::StatusSegment>) {
+) -> StatusLine {
     const RIGHT_EDGE_GAP: usize = 1;
 
     let span_cols = |spans: &[StatusSpan], right: bool| -> usize {
@@ -171,11 +195,14 @@ pub(crate) fn spans_to_segments(
         dim: true,
         ..ui::grid::Style::default()
     };
-
+    let fill_style = ui::grid::Style {
+        bg: Some(fill_bg),
+        ..ui::grid::Style::default()
+    };
     let style_to_grid = |ss: &StyleState| -> ui::grid::Style {
         ui::grid::Style {
             fg: ss.fg,
-            bg: ss.bg,
+            bg: ss.bg.or(Some(fill_bg)),
             bold: ss.bold,
             dim: ss.dim,
             italic: ss.italic,
@@ -184,26 +211,113 @@ pub(crate) fn spans_to_segments(
         }
     };
 
-    let mut left = Vec::new();
-    let mut right = Vec::new();
+    // Emit (text, style) pairs for the left half (col 0 → ...) and
+    // the right half (... → width). Right segments are concatenated
+    // forward; we offset them to the right edge below.
+    let mut left_runs: Vec<(String, ui::grid::Style)> = Vec::new();
+    let mut right_runs: Vec<(String, ui::grid::Style)> = Vec::new();
 
     let mut first_left = true;
     for s in spans.iter().filter(|s| !s.align_right) {
         if s.group && !first_left {
-            left.push(ui::StatusSegment::styled(STATUS_SEP, sep_style));
+            left_runs.push((STATUS_SEP.to_string(), sep_style));
         }
-        left.push(ui::StatusSegment::styled(&s.text, style_to_grid(&s.style)));
+        left_runs.push((s.text.clone(), style_to_grid(&s.style)));
         first_left = false;
     }
-
     let mut first_right = true;
     for s in spans.iter().filter(|s| s.align_right) {
         if s.group && !first_right {
-            right.push(ui::StatusSegment::styled(STATUS_SEP, sep_style));
+            right_runs.push((STATUS_SEP.to_string(), sep_style));
         }
-        right.push(ui::StatusSegment::styled(&s.text, style_to_grid(&s.style)));
+        right_runs.push((s.text.clone(), style_to_grid(&s.style)));
         first_right = false;
     }
 
-    (left, right)
+    let right_w: usize = right_runs.iter().map(|(t, _)| display_width(t)).sum();
+    let right_start = width.saturating_sub(right_w);
+
+    // Build the line text: left runs at col 0, spaces in the middle,
+    // right runs ending at col `width`. Pad with spaces so the text is
+    // exactly `width` cells wide.
+    let mut text = String::with_capacity(width);
+    let mut out_spans: Vec<StatusSpanOut> = Vec::new();
+
+    // Left runs.
+    let mut col: usize = 0;
+    for (t, style) in &left_runs {
+        let cells = display_width(t);
+        let start = col;
+        let end = (col + cells).min(width);
+        if start < end {
+            text.push_str(t);
+            out_spans.push(StatusSpanOut {
+                col_start: start as u16,
+                col_end: end as u16,
+                style: *style,
+            });
+        }
+        col = end;
+    }
+    // Gap between left and right (filled with status_bg).
+    if col < right_start {
+        let pad = right_start - col;
+        for _ in 0..pad {
+            text.push(' ');
+        }
+        out_spans.push(StatusSpanOut {
+            col_start: col as u16,
+            col_end: right_start as u16,
+            style: fill_style,
+        });
+        col = right_start;
+    }
+    // Right runs.
+    for (t, style) in &right_runs {
+        let cells = display_width(t);
+        let start = col;
+        let end = (col + cells).min(width);
+        if start < end {
+            text.push_str(t);
+            out_spans.push(StatusSpanOut {
+                col_start: start as u16,
+                col_end: end as u16,
+                style: *style,
+            });
+        }
+        col = end;
+    }
+    // Pad to full width if right was truncated below `width` cells.
+    while col < width {
+        text.push(' ');
+        col += 1;
+    }
+    // Make sure the final span covers any tail short of `width` (only
+    // happens when `right_w == 0` and the last left run was truncated
+    // — the gap span above already covered the middle in normal cases).
+    let tail_start = out_spans.last().map(|s| s.col_end as usize).unwrap_or(0);
+    if tail_start < width {
+        if let Some(last) = out_spans.last_mut() {
+            if last.style == fill_style {
+                last.col_end = width as u16;
+            } else {
+                out_spans.push(StatusSpanOut {
+                    col_start: tail_start as u16,
+                    col_end: width as u16,
+                    style: fill_style,
+                });
+            }
+        } else {
+            out_spans.push(StatusSpanOut {
+                col_start: 0,
+                col_end: width as u16,
+                style: fill_style,
+            });
+        }
+    }
+
+    StatusLine {
+        text,
+        spans: out_spans,
+    }
 }

@@ -11,7 +11,6 @@ pub mod grid;
 pub mod kill_ring;
 pub mod layout;
 pub mod overlay;
-pub mod status_bar;
 pub mod style;
 pub mod text;
 pub mod theme;
@@ -45,7 +44,6 @@ pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
 pub use layout::{Anchor, Border, Constraint, Corner, Gutters, LayoutTree, Rect, SeparatorStyle};
 pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
-pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
 pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
@@ -105,6 +103,16 @@ pub struct Ui {
     /// callback registry. Cleared when the containing overlay
     /// closes.
     overlay_focus: Option<WinId>,
+    /// Split-shaped windows painted directly via `Window::render` from
+    /// `Ui::render`'s post-layer pass — no compositor `Component` layer
+    /// needed. The status line lives here today; transcript and prompt
+    /// follow as P1.d migrates them off `WindowView`. Painted before
+    /// overlays so overlays still draw on top, matching the prior
+    /// status-as-compositor-layer order (overlays in the closure ran
+    /// after every compositor layer paint, including status z=500).
+    /// Rect comes from `split_rects` (set per frame via
+    /// `set_window_rect`).
+    painted_splits: Vec<WinId>,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -138,7 +146,24 @@ impl Ui {
             next_overlay_id: 1,
             focus_history: Vec::new(),
             overlay_focus: None,
+            painted_splits: Vec::new(),
         }
+    }
+
+    /// Mark `win_id` as a painted split — the renderer will paint it
+    /// via `Window::render` from the post-layer closure, using the rect
+    /// last published via `set_window_rect`. Insertion order is paint
+    /// order. No-op if already registered.
+    pub fn register_painted_split(&mut self, win_id: WinId) {
+        if !self.painted_splits.contains(&win_id) {
+            self.painted_splits.push(win_id);
+        }
+    }
+
+    /// Stop painting `win_id` as a painted split. No-op if not
+    /// registered.
+    pub fn unregister_painted_split(&mut self, win_id: WinId) {
+        self.painted_splits.retain(|&w| w != win_id);
     }
 
     /// Bind a compositor split-layer id to a `WinId` so the focused
@@ -748,6 +773,13 @@ impl Ui {
             .into_iter()
             .map(|(id, rect, ov)| (id, rect, ov.clone()))
             .collect();
+        // Snapshot painted splits with their rects so the post-layer
+        // closure can paint them without re-borrowing `self`.
+        let painted_splits: Vec<(WinId, Rect)> = self
+            .painted_splits
+            .iter()
+            .filter_map(|win| self.split_rects.get(win).map(|r| (*win, *r)))
+            .collect();
         // Pre-pass: drive `Buffer::ensure_rendered_at` on each overlay
         // leaf at the width its leaf rect resolves to, so parsers
         // (markdown / plain wrap / diff / syntax) populate their
@@ -763,6 +795,15 @@ impl Ui {
                 }
             }
         }
+        // Same pre-pass for painted splits.
+        for (win_id, rect) in &painted_splits {
+            let Some(buf_id) = self.wins.get(win_id).map(|w| w.buf) else {
+                continue;
+            };
+            if let Some(buf) = self.bufs.get_mut(&buf_id) {
+                buf.ensure_rendered_at(rect.width);
+            }
+        }
         // Resolve the focused overlay leaf's hardware cursor (if any)
         // so input panels / cmdline draw a visible caret. The
         // compositor's focused-layer cursor path doesn't see overlay
@@ -773,6 +814,13 @@ impl Ui {
         let bufs = &self.bufs;
         let term_size = self.terminal_size;
         self.compositor.render_with(&self.theme, w, |grid, theme| {
+            // Paint splits first so overlays draw on top, matching the
+            // prior order (status was a compositor layer at z=500;
+            // overlays in the closure ran *after* every compositor
+            // layer paint, so any overlap landed overlays-over-status).
+            for (win_id, rect) in &painted_splits {
+                paint_split(grid, theme, *win_id, *rect, wins, bufs, term_size);
+            }
             for (_id, rect, overlay) in &resolved {
                 paint_overlay(grid, theme, *rect, overlay, wins, bufs, term_size);
             }
@@ -977,6 +1025,35 @@ impl Default for Ui {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Paint one painted-split window into `grid` at `rect` via
+/// `Window::render`. Mirrors the leaf branch of `paint_layout_node` for
+/// split-shaped windows that paint outside the overlay layout system.
+/// Missing windows / buffers are silently skipped.
+fn paint_split(
+    grid: &mut Grid,
+    theme: &Theme,
+    win_id: WinId,
+    rect: Rect,
+    wins: &HashMap<WinId, Window>,
+    bufs: &HashMap<BufId, Buffer>,
+    term_size: (u16, u16),
+) {
+    let Some(win) = wins.get(&win_id) else {
+        return;
+    };
+    let Some(buf) = bufs.get(&win.buf) else {
+        return;
+    };
+    let mut slice = grid.slice_mut(rect);
+    let ctx = DrawContext {
+        terminal_width: term_size.0,
+        terminal_height: term_size.1,
+        focused: false,
+        theme: theme.clone(),
+    };
+    win.render(buf, &mut slice, &ctx);
 }
 
 /// Paint one resolved overlay into `grid`. Walks the overlay's layout
