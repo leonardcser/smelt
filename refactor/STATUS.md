@@ -13,45 +13,50 @@ site migration pending.
 from P0 boundary + 7 new theme registry tests). `cargo nextest run
 --test scenarios` — 6 baseline scenarios green.
 
-**Last update:** 2026-04-29. P1.0 opened with the theme registry across
-8 commits (`decb0ab`..`da75d3a`):
+**Last update:** 2026-04-29. P1.0 theme registry landing across 10
+commits (`decb0ab`..`1786716`):
 
 - `decb0ab` — `ui::Theme` registry type (HashMap groups + links).
 - `177ac4c` — plumbed through `DrawContext`; `Ui` owns it.
 - `bb9cc63` — `populate_ui_theme()` mirrors host constants.
-- `2e5adfa` — STATUS / INVENTORY documentation.
 - `9bf1912` — first call site batch: render_loop, events,
   status_bar, ui_ops.
-- `31cfb56` — renamed `crate::theme::Theme` snapshot → `Snapshot` to
-  free the name for `ui::Theme`.
+- `31cfb56` — renamed `crate::theme::Theme` snapshot → `Snapshot`.
 - `d92a715` — status separator color + notification error_label.
 - `da75d3a` — re-populate registry each frame so Lua-driven mutations
-  (`smelt.theme.set('accent', …)`) propagate without a separate
-  notification path.
+  propagate without a separate notification path.
+- `387f4d2` — replaced `crate::theme::Snapshot` with `&ui::Theme` in
+  the entire render pipeline; deleted the snapshot type.
+- `1786716` — added `ColorRole::Agent / Success / ErrorMsg`; migrated
+  `transcript_present/*` renderers off the const colors.
 
-Migration count: 16 of 50 `crate::theme::*` call sites converted
-(34 remain). The registry and constants module run in parallel —
-populated with the same values each frame — so each call site can
-migrate independently.
+Migration tally: 28 of 50 `crate::theme::*` call sites converted; 22
+remain. The remaining sites are essential host-module surface that
+the registry depends on, not migration targets per se:
 
-Remaining call sites split into:
-1. **Snapshot users** (~6): `format.rs`, `transcript.rs`,
-   `content/to_buffer.rs`, `content/transcript_buf.rs`,
-   `content/context.rs`, `app/dialogs/confirm_preview.rs`. Use
-   `crate::theme::Snapshot` for per-render color capture; migrate to
-   `&ui::Theme` once `Snapshot` is replaced.
-2. **Renderer constants** (~7): `app/transcript_present/*` use
-   `crate::theme::AGENT/SUCCESS/ERROR` const Colors. Either add new
-   `ColorRole` variants (Agent / Success / ErrorMsg) or migrate when
-   Snapshot goes away.
-3. **`is_light()` consumers** (3): `transcript.rs:505,544`,
-   `content/highlight/mod.rs:32`. Metadata flag, not a color — could
-   move onto `ui::Theme` as a field, or stay on host as long as the
-   atomic does.
-4. **Lua bindings + tests + headless** (~14): exercise the existing
-   API; will follow the API once the constants module shrinks.
-5. **Bootstrap** (3 in `app/mod.rs`): accent default check at startup.
-   Fine to keep.
+- **Atomic plumbing** (5): `populate_ui_theme()` calls in
+  `format.rs:102`, `to_buffer.rs:159` (test fixture),
+  `app/mod.rs:841`, `app/render_loop.rs:13`; `detect_background()` in
+  `app/mod.rs:840`. These keep registry and atomics coherent each
+  frame.
+- **Atomic mutators** (7): `accent_value`/`set_accent` at startup
+  (`app/mod.rs:535,537`), in Lua bindings (`lua/api/mod.rs:189`,
+  `lua/api/widgets.rs:35`), and 4 test sites in `lua/mod.rs`.
+- **Light/dark metadata** (5): `is_light()` reads in
+  `transcript.rs:505,544`, `content/highlight/mod.rs:32`,
+  `lua/api/widgets.rs:64`, `status_bar.rs:74` slug fallback.
+- **Preset list** (2): `lua/api/mod.rs:139` `preset_by_name`,
+  `lua/api/widgets.rs:73` PRESETS iter — both legitimate uses of
+  static config data.
+- **Headless logs** (3): `app/headless.rs:122,125,145` — ANSI escape
+  sequences for stderr logs; no Ui access; pure const colors.
+
+Truly deleting `crates/tui/src/theme.rs` requires moving the atomic
+state (accent/slug/light) into `ui::Theme` itself, which is a
+separate sub-phase of P1.0. For now, the host module's role is
+narrowed: it's the atomic state holder + light/dark detector +
+preset list; the registry is the lookup surface every renderer reads
+through.
 
 P0 closed: 4 of 9 deletions shipped (orthogonal); 5 structural
 deletions deferred to P1.0 sub-phase (paired with replacements).
@@ -65,25 +70,20 @@ before declaring anything done.
 
 In order:
 
-1. **Replace `Snapshot` with `&ui::Theme`** in the rendering pipeline.
-   `crate::theme::snapshot()` is called per render; the resulting
-   `Snapshot` struct is passed to `project_display_line`, content
-   formatters, etc. Switch each `theme: &Snapshot` to `theme:
-   &ui::Theme` and replace `theme.accent` with
-   `theme.get("SmeltAccent").fg.unwrap_or_default()`. Removes the
-   `Snapshot` type and the `ColorRole::Accent`/etc. resolution.
-2. **Add renderer-color groups** for AGENT / SUCCESS / ERROR consumed
-   by `transcript_present/*`. Either new `ColorRole` variants or
-   direct `ui::Theme` lookups.
-3. **Delete `crate::theme::*` constants module** when call sites drop
-   to zero. Remaining `theme.rs` becomes a `default_smelt_theme()`
-   builder + the `PRESETS` list + light/dark detection
-   (`detect_background`, `is_light`).
-4. Other P1.0 pairings (`BufferView`, `PanelWidget`/`Component`,
+1. **Move atomic theme state onto `ui::Theme`**. `ACCENT_VALUE`,
+   `SLUG_COLOR_VALUE`, `LIGHT_THEME` atomics in `crate::theme::*`
+   become methods on `ui::Theme` (e.g. `set_accent(u8)` rebuilds the
+   relevant Style entries; `is_light()` reads a flag). Once that
+   lands, `populate_ui_theme()` no longer reads from atomics — it
+   reads from Theme itself. The host module shrinks to: light/dark
+   detection (one-shot at startup), the `PRESETS` const list, and
+   the headless ANSI helpers. `Snapshot` is already gone.
+2. **Other P1.0 pairings** (`BufferView`, `PanelWidget`/`Component`,
    `Placement`) per their target sub-phases (P1.a..P1.d).
 
-Recently shipped: theme registry + plumbing + host bridge + 16
-call site migrations. P0 orthogonal deletions
+Recently shipped: theme registry + plumbing + host bridge + 28
+call site migrations + Snapshot elimination + ColorRole expansion.
+P0 orthogonal deletions
 (`selection_style`/`set_selection_bg` shim, `handle_mouse_with_lua` +
 `classify_widget_action`, `MouseAction::Yank`/`WidgetEvent::Yank`,
 `BufferList`). `TESTING.md` (three-layer testing strategy). Test
