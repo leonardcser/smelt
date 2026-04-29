@@ -56,6 +56,13 @@ impl App {
         let (term_w, _) = self.ui.terminal_size();
         let width = term_w as usize;
         let status_bg = Color::AnsiValue(233);
+        let theme_accent_fg = self.ui.theme().get("SmeltAccent").fg;
+        let theme_agent_fg = self.ui.theme().get("SmeltAgent").fg;
+        let theme_muted_fg = self.ui.theme().get("Comment").fg;
+        let theme_plan_fg = self.ui.theme().get("SmeltModePlan").fg;
+        let theme_apply_fg = self.ui.theme().get("SmeltModeApply").fg;
+        let theme_yolo_fg = self.ui.theme().get("SmeltModeYolo").fg;
+        let theme_slug_bg = self.ui.theme().get("SmeltSlug").bg;
 
         let mut spans: Vec<StatusSpan> = Vec::with_capacity(16);
 
@@ -64,7 +71,7 @@ impl App {
         let pill_bg = if is_compacting {
             Color::White
         } else {
-            crate::theme::slug_color()
+            theme_slug_bg.unwrap_or_else(crate::theme::slug_color)
         };
         let pill_style = content::StyleState {
             fg: Some(Color::Black),
@@ -160,15 +167,15 @@ impl App {
         // Mode indicator.
         let mode = self.mode;
         let (mode_icon, mode_name, mode_fg) = match mode {
-            protocol::Mode::Plan => ("◇ ", "plan", crate::theme::PLAN),
-            protocol::Mode::Apply => ("→ ", "apply", crate::theme::APPLY),
-            protocol::Mode::Yolo => ("⚡", "yolo", crate::theme::YOLO),
-            protocol::Mode::Normal => ("○ ", "normal", crate::theme::muted()),
+            protocol::Mode::Plan => ("◇ ", "plan", theme_plan_fg),
+            protocol::Mode::Apply => ("→ ", "apply", theme_apply_fg),
+            protocol::Mode::Yolo => ("⚡", "yolo", theme_yolo_fg),
+            protocol::Mode::Normal => ("○ ", "normal", theme_muted_fg),
         };
         spans.push(StatusSpan {
             text: format!(" {mode_icon}{mode_name} "),
             style: content::StyleState {
-                fg: Some(mode_fg),
+                fg: mode_fg,
                 bg: Some(Color::AnsiValue(234)),
                 ..content::StyleState::default()
             },
@@ -211,7 +218,7 @@ impl App {
             spans.push(StatusSpan {
                 text: "permission pending".into(),
                 style: content::StyleState {
-                    fg: Some(crate::theme::accent()),
+                    fg: theme_accent_fg,
                     bg: Some(status_bg),
                     bold: true,
                     ..content::StyleState::default()
@@ -233,7 +240,7 @@ impl App {
             spans.push(StatusSpan {
                 text: label,
                 style: content::StyleState {
-                    fg: Some(crate::theme::accent()),
+                    fg: theme_accent_fg,
                     bg: Some(status_bg),
                     ..content::StyleState::default()
                 },
@@ -254,7 +261,7 @@ impl App {
             spans.push(StatusSpan {
                 text: label,
                 style: content::StyleState {
-                    fg: Some(crate::theme::AGENT),
+                    fg: theme_agent_fg,
                     bg: Some(status_bg),
                     ..content::StyleState::default()
                 },
@@ -270,7 +277,7 @@ impl App {
             spans.push(StatusSpan {
                 text: p.render(),
                 style: content::StyleState {
-                    fg: Some(crate::theme::muted()),
+                    fg: theme_muted_fg,
                     bg: Some(status_bg),
                     ..content::StyleState::default()
                 },
