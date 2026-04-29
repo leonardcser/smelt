@@ -8,9 +8,15 @@
 # window closes (you /exit claude, or it crashes).
 #
 # Loop stops when one of:
-#   - refactor/check.sh goes red
-#   - the iteration produces no new commit (early-stop or block)
+#   - refactor/.ralph-done present       — plan complete (exit 0)
+#   - refactor/.ralph-needs-input present — every remaining sub-phase
+#                                           needs a user decision (exit 0)
+#   - the iteration produces no new commit — stuck (exit 1)
 #   - Ctrl-C in the ralph window
+#
+# `check.sh` red is NOT a stop reason — the next fresh iteration will
+# see the red docs and try to fix them. If it can't, the no-commit
+# branch eventually catches it.
 #
 # Usage:
 #   refactor/ralph.sh
@@ -47,7 +53,7 @@ while :; do
   # `RALPH_ITER=1` tells refactor/hooks/stop_gate.sh to close this window
   # when the agent stops cleanly, so the loop advances on its own.
   iter_win=$(tmux new-window -n "ralph-$iter" -c "$PWD" -P -F '#{window_id}' \
-    "RALPH_ITER=1 claude --permission-mode auto")
+    "RALPH_ITER=1 claude --permission-mode auto --effort xhigh")
 
   # Wait for claude's TUI to come up before sending input.
   sleep 4
@@ -67,16 +73,24 @@ while :; do
   done
   iter_win=""
 
-  if ! refactor/check.sh --quiet; then
+  if [[ -f refactor/.ralph-done ]]; then
     echo
-    echo "=== refactor/check.sh red — loop stopped ==="
-    break
+    echo "=== plan complete: $(cat refactor/.ralph-done) ==="
+    echo "=== ralph loop ended cleanly ==="
+    exit 0
+  fi
+
+  if [[ -f refactor/.ralph-needs-input ]]; then
+    echo
+    echo "=== your turn: $(cat refactor/.ralph-needs-input) ==="
+    echo "=== see open questions in the active refactor/P<n>.md ==="
+    exit 0
   fi
 
   after=$(git rev-parse HEAD)
   if [[ "$before" == "$after" ]]; then
     echo
-    echo "=== no commit landed this iteration — loop stopped ==="
+    echo "=== no commit landed this iteration — loop stopped (stuck) ==="
     break
   fi
 
