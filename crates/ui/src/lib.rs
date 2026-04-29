@@ -13,6 +13,7 @@ pub mod kill_ring;
 pub mod layout;
 pub mod notification;
 pub mod option_list;
+pub mod overlay;
 pub mod picker;
 pub mod status_bar;
 pub mod style;
@@ -55,10 +56,12 @@ pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
 pub use layout::{
-    Border, Constraint, Corner, FitMax, FloatRelative, Gutters, LayoutTree, Placement, Rect,
+    Anchor, Border, Constraint, Corner, FitMax, FloatRelative, Gutters, LayoutTree, Placement,
+    Rect,
 };
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
+pub use overlay::{Overlay, OverlayId};
 pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
