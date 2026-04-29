@@ -22,35 +22,49 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — fifteen commits landed (foundation
-+ paint pipeline + first float migration). Foundation:
-`40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
-`434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
-`dcb0e8b`, `f80d1d0` (target types + `resolve_anchor`;
-`Ui::overlay_*` API + storage; per-frame resolution; chrome
-`SeparatorStyle`; focus + hit-test primitives; canonical
-Win-typed focus API; overlay/focus structural glue; unified
-`Ui::hit_test`; modal-aware Tab cycling). Paint pipeline +
-first migration: `5a467d5`, `0836ae1`, `41432a8`, `d77d513`
-(`Compositor::render_with` overlay paint hook; minimal
-`Window::render(buf, slice, ctx)`; `paint_chrome` +
-`Ui::render` walks resolved overlays after layer paint;
-text_modal migrated to Overlay + modal-Esc-dismiss built-in).
-The P1.c data + resolution + focus + hit-test + paint layer
-is operational end-to-end — `/stats` and `/cost` already
-render through Overlay rather than `dialog_open`. 65 P1.c
-unit tests total, co-located with the code they cover.
+**P1.c in progress** — sixteen commits landed (foundation
++ paint pipeline + first float migration + leaf event
+routing). Foundation: `40f0c82`, `702305a`, `8fa6760`,
+`d3c4a83`, `44fe779`, `434eee8`/`16ca777`, `7cee24c`,
+`d94d12c`, `2713f01`/`50e2ba5`, `dcb0e8b`, `f80d1d0`
+(target types + `resolve_anchor`; `Ui::overlay_*` API +
+storage; per-frame resolution; chrome `SeparatorStyle`;
+focus + hit-test primitives; canonical Win-typed focus
+API; overlay/focus structural glue; unified `Ui::hit_test`;
+modal-aware Tab cycling). Paint pipeline + first migration
++ leaf-event routing: `5a467d5`, `0836ae1`, `41432a8`,
+`d77d513`, `0922dd0` (`Compositor::render_with` overlay
+paint hook; minimal `Window::render(buf, slice, ctx)`;
+`paint_chrome` + `Ui::render` walks resolved overlays after
+layer paint; text_modal migrated to Overlay; modal-Esc-
+dismiss built-in; `Ui::overlay_focus` field +
+`overlay_for_leaf` helper + `set_focus` accepts overlay
+leaves + `handle_key_with_lua` routes via `focus()`; q +
+Ctrl+C dismiss restored on text_modal via leaf callbacks).
+The P1.c data + resolution + focus + hit-test + paint +
+event-routing layer is operational end-to-end — `/stats`
+and `/cost` render as Overlays with full Esc/q/Ctrl+C
+dismiss parity vs the old DialogConfig path. 68 P1.c unit
+tests total, co-located with the code they cover.
 
-**C.5 first migration shipped.** text_modal (used by `/stats`
-and `/cost`) is now an Overlay { layout: vbox(border+title,
-hbox(leaf)), anchor: ScreenCenter, modal: true }. Esc dismiss
-is wired via a built-in modal-Esc-dismiss in `Ui::handle_key`
-(universal dismiss is fundamental behaviour, not user-
-customisable). Lost in the migration: `q` and `Ctrl+C`
-dismiss keys (text_modal-specific in the old dialog config).
-Restored when leaf-level overlay event routing lands in
-P1.d/P1.e. Recorded as a documented regression in FEATURES.md
-parity walk.
+**C.5 first migration shipped + parity restored.**
+text_modal lives as `Overlay { layout: vbox(border+title,
+hbox(leaf)), anchor: ScreenCenter, modal: true }`. Three
+dismiss vectors:
+
+1. **Esc** — Ui built-in (universal dismiss; fundamental,
+   not user-customisable).
+2. **`q`** — leaf callback registered in text_modal via
+   `win_set_keymap`.
+3. **`Ctrl+C`** — leaf callback registered in text_modal
+   via `win_set_keymap`.
+
+Both leaf callbacks call `ctx.ui.overlay_for_leaf(ctx.win)`
+to resolve the containing overlay, then `overlay_close`.
+This is the same shape every future overlay-based dialog
+will use: register callbacks per leaf WinId, route through
+`Ui::focus()` which prefers `overlay_focus`. No regressions
+vs the prior `dialog_open` path.
 
 **Window::render scope.** The pulled-forward helper is
 read-only viewer scope: paints visible buffer lines from
@@ -73,13 +87,15 @@ follow once every dialog flips.
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 1018 passed
-(11 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
+**Tree:** green. `cargo nextest run --workspace` — 1021 passed
+(14 new since C.4-tail₆: 4 `paint_chrome_*`, 3 `Window::render*`,
 1 `render_with_paints_after_layers`, 1 `render_paints_overlay_leaf_buffer`,
-2 `handle_key_esc_*` modal-dismiss). `cargo clippy --workspace
---all-targets -- -D warnings` clean. Manual TUI parity walk:
-`/stats` and `/cost` open as bordered+titled centered modals,
-Esc dismisses, focus restores to prompt.
+2 `handle_key_esc_*` modal-dismiss, 3 `overlay_open_modal_focuses_*` /
+`set_focus_accepts_overlay_leaf` / `handle_key_routes_to_overlay_leaf_callback`).
+`cargo clippy --workspace --all-targets -- -D warnings` clean. Manual
+TUI parity walk: `/stats` and `/cost` open as bordered+titled
+centered modals; Esc, q, and Ctrl+C all dismiss; focus restores
+to prompt.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
