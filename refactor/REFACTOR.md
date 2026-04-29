@@ -411,6 +411,30 @@ text, and gutters move from `WindowView` / `BufferView` onto
 projection step that writes the prompt source into a render-only
 Buffer with extmarks for wrap, cursor, and selection.
 
+Splits across two sessions because the rendering primitive has to
+land before the migration can flip:
+
+- **P1.d.2a — `Window::render` rendering primitives + painted-split
+  focus.** Adds `Window::viewport: Option<WindowViewport>` +
+  `Window::cursor_kind: Option<CursorKind>` (`Block { glyph, style } |
+  Hardware`). `Window::render` learns to paint the scrollbar (when
+  `viewport.scrollbar` is set) and the block cursor (when
+  `cursor_kind == Block`). `Ui` gains `painted_split_focus:
+  Option<WinId>`; `set_focus` / `focus()` accept focusable painted
+  splits. `Ui::render` surfaces the focused painted split's hardware
+  cursor (when `cursor_kind == Hardware`) ahead of the focused
+  compositor layer's cursor, behind the overlay cursor. No prompt
+  migration yet — pure mechanism for P1.d.2b and P1.d.3 to consume.
+- **P1.d.2b — Migrate prompt to a painted-split Window.** Drops the
+  `"prompt"` and `"prompt_input"` compositor layers; the prompt
+  becomes a single painted-split Window over a unified buffer
+  (chrome rows + visible input slice as buffer lines + extmark
+  highlights). `compute_prompt` rewrites to populate the buffer +
+  set the Window's cursor_kind / viewport. `set_focus(PROMPT_WIN)`
+  replaces `focus_layer("prompt_input")`. Selection paint (vim
+  Visual) flows through the existing buffer extmark path that
+  `compute_input_area` already produces.
+
 #### P1.d.3 — Transcript onto Window::render
 
 Migrate the `"transcript"` compositor layer onto the

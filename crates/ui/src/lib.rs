@@ -49,7 +49,8 @@ pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{ViMode, Vim};
 pub use window::{
-    MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window, WindowViewport,
+    CursorKind, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window,
+    WindowViewport,
 };
 pub use window_cursor::WindowCursor;
 
@@ -113,6 +114,14 @@ pub struct Ui {
     /// Rect comes from `split_rects` (set per frame via
     /// `set_window_rect`).
     painted_splits: Vec<WinId>,
+    /// Focused painted split, if any. Painted splits don't carry a
+    /// compositor layer, so the compositor's focus slot can't track
+    /// them — this lives on `Ui` directly. Key dispatch and
+    /// `focus()` consult this ahead of `compositor.focused()`. Set
+    /// by `set_focus` when the target is a focusable painted split;
+    /// cleared when focus moves elsewhere or the painted split
+    /// unregisters.
+    painted_split_focus: Option<WinId>,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -147,6 +156,7 @@ impl Ui {
             focus_history: Vec::new(),
             overlay_focus: None,
             painted_splits: Vec::new(),
+            painted_split_focus: None,
         }
     }
 
@@ -164,6 +174,9 @@ impl Ui {
     /// registered.
     pub fn unregister_painted_split(&mut self, win_id: WinId) {
         self.painted_splits.retain(|&w| w != win_id);
+        if self.painted_split_focus == Some(win_id) {
+            self.painted_split_focus = None;
+        }
     }
 
     /// Bind a compositor split-layer id to a `WinId` so the focused
@@ -594,6 +607,9 @@ impl Ui {
         if let Some(win) = self.overlay_focus {
             return Some(win);
         }
+        if let Some(win) = self.painted_split_focus {
+            return Some(win);
+        }
         self.compositor
             .focused()
             .and_then(|id| self.layer_to_win(id))
@@ -631,7 +647,21 @@ impl Ui {
                 self.focus_history.push(p);
             }
             self.overlay_focus = None;
+            self.painted_split_focus = None;
             self.compositor.focus(layer_id);
+            return true;
+        }
+        if self.painted_splits.contains(&win) {
+            let focusable = self.wins.get(&win).map(|w| w.focusable).unwrap_or(false);
+            if !focusable {
+                return false;
+            }
+            if let Some(p) = prior {
+                self.focus_history.push(p);
+            }
+            self.overlay_focus = None;
+            self.painted_split_focus = Some(win);
+            self.compositor.clear_focus();
             return true;
         }
         if self.overlay_for_leaf(win).is_some() {
@@ -639,6 +669,7 @@ impl Ui {
                 self.focus_history.push(p);
             }
             self.overlay_focus = Some(win);
+            self.painted_split_focus = None;
             self.compositor.clear_focus();
             return true;
         }
@@ -808,8 +839,17 @@ impl Ui {
         // so input panels / cmdline draw a visible caret. The
         // compositor's focused-layer cursor path doesn't see overlay
         // leaves; we route the cursor through `render_with`'s closure
-        // return.
+        // return. Painted splits feed in the same way — when the
+        // focused painted split has `cursor_kind = Hardware`, its
+        // (cursor_col, cursor_line) absolutely positions the caret.
+        // Block-cursor painted splits paint the cell in
+        // `Window::render` and contribute no hardware cursor.
+        // Overlay > painted-split > compositor-layer is the priority
+        // order; the compositor's focused-layer cursor path applies
+        // when the closure returns `None`.
         let overlay_cursor = self.focused_overlay_cursor(&resolved);
+        let painted_split_cursor = self.focused_painted_split_cursor();
+        let cursor_override = overlay_cursor.or(painted_split_cursor);
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.terminal_size;
@@ -824,7 +864,7 @@ impl Ui {
             for (_id, rect, overlay) in &resolved {
                 paint_overlay(grid, theme, *rect, overlay, wins, bufs, term_size);
             }
-            overlay_cursor
+            cursor_override
         })
     }
 
@@ -853,6 +893,29 @@ impl Ui {
             return None;
         }
         None
+    }
+
+    /// Compute the absolute hardware cursor position for the focused
+    /// painted split. Returns `None` when no painted split is focused,
+    /// the focused window has no `cursor_kind`, the kind is `Block`
+    /// (paints in-place via `Window::render`), or its cursor coordinates
+    /// fall outside the published rect. `Window::cursor_line` /
+    /// `cursor_col` are viewport-relative and we add them to the rect's
+    /// origin.
+    fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
+        let focus = self.painted_split_focus?;
+        let win = self.wins.get(&focus)?;
+        if !matches!(win.cursor_kind, Some(crate::window::CursorKind::Hardware)) {
+            return None;
+        }
+        let rect = self.split_rects.get(&focus).copied()?;
+        let abs_y = rect.top + win.cursor_line;
+        let abs_x = rect.left + win.cursor_col;
+        if abs_y < rect.top + rect.height && abs_x < rect.left + rect.width {
+            Some((abs_x, abs_y))
+        } else {
+            None
+        }
     }
 
     pub fn theme(&self) -> &Theme {
@@ -1707,6 +1770,137 @@ mod tests {
         ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter)); // not modal
         assert!(ui.set_focus(win));
         assert_eq!(ui.focus(), Some(win));
+    }
+
+    #[test]
+    fn set_focus_accepts_focusable_painted_split() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.register_painted_split(win);
+        assert!(ui.set_focus(win));
+        assert_eq!(ui.focus(), Some(win));
+    }
+
+    #[test]
+    fn set_focus_rejects_non_focusable_painted_split() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.win_mut(win).unwrap().focusable = false;
+        ui.register_painted_split(win);
+        assert!(!ui.set_focus(win));
+        assert_eq!(ui.focus(), None);
+    }
+
+    #[test]
+    fn unregister_painted_split_clears_focus() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.register_painted_split(win);
+        ui.set_focus(win);
+        assert_eq!(ui.focus(), Some(win));
+        ui.unregister_painted_split(win);
+        assert_eq!(ui.focus(), None);
+    }
+
+    #[test]
+    fn focused_painted_split_cursor_returns_hardware_cursor_position() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.register_painted_split(win);
+        ui.set_window_rect(win, Rect::new(5, 2, 20, 4));
+        ui.set_focus(win);
+        let w = ui.win_mut(win).unwrap();
+        w.cursor_kind = Some(crate::window::CursorKind::Hardware);
+        w.cursor_line = 1;
+        w.cursor_col = 3;
+        // (rect.left=2, rect.top=5) + (cursor_col=3, cursor_line=1) = (5, 6).
+        assert_eq!(ui.focused_painted_split_cursor(), Some((5, 6)));
+    }
+
+    #[test]
+    fn focused_painted_split_cursor_returns_none_for_block_cursor() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.register_painted_split(win);
+        ui.set_window_rect(win, Rect::new(0, 0, 20, 4));
+        ui.set_focus(win);
+        let w = ui.win_mut(win).unwrap();
+        w.cursor_kind = Some(crate::window::CursorKind::Block {
+            glyph: 'b',
+            style: grid::Style::default(),
+        });
+        w.cursor_line = 0;
+        w.cursor_col = 0;
+        // Block cursor paints in-place; no hardware caret to surface.
+        assert_eq!(ui.focused_painted_split_cursor(), None);
+    }
+
+    #[test]
+    fn focused_painted_split_cursor_returns_none_when_unfocused() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.register_painted_split(win);
+        ui.set_window_rect(win, Rect::new(0, 0, 20, 4));
+        let w = ui.win_mut(win).unwrap();
+        w.cursor_kind = Some(crate::window::CursorKind::Hardware);
+        w.cursor_line = 0;
+        w.cursor_col = 0;
+        // No focus call → painted_split_focus stays None.
+        assert_eq!(ui.focused_painted_split_cursor(), None);
     }
 
     #[test]

@@ -72,6 +72,29 @@ impl ScrollbarState {
     pub fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
         col == self.col && row >= rect.top && row < rect.bottom()
     }
+
+    /// Thumb top row (0-based within the viewport) for a given
+    /// scroll offset. Mirror of `thumb_top_for_click`'s inverse,
+    /// rounded toward the nearest thumb cell. Used by paint paths
+    /// to figure out where the thumb's first cell renders.
+    pub fn thumb_top_for_scroll(&self, scroll_top: u16) -> u16 {
+        let max_thumb = self.max_thumb_top();
+        let max_scroll = self.max_scroll();
+        if max_thumb == 0 || max_scroll == 0 {
+            return 0;
+        }
+        let scroll = scroll_top.min(max_scroll);
+        ((scroll as u32 * max_thumb as u32 + max_scroll as u32 / 2) / max_scroll as u32) as u16
+    }
+
+    /// `true` if viewport-relative row `row` paints as the thumb
+    /// (vs. the track) when scrolled to `scroll_top`. The thumb
+    /// covers `[thumb_top, thumb_top + thumb_size)`.
+    pub fn is_thumb_at(&self, scroll_top: u16, row: u16) -> bool {
+        let thumb_top = self.thumb_top_for_scroll(scroll_top);
+        let thumb_end = thumb_top + self.thumb_size();
+        row >= thumb_top && row < thumb_end
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +194,24 @@ pub struct SplitConfig {
     pub gutters: Gutters,
 }
 
+/// How the focused window's cursor renders. `Window::cursor_line` /
+/// `cursor_col` carry the viewport-relative position; `CursorKind`
+/// only describes the paint shape.
+///
+/// * `Hardware` — the terminal's native caret. `Ui::render` pulls
+///   the absolute (col, row) and emits a `cursor::MoveTo` after the
+///   diff flush. Used for plain text-input fields (cmdline, prompt
+///   in Insert mode, dialog input panels).
+/// * `Block { glyph, style }` — paint the cell at `(cursor_col,
+///   cursor_line)` with `glyph` + `style` and suppress the hardware
+///   caret on this window. Used for vim Normal/Visual modes and the
+///   ghost-text "cursor on prediction" preview.
+#[derive(Clone, Debug)]
+pub enum CursorKind {
+    Hardware,
+    Block { glyph: char, style: Style },
+}
+
 pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,
@@ -183,6 +224,22 @@ pub struct Window {
     /// `kind="list"` dialog leaves) flip this on so the selected
     /// row reads at a glance.
     pub cursor_line_highlight: bool,
+
+    /// Optional cursor render kind. `None` means no cursor at all
+    /// (read-only viewers, non-focusable splits). `Some` says the
+    /// window contributes a cursor when focused — `Hardware` flows
+    /// through `Ui::render` to the terminal caret; `Block` paints
+    /// in-place via `Window::render`. Position is always
+    /// viewport-relative `(cursor_col, cursor_line)`.
+    pub cursor_kind: Option<CursorKind>,
+
+    /// Per-frame viewport geometry. When `Some`, `Window::render`
+    /// paints the scrollbar from the viewport's `scrollbar` state.
+    /// Hosts repopulate each frame from layout state — the field
+    /// lives on Window (not pushed in via render args) so painted
+    /// splits and overlay leaves can both surface scrollbars
+    /// without an extra render-time channel.
+    pub viewport: Option<WindowViewport>,
 
     pub edit_buf: EditBuffer,
     pub cpos: usize,
@@ -226,6 +283,8 @@ impl Window {
             config,
             focusable: true,
             cursor_line_highlight: false,
+            cursor_kind: None,
+            viewport: None,
             edit_buf: EditBuffer::readonly(),
             cpos: 0,
             vim: None,
@@ -887,26 +946,27 @@ impl Window {
     }
 
     /// Paint visible buffer lines into `slice`, starting at this
-    /// window's `scroll_top`. Read-only viewer scope: no extmark
-    /// highlights, no transient selection, no scrollbar, no gutters
-    /// or per-line decoration. Each row of the slice maps 1:1 to a
+    /// window's `scroll_top`. Each row of the slice maps 1:1 to a
     /// buffer line; lines longer than `slice.width()` truncate at
     /// the right edge.
     ///
     /// When `cursor_line_highlight` is on, the cursor row
     /// (`cursor_line` viewport offset) gets a `CursorLine`
     /// theme-driven background — the seam list-shaped Buffer Windows
-    /// use for "selected item" highlighting, before extmark-based
-    /// per-row decoration lands in P1.d. The flag is off by default
-    /// so generic content viewers (transcript, /help, /btw) stay
-    /// clean; list-shaped Windows opt in. Selection paints regardless
-    /// of focus so non-focusable list leaves (picker overlays) still
-    /// show their selection while keys flow elsewhere.
+    /// use for "selected item" highlighting. The flag is off by
+    /// default so generic content viewers (transcript, /help, /btw)
+    /// stay clean; list-shaped Windows opt in. Selection paints
+    /// regardless of focus so non-focusable list leaves (picker
+    /// overlays) still show their selection while keys flow
+    /// elsewhere.
     ///
-    /// This is the seam Overlay paint walks for each leaf in the
-    /// overlay's `LayoutTree`. The richer surface (extmarks +
-    /// scrollbar + gutters + selection) folds in alongside the
-    /// `BufferView` deletion in P1.d.
+    /// When `viewport.scrollbar` is set, the scrollbar paints over
+    /// the right edge column the viewport designates. When
+    /// `cursor_kind == Block`, the block cursor cell paints over
+    /// `(cursor_col, cursor_line)` after extmark layering. The
+    /// `Hardware` cursor variant is read by `Ui::render` and emitted
+    /// as a `cursor::MoveTo` after the diff flush — `Window::render`
+    /// itself does nothing for it.
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
         let width = slice.width();
         let height = slice.height();
@@ -959,6 +1019,55 @@ impl Window {
                 }
             }
         }
+
+        if let Some(viewport) = self.viewport {
+            paint_scrollbar(slice, viewport, &ctx.theme);
+        }
+
+        if let Some(CursorKind::Block { glyph, style }) = &self.cursor_kind {
+            if self.cursor_col < width && self.cursor_line < height {
+                slice.set(self.cursor_col, self.cursor_line, *glyph, *style);
+            }
+        }
+    }
+}
+
+/// Paint the scrollbar described by `viewport.scrollbar` into the
+/// window's `slice`. `viewport.rect` is in absolute terminal
+/// coordinates and `bar.col` is also absolute; we resolve the
+/// scrollbar column relative to the slice's leftmost column.
+fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &crate::Theme) {
+    let Some(bar) = viewport.scrollbar else {
+        return;
+    };
+    let width = slice.width();
+    let height = slice.height();
+    let local_col = bar.col.saturating_sub(viewport.rect.left);
+    if local_col >= width {
+        return;
+    }
+    let thumb = theme.get("SmeltScrollbarThumb");
+    let track = theme.get("SmeltScrollbarTrack");
+    let thumb_style = Style::bg(
+        thumb
+            .bg
+            .or(thumb.fg)
+            .unwrap_or(crossterm::style::Color::Reset),
+    );
+    let track_style = Style::bg(
+        track
+            .bg
+            .or(track.fg)
+            .unwrap_or(crossterm::style::Color::Reset),
+    );
+    let rows = bar.viewport_rows.min(height);
+    for row in 0..rows {
+        let style = if bar.is_thumb_at(viewport.scroll_top, row) {
+            thumb_style
+        } else {
+            track_style
+        };
+        slice.set(local_col, row, ' ', style);
     }
 }
 
@@ -1319,5 +1428,125 @@ mod tests {
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
         w.render(&buf, &mut slice, &ctx);
         assert_eq!(grid.cell(0, 0).style.bg, bg.bg);
+    }
+
+    #[test]
+    fn render_paints_block_cursor_glyph_over_buffer_cell() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["abc".into()]);
+        let mut w = make_win();
+        w.cursor_line = 0;
+        w.cursor_col = 1;
+        let cursor_style = crate::grid::Style::bg(crossterm::style::Color::White);
+        w.cursor_kind = Some(CursorKind::Block {
+            glyph: 'b',
+            style: cursor_style,
+        });
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx());
+        // Block cursor paints the glyph and overrides the buffer-text bg.
+        assert_eq!(grid.cell(1, 0).symbol, 'b');
+        assert_eq!(grid.cell(1, 0).style.bg, cursor_style.bg);
+        // Adjacent cells keep the buffer text untouched.
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(2, 0).symbol, 'c');
+    }
+
+    #[test]
+    fn render_block_cursor_outside_slice_is_clipped() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["abc".into()]);
+        let mut w = make_win();
+        w.cursor_line = 5;
+        w.cursor_col = 99;
+        w.cursor_kind = Some(CursorKind::Block {
+            glyph: '!',
+            style: crate::grid::Style::default(),
+        });
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        // Should not panic, no `!` written anywhere.
+        w.render(&buf, &mut slice, &ctx());
+        for col in 0..10 {
+            assert_ne!(grid.cell(col, 0).symbol, '!');
+        }
+    }
+
+    #[test]
+    fn render_hardware_cursor_is_inert_in_window_render() {
+        // Hardware cursor flows through Ui::render to the terminal
+        // caret; Window::render itself paints nothing extra for it.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["abc".into()]);
+        let mut w = make_win();
+        w.cursor_line = 0;
+        w.cursor_col = 1;
+        w.cursor_kind = Some(CursorKind::Hardware);
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx());
+        // Buffer text untouched at the cursor col.
+        assert_eq!(grid.cell(1, 0).symbol, 'b');
+    }
+
+    #[test]
+    fn render_paints_scrollbar_thumb_at_top_for_scroll_zero() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(sample_rows(40));
+        let mut w = make_win();
+        w.viewport = Some(WindowViewport::new(
+            Rect::new(0, 0, 20, 10),
+            19,
+            40,
+            0,
+            ScrollbarState::new(19, 40, 10),
+        ));
+        let mut theme = Theme::default();
+        let thumb_bg = crossterm::style::Color::AnsiValue(220);
+        let track_bg = crossterm::style::Color::AnsiValue(238);
+        theme.set("SmeltScrollbarThumb", crate::grid::Style::bg(thumb_bg));
+        theme.set("SmeltScrollbarTrack", crate::grid::Style::bg(track_bg));
+        let ctx = DrawContext {
+            terminal_width: 20,
+            terminal_height: 10,
+            focused: false,
+            theme,
+        };
+        let mut grid = Grid::new(20, 10);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));
+        w.render(&buf, &mut slice, &ctx);
+        // At scroll_top=0, thumb paints from row 0; track fills lower rows.
+        assert_eq!(grid.cell(19, 0).style.bg, Some(thumb_bg));
+        assert_eq!(grid.cell(19, 9).style.bg, Some(track_bg));
+    }
+
+    #[test]
+    fn render_skips_scrollbar_when_no_overflow() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(sample_rows(5));
+        let mut w = make_win();
+        // 5 rows fit in 10 row viewport; ScrollbarState::new returns None.
+        w.viewport = Some(WindowViewport::new(
+            Rect::new(0, 0, 20, 10),
+            20,
+            5,
+            0,
+            ScrollbarState::new(19, 5, 10),
+        ));
+        let mut theme = Theme::default();
+        let track_bg = crossterm::style::Color::AnsiValue(238);
+        theme.set("SmeltScrollbarTrack", crate::grid::Style::bg(track_bg));
+        let ctx = DrawContext {
+            terminal_width: 20,
+            terminal_height: 10,
+            focused: false,
+            theme,
+        };
+        let mut grid = Grid::new(20, 10);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 10));
+        w.render(&buf, &mut slice, &ctx);
+        // No scrollbar: rightmost column's bg untouched (Reset/None).
+        assert_ne!(grid.cell(19, 0).style.bg, Some(track_bg));
     }
 }
