@@ -225,9 +225,9 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Parse theme accent from config.
-    if let Some(ref accent) = cfg.theme.accent {
-        let theme_value = if let Ok(v) = accent.parse::<u8>() {
+    // Parse theme accent from config (applied after App::new — see below).
+    let cfg_accent: Option<u8> = cfg.theme.accent.as_ref().map(|accent| {
+        if let Ok(v) = accent.parse::<u8>() {
             v
         } else {
             // Try to find by name in presets
@@ -236,9 +236,8 @@ async fn main() {
                 .find(|(name, _, _)| name.eq_ignore_ascii_case(accent))
                 .map(|(_, _, value)| *value)
                 .unwrap_or(tui::theme::DEFAULT_ACCENT)
-        };
-        tui::theme::set_accent(theme_value);
-    }
+        }
+    });
 
     let shared_session: Arc<Mutex<Option<tui::session::Session>>> = Arc::new(Mutex::new(None));
     let headless_cancel = Arc::new(tokio::sync::Notify::new());
@@ -455,6 +454,9 @@ async fn main() {
     app.model_config = (&model_config).into();
     app.extra_instructions = tui_instructions;
     app.skill_section = tui_skill_section;
+    if let Some(accent) = cfg_accent {
+        app.ui.theme_mut().set_accent(accent);
+    }
     if let Some(mode) = mode_override {
         app.mode = mode;
     }

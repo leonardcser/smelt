@@ -119,10 +119,10 @@ pub(super) fn log_tool(
     let time = format_elapsed(elapsed_ms);
     let d = dim();
     let mark = if is_error {
-        let c = ansi_fg(crate::theme::ERROR);
+        let c = ansi_fg(crossterm::style::Color::Red);
         format!("{c}✗{r}")
     } else {
-        let c = ansi_fg(crate::theme::SUCCESS);
+        let c = ansi_fg(crossterm::style::Color::AnsiValue(77));
         format!("{c}✓{r}")
     };
     eprintln!("{mark} {d}{tool_name}{r} {summary} {d}({time}){r}");
@@ -142,7 +142,7 @@ pub(super) fn log_retry(attempt: u32, delay_ms: u64) {
 }
 
 pub(super) fn log_error(message: &str) {
-    let c = ansi_fg(crate::theme::ERROR);
+    let c = ansi_fg(crossterm::style::Color::Red);
     let r = reset();
     eprintln!("{c}! {message}{r}");
 }

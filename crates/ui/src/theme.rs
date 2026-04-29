@@ -10,9 +10,14 @@
 //! that fanned out one slot to every widget.
 
 use crate::grid::Style;
+use crossterm::style::Color;
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Clone)]
+/// Default accent palette index — `crossterm::style::Color::AnsiValue(208)`,
+/// the warm orange "ember" preset.
+pub const DEFAULT_ACCENT: u8 = 208;
+
+#[derive(Debug, Clone)]
 pub struct Theme {
     groups: HashMap<String, Style>,
     links: HashMap<String, String>,
@@ -20,6 +25,26 @@ pub struct Theme {
     /// host's default-theme builder to choose the correct palette.
     /// Detected once at startup via OSC 11 query.
     is_light: bool,
+    /// Accent palette index (ANSI 256-color). Tracked separately from
+    /// the `SmeltAccent` group entry so a host palette rebuild
+    /// (light/dark flip, preset swap) is a single setter call.
+    accent: u8,
+    /// Slug pill background palette index. `0` means "use accent."
+    /// Stored separately from `SmeltSlug` for the same reason as
+    /// `accent`.
+    slug: u8,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            groups: HashMap::new(),
+            links: HashMap::new(),
+            is_light: false,
+            accent: DEFAULT_ACCENT,
+            slug: 0,
+        }
+    }
 }
 
 impl Theme {
@@ -58,6 +83,35 @@ impl Theme {
 
     pub fn set_light(&mut self, light: bool) {
         self.is_light = light;
+    }
+
+    pub fn accent(&self) -> u8 {
+        self.accent
+    }
+
+    pub fn set_accent(&mut self, ansi: u8) {
+        self.accent = ansi;
+    }
+
+    pub fn accent_color(&self) -> Color {
+        Color::AnsiValue(self.accent)
+    }
+
+    pub fn slug(&self) -> u8 {
+        self.slug
+    }
+
+    pub fn set_slug(&mut self, ansi: u8) {
+        self.slug = ansi;
+    }
+
+    /// Resolved slug pill background. `slug == 0` falls back to accent.
+    pub fn slug_color(&self) -> Color {
+        if self.slug == 0 {
+            self.accent_color()
+        } else {
+            Color::AnsiValue(self.slug)
+        }
     }
 }
 
@@ -126,5 +180,25 @@ mod tests {
         t.set("Y", Style::bg(Color::AnsiValue(2)));
         t.link("X", "Y");
         assert_eq!(t.get("X"), t.get("Y"));
+    }
+
+    #[test]
+    fn accent_defaults_to_ember_and_round_trips() {
+        let mut t = Theme::new();
+        assert_eq!(t.accent(), DEFAULT_ACCENT);
+        assert_eq!(t.accent_color(), Color::AnsiValue(DEFAULT_ACCENT));
+        t.set_accent(75);
+        assert_eq!(t.accent(), 75);
+        assert_eq!(t.accent_color(), Color::AnsiValue(75));
+    }
+
+    #[test]
+    fn slug_zero_falls_back_to_accent() {
+        let mut t = Theme::new();
+        t.set_accent(75);
+        assert_eq!(t.slug(), 0);
+        assert_eq!(t.slug_color(), Color::AnsiValue(75));
+        t.set_slug(108);
+        assert_eq!(t.slug_color(), Color::AnsiValue(108));
     }
 }
