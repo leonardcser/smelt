@@ -839,6 +839,7 @@ impl App {
         initial_message: Option<String>,
     ) {
         crate::theme::detect_background();
+        crate::theme::populate_ui_theme(self.ui.theme_mut());
         terminal::enable_raw_mode().ok();
         let _ = io::stdout().execute(EnterAlternateScreen);
         // Disable DECAWM so writing to the bottom-right cell doesn't

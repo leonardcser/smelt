@@ -332,6 +332,46 @@ pub const SUCCESS: Color = Color::AnsiValue(77);
 pub const ERROR: Color = Color::Red;
 pub const AGENT: Color = Color::AnsiValue(75);
 
+/// Populate a `ui::Theme` registry with smelt's default highlight
+/// groups, sourced from the host-side colour module above. Call this
+/// once after `detect_background()` so light/dark-aware colours
+/// resolve to the right palette.
+///
+/// Group names follow nvim conventions where they overlap (`Visual`,
+/// `Comment`, `ErrorMsg`) and use the `Smelt*` prefix for app-specific
+/// roles (`SmeltAccent`, `SmeltAgent`, `SmeltModePlan`, …). Code with
+/// a `DrawContext` reads these via `ctx.theme.get("Visual")` etc.
+pub fn populate_ui_theme(theme: &mut ui::Theme) {
+    use ui::grid::Style;
+
+    theme.set("Visual", Style::bg(selection_bg()));
+    theme.set("Comment", Style::fg(muted()));
+    theme.set("ErrorMsg", Style::fg(ERROR));
+
+    theme.set("SmeltAccent", Style::fg(accent()));
+    theme.set("SmeltSlug", Style::bg(slug_color()));
+    theme.set("SmeltAgent", Style::fg(AGENT));
+    theme.set("SmeltUserBg", Style::bg(user_bg()));
+    theme.set("SmeltCodeBlockBg", Style::bg(code_block_bg()));
+    theme.set("SmeltBar", Style::bg(bar()));
+    theme.set("SmeltScrollbarTrack", Style::bg(scrollbar_track()));
+    theme.set("SmeltScrollbarThumb", Style::bg(scrollbar_thumb()));
+    theme.set("SmeltToolPending", Style::fg(tool_pending()));
+    theme.set("SmeltReasonOff", Style::fg(reason_off()));
+    theme.set("SmeltSuccess", Style::fg(SUCCESS));
+    theme.set("SmeltHeading", Style::fg(HEADING));
+
+    theme.set("SmeltModePlan", Style::fg(PLAN));
+    theme.set("SmeltModeApply", Style::fg(APPLY));
+    theme.set("SmeltModeYolo", Style::fg(YOLO));
+    theme.set("SmeltModeExec", Style::fg(EXEC));
+
+    theme.set("SmeltReasonLow", Style::fg(REASON_LOW));
+    theme.set("SmeltReasonMed", Style::fg(REASON_MED));
+    theme.set("SmeltReasonHigh", Style::fg(REASON_HIGH));
+    theme.set("SmeltReasonMax", Style::fg(REASON_MAX));
+}
+
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[
     ("ember", "default", DEFAULT_ACCENT),
