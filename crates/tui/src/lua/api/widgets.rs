@@ -151,6 +151,25 @@ fn register_buf(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
             Ok(())
         })?,
     )?;
+    // `smelt.buf.get_line(buf_id, line_idx)` — line_idx is
+    // 1-based to match every other Lua-facing line index in the
+    // codebase (`smelt.buf.add_highlight`, etc.). Returns `nil`
+    // when out of range.
+    buf_tbl.set(
+        "get_line",
+        lua.create_function(|_, (id, line_idx): (u64, u64)| {
+            let line0 = match line_idx.checked_sub(1) {
+                Some(n) => n as usize,
+                None => return Ok(None),
+            };
+            let text = crate::lua::with_app(|app| {
+                app.ui
+                    .buf(ui::BufId(id))
+                    .and_then(|b| b.get_line(line0).map(|s| s.to_string()))
+            });
+            Ok(text)
+        })?,
+    )?;
     buf_tbl.set(
         "set_source",
         lua.create_function(|_, (id, source): (u64, String)| {
@@ -291,6 +310,17 @@ fn register_win(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
                 app.close_float(ui::WinId(id));
             });
             Ok(())
+        })?,
+    )?;
+    // `smelt.win.buf(win_id) -> buf_id | nil` — resolve the
+    // Buffer backing a Window. Used by Lua-side dialog
+    // orchestration (e.g. `dialog.lua` reading text from an
+    // input leaf at submit time).
+    win_tbl.set(
+        "buf",
+        lua.create_function(|_, id: u64| {
+            let buf = crate::lua::with_app(|app| app.ui.win(ui::WinId(id)).map(|w| w.buf.0));
+            Ok(buf)
         })?,
     )?;
     {
