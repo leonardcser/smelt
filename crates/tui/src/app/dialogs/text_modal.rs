@@ -1,13 +1,17 @@
 //! Simple read-only text dialog. One viewer Window inside a centered
-//! Overlay; Esc dismisses.
+//! Overlay; Esc / q / Ctrl+C dismiss.
 
 use super::super::App;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
-use ui::{Border, Constraint, LayoutTree, Overlay, SplitConfig};
+use ui::{
+    Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, SplitConfig,
+};
 
-/// Open a centered modal overlay showing `body`. Esc dismisses
-/// (handled by the modal-Esc-dismiss built-in in `Ui::handle_key`).
+/// Open a centered modal overlay showing `body`. Esc dismisses via
+/// the `Ui` built-in; `q` and `Ctrl+C` dismiss via leaf-callbacks
+/// registered on the viewer window.
 pub fn open(app: &mut App, title: impl Into<String>, body: &str) {
     let buf = app.ui.buf_create(BufCreateOpts::default());
     if let Some(b) = app.ui.buf_mut(buf) {
@@ -28,6 +32,33 @@ pub fn open(app: &mut App, title: impl Into<String>, body: &str) {
     ) else {
         return;
     };
+
+    let dismiss: Callback = Callback::Rust(Box::new(|ctx| {
+        if let Some(overlay_id) = ctx.ui.overlay_for_leaf(ctx.win) {
+            let _ = ctx.ui.overlay_close(overlay_id);
+            CallbackResult::Consumed
+        } else {
+            CallbackResult::Pass
+        }
+    }));
+    let dismiss_ctrl_c: Callback = Callback::Rust(Box::new(|ctx| {
+        if let Some(overlay_id) = ctx.ui.overlay_for_leaf(ctx.win) {
+            let _ = ctx.ui.overlay_close(overlay_id);
+            CallbackResult::Consumed
+        } else {
+            CallbackResult::Pass
+        }
+    }));
+    let _ = app.ui.win_set_keymap(
+        win,
+        KeyBind::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        dismiss,
+    );
+    let _ = app.ui.win_set_keymap(
+        win,
+        KeyBind::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        dismiss_ctrl_c,
+    );
 
     let layout = LayoutTree::vbox(vec![(
         Constraint::Percentage(60),
