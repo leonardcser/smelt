@@ -6,15 +6,16 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** P1.0 theme registry landed end-to-end. Atomic state
-collapsed into `ui::Theme`; `crate::theme::*` is now a small
-smelt-specific init module (`populate_ui_theme` + `detect_background`
-+ `PRESETS`).
+**Phase:** P1.0 theme registry landed end-to-end. P1.a started:
+extmark + namespace model landed in `ui::Buffer` as the primary
+storage; per-line `add_highlight` / `set_decoration` / `set_virtual_text`
+/ `set_mark` are now thin wrappers over `set_extmark` in well-known
+namespaces. Parser `attach(spec)`, `yank_text_for_range`, soft-wrap
+cache, and `edit_buffer.rs` merge are still pending in P1.a.
 
-**Tree:** green. `cargo nextest run --workspace` — 914 passed (908
-from prior boundary + 6 new tests for atomic-on-Theme + helper-
-function direct coverage). `cargo nextest run --test scenarios` — 6
-baseline scenarios green.
+**Tree:** green. `cargo nextest run --workspace` — 922 passed (914
+from prior boundary + 8 new extmark/Buffer tests). `cargo nextest run
+--test scenarios` — 6 baseline scenarios green.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
@@ -49,6 +50,20 @@ commits (`decb0ab`..`e489a79`):
   `content/highlight/mod.rs` as a self-contained mirror updated by
   `populate_ui_theme()` (avoids threading `&Theme` through 14 syntax
   call sites for one branch).
+- `50b8923` — **P1.a kickoff**: extmark + namespace model in
+  `ui::Buffer`. New API: `create_namespace`, `set_extmark`,
+  `del_extmark`, `clear_namespace`, `extmarks(ns)`. Single
+  `BTreeMap<ExtmarkId, Extmark>` per namespace. The convenience
+  methods `add_highlight` / `set_decoration` / `set_virtual_text` /
+  `set_mark` create extmarks in the well-known namespaces
+  (`NS_HIGHLIGHTS`, `NS_DECORATIONS`, `NS_VIRT_TEXT`, `NS_MARKS`).
+  Per-line getters (`highlights_at`, `decoration_at`,
+  `virtual_text_at`, `get_mark`) read directly from the extmark
+  store. `highlights_arc` / `decorations_arc` materialize on demand
+  with a `(changedtick + marks_tick)` cache so `BufferView::sync_from_buffer`
+  still gets `Arc::clone` semantics. `sync_from_buffer` and
+  `build_panels` switched to `&mut Buffer` / `&mut dyn BufferResolver`
+  to thread the lazy materialization.
 
 `crate::theme::*` is now narrow:
 - `populate_ui_theme(&mut Theme)` — initializes `Smelt*` highlight
@@ -76,24 +91,38 @@ before declaring anything done.
 
 ## What's next
 
-Pick a P1 sub-phase to tackle. Each is a substantial rewrite:
+Continue P1.a in subsequent sessions:
 
-1. **P1.a — `Buffer` rewrite** (extmarks + namespaces + `Buffer::attach`
-   parser hooks). Mirrors `nvim_buf_set_extmark`. This is the
-   foundation everything else rides on.
-2. **P1.b — `LayoutTree`**. `Vbox`/`Hbox`/`Leaf(WinId)` with
-   constraints; container chrome (border/title/separator/gap).
-3. **P1.c — `Overlay` replacing `Float`**. Single overlay primitive
-   with anchors; deletes `PanelWidget` + `dialog.rs` multiplexing.
-4. **P1.d — `Window` as only interactive unit**. Cursor/scroll/
-   selection/keymap on one struct; vim/completer state machines
-   decompose; deletes `Component` trait + `BufferView`.
+1. **`Buffer::attach(spec)` parser hook system**. Register a parser
+   (`markdown` / `diff` / `syntax(lang)`) plus an `on_block` callback;
+   parser writes parsed metadata as extmarks in dedicated namespaces.
+   Replaces the current `BufferFormatter` trait + the IR cache in
+   `transcript_cache.rs`.
+2. **YankSubst + `yank_text_for_range(range)`**. Add
+   `yank: Option<YankSubst>` to `Extmark`; `yank_text_for_range`
+   walks intersecting extmarks and applies `YankSubst::Empty /
+   Static(s)`. Replaces the per-cell `SpanMeta::copy_as` model that
+   `transcript.rs::copy_range` walks today.
+3. **Soft-wrap cache on Buffer**. `wrap_cache: HashMap<(content_tick,
+   width), WrapResult>` so multiple Windows on the same Buffer share
+   the wrap result.
+4. **Edit history per-buffer**. Roll `edit_buffer.rs` (`EditBuffer`
+   trait + per-buffer history) into `Buffer`.
+5. **Drop `BufferView` `Arc::clone` of materialized vecs**. After
+   the above land, `BufferView::sync_from_buffer` reads extmarks
+   directly per render; the `cached_highlights` / `cached_decorations`
+   caches in `Buffer` go away.
 
-P1.a is the natural starting point — buffers underlie everything.
+Subsequent P1 sub-phases (after P1.a closes):
+- **P1.b — `LayoutTree`** (`Vbox`/`Hbox`/`Leaf(WinId)` + constraints).
+- **P1.c — `Overlay` replacing `Float`** (deletes `PanelWidget` +
+  `dialog.rs` multiplexing).
+- **P1.d — `Window` as only interactive unit** (deletes `Component`
+  trait + `BufferView`; vim/completer state machines decompose).
 
 Recently shipped: theme registry + plumbing + atomic-on-Theme
 collapse + 42 call site migrations + Snapshot elimination + ColorRole
-expansion.
+expansion + Buffer extmark + namespace model.
 P0 orthogonal deletions
 (`selection_style`/`set_selection_bg` shim, `handle_mouse_with_lua` +
 `classify_widget_action`, `MouseAction::Yank`/`WidgetEvent::Yank`,

@@ -80,7 +80,7 @@ impl BufferView {
         self.lines.len()
     }
 
-    pub fn sync_from_buffer(&mut self, buf: &Buffer) {
+    pub fn sync_from_buffer(&mut self, buf: &mut Buffer) {
         self.lines = Arc::clone(buf.lines_arc());
         self.buf_highlights = Arc::clone(buf.highlights_arc());
         self.decorations = Arc::clone(buf.decorations_arc());
@@ -360,7 +360,7 @@ mod tests {
             },
         );
         let mut view = BufferView::new();
-        view.sync_from_buffer(&buf);
+        view.sync_from_buffer(&mut buf);
         let mut grid = Grid::new(10, 1);
         let ctx = DrawContext {
             terminal_width: 10,
@@ -388,7 +388,7 @@ mod tests {
             },
         );
         let mut view = BufferView::new();
-        view.sync_from_buffer(&buf);
+        view.sync_from_buffer(&mut buf);
         let mut grid = Grid::new(10, 1);
         let ctx = DrawContext {
             terminal_width: 10,
@@ -417,7 +417,7 @@ mod tests {
         );
 
         let mut view = BufferView::new();
-        view.sync_from_buffer(&buf);
+        view.sync_from_buffer(&mut buf);
         assert_eq!(view.decorations.len(), 1);
         assert_eq!(view.decorations[0].fill_bg, Some(Color::Red));
     }
@@ -438,7 +438,7 @@ mod tests {
         );
 
         let mut view = BufferView::new();
-        view.sync_from_buffer(&buf);
+        view.sync_from_buffer(&mut buf);
         assert!(view.buf_highlights[0][0].meta.selectable);
         assert_eq!(
             view.buf_highlights[0][0].meta.copy_as.as_deref(),
@@ -453,7 +453,7 @@ mod tests {
         buf.add_highlight(0, 0, 4, crate::buffer::SpanStyle::fg(Color::Green));
 
         let mut view = BufferView::new();
-        view.sync_from_buffer(&buf);
+        view.sync_from_buffer(&mut buf);
 
         let mut grid = Grid::new(20, 1);
         let ctx = DrawContext {
