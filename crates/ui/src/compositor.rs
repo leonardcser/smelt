@@ -2,6 +2,7 @@ use crate::component::{Component, DrawContext, KeyResult};
 use crate::flush::flush_diff;
 use crate::grid::Grid;
 use crate::layout::Rect;
+use crate::theme::Theme;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::QueueableCommand;
@@ -154,7 +155,7 @@ impl Compositor {
         self.force_redraw = true;
     }
 
-    pub fn render<W: Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+    pub fn render<W: Write>(&mut self, theme: &Theme, w: &mut W) -> std::io::Result<()> {
         self.current.clear_all();
 
         let focused_id = self.focused.clone();
@@ -164,6 +165,7 @@ impl Compositor {
                 terminal_width: self.width,
                 terminal_height: self.height,
                 focused: focused_id.as_deref() == Some(&layer.id),
+                theme: theme.clone(),
             };
             layer.component.prepare(layer.rect, &ctx);
         }
@@ -173,6 +175,7 @@ impl Compositor {
                 terminal_width: self.width,
                 terminal_height: self.height,
                 focused: focused_id.as_deref() == Some(&layer.id),
+                theme: theme.clone(),
             };
             let mut slice = self.current.slice_mut(layer.rect);
             layer.component.draw(layer.rect, &mut slice, &ctx);
@@ -430,7 +433,7 @@ mod tests {
             0,
         );
         let mut out = Vec::new();
-        comp.render(&mut out).unwrap();
+        comp.render(&Theme::default(), &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("hello"));
     }
@@ -530,7 +533,7 @@ mod tests {
             0,
         );
         let mut out = Vec::new();
-        comp.render(&mut out).unwrap();
+        comp.render(&Theme::default(), &mut out).unwrap();
         assert!(!comp.force_redraw);
         comp.resize(40, 10);
         assert!(comp.force_redraw);
@@ -565,11 +568,11 @@ mod tests {
         );
 
         let mut out = Vec::new();
-        comp.render(&mut out).unwrap();
+        comp.render(&Theme::default(), &mut out).unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         let mut out = Vec::new();
-        comp.render(&mut out).unwrap();
+        comp.render(&Theme::default(), &mut out).unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 2);
     }
 
@@ -592,7 +595,7 @@ mod tests {
         comp.add("edit", Box::new(CursorComp), Rect::new(5, 10, 10, 3), 0);
         comp.focus("edit");
         let mut out = Vec::new();
-        comp.render(&mut out).unwrap();
+        comp.render(&Theme::default(), &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("\x1b[?25h"));
     }

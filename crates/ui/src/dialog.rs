@@ -1440,6 +1440,7 @@ mod tests {
             terminal_width: w,
             terminal_height: h,
             focused: true,
+            theme: Default::default(),
         }
     }
 

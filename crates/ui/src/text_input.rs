@@ -432,6 +432,7 @@ mod tests {
             terminal_width: 10,
             terminal_height: 1,
             focused: true,
+            theme: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         Component::draw(&ti, Rect::new(0, 0, 10, 1), &mut slice, &ctx);
@@ -492,6 +493,7 @@ mod tests {
             terminal_width: 20,
             terminal_height: 1,
             focused: true,
+            theme: Default::default(),
         };
         let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 1));
         Component::draw(&ti, Rect::new(0, 0, 20, 1), &mut slice, &ctx);
