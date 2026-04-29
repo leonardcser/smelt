@@ -261,6 +261,18 @@ impl Ui {
             .find_map(|(id, ov)| ov.modal.then_some(id))
     }
 
+    /// Overlay containing the currently-focused window, if focus is
+    /// inside one. Pure structural query — walks open overlays and
+    /// asks whether the focused `WinId` appears as a leaf in their
+    /// layouts. Returns `None` when focus is on a split window or
+    /// nothing is focused.
+    pub fn overlay_focused(&self) -> Option<OverlayId> {
+        let focused = self.focus()?;
+        self.overlays
+            .iter()
+            .find_map(|(id, ov)| ov.layout.contains_leaf(focused).then_some(*id))
+    }
+
     /// Hit-test a screen position against the open overlay set.
     /// Returns the topmost overlay whose resolved rect contains
     /// `(row, col)`, plus whether the hit landed on one of its leaf
@@ -1675,6 +1687,33 @@ mod tests {
         ui.overlay_open(stub_overlay()); // non-modal
         ui.overlay_open(stub_overlay().with_z(100)); // non-modal, higher z
         assert_eq!(ui.active_modal(), None);
+    }
+
+    #[test]
+    fn overlay_focused_returns_none_when_no_focus() {
+        let mut ui = make_ui();
+        ui.overlay_open(stub_overlay());
+        assert_eq!(ui.overlay_focused(), None);
+    }
+
+    #[test]
+    fn overlay_focused_returns_overlay_containing_focused_leaf() {
+        let mut ui = make_ui();
+        let win = WinId(99);
+        ui.register_split("dlg-leaf", win);
+        let id = ui.overlay_open(stub_overlay()); // stub uses Leaf(WinId(99))
+        ui.set_focus(win);
+        assert_eq!(ui.overlay_focused(), Some(id));
+    }
+
+    #[test]
+    fn overlay_focused_returns_none_when_focus_on_unrelated_split() {
+        let mut ui = make_ui();
+        let other = WinId(50);
+        ui.register_split("split", other);
+        ui.overlay_open(stub_overlay());
+        ui.set_focus(other);
+        assert_eq!(ui.overlay_focused(), None);
     }
 
     #[test]
