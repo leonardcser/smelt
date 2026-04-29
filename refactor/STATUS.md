@@ -22,10 +22,10 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — twenty-one commits landed (foundation
+**P1.c in progress** — twenty-two commits landed (foundation
 + paint pipeline + first float migration + leaf event
 routing + content-only Lua dialog migration + Buffer-backed
-list leaves). Foundation:
+list leaves + options-panel migration). Foundation:
 `40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
 `434eee8`/`16ca777`, `7cee24c`, `d94d12c`, `2713f01`/`50e2ba5`,
 `dcb0e8b`, `f80d1d0` (target types + `resolve_anchor`;
@@ -130,14 +130,34 @@ list landed in three commits:
   `/resume` (input + list — still legacy `dialog_open`,
   but the list panel kind no longer crashes the parser).
 
-**C.7.2+ — remaining float migrations + deletions:** still
-ahead. The full `OptionList` surface (multi-select checkbox
-prefix, shortcut keys 1-9, padded meta column, dim styling)
-is the residue not covered by the minimal list leaf.
-`TextInput` rewrite (single editable line buffer + cursor +
-keymap recipe) follows. Once every dialog flips,
-`FloatConfig` / `PanelWidget` / `Placement` and `dialog.rs`'s
-panel multiplexing all delete together.
+**C.7.2 — `kind = "options"` migrated to Buffer-backed
+list leaves.** `62cc719` lifts every today-consumer of
+`kind = "options"` (`/permissions`, `/export`,
+`/plan_mode`, `/confirm`, `/ps`, `/rewind`,
+`/ask_user_question`) onto the Overlay path. The options
+branch in `ui_ops.rs` builds a Buffer with one row per
+`item.label` and pushes it as a focusable
+`PanelSpec::content` with `LeafShape::List { initial_cursor }`
+(driving cursor placement from the panel's `selected = N`
+1-based field). `dialog.lua`'s submit handler falls back
+to `raw_ctx.index` (1-based, populated from
+`Payload::Selection`) when no `panels` array is present
+— overlays don't build a PanelSnapshot. Legacy
+`OptionList` widget path retained behind a
+`has_shortcut || has_multi` guard for residual cases (no
+current consumer exercises it). New helper
+`make_options_buffer(app, &[label])`.
+
+**C.7.3 — remaining float migrations + deletions:** still
+ahead. The residual `OptionList` surface (multi-select
+checkbox prefix, shortcut keys 1-9, padded meta column,
+dim styling) lives behind the legacy guard until a
+real consumer surfaces (or the move to delete becomes
+simpler). `TextInput` rewrite (single editable line
+buffer + cursor + keymap recipe) follows. Once every
+dialog flips, `FloatConfig` / `PanelWidget` / `Placement`
+and `dialog.rs`'s panel multiplexing all delete
+together.
 
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
@@ -272,20 +292,19 @@ above for the running narrative. Target shape from
   `PanelWidget` trait / `dialog.rs` panel multiplexing — all
   deleted at C.9 once every dialog flips.
 
-**Next sub-phase: C.7.2 — full OptionList migration.** The
-minimum list shape (Buffer-backed cursor-driven leaf with
-j/k/Enter) shipped in C.7.0–C.7.1, but mixed dialogs
-(confirm, permissions, agents, rewind, resume, model
-picker, …) still rely on `OptionList`'s richer surface:
-multi-select checkbox prefix, shortcut keys (1-9), padded
-meta column, dim styling, formatted display. The path is
-to render those ornaments into the buffer's text directly
-(meta as right-aligned trailing spaces, checkbox as
-leading glyph, hl extmarks for dim) so the Window stays a
-pure viewer. Once `kind="options"` panels can build a
-Buffer + Window pair, the content-only-vs-mixed branch in
-`open_dialog` collapses. C.8 does the same for
-`TextInput`. C.9 deletes the legacy types.
+**Next sub-phase: C.8 — `TextInput` as Buffer-backed
+Window.** With C.7.2 having migrated the options surface,
+the only remaining widget kind blocking the
+content-only-vs-mixed branch in `open_dialog` is `kind =
+"input"` (currently `PanelContent::Widget(TextInput)`).
+The path is to build a single-line editable Buffer +
+Window with a recipe binding insert keys + Enter →
+`Submit { Text { content } }`. Once that lands,
+mixed-input dialogs (`/resume` workspace + filter,
+`/confirm` rejection-message, `/btw` follow-up question)
+all flip to overlay. C.9 then deletes
+`FloatConfig` / `PanelWidget` / `Placement` /
+`dialog.rs` panel multiplexing.
 
 ## Deferred to P1.a-tail (after the transcript migration)
 
