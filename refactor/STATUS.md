@@ -6,43 +6,51 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** pre-P0 (planning complete, demolition not started).
+**Phase:** pre-P0 (test baseline harness landing; demolition not
+started).
 
-**Tree:** green. All features working. Nothing has been touched yet.
+**Tree:** green. All features working. Two integration scenarios
+landed (`plain_turn`, `thinking_then_text`) — both green and
+deterministic. ~3 to 8 more scenarios still want to land before P0.
 
-**Last update:** 2026-04-28. Pre-P0 scaffolding done: docs + puml +
-diagrams, 10 architectural decisions landed, drift-check script in
-place. Detail of those decisions lives in `DECISIONS.md`.
+**Last update:** 2026-04-29. Testing strategy doc + harness
+scaffolding committed (`dd86689`). First two scenarios committed
+(`22e3d74`): wiremock'd Anthropic SSE → headless smelt → `insta`
+snapshot of the JSONL event stream. Determinism handled via
+redactions on `elapsed_ms` / `avg_tps` / `tokens_per_sec`.
 
 **Note for next session:** puml + SVG are in sync. If the puml is
 edited, regenerate via `plantuml -tsvg
 refactor/tui-ui-architecture-target.puml`. Run `refactor/check.sh`
-before declaring anything done.
+before declaring anything done. Re-run snapshot tests with
+`cargo nextest run --test scenarios` and review diffs by inspecting
+`tests/snapshots/*.snap.new` (no `cargo-insta` binary installed in
+this worktree — bless by `mv` or install it).
 
 ## What's next
 
 In order:
 
-1. **Commit the planning baseline.** Capture this state in git as one
-   commit (`refactor: planning docs + target architecture`). Gives a
-   clean baseline to bisect against.
-2. **Pre-P0 — L2 test baseline harness.** Add `wiremock` + `insta` +
-   `tempfile` dev-deps. Scaffold `crates/tui/tests/{common,scenarios,
-   snapshots}/`. Write 5–10 baseline scenarios on today's binary
-   (plain turn, tool confirm allow/deny, retry, multi-turn, mid-block
-   end, compact, fork). Goldens lock current behaviour before
-   demolition. See `TESTING.md` and the Pre-P0 section in `REFACTOR.md`.
-3. **Start P0** — clear the deck. Delete BufferView, Component,
+1. **Finish the baseline scenario set.** `plain_turn` and
+   `thinking_then_text` are in. Still want roughly: incomplete stream,
+   provider error path, plugin tool happy-path (Lua tool + hook,
+   tests the dispatch round-trip), permission deny, mode change.
+   Goal is 5–10 scenarios that lock the behaviours most likely to
+   silently shift during demolition. Stop when coverage feels
+   adequate, not when a fixed count is hit.
+2. **Start P0** — clear the deck. Delete BufferView, Component,
    PanelWidget, the 6-variant Placement, theme constants, scattered
    selection_style, MouseAction::Yank, etc. End state: red tree, clean
    bones. Write `refactor/P0.md`.
 
-Done in this session: `TRACE.md` (vertical-slice walk-through, also
+Recently shipped: `TRACE.md` (vertical-slice walk-through, also
 serves as the concrete `init.lua` + `bash.lua` API example). Five
 small design holes the trace surfaced got fixed in the canonical docs
-in the same commit. `TESTING.md` (three-layer testing strategy: L1
-marker DSL / L2 headless+wiremock / L3 grid render + Pilot) added as
-the canonical testing reference.
+in the same commit. `TESTING.md` (three-layer testing strategy:
+marker DSL for model state / headless+wiremock for engine integration
+/ grid render + Pilot for rendering) added as the canonical testing
+reference. Test harness + first two scenarios (`plain_turn`,
+`thinking_then_text`) landed; goldens are deterministic across runs.
 
 ## Open questions / blocked
 
