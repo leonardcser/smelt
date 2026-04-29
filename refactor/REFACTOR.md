@@ -414,17 +414,17 @@ Buffer with extmarks for wrap, cursor, and selection.
 Splits across two sessions because the rendering primitive has to
 land before the migration can flip:
 
-- **P1.d.2a — `Window::render` rendering primitives + painted-split
-  focus.** Adds `Window::viewport: Option<WindowViewport>` +
+- **P1.d.2a** ✅ landed (`482da6f`) — `Window::render` rendering
+  primitives + painted-split focus. Adds
+  `Window::viewport: Option<WindowViewport>` +
   `Window::cursor_kind: Option<CursorKind>` (`Block { glyph, style } |
-  Hardware`). `Window::render` learns to paint the scrollbar (when
+  Hardware`). `Window::render` paints the scrollbar (when
   `viewport.scrollbar` is set) and the block cursor (when
   `cursor_kind == Block`). `Ui` gains `painted_split_focus:
   Option<WinId>`; `set_focus` / `focus()` accept focusable painted
   splits. `Ui::render` surfaces the focused painted split's hardware
   cursor (when `cursor_kind == Hardware`) ahead of the focused
-  compositor layer's cursor, behind the overlay cursor. No prompt
-  migration yet — pure mechanism for P1.d.2b and P1.d.3 to consume.
+  compositor layer's cursor, behind the overlay cursor.
 - **P1.d.2b — Migrate prompt to a painted-split Window.** Drops the
   `"prompt"` and `"prompt_input"` compositor layers; the prompt
   becomes a single painted-split Window over a unified buffer
