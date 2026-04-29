@@ -60,7 +60,7 @@ pub use layout::{
 };
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
-pub use overlay::{Overlay, OverlayHitTarget, OverlayId};
+pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
 pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
@@ -286,11 +286,37 @@ impl Ui {
     /// asks whether the focused `WinId` appears as a leaf in their
     /// layouts. Returns `None` when focus is on a split window or
     /// nothing is focused.
-    pub fn overlay_focused(&self) -> Option<OverlayId> {
+    pub fn focused_overlay(&self) -> Option<OverlayId> {
         let focused = self.focus()?;
         self.overlays
             .iter()
             .find_map(|(id, ov)| ov.layout.contains_leaf(focused).then_some(*id))
+    }
+
+    /// Unified hit-test for a screen position. Returns the target
+    /// the cell belongs to: an overlay leaf or chrome, or a split
+    /// window underneath. Overlays are checked first (topmost-z to
+    /// lowest, modal-aware — see `overlay_hit_test`); when no
+    /// overlay covers the point, falls back to the compositor's
+    /// layer-level lookup which today owns split + float layers.
+    /// `Scrollbar` results are reserved for P1.d when Window
+    /// publishes its scrollbar rect; this method never returns
+    /// `Scrollbar` yet.
+    pub fn hit_test(
+        &self,
+        row: u16,
+        col: u16,
+        cursor: Option<(u16, u16)>,
+    ) -> Option<HitTarget> {
+        if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
+            return Some(match target {
+                OverlayHitTarget::Window(w) => HitTarget::Window(w),
+                OverlayHitTarget::Chrome => HitTarget::Chrome { owner: id },
+            });
+        }
+        let layer_id = self.compositor.hit_test(row, col)?;
+        let win = self.layer_to_win(layer_id)?;
+        Some(HitTarget::Window(win))
     }
 
     /// Hit-test a screen position against the open overlay set.
@@ -1798,30 +1824,30 @@ mod tests {
     }
 
     #[test]
-    fn overlay_focused_returns_none_when_no_focus() {
+    fn focused_overlay_returns_none_when_no_focus() {
         let mut ui = make_ui();
         ui.overlay_open(stub_overlay());
-        assert_eq!(ui.overlay_focused(), None);
+        assert_eq!(ui.focused_overlay(), None);
     }
 
     #[test]
-    fn overlay_focused_returns_overlay_containing_focused_leaf() {
+    fn focused_overlay_returns_overlay_containing_focused_leaf() {
         let mut ui = make_ui();
         let win = WinId(99);
         ui.register_split("dlg-leaf", win);
         let id = ui.overlay_open(stub_overlay()); // stub uses Leaf(WinId(99))
         ui.set_focus(win);
-        assert_eq!(ui.overlay_focused(), Some(id));
+        assert_eq!(ui.focused_overlay(), Some(id));
     }
 
     #[test]
-    fn overlay_focused_returns_none_when_focus_on_unrelated_split() {
+    fn focused_overlay_returns_none_when_focus_on_unrelated_split() {
         let mut ui = make_ui();
         let other = WinId(50);
         ui.register_split("split", other);
         ui.overlay_open(stub_overlay());
         ui.set_focus(other);
-        assert_eq!(ui.overlay_focused(), None);
+        assert_eq!(ui.focused_overlay(), None);
     }
 
     #[test]
@@ -1966,6 +1992,38 @@ mod tests {
         // Hit inside the under overlay but outside the modal → blocked,
         // returns None (lower-z overlay can't receive the click).
         assert_eq!(ui.overlay_hit_test(8, 22, None), None);
+    }
+
+    #[test]
+    fn hit_test_returns_overlay_window_when_overlay_covers_point() {
+        let mut ui = make_ui();
+        ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        // Centered (7,20)..(17,60); (10,30) lands on the leaf.
+        let hit = ui.hit_test(10, 30, None).unwrap();
+        assert!(matches!(hit, HitTarget::Window(WinId(99))));
+    }
+
+    #[test]
+    fn hit_test_returns_chrome_with_overlay_owner() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(
+            Overlay::new(
+                LayoutTree::vbox(vec![(
+                    Constraint::Length(8),
+                    LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
+                )])
+                .with_border(layout::Border::Single),
+                layout::Anchor::ScreenCenter,
+            ),
+        );
+        let hit = ui.hit_test(7, 30, None).unwrap();
+        assert_eq!(hit, HitTarget::Chrome { owner: id });
+    }
+
+    #[test]
+    fn hit_test_returns_none_when_nothing_covers_point() {
+        let ui = make_ui();
+        assert_eq!(ui.hit_test(0, 0, None), None);
     }
 
     #[test]

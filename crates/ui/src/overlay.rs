@@ -33,6 +33,20 @@ pub enum OverlayHitTarget {
     Chrome,
 }
 
+/// Result of a global mouse hit-test against the open Ui surface.
+/// Composes `OverlayHitTarget` (overlay paths) with split-window
+/// hits, so callers don't need separate code per surface kind.
+/// `Scrollbar { owner }` is reserved for the eventual split-render
+/// path (P1.d) where Window publishes its scrollbar rect; the
+/// variant exists so callers can pattern-match the full target shape
+/// today, but `Ui::hit_test` doesn't return it yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HitTarget {
+    Window(crate::WinId),
+    Scrollbar { owner: crate::WinId },
+    Chrome { owner: OverlayId },
+}
+
 #[derive(Clone, Debug)]
 pub struct Overlay {
     pub layout: LayoutTree,
