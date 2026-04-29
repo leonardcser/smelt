@@ -11,10 +11,19 @@ model + YankSubst + wrap_at + BufferParser rename are in place; the
 remaining structural work (transcript-pipeline migration onto
 `BufferParser` + `transcript_cache.rs` deletion + `edit_buffer.rs`
 merge) is gated on the transcript renderers moving onto Buffer
-first, which is itself a multi-session keystone. Rather than block
-P1 on that, deferred to a dedicated P1.a-tail effort and moved on
-to **P1.b — LayoutTree** which is independent and unblocks parallel
-overlay (P1.c) and window (P1.d) work.
+first, which is itself a multi-session keystone. Deferred to a
+dedicated P1.a-tail effort.
+
+**P1.b LayoutTree complete.** All four sub-commits (B.1 → B.4)
+landed in this session. `LayoutTree` is now in target shape:
+`Vbox`/`Hbox`/`Leaf(WinId)` with explicit chrome (`gap`, `border`,
+`title`) and `Items: Vec<(Constraint, LayoutTree)>`. Constraints
+expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
+with proper resolution semantics. `Direction` enum deleted.
+`resolve_layout` now returns `HashMap<WinId, Rect>`.
+
+**Next:** P1.c — Overlay replacing Float. Independent of the
+transcript-migration track.
 
 **Tree:** green. `cargo nextest run --workspace` — 930 passed (914
 from prior boundary + 16 new tests covering extmark CRUD, yank
@@ -121,44 +130,48 @@ before declaring anything done.
 
 ## What's next
 
-**P1.b — `LayoutTree`** is the active phase. Target shape from
-`REFACTOR.md` § P1.b:
+**P1.c — `Overlay` replacing `Float`** is the active phase. Target
+shape from `REFACTOR.md` § P1.c:
 
-- `Vbox { gap, separator, border, title, items } | Hbox { ... } |
-  Leaf(WinId)`.
-- `Item = (Constraint, LayoutTree)`.
-- Constraints: `Length / Percentage / Ratio / Min / Max / Fill / Fit`.
-- Container nodes carry chrome: `gap: u16`, `separator:
-  SeparatorStyle`, `border: Option<Border>`, `title: Option<String>`.
+- `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
+- `Anchor::{ Screen(Center) | Screen { row, col } | Cursor(Edge) |
+  Win { target, attach } }`.
+- Drag = mutate the anchor.
+- `Float`/`FloatId` go away. Overlays have an `OverlayId` for chrome
+  hit-testing.
 
-Today's `crates/ui/src/layout.rs` has:
+Deletes:
+- `PanelWidget` trait + `dialog.rs` panel multiplexing.
+- `Placement` enum (replaced by `Anchor`).
+- `FloatConfig` (replaced by `Overlay`).
 
-- `LayoutTree::{ Leaf { name: String, constraint }, Split { direction,
-  children } }` (no chrome on containers; leaves identified by name
-  string, not `WinId`).
-- `Constraint::{ Fixed, Pct, Fill }` (3 of 7 target variants).
+Sub-commits to scope at P1.c kickoff. Likely shape:
+1. **C.1** — Add `Overlay` + `Anchor` types alongside existing
+   `Float`/`Placement`. Add `Ui::overlay_open/close`.
+2. **C.2** — Migrate one float (the simplest dialog) to Overlay
+   as proof. Verify hit-testing + focus.
+3. **C.3** — Migrate remaining floats; delete `FloatConfig` /
+   `PanelWidget` / `dialog.rs` panel multiplexing.
 
-Sub-commits planned:
+## P1.b sub-commits landed this session
 
-1. ✅ **B.1 — Constraint enum expansion** (landed at `70ad2e0`).
-   Added `Min(u16)`, `Max(u16)`, `Ratio(u16, u16)`, `Fit` with
-   proper resolution semantics in `resolve_constraints`. Renamed
-   `Fixed → Length`, `Pct → Percentage`. Updated 8 consumer files.
-   936 tests pass (6 new), clippy clean.
-2. **B.2 — Container chrome on `Split`.** Add `gap: u16`,
-   `border: Option<Border>`, `title: Option<String>` to
-   `LayoutTree::Split`; account for them in `resolve_node` so
-   children get a smaller area. Defer `SeparatorStyle` (needs new
-   enum) to B.2.1. ~Half-day. Doesn't restructure Items tuple yet.
-3. **B.3 — Items tuple + `Leaf(WinId)`.** Hoist constraint from
-   `Leaf` onto a `(Constraint, LayoutTree)` tuple stored in a new
-   `items` field on containers; switch `Leaf` from
-   `name: String` to `WinId`; rewrite `resolve_layout` to return
-   `HashMap<WinId, Rect>`. Cascades through `app/mod.rs`,
-   `content/layout.rs`, `render_loop.rs`. The biggest semantic
-   shift; gates B.4. ~1.5 days.
-4. **B.4 — Replace `Split` with `Vbox`/`Hbox`.** All consumers on
-   the new shape; delete the unified `Split` variant. ~Half-day.
+1. ✅ **B.1 — Constraint enum expansion** (`70ad2e0`).
+   `Min`/`Max`/`Ratio`/`Fit` added; `Fixed→Length`,
+   `Pct→Percentage`. 8 consumer files updated.
+2. ✅ **B.2 — Container chrome + builders** (`5e1d81c`,
+   `14612d8`). `gap`/`border`/`title` on `Split` plus
+   `vbox`/`hbox`/`leaf` constructors and `with_gap` /
+   `with_border` / `with_title` builders. All 17 in-file tests
+   migrated to the constructors. Dummy "gap" leaf in
+   `content/layout.rs` replaced with `.with_gap(1)` chrome.
+3. ✅ **B.3 — Items tuple + `Leaf(WinId)`** (`e615c12`).
+   `Item = (Constraint, LayoutTree)`; constraint hoisted out of
+   `Leaf` onto parent items. `Leaf(WinId)` (string names gone).
+   `resolve_layout` returns `HashMap<WinId, Rect>`. Production
+   consumers use `TRANSCRIPT_WIN`/`PROMPT_WIN` constants.
+4. ✅ **B.4 — Vbox/Hbox + drop Direction** (`2a157da`). `Split`
+   replaced with explicit `Vbox`/`Hbox` variants sharing a
+   `Chrome` struct. `Direction` enum deleted.
 
 Once P1.b closes, P1.c (Overlay replacing Float) becomes
 unblocked.
