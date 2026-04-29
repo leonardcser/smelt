@@ -555,19 +555,10 @@ impl App {
             if let Some(accent) = saved.accent_color {
                 ui.theme_mut().set_accent(accent);
             }
-            ui.set_layout(ui::LayoutTree::Split {
-                direction: ui::layout::Direction::Vertical,
-                children: vec![
-                    ui::LayoutTree::Leaf {
-                        name: "transcript".into(),
-                        constraint: ui::Constraint::Fill,
-                    },
-                    ui::LayoutTree::Leaf {
-                        name: "prompt".into(),
-                        constraint: ui::Constraint::Percentage(25),
-                    },
-                ],
-            });
+            ui.set_layout(ui::LayoutTree::vbox(vec![
+                ui::LayoutTree::leaf("transcript", ui::Constraint::Fill),
+                ui::LayoutTree::leaf("prompt", ui::Constraint::Percentage(25)),
+            ]));
             let input_display_buf = ui.buf_create(ui::buffer::BufCreateOpts {
                 modifiable: true,
                 buftype: ui::buffer::BufType::Prompt,
