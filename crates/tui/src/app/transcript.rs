@@ -502,7 +502,7 @@ impl App {
         if self.transcript.history.is_empty() {
             return None;
         }
-        let mut cache = PersistedLayoutCache::new(crate::theme::is_light());
+        let mut cache = PersistedLayoutCache::new(self.ui.theme().is_light());
         for id in &self.transcript.history.order {
             let Some(block) = self.transcript.history.blocks.get(id) else {
                 continue;
@@ -541,7 +541,7 @@ impl App {
     }
 
     pub fn import_layout_cache(&mut self, cache: PersistedLayoutCache) {
-        if !cache.is_compatible(crate::theme::is_light()) {
+        if !cache.is_compatible(self.ui.theme().is_light()) {
             return;
         }
         let nw = self.ui.terminal_size().0;

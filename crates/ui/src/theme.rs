@@ -16,6 +16,10 @@ use std::collections::HashMap;
 pub struct Theme {
     groups: HashMap<String, Style>,
     links: HashMap<String, String>,
+    /// Whether the host terminal has a light background. Read by the
+    /// host's default-theme builder to choose the correct palette.
+    /// Detected once at startup via OSC 11 query.
+    is_light: bool,
 }
 
 impl Theme {
@@ -46,6 +50,14 @@ impl Theme {
             cur = target;
         }
         self.groups.get(cur).copied().unwrap_or_default()
+    }
+
+    pub fn is_light(&self) -> bool {
+        self.is_light
+    }
+
+    pub fn set_light(&mut self, light: bool) {
+        self.is_light = light;
     }
 }
 
