@@ -25,7 +25,6 @@ pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 pub(crate) use status::BarSpan;
 pub use status::{StatusPosition, StyleState};
 
-use crate::theme;
 use crate::utils::format_duration;
 use crossterm::{style::Color, terminal};
 use std::collections::HashMap;
@@ -110,14 +109,16 @@ pub(super) fn emit_newlines(out: &mut layout_out::SpanCollector, n: u16) {
     }
 }
 
-pub(super) fn reasoning_color(effort: protocol::ReasoningEffort) -> Color {
-    match effort {
-        protocol::ReasoningEffort::Off => theme::reason_off(),
-        protocol::ReasoningEffort::Low => theme::REASON_LOW,
-        protocol::ReasoningEffort::Medium => theme::REASON_MED,
-        protocol::ReasoningEffort::High => theme::REASON_HIGH,
-        protocol::ReasoningEffort::Max => theme::REASON_MAX,
-    }
+pub(super) fn reasoning_color(effort: protocol::ReasoningEffort, theme: &ui::Theme) -> Color {
+    let group = match effort {
+        protocol::ReasoningEffort::Off => "SmeltReasonOff",
+        protocol::ReasoningEffort::Low => "SmeltReasonLow",
+        protocol::ReasoningEffort::Medium => "SmeltReasonMed",
+        protocol::ReasoningEffort::High => "SmeltReasonHigh",
+        protocol::ReasoningEffort::Max => "SmeltReasonMax",
+    };
+    let style = theme.get(group);
+    style.fg.or(style.bg).unwrap_or(Color::Reset)
 }
 
 pub fn term_width() -> usize {

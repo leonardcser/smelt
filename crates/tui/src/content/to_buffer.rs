@@ -31,6 +31,14 @@ fn resolve(c: ColorValue, theme: &Theme) -> Color {
                 ColorRole::Agent => "SmeltAgent",
                 ColorRole::Success => "SmeltSuccess",
                 ColorRole::ErrorMsg => "ErrorMsg",
+                ColorRole::Apply => "SmeltModeApply",
+                ColorRole::Plan => "SmeltModePlan",
+                ColorRole::Exec => "SmeltModeExec",
+                ColorRole::Heading => "SmeltHeading",
+                ColorRole::ReasonLow => "SmeltReasonLow",
+                ColorRole::ReasonMed => "SmeltReasonMed",
+                ColorRole::ReasonHigh => "SmeltReasonHigh",
+                ColorRole::ReasonMax => "SmeltReasonMax",
             };
             let style = theme.get(group);
             // Roles whose conventional slot is bg (Slug, UserBg,

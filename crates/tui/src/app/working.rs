@@ -9,7 +9,6 @@
 //! 60 Hz after every completed turn).
 
 use crate::content::{BarSpan, SPINNER_FRAMES};
-use crate::theme;
 use crate::utils::format_duration;
 use crossterm::style::Color;
 use protocol::TurnMeta;
@@ -228,12 +227,12 @@ impl WorkingState {
         Some(SPINNER_FRAMES[crate::content::spinner_frame_index(live.effective_elapsed())])
     }
 
-    pub(crate) fn throbber_spans(&self, show_tps: bool) -> Vec<BarSpan> {
+    pub(crate) fn throbber_spans(&self, show_tps: bool, muted: Color) -> Vec<BarSpan> {
         if let Some(live) = self.live.as_ref() {
-            return live_spans(live, show_tps);
+            return live_spans(live, show_tps, muted);
         }
         if let Some(last) = self.last.as_ref() {
-            return last_spans(last, show_tps);
+            return last_spans(last, show_tps, muted);
         }
         Vec::new()
     }
@@ -246,14 +245,14 @@ fn avg(samples: &[f64]) -> Option<f64> {
     Some(samples.iter().sum::<f64>() / samples.len() as f64)
 }
 
-fn tps_spans(avg_tps: Option<f64>) -> Vec<BarSpan> {
+fn tps_spans(avg_tps: Option<f64>, muted: Color) -> Vec<BarSpan> {
     let Some(avg) = avg_tps else {
         return Vec::new();
     };
     vec![
         BarSpan {
             text: "·".into(),
-            color: theme::muted(),
+            color: muted,
             bg: None,
             bold: false,
             dim: true,
@@ -261,7 +260,7 @@ fn tps_spans(avg_tps: Option<f64>) -> Vec<BarSpan> {
         },
         BarSpan {
             text: format!(" {:.1} tok/s", avg),
-            color: theme::muted(),
+            color: muted,
             bg: None,
             bold: false,
             dim: true,
@@ -270,7 +269,7 @@ fn tps_spans(avg_tps: Option<f64>) -> Vec<BarSpan> {
     ]
 }
 
-fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
+fn live_spans(live: &LiveTurn, show_tps: bool, muted: Color) -> Vec<BarSpan> {
     let elapsed = live.effective_elapsed();
     let idx = crate::content::spinner_frame_index(elapsed);
     match live.phase {
@@ -285,7 +284,7 @@ fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
             },
             BarSpan {
                 text: format!(" {} ", format_duration(elapsed.as_secs())),
-                color: theme::muted(),
+                color: muted,
                 bg: None,
                 bold: false,
                 dim: true,
@@ -294,7 +293,7 @@ fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
         ],
         TurnPhase::Working | TurnPhase::Retrying { .. } => {
             let spinner_color = if matches!(live.phase, TurnPhase::Retrying { .. }) {
-                theme::muted()
+                muted
             } else {
                 Color::Reset
             };
@@ -309,7 +308,7 @@ fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
                 },
                 BarSpan {
                     text: format!(" {} ", format_duration(elapsed.as_secs())),
-                    color: theme::muted(),
+                    color: muted,
                     bg: None,
                     bold: false,
                     dim: true,
@@ -317,7 +316,7 @@ fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
                 },
             ];
             if show_tps {
-                spans.extend(tps_spans(avg(&live.tps_samples)));
+                spans.extend(tps_spans(avg(&live.tps_samples), muted));
             }
             if let TurnPhase::Retrying { delay, attempt } = live.phase {
                 let remaining = live
@@ -326,7 +325,7 @@ fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
                     .unwrap_or(delay);
                 spans.push(BarSpan {
                     text: format!(" (retrying in {}s #{}) ", remaining.as_secs(), attempt),
-                    color: theme::muted(),
+                    color: muted,
                     bg: None,
                     bold: false,
                     dim: true,
@@ -338,25 +337,25 @@ fn live_spans(live: &LiveTurn, show_tps: bool) -> Vec<BarSpan> {
     }
 }
 
-fn last_spans(last: &LastTurn, show_tps: bool) -> Vec<BarSpan> {
+fn last_spans(last: &LastTurn, show_tps: bool, muted: Color) -> Vec<BarSpan> {
     match last.outcome {
         TurnOutcome::Done => {
             let mut spans = vec![BarSpan {
                 text: format!(" done {} ", format_duration(last.elapsed.as_secs())),
-                color: theme::muted(),
+                color: muted,
                 bg: None,
                 bold: false,
                 dim: true,
                 priority: 0,
             }];
             if show_tps {
-                spans.extend(tps_spans(last.avg_tps));
+                spans.extend(tps_spans(last.avg_tps, muted));
             }
             spans
         }
         TurnOutcome::Interrupted => vec![BarSpan {
             text: " interrupted ".into(),
-            color: theme::muted(),
+            color: muted,
             bg: None,
             bold: false,
             dim: true,

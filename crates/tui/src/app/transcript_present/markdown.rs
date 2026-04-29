@@ -109,7 +109,7 @@ pub(crate) fn render_markdown_inner(
                         style: InlineStyle {
                             bold: true,
                             dim,
-                            fg: Some(theme::HEADING.into()),
+                            fg: Some(ColorValue::Role(ColorRole::Heading)),
                             ..Default::default()
                         },
                     });

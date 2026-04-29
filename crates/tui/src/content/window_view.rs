@@ -154,7 +154,7 @@ impl WindowView {
         }
     }
 
-    fn draw_scrollbar(&self, area: Rect, grid: &mut GridSlice<'_>) {
+    fn draw_scrollbar(&self, area: Rect, grid: &mut GridSlice<'_>, theme: &ui::Theme) {
         let h = grid.height();
         let w = grid.width();
         let Some(viewport) = self.viewport else {
@@ -173,8 +173,20 @@ impl WindowView {
             bar.viewport_rows as usize,
             viewport.scroll_top as usize,
         );
-        let thumb_style = Style::bg(theme::scrollbar_thumb());
-        let track_style = Style::bg(theme::scrollbar_track());
+        let thumb = theme.get("SmeltScrollbarThumb");
+        let track = theme.get("SmeltScrollbarTrack");
+        let thumb_style = Style::bg(
+            thumb
+                .bg
+                .or(thumb.fg)
+                .unwrap_or(crossterm::style::Color::Reset),
+        );
+        let track_style = Style::bg(
+            track
+                .bg
+                .or(track.fg)
+                .unwrap_or(crossterm::style::Color::Reset),
+        );
         for row in 0..h.saturating_sub(local_top).min(bar.viewport_rows) {
             let style = if scrollbar.is_thumb(row as usize) {
                 thumb_style
@@ -198,7 +210,7 @@ impl Component for WindowView {
             WindowContent::Buffer => self.buffer_view.draw(area, grid, ctx),
             WindowContent::Rows => self.draw_rows(grid),
         }
-        self.draw_scrollbar(area, grid);
+        self.draw_scrollbar(area, grid, &ctx.theme);
     }
 
     fn handle_key(&mut self, _code: KeyCode, _mods: KeyModifiers) -> KeyResult {

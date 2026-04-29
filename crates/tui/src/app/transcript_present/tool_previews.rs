@@ -113,7 +113,7 @@ pub(super) fn render_plan_output(
     // 3 + 1(┌) + 1(─) + 6(label) + fill + 1(┐) = 5 + inner_w + 2
     let label = " Plan ";
     let fill = inner_w.saturating_sub(label.len()).saturating_add(1);
-    out.push_fg(theme::PLAN.into());
+    out.push_fg(ColorValue::Role(ColorRole::Plan));
     out.print_gutter(&format!(
         "  \u{250c}\u{2500}{label}{}\u{2510}",
         "\u{2500}".repeat(fill)
@@ -126,14 +126,14 @@ pub(super) fn render_plan_output(
     let bctx = crate::content::BoxContext {
         left: "  \u{2502} ",
         right: " \u{2502}",
-        color: theme::PLAN.into(),
+        color: ColorValue::Role(ColorRole::Plan),
         inner_w,
     };
     rows += render_markdown_inner(out, body, width, bctx.left, false, Some(&bctx));
 
     // Bottom border: "   └──...──┘"
     // 3 + 1(└) + dashes + 1(┘) = 5 + inner_w + 2 → dashes = inner_w + 2
-    out.push_fg(theme::PLAN.into());
+    out.push_fg(ColorValue::Role(ColorRole::Plan));
     out.print_gutter(&format!(
         "  \u{2514}{}\u{2518}",
         "\u{2500}".repeat(inner_w + 2)

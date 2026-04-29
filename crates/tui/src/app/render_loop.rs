@@ -204,11 +204,12 @@ impl App {
                 has_prompt_cursor,
                 bar_info,
             };
+            let theme = self.ui.theme().clone();
             let input_buf = self
                 .ui
                 .buf_mut(self.input_display_buf)
                 .expect("input_display_buf must be registered at startup");
-            content::prompt_data::compute_prompt(&mut prompt_input, input_buf)
+            content::prompt_data::compute_prompt(&mut prompt_input, input_buf, &theme)
         };
 
         let chrome_rows = prompt_output.chrome_rows;

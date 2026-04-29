@@ -122,6 +122,14 @@ pub enum ColorRole {
     Agent,
     Success,
     ErrorMsg,
+    Apply,
+    Plan,
+    Exec,
+    Heading,
+    ReasonLow,
+    ReasonMed,
+    ReasonHigh,
+    ReasonMax,
 }
 
 /// Mirror of crossterm's named colors. We can't store crossterm::Color
