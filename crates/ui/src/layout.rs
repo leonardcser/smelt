@@ -251,15 +251,52 @@ impl LayoutTree {
 }
 
 /// Which corner of a rectangle is its anchor point. Used by
-/// `Placement::Manual` and (target P1.c) by `Anchor::Win {
-/// target, attach }` to specify which corner of the target window
-/// the overlay attaches to.
+/// `Placement::Manual` and by `Anchor::Win { target, attach }` to
+/// specify which corner of the target window the overlay attaches
+/// to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Corner {
     NW,
     NE,
     SW,
     SE,
+}
+
+/// Where an `Overlay` is positioned on screen. Drag = mutate the
+/// anchor; the renderer recomputes the overlay's rect each frame
+/// from the anchor + the overlay's natural / configured size.
+///
+/// Replaces the legacy multi-variant `Placement` enum (which mixed
+/// positioning, sizing, and chrome). Sizing now lives on `Overlay`'s
+/// `layout: LayoutTree` instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Anchor {
+    /// Centered on screen along both axes.
+    ScreenCenter,
+    /// Absolute screen position. The overlay's `corner` is placed at
+    /// `(row, col)` (terminal cell coordinates, top-left = 0,0).
+    ScreenAt {
+        row: i32,
+        col: i32,
+        corner: Corner,
+    },
+    /// Anchored to the text cursor. The overlay's `corner` touches
+    /// the cursor cell, offset by `(row_offset, col_offset)`. If
+    /// the overlay would overflow the screen, the renderer flips to
+    /// the opposite corner (canonical completer popup behavior).
+    Cursor {
+        corner: Corner,
+        row_offset: i32,
+        col_offset: i32,
+    },
+    /// Anchored to another window. The overlay's `attach` corner
+    /// sits on the corresponding edge of the target window's rect.
+    /// Used for prompt-anchored pickers (completers, history search,
+    /// command palette).
+    Win {
+        target: crate::WinId,
+        attach: Corner,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
