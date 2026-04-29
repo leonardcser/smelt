@@ -6,16 +6,20 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** P1.0 theme registry landed end-to-end. P1.a started:
+**Phase:** P1.0 theme registry landed end-to-end. P1.a in progress:
 extmark + namespace model landed in `ui::Buffer` as the primary
-storage; per-line `add_highlight` / `set_decoration` / `set_virtual_text`
-/ `set_mark` are now thin wrappers over `set_extmark` in well-known
-namespaces. Parser `attach(spec)`, `yank_text_for_range`, soft-wrap
-cache, and `edit_buffer.rs` merge are still pending in P1.a.
+storage; `YankSubst` extmark field + `Buffer::yank_text_for_range`
+helper added; soft-wrap cache (`Buffer::wrap_at`) keyed by
+`(changedtick, width)` added. Per-line `add_highlight` /
+`set_decoration` / `set_virtual_text` / `set_mark` are now thin
+wrappers over `set_extmark` in well-known namespaces. `Buffer::attach(spec)`
+parser hooks (replacing `BufferFormatter`) and the `edit_buffer.rs`
+merge are still pending in P1.a.
 
-**Tree:** green. `cargo nextest run --workspace` — 922 passed (914
-from prior boundary + 8 new extmark/Buffer tests). `cargo nextest run
---test scenarios` — 6 baseline scenarios green.
+**Tree:** green. `cargo nextest run --workspace` — 930 passed (914
+from prior boundary + 16 new tests covering extmark CRUD, yank
+substitution, and wrap caching). `cargo nextest run --test scenarios`
+— 6 baseline scenarios green. `cargo clippy` clean.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
@@ -64,6 +68,19 @@ commits (`decb0ab`..`e489a79`):
   still gets `Arc::clone` semantics. `sync_from_buffer` and
   `build_panels` switched to `&mut Buffer` / `&mut dyn BufferResolver`
   to thread the lazy materialization.
+- `67603de` — `YankSubst` extmark field +
+  `Buffer::yank_text_for_range(start_row, start_col, end_row, end_col)`.
+  An extmark with `yank: Some(YankSubst::Empty)` elides covered
+  bytes on yank; `Some(YankSubst::Static(s))` substitutes them.
+  Walks every namespace, sorts substitutions in source order,
+  emits literal text for uncovered bytes. No callers yet — building
+  block for hidden-thinking elision and prompt attachment expansion.
+- `26701d3` — `Buffer::wrap_at(width)` soft-wrap cache keyed by
+  `(changedtick, width)`. Reuses the result across repeated calls
+  and (eventually) across multiple Windows on the same Buffer.
+  Cache invalidates on any line mutation. No callers yet — wrap
+  state today still lives in WindowView; migration is downstream
+  P1.a work.
 
 `crate::theme::*` is now narrow:
 - `populate_ui_theme(&mut Theme)` — initializes `Smelt*` highlight
@@ -91,27 +108,39 @@ before declaring anything done.
 
 ## What's next
 
-Continue P1.a in subsequent sessions:
+Three substantial P1.a items remain — each is multi-day. Pick one:
 
-1. **`Buffer::attach(spec)` parser hook system**. Register a parser
-   (`markdown` / `diff` / `syntax(lang)`) plus an `on_block` callback;
-   parser writes parsed metadata as extmarks in dedicated namespaces.
-   Replaces the current `BufferFormatter` trait + the IR cache in
-   `transcript_cache.rs`.
-2. **YankSubst + `yank_text_for_range(range)`**. Add
-   `yank: Option<YankSubst>` to `Extmark`; `yank_text_for_range`
-   walks intersecting extmarks and applies `YankSubst::Empty /
-   Static(s)`. Replaces the per-cell `SpanMeta::copy_as` model that
-   `transcript.rs::copy_range` walks today.
-3. **Soft-wrap cache on Buffer**. `wrap_cache: HashMap<(content_tick,
-   width), WrapResult>` so multiple Windows on the same Buffer share
-   the wrap result.
-4. **Edit history per-buffer**. Roll `edit_buffer.rs` (`EditBuffer`
-   trait + per-buffer history) into `Buffer`.
-5. **Drop `BufferView` `Arc::clone` of materialized vecs**. After
-   the above land, `BufferView::sync_from_buffer` reads extmarks
-   directly per render; the `cached_highlights` / `cached_decorations`
-   caches in `Buffer` go away.
+1. **`Buffer::attach(spec)` parser hook system**. Replaces the
+   `BufferFormatter` trait + `transcript_cache.rs` IR cache.
+   Parser registers namespaces and an `on_block` callback fired at
+   semantic boundaries. Cascades through `format.rs`, `transcript_cache`,
+   the renderer pipeline, and the persisted layout cache. Highest
+   architectural payoff but the deepest surgery.
+2. **Edit history merge**. Roll `edit_buffer.rs` (`EditBuffer` +
+   per-buffer history + word/line range helpers) into `Buffer`.
+   Cascades through `PromptState`, `Window`, every `input/buffer.rs`
+   site that reaches `self.win.edit_buf.buf`. Contained but
+   high-volume.
+3. **Drop `BufferView` `Arc::clone` of materialized vecs**. Make
+   `BufferView::sync_from_buffer` read extmarks directly per render;
+   delete `cached_highlights` / `cached_decorations` in `Buffer`.
+   Contained to ui crate but threads through every render path.
+
+Migrate-on-demand consumers (build directly on what just landed,
+each ~1 file):
+4. Migrate hidden-thinking blocks to `YankSubst::Empty` extmarks (so
+   the transcript copy path round-trips without the per-cell `copy_as`).
+5. Migrate prompt attachment sigils to `YankSubst::Static(path)`
+   extmarks.
+6. Migrate `WindowView` wrap state to `Buffer::wrap_at` (the cache
+   gains a real consumer).
+
+Subsequent P1 sub-phases (after P1.a closes):
+- **P1.b — `LayoutTree`** (`Vbox`/`Hbox`/`Leaf(WinId)` + constraints).
+- **P1.c — `Overlay` replacing `Float`** (deletes `PanelWidget` +
+  `dialog.rs` multiplexing).
+- **P1.d — `Window` as only interactive unit** (deletes `Component`
+  trait + `BufferView`; vim/completer state machines decompose).
 
 Subsequent P1 sub-phases (after P1.a closes):
 - **P1.b — `LayoutTree`** (`Vbox`/`Hbox`/`Leaf(WinId)` + constraints).
