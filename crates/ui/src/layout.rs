@@ -166,15 +166,18 @@ impl Placement {
     }
 }
 
+/// One child of a container: a sizing `Constraint` paired with the
+/// subtree it applies to. Used by `LayoutTree::Split.items`.
+pub type Item = (Constraint, LayoutTree);
+
 #[derive(Clone, Debug)]
 pub enum LayoutTree {
-    Leaf {
-        name: String,
-        constraint: Constraint,
-    },
+    /// Terminal node identifying a single window. The constraint
+    /// governing its size lives in its parent's `items`.
+    Leaf(crate::WinId),
     Split {
         direction: Direction,
-        children: Vec<LayoutTree>,
+        items: Vec<Item>,
         /// Cells inserted between adjacent children along the primary
         /// axis. `0` packs children flush.
         gap: u16,
@@ -192,10 +195,10 @@ pub enum LayoutTree {
 impl LayoutTree {
     /// Vertical container with no chrome. Children stack top-to-bottom.
     /// Use `.with_gap` / `.with_border` / `.with_title` to add chrome.
-    pub fn vbox(children: Vec<LayoutTree>) -> Self {
+    pub fn vbox(items: Vec<Item>) -> Self {
         Self::Split {
             direction: Direction::Vertical,
-            children,
+            items,
             gap: 0,
             border: None,
             title: None,
@@ -203,21 +206,19 @@ impl LayoutTree {
     }
 
     /// Horizontal container with no chrome. Children pack left-to-right.
-    pub fn hbox(children: Vec<LayoutTree>) -> Self {
+    pub fn hbox(items: Vec<Item>) -> Self {
         Self::Split {
             direction: Direction::Horizontal,
-            children,
+            items,
             gap: 0,
             border: None,
             title: None,
         }
     }
 
-    pub fn leaf(name: impl Into<String>, constraint: Constraint) -> Self {
-        Self::Leaf {
-            name: name.into(),
-            constraint,
-        }
+    /// Terminal leaf for a single window.
+    pub fn leaf(win: crate::WinId) -> Self {
+        Self::Leaf(win)
     }
 
     pub fn with_gap(mut self, g: u16) -> Self {
@@ -271,20 +272,21 @@ pub struct Gutters {
     pub scrollbar: bool,
 }
 
-pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<String, Rect> {
+pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<crate::WinId, Rect> {
     let mut result = HashMap::new();
+    // Top-level tree gets the full area; its constraint is implicit.
     resolve_node(tree, area, &mut result);
     result
 }
 
-fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<String, Rect>) {
+fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<crate::WinId, Rect>) {
     match node {
-        LayoutTree::Leaf { name, .. } => {
-            out.insert(name.clone(), area);
+        LayoutTree::Leaf(win) => {
+            out.insert(*win, area);
         }
         LayoutTree::Split {
             direction,
-            children,
+            items,
             gap,
             border,
             ..
@@ -302,11 +304,11 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<String, Rect>) 
                 Direction::Vertical => inner.height,
                 Direction::Horizontal => inner.width,
             };
-            let total_gap = gap.saturating_mul(children.len().saturating_sub(1) as u16);
+            let total_gap = gap.saturating_mul(items.len().saturating_sub(1) as u16);
             let available = primary_total.saturating_sub(total_gap);
-            let sizes = resolve_constraints(children, available);
+            let sizes = resolve_constraints(items, available);
             let mut offset = 0u16;
-            for (i, (child, &size)) in children.iter().zip(sizes.iter()).enumerate() {
+            for (i, ((_, child), &size)) in items.iter().zip(sizes.iter()).enumerate() {
                 let child_area = match direction {
                     Direction::Vertical => {
                         Rect::new(inner.top + offset, inner.left, inner.width, size)
@@ -317,7 +319,7 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<String, Rect>) 
                 };
                 resolve_node(child, child_area, out);
                 offset += size;
-                if i + 1 < children.len() {
+                if i + 1 < items.len() {
                     offset += *gap;
                 }
             }
@@ -325,25 +327,25 @@ fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<String, Rect>) 
     }
 }
 
-fn resolve_constraints(children: &[LayoutTree], total: u16) -> Vec<u16> {
-    let mut sizes = vec![0u16; children.len()];
+fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
+    let mut sizes = vec![0u16; items.len()];
     let mut remaining = total;
 
     // Pass 1: hard-sized constraints consume their share.
-    for (i, child) in children.iter().enumerate() {
-        match constraint_of(child) {
+    for (i, (c, _)) in items.iter().enumerate() {
+        match c {
             Constraint::Length(n) | Constraint::Max(n) => {
-                let n = n.min(remaining);
+                let n = (*n).min(remaining);
                 sizes[i] = n;
                 remaining -= n;
             }
             Constraint::Percentage(pct) => {
-                let n = ((total as u32 * pct as u32) / 100).min(remaining as u32) as u16;
+                let n = ((total as u32 * *pct as u32) / 100).min(remaining as u32) as u16;
                 sizes[i] = n;
                 remaining -= n;
             }
             Constraint::Min(n) => {
-                let n = n.min(remaining);
+                let n = (*n).min(remaining);
                 sizes[i] = n;
                 remaining -= n;
             }
@@ -353,18 +355,18 @@ fn resolve_constraints(children: &[LayoutTree], total: u16) -> Vec<u16> {
 
     // Pass 2: `Ratio` splits its slice of the remaining proportionally
     // to its siblings' (num, denom) pairs.
-    let ratio_total: u32 = children
+    let ratio_total: u32 = items
         .iter()
-        .filter_map(|c| match constraint_of(c) {
-            Constraint::Ratio(num, _) => Some(num as u32),
+        .filter_map(|(c, _)| match c {
+            Constraint::Ratio(num, _) => Some(*num as u32),
             _ => None,
         })
         .sum();
     let ratio_pool = remaining;
     let mut consumed = 0u16;
-    for (i, child) in children.iter().enumerate() {
-        if let Constraint::Ratio(num, _) = constraint_of(child) {
-            let n = (ratio_pool as u32 * num as u32)
+    for (i, (c, _)) in items.iter().enumerate() {
+        if let Constraint::Ratio(num, _) = c {
+            let n = (ratio_pool as u32 * *num as u32)
                 .checked_div(ratio_total)
                 .unwrap_or(0) as u16;
             sizes[i] = n;
@@ -374,18 +376,15 @@ fn resolve_constraints(children: &[LayoutTree], total: u16) -> Vec<u16> {
     remaining -= consumed.min(remaining);
 
     // Pass 3: `Fill` and `Fit` split the remainder evenly. (`Fit`
-    // behaves like `Fill` until B.3 wires content size.)
-    let fill_count = children
+    // behaves like `Fill` until leaves expose natural size.)
+    let fill_count = items
         .iter()
-        .filter(|c| matches!(constraint_of(c), Constraint::Fill | Constraint::Fit))
+        .filter(|(c, _)| matches!(c, Constraint::Fill | Constraint::Fit))
         .count() as u16;
     if let Some(per_fill) = remaining.checked_div(fill_count) {
         let mut extra = remaining % fill_count;
-        for (i, child) in children.iter().enumerate() {
-            if matches!(
-                constraint_of(child),
-                Constraint::Fill | Constraint::Fit
-            ) {
+        for (i, (c, _)) in items.iter().enumerate() {
+            if matches!(c, Constraint::Fill | Constraint::Fit) {
                 sizes[i] = per_fill + u16::from(extra > 0);
                 extra = extra.saturating_sub(1);
             }
@@ -395,66 +394,64 @@ fn resolve_constraints(children: &[LayoutTree], total: u16) -> Vec<u16> {
     sizes
 }
 
-fn constraint_of(node: &LayoutTree) -> Constraint {
-    match node {
-        LayoutTree::Leaf { constraint, .. } => *constraint,
-        LayoutTree::Split { .. } => Constraint::Fill,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WinId;
+
+    const A: WinId = WinId(100);
+    const B: WinId = WinId(101);
+    const C: WinId = WinId(102);
 
     #[test]
     fn single_leaf_fills_area() {
-        let tree = LayoutTree::leaf("main", Constraint::Fill);
+        let tree = LayoutTree::leaf(A);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["main"], Rect::new(0, 0, 80, 24));
+        assert_eq!(result[&A], Rect::new(0, 0, 80, 24));
     }
 
     #[test]
     fn vertical_split_fixed_and_fill() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("top", Constraint::Fill),
-            LayoutTree::leaf("bottom", Constraint::Length(5)),
+            (Constraint::Fill, LayoutTree::leaf(A)),
+            (Constraint::Length(5), LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["top"], Rect::new(0, 0, 80, 19));
-        assert_eq!(result["bottom"], Rect::new(19, 0, 80, 5));
+        assert_eq!(result[&A], Rect::new(0, 0, 80, 19));
+        assert_eq!(result[&B], Rect::new(19, 0, 80, 5));
     }
 
     #[test]
     fn vertical_split_pct_and_fill() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("transcript", Constraint::Fill),
-            LayoutTree::leaf("prompt", Constraint::Percentage(25)),
+            (Constraint::Fill, LayoutTree::leaf(A)),
+            (Constraint::Percentage(25), LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["prompt"].height, 6);
-        assert_eq!(result["transcript"].height, 18);
+        assert_eq!(result[&B].height, 6);
+        assert_eq!(result[&A].height, 18);
     }
 
     #[test]
     fn horizontal_split() {
         let tree = LayoutTree::hbox(vec![
-            LayoutTree::leaf("left", Constraint::Length(20)),
-            LayoutTree::leaf("right", Constraint::Fill),
+            (Constraint::Length(20), LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["left"], Rect::new(0, 0, 20, 24));
-        assert_eq!(result["right"], Rect::new(0, 20, 60, 24));
+        assert_eq!(result[&A], Rect::new(0, 0, 20, 24));
+        assert_eq!(result[&B], Rect::new(0, 20, 60, 24));
     }
 
     #[test]
     fn multiple_fills_distribute_evenly() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("a", Constraint::Fill),
-            LayoutTree::leaf("b", Constraint::Fill),
+            (Constraint::Fill, LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["a"].height, 12);
-        assert_eq!(result["b"].height, 12);
+        assert_eq!(result[&A].height, 12);
+        assert_eq!(result[&B].height, 12);
     }
 
     #[test]
@@ -469,129 +466,131 @@ mod tests {
     #[test]
     fn nested_split() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::hbox(vec![
-                LayoutTree::leaf("tl", Constraint::Fill),
-                LayoutTree::leaf("tr", Constraint::Fill),
-            ]),
-            LayoutTree::leaf("bottom", Constraint::Length(4)),
+            (
+                Constraint::Fill,
+                LayoutTree::hbox(vec![
+                    (Constraint::Fill, LayoutTree::leaf(A)),
+                    (Constraint::Fill, LayoutTree::leaf(B)),
+                ]),
+            ),
+            (Constraint::Length(4), LayoutTree::leaf(C)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["bottom"], Rect::new(20, 0, 80, 4));
-        assert_eq!(result["tl"], Rect::new(0, 0, 40, 20));
-        assert_eq!(result["tr"], Rect::new(0, 40, 40, 20));
+        assert_eq!(result[&C], Rect::new(20, 0, 80, 4));
+        assert_eq!(result[&A], Rect::new(0, 0, 40, 20));
+        assert_eq!(result[&B], Rect::new(0, 40, 40, 20));
     }
 
     #[test]
     fn min_reserves_floor_then_competes_with_fill() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("header", Constraint::Min(3)),
-            LayoutTree::leaf("body", Constraint::Fill),
+            (Constraint::Min(3), LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["header"].height, 3);
-        assert_eq!(result["body"].height, 21);
+        assert_eq!(result[&A].height, 3);
+        assert_eq!(result[&B].height, 21);
     }
 
     #[test]
     fn max_caps_at_ceiling_when_parent_has_room() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("capped", Constraint::Max(5)),
-            LayoutTree::leaf("rest", Constraint::Fill),
+            (Constraint::Max(5), LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["capped"].height, 5);
-        assert_eq!(result["rest"].height, 19);
+        assert_eq!(result[&A].height, 5);
+        assert_eq!(result[&B].height, 19);
     }
 
     #[test]
     fn max_shrinks_when_parent_smaller_than_ceiling() {
-        let tree = LayoutTree::vbox(vec![LayoutTree::leaf("capped", Constraint::Max(50))]);
+        let tree = LayoutTree::vbox(vec![(Constraint::Max(50), LayoutTree::leaf(A))]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["capped"].height, 24);
+        assert_eq!(result[&A].height, 24);
     }
 
     #[test]
     fn ratio_splits_remaining_proportionally() {
         let tree = LayoutTree::hbox(vec![
-            LayoutTree::leaf("a", Constraint::Ratio(1, 3)),
-            LayoutTree::leaf("b", Constraint::Ratio(2, 3)),
+            (Constraint::Ratio(1, 3), LayoutTree::leaf(A)),
+            (Constraint::Ratio(2, 3), LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 90, 24));
-        assert_eq!(result["a"].width, 30);
-        assert_eq!(result["b"].width, 60);
+        assert_eq!(result[&A].width, 30);
+        assert_eq!(result[&B].width, 60);
     }
 
     #[test]
     fn ratio_competes_with_length_for_remaining() {
         let tree = LayoutTree::hbox(vec![
-            LayoutTree::leaf("fixed", Constraint::Length(20)),
-            LayoutTree::leaf("a", Constraint::Ratio(1, 2)),
-            LayoutTree::leaf("b", Constraint::Ratio(1, 2)),
+            (Constraint::Length(20), LayoutTree::leaf(A)),
+            (Constraint::Ratio(1, 2), LayoutTree::leaf(B)),
+            (Constraint::Ratio(1, 2), LayoutTree::leaf(C)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["fixed"].width, 20);
-        assert_eq!(result["a"].width, 30);
-        assert_eq!(result["b"].width, 30);
+        assert_eq!(result[&A].width, 20);
+        assert_eq!(result[&B].width, 30);
+        assert_eq!(result[&C].width, 30);
     }
 
     #[test]
     fn fit_falls_back_to_fill_for_now() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("a", Constraint::Fit),
-            LayoutTree::leaf("b", Constraint::Fill),
+            (Constraint::Fit, LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["a"].height, 12);
-        assert_eq!(result["b"].height, 12);
+        assert_eq!(result[&A].height, 12);
+        assert_eq!(result[&B].height, 12);
     }
 
     #[test]
     fn zero_height_produces_empty_rects() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("a", Constraint::Length(30)),
-            LayoutTree::leaf("b", Constraint::Fill),
+            (Constraint::Length(30), LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
         ]);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 10));
-        assert_eq!(result["a"].height, 10);
-        assert_eq!(result["b"].height, 0);
+        assert_eq!(result[&A].height, 10);
+        assert_eq!(result[&B].height, 0);
     }
 
     #[test]
     fn gap_inserts_spacing_between_children() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("a", Constraint::Fill),
-            LayoutTree::leaf("b", Constraint::Fill),
-            LayoutTree::leaf("c", Constraint::Fill),
+            (Constraint::Fill, LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
+            (Constraint::Fill, LayoutTree::leaf(C)),
         ])
         .with_gap(2);
-        // 24 total - 2*2 gap = 20 split into thirds.
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["a"], Rect::new(0, 0, 80, 7));
-        assert_eq!(result["b"].top, 9); // 7 + 2 gap
-        assert_eq!(result["c"].top, 18); // 9 + 7 + 2 gap
+        assert_eq!(result[&A], Rect::new(0, 0, 80, 7));
+        assert_eq!(result[&B].top, 9);
+        assert_eq!(result[&C].top, 18);
     }
 
     #[test]
     fn border_insets_children_by_one_each_side() {
-        let tree = LayoutTree::vbox(vec![LayoutTree::leaf("inner", Constraint::Fill)])
+        let tree = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(A))])
             .with_border(Border::Single);
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["inner"], Rect::new(1, 1, 78, 22));
+        assert_eq!(result[&A], Rect::new(1, 1, 78, 22));
     }
 
     #[test]
     fn border_and_gap_compose() {
         let tree = LayoutTree::vbox(vec![
-            LayoutTree::leaf("a", Constraint::Fill),
-            LayoutTree::leaf("b", Constraint::Fill),
+            (Constraint::Fill, LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
         ])
         .with_border(Border::Single)
         .with_gap(1)
         .with_title("dialog");
-        // height 24 - 2 border - 1 gap = 21 split evenly = 10/11.
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(result["a"].top, 1);
-        assert_eq!(result["a"].height + result["b"].height, 21);
-        assert_eq!(result["b"].top, result["a"].top + result["a"].height + 1);
+        assert_eq!(result[&A].top, 1);
+        assert_eq!(result[&A].height + result[&B].height, 21);
+        assert_eq!(result[&B].top, result[&A].top + result[&A].height + 1);
     }
+
 }
