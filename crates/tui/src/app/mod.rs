@@ -782,7 +782,7 @@ impl App {
         let (tw, _th) = self.ui.terminal_size();
         let config = ui::FloatConfig {
             placement: ui::Placement::Manual {
-                anchor: ui::Anchor::NW,
+                anchor: ui::Corner::NW,
                 row: 0,
                 col: 0,
                 width: ui::Constraint::Length(tw),

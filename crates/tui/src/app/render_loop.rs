@@ -434,7 +434,7 @@ impl App {
         if needs_update {
             if let Some(cfg) = self.ui.float_config_mut(win) {
                 cfg.placement = ui::Placement::Manual {
-                    anchor: ui::Anchor::NW,
+                    anchor: ui::Corner::NW,
                     row: desired_top,
                     col: 0,
                     width: ui::Constraint::Length(tw),

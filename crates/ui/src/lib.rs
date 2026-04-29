@@ -55,7 +55,7 @@ pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
 pub use layout::{
-    Anchor, Border, Constraint, FitMax, FloatRelative, Gutters, LayoutTree, Placement, Rect,
+    Border, Constraint, Corner, FitMax, FloatRelative, Gutters, LayoutTree, Placement, Rect,
 };
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
 pub use option_list::{OptionItem, OptionList};
@@ -1057,10 +1057,10 @@ fn resolve_placement(
             let w = resolve_constraint_dim(*width, term_w);
             let h = resolve_constraint_dim(*height, term_h);
             let (top, left) = match anchor {
-                layout::Anchor::NW => (*row, *col),
-                layout::Anchor::NE => (*row, *col - w as i32),
-                layout::Anchor::SW => (*row - h as i32, *col),
-                layout::Anchor::SE => (*row - h as i32, *col - w as i32),
+                layout::Corner::NW => (*row, *col),
+                layout::Corner::NE => (*row, *col - w as i32),
+                layout::Corner::SW => (*row - h as i32, *col),
+                layout::Corner::SE => (*row - h as i32, *col - w as i32),
             };
             let top = top.max(0) as u16;
             let left = left.max(0) as u16;
@@ -1136,7 +1136,7 @@ mod tests {
             &mut ui,
             FloatConfig {
                 placement: Placement::Manual {
-                    anchor: Anchor::NW,
+                    anchor: Corner::NW,
                     row: 4,
                     col: 10,
                     width: Constraint::Length(60),
@@ -1156,7 +1156,7 @@ mod tests {
             &mut ui,
             FloatConfig {
                 placement: Placement::Manual {
-                    anchor: Anchor::SE,
+                    anchor: Corner::SE,
                     row: 24,
                     col: 80,
                     width: Constraint::Length(40),
@@ -1176,7 +1176,7 @@ mod tests {
             &mut ui,
             FloatConfig {
                 placement: Placement::Manual {
-                    anchor: Anchor::NW,
+                    anchor: Corner::NW,
                     row: 20,
                     col: 70,
                     width: Constraint::Length(30),

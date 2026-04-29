@@ -120,7 +120,7 @@ pub enum Placement {
     /// Escape hatch for absolute positioning. Prefer one of the above
     /// when possible.
     Manual {
-        anchor: Anchor,
+        anchor: Corner,
         row: i32,
         col: i32,
         width: Constraint,
@@ -250,8 +250,12 @@ impl LayoutTree {
     }
 }
 
+/// Which corner of a rectangle is its anchor point. Used by
+/// `Placement::Manual` and (target P1.c) by `Anchor::Win {
+/// target, attach }` to specify which corner of the target window
+/// the overlay attaches to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Anchor {
+pub enum Corner {
     NW,
     NE,
     SW,
