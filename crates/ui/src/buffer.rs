@@ -137,6 +137,15 @@ pub struct Mark {
     pub col: usize,
 }
 
+/// Cached soft-wrap result for one `(buffer, width)` pair. One entry
+/// per source line, each carrying the wrapped visual rows for that
+/// line.
+#[derive(Clone, Debug)]
+pub struct WrapResult {
+    pub rows_per_line: Vec<Vec<String>>,
+    pub total_rows: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BufType {
     Normal,
@@ -351,6 +360,11 @@ pub struct Buffer {
     /// Bumped on extmark mutation. Rendering only reacts to the sum;
     /// kept distinct to make cache invalidation precise.
     marks_tick: u64,
+    /// Soft-wrap result cached by `(changedtick, width)`. Multiple
+    /// Windows on the same Buffer at the same width share one
+    /// computation.
+    wrap_cache: Option<WrapResult>,
+    wrap_cache_key: Option<(u64, u16)>,
     /// Well-known namespace ids — interned at construction so the
     /// convenience methods (`add_highlight`, `set_decoration`, …)
     /// don't pay a hashmap lookup per call.
@@ -398,6 +412,8 @@ impl Buffer {
             buftype: opts.buftype,
             changedtick: 0,
             marks_tick: 0,
+            wrap_cache: None,
+            wrap_cache_key: None,
             ns_highlights,
             ns_decorations,
             ns_virt_text,
@@ -554,6 +570,29 @@ impl Buffer {
 
     pub fn changedtick(&self) -> u64 {
         self.changedtick
+    }
+
+    /// Soft-wrap every source line to `width` columns; cached by
+    /// `(changedtick, width)` so repeated calls (or multiple Windows
+    /// on the same Buffer at the same width) share one computation.
+    /// The cache is invalidated automatically when lines change.
+    pub fn wrap_at(&mut self, width: u16) -> &WrapResult {
+        let key = (self.changedtick, width);
+        if self.wrap_cache_key != Some(key) {
+            let mut rows_per_line = Vec::with_capacity(self.lines.len());
+            let mut total_rows = 0usize;
+            for line in self.lines.iter() {
+                let wrapped = crate::text::wrap_line(line, width as usize);
+                total_rows += wrapped.len();
+                rows_per_line.push(wrapped);
+            }
+            self.wrap_cache = Some(WrapResult {
+                rows_per_line,
+                total_rows,
+            });
+            self.wrap_cache_key = Some(key);
+        }
+        self.wrap_cache.as_ref().expect("cache populated above")
     }
 
     // ── Extmark API (the primary surface) ──────────────────────────
@@ -1226,6 +1265,32 @@ mod tests {
         buf.clear_namespace(ns_a, 0, usize::MAX);
         assert_eq!(buf.extmarks(ns_a).len(), 0);
         assert_eq!(buf.extmarks(ns_b).len(), 1);
+    }
+
+    #[test]
+    fn wrap_at_caches_by_changedtick_and_width() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["one two three four".into()]);
+        let r = buf.wrap_at(8).clone();
+        assert_eq!(r.total_rows, r.rows_per_line[0].len());
+        // Same width / unchanged buffer → cache reused (`total_rows`
+        // is equal because the cache hit returns the same shape).
+        let r2 = buf.wrap_at(8).clone();
+        assert_eq!(r.total_rows, r2.total_rows);
+        assert_eq!(r.rows_per_line, r2.rows_per_line);
+        // Different width → recompute.
+        let wide = buf.wrap_at(40).clone();
+        assert_eq!(wide.total_rows, 1);
+        assert_eq!(wide.rows_per_line[0], vec!["one two three four"]);
+    }
+
+    #[test]
+    fn wrap_at_invalidated_by_line_change() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["foo".into()]);
+        assert_eq!(buf.wrap_at(40).rows_per_line[0], vec!["foo"]);
+        buf.set_all_lines(vec!["bar baz".into()]);
+        assert_eq!(buf.wrap_at(40).rows_per_line[0], vec!["bar baz"]);
     }
 
     #[test]
