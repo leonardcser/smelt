@@ -32,7 +32,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 
 | File                  | LOC  | Purpose                                       | Fate         | Phase     | Status  | Notes                                                                                               |
 | --------------------- | ---- | --------------------------------------------- | ------------ | --------- | ------- | --------------------------------------------------------------------------------------------------- |
-| `buffer.rs`           | 583  | Lines, spans, marks, virtual text             | restructured | P1.a      | pending | Gains namespaces / extmarks / `attach(spec)` / `yank_text_for_range` / soft-wrap state              |
+| `buffer.rs`           | 1150 | Lines, namespaced extmarks, marks, virtual text | restructured | P1.a    | partial | Extmark + namespace landed (`set_extmark`/`del_extmark`/`clear_namespace`); `attach(spec)` / `yank_text_for_range` / soft-wrap cache pending |
 | `buffer_view.rs`      | 471  | Renderer wrapper around Buffer                | deleted      | P1.0      | pending | Window absorbs rendering; deferred from P0 because call sites can't compile without replacement     |
 | `callback.rs`         | 367  | Window callbacks + WinEvent routing           | kept         | P2        | pending | Drain pipeline for Lua callbacks; pattern preserved                                                 |
 | `clipboard.rs`        | 30   | Clipboard sink interface                      | merged       | P2        | pending | Folds into `tui::Clipboard` subsystem                                                               |
