@@ -6,22 +6,26 @@ For the entry point and meta-rules, read `README.md` first.
 
 ## Where we are
 
-**Phase:** P0 landed (orthogonal deletions). Five structural deletions
-deferred to P1.0, paired with their replacements.
+**Phase:** P1.0 in progress. Theme registry foundation landed; call
+site migration pending.
 
-**Tree:** green. `cargo nextest run --workspace` — 901 passed.
-`cargo nextest run --test scenarios` — 6 baseline scenarios green
-(5 regression gates + smoke).
+**Tree:** green. `cargo nextest run --workspace` — 908 passed (901
+from P0 boundary + 7 new theme registry tests). `cargo nextest run
+--test scenarios` — 6 baseline scenarios green.
 
-**Last update:** 2026-04-29. P0 landed across three commits: yank /
-mouse-with-lua removal earlier, `selection_style` fields (`4a2e368`),
-`BufferList` (`60db49f`). Strategy shifted mid-phase: original plan
-ended P0 red, but the four remaining structural deletions
-(`BufferView`, theme constants, `PanelWidget` multiplexing, `Component`
-trait, `Placement` enum) couldn't land without their P1 replacements
-existing. Rather than burn the green-tree baseline, those moved to a
-new P1.0 sub-phase that pairs each deletion with its replacement in
-the same commit. See `P0.md` "Decisions made while coding".
+**Last update:** 2026-04-29. P1.0 opened with three commits laying the
+theme infrastructure: `ui::Theme` registry type (`decb0ab`), plumbed
+through `DrawContext` and owned by `Ui` (`177ac4c`), populated from
+host `crate::theme::*` constants at startup (`bb9cc63`). The registry
+runs in parallel with the existing flat module — both are populated
+with the same values, so widgets can opt in to `ctx.theme.get(name)`
+without breaking anything that still reads `crate::theme::accent()`
+etc. Once all 50 call sites migrate, `crates/tui/src/theme.rs` can
+shrink to a default-theme builder + preset list and the constants
+module is gone.
+
+P0 closed: 4 of 9 deletions shipped (orthogonal); 5 structural
+deletions deferred to P1.0 sub-phase (paired with replacements).
 
 **Note for next session:** puml + SVG are in sync. If the puml is
 edited, regenerate via `plantuml -tsvg
@@ -32,16 +36,23 @@ before declaring anything done.
 
 In order:
 
-1. **Start P1.0** — pair each deferred structural deletion with its
-   replacement. First commit is the smallest: `ui::Theme` registry +
-   `crates/tui/src/theme.rs` constants module deletion in one go
-   (tracked task `20260426-083607`). Then P1.a..P1.d absorb the
-   remaining four deletions as part of their primitive landings.
-2. **P1.a (`Buffer` rewrite)**, **P1.b (`LayoutTree`)**, **P1.c
-   (`Overlay`)**, **P1.d (`Window` as the only interactive unit)**
-   per `REFACTOR.md` § P1.
+1. **Migrate `crate::theme::*` call sites to `ctx.theme.get(...)`**
+   one file at a time. Easy ones first: `app/render_loop.rs`
+   `selection_bg()` → `ctx.theme.get("Visual").bg`; `app/status_bar.rs`
+   accent + agent + muted; `format.rs` snapshot consumers. Hot paths
+   that build snapshots take `&Theme` as a parameter instead of
+   reading global atomics.
+2. **Hook the runtime mutators** (`set_accent`, `set_light`,
+   `/theme preset`) to call `populate_ui_theme(ui.theme_mut())` after
+   the atomic update so the registry stays in sync.
+3. **Delete the `crate::theme::*` constants module** when call sites
+   drop to zero. The remaining `theme.rs` becomes a `default_smelt_theme()` builder + the `PRESETS` list + light/dark
+   detection (`detect_background`, `is_light`).
+4. Other P1.0 pairings (`BufferView`, `PanelWidget`/`Component`,
+   `Placement`) per their target sub-phases (P1.a..P1.d).
 
-Recently shipped: P0 orthogonal deletions
+Recently shipped: theme registry foundation (`ui::Theme` +
+plumbing + host bridge). P0 orthogonal deletions
 (`selection_style`/`set_selection_bg` shim, `handle_mouse_with_lua` +
 `classify_widget_action`, `MouseAction::Yank`/`WidgetEvent::Yank`,
 `BufferList`). `TESTING.md` (three-layer testing strategy). Test
