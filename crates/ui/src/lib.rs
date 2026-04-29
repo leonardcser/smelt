@@ -103,6 +103,13 @@ pub struct Ui {
     /// `ctx.theme.get(name)` instead of host-side colour constants. The
     /// host populates this at startup; users override via Lua.
     theme: Theme,
+    /// P1.c overlay storage. Each overlay is a positioned LayoutTree
+    /// of windows; `Ui::overlay_open` returns an `OverlayId` and
+    /// `resolve_anchor` is the per-frame positioning primitive.
+    /// Today's `FloatConfig` plumbing still drives rendering — the
+    /// migration is incremental (C.4+).
+    overlays: HashMap<OverlayId, Overlay>,
+    next_overlay_id: u32,
 }
 
 /// Reserved `WinId` for the main prompt input window. The prompt is
@@ -132,6 +139,8 @@ impl Ui {
             split_rects: HashMap::new(),
             splits: HashMap::new(),
             theme: Theme::new(),
+            overlays: HashMap::new(),
+            next_overlay_id: 1,
         }
     }
 
@@ -194,6 +203,43 @@ impl Ui {
 
     pub fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer> {
         self.bufs.get_mut(&id)
+    }
+
+    // ── Overlay (P1.c) ───────────────────────────────────────────────
+
+    /// Register an overlay. Returns its stable `OverlayId`. The
+    /// overlay's positioning is recomputed each frame from its
+    /// `anchor` via `overlay::resolve_anchor`; mutate the anchor via
+    /// `overlay_mut(id).anchor = …` to drag it.
+    pub fn overlay_open(&mut self, overlay: Overlay) -> OverlayId {
+        let id = OverlayId(self.next_overlay_id);
+        self.next_overlay_id += 1;
+        self.overlays.insert(id, overlay);
+        id
+    }
+
+    /// Close an overlay. Returns the removed `Overlay` for callers
+    /// that want to inspect its layout (e.g. to close the contained
+    /// windows individually).
+    pub fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
+        self.overlays.remove(&id)
+    }
+
+    pub fn overlay(&self, id: OverlayId) -> Option<&Overlay> {
+        self.overlays.get(&id)
+    }
+
+    pub fn overlay_mut(&mut self, id: OverlayId) -> Option<&mut Overlay> {
+        self.overlays.get_mut(&id)
+    }
+
+    /// Iterate overlays in stacking order (lowest `z` first; ties
+    /// broken by insertion order via `OverlayId`).
+    pub fn overlays_in_z_order(&self) -> Vec<(OverlayId, &Overlay)> {
+        let mut entries: Vec<(OverlayId, &Overlay)> =
+            self.overlays.iter().map(|(id, o)| (*id, o)).collect();
+        entries.sort_by_key(|(id, o)| (o.z, id.0));
+        entries
     }
 
     pub fn win_open_split(&mut self, buf: BufId, config: SplitConfig) -> Option<WinId> {
@@ -1351,5 +1397,64 @@ mod tests {
             &mut |_, _, _, _| {},
         );
         assert_eq!(*invoked2.lock().unwrap(), 1, "Ctrl-C should fire Dismiss");
+    }
+
+    // ── Overlay API (P1.c) ───────────────────────────────────────────
+
+    fn stub_overlay() -> Overlay {
+        let layout =
+            LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(WinId(99)))]);
+        Overlay::new(layout, layout::Anchor::ScreenCenter)
+    }
+
+    #[test]
+    fn overlay_open_returns_unique_ids() {
+        let mut ui = make_ui();
+        let a = ui.overlay_open(stub_overlay());
+        let b = ui.overlay_open(stub_overlay());
+        assert_ne!(a, b);
+        assert!(ui.overlay(a).is_some());
+        assert!(ui.overlay(b).is_some());
+    }
+
+    #[test]
+    fn overlay_close_removes_overlay() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(stub_overlay());
+        let removed = ui.overlay_close(id);
+        assert!(removed.is_some());
+        assert!(ui.overlay(id).is_none());
+        assert!(ui.overlay_close(id).is_none());
+    }
+
+    #[test]
+    fn overlay_mut_allows_anchor_drag() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(stub_overlay());
+        ui.overlay_mut(id).unwrap().anchor = layout::Anchor::ScreenAt {
+            row: 5,
+            col: 10,
+            corner: Corner::NW,
+        };
+        assert!(matches!(
+            ui.overlay(id).unwrap().anchor,
+            layout::Anchor::ScreenAt { row: 5, col: 10, .. }
+        ));
+    }
+
+    #[test]
+    fn overlays_in_z_order_sorts_by_z_then_id() {
+        let mut ui = make_ui();
+        let high = ui.overlay_open(stub_overlay().with_z(100));
+        let mid = ui.overlay_open(stub_overlay().with_z(50));
+        let low_a = ui.overlay_open(stub_overlay().with_z(10));
+        let low_b = ui.overlay_open(stub_overlay().with_z(10));
+        let order: Vec<OverlayId> = ui
+            .overlays_in_z_order()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        // Lowest z first; same z falls back to insertion order (id).
+        assert_eq!(order, vec![low_a, low_b, mid, high]);
     }
 }
