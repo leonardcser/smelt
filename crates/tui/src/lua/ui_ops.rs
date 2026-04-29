@@ -105,10 +105,11 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
                     list_items.push(item);
                 }
                 let multi: bool = panel.get("multi").unwrap_or(false);
+                let accent = app.ui.theme().get("SmeltAccent");
                 let mut option_list = OptionList::new(list_items)
                     .multi(multi)
-                    .with_cursor_style(accent_style())
-                    .with_shortcut_style(accent_style());
+                    .with_cursor_style(accent)
+                    .with_shortcut_style(accent);
                 if let Ok(selected) = panel.get::<i64>("selected") {
                     if selected >= 1 {
                         option_list = option_list.with_cursor((selected - 1) as usize);
@@ -263,10 +264,7 @@ pub fn open_picker(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
 
     let style = if prompt_docked {
         ui::PickerStyle {
-            selected_fg: ui::grid::Style {
-                fg: Some(crate::theme::accent()),
-                ..Default::default()
-            },
+            selected_fg: app.ui.theme().get("SmeltAccent"),
             unselected_fg: ui::grid::Style::dim(),
             description_fg: ui::grid::Style::dim(),
             background: ui::grid::Style::default(),
@@ -341,13 +339,6 @@ fn parse_picker_placement(opts: &mlua::Table) -> Placement {
         },
         "prompt_docked" => Placement::docked_above(ui::PROMPT_WIN, Constraint::Fixed(7)),
         _ => Placement::centered(Constraint::Pct(60), Constraint::Pct(50)),
-    }
-}
-
-fn accent_style() -> ui::grid::Style {
-    ui::grid::Style {
-        fg: Some(crate::theme::accent()),
-        ..Default::default()
     }
 }
 

@@ -759,18 +759,18 @@ impl App {
         hint_text: Option<String>,
         dismiss_keys: Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     ) -> ui::DialogConfig {
-        let accent = ui::grid::Style {
-            fg: Some(crate::theme::accent()),
-            ..Default::default()
-        };
+        let theme = self.ui.theme();
+        let accent = theme.get("SmeltAccent");
         let bg = ui::grid::Style {
             bg: Some(crossterm::style::Color::Black),
             ..Default::default()
         };
         let separator = ui::grid::Style {
-            fg: Some(crate::theme::bar()),
+            fg: theme.get("SmeltBar").bg,
             ..Default::default()
         };
+        let scrollbar_track_style = theme.get("SmeltScrollbarTrack");
+        let scrollbar_thumb_style = theme.get("SmeltScrollbarThumb");
         let hints = hint_text.map(|text| {
             let mut sb = ui::StatusBar::new().with_bg(bg);
             sb.set_left(vec![ui::StatusSegment::styled(
@@ -783,14 +783,8 @@ impl App {
             accent_style: accent,
             separator_style: separator,
             background_style: bg,
-            scrollbar_track_style: ui::grid::Style {
-                bg: Some(crate::theme::scrollbar_track()),
-                ..Default::default()
-            },
-            scrollbar_thumb_style: ui::grid::Style {
-                bg: Some(crate::theme::scrollbar_thumb()),
-                ..Default::default()
-            },
+            scrollbar_track_style,
+            scrollbar_thumb_style,
             dismiss_keys,
             hints,
         }

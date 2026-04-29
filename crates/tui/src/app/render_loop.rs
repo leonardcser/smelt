@@ -146,6 +146,7 @@ impl App {
 
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
+        let visual = self.ui.theme().get("Visual");
 
         if let Some(tv) = self
             .ui
@@ -156,12 +157,7 @@ impl App {
                 tdata.clamped_scroll as usize,
             );
             for (line, col_start, col_end) in &transcript_selection {
-                tv.add_highlight(
-                    *line,
-                    *col_start,
-                    *col_end,
-                    ui::grid::Style::bg(crate::theme::selection_bg()),
-                );
+                tv.add_highlight(*line, *col_start, *col_end, visual);
             }
             tv.set_soft_cursor(tcursor.soft_cursor);
             tv.set_viewport(Some(transcript_viewport));
@@ -386,10 +382,7 @@ impl App {
                     blocks_agent: false,
                 };
                 let style = ui::PickerStyle {
-                    selected_fg: ui::Style {
-                        fg: Some(crate::theme::accent()),
-                        ..Default::default()
-                    },
+                    selected_fg: self.ui.theme().get("SmeltAccent"),
                     unselected_fg: ui::Style::dim(),
                     description_fg: ui::Style::dim(),
                     background: ui::Style::default(),
