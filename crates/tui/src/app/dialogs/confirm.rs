@@ -20,7 +20,6 @@ use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::content::display::{ColorRole, ColorValue};
 use crate::content::layout_out::SpanCollector;
-use crate::theme;
 use ui::BufId;
 
 /// Live Confirm request held in `App::confirm_requests` while the
@@ -40,7 +39,7 @@ pub(crate) struct ConfirmEntry {
 /// fill it; the inline bash highlight on the desc keeps title
 /// composition Rust-side until we have a span-level Lua API.
 pub(crate) fn render_title_into_buf(app: &mut App, buf_id: BufId, req: &ConfirmRequest) {
-    let theme_snap = theme::snapshot();
+    let theme_snap = app.ui.theme().clone();
     let width = crate::content::term_width() as u16;
     let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);
     let is_bash = matches!(preview, ConfirmPreview::BashBody { .. }) || req.tool_name == "bash";

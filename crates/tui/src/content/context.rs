@@ -1,7 +1,7 @@
 //! Width-independent context plumbed through layout and paint stages.
 
 use crate::app::transcript_model::ViewState;
-use crate::theme::Snapshot;
+use ui::Theme;
 
 /// Settings that flow through the layout stage. Layout produces a
 /// theme-independent `DisplayBlock` so the only width-relevant inputs
@@ -14,11 +14,11 @@ pub struct LayoutContext {
     pub view_state: ViewState,
 }
 
-/// Context for the paint stage. Carries the active theme snapshot so
+/// Context for the paint stage. Carries the active theme so
 /// `ColorRole::*` spans resolve to the same colors for every block in
 /// one redraw.
 #[derive(Debug, Clone, Copy)]
 pub struct PaintContext<'a> {
-    pub theme: &'a Snapshot,
+    pub theme: &'a Theme,
     pub term_width: u16,
 }
