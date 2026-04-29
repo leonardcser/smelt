@@ -1,9 +1,9 @@
-//! Buffer-formatter registry.
+//! Buffer-parser registry.
 //!
 //! Every "content kind" a `ui::Buffer` can display — markdown, bash
 //! script, syntax-highlighted file, inline diff, soft-wrapped plain
-//! text — lives here as a variant of [`BufFormat`]. An installed
-//! formatter turns the buffer's `source` string into styled lines +
+//! text — lives here as a variant of [`BufFormat`]. An attached
+//! parser turns the buffer's `source` string into styled lines +
 //! soft-wrap decorations at the terminal `width` it's given. The
 //! dialog / window host is responsible for calling
 //! [`ui::Buffer::ensure_rendered_at`] with the current content width
@@ -11,21 +11,21 @@
 //! been subtracted) before sampling the buffer for display.
 //!
 //! This is the single unification point for the transcript's markdown
-//! pipeline and Lua-driven dialog / window content: both can point a
-//! buffer at one of these modes via `ui::BufferFormatter` and reuse
-//! the same wrap-aware, copy-friendly rendering the transcript uses.
+//! pipeline and Lua-driven dialog / window content: both attach a
+//! parser via `ui::BufferParser` and reuse the same wrap-aware,
+//! copy-friendly rendering the transcript uses.
 
 use std::sync::Arc;
-use ui::buffer::{Buffer, BufferFormatter};
+use ui::buffer::{Buffer, BufferParser};
 
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 use crate::content::layout_out::SpanCollector;
 use crate::content::to_buffer::render_into_buffer;
 
-/// Content kind a formatter-backed buffer renders. Constructed from a
+/// Content kind a parser-backed buffer renders. Constructed from a
 /// Lua `mode` string or chosen by a Rust caller, handed to
-/// [`BufFormat::into_formatter`] to get a trait object that can be
-/// installed on a `ui::Buffer`.
+/// [`BufFormat::into_parser`] to get a trait object that can be
+/// attached to a `ui::Buffer`.
 #[derive(Clone, Debug)]
 pub enum BufFormat {
     /// Plain text, soft-wrapped to the render width. Copy-friendly:
@@ -85,19 +85,19 @@ impl BufFormat {
         }
     }
 
-    /// Wrap this mode in a trait object ready to install on a buffer
-    /// via [`ui::Buffer::set_formatter`].
-    pub fn into_formatter(self) -> Arc<dyn BufferFormatter> {
-        Arc::new(ModeFormatter { mode: self })
+    /// Wrap this mode in a trait object ready to attach to a buffer
+    /// via [`ui::Buffer::attach`] / [`ui::Buffer::set_parser`].
+    pub fn into_parser(self) -> Arc<dyn BufferParser> {
+        Arc::new(ModeParser { mode: self })
     }
 }
 
-struct ModeFormatter {
+struct ModeParser {
     mode: BufFormat,
 }
 
-impl BufferFormatter for ModeFormatter {
-    fn render(&self, buf: &mut Buffer, source: &str, width: u16) {
+impl BufferParser for ModeParser {
+    fn parse(&self, buf: &mut Buffer, source: &str, width: u16) {
         let mut theme = ui::Theme::new();
         crate::theme::populate_ui_theme(&mut theme);
         let width = width.max(1);
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn plain_mode_soft_wraps_long_lines() {
-        let mut buf = new_buf().with_formatter(BufFormat::Plain.into_formatter());
+        let mut buf = new_buf().attach(BufFormat::Plain.into_parser());
         buf.set_source("hello world this is a long line that must wrap".into());
         buf.ensure_rendered_at(10);
         assert!(
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn markdown_mode_renders_source() {
-        let mut buf = new_buf().with_formatter(BufFormat::Markdown.into_formatter());
+        let mut buf = new_buf().attach(BufFormat::Markdown.into_parser());
         buf.set_source("# Heading\n\nbody text".into());
         buf.ensure_rendered_at(40);
         assert!(buf.line_count() >= 2);
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn ensure_rendered_is_idempotent_at_same_width() {
-        let mut buf = new_buf().with_formatter(BufFormat::Plain.into_formatter());
+        let mut buf = new_buf().attach(BufFormat::Plain.into_parser());
         buf.set_source("hi".into());
         assert!(buf.ensure_rendered_at(20));
         assert!(!buf.ensure_rendered_at(20));
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn ensure_rendered_reruns_on_width_change() {
-        let mut buf = new_buf().with_formatter(BufFormat::Plain.into_formatter());
+        let mut buf = new_buf().attach(BufFormat::Plain.into_parser());
         buf.set_source("hello world".into());
         buf.ensure_rendered_at(20);
         let narrow_rendered = buf.ensure_rendered_at(5);
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn ensure_rendered_reruns_on_source_change() {
-        let mut buf = new_buf().with_formatter(BufFormat::Plain.into_formatter());
+        let mut buf = new_buf().attach(BufFormat::Plain.into_parser());
         buf.set_source("v1".into());
         buf.ensure_rendered_at(40);
         buf.set_source("v2".into());
@@ -248,9 +248,9 @@ mod tests {
     }
 
     #[test]
-    fn no_formatter_is_noop() {
+    fn no_parser_is_noop() {
         let mut buf = new_buf();
-        buf.set_source("ignored without a formatter".into());
+        buf.set_source("ignored without a parser".into());
         assert!(!buf.ensure_rendered_at(40));
     }
 

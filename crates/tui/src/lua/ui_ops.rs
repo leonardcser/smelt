@@ -354,7 +354,7 @@ fn make_content_buffer(app: &mut App, text: &str, format: Option<BufFormat>) -> 
     if let Some(buf) = app.ui.buf_mut(id) {
         match format {
             Some(fmt) => {
-                buf.set_formatter(fmt.into_formatter());
+                buf.set_parser(fmt.into_parser());
                 buf.set_source(text.to_string());
             }
             None => {

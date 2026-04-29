@@ -18,20 +18,34 @@ use crossterm::style::Color;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// Formatter plugged into a `Buffer` to turn a plain-text `source`
-/// into styled lines + decorations at a given terminal width.
+/// Parser attached to a `Buffer` to maintain its lines, extmarks, and
+/// decorations from a `source` string. Host crates implement this
+/// trait for each "content kind" a buffer can display (markdown,
+/// bash, syntax-highlighted file, inline diff, plain wrap, …); the
+/// `ui` crate knows nothing about any specific format and calls back
+/// through the lifecycle hooks below when the buffer's source or
+/// render width changes.
 ///
-/// Host crates implement this trait for every "content kind" a buffer
-/// can display (markdown, bash, syntax-highlighted file, inline diff,
-/// plain wrap, …). The `ui` crate knows nothing about any specific
-/// format — it just calls `render` when the source or width change.
-///
-/// The formatter's `render` is free to call the usual mutators on
-/// `Buffer` (`set_all_lines`, `add_highlight`, `set_decoration`, …):
-/// the buffer's `source` is read-only from the formatter's point of
-/// view and lives on `Buffer` untouched across renders.
-pub trait BufferFormatter: Send + Sync {
-    fn render(&self, buf: &mut Buffer, source: &str, width: u16);
+/// `parse` is the only required hook today; it has wholesale-rebuild
+/// semantics. The optional `on_attach` lifecycle hook lets a parser
+/// install namespaces or seed initial state the moment the parser is
+/// installed on a Buffer (mirrors nvim's `nvim_buf_attach`). Future
+/// hooks (`on_change`, `on_render`) will let parsers respond
+/// incrementally to line edits and width changes; for now, `parse`
+/// runs whenever `(source_tick, width)` differs from the last call.
+pub trait BufferParser: Send + Sync {
+    /// Rebuild the buffer's lines / extmarks / decorations from
+    /// `source` at the given render `width`. Free to call any mutator
+    /// on `buf` (`set_all_lines`, `add_highlight`, `set_decoration`,
+    /// …). The buffer's `source` is read-only from the parser's
+    /// point of view and lives on `Buffer` untouched across calls.
+    fn parse(&self, buf: &mut Buffer, source: &str, width: u16);
+
+    /// Called once when the parser is installed via
+    /// [`Buffer::attach`] / [`Buffer::set_parser`]. Default no-op;
+    /// override to register custom namespaces, seed marks, or run
+    /// any one-time setup that doesn't depend on `source` or width.
+    fn on_attach(&self, _buf: &mut Buffer) {}
 }
 
 /// Identifier returned by `Buffer::create_namespace`. Stable for the
@@ -372,11 +386,11 @@ pub struct Buffer {
     ns_decorations: NsId,
     ns_virt_text: NsId,
     ns_marks: NsId,
-    /// When set, `source` drives the visible lines: the formatter
-    /// re-renders into this buffer lazily when `ensure_rendered_at`
-    /// is called with a different `(source_tick, width)` than the
-    /// last render.
-    formatter: Option<Arc<dyn BufferFormatter>>,
+    /// When set, `source` drives the visible lines: the parser
+    /// re-runs `parse` into this buffer lazily when
+    /// `ensure_rendered_at` is called with a different
+    /// `(source_tick, width)` than the last call.
+    parser: Option<Arc<dyn BufferParser>>,
     source: String,
     source_tick: u64,
     last_render: Option<(u64, u16)>,
@@ -418,33 +432,37 @@ impl Buffer {
             ns_decorations,
             ns_virt_text,
             ns_marks,
-            formatter: None,
+            parser: None,
             source: String::new(),
             source_tick: 0,
             last_render: None,
         }
     }
 
-    /// Install a formatter. The next `ensure_rendered_at` call
-    /// re-renders from the current `source`. Replaces any prior
-    /// formatter.
-    pub fn set_formatter(&mut self, formatter: Arc<dyn BufferFormatter>) {
-        self.formatter = Some(formatter);
+    /// Attach a parser. Fires `BufferParser::on_attach` once,
+    /// invalidates the render cache so the next `ensure_rendered_at`
+    /// call re-runs `parse` from the current `source`. Replaces any
+    /// prior parser.
+    pub fn set_parser(&mut self, parser: Arc<dyn BufferParser>) {
+        parser.on_attach(self);
+        self.parser = Some(parser);
         self.last_render = None;
     }
 
-    /// Builder equivalent of `set_formatter`.
-    pub fn with_formatter(mut self, formatter: Arc<dyn BufferFormatter>) -> Self {
-        self.set_formatter(formatter);
+    /// Builder form of `set_parser`. Mirrors `nvim_buf_attach` — the
+    /// returned Buffer has the parser installed and `on_attach`
+    /// already fired.
+    pub fn attach(mut self, parser: Arc<dyn BufferParser>) -> Self {
+        self.set_parser(parser);
         self
     }
 
-    pub fn has_formatter(&self) -> bool {
-        self.formatter.is_some()
+    pub fn has_parser(&self) -> bool {
+        self.parser.is_some()
     }
 
-    /// Update the source driving the formatter. The next
-    /// `ensure_rendered_at` will re-render; without a formatter
+    /// Update the source driving the parser. The next
+    /// `ensure_rendered_at` will re-run `parse`; without a parser
     /// attached, the source is held but never consulted.
     pub fn set_source(&mut self, source: String) {
         if source == self.source {
@@ -458,11 +476,11 @@ impl Buffer {
         &self.source
     }
 
-    /// Re-run the formatter if `(source, width)` differs from the last
-    /// render. No-op without a formatter or when nothing changed.
-    /// Returns `true` when a render actually happened.
+    /// Re-run the parser if `(source, width)` differs from the last
+    /// call. No-op without a parser or when nothing changed.
+    /// Returns `true` when a parse actually happened.
     pub fn ensure_rendered_at(&mut self, width: u16) -> bool {
-        let Some(formatter) = self.formatter.clone() else {
+        let Some(parser) = self.parser.clone() else {
             return false;
         };
         let fresh = match self.last_render {
@@ -473,7 +491,7 @@ impl Buffer {
             return false;
         }
         let source = std::mem::take(&mut self.source);
-        formatter.render(self, &source, width);
+        parser.parse(self, &source, width);
         self.source = source;
         self.last_render = Some((self.source_tick, width));
         true
@@ -1419,36 +1437,46 @@ mod tests {
         assert_eq!(arc3[0].len(), 2);
     }
 
-    /// Drives [`Buffer::ensure_rendered_at`] with a stub formatter so
+    /// Drives [`Buffer::ensure_rendered_at`] with a stub parser so
     /// we can assert the caching + re-render semantics without
     /// pulling the full markdown pipeline into the ui crate.
-    struct StubFormatter {
+    struct StubParser {
         calls: std::sync::Mutex<Vec<(String, u16)>>,
+        attach_calls: std::sync::Mutex<u32>,
     }
 
-    impl StubFormatter {
+    impl StubParser {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+                attach_calls: std::sync::Mutex::new(0),
             })
         }
 
         fn call_log(&self) -> Vec<(String, u16)> {
             self.calls.lock().unwrap().clone()
         }
+
+        fn attach_count(&self) -> u32 {
+            *self.attach_calls.lock().unwrap()
+        }
     }
 
-    impl BufferFormatter for StubFormatter {
-        fn render(&self, buf: &mut Buffer, source: &str, width: u16) {
+    impl BufferParser for StubParser {
+        fn parse(&self, buf: &mut Buffer, source: &str, width: u16) {
             self.calls.lock().unwrap().push((source.to_string(), width));
             buf.set_all_lines(vec![format!("{source}@{width}")]);
+        }
+
+        fn on_attach(&self, _buf: &mut Buffer) {
+            *self.attach_calls.lock().unwrap() += 1;
         }
     }
 
     #[test]
-    fn formatter_runs_once_per_source_width() {
-        let fmt = StubFormatter::new();
-        let mut buf = make_buf().with_formatter(fmt.clone());
+    fn parser_runs_once_per_source_width() {
+        let p = StubParser::new();
+        let mut buf = make_buf().attach(p.clone());
         buf.set_source("x".into());
         assert!(buf.ensure_rendered_at(10));
         assert!(!buf.ensure_rendered_at(10));
@@ -1456,7 +1484,7 @@ mod tests {
         buf.set_source("y".into());
         assert!(buf.ensure_rendered_at(20));
         assert_eq!(
-            fmt.call_log(),
+            p.call_log(),
             vec![
                 ("x".to_string(), 10),
                 ("x".to_string(), 20),
@@ -1467,24 +1495,26 @@ mod tests {
     }
 
     #[test]
-    fn setting_same_source_does_not_re_render() {
-        let fmt = StubFormatter::new();
-        let mut buf = make_buf().with_formatter(fmt.clone());
+    fn setting_same_source_does_not_re_parse() {
+        let p = StubParser::new();
+        let mut buf = make_buf().attach(p.clone());
         buf.set_source("abc".into());
         buf.ensure_rendered_at(10);
         buf.set_source("abc".into());
         assert!(!buf.ensure_rendered_at(10));
-        assert_eq!(fmt.call_log().len(), 1);
+        assert_eq!(p.call_log().len(), 1);
     }
 
     #[test]
-    fn installing_formatter_invalidates_render_cache() {
-        let first = StubFormatter::new();
-        let mut buf = make_buf().with_formatter(first.clone());
+    fn attaching_parser_invalidates_render_cache_and_fires_on_attach() {
+        let first = StubParser::new();
+        let mut buf = make_buf().attach(first.clone());
+        assert_eq!(first.attach_count(), 1);
         buf.set_source("s".into());
         buf.ensure_rendered_at(10);
-        let second = StubFormatter::new();
-        buf.set_formatter(second.clone());
+        let second = StubParser::new();
+        buf.set_parser(second.clone());
+        assert_eq!(second.attach_count(), 1);
         assert!(buf.ensure_rendered_at(10));
         assert_eq!(second.call_log().len(), 1);
     }
