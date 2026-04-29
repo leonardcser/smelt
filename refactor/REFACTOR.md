@@ -240,24 +240,37 @@ Tail deferred (gated on transcript-pipeline migration onto
 - `Item = (Constraint, LayoutTree)`. Constraints: `Length /
   Percentage / Ratio / Min / Max / Fill / Fit` (`Fit` stubbed to
   `Fill` until leaves expose natural size).
-- `Chrome { gap: u16, border: Option<Border>, title: Option<String> }`
-  shared by `Vbox`/`Hbox`. `SeparatorStyle` deferred to P1.c (needs
-  new enum + render-time wiring; lands alongside Overlay chrome).
+- `Chrome { gap: u16, border: Option<Border>, title: Option<String>,
+  separator: SeparatorStyle }` shared by `Vbox`/`Hbox`.
+  `SeparatorStyle::{ None | Solid | Dashed }` (data shipped in
+  P1.c-tail; render-time wiring lands alongside the Overlay paint
+  loop in P1.f).
 - Type system allows chrome on any container; convention restricts
   it to overlays.
 
 Builders: `LayoutTree::vbox(items)` / `hbox(items)` / `leaf(win)`
-plus `with_gap` / `with_border` / `with_title`. `resolve_layout`
-returns `HashMap<WinId, Rect>` (not `String`-keyed).
+plus `with_gap` / `with_border` / `with_title` / `with_separator`.
+`resolve_layout` returns `HashMap<WinId, Rect>` (not `String`-keyed).
 
-### P1.c — `Overlay` replacing `Float`
+### P1.c — `Overlay` replacing `Float` (in progress)
 
 - `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
-- `Anchor::{ Screen(Center) | Screen { row, col } | Cursor(Edge) |
-  Win { target, attach } }`.
+- `Anchor::{ ScreenCenter | ScreenAt { row, col, corner } |
+  Cursor { corner, row_offset, col_offset } | Win { target, attach } }`.
 - Drag = mutate the anchor.
 - `Float`/`FloatId` go away. Overlays have an `OverlayId` for chrome
-  hit-testing.
+  hit-testing; `OverlayHitTarget::{ Window(WinId) | Chrome }` is
+  the per-overlay hit-test split.
+
+Data + resolution + focus/hit-test layer landed (C.0 → C.4 +
+tails): types, `resolve_anchor`, `Ui::overlay_open / close /
+overlay / overlay_mut / overlays_in_z_order`,
+`LayoutTree::natural_size`, `Ui::resolve_overlays(cursor)`,
+`Chrome.separator` + `with_separator`, `Ui::active_modal`,
+`Ui::overlay_hit_test`. C.5 (first float migration) gated on a
+render-shape decision — see `STATUS.md` for the open design point.
+C.6+ deletions (`FloatConfig` / `Placement` / `PanelWidget` /
+`dialog.rs` panel multiplexing) wait on C.5.
 
 ### P1.d — `Window` as the only interactive unit
 

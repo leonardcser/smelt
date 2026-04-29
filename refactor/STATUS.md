@@ -190,51 +190,19 @@ before declaring anything done.
 
 ## What's next
 
-**P1.c — `Overlay` replacing `Float`** is the active phase. Target
-shape from `REFACTOR.md` § P1.c:
+**Active phase:** P1.c — `Overlay` replacing `Float`. The
+data + resolution + focus/hit-test layer is in place
+(C.0–C.4 + tails); see "Where we are" above for the running
+narrative and the open C.5 design point. Target shape from
+`REFACTOR.md` § P1.c (for reference):
 
 - `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
-- `Anchor::{ Screen(Center) | Screen { row, col } | Cursor(Edge) |
-  Win { target, attach } }`.
+- `Anchor::{ ScreenCenter | ScreenAt { row, col, corner } |
+  Cursor { corner, row_offset, col_offset } | Win { target, attach } }`.
 - Drag = mutate the anchor.
-- `Float`/`FloatId` go away. Overlays have an `OverlayId` for chrome
-  hit-testing.
-
-Deletes:
-- `PanelWidget` trait + `dialog.rs` panel multiplexing.
-- `Placement` enum (replaced by `Anchor`).
-- `FloatConfig` (replaced by `Overlay`).
-
-Sub-commits to scope at P1.c kickoff. Likely shape:
-1. **C.1** — Add `Overlay` + `Anchor` types alongside existing
-   `Float`/`Placement`. Add `Ui::overlay_open/close`.
-2. **C.2** — Migrate one float (the simplest dialog) to Overlay
-   as proof. Verify hit-testing + focus.
-3. **C.3** — Migrate remaining floats; delete `FloatConfig` /
-   `PanelWidget` / `dialog.rs` panel multiplexing.
-
-## P1.b sub-commits landed this session
-
-1. ✅ **B.1 — Constraint enum expansion** (`70ad2e0`).
-   `Min`/`Max`/`Ratio`/`Fit` added; `Fixed→Length`,
-   `Pct→Percentage`. 8 consumer files updated.
-2. ✅ **B.2 — Container chrome + builders** (`5e1d81c`,
-   `14612d8`). `gap`/`border`/`title` on `Split` plus
-   `vbox`/`hbox`/`leaf` constructors and `with_gap` /
-   `with_border` / `with_title` builders. All 17 in-file tests
-   migrated to the constructors. Dummy "gap" leaf in
-   `content/layout.rs` replaced with `.with_gap(1)` chrome.
-3. ✅ **B.3 — Items tuple + `Leaf(WinId)`** (`e615c12`).
-   `Item = (Constraint, LayoutTree)`; constraint hoisted out of
-   `Leaf` onto parent items. `Leaf(WinId)` (string names gone).
-   `resolve_layout` returns `HashMap<WinId, Rect>`. Production
-   consumers use `TRANSCRIPT_WIN`/`PROMPT_WIN` constants.
-4. ✅ **B.4 — Vbox/Hbox + drop Direction** (`2a157da`). `Split`
-   replaced with explicit `Vbox`/`Hbox` variants sharing a
-   `Chrome` struct. `Direction` enum deleted.
-
-Once P1.b closes, P1.c (Overlay replacing Float) becomes
-unblocked.
+- `Float` / `FloatId` / `FloatConfig` / `Placement` /
+  `PanelWidget` trait / `dialog.rs` panel multiplexing — all
+  deleted at C.6+ once C.5 lands.
 
 ## Deferred to P1.a-tail (after the transcript migration)
 
@@ -297,6 +265,17 @@ None of these block the start of P0 or P1.
 (Phases as they complete. Newest first. One line each, link to the
 P-log.)
 
+- **P1.b — `LayoutTree`.** `Vbox`/`Hbox`/`Leaf(WinId)` + 7
+  `Constraint` variants + `Chrome` (gap/border/title/separator);
+  `resolve_layout` keyed by `WinId`. See `P1.md` § P1.b.
+- **P1.0 — Theme registry + first paired structural deletion.**
+  `ui::Theme` (groups + links) replaces `crate::theme::*` atomic
+  globals; populated each frame from `is_light` / `accent` / `slug`.
+  See `P1.md` § P1.0.
+- **P1.a foundation.** Buffer extmark + namespace model;
+  `YankSubst`; `wrap_at` cache; `BufferParser` rename + `on_attach`
+  hook. Structural completion deferred to P1.a-tail. See `P1.md`
+  § P1.a.
 - **P0 — Clear the deck (orthogonal half).** 4 of 9 deletions
   shipped; 5 structural deletions deferred to P1.0. Tree green; 901
   workspace tests + 6 baseline scenarios passing. See `P0.md`.

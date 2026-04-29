@@ -74,6 +74,37 @@ it isn't. Either path ends with the docs updated.
     work lives in `P<n>.md` "Deferrals"; per-file fates live in
     `INVENTORY.md`. A separate TODO list would drift and duplicate.
 
+## Don't stop until done or blocked
+
+A green tree + a sub-phase landed isn't a stop point — it's a milestone.
+After landing one piece, immediately pick up the next from `STATUS.md`
+without waiting for confirmation. Auto mode in particular treats "what's
+next?" as the default action, not a question.
+
+Stop only when:
+
+- A design choice is genuinely ambiguous and two paths are equally
+  defensible. Capture the options in `STATUS.md` and ask.
+- The next step would require a user-visible behavior change that wasn't
+  in scope. Confirm first.
+- A real external blocker appears (missing credentials, env mismatches,
+  decisions only the user can make).
+
+A "finished task" means: tests pass, clippy clean, `refactor/check.sh`
+green, docs synced (`P<n>.md` / `STATUS.md` / `INVENTORY.md`), and the
+next task on `STATUS.md` picked up. Anything short of that is mid-task.
+
+## Re-orient on every task
+
+Even mid-session, before starting a new task or sub-phase: re-read
+`STATUS.md`, the most recent `P<n>.md`, and any `INVENTORY.md` rows for
+files you'll touch. Files move, rows update, decisions land between
+tasks. The 60 seconds of doc-reading saves an hour of fixing assumptions
+made on stale memory.
+
+Same instinct applies after delegating to a subagent: trust but verify
+its summary against the actual files.
+
 ## Verify when it makes sense
 
 - **At phase boundaries:**
