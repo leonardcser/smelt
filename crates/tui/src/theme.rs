@@ -314,6 +314,7 @@ pub const AGENT: Color = Color::AnsiValue(75);
 pub fn populate_ui_theme(theme: &mut ui::Theme) {
     use ui::grid::Style;
 
+    theme.set_light(is_light());
     theme.set("Visual", Style::bg(selection_bg()));
     theme.set("Comment", Style::fg(muted()));
     theme.set("ErrorMsg", Style::fg(ERROR));
