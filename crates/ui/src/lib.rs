@@ -437,6 +437,25 @@ impl Ui {
         Some(id)
     }
 
+    /// Open a window at a pre-reserved `WinId` (e.g. [`PROMPT_WIN`],
+    /// [`TRANSCRIPT_WIN`]). Returns `false` when the id is already
+    /// occupied or the buffer doesn't exist. Used by frontends that
+    /// want a Window with a stable id callers can register Lua
+    /// callbacks against — the reserved-id machinery skips fresh
+    /// allocation, so this is the only path that lands a Window at
+    /// id 0/1.
+    pub fn win_open_split_at(&mut self, id: WinId, buf: BufId, config: SplitConfig) -> bool {
+        if self.wins.contains_key(&id) || !self.bufs.contains_key(&buf) {
+            return false;
+        }
+        let win = Window::new(id, buf, config);
+        self.wins.insert(id, win);
+        if self.current_win.is_none() {
+            self.current_win = Some(id);
+        }
+        true
+    }
+
     /// Close a window. Returns the Lua callback IDs that were
     /// attached (keymaps, events, fallback) so the caller can drop
     /// them from the Lua-side registry. When `id` is a leaf of an

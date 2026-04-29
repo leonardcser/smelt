@@ -170,10 +170,10 @@ impl App {
         transcript_rect
     }
 
-    /// Compute prompt chrome (queued / stash / bars) + input area, then
-    /// sync both the `prompt` (chrome rows) and `prompt_input` (edit
-    /// buffer) WindowView layers. Returns the `prompt_input` layer rect
-    /// for later `set_layer_rect`.
+    /// Populate the unified prompt buffer (chrome rows + visible
+    /// input slice + bottom bar) and set the painted-split prompt
+    /// Window's cursor + viewport. Returns the input-area rect so
+    /// `prompt_viewport` (mouse routing) can latch onto it.
     fn sync_prompt_layer(
         &mut self,
         term_w: u16,
@@ -212,7 +212,6 @@ impl App {
             content::prompt_data::compute_prompt(&mut prompt_input, input_buf, &theme)
         };
 
-        let chrome_rows = prompt_output.chrome_rows;
         let cursor = prompt_output.cursor;
         let cursor_style = prompt_output.cursor_style;
         // Write the renderer's clamped scroll_top back into the Window
@@ -253,33 +252,23 @@ impl App {
             };
         self.prompt_viewport = prompt_viewport;
 
-        if let Some(pv) = self
-            .ui
-            .layer_mut::<content::window_view::WindowView>("prompt")
-        {
-            pv.set_rows(chrome_rows);
-            pv.set_viewport(None);
-            pv.set_cursor(None, None);
-        }
-
-        let viewport = self.prompt_viewport;
-        let input_buf_id = self.input_display_buf;
-        let buf_snapshot = self.ui.buf(input_buf_id).cloned();
-        if let (Some(pv), Some(mut buf)) = (
-            self.ui
-                .layer_mut::<content::window_view::WindowView>("prompt_input"),
-            buf_snapshot,
-        ) {
-            // `compute_input_area` already wrote only the visible slice
-            // of wrapped lines into `buf`, with highlights indexed
-            // 0..content_rows. Passing the absolute scroll here would
-            // make `BufferView::draw_content` skip past the slice and
-            // render empty rows — the buffer offset must be 0, while
-            // the *viewport* above still carries the real scroll so
-            // the scrollbar tracks correctly.
-            pv.sync_from_buffer(&mut buf, 0);
-            pv.set_viewport(viewport);
-            pv.set_cursor(cursor, cursor_style);
+        // Drive the painted-split Window's cursor + scrollbar viewport
+        // from the prompt output. `cursor_kind = Hardware` flows through
+        // `Ui::render`'s focused-painted-split-cursor path; `Block`
+        // paints in-place via `Window::render`. When the prompt isn't
+        // focused (`has_prompt_cursor == false` collapses `cursor` to
+        // `None`), `cursor_kind` stays `None` so no cursor renders.
+        let cursor_kind = match (cursor, cursor_style) {
+            (Some(_), Some((style, glyph))) => Some(ui::CursorKind::Block { glyph, style }),
+            (Some(_), None) => Some(ui::CursorKind::Hardware),
+            (None, _) => None,
+        };
+        let (cur_col, cur_line) = cursor.unwrap_or((0, 0));
+        if let Some(win) = self.ui.win_mut(ui::PROMPT_WIN) {
+            win.cursor_kind = cursor_kind;
+            win.cursor_col = cur_col;
+            win.cursor_line = cur_line;
+            win.viewport = prompt_viewport;
         }
 
         prompt_input_rect
@@ -289,26 +278,27 @@ impl App {
         &mut self,
         transcript_rect: ui::Rect,
         prompt_rect: ui::Rect,
-        prompt_input_rect: ui::Rect,
+        _prompt_input_rect: ui::Rect,
         term_w: u16,
         term_h: u16,
     ) {
         let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
         self.ui.set_layer_rect("transcript", transcript_rect);
-        self.ui.set_layer_rect("prompt", prompt_rect);
-        self.ui.set_layer_rect("prompt_input", prompt_input_rect);
         // Publish split-window rects so overlay anchors targeting a
         // window (e.g. notification toasts, prompt-docked pickers)
-        // can resolve. The status line's rect lives here too — it's
-        // a painted split (no compositor layer).
+        // can resolve, and so painted splits know where to paint.
         self.ui.set_window_rect(ui::PROMPT_WIN, prompt_rect);
         self.ui.set_window_rect(ui::TRANSCRIPT_WIN, transcript_rect);
         self.ui.set_window_rect(self.status_win, status_rect);
 
         if self.ui.focused_overlay().is_none() {
             match self.app_focus {
-                crate::app::AppFocus::Prompt => self.ui.focus_layer("prompt_input"),
-                crate::app::AppFocus::Content => self.ui.focus_layer("transcript"),
+                crate::app::AppFocus::Prompt => {
+                    self.ui.set_focus(ui::PROMPT_WIN);
+                }
+                crate::app::AppFocus::Content => {
+                    self.ui.set_focus(ui::TRANSCRIPT_WIN);
+                }
             }
         }
     }

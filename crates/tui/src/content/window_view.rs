@@ -12,34 +12,8 @@ pub(crate) struct SoftCursor {
     pub glyph: char,
 }
 
-pub(crate) struct StyledSegment {
-    pub text: String,
-    pub style: Style,
-}
-
-pub(crate) struct WindowRow {
-    pub segments: Vec<StyledSegment>,
-    pub fill: Option<Style>,
-}
-
-impl WindowRow {
-    pub fn styled(segments: Vec<StyledSegment>) -> Self {
-        Self {
-            segments,
-            fill: None,
-        }
-    }
-}
-
-enum WindowContent {
-    Buffer,
-    Rows,
-}
-
 pub(crate) struct WindowView {
     buffer_view: BufferView,
-    rows: Vec<WindowRow>,
-    content: WindowContent,
     viewport: Option<ui::WindowViewport>,
     cursor_info: Option<CursorInfo>,
 }
@@ -48,8 +22,6 @@ impl WindowView {
     pub fn new() -> Self {
         Self {
             buffer_view: BufferView::new(),
-            rows: Vec::new(),
-            content: WindowContent::Rows,
             viewport: None,
             cursor_info: None,
         }
@@ -58,7 +30,6 @@ impl WindowView {
     pub fn sync_from_buffer(&mut self, buf: &mut Buffer, scroll_offset: usize) {
         self.buffer_view.sync_from_buffer(buf);
         self.buffer_view.set_scroll(scroll_offset);
-        self.content = WindowContent::Buffer;
     }
 
     /// Layer a transient highlight on top of the synced buffer. Cleared
@@ -69,23 +40,8 @@ impl WindowView {
             .add_highlight(line, col_start, col_end, style);
     }
 
-    pub fn set_rows(&mut self, rows: Vec<WindowRow>) {
-        self.rows = rows;
-        self.content = WindowContent::Rows;
-    }
-
     pub fn set_viewport(&mut self, viewport: Option<ui::WindowViewport>) {
         self.viewport = viewport;
-    }
-
-    pub fn set_cursor(&mut self, pos: Option<(u16, u16)>, style: Option<(Style, char)>) {
-        self.cursor_info = pos.map(|(cx, cy)| {
-            if let Some((s, glyph)) = style {
-                CursorInfo::block(cx, cy, glyph, s)
-            } else {
-                CursorInfo::hardware(cx, cy)
-            }
-        });
     }
 
     pub fn set_soft_cursor(&mut self, cursor: Option<SoftCursor>, theme: &ui::Theme) {
@@ -112,45 +68,6 @@ impl WindowView {
                 },
             )
         });
-    }
-
-    fn draw_rows(&self, grid: &mut GridSlice<'_>) {
-        let h = grid.height();
-        let w = grid.width();
-        for (row_idx, row) in self.rows.iter().enumerate() {
-            if row_idx as u16 >= h {
-                break;
-            }
-            let y = row_idx as u16;
-
-            if let Some(fill) = row.fill {
-                grid.fill(Rect::new(0, y, w, 1), ' ', fill);
-            }
-
-            let mut col: u16 = 0;
-            for seg in &row.segments {
-                for ch in seg.text.chars() {
-                    if col >= w {
-                        break;
-                    }
-                    let style = if let Some(fill) = row.fill {
-                        Style {
-                            fg: seg.style.fg.or(fill.fg),
-                            bg: seg.style.bg.or(fill.bg),
-                            bold: seg.style.bold,
-                            dim: seg.style.dim,
-                            italic: seg.style.italic,
-                            underline: seg.style.underline,
-                            crossedout: seg.style.crossedout,
-                        }
-                    } else {
-                        seg.style
-                    };
-                    grid.set(col, y, ch, style);
-                    col += 1;
-                }
-            }
-        }
     }
 
     fn draw_scrollbar(&self, area: Rect, grid: &mut GridSlice<'_>, theme: &ui::Theme) {
@@ -205,10 +122,7 @@ impl Component for WindowView {
             return;
         }
 
-        match self.content {
-            WindowContent::Buffer => self.buffer_view.draw(area, grid, ctx),
-            WindowContent::Rows => self.draw_rows(grid),
-        }
+        self.buffer_view.draw(area, grid, ctx);
         self.draw_scrollbar(area, grid, &ctx.theme);
     }
 
@@ -241,13 +155,6 @@ mod tests {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(lines.iter().map(|s| String::from(*s)).collect());
         buf
-    }
-
-    fn plain(text: &str) -> WindowRow {
-        WindowRow::styled(vec![StyledSegment {
-            text: text.to_string(),
-            style: Style::default(),
-        }])
     }
 
     fn ctx(w: u16, h: u16) -> DrawContext {
@@ -306,19 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_row_segments() {
-        let mut view = WindowView::new();
-        view.set_rows(vec![plain("hello"), plain("world")]);
-
-        let mut grid = Grid::new(20, 5);
-        let mut slice = grid.slice_mut(Rect::new(0, 0, 20, 5));
-        view.draw(Rect::new(0, 0, 20, 5), &mut slice, &ctx(20, 5));
-
-        assert_eq!(grid.cell(0, 0).symbol, 'h');
-        assert_eq!(grid.cell(0, 1).symbol, 'w');
-    }
-
-    #[test]
     fn cursor_info_from_soft_cursor() {
         let mut view = WindowView::new();
         view.set_soft_cursor(
@@ -336,31 +230,5 @@ mod tests {
         assert_eq!(cs.glyph, 'b');
         assert!(cs.style.fg.is_some());
         assert!(cs.style.bg.is_some());
-    }
-
-    #[test]
-    fn cursor_position_reported() {
-        let mut view = WindowView::new();
-        view.set_cursor(Some((5, 2)), None);
-        let ci = view.cursor().unwrap();
-        assert_eq!((ci.col, ci.row), (5, 2));
-        assert!(ci.style.is_none());
-    }
-
-    #[test]
-    fn cursor_block_style_reported() {
-        let cursor_style = Style {
-            fg: Some(Color::Black),
-            bg: Some(Color::White),
-            ..Style::default()
-        };
-        let mut view = WindowView::new();
-        view.set_cursor(Some((1, 0)), Some((cursor_style, 'b')));
-        let ci = view.cursor().unwrap();
-        assert_eq!((ci.col, ci.row), (1, 0));
-        let cs = ci.style.unwrap();
-        assert_eq!(cs.glyph, 'b');
-        assert_eq!(cs.style.fg, Some(Color::Black));
-        assert_eq!(cs.style.bg, Some(Color::White));
     }
 }

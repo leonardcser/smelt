@@ -425,15 +425,31 @@ land before the migration can flip:
   splits. `Ui::render` surfaces the focused painted split's hardware
   cursor (when `cursor_kind == Hardware`) ahead of the focused
   compositor layer's cursor, behind the overlay cursor.
-- **P1.d.2b — Migrate prompt to a painted-split Window.** Drops the
-  `"prompt"` and `"prompt_input"` compositor layers; the prompt
-  becomes a single painted-split Window over a unified buffer
-  (chrome rows + visible input slice as buffer lines + extmark
-  highlights). `compute_prompt` rewrites to populate the buffer +
-  set the Window's cursor_kind / viewport. `set_focus(PROMPT_WIN)`
-  replaces `focus_layer("prompt_input")`. Selection paint (vim
-  Visual) flows through the existing buffer extmark path that
-  `compute_input_area` already produces.
+- **P1.d.2b** ✅ landed — migrate prompt to a painted-split Window.
+  Drops the `"prompt"` and `"prompt_input"` compositor layers; the
+  prompt becomes a single painted-split `Window` at `PROMPT_WIN`
+  over a unified `input_display_buf` carrying chrome rows
+  (queued, stash, top bar) + visible input slice + bottom bar as
+  buffer lines with non-overlapping highlight extmarks.
+  `compute_prompt` rewrites to populate the buffer + extmarks in
+  one pass and to set the Window's `cursor_kind` (`Block` for
+  end-of-line / prediction; `Hardware` for typed-char position;
+  `None` when unfocused), `cursor_line` / `cursor_col`, and
+  `viewport`. `Ui::win_open_split_at(id, …)` lands so PROMPT_WIN
+  / TRANSCRIPT_WIN can register a Window at their reserved id
+  without burning a fresh allocation. `paint_scrollbar` in
+  `Window::render` reads `slice.area()` to compute a slice-relative
+  row offset for the scrollbar (`viewport.rect.top -
+  slice.area().top`) so painted splits whose viewport covers a
+  sub-region (the prompt's input area) place the bar correctly;
+  surfaces where window rect == viewport rect (transcript, overlay
+  leaves) keep their prior behaviour because the offset is zero.
+  `set_focus(PROMPT_WIN)` / `set_focus(TRANSCRIPT_WIN)` replace
+  `focus_layer("prompt_input")` / `focus_layer("transcript")` in
+  the per-frame focus restore. `WindowView::set_rows` /
+  `set_cursor` retire alongside `WindowContent::Rows`,
+  `WindowRow`, and `StyledSegment` (the chrome-row intermediate
+  representation moves into `prompt_data.rs` as private types).
 
 #### P1.d.3 — Transcript onto Window::render
 
