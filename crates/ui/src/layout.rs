@@ -248,6 +248,97 @@ impl LayoutTree {
         }
         self
     }
+
+    /// Natural `(width, height)` of this tree given an outer cap. Used
+    /// by overlay sizing: `Length` / `Percentage` / `Ratio` / `Min` /
+    /// `Max` contribute their resolved sizes along the parent axis;
+    /// `Fill` / `Fit` contribute `0` (no content awareness yet — that
+    /// arrives when leaves expose their Buffer extent in P1.d). The
+    /// secondary axis takes the max across siblings. Chrome (border,
+    /// gap) is added on top.
+    ///
+    /// `cap` bounds `Percentage` / `Ratio` resolution and clamps the
+    /// final result. The return value is always `<= cap`.
+    pub fn natural_size(&self, cap: (u16, u16)) -> (u16, u16) {
+        match self {
+            // Leaves have no intrinsic size yet — content-natural
+            // sizing waits for windows to expose Buffer dimensions.
+            // Callers wrap them in containers with explicit sizing.
+            LayoutTree::Leaf(_) => (0, 0),
+            LayoutTree::Vbox { items, chrome } => {
+                natural_box(items, chrome, cap, true)
+            }
+            LayoutTree::Hbox { items, chrome } => {
+                natural_box(items, chrome, cap, false)
+            }
+        }
+    }
+}
+
+fn natural_box(items: &[Item], chrome: &Chrome, cap: (u16, u16), vertical: bool) -> (u16, u16) {
+    let (cap_w, cap_h) = cap;
+    let border_inset: u16 = if chrome.border.is_some() { 2 } else { 0 };
+    let gaps = chrome
+        .gap
+        .saturating_mul(items.len().saturating_sub(1) as u16);
+
+    // Inner cap subtracts border (both axes) and gap (primary only).
+    let (primary_cap, secondary_cap) = if vertical {
+        (
+            cap_h.saturating_sub(border_inset).saturating_sub(gaps),
+            cap_w.saturating_sub(border_inset),
+        )
+    } else {
+        (
+            cap_w.saturating_sub(border_inset).saturating_sub(gaps),
+            cap_h.saturating_sub(border_inset),
+        )
+    };
+
+    let inner_cap = if vertical {
+        (secondary_cap, primary_cap)
+    } else {
+        (primary_cap, secondary_cap)
+    };
+
+    let mut primary = 0u16;
+    let mut secondary = 0u16;
+    for (constraint, child) in items {
+        let (child_w, child_h) = child.natural_size(inner_cap);
+        let primary_size = match constraint {
+            Constraint::Length(n) | Constraint::Max(n) | Constraint::Min(n) => *n,
+            Constraint::Percentage(p) => {
+                ((primary_cap as u32 * *p as u32) / 100).min(primary_cap as u32) as u16
+            }
+            Constraint::Ratio(num, denom) => {
+                if *denom == 0 {
+                    0
+                } else {
+                    ((primary_cap as u32 * *num as u32) / *denom as u32).min(primary_cap as u32)
+                        as u16
+                }
+            }
+            Constraint::Fill | Constraint::Fit => {
+                if vertical {
+                    child_h
+                } else {
+                    child_w
+                }
+            }
+        };
+        let cross_size = if vertical { child_w } else { child_h };
+        primary = primary.saturating_add(primary_size);
+        secondary = secondary.max(cross_size);
+    }
+    primary = primary.saturating_add(gaps).saturating_add(border_inset);
+    secondary = secondary.saturating_add(border_inset);
+
+    let (w, h) = if vertical {
+        (secondary, primary)
+    } else {
+        (primary, secondary)
+    };
+    (w.min(cap_w), h.min(cap_h))
 }
 
 /// Which corner of a rectangle is its anchor point. Used by
@@ -644,4 +735,98 @@ mod tests {
         assert_eq!(result[&B].top, result[&A].top + result[&A].height + 1);
     }
 
+    #[test]
+    fn natural_size_leaf_is_zero() {
+        let tree = LayoutTree::leaf(A);
+        assert_eq!(tree.natural_size((80, 24)), (0, 0));
+    }
+
+    #[test]
+    fn natural_size_vbox_lengths_sum_along_primary() {
+        // Two Length(5) children stacked vertically → height 10,
+        // width 0 (leaves have no width).
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(5), LayoutTree::leaf(A)),
+            (Constraint::Length(5), LayoutTree::leaf(B)),
+        ]);
+        assert_eq!(tree.natural_size((80, 24)), (0, 10));
+    }
+
+    #[test]
+    fn natural_size_hbox_lengths_sum_along_primary() {
+        let tree = LayoutTree::hbox(vec![
+            (Constraint::Length(20), LayoutTree::leaf(A)),
+            (Constraint::Length(10), LayoutTree::leaf(B)),
+        ]);
+        assert_eq!(tree.natural_size((80, 24)), (30, 0));
+    }
+
+    #[test]
+    fn natural_size_vbox_gap_adds_to_primary() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(3), LayoutTree::leaf(A)),
+            (Constraint::Length(4), LayoutTree::leaf(B)),
+            (Constraint::Length(5), LayoutTree::leaf(C)),
+        ])
+        .with_gap(2);
+        // 3 + 4 + 5 + 2*(3-1) = 16
+        assert_eq!(tree.natural_size((80, 24)), (0, 16));
+    }
+
+    #[test]
+    fn natural_size_border_adds_two_each_axis() {
+        let tree = LayoutTree::vbox(vec![(Constraint::Length(10), LayoutTree::leaf(A))])
+            .with_border(Border::Single);
+        // height: 10 + 2 (border); width: 0 + 2 (border).
+        assert_eq!(tree.natural_size((80, 24)), (2, 12));
+    }
+
+    #[test]
+    fn natural_size_percentage_resolves_against_cap() {
+        let tree = LayoutTree::vbox(vec![(Constraint::Percentage(50), LayoutTree::leaf(A))]);
+        // 50% of cap_h=24 = 12.
+        assert_eq!(tree.natural_size((80, 24)), (0, 12));
+    }
+
+    #[test]
+    fn natural_size_ratio_resolves_against_cap() {
+        let tree = LayoutTree::hbox(vec![
+            (Constraint::Ratio(1, 4), LayoutTree::leaf(A)),
+            (Constraint::Ratio(1, 4), LayoutTree::leaf(B)),
+        ]);
+        // 1/4 of cap_w=80 = 20, twice → 40.
+        assert_eq!(tree.natural_size((80, 24)), (40, 0));
+    }
+
+    #[test]
+    fn natural_size_fill_contributes_zero() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(3), LayoutTree::leaf(A)),
+            (Constraint::Fill, LayoutTree::leaf(B)),
+        ]);
+        // Fill has no natural size yet, so total = 3.
+        assert_eq!(tree.natural_size((80, 24)), (0, 3));
+    }
+
+    #[test]
+    fn natural_size_clamps_to_cap() {
+        let tree = LayoutTree::vbox(vec![(Constraint::Length(100), LayoutTree::leaf(A))]);
+        assert_eq!(tree.natural_size((80, 24)), (0, 24));
+    }
+
+    #[test]
+    fn natural_size_nested_chrome_composes() {
+        // Outer Vbox border + inner Hbox of two Length children.
+        let tree = LayoutTree::vbox(vec![(
+            Constraint::Length(5),
+            LayoutTree::hbox(vec![
+                (Constraint::Length(20), LayoutTree::leaf(A)),
+                (Constraint::Length(10), LayoutTree::leaf(B)),
+            ]),
+        )])
+        .with_border(Border::Single);
+        // Outer: 5 (length) + 2 (border) = 7 height; inner Hbox width
+        // 30 + 2 (outer border) = 32.
+        assert_eq!(tree.natural_size((80, 24)), (32, 7));
+    }
 }

@@ -242,6 +242,33 @@ impl Ui {
         entries
     }
 
+    /// Resolve every overlay's screen rect for the upcoming frame.
+    /// Returns z-ordered entries (lowest first) for which the anchor
+    /// resolved — overlays whose `Anchor::Cursor` requires a missing
+    /// `cursor`, or whose `Anchor::Win` target is absent from
+    /// `split_rects`, are skipped silently. The caller (compositor
+    /// integration in C.5+) feeds the cursor it knows from focus.
+    pub fn resolve_overlays(
+        &self,
+        cursor: Option<(u16, u16)>,
+    ) -> Vec<(OverlayId, Rect, &Overlay)> {
+        let (term_w, term_h) = self.terminal_size;
+        let ctx = overlay::AnchorContext {
+            term_width: term_w,
+            term_height: term_h,
+            cursor,
+            win_rects: &self.split_rects,
+        };
+        let mut out = Vec::with_capacity(self.overlays.len());
+        for (id, ov) in self.overlays_in_z_order() {
+            let size = ov.layout.natural_size((term_w, term_h));
+            if let Some(rect) = overlay::resolve_anchor(&ov.anchor, size, &ctx) {
+                out.push((id, rect, ov));
+            }
+        }
+        out
+    }
+
     pub fn win_open_split(&mut self, buf: BufId, config: SplitConfig) -> Option<WinId> {
         if !self.bufs.contains_key(&buf) {
             return None;
@@ -1456,5 +1483,77 @@ mod tests {
             .collect();
         // Lowest z first; same z falls back to insertion order (id).
         assert_eq!(order, vec![low_a, low_b, mid, high]);
+    }
+
+    fn sized_overlay(width: u16, height: u16, anchor: layout::Anchor) -> Overlay {
+        // Single-leaf box wrapped in an Hbox of fixed width holding a
+        // Vbox of fixed height — exercises both axes' natural-size
+        // composition.
+        let layout = LayoutTree::hbox(vec![(
+            Constraint::Length(width),
+            LayoutTree::vbox(vec![(Constraint::Length(height), LayoutTree::leaf(WinId(99)))]),
+        )]);
+        Overlay::new(layout, anchor)
+    }
+
+    #[test]
+    fn resolve_overlays_centers_screen_center_anchor() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
+        let resolved = ui.resolve_overlays(None);
+        assert_eq!(resolved.len(), 1);
+        let (got_id, rect, _) = &resolved[0];
+        assert_eq!(*got_id, id);
+        // Centered: term 80x24, overlay 40x10 → top=7, left=20.
+        assert_eq!(*rect, Rect::new(7, 20, 40, 10));
+    }
+
+    #[test]
+    fn resolve_overlays_skips_cursor_anchor_when_cursor_missing() {
+        let mut ui = make_ui();
+        ui.overlay_open(sized_overlay(
+            10,
+            5,
+            layout::Anchor::Cursor {
+                corner: Corner::NW,
+                row_offset: 0,
+                col_offset: 0,
+            },
+        ));
+        // No cursor supplied → overlay drops out of the resolved set.
+        assert!(ui.resolve_overlays(None).is_empty());
+        // With a cursor, it resolves.
+        let resolved = ui.resolve_overlays(Some((4, 6)));
+        assert_eq!(resolved.len(), 1);
+    }
+
+    #[test]
+    fn resolve_overlays_skips_win_anchor_when_target_missing() {
+        let mut ui = make_ui();
+        ui.overlay_open(sized_overlay(
+            10,
+            5,
+            layout::Anchor::Win {
+                target: WinId(999),
+                attach: Corner::NW,
+            },
+        ));
+        assert!(ui.resolve_overlays(None).is_empty());
+        // Once the target's rect is published, it resolves.
+        ui.set_window_rect(WinId(999), Rect::new(5, 10, 30, 8));
+        let resolved = ui.resolve_overlays(None);
+        assert_eq!(resolved.len(), 1);
+        let (_, rect, _) = &resolved[0];
+        assert_eq!(*rect, Rect::new(5, 10, 10, 5));
+    }
+
+    #[test]
+    fn resolve_overlays_returns_z_ordered_resolved_set() {
+        let mut ui = make_ui();
+        let high = ui.overlay_open(sized_overlay(20, 5, layout::Anchor::ScreenCenter).with_z(100));
+        let low = ui.overlay_open(sized_overlay(10, 4, layout::Anchor::ScreenCenter).with_z(10));
+        let resolved = ui.resolve_overlays(None);
+        let ids: Vec<OverlayId> = resolved.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ids, vec![low, high]);
     }
 }
