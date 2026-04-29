@@ -22,20 +22,25 @@ expanded to `Length`/`Percentage`/`Ratio`/`Min`/`Max`/`Fill`/`Fit`
 with proper resolution semantics. `Direction` enum deleted.
 `resolve_layout` now returns `HashMap<WinId, Rect>`.
 
-**P1.c in progress** — six foundation commits landed (`40f0c82`,
-`702305a`, `8fa6760`, `d3c4a83`, `44fe779`, `434eee8`/`16ca777`):
-`Corner` rename; target `Anchor` + `Overlay` + `OverlayId` types
-in a new `overlay` module; pure `resolve_anchor` function with 9
-tests; `Ui::overlay_open / close / overlay / overlay_mut /
+**P1.c in progress** — seven foundation commits landed
+(`40f0c82`, `702305a`, `8fa6760`, `d3c4a83`, `44fe779`,
+`434eee8`/`16ca777`, `7cee24c`): `Corner` rename; target
+`Anchor` + `Overlay` + `OverlayId` types in a new `overlay`
+module; pure `resolve_anchor` function with 9 tests;
+`Ui::overlay_open / close / overlay / overlay_mut /
 overlays_in_z_order` API + storage with 4 tests; per-frame
 resolution layer (`LayoutTree::natural_size((cap))` + 9 tests;
 `Ui::resolve_overlays(cursor)` returning z-ordered
 `Vec<(OverlayId, Rect, &Overlay)>` + 4 tests); `SeparatorStyle`
 on `Chrome` (None/Solid/Dashed; `with_separator` auto-inflates
 gap from 0→1) + dedup of the dialog-side enum (one definition
-in `layout`, used everywhere). The whole P1.c data + resolution
-layer is in place — callers can ask "where does this overlay
-draw, with which chrome?" without touching the compositor.
+in `layout`, used everywhere); focus + hit-testing primitives
+(`Ui::active_modal()`, `OverlayHitTarget::{Window | Chrome}`,
+`Ui::overlay_hit_test(row, col, cursor)` — modal-aware,
+topmost-first) + 9 tests. The whole P1.c data + resolution +
+focus/hit layer is in place — callers can ask "where does this
+overlay draw, what's modal, what was clicked?" without touching
+the compositor.
 
 **Next in P1.c (open design point):** C.5 — first float migration
 to Overlay — has a render-shape question that needs deciding
@@ -81,11 +86,10 @@ Until that shape is decided, C.5 doesn't ship code. C.6+ (delete
 Phase log: see `P1.md` for closed-sub-phase summary, decisions
 made while coding, and per-section file/type changes.
 
-**Tree:** green. `cargo nextest run --workspace` — 974 passed
-(5 new since C.4: 5 `SeparatorStyle` field/builder/inflation/
-no-render-effect tests; dialog-side `SeparatorStyle` dedup
-preserved test count). `cargo clippy --workspace --all-targets
--- -D warnings` clean.
+**Tree:** green. `cargo nextest run --workspace` — 983 passed
+(9 new since C.4-tail: 3 `active_modal` + 6 `overlay_hit_test`
+covering leaf / chrome / outside / modal-block / topmost-wins).
+`cargo clippy --workspace --all-targets -- -D warnings` clean.
 
 **Last update:** 2026-04-29. P1.0 theme registry landing across 12
 commits (`decb0ab`..`e489a79`):
