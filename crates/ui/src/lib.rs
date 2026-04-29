@@ -18,6 +18,7 @@ pub mod status_bar;
 pub mod style;
 pub mod text;
 pub mod text_input;
+pub mod theme;
 pub mod undo;
 pub mod vim;
 pub mod window;
@@ -62,6 +63,7 @@ pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
 pub use text_input::TextInput;
+pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{ViMode, Vim};
 pub use window::{
