@@ -164,6 +164,21 @@ impl Compositor {
     }
 
     pub fn render<W: Write>(&mut self, theme: &Theme, w: &mut W) -> std::io::Result<()> {
+        self.render_with(theme, w, |_, _| {})
+    }
+
+    /// Render variant that lets the caller paint into the in-flight
+    /// `current` grid after layer paint and before cursor placement /
+    /// flush. Used by `Ui::render` to paint overlays as a peer pass on
+    /// top of split + float layers without making overlays know about
+    /// the layer registry. The closure receives a mutable reference to
+    /// the grid plus a borrowed theme so it can resolve highlight ids.
+    pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme)>(
+        &mut self,
+        theme: &Theme,
+        w: &mut W,
+        after_layers: F,
+    ) -> std::io::Result<()> {
         self.current.clear_all();
 
         let focused_id = self.focused.clone();
@@ -188,6 +203,8 @@ impl Compositor {
             let mut slice = self.current.slice_mut(layer.rect);
             layer.component.draw(layer.rect, &mut slice, &ctx);
         }
+
+        after_layers(&mut self.current, theme);
 
         // Paint block cursors from focused layer into the grid (before flush).
         let cursor_info = focused_id.as_deref().and_then(|fid| {
@@ -444,6 +461,27 @@ mod tests {
         comp.render(&Theme::default(), &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("hello"));
+    }
+
+    #[test]
+    fn render_with_paints_after_layers() {
+        let mut comp = Compositor::new(20, 5);
+        comp.add(
+            "base",
+            Box::new(TestComponent::new("hello")),
+            Rect::new(0, 0, 20, 1),
+            0,
+        );
+        let mut out = Vec::new();
+        comp.render_with(&Theme::default(), &mut out, |grid, _theme| {
+            // Overwrite the first cell of the layer's paint to prove
+            // the closure runs after layer paint.
+            grid.set(0, 0, 'X', Style::default());
+        })
+        .unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains('X'));
+        assert!(s.contains("ello"));
     }
 
     #[test]
