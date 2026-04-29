@@ -416,7 +416,6 @@ pub struct PendingInvocation {
     pub handle: ui::LuaHandle,
     pub win: ui::WinId,
     pub payload: ui::Payload,
-    pub panels: Vec<ui::PanelSnapshot>,
 }
 
 /// Events that drive the Lua task runtime. After the D3 dialog + D2b
@@ -1190,7 +1189,6 @@ mod tests {
             ui::LuaHandle(id),
             ui::WinId(0),
             &ui::Payload::Selection { index: 2 },
-            &[],
         );
         let recorded: u64 = rt.lua.load("return _G.recorded").eval().unwrap();
         // Payload is 0-indexed; Lua gets 1-based.
@@ -1217,7 +1215,6 @@ mod tests {
             &ui::Payload::Text {
                 content: "hi".into(),
             },
-            &[],
         );
         let t: String = rt.lua.load("return _G.t").eval().unwrap();
         assert_eq!(t, "hi");
@@ -1227,7 +1224,7 @@ mod tests {
     fn invoke_callback_unknown_handle_is_noop() {
         let rt = LuaRuntime::new();
         // Nothing registered under id 9999 — should silently succeed.
-        rt.invoke_callback(ui::LuaHandle(9999), ui::WinId(0), &ui::Payload::None, &[]);
+        rt.invoke_callback(ui::LuaHandle(9999), ui::WinId(0), &ui::Payload::None);
     }
 
     /// Regression: every code path that drops a Lua-backed callback
@@ -1256,7 +1253,7 @@ mod tests {
         assert!(rt.shared.callbacks.lock().unwrap().is_empty());
 
         // Invoking the dropped handle must not resurrect the call.
-        rt.invoke_callback(ui::LuaHandle(id), ui::WinId(0), &ui::Payload::None, &[]);
+        rt.invoke_callback(ui::LuaHandle(id), ui::WinId(0), &ui::Payload::None);
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0);
     }
@@ -1285,54 +1282,6 @@ mod tests {
             Some(ui::WinEvent::FocusGained)
         ));
         assert!(parse_win_event("bogus").is_none());
-    }
-
-    #[test]
-    fn invoke_callback_exposes_panels_snapshot() {
-        let rt = LuaRuntime::new();
-        rt.lua
-            .load(
-                r#"
-                _G.sel = nil
-                _G.txt = nil
-                _G.win = nil
-                _G.cb  = function(ctx)
-                    _G.win = ctx.win
-                    _G.sel = ctx.panels[2].selected
-                    _G.txt = ctx.panels[3].text
-                end
-            "#,
-            )
-            .exec()
-            .unwrap();
-        let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
-        let id = rt.register_callback(func).unwrap();
-        let panels = vec![
-            ui::PanelSnapshot {
-                selected: None,
-                text: String::new(),
-            },
-            ui::PanelSnapshot {
-                selected: Some(3),
-                text: String::new(),
-            },
-            ui::PanelSnapshot {
-                selected: None,
-                text: "hello".into(),
-            },
-        ];
-        rt.invoke_callback(
-            ui::LuaHandle(id),
-            ui::WinId(42),
-            &ui::Payload::None,
-            &panels,
-        );
-        let win: u64 = rt.lua.load("return _G.win").eval().unwrap();
-        let sel: u64 = rt.lua.load("return _G.sel").eval().unwrap();
-        let txt: String = rt.lua.load("return _G.txt").eval().unwrap();
-        assert_eq!(win, 42);
-        assert_eq!(sel, 4); // 1-based
-        assert_eq!(txt, "hello");
     }
 
     // Theme bindings (`smelt.theme.set/get/accent/snapshot`) cross the

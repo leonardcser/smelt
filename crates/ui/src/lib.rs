@@ -12,13 +12,11 @@ pub mod grid;
 pub mod kill_ring;
 pub mod layout;
 pub mod notification;
-pub mod option_list;
 pub mod overlay;
 pub mod picker;
 pub mod status_bar;
 pub mod style;
 pub mod text;
-pub mod text_input;
 pub mod theme;
 pub mod undo;
 pub mod vim;
@@ -31,11 +29,8 @@ pub type AttachmentId = u64;
 
 /// Callback shape for routing `Callback::Lua` handles out of Ui into
 /// the host's Lua runtime. Receives the handle, the focused window,
-/// the event payload, and a live snapshot of the window's dialog
-/// panels for pull-read inside the Lua callback. Empty slice when the
-/// window isn't a dialog.
-pub type LuaInvoke<'a> =
-    dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload, &[dialog::PanelSnapshot]) + 'a;
+/// and the event payload.
+pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
 pub use buffer::{BufType, Buffer, BufferParser, Span, SpanStyle};
 pub use buffer_view::BufferView;
@@ -46,9 +41,7 @@ pub use callback::{
 pub use cmdline::{Cmdline, CmdlineStyle};
 pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult, WidgetEvent};
 pub use compositor::Compositor;
-pub use dialog::{
-    Dialog, DialogConfig, PanelContent, PanelHeight, PanelSnapshot, PanelSpec, PanelWidget,
-};
+pub use dialog::{PanelHeight, PanelSpec};
 pub use edit_buffer::EditBuffer;
 pub use flush::flush_diff;
 pub use grid::{Cell, Grid, GridSlice, Style};
@@ -59,12 +52,10 @@ pub use layout::{
     Rect, SeparatorStyle,
 };
 pub use notification::{Notification, NotificationLevel, NotificationStyle};
-pub use option_list::{OptionItem, OptionList};
 pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
 pub use picker::{Picker, PickerItem, PickerStyle};
 pub use status_bar::{StatusBar, StatusSegment};
 pub use style::{HlAttrs, HlGroup};
-pub use text_input::TextInput;
 pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{ViMode, Vim};
@@ -698,107 +689,11 @@ impl Ui {
                     let _ = inner(&mut ctx);
                 }
                 Callback::Lua(handle) => {
-                    let panels = self.snapshot_dialog_panels(target);
-                    lua_invoke(*handle, target, &payload, &panels);
+                    lua_invoke(*handle, target, &payload);
                 }
             }
         }
         self.callbacks.restore_event(target, ev, cbs);
-    }
-
-    /// Open a multi-panel `Dialog` as a compositor float layer.
-    ///
-    /// Panels' buffers stay in `Ui::bufs`; each panel's interaction
-    /// state (cursor, scroll) lives in a dialog-local `Window`. The
-    /// dialog's own `WinId` is registered in `Ui::wins` as a float so
-    /// focus / close paths match `win_open_float`.
-    pub fn dialog_open(
-        &mut self,
-        float_config: FloatConfig,
-        dialog_config: dialog::DialogConfig,
-        panels: Vec<dialog::PanelSpec>,
-    ) -> Option<WinId> {
-        let all_bufs_registered = panels.iter().all(|p| match &p.content {
-            dialog::PanelContent::Buffer(b) => self.bufs.contains_key(b),
-            dialog::PanelContent::Widget(_) => true,
-        });
-        if !all_bufs_registered {
-            return None;
-        }
-        let id = WinId(self.next_win_id);
-        self.next_win_id += 1;
-
-        let (tw, th) = self.terminal_size;
-        let zindex = float_config.zindex;
-
-        // Use the first buffer-backed panel's buffer as the dialog
-        // window's "buf" pointer for registry purposes (dialogs are
-        // multi-buffer and may be widget-only).
-        let primary_buf = panels
-            .iter()
-            .find_map(|p| match &p.content {
-                dialog::PanelContent::Buffer(b) => Some(*b),
-                dialog::PanelContent::Widget(_) => None,
-            })
-            .unwrap_or(BufId(0));
-
-        let panel_structs = dialog::build_panels(panels, &mut self.bufs);
-        let mut dlg = dialog::Dialog::new(dialog_config, panel_structs);
-        // Pre-sync so `FitContent` sees a populated `line_count` on
-        // the first frame — otherwise the dialog lands at the cap
-        // height on open, then snaps to fit on the next render.
-        //
-        // The float rect's width is independent of `natural_h` (every
-        // `Placement` resolves width from terminal size + its width
-        // constraint, not the content height), so we compute it first
-        // with `natural_h = None` and feed the content width into
-        // formatter-backed buffers before sampling `natural_height`.
-        let pre_rect = resolve_float_rect(&float_config, tw, th, None, &self.split_rects);
-        let content_width = pre_rect.width.saturating_sub(1);
-        dlg.sync_from_bufs_mut(content_width, &mut self.bufs);
-        let natural_h = Some(dlg.natural_height());
-        let rect = resolve_float_rect(&float_config, tw, th, natural_h, &self.split_rects);
-
-        let focusable = float_config.focusable;
-        let mut win = Window::new(id, primary_buf, WinConfig::Float(float_config));
-        win.focusable = focusable;
-        self.wins.insert(id, win);
-
-        let layer_id = float_layer_id(id);
-        self.compositor.add(&layer_id, Box::new(dlg), rect, zindex);
-        self.compositor.focus(&layer_id);
-
-        Some(id)
-    }
-
-    /// Access a `Dialog` compositor layer by its WinId for
-    /// post-creation configuration (hints, dismiss keys, etc.).
-    pub fn dialog_mut(&mut self, win_id: WinId) -> Option<&mut dialog::Dialog> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component_mut(&layer_id)?;
-        comp.as_any_mut().downcast_mut::<dialog::Dialog>()
-    }
-
-    pub fn dialog(&self, win_id: WinId) -> Option<&dialog::Dialog> {
-        let layer_id = float_layer_id(win_id);
-        let comp = self.compositor.component(&layer_id)?;
-        comp.as_any().downcast_ref::<dialog::Dialog>()
-    }
-
-    /// Build a live snapshot of every panel on the `Dialog` at `win_id`
-    /// for Lua pull-read. Empty vec when the window isn't a dialog.
-    /// `selected` is the 0-based selection index when the panel is a
-    /// list widget; `text` is the current text for input widgets.
-    pub fn snapshot_dialog_panels(&self, win_id: WinId) -> Vec<dialog::PanelSnapshot> {
-        let Some(dlg) = self.dialog(win_id) else {
-            return Vec::new();
-        };
-        (0..dlg.panel_count())
-            .map(|i| dialog::PanelSnapshot {
-                selected: dlg.selected_index_at(i),
-                text: dlg.panel_widget_text(i).unwrap_or_default(),
-            })
-            .collect()
     }
 
     pub fn win(&self, id: WinId) -> Option<&Window> {
@@ -895,17 +790,13 @@ impl Ui {
             .collect()
     }
 
-    /// Peek at a float layer's natural height for placement. Dialogs
-    /// expose `line_count`-derived height (used by `FitContent`); pickers
+    /// Peek at a float layer's natural height for placement. Pickers
     /// clamp item-count to `max_visible_rows` (used by `DockedAbove`).
     /// Returns `None` for other layer kinds — placement variants that
     /// don't consult natural height treat this as "use the max cap."
     fn natural_layer_height(&self, win_id: WinId) -> Option<u16> {
         let layer_id = float_layer_id(win_id);
         let comp = self.compositor.component(&layer_id)?;
-        if let Some(dlg) = comp.as_any().downcast_ref::<dialog::Dialog>() {
-            return Some(dlg.natural_height());
-        }
         if let Some(p) = comp.as_any().downcast_ref::<picker::Picker>() {
             return Some(p.natural_height());
         }
@@ -1106,7 +997,6 @@ impl Ui {
     // ── Compositor delegation ──────────────────────────────────────
 
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
-        self.sync_float_content();
         self.sync_float_rects();
         let resolved = self.resolve_overlays(None);
         let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
@@ -1151,7 +1041,7 @@ impl Ui {
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
     ) -> KeyResult {
-        self.handle_key_with_lua(code, mods, &mut |_, _, _, _| {})
+        self.handle_key_with_lua(code, mods, &mut |_, _, _| {})
     }
 
     /// Dispatch a key event through the focused window's keymap
@@ -1229,8 +1119,7 @@ impl Ui {
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
-                    let panels = self.snapshot_dialog_panels(win);
-                    lua_invoke(*handle, win, &payload, &panels);
+                    lua_invoke(*handle, win, &payload);
                     KeyResult::Consumed
                 }
             };
@@ -1256,8 +1145,7 @@ impl Ui {
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
-                    let panels = self.snapshot_dialog_panels(win);
-                    lua_invoke(*handle, win, &payload, &panels);
+                    lua_invoke(*handle, win, &payload);
                     KeyResult::Consumed
                 }
             };
@@ -1275,12 +1163,7 @@ impl Ui {
         // when the focused window has a matching callback registered.
         if let KeyResult::Action(action) = &result {
             let mapped = match action {
-                WidgetEvent::Dismiss | WidgetEvent::Cancel => {
-                    Some((WinEvent::Dismiss, Payload::None))
-                }
-                WidgetEvent::Submit | WidgetEvent::SelectDefault => {
-                    Some((WinEvent::Submit, Payload::None))
-                }
+                WidgetEvent::Dismiss => Some((WinEvent::Dismiss, Payload::None)),
                 WidgetEvent::TextChanged => Some((WinEvent::TextChanged, Payload::None)),
                 WidgetEvent::Select(index) => {
                     Some((WinEvent::Submit, Payload::Selection { index: *index }))
@@ -1319,18 +1202,6 @@ impl Ui {
     }
 
     /// Buffer-bearing `Window` driving the user's current view, if any.
-    /// Walks the focused float (a dialog) into its focused panel and
-    /// returns that panel's `Window` when the panel is interactive.
-    /// Falls through to `None` when the focused float is a picker /
-    /// notification / widget panel — the host then decides whether to
-    /// fall back to a split (transcript / prompt) for status purposes.
-    /// Same model nvim uses: a focused float that isn't a "real" buffer
-    /// view contributes no mode to the statusline.
-    pub fn focused_dialog_buffer_window(&self) -> Option<&Window> {
-        let win_id = self.focused_float()?;
-        self.dialog(win_id)?.focused_buffer_window()
-    }
-
     /// Topmost float (by zindex) whose rect contains (row, col). Used
     /// by the host's mouse dispatcher to route wheel / click events
     /// onto the float they actually land on — independent of focus —
@@ -1375,47 +1246,11 @@ impl Ui {
         self.compositor.force_redraw();
     }
 
-    fn sync_float_content(&mut self) {
-        let (tw, th) = self.terminal_size;
-        // Pair each dialog layer with the content width it should
-        // render at. Width is resolved from `Placement` alone — it
-        // never depends on `natural_h`, so we can compute it before
-        // the formatter runs — then we shave a column for the
-        // potential scrollbar so wrapped content never bleeds under
-        // the thumb.
-        let targets: Vec<(String, u16)> = self
-            .wins
-            .iter()
-            .filter(|(_, w)| w.is_float())
-            .map(|(id, w)| {
-                let width = match &w.config {
-                    WinConfig::Float(fc) => {
-                        resolve_float_rect(fc, tw, th, None, &self.split_rects).width
-                    }
-                    _ => tw,
-                };
-                (float_layer_id(*id), width.saturating_sub(1))
-            })
-            .collect();
-        for (layer_id, content_width) in targets {
-            // Split-borrow: `self.bufs` and `self.compositor` are
-            // disjoint fields, so both mutable borrows coexist.
-            let bufs = &mut self.bufs;
-            if let Some(comp) = self.compositor.component_mut(&layer_id) {
-                if let Some(dlg) = comp.as_any_mut().downcast_mut::<dialog::Dialog>() {
-                    dlg.sync_from_bufs_mut(content_width, bufs);
-                }
-            }
-        }
-    }
-
     /// Re-resolve every float's rect from its `Placement` against the
     /// current terminal size and push it into the compositor. Called
     /// each frame from `render`, so floats track terminal resizes,
-    /// prompt geometry changes, and dialog natural-height changes
-    /// without any per-component wiring. Order matters: must run after
-    /// `sync_float_content` so `Dialog::natural_height` reflects the
-    /// current panel contents.
+    /// prompt geometry changes, and picker natural-height changes
+    /// without any per-component wiring.
     fn sync_float_rects(&mut self) {
         for (id, rect) in self.resolve_float_rects() {
             self.compositor.set_rect(&float_layer_id(id), rect);
@@ -1826,95 +1661,6 @@ mod tests {
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0].0, w2);
         assert_eq!(rects[1].0, w1);
-    }
-
-    /// Dismiss dispatch chain regression: dialog widget on Esc /
-    /// Ctrl-C → `WidgetEvent::Dismiss` → `WinEvent::Dismiss` →
-    /// registered callback fires via `lua_invoke`. Guards against
-    /// silent breakage of the path Lua dialogs use to know when the
-    /// user backed out.
-    #[test]
-    fn focused_dialog_esc_invokes_dismiss_callback() {
-        use crate::dialog::{DialogConfig, PanelHeight, PanelSpec};
-        use crossterm::event::{KeyCode, KeyModifiers};
-
-        let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts {
-            buftype: buffer::BufType::Scratch,
-            modifiable: false,
-        });
-        let win = ui
-            .dialog_open(
-                FloatConfig {
-                    focusable: true,
-                    placement: Placement::DockBottom {
-                        above_rows: 0,
-                        full_width: true,
-                        max_width: Constraint::Percentage(100),
-                        max_height: Constraint::Percentage(100),
-                    },
-                    ..Default::default()
-                },
-                DialogConfig::default(),
-                vec![PanelSpec::content(buf, PanelHeight::Fit)],
-            )
-            .unwrap();
-
-        let invoked = std::sync::Arc::new(std::sync::Mutex::new(0u32));
-        let invoked_cb = invoked.clone();
-        ui.win_on_event(
-            win,
-            WinEvent::Dismiss,
-            Callback::Rust(Box::new(move |_| {
-                *invoked_cb.lock().unwrap() += 1;
-                CallbackResult::Consumed
-            })),
-        );
-
-        let _ = ui.handle_key_with_lua(KeyCode::Esc, KeyModifiers::NONE, &mut |_, _, _, _| {});
-        assert_eq!(
-            *invoked.lock().unwrap(),
-            1,
-            "Esc should invoke the registered Dismiss callback exactly once"
-        );
-
-        // Reopen and confirm Ctrl-C does the same.
-        let buf2 = ui.buf_create(buffer::BufCreateOpts {
-            buftype: buffer::BufType::Scratch,
-            modifiable: false,
-        });
-        let win2 = ui
-            .dialog_open(
-                FloatConfig {
-                    focusable: true,
-                    placement: Placement::DockBottom {
-                        above_rows: 0,
-                        full_width: true,
-                        max_width: Constraint::Percentage(100),
-                        max_height: Constraint::Percentage(100),
-                    },
-                    ..Default::default()
-                },
-                DialogConfig::default(),
-                vec![PanelSpec::content(buf2, PanelHeight::Fit)],
-            )
-            .unwrap();
-        let invoked2 = std::sync::Arc::new(std::sync::Mutex::new(0u32));
-        let invoked2_cb = invoked2.clone();
-        ui.win_on_event(
-            win2,
-            WinEvent::Dismiss,
-            Callback::Rust(Box::new(move |_| {
-                *invoked2_cb.lock().unwrap() += 1;
-                CallbackResult::Consumed
-            })),
-        );
-        let _ = ui.handle_key_with_lua(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-            &mut |_, _, _, _| {},
-        );
-        assert_eq!(*invoked2.lock().unwrap(), 1, "Ctrl-C should fire Dismiss");
     }
 
     // ── Overlay API (P1.c) ───────────────────────────────────────────
@@ -2637,7 +2383,7 @@ mod tests {
             })),
         );
         // Fire Submit on the NON-root leaf; root's callback should fire.
-        ui.dispatch_event(b, WinEvent::Submit, Payload::None, &mut |_, _, _, _| {});
+        ui.dispatch_event(b, WinEvent::Submit, Payload::None, &mut |_, _, _| {});
         assert!(*saw.lock().unwrap());
     }
 

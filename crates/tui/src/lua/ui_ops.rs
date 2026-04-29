@@ -13,8 +13,7 @@ use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
 use ui::{
     Border, BufId, Callback, CallbackResult, Constraint, FloatConfig, KeyBind, LayoutTree, Overlay,
-    PanelContent, PanelHeight, PanelSpec, Payload, Placement, SeparatorStyle, SplitConfig,
-    WinEvent, WinId,
+    PanelHeight, PanelSpec, Payload, Placement, SplitConfig, WinEvent, WinId,
 };
 
 /// What shape an overlay leaf takes when the dialog is content-only.
@@ -38,20 +37,18 @@ enum LeafShape {
     /// `Payload::Text { content }`. The buffer carries a dim
     /// placeholder line until the user types; on first keystroke
     /// the placeholder line + extmark clear and real text takes over.
-    /// `name` is the panel's Lua-side identifier — surfaced back to
-    /// dialog.lua so `collect_inputs(name)` can read the right leaf.
-    Input { name: String },
+    Input,
 }
 
 /// Result of `open_dialog`. The Lua binding turns this into a
-/// `(win_id, named_inputs)` multi-return so dialog.lua can resolve
-/// per-name input leaves at submit time.
+/// `(win_id, leaves)` multi-return: `root` is the WinId of the first
+/// declared leaf (used as the dialog's identity for event/keymap
+/// registration), and `leaves` is parallel-indexed to `opts.panels`
+/// so `dialog.lua` can wire each panel handle to its leaf for focus +
+/// per-panel queries (e.g. input `:text()`).
 pub struct DialogOpenResult {
     pub root: WinId,
-    /// `name → leaf_win_id` for every overlay-routed `kind = "input"`
-    /// panel in the dialog. Empty when the legacy widget path was
-    /// taken (dialog.lua falls back to the panels-array).
-    pub named_inputs: Vec<(String, WinId)>,
+    pub leaves: Vec<WinId>,
 }
 
 // ── Dialog ───────────────────────────────────────────────────────────
@@ -82,8 +79,7 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
             "list" => {
                 // `kind = "list"` — caller-supplied buffer rendered as
                 // a focusable Buffer-backed Window with cursor-driven
-                // selection. Routed through the Overlay path; legacy
-                // dialog_open never sees this kind.
+                // selection.
                 let id: u64 = panel
                     .get("buf")
                     .map_err(|e| format!("list.buf is required: {e}"))?;
@@ -109,7 +105,6 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
                 };
                 let focusable: bool = panel.get("focusable").unwrap_or(false);
                 let interactive: bool = panel.get("interactive").unwrap_or(false);
-                let pad_left: u16 = panel.get("pad_left").unwrap_or(0);
                 // `interactive` upgrades the panel to a transcript-style
                 // window: click + double/triple click + drag select all
                 // ride on the same `ui::Window` primitive as the
@@ -119,13 +114,9 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
                 } else {
                     PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
                 };
-                if pad_left > 0 {
-                    spec = spec.with_pad_left(pad_left);
-                }
                 spec = spec
                     .focusable(focusable || interactive)
                     .with_initial_focus(initial_focus);
-                spec = spec.with_separator(parse_separator(&panel)?);
                 if panel.get::<bool>("collapse_when_empty").unwrap_or(false) {
                     spec.collapse_when_empty = true;
                 }
@@ -169,20 +160,14 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
                 // Buffer-backed editable single-line leaf. The
                 // placeholder lives as initial line text + a dim
                 // highlight extmark covering it; the input recipe
-                // clears both on first keystroke. `collapse_when_empty`
-                // is parsed but inert for inputs — TextInput's legacy
-                // `content_rows()` was always 1 too, so the collapse
-                // never fired in practice.
+                // clears both on first keystroke.
                 let placeholder: Option<String> = panel.get("placeholder").ok();
-                let name: Option<String> = panel.get("name").ok();
                 let buf = make_input_buffer(app, placeholder.as_deref());
                 let spec = PanelSpec::content(buf, PanelHeight::Fixed(1))
                     .focusable(true)
                     .with_initial_focus(initial_focus);
                 panel_specs.push(spec);
-                leaf_shapes.push(LeafShape::Input {
-                    name: name.unwrap_or_default(),
-                });
+                leaf_shapes.push(LeafShape::Input);
             }
             other => return Err(format!("unknown panel kind: {other}")),
         }
@@ -247,12 +232,9 @@ fn open_dialog_via_overlay(
     let mut list_leaves: Vec<(WinId, u16)> = Vec::new();
     let mut input_leaves: Vec<WinId> = Vec::new();
     let mut interactive_leaves: Vec<WinId> = Vec::new();
-    let mut named_inputs: Vec<(String, WinId)> = Vec::new();
 
     for (spec, shape) in panels.into_iter().zip(leaf_shapes) {
-        let PanelContent::Buffer(buf) = spec.content else {
-            return Err("open_dialog_via_overlay: non-buffer panel".into());
-        };
+        let buf = spec.buf;
         let win = app
             .ui
             .win_open_split(
@@ -302,11 +284,8 @@ fn open_dialog_via_overlay(
                     focus_target = Some(win);
                 }
             }
-            LeafShape::Input { name } => {
+            LeafShape::Input => {
                 input_leaves.push(win);
-                if !name.is_empty() {
-                    named_inputs.push((name.clone(), win));
-                }
                 if focus_target.is_none() && !spec.focus_initial {
                     focus_target = Some(win);
                 }
@@ -382,7 +361,10 @@ fn open_dialog_via_overlay(
         }
     }
 
-    Ok(DialogOpenResult { root, named_inputs })
+    Ok(DialogOpenResult {
+        root,
+        leaves: leaf_wins,
+    })
 }
 
 /// Where the dialog's overlay anchors. Parsed from `opts.placement` on
@@ -707,17 +689,6 @@ fn configure_input_leaf(app: &mut App, leaf: WinId) {
         CallbackResult::Consumed
     }));
     let _ = app.ui.win_set_key_fallback(leaf, fallback);
-}
-
-fn parse_separator(panel: &mlua::Table) -> Result<SeparatorStyle, String> {
-    match panel.get::<String>("separator").ok().as_deref() {
-        Some("dashed") => Ok(SeparatorStyle::Dashed),
-        Some("solid") => Ok(SeparatorStyle::Solid),
-        Some(other) => Err(format!(
-            "panel.separator: unknown style {other:?} (expected \"dashed\" or \"solid\")"
-        )),
-        None => Ok(SeparatorStyle::None),
-    }
 }
 
 // ── Picker ───────────────────────────────────────────────────────────

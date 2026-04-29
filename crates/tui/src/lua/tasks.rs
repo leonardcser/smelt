@@ -126,16 +126,9 @@ impl LuaRuntime {
     /// - `Payload::Selection` → `{ index = <one-based usize> }`.
     /// - `Payload::Text` → `{ text = <string> }`.
     ///
-    /// Adds `win` (the source WinId) and `panels` (a live snapshot of
-    /// the dialog's panels) to the table.
-    pub fn invoke_callback(
-        &self,
-        handle: ui::LuaHandle,
-        win: ui::WinId,
-        payload: &ui::Payload,
-        panels: &[ui::PanelSnapshot],
-    ) {
-        if let Some((func, payload_table)) = self.prepare_invocation(handle, win, payload, panels) {
+    /// Adds `win` (the source WinId) to the table.
+    pub fn invoke_callback(&self, handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload) {
+        if let Some((func, payload_table)) = self.prepare_invocation(handle, win, payload) {
             if let Err(e) = func.call::<()>(payload_table) {
                 self.record_error(format!("callback `{}`: {e}", handle.0));
             }
@@ -156,7 +149,6 @@ impl LuaRuntime {
         handle: ui::LuaHandle,
         win: ui::WinId,
         payload: &ui::Payload,
-        panels: &[ui::PanelSnapshot],
     ) -> Option<(mlua::Function, mlua::Table)> {
         let func = {
             let cbs = self.shared.callbacks.lock().ok()?;
@@ -178,18 +170,6 @@ impl LuaRuntime {
             self.record_error(format!("callback payload: {e}"));
             return None;
         }
-        match build_panels_table(&self.lua, panels) {
-            Ok(t) => {
-                if let Err(e) = payload_table.set("panels", t) {
-                    self.record_error(format!("callback payload: {e}"));
-                    return None;
-                }
-            }
-            Err(e) => {
-                self.record_error(format!("callback payload: {e}"));
-                return None;
-            }
-        }
         Some((func, payload_table))
     }
 
@@ -206,19 +186,12 @@ impl LuaRuntime {
     /// borrow). The host drains this queue right after the ui call
     /// returns and invokes each callback with the TLS app pointer
     /// installed, giving Lua bindings sole access to App state.
-    pub fn queue_invocation(
-        &self,
-        handle: ui::LuaHandle,
-        win: ui::WinId,
-        payload: &ui::Payload,
-        panels: &[ui::PanelSnapshot],
-    ) {
+    pub fn queue_invocation(&self, handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload) {
         if let Ok(mut q) = self.shared.pending_invocations.lock() {
             q.push(crate::lua::PendingInvocation {
                 handle,
                 win,
                 payload: payload.clone(),
-                panels: panels.to_vec(),
             });
         }
     }
@@ -555,22 +528,4 @@ fn build_plugin_ctx(
     t.set("session_id", session_id.to_string())?;
     t.set("session_dir", session_dir.to_string_lossy().into_owned())?;
     Ok(t)
-}
-
-/// Build a Lua sequence describing a dialog window's panels at
-/// callback-fire time. Each entry is `{ selected = <1-based | nil>,
-/// text = "…" }`. List panels have a 1-based selection; input panels
-/// have non-empty text — plugins disambiguate by which field is
-/// populated, since they configured the panel layout at open time.
-fn build_panels_table(lua: &Lua, panels: &[ui::PanelSnapshot]) -> mlua::Result<mlua::Table> {
-    let out = lua.create_table()?;
-    for (i, p) in panels.iter().enumerate() {
-        let entry = lua.create_table()?;
-        if let Some(sel) = p.selected {
-            entry.set("selected", sel + 1)?;
-        }
-        entry.set("text", p.text.clone())?;
-        out.set(i + 1, entry)?;
-    }
-    Ok(out)
 }

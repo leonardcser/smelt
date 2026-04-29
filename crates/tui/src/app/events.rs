@@ -80,11 +80,8 @@ impl App {
                 } = k;
                 let lua = &self.lua;
                 let mut lua_invoke =
-                    |handle: ui::LuaHandle,
-                     win: ui::WinId,
-                     payload: &ui::Payload,
-                     panels: &[ui::PanelSnapshot]| {
-                        lua.queue_invocation(handle, win, payload, panels);
+                    |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
+                        lua.queue_invocation(handle, win, payload);
                     };
                 let _ = self
                     .ui
@@ -271,11 +268,8 @@ impl App {
                 } = k;
                 let lua = &self.lua;
                 let mut lua_invoke =
-                    |handle: ui::LuaHandle,
-                     win: ui::WinId,
-                     payload: &ui::Payload,
-                     panels: &[ui::PanelSnapshot]| {
-                        lua.queue_invocation(handle, win, payload, panels);
+                    |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
+                        lua.queue_invocation(handle, win, payload);
                     };
                 let result = self
                     .ui
@@ -769,11 +763,8 @@ impl App {
             return;
         }
         let lua = &self.lua;
-        let mut lua_invoke = |handle: ui::LuaHandle,
-                              win: ui::WinId,
-                              payload: &ui::Payload,
-                              panels: &[ui::PanelSnapshot]| {
-            lua.queue_invocation(handle, win, payload, panels);
+        let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
+            lua.queue_invocation(handle, win, payload);
         };
         self.ui.dispatch_event(
             win,

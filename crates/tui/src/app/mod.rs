@@ -337,12 +337,9 @@ pub enum AppFocus {
 
 /// Which surface's scrollbar is driving an in-flight drag gesture.
 /// `Focus(_)` points at the transcript or prompt window; `DialogPanel`
-/// points at a specific buffer-backed panel inside a compositor float
-/// dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollbarDragTarget {
     Focus(AppFocus),
-    DialogPanel { win: ui::WinId, panel: usize },
 }
 
 pub(super) struct TurnState {
@@ -953,11 +950,8 @@ impl App {
             {
                 let lua = &self.lua;
                 let mut lua_invoke =
-                    |handle: ui::LuaHandle,
-                     win: ui::WinId,
-                     payload: &ui::Payload,
-                     panels: &[ui::PanelSnapshot]| {
-                        lua.queue_invocation(handle, win, payload, panels);
+                    |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
+                        lua.queue_invocation(handle, win, payload);
                     };
                 self.ui.dispatch_tick(&mut lua_invoke);
             }
