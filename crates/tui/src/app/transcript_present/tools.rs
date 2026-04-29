@@ -17,8 +17,8 @@ pub(super) fn render_tool(
     width: usize,
 ) -> u16 {
     let color: ColorValue = match status {
-        ToolStatus::Ok => theme::SUCCESS.into(),
-        ToolStatus::Err | ToolStatus::Denied => theme::ERROR.into(),
+        ToolStatus::Ok => ColorValue::Role(ColorRole::Success),
+        ToolStatus::Err | ToolStatus::Denied => ColorValue::Role(ColorRole::ErrorMsg),
         ToolStatus::Confirm => ColorValue::Role(ColorRole::Accent),
         ToolStatus::Pending => ColorValue::Role(ColorRole::ToolPending),
     };
@@ -79,7 +79,7 @@ pub(super) fn render_confirm_result(
 ) -> u16 {
     let mut rows = 2u16;
 
-    out.push_fg(theme::APPLY.into());
+    out.push_fg(ColorValue::Role(ColorRole::Apply));
     out.print("  allow? ");
     out.pop_style();
     print_dim(out, tool);
@@ -134,7 +134,7 @@ pub(super) fn render_confirm_result(
                 print_dim(out, &format!("always{suffix} (dir: {dir})"));
             }
             ConfirmChoice::No => {
-                out.push_fg(theme::ERROR.into());
+                out.push_fg(ColorValue::Role(ColorRole::ErrorMsg));
                 out.print("denied");
                 out.pop_style();
             }
@@ -276,7 +276,7 @@ fn print_agent_summary(out: &mut SpanCollector, summary: &str) {
             if i > 0 {
                 out.print(", ");
             }
-            out.push_fg(theme::AGENT.into());
+            out.push_fg(ColorValue::Role(ColorRole::Agent));
             out.print(name.trim());
             out.pop_style();
         }
@@ -416,7 +416,7 @@ pub(super) fn render_wrapped_output(
     let start = total.saturating_sub(MAX_TOOL_BLOCK_ROWS);
     for seg in &wrapped[start..] {
         if is_error {
-            out.push_fg(theme::ERROR.into());
+            out.push_fg(ColorValue::Role(ColorRole::ErrorMsg));
             out.print_string(format!("  {}", seg));
             out.pop_style();
         } else {
@@ -443,7 +443,7 @@ pub(super) fn render_default_output(
     let mut rows = 0u16;
     for seg in &segs {
         if is_error {
-            out.push_fg(theme::ERROR.into());
+            out.push_fg(ColorValue::Role(ColorRole::ErrorMsg));
             out.print_string(format!("  {}", seg));
             out.pop_style();
         } else {

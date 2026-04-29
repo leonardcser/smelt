@@ -19,7 +19,6 @@ use crate::content::highlight::{
 };
 use crate::content::layout_out::{display_width, SpanCollector};
 use crate::content::{truncate_str, wrap_line, LayoutContext};
-use crate::theme;
 use crate::utils::format_duration;
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
@@ -429,7 +428,7 @@ pub(super) fn render_block(
             let trailing = pad_width.saturating_sub(char_len + 1);
             out.push_style(SpanStyle {
                 bg: Some(ColorValue::Role(ColorRole::UserBg)),
-                fg: Some(theme::EXEC.into()),
+                fg: Some(ColorValue::Role(ColorRole::Exec)),
                 bold: true,
                 ..Default::default()
             });

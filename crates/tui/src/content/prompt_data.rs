@@ -5,7 +5,6 @@ use super::selection::{
 use super::status::BarSpan;
 use super::window_view::{StyledSegment, WindowRow};
 use crate::input::PromptState;
-use crate::theme;
 use ui::buffer::{Buffer, SpanStyle};
 use ui::grid::Style;
 
@@ -47,33 +46,42 @@ pub(crate) struct InputViewport {
     pub scroll_top: u16,
 }
 
-fn cursor_style() -> (Color, Color) {
-    if theme::is_light() {
+fn cursor_style(theme: &ui::Theme) -> (Color, Color) {
+    if theme.is_light() {
         (Color::White, Color::Black)
     } else {
         (Color::Black, Color::White)
     }
 }
 
-pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer) -> PromptOutput {
+fn theme_color(theme: &ui::Theme, group: &str) -> Color {
+    let style = theme.get(group);
+    style.fg.or(style.bg).unwrap_or(Color::Reset)
+}
+
+pub(crate) fn compute_prompt(
+    input: &mut PromptInput<'_>,
+    input_buf: &mut Buffer,
+    theme: &ui::Theme,
+) -> PromptOutput {
     let width = input.width as usize;
     let usable = width.saturating_sub(2);
     let mut chrome_rows: Vec<WindowRow> = Vec::new();
     let mut row_offset: u16 = 0;
 
     // ── Queued messages ──
-    let queued_rows = queued_message_rows(input.queued, usable);
+    let queued_rows = queued_message_rows(input.queued, usable, theme);
     row_offset += queued_rows.len() as u16;
     chrome_rows.extend(queued_rows);
 
     // ── Stash indicator ──
     if input.stash.is_some() {
-        chrome_rows.push(stash_row(usable));
+        chrome_rows.push(stash_row(usable, theme));
         row_offset += 1;
     }
 
     // ── Top bar ──
-    let top_bar_right = build_top_bar_right(&input.bar_info);
+    let top_bar_right = build_top_bar_right(&input.bar_info, theme);
     chrome_rows.push(bar_row(
         width,
         None,
@@ -82,12 +90,13 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer
         } else {
             Some(&top_bar_right)
         },
+        theme,
     ));
     row_offset += 1;
 
     // ── Input area ──
     let input_area_start = row_offset;
-    let input_area = compute_input_area(input, usable, row_offset, input_buf);
+    let input_area = compute_input_area(input, usable, row_offset, input_buf, theme);
     let input_row_count = input_area.visible_rows;
     for _ in 0..input_row_count {
         chrome_rows.push(WindowRow::styled(Vec::new()));
@@ -95,7 +104,7 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer
     row_offset += input_row_count;
 
     // ── Bottom bar ──
-    chrome_rows.push(bar_row(width, None, None));
+    chrome_rows.push(bar_row(width, None, None, theme));
     row_offset += 1;
 
     // ── Status line ──
@@ -123,11 +132,11 @@ pub(crate) fn compute_prompt(input: &mut PromptInput<'_>, input_buf: &mut Buffer
 
 // ── Queued messages ──
 
-fn queued_message_rows(queued: &[String], usable: usize) -> Vec<WindowRow> {
+fn queued_message_rows(queued: &[String], usable: usize, theme: &ui::Theme) -> Vec<WindowRow> {
     let indent = 1usize;
     let text_w = usable.saturating_sub(indent + 1).max(1);
     let mut rows = Vec::new();
-    let user_bg = theme::user_bg();
+    let user_bg = theme_color(theme, "SmeltUserBg");
 
     for msg in queued {
         let is_command = crate::completer::Completer::is_command(msg.trim());
@@ -174,7 +183,7 @@ fn queued_message_rows(queued: &[String], usable: usize) -> Vec<WindowRow> {
                 });
 
                 // Build styled segments for the chunk content
-                let chunk_segs = user_highlight_segments(chunk, is_command, bg_style);
+                let chunk_segs = user_highlight_segments(chunk, is_command, bg_style, theme);
                 segs.extend(chunk_segs);
 
                 segs.push(StyledSegment {
@@ -188,12 +197,17 @@ fn queued_message_rows(queued: &[String], usable: usize) -> Vec<WindowRow> {
     rows
 }
 
-fn user_highlight_segments(text: &str, is_command: bool, base_style: Style) -> Vec<StyledSegment> {
+fn user_highlight_segments(
+    text: &str,
+    is_command: bool,
+    base_style: Style,
+    theme: &ui::Theme,
+) -> Vec<StyledSegment> {
     if is_command {
         return vec![StyledSegment {
             text: text.into(),
             style: Style {
-                fg: Some(theme::accent()),
+                fg: Some(theme_color(theme, "SmeltAccent")),
                 ..base_style
             },
         }];
@@ -210,7 +224,7 @@ fn user_highlight_segments(text: &str, is_command: bool, base_style: Style) -> V
 
 // ── Stash ──
 
-fn stash_row(_usable: usize) -> WindowRow {
+fn stash_row(_usable: usize, theme: &ui::Theme) -> WindowRow {
     let text = "› Stashed (ctrl+s to unstash)";
     let display: String = text.chars().take(_usable).collect();
     WindowRow::styled(vec![
@@ -221,7 +235,7 @@ fn stash_row(_usable: usize) -> WindowRow {
         StyledSegment {
             text: display,
             style: Style {
-                fg: Some(theme::muted()),
+                fg: Some(theme_color(theme, "Comment")),
                 dim: true,
                 ..Style::default()
             },
@@ -231,9 +245,14 @@ fn stash_row(_usable: usize) -> WindowRow {
 
 // ── Bar (horizontal rule with optional spans) ──
 
-fn bar_row(width: usize, left: Option<&[BarSpan]>, right: Option<&[BarSpan]>) -> WindowRow {
+fn bar_row(
+    width: usize,
+    left: Option<&[BarSpan]>,
+    right: Option<&[BarSpan]>,
+    theme: &ui::Theme,
+) -> WindowRow {
     let dash = "\u{2500}";
-    let bar_color = theme::bar();
+    let bar_color = theme_color(theme, "SmeltBar");
     let min_dashes = 4;
 
     let max_priority = left
@@ -359,12 +378,14 @@ fn bar_row(width: usize, left: Option<&[BarSpan]>, right: Option<&[BarSpan]>) ->
     WindowRow::styled(segs)
 }
 
-fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
+fn build_top_bar_right(info: &BarInfo, theme: &ui::Theme) -> Vec<BarSpan> {
+    let muted = theme_color(theme, "Comment");
+    let bar = theme_color(theme, "SmeltBar");
     let mut spans = Vec::new();
     if let Some(ref model) = info.model_label {
         spans.push(BarSpan {
             text: format!(" {}", model),
-            color: theme::muted(),
+            color: muted,
             bg: None,
             bold: false,
             dim: false,
@@ -374,7 +395,7 @@ fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
             let effort = info.reasoning_effort;
             spans.push(BarSpan {
                 text: format!(" {}", effort.label()),
-                color: super::reasoning_color(effort),
+                color: super::reasoning_color(effort, theme),
                 bg: None,
                 bold: false,
                 dim: false,
@@ -387,7 +408,7 @@ fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
             if !spans.is_empty() {
                 spans.push(BarSpan {
                     text: " ·".into(),
-                    color: theme::bar(),
+                    color: bar,
                     bg: None,
                     bold: false,
                     dim: false,
@@ -406,7 +427,7 @@ fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
             };
             spans.push(BarSpan {
                 text: token_text,
-                color: theme::muted(),
+                color: muted,
                 bg: None,
                 bold: false,
                 dim: false,
@@ -418,7 +439,7 @@ fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
         if !spans.is_empty() {
             spans.push(BarSpan {
                 text: " ·".into(),
-                color: theme::bar(),
+                color: bar,
                 bg: None,
                 bold: false,
                 dim: false,
@@ -427,7 +448,7 @@ fn build_top_bar_right(info: &BarInfo) -> Vec<BarSpan> {
         }
         spans.push(BarSpan {
             text: format!(" {}", crate::metrics::format_cost(info.session_cost_usd)),
-            color: theme::muted(),
+            color: muted,
             bg: None,
             bold: false,
             dim: false,
@@ -460,6 +481,7 @@ fn compute_input_area(
     usable: usize,
     row_offset: u16,
     buf: &mut Buffer,
+    theme: &ui::Theme,
 ) -> InputArea {
     let height = input.height as usize;
     let state = input.input;
@@ -531,7 +553,7 @@ fn compute_input_area(
         let line = if let Some(first) = chars_iter.next() {
             let rest: String = chars_iter.collect();
             if input.has_prompt_cursor {
-                let (fg, bg) = cursor_style();
+                let (fg, bg) = cursor_style(theme);
                 let cursor_char_style = Style {
                     fg: Some(fg),
                     bg: Some(bg),
@@ -545,7 +567,7 @@ fn compute_input_area(
             }
         } else {
             if input.has_prompt_cursor {
-                let (fg, bg) = cursor_style();
+                let (fg, bg) = cursor_style(theme);
                 cursor_info.cursor_pos = Some((1, 0));
                 cursor_info.cursor_style = Some((
                     Style {
@@ -637,19 +659,19 @@ fn compute_input_area(
             add_segments_to_buffer(
                 buf,
                 li,
-                &styled_char_segments(line, &cmd_kinds, line_sel, line_cursor),
+                &styled_char_segments(line, &cmd_kinds, line_sel, line_cursor, theme),
             );
         } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
             add_segments_to_buffer(
                 buf,
                 li,
-                &exec_bang_segments(line, kinds, line_sel, line_cursor),
+                &exec_bang_segments(line, kinds, line_sel, line_cursor, theme),
             );
         } else {
             add_segments_to_buffer(
                 buf,
                 li,
-                &styled_char_segments(line, kinds, line_sel, line_cursor),
+                &styled_char_segments(line, kinds, line_sel, line_cursor, theme),
             );
         }
 
@@ -660,7 +682,7 @@ fn compute_input_area(
     }
 
     if cursor_line >= total_content_rows && input.has_prompt_cursor && !show_prediction {
-        let (fg, bg) = cursor_style();
+        let (fg, bg) = cursor_style(theme);
         cursor_info.cursor_pos = Some((1, content_rows.saturating_sub(1) as u16));
         cursor_info.cursor_style = Some((
             Style {
@@ -720,14 +742,16 @@ fn styled_char_segments(
     kinds: &[SpanKind],
     selection: Option<(usize, usize)>,
     cursor_pos: Option<usize>,
+    theme: &ui::Theme,
 ) -> Vec<StyledSegment> {
     let mut segments: Vec<StyledSegment> = Vec::new();
     let mut current_text = String::new();
     let mut current_style = Style::default();
     let char_count = line.chars().count();
 
-    let (cursor_fg, cursor_bg) = cursor_style();
-    let selection_bg = theme::selection_bg();
+    let (cursor_fg, cursor_bg) = cursor_style(theme);
+    let selection_bg = theme_color(theme, "Visual");
+    let accent = theme_color(theme, "SmeltAccent");
 
     for (i, ch) in line.chars().enumerate() {
         let kind = kinds.get(i).copied().unwrap_or(SpanKind::Plain);
@@ -742,7 +766,7 @@ fn styled_char_segments(
             }
         } else {
             let fg = match kind {
-                SpanKind::AtRef | SpanKind::Attachment => Some(theme::accent()),
+                SpanKind::AtRef | SpanKind::Attachment => Some(accent),
                 SpanKind::Plain => None,
             };
             let bg = if want_sel { Some(selection_bg) } else { None };
@@ -799,6 +823,7 @@ fn exec_bang_segments(
     kinds: &[SpanKind],
     selection: Option<(usize, usize)>,
     cursor_pos: Option<usize>,
+    theme: &ui::Theme,
 ) -> Vec<StyledSegment> {
     let mut segs = Vec::new();
 
@@ -806,7 +831,7 @@ fn exec_bang_segments(
     let bang_selected = selection.is_some_and(|(s, _)| s == 0);
 
     if bang_cursor {
-        let (fg, bg) = cursor_style();
+        let (fg, bg) = cursor_style(theme);
         segs.push(StyledSegment {
             text: "!".into(),
             style: Style {
@@ -821,7 +846,7 @@ fn exec_bang_segments(
             style: Style {
                 fg: Some(Color::Red),
                 bg: if bang_selected {
-                    Some(theme::selection_bg())
+                    Some(theme_color(theme, "Visual"))
                 } else {
                     None
                 },
@@ -849,6 +874,7 @@ fn exec_bang_segments(
             if kinds.len() > 1 { &kinds[1..] } else { &[] },
             rest_sel,
             rest_cursor,
+            theme,
         ));
     }
 
@@ -859,15 +885,21 @@ fn exec_bang_segments(
 mod tests {
     use super::*;
 
+    fn test_theme() -> ui::Theme {
+        let mut t = ui::Theme::new();
+        crate::theme::populate_ui_theme(&mut t);
+        t
+    }
+
     #[test]
     fn stash_row_has_muted_style() {
-        let row = stash_row(40);
+        let row = stash_row(40, &test_theme());
         assert!(row.segments[1].style.dim);
     }
 
     #[test]
     fn bar_row_fills_with_dashes() {
-        let row = bar_row(20, None, None);
+        let row = bar_row(20, None, None, &test_theme());
         let text: String = row.segments.iter().map(|s| s.text.as_str()).collect();
         assert!(text.contains("────"));
     }
@@ -882,7 +914,7 @@ mod tests {
             dim: false,
             priority: 0,
         }];
-        let row = bar_row(30, None, Some(&right));
+        let row = bar_row(30, None, Some(&right), &test_theme());
         let text: String = row.segments.iter().map(|s| s.text.as_str()).collect();
         assert!(text.contains(" model"));
         assert!(text.contains("────"));
@@ -890,14 +922,20 @@ mod tests {
 
     #[test]
     fn styled_char_segments_plain() {
-        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, None);
+        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, None, &test_theme());
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].text, "hello");
     }
 
     #[test]
     fn styled_char_segments_with_cursor() {
-        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], None, Some(2));
+        let segs = styled_char_segments(
+            "hello",
+            &[SpanKind::Plain; 5],
+            None,
+            Some(2),
+            &test_theme(),
+        );
         // Before cursor, cursor char, after cursor
         assert!(segs.len() >= 3);
         // The cursor char should have inverted colors
@@ -908,7 +946,8 @@ mod tests {
 
     #[test]
     fn styled_char_segments_cursor_at_end() {
-        let segs = styled_char_segments("hi", &[SpanKind::Plain; 2], None, Some(2));
+        let segs =
+            styled_char_segments("hi", &[SpanKind::Plain; 2], None, Some(2), &test_theme());
         let last = segs.last().unwrap();
         assert_eq!(last.text, " ");
         assert!(last.style.bg.is_some());
@@ -916,7 +955,13 @@ mod tests {
 
     #[test]
     fn styled_char_segments_with_selection() {
-        let segs = styled_char_segments("hello", &[SpanKind::Plain; 5], Some((1, 4)), None);
+        let segs = styled_char_segments(
+            "hello",
+            &[SpanKind::Plain; 5],
+            Some((1, 4)),
+            None,
+            &test_theme(),
+        );
         // Should have: unselected "h", selected "ell", unselected "o"
         assert!(segs.len() >= 3);
         assert_eq!(segs[0].text, "h");
@@ -927,7 +972,7 @@ mod tests {
     #[test]
     fn exec_bang_segments_highlights_bang() {
         let kinds = vec![SpanKind::Plain; 4];
-        let segs = exec_bang_segments("!ls", &kinds, None, None);
+        let segs = exec_bang_segments("!ls", &kinds, None, None, &test_theme());
         assert_eq!(segs[0].text, "!");
         assert_eq!(segs[0].style.fg, Some(crossterm::style::Color::Red));
         assert!(segs[0].style.bold);
@@ -962,7 +1007,7 @@ mod tests {
                 buftype: ui::buffer::BufType::Prompt,
             },
         );
-        let output = compute_prompt(&mut prompt_input, &mut input_buf);
+        let output = compute_prompt(&mut prompt_input, &mut input_buf, &test_theme());
         // Should have at least: top bar + input area + bottom bar
         assert!(output.chrome_rows.len() >= 3);
         // Cursor should be in the input area

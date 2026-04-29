@@ -3,10 +3,10 @@
 //! the `SpanCollector` projection pipeline. `app/dialogs/confirm.rs`
 //! consumes `from_tool` + `render_into_buffer`.
 
+use crate::content::display::{ColorRole, ColorValue};
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 use crate::content::layout_out::SpanCollector;
 use crate::content::wrap_line;
-use crate::theme;
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
 
@@ -267,7 +267,7 @@ fn render_notebook_preview(
             return;
         }
         out.print(" ");
-        out.push_fg(theme::muted().into());
+        out.push_fg(ColorValue::Role(ColorRole::Muted));
         out.print(line);
         out.pop_style();
         out.newline();
