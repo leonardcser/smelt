@@ -1034,16 +1034,26 @@ impl Window {
 
 /// Paint the scrollbar described by `viewport.scrollbar` into the
 /// window's `slice`. `viewport.rect` is in absolute terminal
-/// coordinates and `bar.col` is also absolute; we resolve the
-/// scrollbar column relative to the slice's leftmost column.
+/// coordinates; the scrollbar paints at `viewport.rect.top -
+/// slice.area().top` rows down from the slice origin so painted
+/// splits whose viewport covers only a sub-region of the window
+/// (the prompt's input area) place the scrollbar correctly. For
+/// surfaces where window rect == viewport rect (transcript,
+/// overlay leaves) the row offset is zero and behaviour matches
+/// the prior version.
 fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &crate::Theme) {
     let Some(bar) = viewport.scrollbar else {
         return;
     };
     let width = slice.width();
     let height = slice.height();
-    let local_col = bar.col.saturating_sub(viewport.rect.left);
+    let area = slice.area();
+    let local_col = bar.col.saturating_sub(area.left);
     if local_col >= width {
+        return;
+    }
+    let row_offset = viewport.rect.top.saturating_sub(area.top);
+    if row_offset >= height {
         return;
     }
     let thumb = theme.get("SmeltScrollbarThumb");
@@ -1060,14 +1070,15 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
             .or(track.fg)
             .unwrap_or(crossterm::style::Color::Reset),
     );
-    let rows = bar.viewport_rows.min(height);
+    let avail = height.saturating_sub(row_offset);
+    let rows = bar.viewport_rows.min(avail);
     for row in 0..rows {
         let style = if bar.is_thumb_at(viewport.scroll_top, row) {
             thumb_style
         } else {
             track_style
         };
-        slice.set(local_col, row, ' ', style);
+        slice.set(local_col, row_offset + row, ' ', style);
     }
 }
 

@@ -3,12 +3,31 @@ use super::selection::{
     spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
 };
 use super::status::BarSpan;
-use super::window_view::{StyledSegment, WindowRow};
 use crate::input::PromptState;
 use ui::buffer::{Buffer, SpanStyle};
 use ui::grid::Style;
 
 use crossterm::style::Color;
+
+/// Intermediate representation for a chrome row inside the prompt:
+/// queued message, stash indicator, top/bottom bar. `compute_prompt`
+/// composes a Vec of these, then converts to (line text + non-
+/// overlapping highlight extmarks) before writing to the unified
+/// buffer.
+struct StyledSegment {
+    text: String,
+    style: Style,
+}
+
+struct WindowRow {
+    segments: Vec<StyledSegment>,
+}
+
+impl WindowRow {
+    fn styled(segments: Vec<StyledSegment>) -> Self {
+        Self { segments }
+    }
+}
 
 pub(crate) struct PromptInput<'a> {
     pub queued: &'a [String],
@@ -32,7 +51,6 @@ pub(crate) struct BarInfo {
 }
 
 pub(crate) struct PromptOutput {
-    pub chrome_rows: Vec<WindowRow>,
     pub cursor: Option<(u16, u16)>,
     pub cursor_style: Option<(Style, char)>,
     pub input_viewport: Option<InputViewport>,
@@ -61,26 +79,18 @@ fn theme_color(theme: &ui::Theme, group: &str) -> Color {
 
 pub(crate) fn compute_prompt(
     input: &mut PromptInput<'_>,
-    input_buf: &mut Buffer,
+    buf: &mut Buffer,
     theme: &ui::Theme,
 ) -> PromptOutput {
     let width = input.width as usize;
     let usable = width.saturating_sub(2);
+
+    // ── Chrome rows (queued, stash, top bar) ──
     let mut chrome_rows: Vec<WindowRow> = Vec::new();
-    let mut row_offset: u16 = 0;
-
-    // ── Queued messages ──
-    let queued_rows = queued_message_rows(input.queued, usable, theme);
-    row_offset += queued_rows.len() as u16;
-    chrome_rows.extend(queued_rows);
-
-    // ── Stash indicator ──
+    chrome_rows.extend(queued_message_rows(input.queued, usable, theme));
     if input.stash.is_some() {
         chrome_rows.push(stash_row(usable, theme));
-        row_offset += 1;
     }
-
-    // ── Top bar ──
     let top_bar_right = build_top_bar_right(&input.bar_info, theme);
     chrome_rows.push(bar_row(
         width,
@@ -92,42 +102,90 @@ pub(crate) fn compute_prompt(
         },
         theme,
     ));
-    row_offset += 1;
+    let chrome_top_count = chrome_rows.len() as u16;
 
-    // ── Input area ──
-    let input_area_start = row_offset;
-    let input_area = compute_input_area(input, usable, row_offset, input_buf, theme);
+    // ── Input area (returns lines + highlights, no buffer mutation) ──
+    let input_area = compute_input_area(input, usable, chrome_top_count, theme);
     let input_row_count = input_area.visible_rows;
-    for _ in 0..input_row_count {
-        chrome_rows.push(WindowRow::styled(Vec::new()));
-    }
-    row_offset += input_row_count;
 
     // ── Bottom bar ──
-    chrome_rows.push(bar_row(width, None, None, theme));
-    row_offset += 1;
+    let bottom_bar = bar_row(width, None, None, theme);
 
-    // ── Status line ──
-    // Status line is rendered as a separate component (StatusBar), not as a WindowRow.
-    // The caller handles it separately.
-    let _ = row_offset;
+    // ── Compose unified buffer (chrome + input slice + bottom bar) ──
+    let mut all_lines: Vec<String> =
+        Vec::with_capacity(chrome_rows.len() + input_area.lines.len() + 1);
+    let mut all_highlights: Vec<(usize, u16, u16, SpanStyle)> = Vec::new();
+
+    for (i, row) in chrome_rows.iter().enumerate() {
+        let (text, hls) = window_row_to_buffer_line(row);
+        all_lines.push(text);
+        for (s, e, style) in hls {
+            all_highlights.push((i, s, e, style));
+        }
+    }
+    let input_offset = all_lines.len();
+    for line in &input_area.lines {
+        all_lines.push(line.clone());
+    }
+    for &(rel_li, s, e, ref style) in &input_area.highlights {
+        all_highlights.push((input_offset + rel_li, s, e, style.clone()));
+    }
+    let bottom_idx = all_lines.len();
+    let (bb_text, bb_hls) = window_row_to_buffer_line(&bottom_bar);
+    all_lines.push(bb_text);
+    for (s, e, style) in bb_hls {
+        all_highlights.push((bottom_idx, s, e, style));
+    }
+
+    let total_lines = all_lines.len();
+    buf.set_all_lines(all_lines);
+    buf.clear_highlights(0, total_lines);
+    for (line, s, e, style) in all_highlights {
+        buf.add_highlight(line, s, e, style);
+    }
+
+    let cursor = input_area
+        .cursor_pos
+        .map(|(c, r)| (c, chrome_top_count + r));
 
     PromptOutput {
-        chrome_rows,
-        cursor: input_area.cursor_info.cursor_pos,
-        cursor_style: input_area.cursor_info.cursor_style,
+        cursor,
+        cursor_style: input_area.cursor_style,
         input_viewport: if input_row_count > 0 {
             Some(InputViewport {
-                top_row: input_area_start,
+                top_row: chrome_top_count,
                 rows: input_row_count,
                 content_width: usable as u16,
-                total_rows: input_area.scroll_info.total_content_rows as u16,
-                scroll_top: input_area.scroll_info.scroll_offset as u16,
+                total_rows: input_area.total_content_rows as u16,
+                scroll_top: input_area.scroll_offset as u16,
             })
         } else {
             None
         },
     }
+}
+
+/// Convert a `WindowRow`'s segments into a plain line text plus
+/// non-overlapping `(col_start, col_end, SpanStyle)` highlights for
+/// each non-default-styled segment. Default-styled segments contribute
+/// their text to the line but no highlight extmark — `Window::render`
+/// paints those cells with the row's base style. Mirrors the
+/// non-overlapping-spans pattern the status line uses.
+fn window_row_to_buffer_line(row: &WindowRow) -> (String, Vec<(u16, u16, SpanStyle)>) {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+    let mut col: u16 = 0;
+    for seg in &row.segments {
+        let start = col;
+        for ch in seg.text.chars() {
+            text.push(ch);
+            col = col.saturating_add(1);
+        }
+        if col > start && seg.style != Style::default() {
+            highlights.push((start, col, span_style(seg.style)));
+        }
+    }
+    (text, highlights)
 }
 
 // ── Queued messages ──
@@ -460,19 +518,19 @@ fn build_top_bar_right(info: &BarInfo, theme: &ui::Theme) -> Vec<BarSpan> {
 
 // ── Input area ──
 
-struct CursorInfo {
+struct InputArea {
+    /// Visible-slice lines, one per visible row (length =
+    /// `visible_rows`). Caller appends these to the unified prompt
+    /// buffer at the chrome offset.
+    lines: Vec<String>,
+    /// `(visible_line_idx, col_start, col_end, style)` for each
+    /// styled span over the visible slice. Indices are
+    /// 0-relative to `lines`; the caller adds the chrome offset.
+    highlights: Vec<(usize, u16, u16, SpanStyle)>,
     cursor_pos: Option<(u16, u16)>,
     cursor_style: Option<(Style, char)>,
-}
-
-struct ScrollInfo {
     scroll_offset: usize,
     total_content_rows: usize,
-}
-
-struct InputArea {
-    cursor_info: CursorInfo,
-    scroll_info: ScrollInfo,
     visible_rows: u16,
 }
 
@@ -480,7 +538,6 @@ fn compute_input_area(
     input: &PromptInput<'_>,
     usable: usize,
     row_offset: u16,
-    buf: &mut Buffer,
     theme: &ui::Theme,
 ) -> InputArea {
     let height = input.height as usize;
@@ -540,10 +597,9 @@ fn compute_input_area(
     };
 
     let show_prediction = prediction.is_some() && state.buf.is_empty();
-    let mut cursor_info = CursorInfo {
-        cursor_pos: None,
-        cursor_style: None,
-    };
+    let mut cursor_pos: Option<(u16, u16)> = None;
+    let mut cursor_style_out: Option<(Style, char)> = None;
+    let mut highlights: Vec<(usize, u16, u16, SpanStyle)> = Vec::new();
 
     if show_prediction {
         let pred = prediction.unwrap();
@@ -559,8 +615,8 @@ fn compute_input_area(
                     bg: Some(bg),
                     ..Style::default()
                 };
-                cursor_info.cursor_pos = Some((1, 0));
-                cursor_info.cursor_style = Some((cursor_char_style, first));
+                cursor_pos = Some((1, 0));
+                cursor_style_out = Some((cursor_char_style, first));
                 format!(" {first}{rest}")
             } else {
                 format!(" {}{}", first, rest)
@@ -568,8 +624,8 @@ fn compute_input_area(
         } else {
             if input.has_prompt_cursor {
                 let (fg, bg) = cursor_style(theme);
-                cursor_info.cursor_pos = Some((1, 0));
-                cursor_info.cursor_style = Some((
+                cursor_pos = Some((1, 0));
+                cursor_style_out = Some((
                     Style {
                         fg: Some(fg),
                         bg: Some(bg),
@@ -580,38 +636,36 @@ fn compute_input_area(
             }
             " ".to_string()
         };
-        buf.set_all_lines(vec![line]);
         if let Some((first, rest_start)) = first_prediction_split(first_line, max_chars) {
             if !input.has_prompt_cursor {
                 let end = 1 + first.chars().count() as u16 + rest_start.chars().count() as u16;
-                buf.add_highlight(0, 1, end, SpanStyle::dim());
+                highlights.push((0, 1, end, SpanStyle::dim()));
             } else if !rest_start.is_empty() {
                 let start = 2;
                 let end = start + rest_start.chars().count() as u16;
-                buf.add_highlight(0, start, end, SpanStyle::dim());
+                highlights.push((0, start, end, SpanStyle::dim()));
             }
         }
         return InputArea {
-            cursor_info,
-            scroll_info: ScrollInfo {
-                scroll_offset: 0,
-                total_content_rows: 0,
-            },
+            lines: vec![line],
+            highlights,
+            cursor_pos,
+            cursor_style: cursor_style_out,
+            scroll_offset: 0,
+            total_content_rows: 0,
             visible_rows: 1,
         };
     }
 
-    let visible_lines: Vec<String> = visual_lines
+    let mut lines: Vec<String> = visual_lines
         .iter()
         .skip(scroll_offset)
         .take(content_rows)
         .map(|(line, _)| format!(" {line}"))
         .collect();
-    buf.set_all_lines(if visible_lines.is_empty() {
-        vec![" ".into()]
-    } else {
-        visible_lines
-    });
+    if lines.is_empty() {
+        lines.push(" ".into());
+    }
 
     let line_char_offsets = compute_visual_line_offsets(&display_buf, &visual_lines);
 
@@ -644,7 +698,7 @@ fn compute_input_area(
             None
         };
 
-        if is_command {
+        let segments = if is_command {
             let line_chars = line.chars().count();
             let prefix_chars = if abs_idx == 0 {
                 line.char_indices()
@@ -656,35 +710,24 @@ fn compute_input_area(
             };
             let mut cmd_kinds = vec![SpanKind::AtRef; prefix_chars];
             cmd_kinds.resize(line_chars, SpanKind::Plain);
-            add_segments_to_buffer(
-                buf,
-                li,
-                &styled_char_segments(line, &cmd_kinds, line_sel, line_cursor, theme),
-            );
+            styled_char_segments(line, &cmd_kinds, line_sel, line_cursor, theme)
         } else if (is_exec || is_exec_invalid) && abs_idx == 0 && line.starts_with('!') {
-            add_segments_to_buffer(
-                buf,
-                li,
-                &exec_bang_segments(line, kinds, line_sel, line_cursor, theme),
-            );
+            exec_bang_segments(line, kinds, line_sel, line_cursor, theme)
         } else {
-            add_segments_to_buffer(
-                buf,
-                li,
-                &styled_char_segments(line, kinds, line_sel, line_cursor, theme),
-            );
-        }
+            styled_char_segments(line, kinds, line_sel, line_cursor, theme)
+        };
+        push_segment_highlights(&mut highlights, li, &segments);
 
         if line_cursor.is_some() {
             let cursor_col = 1 + cursor_char_in_line as u16;
-            cursor_info.cursor_pos = Some((cursor_col, li as u16));
+            cursor_pos = Some((cursor_col, li as u16));
         }
     }
 
     if cursor_line >= total_content_rows && input.has_prompt_cursor && !show_prediction {
         let (fg, bg) = cursor_style(theme);
-        cursor_info.cursor_pos = Some((1, content_rows.saturating_sub(1) as u16));
-        cursor_info.cursor_style = Some((
+        cursor_pos = Some((1, content_rows.saturating_sub(1) as u16));
+        cursor_style_out = Some((
             Style {
                 fg: Some(fg),
                 bg: Some(bg),
@@ -695,11 +738,12 @@ fn compute_input_area(
     }
 
     InputArea {
-        cursor_info,
-        scroll_info: ScrollInfo {
-            scroll_offset,
-            total_content_rows,
-        },
+        lines,
+        highlights,
+        cursor_pos,
+        cursor_style: cursor_style_out,
+        scroll_offset,
+        total_content_rows,
         visible_rows: content_rows as u16,
     }
 }
@@ -711,14 +755,22 @@ fn first_prediction_split(line: &str, max_chars: usize) -> Option<(String, Strin
     Some((first.to_string(), rest))
 }
 
-fn add_segments_to_buffer(buf: &mut Buffer, line_idx: usize, segments: &[StyledSegment]) {
+/// Append the input row's styled segments as `(line_idx, col_start,
+/// col_end, SpanStyle)` highlight tuples. Mirrors the prior
+/// `add_segments_to_buffer`'s 1-column leading offset (the input
+/// area's lines start with a literal space).
+fn push_segment_highlights(
+    out: &mut Vec<(usize, u16, u16, SpanStyle)>,
+    line_idx: usize,
+    segments: &[StyledSegment],
+) {
     let mut col = 1u16;
     for seg in segments {
         let len = seg.text.chars().count() as u16;
         if len > 0 {
             let end = col + len;
             if seg.style != Style::default() {
-                buf.add_highlight(line_idx, col, end, span_style(seg.style));
+                out.push((line_idx, col, end, span_style(seg.style)));
             }
             col = end;
         }
@@ -1002,9 +1054,15 @@ mod tests {
             },
         );
         let output = compute_prompt(&mut prompt_input, &mut input_buf, &test_theme());
-        // Should have at least: top bar + input area + bottom bar
-        assert!(output.chrome_rows.len() >= 3);
-        // Cursor should be in the input area
-        assert!(output.cursor.is_some());
+        // Buffer carries chrome (top bar) + input area + bottom bar at least.
+        assert!(input_buf.line_count() >= 3);
+        // Cursor lands in the input area, after the chrome rows.
+        let (col, row) = output.cursor.expect("cursor populated");
+        assert!(row >= 1, "cursor row {row} should be past the top bar");
+        assert_eq!(col, 1, "cursor sits past the leading space");
+        // First line is part of the top-bar chrome (or queued/stash);
+        // either way it isn't the input area's `" "` row.
+        let first = input_buf.get_line(0).unwrap_or("");
+        assert!(!first.is_empty());
     }
 }

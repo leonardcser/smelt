@@ -593,29 +593,29 @@ impl App {
                 buftype: ui::buffer::BufType::Prompt,
             });
             let transcript_view = crate::content::window_view::WindowView::new();
-            let prompt_chrome_view = crate::content::window_view::WindowView::new();
-            let prompt_input_view = crate::content::window_view::WindowView::new();
             ui.add_layer(
                 "transcript",
                 Box::new(transcript_view),
                 ui::Rect::new(0, 0, w, h),
                 0,
             );
-            ui.add_layer(
-                "prompt",
-                Box::new(prompt_chrome_view),
-                ui::Rect::new(0, 0, w, 1),
-                1,
-            );
-            ui.add_layer(
-                "prompt_input",
-                Box::new(prompt_input_view),
-                ui::Rect::new(0, 0, w, 1),
-                2,
-            );
-            ui.register_split("prompt_input", ui::PROMPT_WIN);
             ui.register_split("transcript", ui::TRANSCRIPT_WIN);
-            ui.focus_layer("prompt_input");
+            // Prompt: a Buffer-backed Window painted via `Ui::render`
+            // from the post-layer closure. No compositor `Component`
+            // layer — `compute_prompt` writes the unified buffer
+            // (chrome rows + visible input slice + bottom bar) with
+            // highlight extmarks each frame, and the painted-split
+            // path consumes it via `Window::render`.
+            assert!(ui.win_open_split_at(
+                ui::PROMPT_WIN,
+                input_display_buf,
+                ui::SplitConfig {
+                    region: "prompt".into(),
+                    gutters: ui::Gutters::default(),
+                },
+            ));
+            ui.register_painted_split(ui::PROMPT_WIN);
+            ui.set_focus(ui::PROMPT_WIN);
             // Status line: Buffer-backed Window painted directly via
             // `Window::render` from `Ui::render`'s post-layer closure.
             // No compositor `Component` layer — the buffer carries the
