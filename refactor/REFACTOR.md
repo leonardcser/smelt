@@ -498,18 +498,65 @@ agnostic of the `Host` body while letting handlers reach `lua()` /
 
 ### P1.f — `Ui` facade
 
-- `bufs: Map<BufId, Buffer>`, `wins: Map<WinId, Window>`,
-  `splits: LayoutTree`, `overlays: Vec<Overlay>`,
-  `focus: Option<WinId>`, `focus_history`, `capture: Option<HitTarget>`,
-  `cursor_shape: CursorShape` (single global), `theme`.
-- API: `buf_create`/`buf_mut`, `win_open`/`win_close`/`win_mut`,
-  `overlay_open`/`overlay_close`, `dispatch_event`, `render`,
-  `focus`/`set_focus`/`focused_window`/`focused_overlay`/
-  `active_modal`, `hit_test`, `focus_next`/`focus_prev`
-  (modal-aware).
-- Render: event-driven, diff-based, no dirty flag. Resize/Ctrl-L
-  zeros the previous-grid baseline; the diff becomes a full repaint
-  by virtue of writing every cell.
+End-state field set: `bufs: Map<BufId, Buffer>`, `wins: Map<WinId,
+Window>`, `splits: LayoutTree`, `overlays: Vec<Overlay>`,
+`focus: Option<WinId>`, `focus_history`, `capture: Option<HitTarget>`,
+`cursor_shape: CursorShape` (single global), `theme`. End-state API:
+`buf_create`/`buf_mut`, `win_open`/`win_close`/`win_mut`,
+`overlay_open`/`overlay_close`, `dispatch_event`, `render`,
+`focus`/`set_focus`/`focused_window`/`focused_overlay`/`active_modal`,
+`hit_test`, `focus_next`/`focus_prev` (modal-aware). Render is
+event-driven, diff-based, no dirty flag — resize/Ctrl-L zeros the
+previous-grid baseline so the diff becomes a full repaint by virtue
+of writing every cell.
+
+The whole rewrite is too big for one session; it splits into
+incremental sub-phases that each end green. Order is by what unblocks
+the rest.
+
+#### P1.f.1 — Collapse focus slots into a single `Ui::focus` ✅ landed
+
+Replace the dual `overlay_focus: Option<WinId>` + `painted_split_focus:
+Option<WinId>` storage with a single `focus: Option<WinId>` slot.
+Focus discrimination (overlay leaf vs painted split) becomes a
+lookup-time derivation via `overlay_for_leaf` / `painted_splits.contains`.
+`focused_overlay_cursor` and `focused_painted_split_cursor` filter
+the unified slot by kind. Behaviour identical; storage normalized.
+
+#### P1.f.2 — `overlays: HashMap<OverlayId, Overlay>` → `Vec<Overlay>`
+
+`OverlayId` becomes a `Vec` index (or generation-tagged handle).
+`overlays_in_z_order` collapses to a sort over the live vec; insertion
+order is stable.
+
+#### P1.f.3 — `splits: LayoutTree` owned by `Ui`
+
+Today the host (`tui`) builds a `LayoutTree` and pushes resolved rects
+to `Ui` per frame via `set_window_rect`. Move the tree onto `Ui` and
+have `Ui::render` resolve rects itself. `painted_splits: Vec<WinId>` +
+`split_rects: HashMap<WinId, Rect>` retire — leaves of the owned tree
+replace the registry; resolved rects come from the per-frame
+`resolve_layout` walk.
+
+#### P1.f.4 — `capture: Option<HitTarget>` for in-flight gestures
+
+Move drag-state tracking from `app/mouse.rs` onto `Ui::capture`.
+`Ui::dispatch_event` consults capture before hit_test; mouse-up
+clears it. Auto-clears when the captured target unregisters
+(painted split removed, overlay closed).
+
+#### P1.f.5 — Global `cursor_shape: CursorShape`
+
+Today `cursor_kind` lives per-`Window`. Move the active shape onto
+`Ui::cursor_shape` as a single global, updated on focus change.
+Per-Window state degrades to "is the cursor visible from this window's
+viewport?" (already a render-time question).
+
+#### P1.f.6 — `Ui::dispatch_event` consolidation
+
+Today key + mouse dispatch live in `handle_key_with_lua` and
+`app::mouse::dispatch_*`. Collapse into a single `Ui::dispatch_event`
+taking the unified `Event::{ Key | Mouse | Resize | Focus | Blur }`.
 
 End of P1: `ui` compiles in isolation. Has unit tests against fake
 grids. `tui` is still red — it consumes the new shapes in P2.
