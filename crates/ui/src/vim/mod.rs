@@ -8,6 +8,7 @@ use crate::text::{
     char_class, line_end, line_start, word_backward_pos, word_forward_pos, CharClass,
 };
 use crate::undo::{UndoEntry, UndoHistory};
+use crate::window_cursor::WindowCursor;
 use crate::AttachmentId;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motions::{
@@ -54,6 +55,9 @@ pub enum Action {
 /// `clipboard` is the App-owned `Clipboard` subsystem (kill ring +
 /// platform sink): yanks mirror into the sink, pastes pull from it
 /// when it was updated externally (see `KillRing::last_clipboard_write`).
+/// `cursor` carries the per-Window `curswant` (preferred vertical-motion
+/// column) and selection anchor; `vim_state` carries the per-Window
+/// persistent vim state (Visual anchor, last `f`/`t` target).
 pub struct VimContext<'a> {
     pub buf: &'a mut String,
     pub cpos: &'a mut usize,
@@ -61,6 +65,8 @@ pub struct VimContext<'a> {
     pub history: &'a mut UndoHistory,
     pub clipboard: &'a mut Clipboard,
     pub mode: &'a mut VimMode,
+    pub cursor: &'a mut WindowCursor,
+    pub vim_state: &'a mut VimWindowState,
 }
 
 impl VimContext<'_> {
@@ -157,8 +163,8 @@ impl Op {
     }
 }
 
-#[derive(Clone, Copy)]
-enum FindKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindKind {
     Forward,
     ForwardTill,
     Backward,
@@ -196,21 +202,30 @@ enum SubState {
 
 // ── Vim state ───────────────────────────────────────────────────────────────
 
+/// Persistent per-Window vim state. Outlives any single key sequence:
+/// `visual_anchor` survives until the next `v`/`V`; `last_find` lives
+/// for the lifetime of the Window so `;`/`,` repeats keep working
+/// across other commands.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VimWindowState {
+    /// Byte position of the Visual-mode anchor (where the most recent
+    /// `v`/`V` was pressed). Only meaningful while
+    /// `mode ∈ {Visual, VisualLine}`; carries a stale value otherwise.
+    pub visual_anchor: usize,
+    /// Last `f`/`t`/`F`/`T` target, replayed by `;` (same direction) or
+    /// `,` (reversed).
+    pub last_find: Option<(FindKind, char)>,
+}
+
+/// In-flight key-sequence state (operator pending, count accumulators,
+/// sub-state). Lives on `Vim` because it lasts only for the duration of
+/// one keystroke sequence — no consumer outside vim observes it.
 pub struct Vim {
     sub: SubState,
     /// Count accumulated before the operator (or before a standalone motion).
     count1: Option<usize>,
     /// Count accumulated after the operator, before the motion.
     count2: Option<usize>,
-    last_find: Option<(FindKind, char)>,
-    /// Byte position of the visual mode anchor (where 'v'/'V' was pressed).
-    visual_anchor: usize,
-    /// Desired column for vertical motions (j/k). Synchronised with
-    /// the owning window's `WindowCursor.curswant` at every entry to
-    /// `handle_key` so the keymap's shift+arrow path and vim's j/k
-    /// share one source of truth — vertical motion behaves identically
-    /// regardless of which key produced it.
-    curswant: Option<usize>,
 }
 
 impl Default for Vim {
@@ -225,18 +240,20 @@ impl Vim {
             sub: SubState::Ready,
             count1: None,
             count2: None,
-            last_find: None,
-            visual_anchor: 0,
-            curswant: None,
         }
     }
 
     /// Returns the visual selection range (start, end) as byte offsets when
     /// `mode` is Visual or VisualLine. Range is always ordered (start <= end).
-    pub fn visual_range(&self, buf: &str, cpos: usize, mode: VimMode) -> Option<(usize, usize)> {
+    pub fn visual_range(
+        state: &VimWindowState,
+        buf: &str,
+        cpos: usize,
+        mode: VimMode,
+    ) -> Option<(usize, usize)> {
         match mode {
             VimMode::Visual => {
-                let anchor = self.visual_anchor.min(buf.len());
+                let anchor = state.visual_anchor.min(buf.len());
                 let cursor = cpos.min(buf.len());
                 let (a, b) = if anchor <= cursor {
                     (anchor, next_char_boundary(buf, cursor).min(buf.len()))
@@ -246,7 +263,7 @@ impl Vim {
                 Some((a, b))
             }
             VimMode::VisualLine => {
-                let anchor = self.visual_anchor.min(buf.len());
+                let anchor = state.visual_anchor.min(buf.len());
                 let cursor = cpos.min(buf.len());
                 let start = line_start(buf, anchor).min(line_start(buf, cursor));
                 let end = line_end(buf, anchor).max(line_end(buf, cursor));
@@ -264,27 +281,13 @@ impl Vim {
         self.reset_counts();
     }
 
-    /// Read the current preferred vertical-motion column. Callers sync
-    /// this back to the owning window's `WindowCursor` after a dispatch
-    /// so shift+arrow and vim j/k share one curswant.
-    pub fn curswant(&self) -> Option<usize> {
-        self.curswant
-    }
-
-    /// Seed `curswant` before a dispatch (from the window's
-    /// `WindowCursor.curswant`). Vim's j / k / visual-j / visual-k then
-    /// read and update this value; the caller writes it back out.
-    pub fn set_curswant(&mut self, c: Option<usize>) {
-        self.curswant = c;
-    }
-
     /// Read the Visual-mode anchor byte. Returns `Some(byte)` only
     /// while in `Visual`/`VisualLine`; `None` in Normal/Insert. Used by
     /// the prompt mouse adapter to translate between source-byte and
     /// wrapped-byte spaces across `Window::handle_mouse` calls.
-    pub fn visual_anchor(&self, mode: VimMode) -> Option<usize> {
+    pub fn visual_anchor(state: &VimWindowState, mode: VimMode) -> Option<usize> {
         match mode {
-            VimMode::Visual | VimMode::VisualLine => Some(self.visual_anchor),
+            VimMode::Visual | VimMode::VisualLine => Some(state.visual_anchor),
             _ => None,
         }
     }
@@ -293,12 +296,19 @@ impl Vim {
     /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
     /// selection originates at the click rather than the previous cursor
     /// position. Writes through `mode_ref` so the App-owned VimMode
-    /// sees the transition.
-    pub fn begin_visual(&mut self, mode_ref: &mut VimMode, mode: VimMode, cpos: usize) {
+    /// sees the transition; writes the anchor through `state` so the
+    /// per-Window vim state stays the source of truth.
+    pub fn begin_visual(
+        &mut self,
+        mode_ref: &mut VimMode,
+        state: &mut VimWindowState,
+        mode: VimMode,
+        cpos: usize,
+    ) {
         *mode_ref = mode;
         self.sub = SubState::Ready;
         self.reset_counts();
-        self.visual_anchor = cpos;
+        state.visual_anchor = cpos;
     }
 
     /// Process a key event. Reads and mutates `ctx` (buffer, cursor,
@@ -479,7 +489,7 @@ impl Vim {
     fn handle_normal_char(&mut self, c: char, ctx: &mut VimContext<'_>) -> Action {
         // Clear desired column for any non-vertical motion.
         if c != 'j' && c != 'k' && !c.is_ascii_digit() {
-            self.curswant = None;
+            ctx.cursor.clear_curswant();
         }
 
         // Count digit accumulation.
@@ -666,13 +676,13 @@ impl Vim {
 
             // ── Visual mode ─────────────────────────────────────────────
             'v' => {
-                self.visual_anchor = *ctx.cpos;
+                ctx.vim_state.visual_anchor = *ctx.cpos;
                 *ctx.mode = VimMode::Visual;
                 self.reset_pending();
                 Action::Consumed
             }
             'V' => {
-                self.visual_anchor = *ctx.cpos;
+                ctx.vim_state.visual_anchor = *ctx.cpos;
                 *ctx.mode = VimMode::VisualLine;
                 self.reset_pending();
                 Action::Consumed
@@ -743,7 +753,7 @@ impl Vim {
                 Action::Consumed
             }
             ';' => {
-                if let Some((kind, ch)) = self.last_find {
+                if let Some((kind, ch)) = ctx.vim_state.last_find {
                     let n = self.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind, ch, n);
                 }
@@ -751,7 +761,7 @@ impl Vim {
                 Action::Consumed
             }
             ',' => {
-                if let Some((kind, ch)) = self.last_find {
+                if let Some((kind, ch)) = ctx.vim_state.last_find {
                     let n = self.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind.reversed(), ch, n);
                 }
@@ -787,15 +797,15 @@ impl Vim {
             'j' => {
                 let n = self.take_count();
                 if ctx.buf.contains('\n') {
-                    let (new_pos, col) = move_down_col(ctx.buf, *ctx.cpos, self.curswant);
+                    let (new_pos, col) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
                     if new_pos == *ctx.cpos && n <= 1 {
                         self.reset_pending();
                         return Action::HistoryNext;
                     }
-                    self.curswant = Some(col);
+                    ctx.cursor.set_curswant(Some(col));
                     *ctx.cpos = new_pos;
                     for _ in 1..n {
-                        (*ctx.cpos, _) = move_down_col(ctx.buf, *ctx.cpos, self.curswant);
+                        (*ctx.cpos, _) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
                     }
                     clamp_normal(ctx.buf, ctx.cpos);
                     return Action::Consumed;
@@ -810,15 +820,15 @@ impl Vim {
             'k' => {
                 let n = self.take_count();
                 if ctx.buf.contains('\n') {
-                    let (new_pos, col) = move_up_col(ctx.buf, *ctx.cpos, self.curswant);
+                    let (new_pos, col) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
                     if new_pos == *ctx.cpos && n <= 1 {
                         self.reset_pending();
                         return Action::HistoryPrev;
                     }
-                    self.curswant = Some(col);
+                    ctx.cursor.set_curswant(Some(col));
                     *ctx.cpos = new_pos;
                     for _ in 1..n {
-                        (*ctx.cpos, _) = move_up_col(ctx.buf, *ctx.cpos, self.curswant);
+                        (*ctx.cpos, _) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
                     }
                     clamp_normal(ctx.buf, ctx.cpos);
                     return Action::Consumed;
@@ -878,7 +888,7 @@ impl Vim {
             }
             '0' => {
                 *ctx.cpos = line_start(ctx.buf, *ctx.cpos);
-                self.curswant = None;
+                ctx.cursor.clear_curswant();
                 self.reset_pending();
                 Action::Consumed
             }
@@ -958,7 +968,7 @@ impl Vim {
             self.sub = SubState::Ready;
             if let KeyCode::Char(c) = key.code {
                 if let Some((start, end)) = text_object(ctx.buf, *ctx.cpos, inner, c) {
-                    self.visual_anchor = start;
+                    ctx.vim_state.visual_anchor = start;
                     *ctx.cpos = end.saturating_sub(1);
                 }
             }
@@ -1032,7 +1042,7 @@ impl Vim {
 
     fn handle_visual_char(&mut self, c: char, ctx: &mut VimContext<'_>) -> Action {
         if c != 'j' && c != 'k' && !c.is_ascii_digit() {
-            self.curswant = None;
+            ctx.cursor.clear_curswant();
         }
         match c {
             // ── Escape visual mode ─────────────────────────────────────
@@ -1067,7 +1077,9 @@ impl Vim {
 
             // ── Operators on selection ──────────────────────────────────
             'd' | 'x' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                if let Some((start, end)) =
+                    Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                {
                     let linewise = *ctx.mode == VimMode::VisualLine;
                     ctx.save_undo();
                     ctx.yank_range(start, end, linewise);
@@ -1101,7 +1113,9 @@ impl Vim {
                 Action::Consumed
             }
             'c' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                if let Some((start, end)) =
+                    Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                {
                     let linewise = *ctx.mode == VimMode::VisualLine;
                     ctx.save_undo();
                     ctx.yank_range(start, end, linewise);
@@ -1124,7 +1138,9 @@ impl Vim {
                 Action::Consumed
             }
             'y' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                if let Some((start, end)) =
+                    Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                {
                     let linewise = *ctx.mode == VimMode::VisualLine;
                     ctx.yank_range(start, end, linewise);
                     ctx.clipboard.kill_ring.mark_yanked();
@@ -1136,7 +1152,9 @@ impl Vim {
 
             // ── Case toggling on selection ─────────────────────────────
             '~' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                if let Some((start, end)) =
+                    Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                {
                     ctx.save_undo();
                     let toggled: String = ctx.buf[start..end]
                         .chars()
@@ -1154,7 +1172,9 @@ impl Vim {
                 Action::Consumed
             }
             'U' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                if let Some((start, end)) =
+                    Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                {
                     ctx.save_undo();
                     let upper = ctx.buf[start..end].to_uppercase();
                     ctx.buf.replace_range(start..end, &upper);
@@ -1163,7 +1183,9 @@ impl Vim {
                 Action::Consumed
             }
             'u' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                if let Some((start, end)) =
+                    Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                {
                     ctx.save_undo();
                     let lower = ctx.buf[start..end].to_lowercase();
                     ctx.buf.replace_range(start..end, &lower);
@@ -1174,7 +1196,9 @@ impl Vim {
 
             // ── Join lines ─────────────────────────────────────────────
             'J' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                if let Some((start, end)) =
+                    Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                {
                     ctx.save_undo();
                     let mut pos = start;
                     let mut remaining = end;
@@ -1203,7 +1227,9 @@ impl Vim {
             'p' | 'P' => {
                 ctx.sync_paste_from_clipboard();
                 if !ctx.register().is_empty() {
-                    if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                    if let Some((start, end)) =
+                        Self::visual_range(ctx.vim_state, ctx.buf, *ctx.cpos, *ctx.mode)
+                    {
                         ctx.save_undo();
                         let old = ctx.buf[start..end].to_string();
                         let text = ctx.register().to_string();
@@ -1244,8 +1270,8 @@ impl Vim {
                 let n = self.take_count();
                 for _ in 0..n {
                     let col;
-                    (*ctx.cpos, col) = move_down_col(ctx.buf, *ctx.cpos, self.curswant);
-                    self.curswant = Some(col);
+                    (*ctx.cpos, col) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
+                    ctx.cursor.set_curswant(Some(col));
                 }
                 clamp_normal(ctx.buf, ctx.cpos);
                 Action::Consumed
@@ -1254,8 +1280,8 @@ impl Vim {
                 let n = self.take_count();
                 for _ in 0..n {
                     let col;
-                    (*ctx.cpos, col) = move_up_col(ctx.buf, *ctx.cpos, self.curswant);
-                    self.curswant = Some(col);
+                    (*ctx.cpos, col) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
+                    ctx.cursor.set_curswant(Some(col));
                 }
                 clamp_normal(ctx.buf, ctx.cpos);
                 Action::Consumed
@@ -1357,14 +1383,14 @@ impl Vim {
                 Action::Consumed
             }
             ';' => {
-                if let Some((kind, ch)) = self.last_find {
+                if let Some((kind, ch)) = ctx.vim_state.last_find {
                     let n = self.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind, ch, n);
                 }
                 Action::Consumed
             }
             ',' => {
-                if let Some((kind, ch)) = self.last_find {
+                if let Some((kind, ch)) = ctx.vim_state.last_find {
                     let n = self.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind.reversed(), ch, n);
                 }
@@ -1380,7 +1406,7 @@ impl Vim {
 
             // ── Swap anchor and cursor ─────────────────────────────────
             'o' => {
-                std::mem::swap(&mut self.visual_anchor, ctx.cpos);
+                std::mem::swap(&mut ctx.vim_state.visual_anchor, ctx.cpos);
                 Action::Consumed
             }
 
@@ -1440,7 +1466,7 @@ impl Vim {
         self.sub = SubState::Ready;
         if let KeyCode::Char(ch) = key.code {
             let n = self.take_count();
-            self.last_find = Some((kind, ch));
+            ctx.vim_state.last_find = Some((kind, ch));
             let mut pos = *ctx.cpos;
             for _ in 0..n {
                 if let Some(p) = find_char(ctx.buf, pos, kind, ch) {
@@ -1463,7 +1489,7 @@ impl Vim {
         self.sub = SubState::Ready;
         if let KeyCode::Char(ch) = key.code {
             let n = self.effective_count();
-            self.last_find = Some((kind, ch));
+            ctx.vim_state.last_find = Some((kind, ch));
             let origin = *ctx.cpos;
             // For operators, always find the actual char position (Forward/Backward),
             // then adjust the range for till variants.
@@ -1948,8 +1974,10 @@ mod tests {
     }
 
     /// Owns the cross-call state (clipboard + kill ring + undo history +
-    /// mode) that vim borrows. `mode` mirrors the App-owned single-global
-    /// VimMode in production code; tests own one locally.
+    /// mode + window cursor + per-window vim state) that vim borrows.
+    /// `mode` mirrors the App-owned single-global VimMode in production
+    /// code; tests own one locally. `cursor` and `vim_state` mirror the
+    /// per-Window state that production carries on `ui::Window`.
     struct TestHarness {
         vim: Vim,
         buf: String,
@@ -1958,6 +1986,8 @@ mod tests {
         clipboard: Clipboard,
         history: UndoHistory,
         mode: VimMode,
+        cursor: WindowCursor,
+        vim_state: VimWindowState,
     }
 
     impl TestHarness {
@@ -1976,6 +2006,8 @@ mod tests {
                 clipboard,
                 history: UndoHistory::new(None),
                 mode: VimMode::Normal,
+                cursor: WindowCursor::new(),
+                vim_state: VimWindowState::default(),
             }
         }
 
@@ -1987,6 +2019,8 @@ mod tests {
                 history: &mut self.history,
                 clipboard: &mut self.clipboard,
                 mode: &mut self.mode,
+                cursor: &mut self.cursor,
+                vim_state: &mut self.vim_state,
             };
             self.vim.handle_key(k, &mut ctx)
         }

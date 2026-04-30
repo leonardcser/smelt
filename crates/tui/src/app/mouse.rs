@@ -291,7 +291,7 @@ impl App {
             .win
             .vim
             .as_ref()
-            .and_then(|v| v.visual_anchor(self.vim_mode));
+            .and_then(|_| ui::Vim::visual_anchor(&self.input.win.vim_state, self.vim_mode));
 
         self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
         self.input
@@ -306,6 +306,7 @@ impl App {
             if let Some(a) = saved_vim_visual_anchor {
                 vim.begin_visual(
                     &mut self.vim_mode,
+                    &mut self.input.win.vim_state,
                     crate::vim::VimMode::Visual,
                     wrap.src_to_wrapped(a),
                 );
@@ -335,7 +336,7 @@ impl App {
             .win
             .vim
             .as_ref()
-            .and_then(|v| v.visual_anchor(self.vim_mode));
+            .and_then(|_| ui::Vim::visual_anchor(&self.input.win.vim_state, self.vim_mode));
 
         self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
         self.input
@@ -350,6 +351,7 @@ impl App {
             if let Some(a) = new_w_vim_anchor {
                 vim.begin_visual(
                     &mut self.vim_mode,
+                    &mut self.input.win.vim_state,
                     crate::vim::VimMode::Visual,
                     wrap.wrapped_to_src(a),
                 );

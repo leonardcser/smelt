@@ -778,10 +778,15 @@ impl App {
         }
         let buf = rows.join("\n");
         let cpos = self.transcript_window.compute_cpos(&rows);
-        let active_selection = if let Some(vim) = self.transcript_window.vim.as_ref() {
+        let active_selection = if self.transcript_window.vim.is_some() {
             match self.vim_mode {
                 crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine => {
-                    vim.visual_range(&buf, cpos, self.vim_mode)
+                    ui::Vim::visual_range(
+                        &self.transcript_window.vim_state,
+                        &buf,
+                        cpos,
+                        self.vim_mode,
+                    )
                 }
                 _ => self.transcript_window.win_cursor.range(cpos),
             }
