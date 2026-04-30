@@ -5,13 +5,16 @@
 
 mod agent;
 mod au;
+mod bash;
 mod buf;
 mod cell;
 mod cmd;
+mod diff;
 mod engine;
 mod fuzzy;
 mod history;
 mod keymap;
+mod notebook;
 mod permissions;
 mod process;
 mod prompt;
@@ -20,6 +23,7 @@ mod settings;
 mod shell;
 mod spawn;
 mod statusline;
+mod syntax;
 mod task;
 mod theme;
 mod timer;
@@ -112,11 +116,15 @@ impl LuaRuntime {
         smelt.set("ui", smelt_ui)?;
         smelt.set("keymap", smelt_keymap)?;
 
+        // Renderer primitives — `smelt.{diff,syntax,bash,notebook}.render`
+        // share `content::to_buffer::render_into_buffer`. Any plugin
+        // can paint highlit content into a buffer it owns.
+        diff::register(lua, &smelt)?;
+        syntax::register(lua, &smelt)?;
+        bash::register(lua, &smelt)?;
+        notebook::register(lua, &smelt)?;
         // smelt.confirm.* primitives consumed by confirm.lua.
         crate::lua::confirm_ops::register(lua, &smelt)?;
-        // smelt.{diff,syntax,…} renderer primitives shared by every
-        // plugin that wants to draw highlit content into a buffer.
-        crate::lua::render_ops::register(lua, &smelt)?;
 
         lua.globals().set("smelt", smelt)?;
 

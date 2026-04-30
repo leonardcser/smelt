@@ -26,7 +26,6 @@
 mod api;
 pub mod app_ref;
 mod confirm_ops;
-mod render_ops;
 mod task;
 mod tasks;
 pub mod ui_ops;
