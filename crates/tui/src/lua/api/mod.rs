@@ -18,6 +18,7 @@ mod history;
 mod keymap;
 mod mode;
 mod notebook;
+mod path;
 mod permissions;
 mod process;
 mod prompt;
@@ -75,6 +76,7 @@ impl LuaRuntime {
         shell::register(lua, &smelt)?;
         agent::register(lua, &smelt)?;
         permissions::register(lua, &smelt)?;
+        path::register(lua, &smelt)?;
         fuzzy::register(lua, &smelt)?;
         history::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;

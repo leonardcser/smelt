@@ -14,6 +14,7 @@ pub mod instructions;
 pub mod keymap;
 pub mod lua;
 pub mod metrics;
+pub mod path;
 pub mod perf;
 pub mod persist;
 pub mod picker;
