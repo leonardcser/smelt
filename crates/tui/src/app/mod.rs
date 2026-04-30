@@ -1,5 +1,6 @@
 mod agent;
 pub(crate) mod app_config;
+pub(crate) mod cells;
 mod cmdline;
 pub mod commands;
 pub(crate) mod confirms;
@@ -230,6 +231,13 @@ pub struct App {
     /// `smelt.defer` alias) all route here through `with_app`.
     /// Drained each main-loop iteration via `App::tick_timers`.
     pub(crate) timers: timers::Timers,
+    /// Reactive name → value registry plus a deferred subscriber
+    /// queue. Built-in cells declare here at startup; setters
+    /// publish via `cells.set(name, value)` and the main loop drains
+    /// queued subscribers between event handlers. P2.a.4a lands the
+    /// primitive type only — Lua bindings (a.4b) and built-in
+    /// migrations (a.4c) follow.
+    pub(crate) cells: cells::Cells,
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
@@ -704,6 +712,7 @@ impl App {
             agent: None,
             confirms: confirms::Confirms::new(),
             timers: timers::Timers::new(),
+            cells: cells::Cells::new(),
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
@@ -776,6 +785,47 @@ impl App {
         for func in due {
             if let Err(e) = func.call::<()>(()) {
                 self.lua.record_error(format!("timer: {e}"));
+            }
+        }
+    }
+
+    /// Drain cell-fire notifications queued by `Cells::set_dyn` and
+    /// run each subscriber against the snapshot. Called once per
+    /// main-loop iteration after timers tick — same reasoning as
+    /// `tick_timers`: fires happen with the `&mut Cells` borrow
+    /// released so a subscriber that re-enters `app.cells.set_dyn /
+    /// subscribe_kind / unsubscribe` composes cleanly with the TLS
+    /// app pointer.
+    ///
+    /// Today every cell value is a `LuaCellValue` (Lua-defined
+    /// cells only); Rust-typed built-ins migrate in P2.a.4c with
+    /// their per-type Lua converters. Until then, a Lua subscriber
+    /// against a non-Lua cell is silently skipped.
+    pub fn drain_cells_pending(&mut self) {
+        if !self.cells.has_pending() {
+            return;
+        }
+        let fires = self.cells.drain_pending();
+        for fire in fires {
+            for cb in &fire.callbacks {
+                let cells::SubscriberKind::Lua(handle) = cb;
+                let Some(lv) = fire.value.downcast_ref::<cells::LuaCellValue>() else {
+                    // Rust-typed cell with a Lua subscriber
+                    // — converter lands with a.4c.
+                    continue;
+                };
+                let lua = &self.lua.lua;
+                let func = match lua.registry_value::<mlua::Function>(&handle.key) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let value: mlua::Value = match lua.registry_value::<mlua::Value>(&lv.key) {
+                    Ok(v) => v,
+                    Err(_) => mlua::Value::Nil,
+                };
+                if let Err(e) = func.call::<()>(value) {
+                    self.lua.record_error(format!("cell `{}`: {e}", fire.name));
+                }
             }
         }
     }
@@ -1068,6 +1118,7 @@ impl App {
             let _app_guard = crate::lua::install_app_ptr(self);
             // ── Lua timer + notification pump ────────────────────────────
             self.tick_timers();
+            self.drain_cells_pending();
             self.drive_lua_tasks();
             let (items, tick_errors) = self.lua.tick_statusline();
             self.custom_status_items = items;

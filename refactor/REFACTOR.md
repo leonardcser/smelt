@@ -431,7 +431,30 @@ bridges, then the aggregate.
   the `confirm_requested` cell instead of looking it up by handle.
 - **a.4** — `Cells` registry (typed name → value + subscribers). New
   primitive; built-in cells migrate from scattered App fields
-  (`vim_mode`, `agent_mode` via `mode`, …).
+  (`vim_mode`, `agent_mode` via `mode`, …). Splits across three
+  sessions because the registry shape, the Lua surface, and the
+  built-in migrations are each natural single-session units:
+  - **a.4a** — `Cells` primitive type: typed name → value storage,
+    Rust-side subscribers, queue-then-drain so subscriber bodies
+    run after `&mut Cells` releases. `cells: Cells` field on `App`
+    (no consumers yet — drain wiring lands with a.4b's first Lua
+    subscriber). Tests cover declare / get / set / subscribe /
+    drain_pending.
+  - **a.4b** — Lua bindings: `smelt.cell.new`, `smelt.cell(name):
+    {get,set,subscribe}`, `smelt.cell:glob_subscribe`, and the
+    `smelt.au.{on,fire}` alias over the same registry. Main-loop
+    drain pump fires Rust + Lua subscribers between event
+    handlers (sole-`&mut App` window after `with_app` borrows
+    release).
+  - **a.4c** — built-in cell migrations: stateful slots
+    (`vim_mode`, `agent_mode`, `model`, `reasoning`,
+    `confirms_pending`, `tokens_used`, `errors`, `cwd`,
+    `session_title`, `branch`, `now`, `spinner_frame`) and
+    event-shaped cells (`history`, `turn_complete`, `turn_error`,
+    `confirm_requested`, `confirm_resolved`, `session_started`,
+    `session_ended`) declared at startup; existing setters
+    publish through `Cells`. Statusline + plugin subscribers
+    fan out from one registry.
 - **a.5** ✅ — `Timers { set, every, cancel }` carve-out: storage
   lifts off `LuaShared.timers` onto `app::timers::Timers` on `App`;
   `App::tick_timers` drains via `Timers::drain_due` (re-arms
