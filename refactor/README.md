@@ -30,43 +30,49 @@ file fates (`INVENTORY.md`), parity (`FEATURES.md`), test strategy
 
 ## Granularity
 
-**One session = one sub-phase.** Sub-phases are the natural unit
-(`C.7.3`, `C.8`, `C.9`, …). Don't fragment into per-commit sessions; don't
-swallow whole phases in one. If a sub-phase turns out larger than fits one
-session, split it in `REFACTOR.md` (e.g. `C.8` → `C.8a` / `C.8b`), land
-`C.8a`, exit. The split is part of the work.
+**Sub-phase is the natural unit** (`C.7.3`, `C.8`, `C.9`, …). A session
+lands one or more consecutive sub-phases — don't split one across
+sessions, don't merge two into a single commit, don't swallow whole
+phases in one go. If a sub-phase turns out larger than fits one
+session, split it in `REFACTOR.md` (e.g. `C.8` → `C.8a` / `C.8b`),
+land `C.8a`, exit. The split is part of the work.
 
 ## Greenness
 
-- **Sessions and phases must end green.** Intermediate commits don't.
+- **Each sub-phase + its docs commit must end green.** Intermediate
+  commits within a sub-phase can be red.
 - **Red commits inside a session are encouraged when they avoid scaffolding.**
   If a final-shape commit can only land by leaving the tree red until the
   next commit lands the matching change, do that. The alternative — migration
   shims, parallel "kept for now" implementations, "removed in next commit"
   comments — is exactly the noise this refactor exists to delete.
 - **No throwaway scaffolding.** When a step rewrites a thing, the old thing
-  goes in the same session.
+  goes in the same sub-phase.
 
 ## Stopping rule
 
-Stop when one of:
+After a sub-phase lands green (HEAD, `cargo nextest`, `refactor/check.sh`,
+`P<n>.md`, `REFACTOR.md` all in sync), check the next un-landed sub-phase:
 
-1. The active sub-phase landed: tree green at HEAD, `cargo nextest` green,
-   `refactor/check.sh` green, `P<n>.md` updated, the sub-phase entry in
-   `REFACTOR.md` marked landed.
-2. **Real external blocker** — missing credentials, broken environment, an
-   action that genuinely requires the user to do something at their machine
-   (e.g. interactive `gh auth login`). Record what's needed in `P<n>.md`
-   "Open questions" and exit.
-3. Two consecutive failed attempts to land the active sub-phase. Exit,
-   human looks.
+1. **Independent and unblocked** — keep going. Land it in this session.
+2. **Needs a decision you don't have** — defer dependents, log the
+   question in `P<n>.md`, look elsewhere; if nothing's independent, exit.
+3. **Active phase closes** — exit; the next session opens `P<n+1>`.
+
+Hard stops (exit immediately, regardless of remaining work):
+
+- **Real external blocker** — missing credentials, broken environment,
+  action that genuinely requires the user (e.g. interactive
+  `gh auth login`). Record in `P<n>.md` "Open questions" and exit.
+- **Two consecutive failed attempts** to land a sub-phase. Exit, human
+  looks.
 
 **Ambiguity is not a stop reason** — see "The plan is not final" above. A
 clear better option means you pick it; a rippling unresolved decision means
 you defer the dependent sub-phases and move on to independent ones.
 
-Do **not** stop just because a single commit landed — keep going within the
-sub-phase. Do **not** start a new sub-phase in the same session.
+Do **not** stop just because a single commit landed — keep going within
+the sub-phase, and keep going across sub-phases when the next is unblocked.
 
 ## Code stays phase-agnostic
 
