@@ -5,30 +5,33 @@ pub enum ExecEvent {
     Done(Option<i32>),
 }
 
-/// Stable command outcome exposed through `api::cmd::run`. Internally
-/// this is the same as the private `CommandAction` — kept as a public
-/// alias so the API surface can evolve independently of the internal
-/// enum variants. For now it's just a re-export.
+/// Stable command outcome exposed through `api::cmd::run`. Lua
+/// command bodies do their own side effects via `with_app`; the
+/// outcome only carries a shell-escape `Exec` channel pair when
+/// the line started with `!`.
 pub type CommandOutcome = CommandAction;
 
 /// Public command runner used by `crate::api::cmd::run`. Accepts raw
-/// command lines (`/quit`, `:q`, `/compact foo`, etc.) and dispatches
-/// Lua commands first (plugin-owned names take precedence, letting
-/// init.lua override built-ins), falling back to `handle_command` —
-/// which looks the name up in `RUST_COMMANDS` and invokes the entry's
-/// handler fn.
-///
+/// command lines (`/quit`, `:q`, `/compact foo`, `! ls`, ...).
 /// Normalises a leading `:` to `/` so `/quit` and `:quit` dispatch
-/// identically.
+/// identically. `!` lines spawn a shell escape; everything else
+/// dispatches by name to a Lua-registered handler (or no-ops if
+/// nothing matches).
 pub fn run_command(app: &mut TuiApp, line: &str) -> CommandOutcome {
     let line = line.trim();
+    if let Some(rest) = line.strip_prefix('!') {
+        if !app.input.skip_shell_escape() {
+            return match app.start_shell_escape(rest) {
+                Some((rx, kill)) => CommandAction::Exec(rx, kill),
+                None => CommandAction::Continue,
+            };
+        }
+    }
     let normalized: String = if let Some(rest) = line.strip_prefix(':') {
         format!("/{rest}")
     } else {
         line.to_string()
     };
-    // Lua-registered commands take precedence over built-ins so
-    // users can override `/help`, `/export`, etc. from init.lua.
     let name_arg = normalized.trim_start_matches('/');
     let (name, arg) = match name_arg.find(char::is_whitespace) {
         Some(idx) => (
@@ -41,70 +44,18 @@ pub fn run_command(app: &mut TuiApp, line: &str) -> CommandOutcome {
         .cells
         .set_dyn("cmd_pre", std::rc::Rc::new(name.to_string()));
     app.drain_cells_pending();
-    let outcome = if !name.is_empty() && app.core.lua.has_command(name) {
+    if !name.is_empty() && app.core.lua.has_command(name) {
         app.core.lua.run_command(name, arg);
-        CommandAction::Continue
-    } else {
-        app.handle_command(&normalized)
-    };
+    }
     app.core
         .cells
         .set_dyn("cmd_post", std::rc::Rc::new(name.to_string()));
     app.drain_cells_pending();
     app.flush_lua_callbacks();
-    outcome
-}
-
-/// One Rust-dispatched slash command. `desc = Some(_)` means the command
-/// surfaces in the `/` completer; `None` is a hidden alias (`/q`, `/qa`,
-/// …) dispatched but not shown.
-pub(crate) struct RustCommand {
-    pub name: &'static str,
-    pub desc: Option<&'static str>,
-    pub handler: fn(&mut TuiApp, Option<String>) -> CommandAction,
-}
-
-pub(crate) const RUST_COMMANDS: &[RustCommand] = &[];
-
-/// Visible `(name, desc)` pairs for the `/` completer. Hidden aliases
-/// (`/q`, `/qa`, …) are filtered out.
-pub(crate) fn rust_command_items() -> impl Iterator<Item = (&'static str, &'static str)> {
-    RUST_COMMANDS
-        .iter()
-        .filter_map(|c| c.desc.map(|d| (c.name, d)))
-}
-
-/// True when `name` (without leading slash) is a registered Rust
-/// command. Aliases included.
-pub(crate) fn is_rust_command(name: &str) -> bool {
-    RUST_COMMANDS.iter().any(|c| c.name == name)
+    CommandAction::Continue
 }
 
 impl TuiApp {
-    // ── Commands ─────────────────────────────────────────────────────────
-
-    pub(super) fn handle_command(&mut self, input: &str) -> CommandAction {
-        if let Some(rest) = input.strip_prefix('!') {
-            if !self.input.skip_shell_escape() {
-                return match self.start_shell_escape(rest) {
-                    Some((rx, kill)) => CommandAction::Exec(rx, kill),
-                    None => CommandAction::Continue,
-                };
-            }
-        }
-        let Some(body) = input.strip_prefix('/') else {
-            return CommandAction::Continue;
-        };
-        let (name, arg) = match body.find(char::is_whitespace) {
-            Some(idx) => (&body[..idx], Some(body[idx + 1..].trim().to_string())),
-            None => (body, None),
-        };
-        match RUST_COMMANDS.iter().find(|c| c.name == name) {
-            Some(cmd) => (cmd.handler)(self, arg.filter(|s| !s.is_empty())),
-            None => CommandAction::Continue,
-        }
-    }
-
     /// Apply the result of `process_input` to app state (starting an agent,
     /// running a command, opening a dialog, etc.). Returns `true` if the app
     /// should quit. Centralizes the dispatch previously duplicated across the
@@ -124,23 +75,11 @@ impl TuiApp {
                 let turn = self.begin_custom_command_turn(*cmd);
                 self.agent = Some(turn);
             }
-            InputOutcome::Compact { instructions } => {
-                if self.core.session.messages.is_empty() {
-                    self.notify_error("nothing to compact".into());
-                } else {
-                    self.compact_history(instructions);
-                }
-            }
             InputOutcome::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
             }
-            InputOutcome::CancelAndClear => {
-                self.reset_session();
-                self.agent = None;
-            }
             InputOutcome::Continue => {}
-            InputOutcome::Quit => return true,
         }
         false
     }
@@ -173,13 +112,13 @@ impl TuiApp {
             return Some(EventOutcome::Noop);
         }
 
-        // Delegate to the unified handler.
+        // Delegate to the unified handler. Lua command bodies do their
+        // own side effects via `with_app` (`smelt.quit`, `smelt.session.*`,
+        // ...); the only `CommandAction` left to forward up is `Exec` for
+        // shell escapes (`! cmd`).
         match run_command(self, input) {
-            CommandAction::Quit => Some(EventOutcome::Quit),
-            CommandAction::CancelAndClear => Some(EventOutcome::CancelAndClear),
             CommandAction::Exec(rx, kill) => Some(EventOutcome::Exec(rx, kill)),
             CommandAction::Continue => Some(EventOutcome::Noop),
-            CommandAction::Compact { .. } => unreachable!(), // blocked above
         }
     }
 

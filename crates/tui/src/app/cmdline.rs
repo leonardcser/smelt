@@ -365,26 +365,12 @@ impl TuiApp {
         }
         let action = super::commands::run_command(self, &format!(":{line}"));
         match action {
-            CommandAction::Quit => true,
-            CommandAction::CancelAndClear => {
-                self.reset_session();
-                self.agent = None;
-                false
-            }
-            CommandAction::Compact { instructions } => {
-                if self.core.session.messages.is_empty() {
-                    self.notify_error("nothing to compact".into());
-                } else {
-                    self.compact_history(instructions);
-                }
-                false
-            }
             CommandAction::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
                 false
             }
-            CommandAction::Continue => false,
+            CommandAction::Continue => self.pending_quit,
         }
     }
 
