@@ -534,7 +534,21 @@ bridges, then the aggregate.
   `select!` engine-drain gates swap from
   `focused_overlay_blocks_agent()` to `confirms.is_clear()`. P2.d
   folds the engine-event drain into this type.
-- **a.12** — Aggregate `Core` + `TuiApp` / `HeadlessApp`.
+- **a.12** — Aggregate `Core` + `TuiApp` / `HeadlessApp`. Splits across
+  two sessions because the subsystem aggregation (~350 callsite renames)
+  and the frontend split (App → `TuiApp` + new `HeadlessApp` over the
+  existing headless coordinator) are each natural single-session units:
+  - **a.12a** ✅ — introduce `Core` struct; move the 8 subsystem fields
+    (`config`, `session`, `confirms`, `clipboard`, `timers`, `cells`,
+    `lua`, `engine`) off `App` into `Core`; add `pub core: Core` field
+    on `App`; rewrite every `self.<subsystem>.X` / `app.<subsystem>.X`
+    callsite to read through `self.core.<subsystem>.X` /
+    `app.core.<subsystem>.X`. `tools: ToolRuntime` slot stays vacant
+    because a.10 is gated on P5.a.
+  - **a.12b** — rename `App` → `TuiApp`; carve `HeadlessApp { core,
+    sink: HeadlessSink }` over today's headless-coordinator surface;
+    the TUI / headless / sub-agent entry points in `src/main.rs`
+    dispatch to the right frontend type up-front.
 
 Aggregate:
 
