@@ -817,8 +817,8 @@ const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/cmd.lua"),
     ),
     (
-        "smelt/confirm.lua",
-        include_str!("../../../../runtime/lua/smelt/confirm.lua"),
+        "smelt/dialogs/confirm.lua",
+        include_str!("../../../../runtime/lua/smelt/dialogs/confirm.lua"),
     ),
 ];
 
@@ -832,7 +832,8 @@ pub(super) fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// Modules embedded in the binary, available via `require("smelt.plugins.X")`.
-/// Bootstrap primitives (`_bootstrap.lua`, `dialog.lua`, `picker.lua`) are
+/// Bootstrap primitives (`_bootstrap.lua`, `dialog.lua`, `widgets/picker.lua`,
+/// `widgets/prompt_picker.lua`, `cmd.lua`, `dialogs/confirm.lua`) are
 /// loaded via `load_bootstrap_chunks`, not here — they don't need to be
 /// `require`-able.
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
@@ -857,8 +858,8 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/export.lua"),
     ),
     (
-        "smelt.plugins.rewind",
-        include_str!("../../../../runtime/lua/smelt/plugins/rewind.lua"),
+        "smelt.dialogs.rewind",
+        include_str!("../../../../runtime/lua/smelt/dialogs/rewind.lua"),
     ),
     (
         "smelt.plugins.background_commands",
@@ -873,16 +874,16 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/yank_block.lua"),
     ),
     (
-        "smelt.plugins.permissions",
-        include_str!("../../../../runtime/lua/smelt/plugins/permissions.lua"),
+        "smelt.dialogs.permissions",
+        include_str!("../../../../runtime/lua/smelt/dialogs/permissions.lua"),
     ),
     (
-        "smelt.plugins.resume",
-        include_str!("../../../../runtime/lua/smelt/plugins/resume.lua"),
+        "smelt.dialogs.resume",
+        include_str!("../../../../runtime/lua/smelt/dialogs/resume.lua"),
     ),
     (
-        "smelt.plugins.agents",
-        include_str!("../../../../runtime/lua/smelt/plugins/agents.lua"),
+        "smelt.dialogs.agents",
+        include_str!("../../../../runtime/lua/smelt/dialogs/agents.lua"),
     ),
     (
         "smelt.plugins.theme",
@@ -917,12 +918,12 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.ask_user_question",
     "smelt.plugins.btw",
     "smelt.plugins.export",
-    "smelt.plugins.rewind",
+    "smelt.dialogs.rewind",
     "smelt.plugins.background_commands",
     "smelt.plugins.help",
-    "smelt.plugins.permissions",
-    "smelt.plugins.resume",
-    "smelt.plugins.agents",
+    "smelt.dialogs.permissions",
+    "smelt.dialogs.resume",
+    "smelt.dialogs.agents",
     "smelt.plugins.theme",
     "smelt.plugins.color",
     "smelt.plugins.model",
