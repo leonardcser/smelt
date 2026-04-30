@@ -523,11 +523,16 @@ lookup-time derivation via `overlay_for_leaf` / `painted_splits.contains`.
 `focused_overlay_cursor` and `focused_painted_split_cursor` filter
 the unified slot by kind. Behaviour identical; storage normalized.
 
-#### P1.f.2 — `overlays: HashMap<OverlayId, Overlay>` → `Vec<Overlay>`
+#### P1.f.2 — `overlays: HashMap<OverlayId, Overlay>` → `Vec<Overlay>` ✅ landed
 
-`OverlayId` becomes a `Vec` index (or generation-tagged handle).
-`overlays_in_z_order` collapses to a sort over the live vec; insertion
-order is stable.
+Storage swap: `Vec<(OverlayId, Overlay)>` keeping the stable
+`OverlayId(u32)` counter as the public handle. Insertion order is
+preserved naturally via `push`; `overlays_in_z_order` simplifies to
+a stable `sort_by_key(|_, o| o.z)` over a snapshot — Rust's stable
+sort holds the vec's insertion order for equal-z entries, which is
+the contract the prior `(o.z, id.0)` composite key encoded
+explicitly. `overlay_close` becomes `position` + `remove`; lookups
+collapse to `iter().find_map`. Public API unchanged.
 
 #### P1.f.3 — `splits: LayoutTree` owned by `Ui`
 
