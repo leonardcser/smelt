@@ -39,6 +39,7 @@ pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
     WinEvent,
 };
+pub use clipboard::{Clipboard, NullSink, Sink};
 pub use compositor::Compositor;
 pub use dialog::{PanelHeight, PanelSpec};
 pub use edit_buffer::EditBuffer;

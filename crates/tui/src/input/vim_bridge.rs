@@ -1,14 +1,15 @@
 //! Bridge between `PromptState` and the vim state machine.
 //!
 //! Vim borrows the input's live `buf`/`cpos`/`attachment_ids` plus the
-//! kill ring and `UndoHistory` owned by `PromptState`, plus the
-//! **single global** `VimMode` owned by `App`. The mode reference is
-//! threaded in by the caller so vim and every other surface read one
-//! source of truth.
+//! `UndoHistory` owned by `PromptState`, the **single global** `VimMode`
+//! owned by `App`, and the **single global** `Clipboard` (kill ring +
+//! platform sink) also owned by `App`. Both globals are threaded in by
+//! the caller so vim and every other surface read one source of truth.
 
 use super::{Action, History, PromptState};
 use crate::vim::{self, VimContext, VimMode};
 use crossterm::event::{Event, KeyEvent};
+use ui::Clipboard;
 
 /// Outcome of the vim bridge for a single key event.
 pub(super) enum VimBridgeResult {
@@ -26,6 +27,7 @@ impl PromptState {
         ev: &Event,
         history: &mut Option<&mut History>,
         mode: &mut VimMode,
+        clipboard: &mut Clipboard,
     ) -> VimBridgeResult {
         if self.win.vim.is_none() {
             return VimBridgeResult::NotAKey;
@@ -43,14 +45,12 @@ impl PromptState {
         let vim = self.win.vim.as_mut().unwrap();
         vim.set_curswant(seed);
         let result = {
-            let mut clipboard = crate::app::commands::SystemClipboard;
             let mut ctx = VimContext {
                 buf: &mut self.win.edit_buf.buf,
                 cpos: &mut self.win.cpos,
                 attachments: &mut self.win.edit_buf.attachment_ids,
-                kill_ring: &mut self.win.kill_ring,
                 history: &mut self.win.edit_buf.history,
-                clipboard: &mut clipboard,
+                clipboard,
                 mode,
             };
             vim.handle_key(key_ev, &mut ctx)

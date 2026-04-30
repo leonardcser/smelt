@@ -901,12 +901,13 @@ These describe the *target* codebase. Refactor-process rules
 
 `cargo nextest run` covers unit-testable logic. For visual behaviour
 (dialog rendering, layout, selection), drive the real binary in a tmux
-side pane. **You're already inside tmux** — never `tmux kill-server` /
+side pane against a local OpenAI-compatible LLM endpoint.
+**You're already inside tmux** — never `tmux kill-server` /
 `kill-session` / `new-session`. Split the current window:
 
 ```bash
 tmux split-window -h -t <session:window> -c <worktree-path> -P -F '#{pane_id}'
-tmux send-keys -t %ID './target/debug/smelt' Enter
+tmux send-keys -t %ID 'cargo run -- --api-base http://0.0.0.0:8080/v1 --model Qwen/Qwen3.6-27B' Enter
 tmux capture-pane -t %ID -p | tail -N
 ```
 

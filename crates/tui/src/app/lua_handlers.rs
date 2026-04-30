@@ -101,10 +101,8 @@ impl App {
     pub(crate) fn yank_current_block(&mut self) {
         let abs_row = self.transcript_window.cursor_abs_row();
         if let Some(text) = self.block_text_at_row(abs_row, self.settings.show_thinking) {
-            if super::commands::copy_to_clipboard(&text).is_ok() {
-                self.transcript_window
-                    .kill_ring
-                    .record_clipboard_write(text);
+            if self.clipboard.write(&text).is_ok() {
+                self.clipboard.kill_ring.record_clipboard_write(text);
             }
             self.notify("block copied".into());
         } else {

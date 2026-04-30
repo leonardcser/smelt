@@ -122,16 +122,20 @@ impl PromptState {
     }
 
     /// Selection range to *render* with the selection-bg style. Falls
-    /// back to the yank-flash range from the kill ring when there's no
-    /// real selection so vim copy ops (`yy`, `yw`, visual `y`, …) get
-    /// the brief post-yank highlight, matching nvim's
+    /// back to the yank-flash range from the App-level kill ring when
+    /// there's no real selection so vim copy ops (`yy`, `yw`, visual
+    /// `y`, …) get the brief post-yank highlight, matching nvim's
     /// `vim.highlight.on_yank`. Editing logic must keep using
     /// `selection_range` so the flash never affects mutations.
-    pub fn display_selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
+    pub fn display_selection_range(
+        &self,
+        mode: VimMode,
+        clipboard: &ui::Clipboard,
+    ) -> Option<(usize, usize)> {
         if let Some(range) = self.selection_range(mode) {
             return Some(range);
         }
-        self.win
+        clipboard
             .kill_ring
             .yank_flash_range(std::time::Instant::now())
     }
@@ -236,31 +240,21 @@ impl PromptState {
         self.win.cpos = cpos.min(self.win.edit_buf.buf.len());
     }
 
-    /// Take the kill ring contents (moves ownership, leaves empty).
-    pub fn take_kill_ring(&mut self) -> String {
-        self.win.kill_ring.take()
-    }
-
-    /// Set the kill ring contents (used to sync back from dialogs).
-    pub fn set_kill_ring(&mut self, contents: String) {
-        self.win.kill_ring.set(contents);
-    }
-
     /// Reconcile the kill ring with the system clipboard before an
     /// emacs-style paste (`C-y`). If the clipboard text differs from
     /// what we last pushed, treat it as externally updated and
     /// overwrite the kill ring (charwise — external sources don't
     /// know about vim's linewise concept). When they match, the kill
     /// ring is already authoritative.
-    fn sync_kill_ring_from_clipboard(&mut self) {
-        let Some(text) = crate::app::commands::paste_from_clipboard() else {
+    fn sync_kill_ring_from_clipboard(clipboard: &mut ui::Clipboard) {
+        let Some(text) = clipboard.read() else {
             return;
         };
-        if self.win.kill_ring.last_clipboard_write() == Some(text.as_str()) {
+        if clipboard.kill_ring.last_clipboard_write() == Some(text.as_str()) {
             return;
         }
-        self.win.kill_ring.set(text.clone());
-        self.win.kill_ring.record_clipboard_write(text);
+        clipboard.kill_ring.set(text.clone());
+        clipboard.kill_ring.record_clipboard_write(text);
     }
 
     pub fn clear(&mut self) {
@@ -475,9 +469,10 @@ impl PromptState {
         action: KeyAction,
         history: Option<&mut History>,
         mode: VimMode,
+        clipboard: &mut ui::Clipboard,
     ) -> Action {
         if !matches!(action, KeyAction::Yank | KeyAction::YankPop) {
-            self.win.kill_ring.clear_yank();
+            clipboard.kill_ring.clear_yank();
         }
         // Any non-vertical action abandons the preferred column so the
         // next vertical motion picks up wherever the user is now.
@@ -718,10 +713,10 @@ impl PromptState {
                 if self.has_selection(mode) {
                     let deleted = self.delete_selection(mode);
                     if let Some(text) = deleted {
-                        self.kill_and_copy(text);
+                        self.kill_and_copy(text, clipboard);
                     }
                 } else {
-                    self.kill_to_end_of_line();
+                    self.kill_to_end_of_line(clipboard);
                 }
                 Action::Redraw
             }
@@ -730,10 +725,10 @@ impl PromptState {
                 if self.has_selection(mode) {
                     let deleted = self.delete_selection(mode);
                     if let Some(text) = deleted {
-                        self.kill_and_copy(text);
+                        self.kill_and_copy(text, clipboard);
                     }
                 } else {
-                    self.kill_to_start_of_line();
+                    self.kill_to_start_of_line(clipboard);
                 }
                 Action::Redraw
             }
@@ -742,9 +737,8 @@ impl PromptState {
                 if self.has_selection(mode) {
                     self.delete_selection(mode);
                 }
-                self.sync_kill_ring_from_clipboard();
-                if let Some(new_cpos) = self
-                    .win
+                Self::sync_kill_ring_from_clipboard(clipboard);
+                if let Some(new_cpos) = clipboard
                     .kill_ring
                     .yank(&mut self.win.edit_buf.buf, self.win.cpos)
                 {
@@ -754,7 +748,7 @@ impl PromptState {
                 Action::Redraw
             }
             KeyAction::YankPop => {
-                if let Some(new_cpos) = self.win.kill_ring.yank_pop(&mut self.win.edit_buf.buf) {
+                if let Some(new_cpos) = clipboard.kill_ring.yank_pop(&mut self.win.edit_buf.buf) {
                     self.win.cpos = new_cpos;
                     self.recompute_completer();
                 }
@@ -801,10 +795,10 @@ impl PromptState {
             KeyAction::CopySelection => {
                 if let Some((start, end)) = self.selection_range(mode) {
                     let text = self.win.edit_buf.buf[start..end].to_string();
-                    if crate::app::copy_to_clipboard(&text).is_ok() {
-                        self.win.kill_ring.record_clipboard_write(text.clone());
+                    if clipboard.write(&text).is_ok() {
+                        clipboard.kill_ring.record_clipboard_write(text.clone());
                     }
-                    self.win.kill_ring.set(text);
+                    clipboard.kill_ring.set(text);
                 }
                 Action::Noop
             }
@@ -812,10 +806,10 @@ impl PromptState {
                 if self.selection_range(mode).is_some() {
                     self.save_undo(mode);
                     if let Some(text) = self.delete_selection(mode) {
-                        if crate::app::copy_to_clipboard(&text).is_ok() {
-                            self.win.kill_ring.record_clipboard_write(text.clone());
+                        if clipboard.write(&text).is_ok() {
+                            clipboard.kill_ring.record_clipboard_write(text.clone());
                         }
-                        self.win.kill_ring.set(text);
+                        clipboard.kill_ring.set(text);
                     }
                     self.recompute_completer();
                     Action::Redraw
@@ -922,6 +916,7 @@ impl PromptState {
         ev: Event,
         mut history: Option<&mut History>,
         mode: &mut VimMode,
+        clipboard: &mut ui::Clipboard,
     ) -> Action {
         // 1. Completer intercepts navigation keys when active.
         if self.completer.is_some() {
@@ -931,7 +926,7 @@ impl PromptState {
         }
 
         // 2. Vim mode intercepts key events.
-        match self.dispatch_vim(&ev, &mut history, mode) {
+        match self.dispatch_vim(&ev, &mut history, mode, clipboard) {
             VimBridgeResult::Handled(action) => return action,
             VimBridgeResult::Passthrough => {
                 // Fall through to keymap / char insert below.
@@ -1015,7 +1010,7 @@ impl PromptState {
             };
 
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
-                return self.execute_key_action(action, history, *mode);
+                return self.execute_key_action(action, history, *mode, clipboard);
             }
 
             // Fallback: insert character for unmodified / shift-only key presses.
@@ -1206,6 +1201,18 @@ pub fn resolve_agent_esc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl PromptState {
+        /// Test-only convenience: run `execute_key_action` against a
+        /// throwaway null clipboard. Most tests don't exercise the
+        /// kill-ring path; the few that do (`KeyAction::Yank`,
+        /// `YankPop`, `Cut`, `Copy`, `KillTo*`) use `execute_key_action`
+        /// directly with a real `Clipboard` and assert against it.
+        fn test_action(&mut self, action: KeyAction, mode: VimMode) -> Action {
+            let mut clip = ui::Clipboard::null();
+            self.execute_key_action(action, None, mode, &mut clip)
+        }
+    }
 
     // ── Vim-mode Esc behavior ───────────────────────────────────────────
 
@@ -1642,7 +1649,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert_eq!(input.win.win_cursor.anchor(), Some(0));
         assert_eq!(input.win.cpos, 1);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 1)));
@@ -1653,9 +1660,9 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert_eq!(input.win.win_cursor.anchor(), Some(0));
         assert_eq!(input.win.cpos, 3);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 3)));
@@ -1666,10 +1673,10 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert!(input.selection_range(ui::VimMode::Insert).is_some());
-        input.execute_key_action(KeyAction::MoveRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::MoveRight, ui::VimMode::Insert);
         assert!(input.selection_range(ui::VimMode::Insert).is_none());
     }
 
@@ -1680,10 +1687,10 @@ mod tests {
         input.win.cpos = 0;
         // Select "hello"
         for _ in 0..5 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         }
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 5)));
-        input.execute_key_action(KeyAction::Backspace, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::Backspace, ui::VimMode::Insert);
         assert_eq!(input.buf, " world");
         assert_eq!(input.win.cpos, 0);
     }
@@ -1694,9 +1701,9 @@ mod tests {
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         }
-        input.execute_key_action(KeyAction::DeleteCharForward, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::DeleteCharForward, ui::VimMode::Insert);
         assert_eq!(input.buf, " world");
     }
 
@@ -1706,7 +1713,7 @@ mod tests {
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         }
         input.insert_char('X', ui::VimMode::Insert);
         assert_eq!(input.buf, "X world");
@@ -1718,8 +1725,8 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 5;
-        input.execute_key_action(KeyAction::SelectLeft, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectLeft, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
         assert_eq!(input.win.win_cursor.anchor(), Some(5));
         assert_eq!(input.win.cpos, 3);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((3, 5)));
@@ -1730,11 +1737,11 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world foo".to_string();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectWordForward, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectWordForward, ui::VimMode::Insert);
         assert_eq!(input.win.win_cursor.anchor(), Some(0));
         // word_forward_pos from 0 should be 6 (start of "world").
         assert_eq!(input.win.cpos, 6);
-        input.execute_key_action(KeyAction::Backspace, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::Backspace, ui::VimMode::Insert);
         assert_eq!(input.buf, "world foo");
     }
 
@@ -1743,9 +1750,9 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 11;
-        input.execute_key_action(KeyAction::SelectWordBackward, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectWordBackward, ui::VimMode::Insert);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((6, 11)));
-        input.execute_key_action(KeyAction::Backspace, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::Backspace, ui::VimMode::Insert);
         assert_eq!(input.buf, "hello ");
     }
 
@@ -1754,7 +1761,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 5;
-        input.execute_key_action(KeyAction::SelectStartOfLine, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectStartOfLine, ui::VimMode::Insert);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 5)));
     }
 
@@ -1763,7 +1770,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 5;
-        input.execute_key_action(KeyAction::SelectEndOfLine, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectEndOfLine, ui::VimMode::Insert);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((5, 11)));
     }
 
@@ -1773,9 +1780,9 @@ mod tests {
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         }
-        input.execute_key_action(KeyAction::InsertNewline, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::InsertNewline, ui::VimMode::Insert);
         assert_eq!(input.buf, "\n world");
         assert_eq!(input.win.cpos, 1);
     }
@@ -1783,15 +1790,21 @@ mod tests {
     #[test]
     fn kill_to_eol_with_selection() {
         let mut input = PromptState::new();
+        let mut clip = ui::Clipboard::null();
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..5 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert, &mut clip);
         }
-        input.execute_key_action(KeyAction::KillToEndOfLine, None, ui::VimMode::Insert);
+        input.execute_key_action(
+            KeyAction::KillToEndOfLine,
+            None,
+            ui::VimMode::Insert,
+            &mut clip,
+        );
         assert_eq!(input.buf, " world");
-        // Killed text should be in kill ring.
-        assert_eq!(input.win.kill_ring.current(), "hello");
+        // Killed text lands on the App-level kill ring.
+        assert_eq!(clip.kill_ring.current(), "hello");
     }
 
     #[test]
@@ -1800,10 +1813,10 @@ mod tests {
         input.win.edit_buf.buf = "ab".to_string();
         input.win.cpos = 0;
         // Select all.
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 2)));
-        input.execute_key_action(KeyAction::Backspace, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::Backspace, ui::VimMode::Insert);
         assert_eq!(input.buf, "");
         assert_eq!(input.win.cpos, 0);
     }
@@ -1822,7 +1835,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert!(input.selection_range(ui::VimMode::Insert).is_some());
         input.clear();
         assert!(input.selection_range(ui::VimMode::Insert).is_none());
@@ -1835,9 +1848,9 @@ mod tests {
         input.win.cpos = 6;
         // Select "wor"
         for _ in 0..3 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         }
-        input.execute_key_action(KeyAction::DeleteWordBackward, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::DeleteWordBackward, ui::VimMode::Insert);
         assert_eq!(input.buf, "hello ld");
     }
 
@@ -1847,9 +1860,9 @@ mod tests {
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         for _ in 0..3 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         }
-        input.execute_key_action(KeyAction::DeleteWordForward, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::DeleteWordForward, ui::VimMode::Insert);
         assert_eq!(input.buf, "lo world");
     }
 
@@ -1859,9 +1872,9 @@ mod tests {
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 3;
         for _ in 0..4 {
-            input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+            input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         }
-        input.execute_key_action(KeyAction::DeleteToStartOfLine, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::DeleteToStartOfLine, ui::VimMode::Insert);
         assert_eq!(input.buf, "helorld");
     }
 
@@ -1870,7 +1883,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectLeft, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
         assert_eq!(input.win.win_cursor.anchor(), Some(0));
     }
@@ -1880,7 +1893,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 5;
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert_eq!(input.win.cpos, 5);
     }
 
@@ -1889,7 +1902,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = String::new();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
         assert!(input.selection_range(ui::VimMode::Insert).is_none());
     }
@@ -1899,12 +1912,12 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "héllo".to_string();
         input.win.cpos = 0;
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         // Should select "hé" — 2 chars but 3 bytes.
         assert_eq!(input.win.cpos, 3); // byte offset of 'l'
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 3)));
-        input.execute_key_action(KeyAction::Backspace, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::Backspace, ui::VimMode::Insert);
         assert_eq!(input.buf, "llo");
     }
 
@@ -1914,14 +1927,14 @@ mod tests {
         input.win.edit_buf.buf = "abcdef".to_string();
         input.win.cpos = 3; // on 'd'
                             // Select right 2 chars.
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectRight, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((3, 5)));
         // Then select left 4 chars — anchor stays at 3.
-        input.execute_key_action(KeyAction::SelectLeft, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectLeft, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectLeft, None, ui::VimMode::Insert);
-        input.execute_key_action(KeyAction::SelectLeft, None, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
+        input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
         assert_eq!(input.win.cpos, 1);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((1, 3)));
     }
@@ -1934,12 +1947,13 @@ mod tests {
 
         let mut input = PromptState::new();
         let mut mode = ui::VimMode::Insert;
+        let mut clipboard = ui::Clipboard::null();
         input.set_vim_enabled(true);
         input.win.edit_buf.buf = "hello world".to_string();
         input.win.cpos = 0;
         // Create a shift selection.
-        input.execute_key_action(KeyAction::SelectRight, None, mode);
-        input.execute_key_action(KeyAction::SelectRight, None, mode);
+        input.test_action(KeyAction::SelectRight, mode);
+        input.test_action(KeyAction::SelectRight, mode);
         assert!(input.selection_range(mode).is_some());
         // Press Esc — vim switches to normal mode AND clears selection.
         let esc = Event::Key(KeyEvent {
@@ -1948,7 +1962,7 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         });
-        input.handle_event(esc, None, &mut mode);
+        input.handle_event(esc, None, &mut mode, &mut clipboard);
         assert!(
             input.selection_range(mode).is_none(),
             "Esc should clear shift selection"

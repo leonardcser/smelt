@@ -34,6 +34,7 @@ pub(crate) struct PromptInput<'a> {
     pub stash: &'a Option<crate::input::InputSnapshot>,
     pub input: &'a PromptState,
     pub vim_mode: ui::VimMode,
+    pub clipboard: &'a ui::Clipboard,
     pub prediction: Option<&'a str>,
     pub width: u16,
     pub height: u16,
@@ -550,7 +551,7 @@ fn compute_input_area(
     let char_kinds = build_char_kinds(&spans);
     let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
     let display_selection = state
-        .display_selection_range(input.vim_mode)
+        .display_selection_range(input.vim_mode, input.clipboard)
         .map(|(start, end)| {
             let raw_start_char = crate::input::char_pos(&state.buf, start);
             let raw_end_char = crate::input::char_pos(&state.buf, end);
@@ -1030,11 +1031,13 @@ mod tests {
     #[test]
     fn compute_prompt_produces_bars_and_status() {
         let input_state = PromptState::default();
+        let test_clipboard = ui::Clipboard::null();
         let mut prompt_input = PromptInput {
             queued: &[],
             stash: &None,
             input: &input_state,
             vim_mode: ui::VimMode::Insert,
+            clipboard: &test_clipboard,
             prediction: None,
             width: 80,
             height: 10,

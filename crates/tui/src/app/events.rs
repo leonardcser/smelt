@@ -459,9 +459,12 @@ impl App {
         }
 
         // Delegate to PromptState::handle_event (menu, completer, vim, editing).
-        let action = self
-            .input
-            .handle_event(ev, Some(&mut self.input_history), &mut self.vim_mode);
+        let action = self.input.handle_event(
+            ev,
+            Some(&mut self.input_history),
+            &mut self.vim_mode,
+            &mut self.clipboard,
+        );
         self.dispatch_input_action(action)
     }
 
@@ -532,7 +535,8 @@ impl App {
                 &mut t.esc_vim_mode,
             ) {
                 EscAction::VimToNormal => {
-                    self.input.handle_event(ev, None, &mut self.vim_mode);
+                    self.input
+                        .handle_event(ev, None, &mut self.vim_mode, &mut self.clipboard);
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -556,9 +560,12 @@ impl App {
         }
 
         // Everything else → PromptState::handle_event (type-ahead with history).
-        let input_action =
-            self.input
-                .handle_event(ev, Some(&mut self.input_history), &mut self.vim_mode);
+        let input_action = self.input.handle_event(
+            ev,
+            Some(&mut self.input_history),
+            &mut self.vim_mode,
+            &mut self.clipboard,
+        );
         match input_action {
             Action::Submit {
                 mut content,

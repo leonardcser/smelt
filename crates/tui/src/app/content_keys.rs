@@ -174,7 +174,7 @@ impl App {
                         let e = ui::text::snap(&buf, e);
                         if s < e {
                             let copy = self.copy_display_range(s, e, self.settings.show_thinking);
-                            let _ = crate::app::commands::copy_to_clipboard(&copy);
+                            let _ = self.clipboard.write(&copy);
                         }
                     }
                     return EventOutcome::Redraw;
@@ -213,26 +213,40 @@ impl App {
     /// `Vim` instance, and mirror the resulting cursor / visual / yank
     /// state back onto our scroll + cursor. Returns `true` when vim
     /// consumed the key (caller should return `Redraw`).
+    ///
+    /// The transcript yank path mutes the platform sink during vim
+    /// dispatch (via `Clipboard::swap_sink`) so vim's `yank_range`
+    /// captures the *raw* source range into the kill ring without
+    /// pushing the raw markdown to the system clipboard. After vim
+    /// returns we look up the source range, build the *rendered* copy
+    /// via `copy_display_range`, and push that — so external pastes
+    /// see the rendered text rather than the raw markdown.
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
-        match self
-            .transcript_window
-            .handle_key(k, &rows, viewport, &mut self.vim_mode)
-        {
+        let result = {
+            let prev_sink = self.clipboard.swap_sink(Box::new(ui::NullSink));
+            let r = self.transcript_window.handle_key(
+                k,
+                &rows,
+                viewport,
+                &mut self.vim_mode,
+                &mut self.clipboard,
+            );
+            self.clipboard.swap_sink(prev_sink);
+            r
+        };
+        match result {
             None => false,
             Some(yanked) => {
                 if let Some(raw) = yanked {
-                    let copy = if let Some((s, e)) = self.transcript_window.kill_ring.source_range()
-                    {
+                    let copy = if let Some((s, e)) = self.clipboard.kill_ring.source_range() {
                         self.copy_display_range(s, e, self.settings.show_thinking)
                     } else {
                         raw
                     };
-                    if crate::app::commands::copy_to_clipboard(&copy).is_ok() {
-                        self.transcript_window
-                            .kill_ring
-                            .record_clipboard_write(copy);
+                    if self.clipboard.write(&copy).is_ok() {
+                        self.clipboard.kill_ring.record_clipboard_write(copy);
                     }
                 }
                 self.snap_transcript_cursor();
