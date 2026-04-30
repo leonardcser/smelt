@@ -31,7 +31,10 @@ mod task;
 mod tasks;
 pub mod ui_ops;
 
-pub use app_ref::{install_app_ptr, try_with_app, with_app, AppPtrGuard};
+pub use app_ref::{
+    install_app_ptr, try_with_app, try_with_ui_host, with_app, with_ui_host, AppPtrGuard,
+};
+pub(crate) use app_ref::{try_with_host, with_host};
 
 pub use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
 pub use tasks::PluginToolEnv;

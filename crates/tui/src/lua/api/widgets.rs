@@ -43,15 +43,16 @@ fn register_theme(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     theme_tbl.set(
         "accent",
         lua.create_function(|lua, ()| {
-            let color = crate::lua::with_app(|app| app.ui.theme().accent_color());
+            let color = crate::lua::with_ui_host(|host| host.ui().theme().accent_color());
             color_to_lua(lua, color)
         })?,
     )?;
     theme_tbl.set(
         "get",
         lua.create_function(|lua, role: String| {
-            let color = crate::lua::with_app(|app| theme_role_get(app.ui.theme(), &role))
-                .ok_or_else(|| LuaError::RuntimeError(format!("unknown theme role: {role}")))?;
+            let color =
+                crate::lua::with_ui_host(|host| theme_role_get(host.ui().theme(), &role))
+                    .ok_or_else(|| LuaError::RuntimeError(format!("unknown theme role: {role}")))?;
             color_to_lua(lua, color)
         })?,
     )?;
@@ -59,14 +60,14 @@ fn register_theme(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "set",
         lua.create_function(|_, (role, value): (String, mlua::Table)| {
             let ansi = color_ansi_from_lua(&value)?;
-            crate::lua::with_app(|app| theme_role_set(app.ui.theme_mut(), &role, ansi))
+            crate::lua::with_ui_host(|host| theme_role_set(host.ui().theme_mut(), &role, ansi))
         })?,
     )?;
     theme_tbl.set(
         "snapshot",
         lua.create_function(|lua, ()| {
             let t = lua.create_table()?;
-            let pairs = crate::lua::with_app(|app| theme_snapshot_pairs(app.ui.theme()));
+            let pairs = crate::lua::with_ui_host(|host| theme_snapshot_pairs(host.ui().theme()));
             for (name, color) in pairs {
                 t.set(name, color_to_lua(lua, color)?)?;
             }
@@ -75,7 +76,11 @@ fn register_theme(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     theme_tbl.set(
         "is_light",
-        lua.create_function(|_, ()| Ok(crate::lua::with_app(|app| app.ui.theme().is_light())))?,
+        lua.create_function(|_, ()| {
+            Ok(crate::lua::with_ui_host(|host| {
+                host.ui().theme().is_light()
+            }))
+        })?,
     )?;
     // Built-in color presets (name, description, ANSI-256 value).
     // Exposed so Lua-side pickers (`/theme`, `/color`) can use
@@ -327,7 +332,9 @@ fn register_win(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
     win_tbl.set(
         "buf",
         lua.create_function(|_, id: u64| {
-            let buf = crate::lua::with_app(|app| app.ui.win(ui::WinId(id)).map(|w| w.buf.0));
+            let buf =
+                crate::lua::try_with_ui_host(|host| host.ui().win(ui::WinId(id)).map(|w| w.buf.0))
+                    .flatten();
             Ok(buf)
         })?,
     )?;

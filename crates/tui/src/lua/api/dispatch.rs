@@ -4,7 +4,6 @@
 //! statusline sources, and spawned tasks.
 
 use super::{lua_table_to_args, lua_table_to_json};
-use crate::app::Host;
 use crate::lua::{LuaHandle, LuaShared, PluginToolHandles, TaskCompletion, TaskEvent};
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
@@ -286,8 +285,8 @@ fn register_tools(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> Lu
             |_, (request_id, call_id, result): (u64, String, mlua::Table)| {
                 let content: String = result.get("content").unwrap_or_default();
                 let is_error: bool = result.get("is_error").unwrap_or(false);
-                crate::lua::with_app(|app| {
-                    app.core.engine.send(protocol::UiCommand::PluginToolResult {
+                crate::lua::with_host(|host| {
+                    host.engine().send(protocol::UiCommand::PluginToolResult {
                         request_id,
                         call_id,
                         content,
@@ -380,9 +379,8 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "set",
         lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
             let key = lua.create_registry_value(handler)?;
-            Ok(crate::lua::try_with_app(|app| {
-                app.core
-                    .timers
+            Ok(crate::lua::try_with_host(|host| {
+                host.timers()
                     .set(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
@@ -397,9 +395,8 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 ));
             }
             let key = lua.create_registry_value(handler)?;
-            Ok(crate::lua::try_with_app(|app| {
-                app.core
-                    .timers
+            Ok(crate::lua::try_with_host(|host| {
+                host.timers()
                     .every(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
@@ -408,7 +405,7 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     timer_tbl.set(
         "cancel",
         lua.create_function(|_, id: u64| {
-            Ok(crate::lua::try_with_app(|app| app.timers().cancel(id)).unwrap_or(false))
+            Ok(crate::lua::try_with_host(|host| host.timers().cancel(id)).unwrap_or(false))
         })?,
     )?;
     smelt.set("timer", timer_tbl)?;
