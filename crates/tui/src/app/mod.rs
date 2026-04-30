@@ -1555,11 +1555,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_clear_is_blocked() {
-        assert!(classify_startup_command("/clear").is_some());
-    }
-
-    #[test]
     fn startup_unknown_slash_not_a_command() {
         // Not a recognized command — should pass through as a message
         assert!(classify_startup_command("/unknown").is_none());

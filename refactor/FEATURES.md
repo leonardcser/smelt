@@ -98,12 +98,12 @@ to invoke_ the feature.
 
 | Command                                           | Source today                      | Restored by                      | Status  |
 | ------------------------------------------------- | --------------------------------- | -------------------------------- | ------- |
-| `/clear`, `/new`                                  | `app/commands.rs::cmd_clear`      | P4.e                             | working |
+| `/clear`, `/new`                                  | `runtime/lua/smelt/plugins/session.lua` | P4.e                       | working — Lua command (`04f6419`); calls `smelt.session.reset()` |
 | `/quit`, `/exit`, `:q`, `:qa`, `:wq`, `:wqa`      | `app/commands.rs::cmd_quit`       | P4.e                             | working |
 | `/rewind`                                         | `plugins/rewind.lua`              | P4.d → `dialogs/rewind.lua`      | working |
 | `/resume`                                         | `plugins/resume.lua`              | P4.d → `dialogs/resume.lua`      | working |
 | `/compact [instructions]`                         | `app/commands.rs::cmd_compact`    | P4.e                             | working |
-| `/fork`, `/branch`                                | `app/commands.rs::cmd_fork`       | P4.e                             | working |
+| `/fork`, `/branch`                                | `runtime/lua/smelt/plugins/session.lua` | P4.e                       | working — Lua command (`04f6419`); calls `smelt.session.fork()` |
 | `/model [provider/model]`                         | `plugins/model.lua`               | P4.e                             | working |
 | `/settings`                                       | `plugins/settings.lua`            | P4.e                             | working |
 | `/theme [name]`                                   | `plugins/theme.lua`               | P4.e + `colorschemes/`           | working |
@@ -221,7 +221,7 @@ to invoke_ the feature.
 | --------------------------------------------------- | ------------------------------------------------------------------ | ----------- | ------- |
 | Auto-save every turn                                | `persist.rs` + `session.rs`                                        | P2.a        | working |
 | Resume (`-r` / `/resume`)                           | `persist.rs` + `plugins/resume.lua`                                | P2.a + P4.d | working |
-| Session branching / fork (`/fork`)                  | `app/commands.rs::cmd_fork` + `app/history.rs`                     | P2.a + P4.e | working |
+| Session branching / fork (`/fork`)                  | `plugins/session.lua` + `app/history.rs::fork_session` | P2.a + P4.e | working |
 | Rewind to turn (`/rewind`, Esc Esc)                 | `app/history.rs` + `plugins/rewind.lua`                            | P2.a + P4.d | working |
 | Conversation export (markdown → clip/file)          | `plugins/export.lua`                                               | P4.e        | working |
 | Message queuing (queue while running, pop on Enter) | `app/events.rs` + `app/working.rs`                                 | P2          | working |

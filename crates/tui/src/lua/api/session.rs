@@ -96,6 +96,28 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         })?,
     )?;
+    session_tbl.set(
+        "fork",
+        lua.create_function(|_, ()| {
+            crate::lua::with_app(|app| app.fork_session());
+            Ok(())
+        })?,
+    )?;
+    session_tbl.set(
+        "reset",
+        lua.create_function(|_, ()| {
+            crate::lua::with_app(|app| {
+                engine::log::entry(
+                    engine::log::Level::Info,
+                    "agent_stop",
+                    &serde_json::json!({ "reason": "user_cancel_and_clear" }),
+                );
+                app.reset_session();
+                app.agent = None;
+            });
+            Ok(())
+        })?,
+    )?;
     smelt.set("session", session_tbl)?;
     Ok(())
 }
