@@ -2,8 +2,8 @@
 //!
 //! Vim borrows the input's live `buf`/`cpos`/`attachment_ids` plus the
 //! `UndoHistory` owned by `PromptState`, the **single global** `VimMode`
-//! owned by `App`, the **single global** `Clipboard` (kill ring + platform
-//! sink) also owned by `App`, and the per-Window `curswant` +
+//! owned by `TuiApp`, the **single global** `Clipboard` (kill ring + platform
+//! sink) also owned by `TuiApp`, and the per-Window `curswant` +
 //! `VimWindowState` (Visual anchor, last `f`/`t`) carried on
 //! `ui::Window`. Vim itself holds only in-flight key-sequence state.
 

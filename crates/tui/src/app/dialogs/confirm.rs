@@ -15,7 +15,7 @@
 //!
 //! Plugin tools drive their own dialogs through `smelt.ui.dialog.open`.
 
-use super::super::App;
+use super::super::TuiApp;
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::content::display::{ColorRole, ColorValue};
@@ -30,7 +30,7 @@ use ui::BufId;
 /// Lua creates the buffer via `smelt.buf.create` and asks Rust to
 /// fill it; the inline bash highlight on the desc keeps title
 /// composition Rust-side until we have a span-level Lua API.
-pub(crate) fn render_title_into_buf(app: &mut App, buf_id: BufId, req: &ConfirmRequest) {
+pub(crate) fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) {
     let theme_snap = app.ui.theme().clone();
     let width = crate::content::term_width() as u16;
     let preview = ConfirmPreview::from_tool(&req.tool_name, &req.desc, &req.args);

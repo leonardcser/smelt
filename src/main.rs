@@ -225,7 +225,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Parse theme accent from config (applied after App::new — see below).
+    // Parse theme accent from config (applied after TuiApp::new — see below).
     let cfg_accent: Option<u8> = cfg.theme.accent.as_ref().map(|accent| {
         if let Ok(v) = accent.parse::<u8>() {
             v
@@ -542,7 +542,7 @@ async fn main() {
             .await;
     } else {
         // Build the TUI app.
-        let mut app = tui::app::App::new(
+        let mut app = tui::app::TuiApp::new(
             model,
             initial_api_base,
             api_key_env,
@@ -652,7 +652,7 @@ async fn main() {
 /// Assemble the `AppConfig` for a headless / subagent frontend from
 /// resolved CLI + config inputs. No saved-state seeding (predictable
 /// behaviour from the CLI invocation) — the TUI path layers
-/// `state::State::load()` on top of its own fields inside `App::new`.
+/// `state::State::load()` on top of its own fields inside `TuiApp::new`.
 #[allow(clippy::too_many_arguments)]
 fn build_headless_config(
     model: String,

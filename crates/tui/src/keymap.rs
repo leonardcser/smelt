@@ -14,7 +14,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// doesn't matter — priority comes from the binding list order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyAction {
-    // App control
+    // TuiApp control
     Quit,
     CancelAgent,
     ClearBuffer,
@@ -246,7 +246,7 @@ static BINDINGS: &[Binding] = &[
         when().ghost_text().buf_empty(),
         KeyAction::AcceptGhostText,
     ),
-    // ── App control ─────────────────────────────────────────────────────
+    // ── TuiApp control ─────────────────────────────────────────────────────
     // Ctrl+C: context-dependent (menu/completer/clear/quit/cancel)
     // Note: menu and completer dismissal happen before keymap lookup.
     bind(

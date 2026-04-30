@@ -19,7 +19,7 @@ use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
 use std::sync::Arc;
 
-/// Register a 0-arg getter that reads live state from `App` via
+/// Register a 0-arg getter that reads live state from `TuiApp` via
 /// `try_with_app`. Replaces the old snapshot-mirror pattern — every
 /// read goes through the TLS pointer installed at the top of each
 /// tick / Lua-entry boundary.
@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// Reads use `try_with_app` (not `with_app`) so callers from a context
 /// without `install_app_ptr` get the type's `Default` instead of a
 /// panic. In production every Lua-entry path installs the pointer, so
-/// the fallback is dead; tests that exercise bindings without an App
+/// the fallback is dead; tests that exercise bindings without a `TuiApp`
 /// get empty/zeroed values rather than panics.
 macro_rules! app_read {
     ($lua:expr, |$app:ident| $body:expr) => {{

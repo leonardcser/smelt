@@ -1,6 +1,6 @@
 use super::*;
 
-impl App {
+impl TuiApp {
     /// Send a permission decision — either to a child agent (via socket reply)
     /// or to the local engine. This is the single routing point for all
     /// permission verdicts.

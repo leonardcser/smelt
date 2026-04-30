@@ -1,6 +1,6 @@
 //! Background session persistence.
 //!
-//! `App::save_session` used to serialize + write the full session on the
+//! `TuiApp::save_session` used to serialize + write the full session on the
 //! main loop — easily 1–5 MB of JSON work at every turn boundary. This
 //! module moves the serialization and disk I/O to a worker thread. The
 //! main loop clones the session + the blob data it needs into a

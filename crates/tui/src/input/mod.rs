@@ -109,7 +109,7 @@ impl PromptState {
 
     /// Returns the current selection range as (start_byte, end_byte), ordered.
     /// Works for both vim visual modes and shift+key selection. `mode` is
-    /// the App-owned single-global VimMode (only consulted when vim is
+    /// the TuiApp-owned single-global VimMode (only consulted when vim is
     /// enabled on this prompt).
     pub fn selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
@@ -127,7 +127,7 @@ impl PromptState {
     }
 
     /// Selection range to *render* with the selection-bg style. Falls
-    /// back to the yank-flash range from the App-level kill ring when
+    /// back to the yank-flash range from the TuiApp-level kill ring when
     /// there's no real selection so vim copy ops (`yy`, `yw`, visual
     /// `y`, …) get the brief post-yank highlight, matching nvim's
     /// `vim.highlight.on_yank`. Editing logic must keep using
@@ -176,7 +176,7 @@ impl PromptState {
     }
 
     /// Select the word at `cpos`. Used by mouse double-click. `mode` is
-    /// the App-owned single-global VimMode written through when vim is
+    /// the TuiApp-owned single-global VimMode written through when vim is
     /// enabled.
     pub fn select_word_at(&mut self, cpos: usize, mode: &mut VimMode) -> Option<(usize, usize)> {
         let (start, end) = self.win.edit_buf.word_range_at(cpos)?;
@@ -222,7 +222,7 @@ impl PromptState {
     }
 
     /// Restore vim to a specific mode (used after double-Esc cancel).
-    /// Writes through `mode_ref` (the App-owned single global) and
+    /// Writes through `mode_ref` (the TuiApp-owned single global) and
     /// resets the in-flight key sequence on the prompt's Vim instance.
     pub fn set_vim_mode(&mut self, mode_ref: &mut VimMode, new: VimMode) {
         if self.win.vim_enabled {
@@ -519,7 +519,7 @@ impl PromptState {
             KeyAction::OpenHelp => Action::Noop,    // caller checks
             KeyAction::AcceptGhostText => Action::Noop, // caller checks
 
-            // ── App control ─────────────────────────────────────────────
+            // ── TuiApp control ─────────────────────────────────────────────
             KeyAction::ClearBuffer => {
                 self.clear();
                 Action::Redraw
@@ -924,7 +924,7 @@ impl PromptState {
     /// Process a terminal event. Returns what the caller should do next.
     ///
     /// Priority ladder: completer → vim → paste → resize → keymap → insert.
-    /// `mode` is the App-owned single-global VimMode; the bridge writes
+    /// `mode` is the TuiApp-owned single-global VimMode; the bridge writes
     /// through it during vim dispatch and other paths read it.
     pub fn handle_event(
         &mut self,
@@ -1818,7 +1818,7 @@ mod tests {
             &mut clip,
         );
         assert_eq!(input.buf, " world");
-        // Killed text lands on the App-level kill ring.
+        // Killed text lands on the TuiApp-level kill ring.
         assert_eq!(clip.kill_ring.current(), "hello");
     }
 

@@ -2,7 +2,7 @@
 //!
 //! `Transcript` owns the block history and the width-keyed display
 //! snapshot. Streaming input parsing lives in `StreamParser` (owned
-//! by `App`).
+//! by `TuiApp`).
 
 use super::display::SpanMeta;
 use crate::app::transcript_model::{

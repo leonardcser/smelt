@@ -1,6 +1,6 @@
 //! Headless-safe runtime core: subsystems that are independent of the
-//! terminal compositor. Lives behind `App.core` until the
-//! `TuiApp` / `HeadlessApp` split (a.12b) wraps it directly.
+//! terminal compositor. Lives at `TuiApp.core` and `HeadlessApp.core`;
+//! `Core::new(config, engine)` is the only construction path.
 
 use super::{
     app_config::AppConfig, cells, cells::Cells, commands, confirms::Confirms,
@@ -15,7 +15,7 @@ pub struct Core {
     /// api_key_env / provider_type / available_models / model_config /
     /// cli_*overrides / mode / mode_cycle / reasoning_effort /
     /// reasoning_cycle / settings / multi_agent / context_window.
-    /// Populated by `App::new` from CLI args + saved state, then
+    /// Populated by `TuiApp::new` from CLI args + saved state, then
     /// mutated by user actions (Shift+Tab cycles `mode`, `/model`
     /// rewrites `model`, etc.).
     pub config: AppConfig,
@@ -33,7 +33,7 @@ pub struct Core {
     /// Scheduled Lua callbacks. `smelt.timer.set` /
     /// `smelt.timer.every` / `smelt.timer.cancel` (and the
     /// `smelt.defer` alias) all route here through `with_app`.
-    /// Drained each main-loop iteration via `App::tick_timers`.
+    /// Drained each main-loop iteration via `TuiApp::tick_timers`.
     pub(crate) timers: Timers,
     /// Reactive name → value registry plus a deferred subscriber
     /// queue. Built-in cells declare here at startup; setters
@@ -52,7 +52,7 @@ pub struct Core {
 
 impl Core {
     /// Build the headless-safe core from a populated `AppConfig` and a
-    /// fresh `EngineHandle`. Both `App::new` (TUI) and `HeadlessApp::new`
+    /// fresh `EngineHandle`. Both `TuiApp::new` (TUI) and `HeadlessApp::new`
     /// (one-shot / subagent) call this — the only single source of
     /// truth for the eight subsystem fields' construction.
     pub fn new(config: AppConfig, engine: EngineHandle) -> Self {

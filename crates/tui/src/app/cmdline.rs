@@ -3,7 +3,7 @@
 //!
 //! All key handling lives in `cmdline_handle_key`, called by
 //! `events.rs` before compositor dispatch. The overlay leaf carries no
-//! Window-level keymap recipe; cmdline state mutates through the App
+//! Window-level keymap recipe; cmdline state mutates through the TuiApp
 //! directly, including text editing, history navigation, completer
 //! cycling, command execution, and dismissal.
 
@@ -19,7 +19,7 @@ use ui::{Constraint, LayoutTree, Overlay, SplitConfig};
 const PREFIX: &str = ":";
 const PREFIX_LEN: u16 = 1;
 
-impl App {
+impl TuiApp {
     pub fn cmdline_is_focused(&self) -> bool {
         self.well_known
             .cmdline

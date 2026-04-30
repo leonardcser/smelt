@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl App {
+impl TuiApp {
     pub(super) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
         self.update_spinner();
@@ -177,7 +177,7 @@ impl App {
         // Selection lands in a dedicated `NS_SELECTION` namespace so
         // its paint order is stable: `Window::render` walks all
         // namespaces in NsId order, and the selection ns is created
-        // after `ns_highlights` in `App::new`, so its spans paint
+        // after `ns_highlights` in `TuiApp::new`, so its spans paint
         // after projection highlights and override their bg/fg.
         if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
             let ns = buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);

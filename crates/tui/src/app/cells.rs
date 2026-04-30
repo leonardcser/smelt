@@ -7,13 +7,13 @@
 //! name on `set_dyn`. Writes (`set_dyn`) snapshot the new value and
 //! the union of (direct + matching glob) subscribers into a pending
 //! fire queue; the loop drains the queue at a safe point (after the
-//! current `&mut Cells` / `&mut App` borrow releases) so subscriber
+//! current `&mut Cells` / `&mut TuiApp` borrow releases) so subscriber
 //! bodies can re-enter `Cells` / other subsystems freely. Same
 //! "queue, release the borrow, then fire" pattern Timers and Lua
 //! keymap dispatch already use.
 //!
 //! `Rc<dyn Any>` is intentionally `!Send`-friendly: `Cells` lives on
-//! the `!Send` `App` and Lua values (carried as `mlua::RegistryKey`
+//! the `!Send` `TuiApp` and Lua values (carried as `mlua::RegistryKey`
 //! inside `LuaCellValue`) are non-Send too. Snapshots use `Rc::clone`
 //! so cell values never need a deep-clone impl — the subscriber sees
 //! the value as it stood at the moment of the `set`, even if later
@@ -313,7 +313,7 @@ impl Cells {
     }
 }
 
-/// Initial values App passes to `register_builtin_cells` so the
+/// Initial values TuiApp passes to `register_builtin_cells` so the
 /// stateful cells start with the same content the underlying source
 /// fields hold (mode, model, vim_mode, …) — ensures plugin authors
 /// reading `smelt.cell("agent_mode"):get()` at startup see the right
@@ -360,14 +360,14 @@ pub struct ConfirmResolved {
 /// Payload for the `history` cell. `kind` is a short stable string
 /// ("set" | "cleared" | "forked" | "loaded") describing the mutation,
 /// `count` is the post-mutation `messages.len()` so a subscriber sees
-/// the new size without having to reach into App state.
+/// the new size without having to reach into TuiApp state.
 #[derive(Debug, Clone)]
 pub struct HistoryDelta {
     pub kind: String,
     pub count: usize,
 }
 
-/// Payload for the `turn_end` cell. Fires from `App::finish_turn` on
+/// Payload for the `turn_end` cell. Fires from `TuiApp::finish_turn` on
 /// every turn termination — natural end (paired with `turn_complete`),
 /// cancel (Esc / Ctrl-C / mode switch), or error. `cancelled = true`
 /// for the cancel/error legs; subscribers needing the message list
@@ -604,7 +604,7 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("session_title", seeds.session_title);
     cells.declare("branch", seeds.branch);
     // `now` carries unix epoch seconds; Lua plugins format with
-    // `os.date("%H:%M:%S", smelt.cell("now"):get())`. App publishes
+    // `os.date("%H:%M:%S", smelt.cell("now"):get())`. TuiApp publishes
     // through `publish_diff_cells` so subscribers fire when the
     // second changes (loop must already be awake — idle ticks
     // genuinely have nothing to display).
@@ -614,7 +614,7 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     // Event-shaped cells: declared with an `EventStub` placeholder so
     // `smelt.cell.subscribe` works today; setters land later (turn
     // events with EngineBridge in a.11; confirm/session lifecycle as
-    // their App-side handlers migrate).
+    // their TuiApp-side handlers migrate).
     cells.declare("history", EventStub);
     cells.declare("turn_complete", EventStub);
     cells.declare("turn_error", EventStub);

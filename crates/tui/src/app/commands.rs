@@ -20,7 +20,7 @@ pub type CommandOutcome = CommandAction;
 ///
 /// Normalises a leading `:` to `/` so `/quit` and `:quit` dispatch
 /// identically.
-pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
+pub fn run_command(app: &mut TuiApp, line: &str) -> CommandOutcome {
     let line = line.trim();
     let normalized: String = if let Some(rest) = line.strip_prefix(':') {
         format!("/{rest}")
@@ -61,7 +61,7 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
 pub(crate) struct RustCommand {
     pub name: &'static str,
     pub desc: Option<&'static str>,
-    pub handler: fn(&mut App, Option<String>) -> CommandAction,
+    pub handler: fn(&mut TuiApp, Option<String>) -> CommandAction,
 }
 
 pub(crate) const RUST_COMMANDS: &[RustCommand] = &[
@@ -146,26 +146,26 @@ pub(crate) fn is_rust_command(name: &str) -> bool {
     RUST_COMMANDS.iter().any(|c| c.name == name)
 }
 
-fn cmd_quit(_: &mut App, _: Option<String>) -> CommandAction {
+fn cmd_quit(_: &mut TuiApp, _: Option<String>) -> CommandAction {
     CommandAction::Quit
 }
 
-fn cmd_clear(_: &mut App, _: Option<String>) -> CommandAction {
+fn cmd_clear(_: &mut TuiApp, _: Option<String>) -> CommandAction {
     CommandAction::CancelAndClear
 }
 
-fn cmd_compact(_: &mut App, arg: Option<String>) -> CommandAction {
+fn cmd_compact(_: &mut TuiApp, arg: Option<String>) -> CommandAction {
     CommandAction::Compact {
         instructions: arg.filter(|s| !s.is_empty()),
     }
 }
 
-fn cmd_fork(app: &mut App, _: Option<String>) -> CommandAction {
+fn cmd_fork(app: &mut TuiApp, _: Option<String>) -> CommandAction {
     app.fork_session();
     CommandAction::Continue
 }
 
-fn cmd_stats(app: &mut App, _: Option<String>) -> CommandAction {
+fn cmd_stats(app: &mut TuiApp, _: Option<String>) -> CommandAction {
     let entries = crate::metrics::load();
     let stats = crate::metrics::render_stats(&entries);
     let text = crate::metrics::render_stats_text(&stats);
@@ -173,7 +173,7 @@ fn cmd_stats(app: &mut App, _: Option<String>) -> CommandAction {
     CommandAction::Continue
 }
 
-fn cmd_cost(app: &mut App, _: Option<String>) -> CommandAction {
+fn cmd_cost(app: &mut TuiApp, _: Option<String>) -> CommandAction {
     let turns = app.user_turns().len();
     let resolved = engine::pricing::resolve(
         &app.core.config.model,
@@ -191,7 +191,7 @@ fn cmd_cost(app: &mut App, _: Option<String>) -> CommandAction {
     CommandAction::Continue
 }
 
-impl App {
+impl TuiApp {
     // ── Commands ─────────────────────────────────────────────────────────
 
     pub(super) fn handle_command(&mut self, input: &str) -> CommandAction {
@@ -546,7 +546,7 @@ fn paste_from_clipboard() -> Option<String> {
 }
 
 /// `ui::Sink` impl backed by the platform subprocess helpers. Owned
-/// by the App-level `ui::Clipboard` so vim yank / paste sites push
+/// by the TuiApp-level `ui::Clipboard` so vim yank / paste sites push
 /// through the same path the prompt and transcript already use.
 pub(crate) struct SystemSink;
 

@@ -1,12 +1,12 @@
 //! `pub(crate)` operations called by Lua bindings through `with_app`.
-//! Each method wraps a multi-step App mutation that the Lua layer
+//! Each method wraps a multi-step TuiApp mutation that the Lua layer
 //! invokes as a single semantic action — `/<command>` dispatch,
 //! settings toggle, transcript yank, and so on.
 
 use super::transcript_model::ConfirmChoice;
-use super::App;
+use super::TuiApp;
 
-impl App {
+impl TuiApp {
     /// Run a slash command. Mirrors the user typing `:<line>` into
     /// the cmdline — handles `Quit`, `CancelAndClear`, `Compact`,
     /// `Exec`, `Continue` action returns from `crate::api::cmd::run`.

@@ -45,9 +45,9 @@ pub enum Action {
 
 /// Shared mutable state that vim needs to operate on.
 ///
-/// `mode` is the **single global** App-owned `VimMode`; vim reads and
+/// `mode` is the **single global** TuiApp-owned `VimMode`; vim reads and
 /// writes it through this reference rather than owning a private copy.
-/// `clipboard` is the App-owned `Clipboard` subsystem (kill ring +
+/// `clipboard` is the TuiApp-owned `Clipboard` subsystem (kill ring +
 /// platform sink): yanks mirror into the sink, pastes pull from it
 /// when it was updated externally (see `KillRing::last_clipboard_write`).
 /// `curswant` is the per-Window preferred vertical-motion column (in
@@ -1888,7 +1888,7 @@ mod tests {
 
     /// Owns the cross-call state (clipboard + kill ring + undo history +
     /// mode + curswant + per-window vim state) that vim borrows.
-    /// `mode` mirrors the App-owned single-global VimMode in production
+    /// `mode` mirrors the TuiApp-owned single-global VimMode in production
     /// code; tests own one locally. `curswant` and `vim_state` mirror
     /// the per-Window state that production carries on `ui::Window`.
     struct TestHarness {

@@ -5,7 +5,7 @@
 use super::*;
 use crossterm::event::Event;
 
-impl App {
+impl TuiApp {
     pub(super) fn handle_event_app_history(&mut self, ev: &Event) -> EventOutcome {
         let k = match ev {
             Event::Key(k) => *k,

@@ -57,26 +57,26 @@ pub mod buf {
 /// subsequent slices as the `active_*` → live-block collapse progresses.
 pub mod block {
     use crate::app::transcript_model::{Block, BlockId, Status, ViewState};
-    use crate::app::App;
+    use crate::app::TuiApp;
 
     /// Current view state of a block.
-    pub fn view_state(app: &App, id: BlockId) -> ViewState {
+    pub fn view_state(app: &TuiApp, id: BlockId) -> ViewState {
         app.block_view_state(id)
     }
 
     /// Set a block's view state. Invalidates that block's layout cache
     /// so the next frame re-lays-out against the new state.
-    pub fn set_view_state(app: &mut App, id: BlockId, state: ViewState) {
+    pub fn set_view_state(app: &mut TuiApp, id: BlockId, state: ViewState) {
         app.set_block_view_state(id, state);
     }
 
     /// Current lifecycle status of a block.
-    pub fn status(app: &App, id: BlockId) -> Status {
+    pub fn status(app: &TuiApp, id: BlockId) -> Status {
         app.block_status(id)
     }
 
     /// Set a block's lifecycle status.
-    pub fn set_status(app: &mut App, id: BlockId, status: Status) {
+    pub fn set_status(app: &mut TuiApp, id: BlockId, status: Status) {
         app.set_block_status(id, status);
     }
 
@@ -84,20 +84,20 @@ pub mod block {
     /// `BlockId`. The id is stable across subsequent `rewrite` calls —
     /// the canonical handle for live-updating a block as a stream
     /// arrives.
-    pub fn push_streaming(app: &mut App, block: Block) -> BlockId {
+    pub fn push_streaming(app: &mut TuiApp, block: Block) -> BlockId {
         app.push_streaming(block)
     }
 
     /// Replace the content of an existing block in place. Preserves
     /// `BlockId`, `Status`, and `ViewState`; the layout cache
     /// auto-invalidates via the content-hash component of `LayoutKey`.
-    pub fn rewrite(app: &mut App, id: BlockId, block: Block) {
+    pub fn rewrite(app: &mut TuiApp, id: BlockId, block: Block) {
         app.rewrite_block(id, block);
     }
 
     /// `BlockId`s of blocks currently in `Status::Streaming`, in
     /// transcript order.
-    pub fn streaming_ids(app: &App) -> Vec<BlockId> {
+    pub fn streaming_ids(app: &TuiApp) -> Vec<BlockId> {
         app.streaming_block_ids()
     }
 }
@@ -107,7 +107,7 @@ pub mod block {
 /// register here; keybindings resolve to names that route through
 /// `run`. Modelled on nvim's `nvim_command` / `user_command` split.
 pub mod cmd {
-    use crate::app::App;
+    use crate::app::TuiApp;
 
     /// Result of running a command — tells the caller whether the app
     /// should continue, quit, clear, open a dialog, etc. Thin wrapper
@@ -122,7 +122,7 @@ pub mod cmd {
     /// The same code path runs whether the user typed the command,
     /// pressed a keybind that resolved to `Action::Cmd(name)`, or a
     /// plugin invoked it programmatically.
-    pub fn run(app: &mut App, line: &str) -> Outcome {
+    pub fn run(app: &mut TuiApp, line: &str) -> Outcome {
         crate::app::commands::run_command(app, line)
     }
 }

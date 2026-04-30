@@ -8,7 +8,7 @@ use crossterm::{
 };
 use std::time::{Duration, Instant};
 
-impl App {
+impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
 
     /// Handle a single terminal event, potentially starting/stopping agents.
@@ -69,7 +69,7 @@ impl App {
             if let Event::Key(k) = ev {
                 // Cmdline owns its keystrokes end-to-end: text edit,
                 // history nav, completer cycling, and command exec
-                // all need `&mut App`, so the overlay leaf has no
+                // all need `&mut TuiApp`, so the overlay leaf has no
                 // recipe and `cmdline_handle_key` runs every key
                 // before the generic compositor dispatch. Returns
                 // `Some(true)` only when the run command resolved to

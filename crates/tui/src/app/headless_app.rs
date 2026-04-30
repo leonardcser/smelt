@@ -3,7 +3,7 @@
 //! (persistent worker over a Unix socket). Constructed in
 //! `src/main.rs` directly — no `Ui`, no buffers, no compositor.
 //!
-//! The methods on `HeadlessApp` mirror the surface today's `App`
+//! The methods on `HeadlessApp` mirror the surface today's `TuiApp`
 //! offered for these two flows: `run_oneshot` drains a single turn
 //! and prints summaries; `run_subagent` enters a multi-turn loop
 //! receiving messages over a parent socket, forwarding LLM events

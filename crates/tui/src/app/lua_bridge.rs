@@ -1,12 +1,12 @@
-//! Per-tick glue between `App` and the Lua runtime. Drains pending
+//! Per-tick glue between `TuiApp` and the Lua runtime. Drains pending
 //! Lua callback invocations + the task-runtime inbox so dispatched
 //! handlers see a consistent state.
 
 use super::*;
 
-impl App {
+impl TuiApp {
     /// Vim-mode label for the currently focused buffer Window. Reads
-    /// the App-owned single-global `vim_mode` whenever the focused
+    /// the TuiApp-owned single-global `vim_mode` whenever the focused
     /// surface has a Vim instance attached. Returns `None` for
     /// surfaces without vim (nvim's "no mode in widget windows").
     pub(super) fn current_vim_mode_label(&self) -> Option<String> {
@@ -58,18 +58,18 @@ impl App {
 
     /// Drain the pending-invocation queue built up during
     /// `ui.dispatch_event` / `ui.fire_win_event`. Each Lua callback fires
-    /// under an `install_app_ptr` scope so its body can reach `&mut App`
+    /// under an `install_app_ptr` scope so its body can reach `&mut TuiApp`
     /// through `crate::lua::with_app`. Until a binding uses it, this is
     /// behaviour-neutral: callbacks just fire after the ui borrow
     /// releases instead of during it.
     ///
-    /// Two-phase to keep `&mut App` aliasing clean: phase 1 uses the
+    /// Two-phase to keep `&mut TuiApp` aliasing clean: phase 1 uses the
     /// `&mut self` borrow to prepare mlua Function + payload handles
     /// (these own internal refs to the Lua state, independent of Rust
     /// borrows on self); phase 2 installs the TLS pointer and calls
     /// each function with no Rust-level borrow on self alive — so a
     /// Lua body that reaches back via `with_app` gets the sole `&mut
-    /// App` reborrow.
+    /// TuiApp` reborrow.
     pub(super) fn drain_lua_invocations(&mut self) {
         loop {
             let pending = self.core.lua.drain_invocations();

@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl App {
+impl TuiApp {
     fn compute_status_position(&mut self) -> Option<content::StatusPosition> {
         match self.app_focus {
             crate::app::AppFocus::Prompt => {

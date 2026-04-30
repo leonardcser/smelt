@@ -1,4 +1,4 @@
-//! Transcript ownership on `App` — block history, streaming state
+//! Transcript ownership on `TuiApp` — block history, streaming state
 //! (thinking / text / tools / agents / exec), projection to a
 //! ui::Buffer, and the transcript-cursor glyph cache.
 
@@ -40,7 +40,7 @@ pub(crate) struct TranscriptCursor {
     pub soft_cursor: Option<SoftCursor>,
 }
 
-impl App {
+impl TuiApp {
     pub fn block_count(&self) -> usize {
         self.transcript.block_count()
     }
