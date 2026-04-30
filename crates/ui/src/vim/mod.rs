@@ -1,22 +1,18 @@
-mod motions;
-mod text_objects;
-
-pub(crate) use motions::{move_down, move_down_col, move_up, move_up_col};
-
 use crate::clipboard::Clipboard;
-use crate::text::{
-    char_class, line_end, line_start, word_backward_pos, word_forward_pos, CharClass,
+use crate::motions::{
+    advance_chars, clamp_normal, current_line_content_range, current_line_range, find_char,
+    find_matching_bracket, first_non_blank, first_non_blank_at, goto_line, line_end_normal,
+    move_down, move_down_col, move_left, move_right_inclusive, move_right_normal, move_up,
+    move_up_col, repeat_find, retreat_chars, word_end_pos, FindKind,
 };
+use crate::text::{
+    char_class, line_end, line_start, next_char_boundary, prev_char_boundary, word_backward_pos,
+    word_forward_pos, CharClass,
+};
+use crate::text_objects::text_object;
 use crate::undo::{UndoEntry, UndoHistory};
 use crate::AttachmentId;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use motions::{
-    advance_chars, clamp_normal, current_line_content_range, current_line_range, find_char,
-    find_matching_bracket, first_non_blank, first_non_blank_at, goto_line, line_end_normal,
-    move_left, move_right_inclusive, move_right_normal, next_char_boundary, prev_char_boundary,
-    repeat_find, retreat_chars, word_end_pos,
-};
-use text_objects::text_object;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -160,25 +156,6 @@ impl Op {
             Op::Delete => 'd',
             Op::Change => 'c',
             Op::Yank => 'y',
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FindKind {
-    Forward,
-    ForwardTill,
-    Backward,
-    BackwardTill,
-}
-
-impl FindKind {
-    fn reversed(self) -> Self {
-        match self {
-            FindKind::Forward => FindKind::Backward,
-            FindKind::ForwardTill => FindKind::BackwardTill,
-            FindKind::Backward => FindKind::Forward,
-            FindKind::BackwardTill => FindKind::ForwardTill,
         }
     }
 }

@@ -1,13 +1,11 @@
-//! Vim text-object selection (iw/aw, i"/a", i(/a(, etc.).
+//! Vim-shaped text-object selection (iw/aw, i"/a", i(/a(, etc.).
+//!
+//! Pure helpers over `&str` buffers — no editor state. Used by the vim
+//! keymap and any other code that wants the same selection semantics.
 
 use crate::text::{char_class, line_end, line_start, CharClass};
 
-pub(super) fn text_object(
-    buf: &str,
-    cpos: usize,
-    inner: bool,
-    kind: char,
-) -> Option<(usize, usize)> {
+pub fn text_object(buf: &str, cpos: usize, inner: bool, kind: char) -> Option<(usize, usize)> {
     match kind {
         'w' => text_object_word(buf, cpos, inner, CharClass::Word),
         'W' => text_object_word(buf, cpos, inner, CharClass::WORD),

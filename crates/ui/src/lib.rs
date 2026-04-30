@@ -8,9 +8,11 @@ pub mod flush;
 pub mod grid;
 pub mod kill_ring;
 pub mod layout;
+pub mod motions;
 pub mod overlay;
 pub mod style;
 pub mod text;
+pub mod text_objects;
 pub mod theme;
 pub mod undo;
 pub mod vim;
@@ -47,11 +49,12 @@ pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use kill_ring::KillRing;
 pub use layout::{Anchor, Border, Constraint, Corner, Gutters, LayoutTree, Rect, SeparatorStyle};
+pub use motions::FindKind;
 pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
 pub use style::{HlAttrs, HlGroup};
 pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
-pub use vim::{FindKind, VimMode, VimWindowState};
+pub use vim::{VimMode, VimWindowState};
 pub use window::{
     CursorKind, DrawContext, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit,
     Window, WindowViewport,
