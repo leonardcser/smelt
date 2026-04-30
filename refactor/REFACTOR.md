@@ -451,20 +451,31 @@ land before the migration can flip:
   `WindowRow`, and `StyledSegment` (the chrome-row intermediate
   representation moves into `prompt_data.rs` as private types).
 
-#### P1.d.3 — Transcript onto Window::render
+#### P1.d.3 — Transcript onto Window::render ✅ landed
 
-Migrate the `"transcript"` compositor layer onto the
-`painted_splits` path. Scrollbar paint and selection move onto
-`Window::render` extmarks; soft-wrap state lives on
-`Buffer::wrap_at` (already shipped as P1.a foundation but unused
-today). Transcript projection rewrites to populate the
-transcript Buffer + extmarks instead of `WindowView::set_rows`.
+Migrated the `"transcript"` compositor layer onto the
+`painted_splits` path. The transcript is now a `Window` opened at
+`TRANSCRIPT_WIN` over a fresh `transcript_display_buf` registered in
+`Ui::bufs`, painted via `Ui::render`'s post-layer closure.
+`TranscriptProjection` no longer owns its `Buffer` — `project()`
+borrows the display buffer instead. Selection lands as extmarks in a
+dedicated `NS_SELECTION` namespace; `Buffer::highlights_at` walks
+every namespace whose payload is `ExtmarkPayload::Highlight`, sorted
+by `NsId` ascending so selection paints on top of projection
+highlights. Soft cursor surfaces as `cursor_kind = Block`.
+`crates/tui/src/content/window_view.rs`,
+`crates/ui/src/buffer_view.rs`, and `crates/tui/src/content/scrollbar.rs`
+retire; the `BufferView`-only materialized cache on `Buffer`
+(`cached_highlights` / `cached_decorations` / `cache_tick` +
+`highlights_arc` / `decorations_arc` / `lines_arc`) retires with
+them. Soft-wrap onto `Buffer::wrap_at` is still pending — wrap state
+remains a per-line projection step until the `BufferParser` hooks
+land in P1.a-tail.
 
 #### P1.d.4 — Retire `Component` + `WidgetEvent::{Dismiss, Select}`
 
 With every consumer migrated, delete the trait + the two surviving
-event variants. `crates/ui/src/buffer_view.rs` /
-`crates/ui/src/component.rs` retire; `crates/tui/src/content/window_view.rs`
+event variants. `crates/ui/src/component.rs`
 retires. The compositor becomes overlay-aware only — no
 `Box<dyn Component>` storage.
 
