@@ -297,12 +297,11 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `plugins/theme.lua`               | 32  | `/theme` accent picker                | moved        | P4    | pending | → `colorschemes/<n>.lua` + `commands.lua` thin wrapper             |
 | `plugins/toggles.lua`             | 13  | `/vim`, `/thinking` toggles           | moved        | P4.e  | pending | → `commands.lua`                                                   |
 | `plugins/yank_block.lua`          | 12  | Optional `/yank-block`                | kept         | P4    | pending | Stays as opt-in plugin                                             |
+| `colorschemes/default.lua`        | 9   | Default colorscheme (ember accent)    | added        | P4.a  | landed  | Seed (`9bb2f11`); `require`-able as `smelt.colorschemes.default`. Pattern target for plugin-authored schemes. |
 
 **To be created (P4.a):**
 
-- `widgets/{input,options,list,picker,cmdline,statusline,notification}.lua`
-- `dialogs/{confirm,permissions,agents,rewind,resume}.lua`
-- `colorschemes/<default>.lua`
+- `widgets/{input,options,list,cmdline,statusline,notification}.lua`
 - `transcript.lua`, `diff.lua`, `status.lua`, `modes.lua`, `commands.lua`
 
 **To be created (P5.b) under `tools/`:**
