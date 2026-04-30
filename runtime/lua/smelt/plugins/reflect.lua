@@ -5,4 +5,7 @@
 
 smelt.cmd.register("reflect", function(arg)
   smelt.engine.submit_builtin_command("reflect", arg)
-end, { desc = "step back and rethink recent changes before moving on" })
+end, {
+  desc = "step back and rethink recent changes before moving on",
+  while_busy = false,
+})
