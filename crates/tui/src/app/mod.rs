@@ -1334,9 +1334,11 @@ impl TuiApp {
                     let coalesce_scroll = self.ui.focused_overlay().is_none();
                     let mut scroll_delta: isize = 0;
                     let mut scroll_row: u16 = 0;
+                    let mut scroll_col: u16 = 0;
                     let absorb = |ev: event::Event,
                                       delta: &mut isize,
-                                      row: &mut u16|
+                                      row: &mut u16,
+                                      col: &mut u16|
                      -> Option<event::Event> {
                         if !coalesce_scroll {
                             return Some(ev);
@@ -1346,11 +1348,13 @@ impl TuiApp {
                                 event::MouseEventKind::ScrollUp => {
                                     *delta -= 3;
                                     *row = m.row;
+                                    *col = m.column;
                                     return None;
                                 }
                                 event::MouseEventKind::ScrollDown => {
                                     *delta += 3;
                                     *row = m.row;
+                                    *col = m.column;
                                     return None;
                                 }
                                 _ => {}
@@ -1359,7 +1363,12 @@ impl TuiApp {
                         Some(ev)
                     };
 
-                    if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
+                    if let Some(ev) = absorb(
+                        ev,
+                        &mut scroll_delta,
+                        &mut scroll_row,
+                        &mut scroll_col,
+                    ) {
                         if self.dispatch_terminal_event(ev, &mut t) {
                             break 'main;
                         }
@@ -1368,7 +1377,12 @@ impl TuiApp {
                     // Drain buffered terminal events (coalesce scroll).
                     while event::poll(Duration::ZERO).unwrap_or(false) {
                         if let Ok(ev) = event::read() {
-                            if let Some(ev) = absorb(ev, &mut scroll_delta, &mut scroll_row) {
+                            if let Some(ev) = absorb(
+                                ev,
+                                &mut scroll_delta,
+                                &mut scroll_row,
+                                &mut scroll_col,
+                            ) {
                                 if self.dispatch_terminal_event(ev, &mut t) {
                                     break 'main;
                                 }
@@ -1378,7 +1392,7 @@ impl TuiApp {
 
                     // Apply any accumulated scroll as a single motion.
                     if scroll_delta != 0 {
-                        self.scroll_under_mouse(scroll_row, scroll_delta);
+                        self.scroll_under_mouse(scroll_row, scroll_col, scroll_delta);
                     }
 
                     self.render_normal(self.agent.is_some());

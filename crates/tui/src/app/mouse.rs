@@ -86,11 +86,11 @@ impl TuiApp {
 
         match me.kind {
             MouseEventKind::ScrollUp => {
-                self.scroll_under_mouse(me.row, -3);
+                self.scroll_under_mouse(me.row, me.column, -3);
                 EventOutcome::Redraw
             }
             MouseEventKind::ScrollDown => {
-                self.scroll_under_mouse(me.row, 3);
+                self.scroll_under_mouse(me.row, me.column, 3);
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
@@ -150,9 +150,15 @@ impl TuiApp {
     /// `delta` visual rows. The cursor's viewport-relative row stays
     /// constant — visually pinned in the viewport while the buffer
     /// scrolls under it. Same UX as the transcript today, applied to
-    /// every buffer surface.
-    pub(super) fn scroll_under_mouse(&mut self, row: u16, delta: isize) {
-        if matches!(self.layout.hit_test(row, 0), content::HitRegion::Prompt) {
+    /// every buffer surface. Routing reads `Ui::hit_test(row, col,
+    /// None)`: a `Window(PROMPT_WIN)` hit drives the prompt; anything
+    /// else falls back to the transcript scroll path.
+    pub(super) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
+        let on_prompt = matches!(
+            self.ui.hit_test(row, col, None),
+            Some(ui::HitTarget::Window(w)) if w == ui::PROMPT_WIN
+        );
+        if on_prompt {
             self.app_focus = crate::app::AppFocus::Prompt;
             // Prompt's `edit_buf.buf` is the source buffer (≠ wrapped
             // display rows). The vertical-motion helper operates on
