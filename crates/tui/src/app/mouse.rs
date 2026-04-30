@@ -7,17 +7,38 @@ impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
-        // Wheel-over-overlay absorb + active-modal click-outside
-        // absorb both live in `Ui::dispatch_event(Event::Mouse(_))`.
-        // For wheel-on-overlay we surface a redraw so the pointer
-        // hover updates; for modal absorb the redraw matters less but
-        // is still cheap. Anything Ui doesn't claim (`Ignored`) keeps
-        // flowing through the TuiApp-side routing below.
+        // Wheel-over-overlay absorb, active-modal click-outside
+        // absorb, and the scrollbar drag gesture all live in
+        // `Ui::dispatch_event(Event::Mouse(_))`. For wheel-on-overlay
+        // we surface a redraw so the pointer hover updates; modal
+        // absorb returns Noop. Scrollbar Down/Drag/Up land Ui-side
+        // and return `Status::Consumed`; the host reads back the new
+        // `scroll_top` from `Ui::win` and propagates to its mirror
+        // state for the owner pane. Anything Ui doesn't claim
+        // (`Ignored`) keeps flowing through the TuiApp-side routing
+        // below.
+        let cap_before = self.ui.capture();
         if matches!(
             self.ui
                 .dispatch_event(ui::Event::Mouse(me), &mut |_, _, _| {}),
             ui::Status::Consumed
         ) {
+            let scrollbar_owner = match (cap_before, self.ui.capture()) {
+                (Some(ui::HitTarget::Scrollbar { owner }), _)
+                | (_, Some(ui::HitTarget::Scrollbar { owner })) => Some(owner),
+                _ => None,
+            };
+            if let Some(owner) = scrollbar_owner {
+                self.propagate_scrollbar_scroll(owner);
+                if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if owner == ui::TRANSCRIPT_WIN {
+                        self.app_focus = crate::app::AppFocus::Content;
+                    } else if owner == ui::PROMPT_WIN {
+                        self.app_focus = crate::app::AppFocus::Prompt;
+                    }
+                }
+                return EventOutcome::Redraw;
+            }
             let is_scroll = matches!(
                 me.kind,
                 MouseEventKind::ScrollUp
@@ -48,11 +69,7 @@ impl TuiApp {
                 // `Window::mouse_up` self-guards bare clicks (no yank,
                 // no clear-on-empty) and handles its own anchor cleanup,
                 // so both branches just dispatch unconditionally.
-                // Scrollbar drag is a `TuiApp`-owned gesture and takes the
-                // Up itself — the adapter call is skipped there.
-                if !matches!(self.ui.capture(), Some(ui::HitTarget::Scrollbar { .. })) {
-                    self.dispatch_focused_mouse(me, 0);
-                }
+                self.dispatch_focused_mouse(me, 0);
                 if self.app_focus == crate::app::AppFocus::Prompt {
                     if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
                         if self.input.win.vim_enabled {
@@ -62,7 +79,6 @@ impl TuiApp {
                 }
                 self.mouse_drag_active = false;
                 self.drag_autoscroll_since = None;
-                self.ui.clear_capture();
                 return EventOutcome::Redraw;
             }
             _ => {}
@@ -93,10 +109,6 @@ impl TuiApp {
                 if let Some(vp) = self.viewport_for(ui::PROMPT_WIN) {
                     if vp.contains(me.row, me.column) {
                         self.app_focus = crate::app::AppFocus::Prompt;
-                        if self.begin_scrollbar_drag_if_hit(me.row, me.column, ui::PROMPT_WIN) {
-                            return EventOutcome::Redraw;
-                        }
-                        self.ui.clear_capture();
                         if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
                             && self.input.win.vim_enabled
                         {
@@ -122,13 +134,9 @@ impl TuiApp {
                 }
                 self.app_focus = crate::app::AppFocus::Content;
                 // Route the event through the `Viewport` recorded by
-                // the last paint: scrollbar clicks latch a
-                // `ScrollbarDrag`; content clicks delegate to the
-                // transcript Window's mouse handler.
-                if self.begin_scrollbar_drag_if_hit(me.row, me.column, ui::TRANSCRIPT_WIN) {
-                    return EventOutcome::Redraw;
-                }
-                self.ui.clear_capture();
+                // the last paint: content clicks delegate to the
+                // transcript Window's mouse handler. Scrollbar clicks
+                // are absorbed earlier by `Ui::dispatch_event`.
                 self.handle_content_mouse(me, count);
                 EventOutcome::Redraw
             }
@@ -185,13 +193,10 @@ impl TuiApp {
         }
     }
 
-    /// Drag handler: scrollbar drags re-snap the thumb; otherwise the
-    /// event flows to the focused buffer adapter.
+    /// Drag handler: scrollbar drags are absorbed Ui-side; this only
+    /// fires for content drags, which extend the focused buffer's
+    /// selection.
     fn extend_selection_to(&mut self, me: MouseEvent) {
-        if let Some(ui::HitTarget::Scrollbar { owner }) = self.ui.capture() {
-            self.apply_scrollbar_drag(owner, me.row);
-            return;
-        }
         self.dispatch_focused_mouse(me, 0);
     }
 
@@ -202,10 +207,7 @@ impl TuiApp {
     /// its sleep interval down the longer the cursor stays at the edge,
     /// which is how acceleration happens.
     pub(super) fn tick_drag_autoscroll(&mut self) {
-        if !self.mouse_drag_active
-            || self.app_focus != crate::app::AppFocus::Content
-            || matches!(self.ui.capture(), Some(ui::HitTarget::Scrollbar { .. }))
-        {
+        if !self.mouse_drag_active || self.app_focus != crate::app::AppFocus::Content {
             self.drag_autoscroll_since = None;
             return;
         }
@@ -372,42 +374,20 @@ impl TuiApp {
         }
     }
 
-    /// If `(row, col)` lands on the scrollbar of `owner`'s pane, latch
-    /// a `HitTarget::Scrollbar { owner }` capture on `Ui` so subsequent
-    /// drag rows continue mapping to it even when the pointer wanders
-    /// off the track. Snaps the buffer's scroll once so the thumb
-    /// re-centres under the pointer. Returns `true` when consumed.
-    fn begin_scrollbar_drag_if_hit(&mut self, row: u16, col: u16, owner: ui::WinId) -> bool {
-        let Some(vp) = self.viewport_for(owner) else {
-            return false;
-        };
-        let Some(bar) = vp.scrollbar else {
-            return false;
-        };
-        if !bar.contains(vp.rect, row, col) {
-            return false;
-        }
-        self.ui.set_capture(ui::HitTarget::Scrollbar { owner });
-        self.apply_scrollbar_drag(owner, row);
-        true
-    }
-
-    /// Apply an in-flight scrollbar drag to the current pointer row:
-    /// translate the row into a thumb-top via the captured target's
-    /// scrollbar geometry, then into a buffer scroll offset via the
-    /// region's proportional map.
-    fn apply_scrollbar_drag(&mut self, owner: ui::WinId, row: u16) {
-        let Some(vp) = self.viewport_for(owner) else {
+    /// Mirror the new `scroll_top` `Ui::dispatch_event` wrote to
+    /// `Ui::wins[owner]` back onto the host's parallel pane state so
+    /// the next render reflects the scroll. For the transcript also
+    /// recomputes `follow_tail` against the projected display rows
+    /// and re-anchors its in-pane cursor to whichever visible row
+    /// the scroll resolved to. PROMPT_WIN only needs the raw
+    /// `scroll_top` copy — the next render-loop pass clamps it
+    /// against the prompt buffer's height.
+    fn propagate_scrollbar_scroll(&mut self, owner: ui::WinId) {
+        let Some(scroll_top) = self.ui.win(owner).map(|w| w.scroll_top) else {
             return;
         };
-        let Some(bar) = vp.scrollbar else {
-            return;
-        };
-        let rel_row = row.saturating_sub(vp.rect.top);
-        let thumb_top = bar.thumb_top_for_click(rel_row);
-        let from_top = bar.scroll_from_top_for_thumb(thumb_top);
         if owner == ui::TRANSCRIPT_WIN {
-            self.transcript_window.scroll_top = from_top;
+            self.transcript_window.scroll_top = scroll_top;
             let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             let viewport = self.viewport_rows_estimate();
             let max_scroll = (rows.len() as u16).saturating_sub(viewport);
@@ -415,7 +395,7 @@ impl TuiApp {
             self.transcript_window
                 .reanchor_to_visible_row(&rows, viewport);
         } else if owner == ui::PROMPT_WIN {
-            self.input.win.scroll_top = from_top;
+            self.input.win.scroll_top = scroll_top;
         }
     }
 

@@ -397,9 +397,9 @@ impl Ui {
     /// leaf underneath. Overlays are checked first (topmost-z to
     /// lowest, modal-aware — see `overlay_hit_test`); when no overlay
     /// covers the point, walks splits leaves in declaration order.
-    /// `Scrollbar` results are reserved for the eventual split-render
-    /// path where Window publishes its scrollbar rect; this method
-    /// never returns `Scrollbar` yet.
+    /// Splits leaves with a painted scrollbar return
+    /// [`HitTarget::Scrollbar`] when the click lands on the bar's
+    /// column; the rest of the leaf returns [`HitTarget::Window`].
     pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
@@ -410,9 +410,20 @@ impl Ui {
         let split_rects = self.resolve_splits();
         for win in self.splits.leaves_in_order() {
             if let Some(rect) = split_rects.get(&win) {
-                if rect.contains(row, col) {
-                    return Some(HitTarget::Window(win));
+                if !rect.contains(row, col) {
+                    continue;
                 }
+                if let Some(bar_owner) = self
+                    .wins
+                    .get(&win)
+                    .and_then(|w| w.viewport)
+                    .and_then(|vp| vp.scrollbar.map(|bar| (vp, bar)))
+                    .filter(|(vp, bar)| bar.contains(vp.rect, row, col))
+                    .map(|_| win)
+                {
+                    return Some(HitTarget::Scrollbar { owner: bar_owner });
+                }
+                return Some(HitTarget::Window(win));
             }
         }
         None
@@ -993,17 +1004,24 @@ impl Ui {
     ///   work (cache invalidation, layout adapters) on top.
     /// - [`Event::Mouse`] — absorbs wheel events that drift over a
     ///   focused overlay (so they don't bleed into the transcript
-    ///   below) and absorbs clicks/drags outside the rect of an
-    ///   active modal overlay. All other mouse routing (drag, click
-    ///   counts, scrollbar, prompt/transcript cursor positioning)
-    ///   stays host-side; Ui returns `Ignored` so the host can
-    ///   continue routing.
+    ///   below), absorbs clicks/drags outside the rect of an active
+    ///   modal overlay, and owns the scrollbar drag gesture: a
+    ///   left-Down on a painted scrollbar latches a
+    ///   [`HitTarget::Scrollbar`] capture and snaps the owning
+    ///   window's `scroll_top`; subsequent left-Drag rows re-snap
+    ///   while the capture holds; left-Up releases the capture.
+    ///   Hosts mirroring `scroll_top` elsewhere read it back from
+    ///   [`Ui::win`] after dispatch returns `Consumed` and apply any
+    ///   per-window side effects (re-anchor, follow-tail). All other
+    ///   mouse routing (content drag, click counts, prompt/transcript
+    ///   cursor positioning) stays host-side; Ui returns `Ignored`
+    ///   so the host can continue routing.
     /// - [`Event::FocusGained`] / [`Event::FocusLost`] /
     ///   [`Event::Paste`] — Ui has no state to update; returns
     ///   `Ignored` so hosts can track terminal focus / drive
     ///   paste-side effects.
     pub fn dispatch_event(&mut self, ev: Event, lua_invoke: &mut LuaInvoke) -> Status {
-        use crossterm::event::{KeyEvent, MouseEventKind};
+        use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
         match ev {
             Event::Key(KeyEvent {
                 code, modifiers, ..
@@ -1013,6 +1031,30 @@ impl Ui {
                 Status::Consumed
             }
             Event::Mouse(me) => {
+                match me.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(HitTarget::Scrollbar { owner }) =
+                            self.hit_test(me.row, me.column, None)
+                        {
+                            self.set_capture(HitTarget::Scrollbar { owner });
+                            self.apply_scrollbar_drag(owner, me.row);
+                            return Status::Consumed;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(HitTarget::Scrollbar { owner }) = self.capture {
+                            self.apply_scrollbar_drag(owner, me.row);
+                            return Status::Consumed;
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if matches!(self.capture, Some(HitTarget::Scrollbar { .. })) {
+                            self.clear_capture();
+                            return Status::Consumed;
+                        }
+                    }
+                    _ => {}
+                }
                 let is_scroll = matches!(
                     me.kind,
                     MouseEventKind::ScrollUp
@@ -1034,6 +1076,29 @@ impl Ui {
                 Status::Ignored
             }
             Event::FocusGained | Event::FocusLost | Event::Paste(_) => Status::Ignored,
+        }
+    }
+
+    /// Translate a scrollbar-drag pointer row into a scroll offset on
+    /// `owner`'s painted viewport and write it to
+    /// `Ui::wins[owner].scroll_top`. No-op when `owner` is missing or
+    /// has no painted scrollbar — defensive against torn state when a
+    /// drag outlives the underlying viewport.
+    fn apply_scrollbar_drag(&mut self, owner: WinId, row: u16) {
+        let Some(win) = self.wins.get(&owner) else {
+            return;
+        };
+        let Some(vp) = win.viewport else {
+            return;
+        };
+        let Some(bar) = vp.scrollbar else {
+            return;
+        };
+        let rel_row = row.saturating_sub(vp.rect.top);
+        let thumb_top = bar.thumb_top_for_click(rel_row);
+        let from_top = bar.scroll_from_top_for_thumb(thumb_top);
+        if let Some(win) = self.wins.get_mut(&owner) {
+            win.scroll_top = from_top;
         }
     }
 
@@ -2661,5 +2726,119 @@ mod tests {
         // Different cell resets the count.
         assert_eq!(ui.record_click(5, 7), 2);
         assert_eq!(ui.record_click(8, 7), 1);
+    }
+
+    /// Set up a single splits leaf at `(0, 0, 20, 10)` with a painted
+    /// scrollbar at column 19 covering 100 rows of content. Returns
+    /// the leaf's `WinId` so callers can latch capture / hit-test
+    /// against it.
+    fn make_scrollbar_split(ui: &mut Ui) -> WinId {
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
+        let rect = layout::Rect::new(0, 0, 20, 10);
+        let bar = window::ScrollbarState::new(19, 100, 10).unwrap();
+        let w = ui.win_mut(win).unwrap();
+        w.viewport = Some(window::WindowViewport::new(rect, 19, 100, 0, Some(bar)));
+        win
+    }
+
+    fn mouse_event(kind: crossterm::event::MouseEventKind, row: u16, col: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            row,
+            column: col,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn hit_test_returns_scrollbar_for_splits_leaf_with_painted_bar() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        // Column 19 is the scrollbar column; rows 0..10 are inside the
+        // viewport.
+        assert_eq!(
+            ui.hit_test(3, 19, None),
+            Some(HitTarget::Scrollbar { owner: win })
+        );
+        // Same row, column 18 → content, not scrollbar.
+        assert_eq!(ui.hit_test(3, 18, None), Some(HitTarget::Window(win)));
+    }
+
+    #[test]
+    fn dispatch_mouse_left_down_on_scrollbar_latches_capture_and_snaps_scroll() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        let down = mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            9,
+            19,
+        );
+        let status = ui.dispatch_event(down, &mut |_, _, _| {});
+        assert_eq!(status, Status::Consumed);
+        assert_eq!(ui.capture(), Some(HitTarget::Scrollbar { owner: win }));
+        // Bottom row click → bar snaps to max scroll (90 = total - viewport).
+        assert_eq!(ui.win(win).unwrap().scroll_top, 90);
+    }
+
+    #[test]
+    fn dispatch_mouse_left_drag_with_scrollbar_capture_resnaps_scroll() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        ui.set_capture(HitTarget::Scrollbar { owner: win });
+        let drag = mouse_event(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            5,
+            5,
+        );
+        let status = ui.dispatch_event(drag, &mut |_, _, _| {});
+        assert_eq!(status, Status::Consumed);
+        // Capture survives the drag.
+        assert_eq!(ui.capture(), Some(HitTarget::Scrollbar { owner: win }));
+        // Mid-track drag advances scroll past zero.
+        assert!(ui.win(win).unwrap().scroll_top > 0);
+    }
+
+    #[test]
+    fn dispatch_mouse_left_up_with_scrollbar_capture_clears_it() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        ui.set_capture(HitTarget::Scrollbar { owner: win });
+        let up = mouse_event(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            0,
+            0,
+        );
+        let status = ui.dispatch_event(up, &mut |_, _, _| {});
+        assert_eq!(status, Status::Consumed);
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn dispatch_mouse_left_down_off_scrollbar_returns_ignored() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        let down = mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            3,
+            5,
+        );
+        let status = ui.dispatch_event(down, &mut |_, _, _| {});
+        // Splits leaf without scrollbar capture is host-routed.
+        assert_eq!(status, Status::Ignored);
+        assert_eq!(ui.capture(), None);
+        let _ = win;
     }
 }
