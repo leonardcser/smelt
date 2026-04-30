@@ -301,13 +301,6 @@ pub struct App {
     /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
     /// up the longer the cursor stays at the edge.
     pub drag_autoscroll_since: Option<std::time::Instant>,
-    /// When the initial mouse-down landed on a scrollbar (prompt or
-    /// transcript), every subsequent drag tick
-    /// re-maps the pointer row to a scroll offset instead of extending
-    /// a visual selection — even if the pointer wanders off the track
-    /// column. The stored value records which surface's scrollbar owns
-    /// the gesture.
-    pub drag_on_scrollbar: Option<ScrollbarDragTarget>,
     /// Prompt vim mode at the start of a mouse-drag. Set on mouse-down
     /// inside the prompt viewport (only when vim is enabled) before the
     /// drag enters `Visual`, restored on mouse-up so a drag from Insert
@@ -370,13 +363,6 @@ pub struct App {
 pub enum AppFocus {
     Prompt,
     Content,
-}
-
-/// Which surface's scrollbar is driving an in-flight drag gesture.
-/// `Focus(_)` points at the transcript or prompt window; `DialogPanel`
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScrollbarDragTarget {
-    Focus(AppFocus),
 }
 
 pub(super) struct TurnState {
@@ -772,7 +758,6 @@ impl App {
             last_click: None,
             mouse_drag_active: false,
             drag_autoscroll_since: None,
-            drag_on_scrollbar: None,
             prompt_drag_return_vim_mode: None,
             vim_mode: ui::VimMode::Insert,
             clipboard: ui::Clipboard::new(Box::new(commands::SystemSink)),
