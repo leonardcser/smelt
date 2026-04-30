@@ -545,10 +545,17 @@ bridges, then the aggregate.
     callsite to read through `self.core.<subsystem>.X` /
     `app.core.<subsystem>.X`. `tools: ToolRuntime` slot stays vacant
     because a.10 is gated on P5.a.
-  - **a.12b** — rename `App` → `TuiApp`; carve `HeadlessApp { core,
-    sink: HeadlessSink }` over today's headless-coordinator surface;
-    the TUI / headless / sub-agent entry points in `src/main.rs`
-    dispatch to the right frontend type up-front.
+  - **a.12b** — frontend split. Splits across two sessions because the
+    HeadlessApp carve (~600 LOC moved + new `Core::new` + sink
+    encapsulation + main.rs branch flip) and the `App` → `TuiApp`
+    rename (~300+ callsites) are each natural single-session units:
+    - **a.12b1** — carve `HeadlessApp { core, sink: HeadlessSink }`
+      over today's `App::run_headless` / `App::run_subagent` surface;
+      add `Core::new(config, engine)` so both frontends share the
+      headless-safe construction path; main.rs branches on
+      `args.headless || args.subagent` *before* `App::new`,
+      constructing `HeadlessApp` directly for those paths.
+    - **a.12b2** — rename `App` → `TuiApp` throughout the codebase.
 
 Aggregate:
 
