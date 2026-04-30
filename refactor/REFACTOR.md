@@ -470,13 +470,14 @@ bridges, then the aggregate.
       `TokenUsage → Lua table` projector. Auxiliary (background)
       requests are excluded so a subscriber sees only user-visible
       context flow.
-    - **a.4c.3** — event-shaped cells (`history`, `turn_complete`,
-      `turn_error`, `confirm_requested`, `confirm_resolved`,
-      `session_started`, `session_ended`) wired to their existing
-      handlers; payload projectors for `TurnMeta`, `TurnError`,
-      handle ids, etc. Some entries (`turn_complete`, `turn_error`)
-      fold cleanly into `EngineBridge` once a.11 lands; others
-      (confirm/session lifecycle) are App-side.
+    - **a.4c.3** ✅ — seven event-shaped cells (`history`,
+      `turn_complete`, `turn_error`, `confirm_requested`,
+      `confirm_resolved`, `session_started`, `session_ended`) wired
+      to their existing handlers; typed payload structs + projectors
+      live in `app/cells.rs`; `ConfirmChoice` projects to a stable
+      short label string. `turn_complete` / `turn_error` publishes
+      relocate alongside their handlers when EngineBridge lands
+      (a.11).
 - **a.5** ✅ — `Timers { set, every, cancel }` carve-out: storage
   lifts off `LuaShared.timers` onto `app::timers::Timers` on `App`;
   `App::tick_timers` drains via `Timers::drain_due` (re-arms
