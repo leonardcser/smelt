@@ -5,9 +5,7 @@
 //! by `TuiApp`).
 
 use super::display::SpanMeta;
-use crate::app::transcript_model::{
-    Block, BlockHistory, BlockId, LayoutKey, Status, ToolState, ViewState,
-};
+use crate::app::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -586,30 +584,8 @@ impl Transcript {
         self.history.set_view_state(id, state);
     }
 
-    pub fn block_status(&self, id: BlockId) -> Status {
-        self.history.status(id)
-    }
-
-    pub fn set_block_status(&mut self, id: BlockId, status: Status) {
-        self.history.set_status(id, status);
-    }
-
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.history.drain_finished_blocks()
-    }
-
-    pub fn rewrite_block(&mut self, id: BlockId, block: Block) {
-        self.history.rewrite(id, block);
-    }
-
-    pub fn push_streaming(&mut self, block: Block) -> BlockId {
-        let id = self.history.push(block);
-        self.history.set_status(id, Status::Streaming);
-        id
-    }
-
-    pub fn streaming_block_ids(&self) -> Vec<BlockId> {
-        self.history.streaming_block_ids().collect()
     }
 
     pub fn set_tool_state(&mut self, call_id: String, state: ToolState) {

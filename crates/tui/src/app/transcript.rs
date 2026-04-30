@@ -3,7 +3,7 @@
 //! ui::Buffer, and the transcript-cursor glyph cache.
 
 use super::transcript_model::{
-    AgentBlockStatus, Block, BlockId, Status, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    AgentBlockStatus, Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 use super::*;
 use crate::app::transcript_cache::{PersistedLayoutCache, RenderCache};
@@ -430,28 +430,8 @@ impl TuiApp {
         self.transcript.set_block_view_state(id, state);
     }
 
-    pub fn block_status(&self, id: BlockId) -> Status {
-        self.transcript.block_status(id)
-    }
-
-    pub fn set_block_status(&mut self, id: BlockId, status: Status) {
-        self.transcript.set_block_status(id, status);
-    }
-
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.transcript.drain_finished_blocks()
-    }
-
-    pub fn rewrite_block(&mut self, id: BlockId, block: Block) {
-        self.transcript.rewrite_block(id, block);
-    }
-
-    pub fn push_streaming(&mut self, block: Block) -> BlockId {
-        self.transcript.push_streaming(block)
-    }
-
-    pub fn streaming_block_ids(&self) -> Vec<BlockId> {
-        self.transcript.streaming_block_ids()
     }
 
     pub fn update_tool_state(
