@@ -113,8 +113,13 @@ impl PromptState {
     /// enabled on this prompt).
     pub fn selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
-        if let Some(ref vim) = self.win.vim {
-            if let Some(range) = vim.visual_range(&self.win.edit_buf.buf, self.win.cpos, mode) {
+        if self.win.vim.is_some() {
+            if let Some(range) = ui::Vim::visual_range(
+                &self.win.vim_state,
+                &self.win.edit_buf.buf,
+                self.win.cpos,
+                mode,
+            ) {
                 return Some(range);
             }
         }
@@ -177,7 +182,12 @@ impl PromptState {
         let (start, end) = self.win.edit_buf.word_range_at(cpos)?;
         self.win.cpos = end.saturating_sub(1).max(start);
         if let Some(vim) = self.win.vim.as_mut() {
-            vim.begin_visual(mode, crate::vim::VimMode::Visual, start);
+            vim.begin_visual(
+                mode,
+                &mut self.win.vim_state,
+                crate::vim::VimMode::Visual,
+                start,
+            );
         } else {
             self.win.win_cursor.set_anchor(Some(start));
         }

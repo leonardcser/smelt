@@ -2,9 +2,10 @@
 //!
 //! Vim borrows the input's live `buf`/`cpos`/`attachment_ids` plus the
 //! `UndoHistory` owned by `PromptState`, the **single global** `VimMode`
-//! owned by `App`, and the **single global** `Clipboard` (kill ring +
-//! platform sink) also owned by `App`. Both globals are threaded in by
-//! the caller so vim and every other surface read one source of truth.
+//! owned by `App`, the **single global** `Clipboard` (kill ring + platform
+//! sink) also owned by `App`, and the per-Window `WindowCursor` +
+//! `VimWindowState` (Visual anchor, last `f`/`t`, `curswant`) carried on
+//! `ui::Window`. Vim itself holds only in-flight key-sequence state.
 
 use super::{Action, History, PromptState};
 use crate::vim::{self, VimContext, VimMode};
@@ -37,13 +38,7 @@ impl PromptState {
         };
         let key_ev: KeyEvent = *key_ev;
 
-        // Seed vim's curswant from the window cursor so a prior
-        // shift+arrow-driven vertical motion's preferred column is
-        // preserved when the user next hits j/k, and write it back out
-        // after — one source of truth, one `curswant`.
-        let seed = self.win.win_cursor.curswant();
         let vim = self.win.vim.as_mut().unwrap();
-        vim.set_curswant(seed);
         let result = {
             let mut ctx = VimContext {
                 buf: &mut self.win.edit_buf.buf,
@@ -52,11 +47,11 @@ impl PromptState {
                 history: &mut self.win.edit_buf.history,
                 clipboard,
                 mode,
+                cursor: &mut self.win.win_cursor,
+                vim_state: &mut self.win.vim_state,
             };
             vim.handle_key(key_ev, &mut ctx)
         };
-        let post = self.win.vim.as_ref().unwrap().curswant();
-        self.win.win_cursor.set_curswant(post);
 
         match result {
             vim::Action::Consumed => {

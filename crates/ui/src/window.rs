@@ -5,7 +5,7 @@ use crate::grid::{GridSlice, Style};
 use crate::layout::{Gutters, Rect};
 use crate::text::{byte_to_cell, cell_to_byte};
 use crate::theme::Theme;
-use crate::vim::{Action, Vim, VimContext, VimMode};
+use crate::vim::{Action, Vim, VimContext, VimMode, VimWindowState};
 use crate::window_cursor::WindowCursor;
 use crate::{BufId, WinId};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -261,6 +261,11 @@ pub struct Window {
     pub edit_buf: EditBuffer,
     pub cpos: usize,
     pub vim: Option<Vim>,
+    /// Persistent per-Window vim state (Visual anchor, last `f`/`t`
+    /// target). Lives on `Window` rather than `Vim` so the in-flight
+    /// key-sequence state on `Vim` stays the only thing scoped to a
+    /// single keystroke run; vim reads/writes through `VimContext`.
+    pub vim_state: VimWindowState,
     pub win_cursor: WindowCursor,
     pub scroll_top: u16,
     pub cursor_line: u16,
@@ -304,6 +309,7 @@ impl Window {
             edit_buf: EditBuffer::readonly(),
             cpos: 0,
             vim: None,
+            vim_state: VimWindowState::default(),
             win_cursor: WindowCursor::new(),
             scroll_top: 0,
             cursor_line: 0,
@@ -346,8 +352,8 @@ impl Window {
 
     pub fn selection_range(&self, rows: &[String], mode: VimMode) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(rows);
-        if let Some(ref vim) = self.vim {
-            if let Some(range) = vim.visual_range(&rows.join("\n"), cpos, mode) {
+        if self.vim.is_some() {
+            if let Some(range) = Vim::visual_range(&self.vim_state, &rows.join("\n"), cpos, mode) {
                 return Some(range);
             }
         }
@@ -430,7 +436,7 @@ impl Window {
         let offsets = Self::line_start_offsets(rows);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         if let Some(vim) = self.vim.as_mut() {
-            vim.begin_visual(mode, VimMode::Visual, start);
+            vim.begin_visual(mode, &mut self.vim_state, VimMode::Visual, start);
         } else {
             self.win_cursor.set_anchor(Some(start));
         }
@@ -661,7 +667,7 @@ impl Window {
                 self.drag_anchor_word = None;
                 self.drag_anchor_line = None;
                 if let Some(vim) = self.vim.as_mut() {
-                    vim.begin_visual(ctx.vim_mode, VimMode::Visual, cpos);
+                    vim.begin_visual(ctx.vim_mode, &mut self.vim_state, VimMode::Visual, cpos);
                 } else {
                     self.win_cursor.set_anchor(Some(cpos));
                 }
@@ -742,7 +748,12 @@ impl Window {
         };
         self.cpos = new_cpos;
         if let Some(vim) = self.vim.as_mut() {
-            vim.begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
+            vim.begin_visual(
+                ctx.vim_mode,
+                &mut self.vim_state,
+                VimMode::Visual,
+                new_anchor,
+            );
         } else {
             self.win_cursor.set_anchor(Some(new_anchor));
         }
@@ -768,7 +779,12 @@ impl Window {
         };
         self.cpos = new_cpos;
         if let Some(vim) = self.vim.as_mut() {
-            vim.begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
+            vim.begin_visual(
+                ctx.vim_mode,
+                &mut self.vim_state,
+                VimMode::Visual,
+                new_anchor,
+            );
         } else {
             self.win_cursor.set_anchor(Some(new_anchor));
         }
@@ -835,7 +851,6 @@ impl Window {
             },
             _ => key,
         };
-        vim.set_curswant(self.win_cursor.curswant());
         let mut cpos = self.cpos;
         let mut ctx = VimContext {
             buf: &mut self.edit_buf.buf,
@@ -844,10 +859,11 @@ impl Window {
             history: &mut self.edit_buf.history,
             clipboard,
             mode,
+            cursor: &mut self.win_cursor,
+            vim_state: &mut self.vim_state,
         };
         let action = vim.handle_key(key, &mut ctx);
         self.cpos = cpos;
-        self.win_cursor.set_curswant(vim.curswant());
         !matches!(action, Action::Passthrough)
     }
 
