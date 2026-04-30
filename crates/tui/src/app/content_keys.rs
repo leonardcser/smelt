@@ -66,7 +66,7 @@ impl App {
             return outcome;
         }
 
-        if self.transcript_window.vim_enabled() {
+        if self.transcript_window.vim_enabled {
             if self.handle_content_vim_key(k) {
                 return EventOutcome::Redraw;
             }

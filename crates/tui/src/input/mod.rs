@@ -9,7 +9,7 @@ use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::CompleterSession;
 use crate::content;
 use crate::keymap::{self, KeyAction, KeyContext};
-use crate::vim::{Vim, VimMode};
+use crate::vim::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
 use vim_bridge::VimBridgeResult;
@@ -113,8 +113,8 @@ impl PromptState {
     /// enabled on this prompt).
     pub fn selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
-        if self.win.vim.is_some() {
-            if let Some(range) = ui::Vim::visual_range(
+        if self.win.vim_enabled {
+            if let Some(range) = ui::vim::visual_range(
                 &self.win.vim_state,
                 &self.win.edit_buf.buf,
                 self.win.cpos,
@@ -181,7 +181,7 @@ impl PromptState {
     pub fn select_word_at(&mut self, cpos: usize, mode: &mut VimMode) -> Option<(usize, usize)> {
         let (start, end) = self.win.edit_buf.word_range_at(cpos)?;
         self.win.cpos = end.saturating_sub(1).max(start);
-        if self.win.vim.is_some() {
+        if self.win.vim_enabled {
             self.win
                 .vim_state
                 .begin_visual(mode, crate::vim::VimMode::Visual, start);
@@ -208,7 +208,7 @@ impl PromptState {
     }
 
     pub fn vim_enabled(&self) -> bool {
-        self.win.vim.is_some()
+        self.win.vim_enabled
     }
 
     /// Returns true if the current content originated from a paste and should
@@ -218,20 +218,14 @@ impl PromptState {
     }
 
     pub fn set_vim_enabled(&mut self, enabled: bool) {
-        if enabled {
-            if self.win.vim.is_none() {
-                self.win.vim = Some(Vim::new());
-            }
-        } else {
-            self.win.vim = None;
-        }
+        self.win.set_vim_enabled(enabled);
     }
 
     /// Restore vim to a specific mode (used after double-Esc cancel).
     /// Writes through `mode_ref` (the App-owned single global) and
     /// resets the in-flight key sequence on the prompt's Vim instance.
     pub fn set_vim_mode(&mut self, mode_ref: &mut VimMode, new: VimMode) {
-        if self.win.vim.is_some() {
+        if self.win.vim_enabled {
             self.win.vim_state.set_mode(mode_ref, new);
         }
     }
@@ -457,12 +451,12 @@ impl PromptState {
         KeyContext {
             buf_empty: self.win.edit_buf.buf.is_empty()
                 && self.win.edit_buf.attachment_ids.is_empty(),
-            vim_non_insert: self.win.vim.is_some()
+            vim_non_insert: self.win.vim_enabled
                 && matches!(
                     mode,
                     VimMode::Normal | VimMode::Visual | VimMode::VisualLine
                 ),
-            vim_enabled: self.win.vim.is_some(),
+            vim_enabled: self.win.vim_enabled,
             agent_running,
             ghost_text_visible,
         }
@@ -1020,12 +1014,12 @@ impl PromptState {
             let ctx = KeyContext {
                 buf_empty: self.win.edit_buf.buf.is_empty()
                     && self.win.edit_buf.attachment_ids.is_empty(),
-                vim_non_insert: self.win.vim.is_some()
+                vim_non_insert: self.win.vim_enabled
                     && matches!(
                         *mode,
                         VimMode::Normal | VimMode::Visual | VimMode::VisualLine
                     ),
-                vim_enabled: self.win.vim.is_some(),
+                vim_enabled: self.win.vim_enabled,
                 agent_running: false,
                 ghost_text_visible: false,
             };

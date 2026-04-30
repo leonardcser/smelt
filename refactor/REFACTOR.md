@@ -386,91 +386,29 @@ overlay leaves use today via `paint_overlay`. The `Component` trait,
 decompose alongside. Sub-phases land independently, each green at
 the boundary.
 
-#### P1.d.1 — Buffer-backed status line
+#### P1.d.1 — Buffer-backed status line ✅ landed (`65f90fb`)
 
-Smallest wedge: migrate the `"status"` compositor layer onto a
-Buffer-backed Window painted directly from `Ui::render`'s
-post-layer pass. Lays the `painted_splits` mechanism (split-shaped
-windows that paint via `Window::render` from the closure, no
-`Component` layer) that subsequent sub-phases reuse for the prompt
-and transcript views. The `tui::app::status_bar::refresh_status_bar`
-composer rewrites to populate the status buffer with a single line +
-highlight extmarks instead of pushing `StatusSegment` into
-`ui::StatusBar`. Deletes `crates/ui/src/status_bar.rs` (StatusBar
-widget + StatusSegment) and the `ui::layer_mut::<ui::StatusBar>`
-call site. `Component` / remaining `WidgetEvent` variants stay
-alive — transcript / prompt still consume them.
+Migrate the `"status"` compositor layer onto a Buffer-backed
+painted-split Window (the `painted_splits` mechanism prompt and
+transcript reuse). See `P1.md` for detail.
 
-#### P1.d.2 — Prompt input onto Window::render
+#### P1.d.2 — Prompt onto Window::render ✅ landed
 
-Migrate the `"prompt"` and `"prompt_input"` compositor layers onto
-the `painted_splits` path. Selection paint, soft cursor, ghost
-text, and gutters move from `WindowView` / `BufferView` onto
-`Window::render` (extmarks in `"selection"` / `"completer"` /
-`"gutter"` namespaces). The prompt's wrapped display becomes a
-projection step that writes the prompt source into a render-only
-Buffer with extmarks for wrap, cursor, and selection.
+Migrate the `"prompt"` / `"prompt_input"` compositor layers onto
+the painted-split path. Two sessions:
 
-Splits across two sessions because the rendering primitive has to
-land before the migration can flip:
+- **5f.2a** ✅ (`482da6f`) — `Window::render` paints scrollbar +
+  block cursor; `Ui::painted_split_focus` lands.
+- **5f.2b** ✅ (`3dadb59`) — prompt migrates to a painted-split
+  Window over a unified `input_display_buf`; `WindowView` chrome
+  intermediate retires.
 
-- **P1.d.2a** ✅ landed (`482da6f`) — `Window::render` rendering
-  primitives + painted-split focus. Adds
-  `Window::viewport: Option<WindowViewport>` +
-  `Window::cursor_kind: Option<CursorKind>` (`Block { glyph, style } |
-  Hardware`). `Window::render` paints the scrollbar (when
-  `viewport.scrollbar` is set) and the block cursor (when
-  `cursor_kind == Block`). `Ui` gains `painted_split_focus:
-  Option<WinId>`; `set_focus` / `focus()` accept focusable painted
-  splits. `Ui::render` surfaces the focused painted split's hardware
-  cursor (when `cursor_kind == Hardware`) ahead of the focused
-  compositor layer's cursor, behind the overlay cursor.
-- **P1.d.2b** ✅ landed — migrate prompt to a painted-split Window.
-  Drops the `"prompt"` and `"prompt_input"` compositor layers; the
-  prompt becomes a single painted-split `Window` at `PROMPT_WIN`
-  over a unified `input_display_buf` carrying chrome rows
-  (queued, stash, top bar) + visible input slice + bottom bar as
-  buffer lines with non-overlapping highlight extmarks.
-  `compute_prompt` rewrites to populate the buffer + extmarks in
-  one pass and to set the Window's `cursor_kind` (`Block` for
-  end-of-line / prediction; `Hardware` for typed-char position;
-  `None` when unfocused), `cursor_line` / `cursor_col`, and
-  `viewport`. `Ui::win_open_split_at(id, …)` lands so PROMPT_WIN
-  / TRANSCRIPT_WIN can register a Window at their reserved id
-  without burning a fresh allocation. `paint_scrollbar` in
-  `Window::render` reads `slice.area()` to compute a slice-relative
-  row offset for the scrollbar (`viewport.rect.top -
-  slice.area().top`) so painted splits whose viewport covers a
-  sub-region (the prompt's input area) place the bar correctly;
-  surfaces where window rect == viewport rect (transcript, overlay
-  leaves) keep their prior behaviour because the offset is zero.
-  `set_focus(PROMPT_WIN)` / `set_focus(TRANSCRIPT_WIN)` replace
-  `focus_layer("prompt_input")` / `focus_layer("transcript")` in
-  the per-frame focus restore. `WindowView::set_rows` /
-  `set_cursor` retire alongside `WindowContent::Rows`,
-  `WindowRow`, and `StyledSegment` (the chrome-row intermediate
-  representation moves into `prompt_data.rs` as private types).
+#### P1.d.3 — Transcript onto Window::render ✅ landed (`51c3416`)
 
-#### P1.d.3 — Transcript onto Window::render ✅ landed
-
-Migrated the `"transcript"` compositor layer onto the
-`painted_splits` path. The transcript is now a `Window` opened at
-`TRANSCRIPT_WIN` over a fresh `transcript_display_buf` registered in
-`Ui::bufs`, painted via `Ui::render`'s post-layer closure.
-`TranscriptProjection` no longer owns its `Buffer` — `project()`
-borrows the display buffer instead. Selection lands as extmarks in a
-dedicated `NS_SELECTION` namespace; `Buffer::highlights_at` walks
-every namespace whose payload is `ExtmarkPayload::Highlight`, sorted
-by `NsId` ascending so selection paints on top of projection
-highlights. Soft cursor surfaces as `cursor_kind = Block`.
-`crates/tui/src/content/window_view.rs`,
-`crates/ui/src/buffer_view.rs`, and `crates/tui/src/content/scrollbar.rs`
-retire; the `BufferView`-only materialized cache on `Buffer`
-(`cached_highlights` / `cached_decorations` / `cache_tick` +
-`highlights_arc` / `decorations_arc` / `lines_arc`) retires with
-them. Soft-wrap onto `Buffer::wrap_at` is still pending — wrap state
-remains a per-line projection step until the `BufferParser` hooks
-land in P1.a-tail.
+Transcript becomes a painted-split Window over a fresh
+`transcript_display_buf`; selection lands in `NS_SELECTION`;
+`WindowView` / `BufferView` / `content/scrollbar.rs` retire. Soft
+wrap onto `Buffer::wrap_at` defers to P1.a-tail.
 
 #### P1.d.4 — Retire `Component` + `WidgetEvent::{Dismiss, Select}` ✅ landed
 
@@ -500,8 +438,12 @@ App / Buffer / Window / Clipboard. Splits across sessions:
 - **5f.1** ✅ landed — inline `WindowCursor` (anchor + curswant)
   onto `Window`; delete `window_cursor.rs`. `VimContext::cursor`
   shrinks to `curswant: &mut Option<usize>`.
-- **5f.2** — Vim becomes a per-Window keymap recipe (Rust; Lua
-  recipes are P3.b). Delete `crates/ui/src/vim/`.
+- **5f.2** — Vim becomes a per-Window keymap recipe; delete
+  `crates/ui/src/vim/`. Splits: **5f.2a** drop the `Vim` ZST
+  (`Option<Vim>` → `vim_enabled: bool`; methods → free fns /
+  `VimWindowState`); **5f.2b** lift `motions` / `text_objects`
+  out of `vim/` as primitives; **5f.2c** flatten dispatcher to
+  recipe-style registrations and delete the directory.
 
 #### P1.d.6 — Completer state machine decomposes
 

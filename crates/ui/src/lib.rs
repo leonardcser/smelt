@@ -51,7 +51,7 @@ pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
 pub use style::{HlAttrs, HlGroup};
 pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
-pub use vim::{FindKind, Vim, VimMode, VimWindowState};
+pub use vim::{FindKind, VimMode, VimWindowState};
 pub use window::{
     CursorKind, DrawContext, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit,
     Window, WindowViewport,

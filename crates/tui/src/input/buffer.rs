@@ -14,7 +14,7 @@ impl PromptState {
     /// When vim is in insert mode, skip — the entire insert session is
     /// already covered by the undo entry saved on insert entry.
     pub fn save_undo(&mut self, mode: VimMode) {
-        if self.win.vim.is_some() && mode == VimMode::Insert {
+        if self.win.vim_enabled && mode == VimMode::Insert {
             return; // insert session groups all edits into one undo step
         }
         self.win.edit_buf.history.save(ui::UndoEntry::snapshot(

@@ -30,7 +30,7 @@ impl PromptState {
         mode: &mut VimMode,
         clipboard: &mut Clipboard,
     ) -> VimBridgeResult {
-        if self.win.vim.is_none() {
+        if !self.win.vim_enabled {
             return VimBridgeResult::NotAKey;
         }
         let Event::Key(key_ev) = ev else {
@@ -38,7 +38,6 @@ impl PromptState {
         };
         let key_ev: KeyEvent = *key_ev;
 
-        let vim = self.win.vim.as_mut().unwrap();
         let result = {
             let mut ctx = VimContext {
                 buf: &mut self.win.edit_buf.buf,
@@ -50,7 +49,7 @@ impl PromptState {
                 curswant: &mut self.win.curswant,
                 vim_state: &mut self.win.vim_state,
             };
-            vim.handle_key(key_ev, &mut ctx)
+            vim::handle_key(key_ev, &mut ctx)
         };
 
         match result {
