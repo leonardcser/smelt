@@ -7,6 +7,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use std::time::{Duration, Instant};
+use ui::UiHost;
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -776,7 +777,7 @@ impl TuiApp {
     /// to one.
     pub(crate) fn close_overlay_leaf(&mut self, win_id: ui::WinId) {
         crate::picker::forget(self, win_id);
-        for id in self.ui.win_close(win_id) {
+        for id in self.win_close(win_id) {
             self.core.lua.remove_callback(id);
         }
     }
