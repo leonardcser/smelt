@@ -57,15 +57,17 @@ pub fn run_command(app: &mut TuiApp, line: &str) -> CommandOutcome {
 
 impl TuiApp {
     /// Apply the result of `process_input` to app state (starting an agent,
-    /// running a command, opening a dialog, etc.). Returns `true` if the app
-    /// should quit. Centralizes the dispatch previously duplicated across the
-    /// Submit path, queued-message fallback, and auto-start-from-queued loop.
+    /// running a command, kicking off a shell escape). Centralizes the
+    /// dispatch previously duplicated across the Submit path, queued-message
+    /// fallback, and auto-start-from-queued loop. Quit is not an outcome
+    /// here — `/quit` and friends set `pending_quit` directly via the Lua
+    /// `smelt.quit()` body, and the main loop honors it on the next tick.
     pub(super) fn apply_input_outcome(
         &mut self,
         outcome: InputOutcome,
         content: Content,
         display: &str,
-    ) -> bool {
+    ) {
         match outcome {
             InputOutcome::StartAgent => {
                 let turn = self.begin_agent_turn(display, content);
@@ -81,7 +83,6 @@ impl TuiApp {
             }
             InputOutcome::Continue => {}
         }
-        false
     }
 
     /// Execute a command while the agent is running.
