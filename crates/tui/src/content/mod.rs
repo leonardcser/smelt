@@ -5,7 +5,6 @@ pub(crate) mod layout;
 pub(crate) mod layout_out;
 pub(crate) mod prompt_data;
 pub(crate) mod prompt_wrap;
-mod scrollbar;
 pub(crate) mod selection;
 pub(crate) mod status;
 pub(crate) mod stream_parser;
@@ -13,7 +12,6 @@ pub(crate) mod to_buffer;
 pub(crate) mod transcript;
 pub(crate) mod transcript_buf;
 pub(crate) mod viewport;
-pub(crate) mod window_view;
 
 pub(crate) use layout::HitRegion;
 pub use status::StatusItem;

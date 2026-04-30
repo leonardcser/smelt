@@ -1,5 +1,4 @@
 pub mod buffer;
-pub mod buffer_view;
 pub mod callback;
 pub mod clipboard;
 pub mod component;
@@ -29,7 +28,6 @@ pub type AttachmentId = u64;
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
 pub use buffer::{BufType, Buffer, BufferParser, Span, SpanStyle};
-pub use buffer_view::BufferView;
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
     WinEvent,

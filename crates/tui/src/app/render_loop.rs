@@ -107,9 +107,13 @@ impl App {
         (has_prompt_cursor, has_transcript_cursor)
     }
 
-    /// Project the transcript into its buffer, compute the soft cursor,
-    /// and sync the `transcript` WindowView layer (rows + selection
-    /// overlays + viewport). Returns the transcript layer's rect.
+    /// Project the transcript into its display buffer, compute the
+    /// soft cursor, and drive the painted-split `Ui::wins[TRANSCRIPT_WIN]`
+    /// (cursor + viewport + scroll). Selection paints via extmarks in
+    /// the buffer's `NS_SELECTION` namespace; soft cursor surfaces as
+    /// `cursor_kind = Block { glyph, style }` so `Window::render`
+    /// paints the cell after extmark layering. Returns the rect so
+    /// `finalize_layer_rects` can publish it through `set_window_rect`.
     fn sync_transcript_layer(
         &mut self,
         term_w: u16,
@@ -150,21 +154,75 @@ impl App {
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
         let visual = self.ui.theme().get("Visual");
-        let theme = self.ui.theme().clone();
+        let visual_span = ui::buffer::SpanStyle {
+            fg: visual.fg,
+            bg: visual.bg,
+            ..Default::default()
+        };
 
-        if let Some(tv) = self
-            .ui
-            .layer_mut::<content::window_view::WindowView>("transcript")
-        {
-            tv.sync_from_buffer(
-                self.transcript_projection.buf_mut(),
-                tdata.clamped_scroll as usize,
-            );
+        // Selection lands in a dedicated `NS_SELECTION` namespace so
+        // its paint order is stable: `Window::render` walks all
+        // namespaces in NsId order, and the selection ns is created
+        // after `ns_highlights` in `App::new`, so its spans paint
+        // after projection highlights and override their bg/fg.
+        if let Some(buf) = self.ui.buf_mut(self.transcript_display_buf) {
+            let ns = buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
+            buf.clear_namespace(ns, 0, usize::MAX);
             for (line, col_start, col_end) in &transcript_selection {
-                tv.add_highlight(*line, *col_start, *col_end, visual);
+                buf.set_extmark(
+                    ns,
+                    *line,
+                    *col_start as usize,
+                    ui::buffer::ExtmarkOpts::highlight(
+                        *col_end as usize,
+                        visual_span.clone(),
+                        ui::buffer::SpanMeta::default(),
+                    ),
+                );
             }
-            tv.set_soft_cursor(tcursor.soft_cursor, &theme);
-            tv.set_viewport(Some(transcript_viewport));
+        }
+
+        // Drive the painted-split Window's cursor + scrollbar viewport
+        // from the projection. The transcript shows a vim-style block
+        // cursor over the glyph beneath when content owns focus —
+        // `cursor_kind = Block { glyph, style }` paints in-place after
+        // extmark layering. When content doesn't own the cursor (prompt
+        // focused / terminal unfocused / cmdline up), `soft_cursor` is
+        // `None` and `cursor_kind` collapses to `None` so no cursor
+        // renders.
+        let cursor_kind = tcursor.soft_cursor.as_ref().map(|c| {
+            let theme = self.ui.theme();
+            let (fg, bg) = if theme.is_light() {
+                (
+                    crossterm::style::Color::White,
+                    crossterm::style::Color::Black,
+                )
+            } else {
+                (
+                    crossterm::style::Color::Black,
+                    crossterm::style::Color::White,
+                )
+            };
+            ui::CursorKind::Block {
+                glyph: c.glyph,
+                style: ui::Style {
+                    fg: Some(fg),
+                    bg: Some(bg),
+                    ..Default::default()
+                },
+            }
+        });
+        let (cur_col, cur_line) = tcursor
+            .soft_cursor
+            .as_ref()
+            .map(|c| (c.col, c.row))
+            .unwrap_or((0, 0));
+        if let Some(win) = self.ui.win_mut(ui::TRANSCRIPT_WIN) {
+            win.cursor_kind = cursor_kind;
+            win.cursor_col = cur_col;
+            win.cursor_line = cur_line;
+            win.scroll_top = tdata.clamped_scroll;
+            win.viewport = Some(transcript_viewport);
         }
 
         transcript_rect
@@ -283,7 +341,6 @@ impl App {
         term_h: u16,
     ) {
         let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
-        self.ui.set_layer_rect("transcript", transcript_rect);
         // Publish split-window rects so overlay anchors targeting a
         // window (e.g. notification toasts, prompt-docked pickers)
         // can resolve, and so painted splits know where to paint.
