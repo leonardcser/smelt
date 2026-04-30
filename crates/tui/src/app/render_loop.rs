@@ -45,9 +45,9 @@ impl App {
                 term_height: term_h,
                 prompt_height: natural_prompt_height,
             },
-            self.status_win,
+            self.well_known.statusline,
         ));
-        self.layout = content::layout::LayoutState::from_ui(&self.ui, self.status_win);
+        self.layout = content::layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
         let viewport_rows = self.layout.viewport_rows();
         let prompt_rect = self.layout.prompt;
         let prompt_height = prompt_rect.height;
@@ -179,7 +179,7 @@ impl App {
         // namespaces in NsId order, and the selection ns is created
         // after `ns_highlights` in `App::new`, so its spans paint
         // after projection highlights and override their bg/fg.
-        if let Some(buf) = self.ui.buf_mut(self.transcript_display_buf) {
+        if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
             let ns = buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
             buf.clear_namespace(ns, 0, usize::MAX);
             for (line, col_start, col_end) in &transcript_selection {
@@ -277,8 +277,8 @@ impl App {
             let theme = self.ui.theme().clone();
             let input_buf = self
                 .ui
-                .buf_mut(self.input_display_buf)
-                .expect("input_display_buf must be registered at startup");
+                .win_buf_mut(self.well_known.prompt)
+                .expect("prompt window must be registered at startup");
             content::prompt_data::compute_prompt(&mut prompt_input, input_buf, &theme)
         };
 

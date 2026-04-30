@@ -329,26 +329,29 @@ pub struct App {
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
-    /// Stable `BufId` for the prompt input's styled display buffer.
-    /// Populated each frame by `compute_prompt` and consumed by the
-    /// painted-split path on `Ui::wins[PROMPT_WIN]`.
-    pub(super) input_display_buf: ui::BufId,
-    /// Stable `BufId` for the transcript's display buffer.
-    /// `project_transcript_buffer` rewrites its lines + highlight
-    /// extmarks each frame; the painted-split path on
-    /// `Ui::wins[TRANSCRIPT_WIN]` consumes them via `Window::render`.
-    /// Selection bg lands as extmarks in the dedicated
-    /// `NS_SELECTION` namespace so paint ordering is stable.
-    pub(super) transcript_display_buf: ui::BufId,
-    /// `WinId` of the status-line Window. The status line is a
-    /// Buffer-backed Window registered as a painted split — `Ui::render`
-    /// paints it via `Window::render` from the post-layer closure, no
-    /// compositor `Component` layer involved. `refresh_status_bar`
-    /// rewrites the buffer's single line + highlight extmarks each frame.
-    pub(super) status_win: ui::WinId,
-    /// `BufId` for the status-line Buffer. One line; never modifiable
-    /// from outside `refresh_status_bar`.
-    pub(super) status_buf: ui::BufId,
+    /// `WinId`s of the well-known split-tree surfaces. The matching
+    /// `Buffer`s are reached via `Ui::win_buf` / `win_buf_mut`.
+    pub(crate) well_known: WellKnown,
+}
+
+/// The well-known split-tree windows that smelt always carries:
+/// the prompt, the transcript, and the statusline. Buffers are
+/// reached through `Ui::win_buf{,_mut}(WinId)` — there's exactly
+/// one `Buffer` per well-known `Window`.
+pub struct WellKnown {
+    /// Prompt input window. Stable id `ui::PROMPT_WIN`. Its buffer
+    /// is rewritten each frame by `compute_prompt` (chrome rows +
+    /// visible input slice + bottom bar + completer extmark).
+    pub prompt: ui::WinId,
+    /// Transcript window. Stable id `ui::TRANSCRIPT_WIN`. Its
+    /// buffer is rewritten each frame by
+    /// `project_transcript_buffer`; selection bg lands as extmarks
+    /// in the `NS_SELECTION` namespace.
+    pub transcript: ui::WinId,
+    /// Statusline window. Dynamically allocated at startup. Its
+    /// buffer carries one line; `refresh_status_bar` rewrites it
+    /// each frame.
+    pub statusline: ui::WinId,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -566,7 +569,7 @@ impl App {
         // Load workspace rules from disk into them at startup.
         let runtime_approvals = engine.runtime_approvals();
 
-        let (ui, input_display_buf, transcript_display_buf, status_win, status_buf) = {
+        let (ui, transcript_display_buf, well_known) = {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = ui::Ui::new();
             ui.set_terminal_size(w, h);
@@ -648,10 +651,12 @@ impl App {
             ui.set_focus(ui::PROMPT_WIN);
             (
                 ui,
-                input_display_buf,
                 transcript_display_buf,
-                status_win,
-                status_buf,
+                WellKnown {
+                    prompt: ui::PROMPT_WIN,
+                    transcript: ui::TRANSCRIPT_WIN,
+                    statusline: status_win,
+                },
             )
         };
 
@@ -667,7 +672,6 @@ impl App {
             transcript: crate::content::transcript::Transcript::new(),
             parser: crate::content::stream_parser::StreamParser::new(),
             transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
-            transcript_display_buf,
             last_viewport_text: Vec::new(),
             history: Vec::new(),
             input_history: History::load(),
@@ -764,9 +768,7 @@ impl App {
             agent_prompt_config: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
-            input_display_buf,
-            status_win,
-            status_buf,
+            well_known,
         }
     }
 
@@ -799,8 +801,8 @@ impl App {
     pub(crate) fn prompt_completer_text(&mut self) -> Option<String> {
         let buf = self
             .ui
-            .buf_mut(self.input_display_buf)
-            .expect("input_display_buf registered at startup");
+            .win_buf_mut(self.well_known.prompt)
+            .expect("prompt window registered at startup");
         let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
         buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
             if let ui::buffer::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
@@ -817,8 +819,8 @@ impl App {
     pub(crate) fn set_prompt_completer(&mut self, text: String) {
         let buf = self
             .ui
-            .buf_mut(self.input_display_buf)
-            .expect("input_display_buf registered at startup");
+            .win_buf_mut(self.well_known.prompt)
+            .expect("prompt window registered at startup");
         let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
         buf.clear_namespace(ns, 0, usize::MAX);
         buf.set_extmark(
@@ -832,8 +834,8 @@ impl App {
     pub(crate) fn clear_prompt_completer(&mut self) {
         let buf = self
             .ui
-            .buf_mut(self.input_display_buf)
-            .expect("input_display_buf registered at startup");
+            .win_buf_mut(self.well_known.prompt)
+            .expect("prompt window registered at startup");
         let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
         buf.clear_namespace(ns, 0, usize::MAX);
     }

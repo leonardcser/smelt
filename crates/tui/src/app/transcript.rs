@@ -653,8 +653,8 @@ impl App {
 
         let buf = self
             .ui
-            .buf_mut(self.transcript_display_buf)
-            .expect("transcript_display_buf must be registered at startup");
+            .win_buf_mut(self.well_known.transcript)
+            .expect("transcript window must be registered at startup");
         self.transcript_projection.project(
             buf,
             &mut self.transcript.history,
