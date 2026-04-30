@@ -528,8 +528,12 @@ bridges, then the aggregate.
 - **a.10** — `ToolRuntime { registry: Map<name, LuaTool> }` — own
   type, impls `engine::ToolDispatcher` (depends on P5.a's trait
   shape — may defer).
-- **a.11** — `EngineBridge { drains event_rx → host calls }` — own
-  type, owns the `EngineHandle`.
+- **a.11** ✅ — `EngineBridge` carve-out: `App.engine` typed
+  `engine_bridge::EngineBridge` over today's `EngineHandle` (`send`
+  / `recv` / `try_recv` / `processes()` / `drain_spawned()`); two
+  `select!` engine-drain gates swap from
+  `focused_overlay_blocks_agent()` to `confirms.is_clear()`. P2.d
+  folds the engine-event drain into this type.
 - **a.12** — Aggregate `Core` + `TuiApp` / `HeadlessApp`.
 
 Aggregate:

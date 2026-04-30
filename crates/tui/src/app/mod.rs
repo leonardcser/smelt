@@ -6,6 +6,7 @@ pub mod commands;
 pub(crate) mod confirms;
 mod content_keys;
 pub(crate) mod dialogs;
+pub(crate) mod engine_bridge;
 mod events;
 mod headless;
 mod history;
@@ -214,7 +215,7 @@ pub struct App {
     pub agents: Vec<TrackedAgent>,
     /// Shared agent snapshots for live dialog updates.
     pub agent_snapshots: crate::app::SharedSnapshots,
-    pub engine: EngineHandle,
+    pub(crate) engine: engine_bridge::EngineBridge,
     pub(crate) permissions: Arc<Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `App` so reducer handlers (`apply_ops`) can mutate
@@ -717,7 +718,7 @@ impl App {
             agent_id: String::new(),
             agents: Vec::new(),
             agent_snapshots: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            engine,
+            engine: engine_bridge::EngineBridge::new(engine),
             permissions,
             agent: None,
             confirms: confirms::Confirms::new(),
@@ -1205,7 +1206,7 @@ impl App {
             }
 
             // ── Drain engine events (paused only for Confirm) ──
-            if !self.focused_overlay_blocks_agent() {
+            if self.confirms.is_clear() {
                 loop {
                     let ev = match self.engine.try_recv() {
                         Ok(ev) => ev,
@@ -1455,7 +1456,7 @@ impl App {
                     self.render_normal(self.agent.is_some());
                 }
 
-                Some(ev) = self.engine.recv(), if !self.focused_overlay_blocks_agent() => {
+                Some(ev) = self.engine.recv(), if self.confirms.is_clear() => {
                     if let Some(mut ag) = self.agent.take() {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(

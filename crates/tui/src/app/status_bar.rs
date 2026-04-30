@@ -239,7 +239,7 @@ impl App {
         }
 
         // Running procs.
-        let running_procs = self.engine.processes.running_count();
+        let running_procs = self.engine.processes().running_count();
         if running_procs > 0 {
             let label = if running_procs == 1 {
                 "1 proc".into()
