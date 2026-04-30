@@ -461,8 +461,14 @@ bridges, then the aggregate.
   for in-session message history.
   (Sub-agent state lives in Lua cells fed by `tui::subprocess`
   `on_event` callbacks — see P5.b — not on `Session`.)
-- **a.8** — `Clipboard` already exists as `ui::Clipboard`. This step
-  formalises it as a Core subsystem if any wiring is still loose.
+- **a.8** ✅ — `Clipboard` formalised: every clipboard text I/O routes
+  through `app.clipboard.{read,write}`. The two bypass paths retire —
+  Lua `smelt.clipboard(text)` writes via `with_app(|a| a.clipboard.write(...))`
+  (matches `smelt.notify`); `KeyAction::ClipboardImage`'s text fallback
+  reads via `clipboard.read()`. `commands::{copy_to_clipboard,
+  paste_from_clipboard}` drop `pub(crate)` — `SystemSink` is their only
+  caller, every other clipboard touch in the runtime flows through the
+  App-level subsystem.
 - **a.9** — `LuaRuntime` reshape: drop the parallel autocmd registry;
   `smelt.au.*` routes through `Cells`.
 - **a.10** — `ToolRuntime { registry: Map<name, LuaTool> }` — own
