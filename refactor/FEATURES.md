@@ -261,6 +261,7 @@ to invoke_ the feature.
 | `smelt.settings.*`                                      | `lua/api/state.rs`                  | P3.b                                       | working        |
 | `smelt.permissions.list/sync`                           | `lua/api/state.rs`                  | P3.b → `lua/api/permissions.rs`            | working        |
 | `smelt.theme.snapshot/get/set/apply`                    | `lua/api/widgets.rs`                | P3.b → `lua/api/theme.rs` (registry)       | working        |
+| `smelt.theme.use(name)`                                 | `_bootstrap.lua`                    | P4.a (sugar over `require("smelt.colorschemes." .. name)`) | working        |
 | `smelt.clipboard.{read,write}` + legacy `__call` write   | `lua/api/clipboard.rs`                | P3.b ✓                                     | working |
 | `smelt.process.*` (spawn/list/kill)                     | `lua/api/state.rs`                  | P3.b → `lua/api/process.rs`                | working        |
 | `smelt.fuzzy.*`                                         | `_bootstrap.lua`                    | P3.b                                       | working        |

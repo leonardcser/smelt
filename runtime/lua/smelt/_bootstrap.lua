@@ -36,6 +36,15 @@ function smelt.tools.call(name, args, parent_call_id)
   return coroutine.yield({ __yield = "external", id = id })
 end
 
+-- Apply a colorscheme by name. `smelt.theme.use("default")` requires
+-- `smelt.colorschemes.<name>` and lets the loaded chunk run its
+-- `smelt.theme.set` / `smelt.theme.link` calls. Plugin authors install
+-- a colorscheme by adding `runtime/lua/smelt/colorschemes/<name>.lua`
+-- (or shipping it under their own package).
+function smelt.theme.use(name)
+  return require("smelt.colorschemes." .. name)
+end
+
 -- Fuzzy-rank a list against `query`. Returns an array of 1-based indices
 -- into `items`, best matches first. `key_fn(item) -> haystack_string` is
 -- optional; omit to score the raw item (must be a string). An empty query
