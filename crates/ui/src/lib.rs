@@ -162,11 +162,9 @@ impl Ui {
     /// Record a primary-button Down for click-count tracking and
     /// return the resulting count (1, 2, or 3). Successive Downs on
     /// the same cell within 400ms increment up to 3; the fourth
-    /// click wraps back to 1 so a fresh gesture restarts. Hosts
-    /// call this on every primary-button Down before per-pane
-    /// dispatch — once Down dispatch lives in `Ui::dispatch_event`
-    /// (P2.b.4c.5), this becomes an internal helper.
-    pub fn record_click(&mut self, row: u16, col: u16) -> u8 {
+    /// click wraps back to 1 so a fresh gesture restarts. Internal
+    /// helper for [`Self::resolve_split_mouse`].
+    fn record_click(&mut self, row: u16, col: u16) -> u8 {
         use std::time::{Duration, Instant};
         let now = Instant::now();
         let count = match self.last_click {
@@ -303,11 +301,6 @@ impl Ui {
             self.next_buf_id = id.0 + 1;
         }
         Ok(id)
-    }
-
-    pub fn buf_delete(&mut self, id: BufId) {
-        self.wins.retain(|_, w| w.buf != id);
-        self.bufs.remove(&id);
     }
 
     pub fn buf(&self, id: BufId) -> Option<&Buffer> {
@@ -789,9 +782,11 @@ impl Ui {
     }
 
     /// Read-only view of the focus history (oldest first; the most
-    /// recent prior focus is at the back). Test + introspection
-    /// helper; production callers should reach through `set_focus`.
-    pub fn focus_history(&self) -> &[WinId] {
+    /// recent prior focus is at the back). Test-only introspection
+    /// helper — production state flows through `set_focus` /
+    /// `overlay_close`.
+    #[cfg(test)]
+    fn focus_history(&self) -> &[WinId] {
         &self.focus_history
     }
 
