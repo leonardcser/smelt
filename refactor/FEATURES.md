@@ -277,7 +277,9 @@ to invoke_ the feature.
 | `smelt.grep` (`run(pattern, path, opts)` over ripgrep — content / files_with_matches / count modes; case / multiline / context / glob / type / timeout) | `lua/api/grep.rs` + `tui/grep.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.http` (`get(url, opts)` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.html` (`title / links / to_text` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.parse / notebook` | _missing today_                     | P3.c                                       | offline-pre-P3 |
+| `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `tui::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.notebook.parse` (Jupyter `.ipynb` parse over `tui::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.parse` | _missing today_                     | P3.c                                       | offline-pre-P3 |
 
 ## Headless / non-TUI modes
 

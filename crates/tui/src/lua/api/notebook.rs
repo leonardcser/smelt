@@ -1,9 +1,15 @@
-//! `smelt.notebook.render(buf_id, args)` — paint an `edit_notebook`
-//! preview into a Buffer the caller owns. Reuses
-//! `ConfirmPreview::from_tool` so the picker/confirm/dialog paths
-//! all render notebook ops the same way.
+//! `smelt.notebook` bindings.
+//!
+//! - `render(buf_id, args)` paints an `edit_notebook` preview into a
+//!   Buffer the caller owns (UiHost-only). Reuses
+//!   `ConfirmPreview::from_tool` so the picker/confirm/dialog paths
+//!   all render notebook ops the same way.
+//! - `parse / source_to_string / cell_index_by_id / is_notebook_path`
+//!   are Host-tier read shapes over `tui::notebook` for plugins that
+//!   want to introspect a notebook's structure.
 
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
+use crate::notebook;
 use mlua::prelude::*;
 use std::collections::HashMap;
 use ui::BufId;
@@ -29,8 +35,50 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         })?,
     )?;
+    notebook.set(
+        "is_notebook_path",
+        lua.create_function(|_, p: String| Ok(crate::notebook::is_notebook_path(&p)))?,
+    )?;
+
+    notebook.set(
+        "parse",
+        lua.create_function(|lua, json: String| match notebook::parse(&json) {
+            Ok(nb) => Ok((Some(notebook_to_lua(lua, &nb)?), None)),
+            Err(err) => Ok((None, Some(err.to_string()))),
+        })?,
+    )?;
+
     smelt.set("notebook", notebook)?;
     Ok(())
+}
+
+fn notebook_to_lua(lua: &Lua, nb: &notebook::Notebook) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    if let Some(v) = nb.format {
+        t.set("nbformat", v)?;
+    }
+    if let Some(v) = nb.format_minor {
+        t.set("nbformat_minor", v)?;
+    }
+    let cells = lua.create_table()?;
+    for (i, cell) in nb.cells.iter().enumerate() {
+        cells.set(i + 1, cell_to_lua(lua, cell)?)?;
+    }
+    t.set("cells", cells)?;
+    Ok(t)
+}
+
+fn cell_to_lua(lua: &Lua, cell: &notebook::Cell) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("kind", cell.kind.as_str())?;
+    if let Some(id) = &cell.id {
+        t.set("id", id.clone())?;
+    }
+    t.set("source", cell.source.clone())?;
+    if let Some(n) = cell.execution_count {
+        t.set("execution_count", n)?;
+    }
+    Ok(t)
 }
 
 /// Shallow Lua → JSON map conversion for tool-arg tables. Strings,
