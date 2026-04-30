@@ -22,12 +22,11 @@ impl App {
     }
 
     pub(super) fn set_history(&mut self, messages: Vec<Message>) {
-        self.history = messages;
+        self.session.messages = messages;
         self.sync_session_snapshot();
     }
 
     pub(super) fn sync_session_snapshot(&mut self) {
-        self.session.messages = self.history.clone();
         self.session.updated_at_ms = session::now_ms();
         self.session.mode = Some(self.config.mode.as_str().to_string());
         self.session.reasoning_effort = Some(self.config.reasoning_effort);
@@ -59,15 +58,16 @@ impl App {
         if let Some(tokens) = self.session.context_tokens {
             self.session
                 .token_snapshots
-                .push((self.history.len(), tokens));
+                .push((self.session.messages.len(), tokens));
         }
+        let cost = self.session.session_cost_usd;
         self.session
             .cost_snapshots
-            .push((self.history.len(), self.session.session_cost_usd));
+            .push((self.session.messages.len(), cost));
     }
 
     pub(super) fn fork_session(&mut self) {
-        if self.history.is_empty() {
+        if self.session.messages.is_empty() {
             self.notify_error("nothing to fork".into());
             return;
         }
@@ -85,7 +85,7 @@ impl App {
         // Cancel any in-flight engine work (agent turn, title generation, etc.)
         // before clearing state so stale events don't restore old data.
         self.engine.send(UiCommand::Cancel);
-        self.history.clear();
+        self.session.messages.clear();
         self.pending_agent_blocks.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
@@ -147,9 +147,8 @@ impl App {
         if let Some(ref slug) = self.session.slug {
             self.set_task_label(slug.clone());
         }
-        self.history = self.session.messages.clone();
         // Defensive scrub: drop any snapshots beyond restored history.
-        let hist_len = self.history.len();
+        let hist_len = self.session.messages.len();
         self.session
             .token_snapshots
             .retain(|(len, _)| *len <= hist_len);
@@ -187,7 +186,7 @@ impl App {
         if let Some(ref slug) = self.session.slug {
             self.set_task_label(slug.clone());
         }
-        if self.history.is_empty() {
+        if self.session.messages.is_empty() {
             return;
         }
 
@@ -195,7 +194,7 @@ impl App {
         let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
         let mut agent_blocks: HashMap<String, protocol::AgentBlockData> = HashMap::new();
         let render_cache = session::load_render_cache(&self.session);
-        for msg in &self.history {
+        for msg in &self.session.messages {
             if matches!(msg.role, Role::Tool) {
                 if let Some(ref id) = msg.tool_call_id {
                     let text = msg
@@ -233,7 +232,7 @@ impl App {
         let mut blocking_agent_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        let messages = self.history.clone();
+        let messages = self.session.messages.clone();
         for msg in &messages {
             match msg.role {
                 Role::User => {
@@ -415,7 +414,7 @@ impl App {
 
     pub fn save_session(&mut self) {
         let _perf = crate::perf::begin("session:save");
-        if self.history.is_empty() {
+        if self.session.messages.is_empty() {
             return;
         }
         self.sync_session_snapshot();
@@ -462,13 +461,15 @@ impl App {
             return;
         }
         let last_user_idx = self
-            .history
+            .session
+            .messages
             .iter()
             .rposition(|m| matches!(m.role, protocol::Role::User));
         let last_user_message = match (last_user_idx, current_message) {
             (_, Some(msg)) if !msg.is_empty() => msg.to_string(),
             (Some(i), _) => self
-                .history
+                .session
+                .messages
                 .get(i)
                 .and_then(|m| m.content.as_ref())
                 .map(|c| c.text_content())
@@ -485,7 +486,7 @@ impl App {
         }
         // Tail of assistant text after the last user message (bounded to 1000 chars).
         let tail_start = last_user_idx.map(|i| i + 1).unwrap_or(0);
-        let mut assistant_tail: String = self.history[tail_start..]
+        let mut assistant_tail: String = self.session.messages[tail_start..]
             .iter()
             .filter(|m| matches!(m.role, protocol::Role::Assistant))
             .filter_map(|m| m.content.as_ref().map(|c| c.text_content()))
@@ -523,7 +524,7 @@ impl App {
             self.working.begin(TurnPhase::Compacting);
         };
         self.engine.send(UiCommand::Compact {
-            history: self.history.clone(),
+            history: self.session.messages.clone(),
             instructions,
         });
     }
@@ -539,7 +540,7 @@ impl App {
         // Replace history with the compacted messages (summary + kept turns).
         // Old snapshots key into pre-compaction positions and are no longer
         // valid, but the running cost carries forward.
-        self.history = messages;
+        self.session.messages = messages;
         self.session.token_snapshots.clear();
         self.session.cost_snapshots.clear();
         self.session.turn_metas.clear();
@@ -578,7 +579,7 @@ impl App {
 
         let mut user_count = 0;
         let mut hist_idx = 0;
-        for (i, msg) in self.history.iter().enumerate() {
+        for (i, msg) in self.session.messages.iter().enumerate() {
             if matches!(msg.role, Role::User) {
                 user_count += 1;
                 if user_count > user_turns_to_keep {
@@ -591,7 +592,8 @@ impl App {
 
         // Extract image (label, data_url) pairs from the target message before truncating.
         let images: Vec<(String, String)> = self
-            .history
+            .session
+            .messages
             .get(hist_idx)
             .and_then(|msg| msg.content.as_ref())
             .map(|content| match content {
@@ -608,7 +610,7 @@ impl App {
             })
             .unwrap_or_default();
 
-        self.history.truncate(hist_idx);
+        self.session.messages.truncate(hist_idx);
         truncate_keyed(&mut self.session.token_snapshots, hist_idx);
         truncate_keyed(&mut self.session.cost_snapshots, hist_idx);
         truncate_keyed(&mut self.session.turn_metas, hist_idx);

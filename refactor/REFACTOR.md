@@ -445,10 +445,13 @@ bridges, then the aggregate.
   `self.session.*`; the `save_snapshots_to_session` /
   `restore_snapshots_from_session` sync helpers retire (Session
   is now SoT for cost/token/turn-meta state).
-- **a.7b** — `history` field follows the same path:
-  `App.history: Vec<Message>` collapses into `self.session.messages`.
-  ~70+ refs across `transcript.rs` / `agent.rs` / `history.rs` /
-  `mod.rs`; mechanical but worth its own session.
+- **a.7b** ✅ — `App.history: Vec<Message>` collapses into
+  `self.session.messages`; ~25 call sites across
+  `app/{mod,agent,history,cmdline,commands,lua_handlers}.rs` +
+  `lua/api/state.rs` rerouted; `set_history` writes
+  `self.session.messages` directly and `sync_session_snapshot`
+  no longer copies messages. Session is the single source of truth
+  for in-session message history.
   (Sub-agent state lives in Lua cells fed by `tui::subprocess`
   `on_event` callbacks — see P5.b — not on `Session`.)
 - **a.8** — `Clipboard` already exists as `ui::Clipboard`. This step
