@@ -96,6 +96,38 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         })?,
     )?;
 
+    // smelt.engine.submit_builtin_command(name, arg?) — start a
+    // custom-command turn from a built-in prompt template (rendered
+    // with the current `multi_agent` context, frontmatter overrides
+    // applied). Used by Lua plugins for `/reflect` and `/simplify`.
+    engine_tbl.set(
+        "submit_builtin_command",
+        lua.create_function(|_, (name, arg): (String, Option<String>)| {
+            crate::lua::with_app(|app| {
+                let mut input = format!("/{name}");
+                if let Some(a) = arg.as_deref() {
+                    let trimmed = a.trim();
+                    if !trimmed.is_empty() {
+                        input.push(' ');
+                        input.push_str(trimmed);
+                    }
+                }
+                let multi = app.core.config.multi_agent;
+                let Some(cmd) = crate::builtin_commands::resolve(&input, multi) else {
+                    app.notify_error(format!("unknown builtin command: /{name}"));
+                    return;
+                };
+                if app.agent.is_some() {
+                    app.notify_error(format!("cannot run /{name} while agent is working"));
+                    return;
+                }
+                let turn = app.begin_custom_command_turn(cmd);
+                app.agent = Some(turn);
+            });
+            Ok(())
+        })?,
+    )?;
+
     // smelt.engine.ask({ system, messages?, question?, task?, on_response })
     {
         let s = shared.clone();

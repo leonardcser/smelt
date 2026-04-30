@@ -82,12 +82,13 @@ pub fn list() -> Vec<(String, String)> {
     items
 }
 
-/// Resolve a command input (e.g. "/commit" or "/commit fix typos") to a
-/// parsed CustomCommand.  Any text after the command name is appended to the
-/// body as extra user instructions.  Custom commands take priority; builtin
-/// commands are used as a fallback. `multi_agent` is forwarded to builtin
-/// template rendering so sections gated on multi-agent mode resolve correctly.
-pub fn resolve(input: &str, multi_agent: bool) -> Option<CustomCommand> {
+/// Resolve a user-defined custom command (`~/.config/smelt/commands/<name>.md`)
+/// from input like `"/commit"` or `"/commit fix typos"`. Any text after the
+/// command name is appended to the body as extra user instructions. Returns
+/// `None` for missing files; built-in command bodies (`/reflect`, `/simplify`)
+/// resolve through `crate::builtin_commands::resolve` directly, called from
+/// the `submit_builtin_command` Lua binding.
+pub fn resolve(input: &str) -> Option<CustomCommand> {
     let after_slash = input.strip_prefix('/')?;
     let name = after_slash.split_whitespace().next()?;
     if name.is_empty() || name.contains('/') || name.contains('.') {
@@ -95,18 +96,18 @@ pub fn resolve(input: &str, multi_agent: bool) -> Option<CustomCommand> {
     }
     let extra = after_slash[name.len()..].trim();
     let path = commands_dir().join(format!("{name}.md"));
-    if let Some(mut cmd) = parse_command(&path, name) {
-        if !extra.is_empty() {
-            cmd.body.push_str("\n\n");
-            cmd.body.push_str(extra);
-        }
-        return Some(cmd);
+    let mut cmd = parse_command(&path, name)?;
+    if !extra.is_empty() {
+        cmd.body.push_str("\n\n");
+        cmd.body.push_str(extra);
     }
-    crate::builtin_commands::resolve(input, multi_agent)
+    Some(cmd)
 }
 
-/// Check whether `input` (e.g. "/commit") matches a custom or builtin command
-/// name, ignoring any trailing arguments.
+/// Check whether `input` (e.g. "/commit") matches a user-defined custom
+/// command file, ignoring any trailing arguments. Built-ins (`/reflect`,
+/// `/simplify`) are Lua-registered slash commands and are detected by the
+/// completer through `crate::lua::is_lua_command`.
 pub fn is_custom_command(input: &str) -> bool {
     let name = input
         .strip_prefix('/')
@@ -116,7 +117,6 @@ pub fn is_custom_command(input: &str) -> bool {
         return false;
     }
     commands_dir().join(format!("{name}.md")).exists()
-        || crate::builtin_commands::is_builtin_command(input)
 }
 
 fn parse_command(path: &Path, name: &str) -> Option<CustomCommand> {

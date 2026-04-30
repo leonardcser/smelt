@@ -109,7 +109,7 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn begin_custom_command_turn(
+    pub(crate) fn begin_custom_command_turn(
         &mut self,
         cmd: crate::custom_commands::CustomCommand,
     ) -> TurnState {

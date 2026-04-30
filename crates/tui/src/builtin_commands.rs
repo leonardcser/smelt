@@ -1,3 +1,12 @@
+//! Built-in `/reflect` and `/simplify` prompt templates. Bodies live as
+//! `.md` files under `engine/src/prompts/commands/`; this module renders
+//! them with the current `multi_agent` context, applies frontmatter
+//! overrides, and returns a [`CustomCommand`] ready for
+//! `TuiApp::begin_custom_command_turn`. The only public surface is
+//! `resolve`, called from the `smelt.engine.submit_builtin_command` Lua
+//! binding (the `/reflect` and `/simplify` Lua plugins are the user-
+//! visible entry points).
+
 use crate::custom_commands::CustomCommand;
 
 struct BuiltinCommand {
@@ -15,30 +24,6 @@ const COMMANDS: &[BuiltinCommand] = &[
         content: include_str!("../../engine/src/prompts/commands/simplify.md"),
     },
 ];
-
-/// List all builtin commands: (name, description) pairs.
-pub fn list() -> Vec<(String, String)> {
-    COMMANDS
-        .iter()
-        .map(|cmd| {
-            let (overrides, body) = crate::custom_commands::parse_frontmatter(cmd.content);
-            let desc = overrides.description.unwrap_or_else(|| {
-                body.lines()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| {
-                        let s = l.trim();
-                        if s.len() > 60 {
-                            format!("{}...", &s[..s.floor_char_boundary(57)])
-                        } else {
-                            s.to_string()
-                        }
-                    })
-                    .unwrap_or_default()
-            });
-            (cmd.name.to_string(), desc)
-        })
-        .collect()
-}
 
 /// Resolve a builtin command by name, appending any extra arguments.
 /// Builtin command bodies are minijinja templates; `multi_agent` controls
@@ -61,15 +46,6 @@ pub fn resolve(input: &str, multi_agent: bool) -> Option<CustomCommand> {
     })
 }
 
-/// Check whether `input` matches a builtin command name.
-pub fn is_builtin_command(input: &str) -> bool {
-    let name = input
-        .strip_prefix('/')
-        .and_then(|s| s.split_whitespace().next())
-        .unwrap_or("");
-    COMMANDS.iter().any(|c| c.name == name)
-}
-
 fn render_template(body: &str, multi_agent: bool) -> String {
     let env = minijinja::Environment::new();
     match env.template_from_str(body) {
@@ -83,12 +59,6 @@ fn render_template(body: &str, multi_agent: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn list_includes_simplify() {
-        let items = list();
-        assert!(items.iter().any(|(name, _)| name == "simplify"));
-    }
 
     #[test]
     fn resolve_simplify_multi_agent() {
@@ -113,9 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn is_builtin() {
-        assert!(is_builtin_command("/simplify"));
-        assert!(is_builtin_command("/simplify extra args"));
-        assert!(!is_builtin_command("/nonexistent"));
+    fn unknown_returns_none() {
+        assert!(resolve("/nonexistent", true).is_none());
     }
 }

@@ -1148,9 +1148,7 @@ impl TuiApp {
             // ── Auto-start from leftover queued messages (one per turn) ──
             if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
-                if let Some(cmd) =
-                    crate::custom_commands::resolve(text.trim(), self.core.config.multi_agent)
-                {
+                if let Some(cmd) = crate::custom_commands::resolve(text.trim()) {
                     let turn = self.begin_custom_command_turn(cmd);
                     self.agent = Some(turn);
                 } else if !text.is_empty() {

@@ -120,8 +120,8 @@ to invoke_ the feature.
 | `/help`                                           | `plugins/help.lua`                | P4.e                             | working — Overlay (P1.c C.6) |
 | `/history`                                        | `plugins/history_search.lua`      | P4.e                             | working |
 | `/yank-block` (opt-in)                            | `plugins/yank_block.lua`          | P4                               | working |
-| `/reflect`                                        | `builtin_commands.rs`             | P4.e                             | working |
-| `/simplify`                                       | `builtin_commands.rs`             | P4.e                             | working |
+| `/reflect`                                        | `runtime/lua/smelt/plugins/reflect.lua` + `builtin_commands::resolve` | P4.e | working — Lua command (`4420015`); body via `smelt.engine.submit_builtin_command` |
+| `/simplify`                                       | `runtime/lua/smelt/plugins/simplify.lua` + `builtin_commands::resolve` | P4.e | working — Lua command (`4420015`); multi-agent branches honored via the binding's `multi_agent` context |
 | Custom commands (`~/.config/smelt/commands/*.md`) | `custom_commands.rs`              | P4.e                             | working |
 | `! <shell>` (shell escape)                        | `app/cmdline.rs`                  | P4 (cmdline widget)              | working |
 
