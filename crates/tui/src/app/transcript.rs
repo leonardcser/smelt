@@ -761,6 +761,7 @@ impl App {
             && matches!(self.vim_mode, ui::VimMode::Visual | ui::VimMode::VisualLine);
         let anchor_set = self.transcript_window.selection_anchor.is_some();
         let yank_flash = self
+            .core
             .clipboard
             .kill_ring
             .yank_flash_range(std::time::Instant::now())
@@ -769,7 +770,7 @@ impl App {
             return Vec::new();
         }
 
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         if rows.is_empty() {
             return Vec::new();
         }
@@ -792,7 +793,8 @@ impl App {
         // briefly paints over the yanked text after `y`-family vim ops
         // (mirrors nvim's `vim.highlight.on_yank`).
         let (s, e) = match active_selection.or_else(|| {
-            self.clipboard
+            self.core
+                .clipboard
                 .kill_ring
                 .yank_flash_range(std::time::Instant::now())
         }) {

@@ -56,7 +56,7 @@ impl App {
     /// Compact the transcript or notify "nothing to compact" when
     /// `session.messages` is empty.
     pub(crate) fn compact_or_notify(&mut self, instructions: Option<String>) {
-        if self.session.messages.is_empty() {
+        if self.core.session.messages.is_empty() {
             self.notify_error("nothing to compact".into());
         } else {
             self.compact_history(instructions);
@@ -74,7 +74,7 @@ impl App {
             if let Some((text, images)) = self.rewind_to(bidx) {
                 self.input.restore_from_rewind(text, images);
             }
-            while self.engine.try_recv().is_ok() {}
+            while self.core.engine.try_recv().is_ok() {}
             self.save_session();
         } else if restore_vim_insert {
             self.input
@@ -97,9 +97,10 @@ impl App {
     /// (`/yank-block`). Notifies success / failure.
     pub(crate) fn yank_current_block(&mut self) {
         let abs_row = self.transcript_window.cursor_abs_row();
-        if let Some(text) = self.block_text_at_row(abs_row, self.config.settings.show_thinking) {
-            if self.clipboard.write(&text).is_ok() {
-                self.clipboard.kill_ring.record_clipboard_write(text);
+        if let Some(text) = self.block_text_at_row(abs_row, self.core.config.settings.show_thinking)
+        {
+            if self.core.clipboard.write(&text).is_ok() {
+                self.core.clipboard.kill_ring.record_clipboard_write(text);
             }
             self.notify("block copied".into());
         } else {

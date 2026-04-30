@@ -132,7 +132,7 @@ impl App {
                     }
                     return EventOutcome::Noop;
                 }
-                if !self.has_transcript_content(self.config.settings.show_thinking) {
+                if !self.has_transcript_content(self.core.config.settings.show_thinking) {
                     return EventOutcome::Noop;
                 }
                 self.app_focus = crate::app::AppFocus::Content;
@@ -179,11 +179,11 @@ impl App {
             }
             return;
         }
-        if !self.has_transcript_content(self.config.settings.show_thinking) {
+        if !self.has_transcript_content(self.core.config.settings.show_thinking) {
             return;
         }
         self.app_focus = crate::app::AppFocus::Content;
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
             .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
@@ -344,11 +344,11 @@ impl App {
     /// instead of empty padding), and lets the window mutate its own
     /// selection state.
     fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         if rows.is_empty() {
             return;
         }
-        let (soft, hard) = self.transcript_line_breaks(self.config.settings.show_thinking);
+        let (soft, hard) = self.transcript_line_breaks(self.core.config.settings.show_thinking);
         let Some(viewport) = self.transcript_viewport else {
             return;
         };
@@ -380,7 +380,7 @@ impl App {
             .min(rows.len().saturating_sub(1));
         let rel_col = me.column.saturating_sub(vp.rect.left) as usize;
         let snapped =
-            self.snap_col_to_selectable(line_idx, rel_col, self.config.settings.show_thinking);
+            self.snap_col_to_selectable(line_idx, rel_col, self.core.config.settings.show_thinking);
         MouseEvent {
             column: vp.rect.left.saturating_add(snapped as u16),
             ..me
@@ -423,7 +423,7 @@ impl App {
         let from_top = bar.scroll_from_top_for_thumb(thumb_top);
         if owner == ui::TRANSCRIPT_WIN {
             self.transcript_window.scroll_top = from_top;
-            let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+            let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             let viewport = self.viewport_rows_estimate();
             let max_scroll = (rows.len() as u16).saturating_sub(viewport);
             self.transcript_window.follow_tail = self.transcript_window.scroll_top >= max_scroll;

@@ -11,7 +11,7 @@
 //! removed, due periodics are re-armed in place, and the LuaHandles for
 //! due entries are pulled out as `mlua::Function` clones so the
 //! callbacks fire *after* the borrow on `Timers` releases. That lets a
-//! callback re-enter `with_app(|app| app.timers.set(...))` without a
+//! callback re-enter `with_app(|app| app.core.timers.set(...))` without a
 //! re-entrant borrow.
 
 use std::time::{Duration, Instant};

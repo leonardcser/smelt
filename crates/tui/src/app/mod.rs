@@ -5,6 +5,7 @@ mod cmdline;
 pub mod commands;
 pub(crate) mod confirms;
 mod content_keys;
+pub(crate) mod core;
 pub(crate) mod dialogs;
 pub(crate) mod engine_bridge;
 mod events;
@@ -108,14 +109,10 @@ pub enum AgentTrackStatus {
 // ── App ──────────────────────────────────────────────────────────────────────
 
 pub struct App {
-    /// Connection + behaviour configuration: model / api_base /
-    /// api_key_env / provider_type / available_models / model_config /
-    /// cli_*overrides / mode / mode_cycle / reasoning_effort /
-    /// reasoning_cycle / settings / multi_agent / context_window.
-    /// Populated by `App::new` from CLI args + saved state, then
-    /// mutated by user actions (Shift+Tab cycles `mode`, `/model`
-    /// rewrites `model`, etc.).
-    pub config: app_config::AppConfig,
+    /// Headless-safe subsystems aggregated into one struct. Today's
+    /// `App` is one frontend over this `Core`; `HeadlessApp` lands as
+    /// the second in a.12b. Subsystem access is `self.core.<field>.X`.
+    pub core: core::Core,
     /// Block history, tool states, layout cache — the committed transcript.
     pub(crate) transcript: crate::content::transcript::Transcript,
     /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
@@ -140,7 +137,6 @@ pub struct App {
     pub runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
-    pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     /// Short task label (slug) shown on the status bar after the throbber.
     pub task_label: Option<String>,
@@ -215,30 +211,12 @@ pub struct App {
     pub agents: Vec<TrackedAgent>,
     /// Shared agent snapshots for live dialog updates.
     pub agent_snapshots: crate::app::SharedSnapshots,
-    pub(crate) engine: engine_bridge::EngineBridge,
     pub(crate) permissions: Arc<Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `App` so reducer handlers (`apply_ops`) can mutate
     /// it directly rather than threading `&mut Option<TurnState>`
     /// through every call chain.
     pub(crate) agent: Option<TurnState>,
-    /// Pending Confirm dialog requests, keyed by Lua-side handle id.
-    /// `agent.rs` registers a request before firing
-    /// `smelt.confirm.open(handle_id)`; the Lua dialog reads it back
-    /// through Rust primitives and resolves it on submit / dismiss.
-    pub(crate) confirms: confirms::Confirms,
-    /// Scheduled Lua callbacks. `smelt.timer.set` /
-    /// `smelt.timer.every` / `smelt.timer.cancel` (and the
-    /// `smelt.defer` alias) all route here through `with_app`.
-    /// Drained each main-loop iteration via `App::tick_timers`.
-    pub(crate) timers: timers::Timers,
-    /// Reactive name → value registry plus a deferred subscriber
-    /// queue. Built-in cells declare here at startup; setters
-    /// publish via `cells.set(name, value)` and the main loop drains
-    /// queued subscribers between event handlers. P2.a.4a lands the
-    /// primitive type only — Lua bindings (a.4b) and built-in
-    /// migrations (a.4c) follow.
-    pub(crate) cells: cells::Cells,
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
@@ -296,14 +274,6 @@ pub struct App {
     /// via `VimContext.mode` and `MouseCtx.vim_mode`. Defaults to
     /// `Insert`, matching the historical default.
     pub vim_mode: ui::VimMode,
-    /// **Single global** clipboard subsystem (kill ring + platform
-    /// sink). Vim and emacs yank/paste sites borrow this directly so
-    /// the prompt, the transcript, dialog inputs, and any future Lua
-    /// tools share one kill ring backed by the same system clipboard.
-    pub clipboard: ui::Clipboard,
-    /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
-    /// user-registered commands / keymaps / autocmds.
-    pub lua: crate::lua::LuaRuntime,
     /// Extra instructions from AGENTS.md / config, injected into the system
     /// prompt as a section. Set during app initialization.
     pub extra_instructions: Option<String>,
@@ -664,23 +634,32 @@ impl App {
         };
 
         Self {
-            config: app_config::AppConfig {
-                model,
-                api_base,
-                api_key_env,
-                provider_type,
-                available_models,
-                model_config: engine::ModelConfig::default(),
-                cli_model_override,
-                cli_api_base_override,
-                cli_api_key_env_override,
-                mode,
-                mode_cycle,
-                reasoning_effort,
-                reasoning_cycle,
-                settings,
-                multi_agent,
-                context_window: None,
+            core: core::Core {
+                config: app_config::AppConfig {
+                    model,
+                    api_base,
+                    api_key_env,
+                    provider_type,
+                    available_models,
+                    model_config: engine::ModelConfig::default(),
+                    cli_model_override,
+                    cli_api_base_override,
+                    cli_api_key_env_override,
+                    mode,
+                    mode_cycle,
+                    reasoning_effort,
+                    reasoning_cycle,
+                    settings,
+                    multi_agent,
+                    context_window: None,
+                },
+                session: session::Session::new(),
+                confirms: confirms::Confirms::new(),
+                clipboard: ui::Clipboard::new(Box::new(commands::SystemSink)),
+                timers: timers::Timers::new(),
+                cells,
+                lua: crate::lua::LuaRuntime::new(),
+                engine: engine_bridge::EngineBridge::new(engine),
             },
             transcript: crate::content::transcript::Transcript::new(),
             parser: crate::content::stream_parser::StreamParser::new(),
@@ -694,7 +673,6 @@ impl App {
             pending_agent_messages: Vec::new(),
             runtime_approvals,
             cwd,
-            session: session::Session::new(),
             shared_session,
             task_label: None,
             pending_dialog: false,
@@ -718,12 +696,8 @@ impl App {
             agent_id: String::new(),
             agents: Vec::new(),
             agent_snapshots: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            engine: engine_bridge::EngineBridge::new(engine),
             permissions,
             agent: None,
-            confirms: confirms::Confirms::new(),
-            timers: timers::Timers::new(),
-            cells,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
@@ -760,8 +734,6 @@ impl App {
             drag_autoscroll_since: None,
             prompt_drag_return_vim_mode: None,
             vim_mode: ui::VimMode::Insert,
-            clipboard: ui::Clipboard::new(Box::new(commands::SystemSink)),
-            lua: crate::lua::LuaRuntime::new(),
             extra_instructions: None,
             skill_section: None,
             agent_prompt_config: None,
@@ -777,7 +749,7 @@ impl App {
         let cwd = std::path::Path::new(&self.cwd);
         self.prompt_sections = crate::prompt_sections::build_defaults(
             cwd,
-            self.config.mode,
+            self.core.config.mode,
             true, // TUI is always interactive
             self.agent_prompt_config.as_ref(),
             self.skill_section.as_deref(),
@@ -788,14 +760,14 @@ impl App {
 
     /// Drain timers whose deadline has passed: re-arm recurring entries,
     /// drop one-shots, fire each callback after the borrow on `Timers`
-    /// releases so a callback that re-enters `app.timers.set/every/cancel`
+    /// releases so a callback that re-enters `app.core.timers.set/every/cancel`
     /// composes cleanly with the TLS app pointer.
     pub fn tick_timers(&mut self) {
         let now = std::time::Instant::now();
-        let due = self.timers.drain_due(now, &self.lua.lua);
+        let due = self.core.timers.drain_due(now, &self.core.lua.lua);
         for func in due {
             if let Err(e) = func.call::<()>(()) {
-                self.lua.record_error(format!("timer: {e}"));
+                self.core.lua.record_error(format!("timer: {e}"));
             }
         }
     }
@@ -804,7 +776,7 @@ impl App {
     /// run each subscriber against the snapshot. Called once per
     /// main-loop iteration after timers tick — same reasoning as
     /// `tick_timers`: fires happen with the `&mut Cells` borrow
-    /// released so a subscriber that re-enters `app.cells.set_dyn /
+    /// released so a subscriber that re-enters `app.core.cells.set_dyn /
     /// subscribe_kind / unsubscribe` composes cleanly with the TLS
     /// app pointer.
     ///
@@ -817,15 +789,17 @@ impl App {
     /// `spinner_frame` follow the same diff pattern so subscribers
     /// fire only on second-rollover / frame-rollover, not every tick.
     pub fn publish_diff_cells(&mut self) {
-        self.cells
+        self.core
+            .cells
             .publish_if_changed("vim_mode", format!("{:?}", self.vim_mode));
-        self.cells
-            .publish_if_changed("confirms_pending", !self.confirms.is_clear());
+        self.core
+            .cells
+            .publish_if_changed("confirms_pending", !self.core.confirms.is_clear());
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.cells.publish_if_changed("now", now_secs);
+        self.core.cells.publish_if_changed("now", now_secs);
         // Spinner advances only while a turn is animating; outside of
         // a live turn the frame stays at 0 so a subscriber sees a
         // single rollover when the turn ends and never fires again.
@@ -835,7 +809,7 @@ impl App {
             .filter(|_| self.working.is_animating())
             .map(|e| crate::content::spinner_frame_index(e) as u8)
             .unwrap_or(0);
-        self.cells.publish_if_changed("spinner_frame", frame);
+        self.core.cells.publish_if_changed("spinner_frame", frame);
     }
 
     /// Direct subscribers see the Lua function called as `func(value)`;
@@ -845,13 +819,13 @@ impl App {
     /// the per-`TypeId` projector registered on `Cells`; values with
     /// no registered projector surface as `nil`.
     pub fn drain_cells_pending(&mut self) {
-        if !self.cells.has_pending() {
+        if !self.core.cells.has_pending() {
             return;
         }
-        let fires = self.cells.drain_pending();
-        let lua = &self.lua.lua;
+        let fires = self.core.cells.drain_pending();
+        let lua = &self.core.lua.lua;
         for fire in fires {
-            let value = self.cells.project_to_lua(&*fire.value, lua);
+            let value = self.core.cells.project_to_lua(&*fire.value, lua);
             for cb in &fire.callbacks {
                 let cells::SubscriberKind::Lua(handle) = &cb.kind;
                 let func = match lua.registry_value::<mlua::Function>(&handle.key) {
@@ -864,14 +838,16 @@ impl App {
                     func.call::<()>(value.clone())
                 };
                 if let Err(e) = result {
-                    self.lua.record_error(format!("cell `{}`: {e}", fire.name));
+                    self.core
+                        .lua
+                        .record_error(format!("cell `{}`: {e}", fire.name));
                 }
             }
         }
     }
 
     pub fn settings_state(&self) -> state::ResolvedSettings {
-        let mut s = self.config.settings.clone();
+        let mut s = self.core.config.settings.clone();
         s.vim = self.input.vim_enabled();
         s
     }
@@ -1079,9 +1055,9 @@ impl App {
         let _ = io::stdout().execute(EnableFocusChange);
         let _ = io::stdout().execute(EnableMouseCapture);
 
-        if !self.session.messages.is_empty() {
+        if !self.core.session.messages.is_empty() {
             self.restore_screen();
-            if let Some(ref slug) = self.session.slug {
+            if let Some(ref slug) = self.core.session.slug {
                 self.set_task_label(slug.clone());
             }
             self.finish_transcript_turn();
@@ -1097,19 +1073,21 @@ impl App {
         // Lua runs at startup so those reads land on the real App.
         {
             let _guard = crate::lua::install_app_ptr(self);
-            self.lua.load_plugins();
-            self.cells
-                .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
+            self.core.lua.load_plugins();
+            self.core.cells.set_dyn(
+                "session_started",
+                std::rc::Rc::new(self.core.session.id.clone()),
+            );
             self.drain_cells_pending();
         }
-        if let Some(err) = self.lua.load_error.take() {
+        if let Some(err) = self.core.lua.load_error.take() {
             self.notify_error(format!("lua init: {err}"));
         }
         self.flush_lua_callbacks();
         // Plugins have now registered their commands — pull every
         // declared `args = {...}` list so the CommandArg picker opens
         // when the user types `/name ` (space).
-        self.input.command_arg_sources = self.lua.list_command_args();
+        self.input.command_arg_sources = self.core.lua.list_command_args();
 
         let mut term_events = EventStream::new();
 
@@ -1163,7 +1141,7 @@ impl App {
             self.publish_diff_cells();
             self.drain_cells_pending();
             self.drive_lua_tasks();
-            let (items, tick_errors) = self.lua.tick_statusline();
+            let (items, tick_errors) = self.core.lua.tick_statusline();
             self.custom_status_items = items;
             for (name, msg) in tick_errors {
                 match msg {
@@ -1179,7 +1157,8 @@ impl App {
                 }
             }
             for _id in self.drain_finished_blocks() {
-                self.cells
+                self.core
+                    .cells
                     .set_dyn("block_done", std::rc::Rc::new(crate::app::cells::EventStub));
             }
             self.drain_cells_pending();
@@ -1188,7 +1167,7 @@ impl App {
             // Tick callback — e.g. Agents pulls a fresh subagent
             // snapshot here each frame.
             {
-                let lua = &self.lua;
+                let lua = &self.core.lua;
                 let mut lua_invoke =
                     |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
@@ -1200,15 +1179,15 @@ impl App {
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
-                    self.config.context_window = result;
+                    self.core.config.context_window = result;
                     ctx_rx = None;
                 }
             }
 
             // ── Drain engine events (paused only for Confirm) ──
-            if self.confirms.is_clear() {
+            if self.core.confirms.is_clear() {
                 loop {
-                    let ev = match self.engine.try_recv() {
+                    let ev = match self.core.engine.try_recv() {
                         Ok(ev) => ev,
                         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -1256,7 +1235,7 @@ impl App {
             if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
                 if let Some(cmd) =
-                    crate::custom_commands::resolve(text.trim(), self.config.multi_agent)
+                    crate::custom_commands::resolve(text.trim(), self.core.config.multi_agent)
                 {
                     let turn = self.begin_custom_command_turn(cmd);
                     self.agent = Some(turn);
@@ -1272,7 +1251,7 @@ impl App {
             // ── Auto-start from pending agent messages ─────────────────
             if self.agent.is_none() && !self.pending_agent_messages.is_empty() {
                 let msgs = std::mem::take(&mut self.pending_agent_messages);
-                self.session.messages.extend(msgs);
+                self.core.session.messages.extend(msgs);
                 let turn = self.begin_agent_message_turn();
                 self.agent = Some(turn);
             }
@@ -1374,6 +1353,7 @@ impl App {
             // a borrow on `self` that conflicts with other branches.
             let now = Instant::now();
             let yank_flash_active = self
+                .core
                 .clipboard
                 .kill_ring
                 .yank_flash_until()
@@ -1456,7 +1436,7 @@ impl App {
                     self.render_normal(self.agent.is_some());
                 }
 
-                Some(ev) = self.engine.recv(), if self.confirms.is_clear() => {
+                Some(ev) = self.core.engine.recv(), if self.core.confirms.is_clear() => {
                     if let Some(mut ag) = self.agent.take() {
                         let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
@@ -1535,7 +1515,8 @@ impl App {
         if self.agent.is_some() {
             self.finish_turn(true);
         }
-        self.cells
+        self.core
+            .cells
             .set_dyn("shutdown", std::rc::Rc::new(crate::app::cells::EventStub));
         self.drain_cells_pending();
         self.save_session();
@@ -1598,17 +1579,17 @@ impl App {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        self.engine.send(UiCommand::StartTurn {
+        self.core.engine.send(UiCommand::StartTurn {
             turn_id,
             content: Content::text(message),
-            mode: self.config.mode,
-            model: self.config.model.clone(),
-            reasoning_effort: self.config.reasoning_effort,
-            history: self.session.messages.clone(),
-            api_base: Some(self.config.api_base.clone()),
+            mode: self.core.config.mode,
+            model: self.core.config.model.clone(),
+            reasoning_effort: self.core.config.reasoning_effort,
+            history: self.core.session.messages.clone(),
+            api_base: Some(self.core.config.api_base.clone()),
             api_key: Some(self.api_key()),
-            session_id: self.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.session),
+            session_id: self.core.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.core.session),
             model_config_overrides: None,
             permission_overrides: None,
             system_prompt: None,
@@ -1626,12 +1607,12 @@ impl App {
         let mut interrupted = false;
         loop {
             let ev = tokio::select! {
-                ev = self.engine.recv() => match ev {
+                ev = self.core.engine.recv() => match ev {
                     Some(ev) => ev,
                     None => break,
                 },
                 _ = cancel.notified() => {
-                    self.engine.send(protocol::UiCommand::Cancel);
+                    self.core.engine.send(protocol::UiCommand::Cancel);
                     interrupted = true;
                     break;
                 }
@@ -1644,8 +1625,8 @@ impl App {
                     // Still need to handle side-effect events.
                     match ev {
                         EngineEvent::RequestPermission { request_id, .. } => {
-                            let approved = self.config.mode == Mode::Yolo;
-                            self.engine.send(UiCommand::PermissionDecision {
+                            let approved = self.core.config.mode == Mode::Yolo;
+                            self.core.engine.send(UiCommand::PermissionDecision {
                                 request_id,
                                 approved,
                                 message: None,
@@ -1718,8 +1699,8 @@ impl App {
                         headless::log_retry(attempt, delay_ms);
                     }
                     EngineEvent::RequestPermission { request_id, .. } => {
-                        let approved = self.config.mode == Mode::Yolo;
-                        self.engine.send(UiCommand::PermissionDecision {
+                        let approved = self.core.config.mode == Mode::Yolo;
+                        self.core.engine.send(UiCommand::PermissionDecision {
                             request_id,
                             approved,
                             message: None,
@@ -1788,7 +1769,7 @@ impl App {
             from_slug: from_slug.to_string(),
             message: message.to_string(),
         });
-        self.engine.send(UiCommand::AgentMessage {
+        self.core.engine.send(UiCommand::AgentMessage {
             from_id: from_id.to_string(),
             from_slug: from_slug.to_string(),
             message: message.to_string(),
@@ -1797,10 +1778,10 @@ impl App {
 
     /// Send a Btw query to the engine on behalf of a querying peer.
     fn send_btw_query(&self, question: String) {
-        self.engine.send(UiCommand::Btw {
+        self.core.engine.send(UiCommand::Btw {
             question,
-            history: self.session.messages.clone(),
-            reasoning_effort: self.config.reasoning_effort,
+            history: self.core.session.messages.clone(),
+            reasoning_effort: self.core.config.reasoning_effort,
         });
     }
 
@@ -1843,7 +1824,7 @@ impl App {
                     match incoming {
                         engine::socket::IncomingMessage::Message { from_id, from_slug, message } => {
                             self.forward_agent_message(&from_id, &from_slug, &message);
-                            self.session.messages
+                            self.core.session.messages
                                 .push(protocol::Message::agent(&from_id, &from_slug, &message));
                             self.run_subagent_turn(
                                 Content::text(""),
@@ -1856,7 +1837,7 @@ impl App {
                         }
                         engine::socket::IncomingMessage::Query { from_id: _, question, reply_tx } => {
                             self.send_btw_query(question);
-                            while let Some(ev) = self.engine.recv().await {
+                            while let Some(ev) = self.core.engine.recv().await {
                                 headless::emit_json(&ev);
                                 if let EngineEvent::BtwResponse { content } = ev {
                                     let _ = reply_tx.send(content);
@@ -1899,8 +1880,8 @@ impl App {
 
         // Generate title/slug for the subagent.
         let text = content.text_content();
-        if self.session.slug.is_none() && !text.is_empty() {
-            self.engine.send(UiCommand::GenerateTitle {
+        if self.core.session.slug.is_none() && !text.is_empty() {
+            self.core.engine.send(UiCommand::GenerateTitle {
                 last_user_message: text,
                 assistant_tail: String::new(),
             });
@@ -1909,17 +1890,17 @@ impl App {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        self.engine.send(UiCommand::StartTurn {
+        self.core.engine.send(UiCommand::StartTurn {
             turn_id,
             content,
-            mode: self.config.mode,
-            model: self.config.model.clone(),
-            reasoning_effort: self.config.reasoning_effort,
-            history: self.session.messages.clone(),
-            api_base: Some(self.config.api_base.clone()),
+            mode: self.core.config.mode,
+            model: self.core.config.model.clone(),
+            reasoning_effort: self.core.config.reasoning_effort,
+            history: self.core.session.messages.clone(),
+            api_base: Some(self.core.config.api_base.clone()),
             api_key: Some(self.api_key()),
-            session_id: self.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.session),
+            session_id: self.core.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.core.session),
             model_config_overrides: None,
             permission_overrides: None,
             system_prompt: None,
@@ -1960,7 +1941,7 @@ impl App {
                         return;
                     }
                 }
-                maybe_ev = self.engine.recv() => {
+                maybe_ev = self.core.engine.recv() => {
                     let Some(ev) = maybe_ev else {
                         break;
                     };
@@ -1978,12 +1959,12 @@ impl App {
                                 parent_socket, my_agent_id, &tool_name,
                                 &args, &confirm_message, &approval_patterns, summary.as_deref(),
                             ).await;
-                            self.engine.send(UiCommand::PermissionDecision {
+                            self.core.engine.send(UiCommand::PermissionDecision {
                                 request_id, approved, message,
                             });
                         }
                         EngineEvent::Messages { messages, .. } => {
-                            self.session.messages = messages;
+                            self.core.session.messages = messages;
                         }
                         EngineEvent::BtwResponse { content } => {
                             if let Some(tx) = pending_query_tx.take() {
@@ -1991,22 +1972,22 @@ impl App {
                             }
                         }
                         EngineEvent::TitleGenerated { title, slug } => {
-                            self.session.title = Some(title);
-                            self.session.slug = Some(slug.clone());
+                            self.core.session.title = Some(title);
+                            self.core.session.slug = Some(slug.clone());
                             engine::registry::update_slug(my_pid, &slug);
                         }
                         EngineEvent::TurnError { .. } => {
                             break;
                         }
                         EngineEvent::TurnComplete { messages, .. } => {
-                            self.session.messages = messages;
+                            self.core.session.messages = messages;
 
                             // Auto-return last assistant message to parent.
                             if let Some(socket) = parent_socket {
-                                if let Some(last_asst) = self.session.messages.iter().rev().find(|m| m.role == protocol::Role::Assistant) {
+                                if let Some(last_asst) = self.core.session.messages.iter().rev().find(|m| m.role == protocol::Role::Assistant) {
                                     let text = last_asst.content.as_ref().map(|c| c.text_content()).unwrap_or_default();
                                     if !text.is_empty() {
-                                        let slug = self.session.slug.as_deref().unwrap_or("");
+                                        let slug = self.core.session.slug.as_deref().unwrap_or("");
                                         let _ = engine::socket::send_message(socket, my_agent_id, slug, &text).await;
                                     }
                                 }

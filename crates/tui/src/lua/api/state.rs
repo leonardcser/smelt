@@ -24,7 +24,7 @@ fn register_transcript(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     transcript_tbl.set(
         "text",
         app_read!(lua, |app| app
-            .full_transcript_display_text(app.config.settings.show_thinking)
+            .full_transcript_display_text(app.core.config.settings.show_thinking)
             .join("\n")),
     )?;
     transcript_tbl.set(
@@ -45,38 +45,49 @@ fn register_engine_and_session(
 ) -> LuaResult<()> {
     let engine_tbl = lua.create_table()?;
 
-    engine_tbl.set("model", app_read!(lua, |app| app.config.model.clone()))?;
+    engine_tbl.set("model", app_read!(lua, |app| app.core.config.model.clone()))?;
     engine_tbl.set(
         "mode",
-        app_read!(lua, |app| app.config.mode.as_str().to_string()),
+        app_read!(lua, |app| app.core.config.mode.as_str().to_string()),
     )?;
     engine_tbl.set(
         "reasoning_effort",
-        app_read!(lua, |app| app.config.reasoning_effort.label().to_string()),
+        app_read!(lua, |app| app
+            .core
+            .config
+            .reasoning_effort
+            .label()
+            .to_string()),
     )?;
     engine_tbl.set("is_busy", app_read!(lua, |app| app.agent.is_some()))?;
-    engine_tbl.set("cost", app_read!(lua, |app| app.session.session_cost_usd))?;
+    engine_tbl.set(
+        "cost",
+        app_read!(lua, |app| app.core.session.session_cost_usd),
+    )?;
     engine_tbl.set(
         "context_tokens",
-        app_read!(lua, |app| app.session.context_tokens),
+        app_read!(lua, |app| app.core.session.context_tokens),
     )?;
     engine_tbl.set(
         "context_window",
-        app_read!(lua, |app| app.config.context_window),
+        app_read!(lua, |app| app.core.config.context_window),
     )?;
 
     // smelt.session.*
     let session_tbl = lua.create_table()?;
-    session_tbl.set("title", app_read!(lua, |app| app.session.title.clone()))?;
+    session_tbl.set(
+        "title",
+        app_read!(lua, |app| app.core.session.title.clone()),
+    )?;
     session_tbl.set("cwd", app_read!(lua, |app| app.cwd.clone()))?;
     session_tbl.set(
         "created_at_ms",
-        app_read!(lua, |app| app.session.created_at_ms),
+        app_read!(lua, |app| app.core.session.created_at_ms),
     )?;
-    session_tbl.set("id", app_read!(lua, |app| app.session.id.clone()))?;
+    session_tbl.set("id", app_read!(lua, |app| app.core.session.id.clone()))?;
     session_tbl.set(
         "dir",
-        app_read!(lua, |app| crate::session::dir_for(&app.session)
+        app_read!(lua, |app| crate::session::dir_for(&app.core.session)
             .display()
             .to_string()),
     )?;
@@ -111,7 +122,7 @@ fn register_engine_and_session(
         "list",
         lua.create_function(|lua, ()| {
             let current_id =
-                crate::lua::try_with_app(|app| app.session.id.clone()).unwrap_or_default();
+                crate::lua::try_with_app(|app| app.core.session.id.clone()).unwrap_or_default();
             let sessions = crate::session::list_sessions();
             let out = lua.create_table()?;
             let mut idx = 1;
@@ -147,7 +158,7 @@ fn register_engine_and_session(
         "delete",
         lua.create_function(|_, id: String| {
             crate::lua::with_app(|app| {
-                if id != app.session.id {
+                if id != app.core.session.id {
                     crate::session::delete(&id);
                 }
             });
@@ -170,7 +181,7 @@ fn register_engine_and_session(
         lua.create_function(|lua, ()| {
             let out = lua.create_table()?;
             if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
-                for (i, m) in app.config.available_models.iter().enumerate() {
+                for (i, m) in app.core.config.available_models.iter().enumerate() {
                     let entry = lua.create_table()?;
                     entry.set("key", m.key.clone())?;
                     entry.set("name", m.model_name.clone())?;
@@ -214,7 +225,7 @@ fn register_engine_and_session(
     engine_tbl.set(
         "cancel",
         lua.create_function(|_, ()| {
-            crate::lua::with_app(|app| app.engine.send(protocol::UiCommand::Cancel));
+            crate::lua::with_app(|app| app.core.engine.send(protocol::UiCommand::Cancel));
             Ok(())
         })?,
     )?;
@@ -278,7 +289,7 @@ fn register_engine_and_session(
                 }
 
                 crate::lua::with_app(|app| {
-                    app.engine.send(protocol::UiCommand::EngineAsk {
+                    app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
                         messages,
@@ -294,8 +305,8 @@ fn register_engine_and_session(
     engine_tbl.set(
         "history",
         lua.create_function(|lua, ()| {
-            let history =
-                crate::lua::try_with_app(|app| app.session.messages.clone()).unwrap_or_default();
+            let history = crate::lua::try_with_app(|app| app.core.session.messages.clone())
+                .unwrap_or_default();
             messages_to_lua(lua, &history)
         })?,
     )?;
@@ -309,8 +320,8 @@ fn register_process(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     process_tbl.set(
         "list",
         lua.create_function(|lua, ()| {
-            let procs =
-                crate::lua::try_with_app(|app| app.engine.processes().list()).unwrap_or_default();
+            let procs = crate::lua::try_with_app(|app| app.core.engine.processes().list())
+                .unwrap_or_default();
             let out = lua.create_table()?;
             for (i, p) in procs.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -326,7 +337,7 @@ fn register_process(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "kill",
         lua.create_function(|_, id: String| {
             crate::lua::with_app(|app| {
-                let registry = app.engine.processes().clone();
+                let registry = app.core.engine.processes().clone();
                 tokio::spawn(async move {
                     let _ = registry.stop(&id).await;
                 });
@@ -337,7 +348,7 @@ fn register_process(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     process_tbl.set(
         "read_output",
         lua.create_function(|lua, id: String| {
-            let read = crate::lua::try_with_app(|app| app.engine.processes().read(&id));
+            let read = crate::lua::try_with_app(|app| app.core.engine.processes().read(&id));
             match read {
                 Some(Ok((text, running, exit_code))) => {
                     let t = lua.create_table()?;
@@ -360,7 +371,7 @@ fn register_process(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     process_tbl.set(
         "spawn_bg",
         lua.create_function(|_, command: String| -> LuaResult<String> {
-            let registry = crate::lua::try_with_app(|app| app.engine.processes().clone())
+            let registry = crate::lua::try_with_app(|app| app.core.engine.processes().clone())
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
             let mut cmd = tokio::process::Command::new("sh");
             cmd.arg("-c")

@@ -88,7 +88,7 @@ impl App {
         // Pull in the latest nav-only text (selectable chars) so cpos
         // stays valid across streaming updates.
 
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.resync(&rows, viewport);
         let ctx = KeyContext {
@@ -172,9 +172,12 @@ impl App {
                         let s = ui::text::snap(&buf, s);
                         let e = ui::text::snap(&buf, e);
                         if s < e {
-                            let copy =
-                                self.copy_display_range(s, e, self.config.settings.show_thinking);
-                            let _ = self.clipboard.write(&copy);
+                            let copy = self.copy_display_range(
+                                s,
+                                e,
+                                self.core.config.settings.show_thinking,
+                            );
+                            let _ = self.core.clipboard.write(&copy);
                         }
                     }
                     return EventOutcome::Redraw;
@@ -185,7 +188,8 @@ impl App {
                 self.transcript_window.cpos = new_cpos;
                 self.snap_transcript_cursor();
 
-                let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+                let rows =
+                    self.full_transcript_display_text(self.core.config.settings.show_thinking);
                 let viewport = self.viewport_rows_estimate();
                 self.transcript_window.resync(&rows, viewport);
                 return EventOutcome::Redraw;
@@ -202,7 +206,7 @@ impl App {
     /// vertical motion shares one code path (with `curswant`) across
     /// mouse wheel, Ctrl-U/D, arrows and j/k.
     pub(super) fn move_content_cursor_by_lines(&mut self, delta: isize) {
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
             .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
@@ -222,31 +226,31 @@ impl App {
     /// via `copy_display_range`, and push that — so external pastes
     /// see the rendered text rather than the raw markdown.
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         let result = {
-            let prev_sink = self.clipboard.swap_sink(Box::new(ui::NullSink));
+            let prev_sink = self.core.clipboard.swap_sink(Box::new(ui::NullSink));
             let r = self.transcript_window.handle_key(
                 k,
                 &rows,
                 viewport,
                 &mut self.vim_mode,
-                &mut self.clipboard,
+                &mut self.core.clipboard,
             );
-            self.clipboard.swap_sink(prev_sink);
+            self.core.clipboard.swap_sink(prev_sink);
             r
         };
         match result {
             None => false,
             Some(yanked) => {
                 if let Some(raw) = yanked {
-                    let copy = if let Some((s, e)) = self.clipboard.kill_ring.source_range() {
-                        self.copy_display_range(s, e, self.config.settings.show_thinking)
+                    let copy = if let Some((s, e)) = self.core.clipboard.kill_ring.source_range() {
+                        self.copy_display_range(s, e, self.core.config.settings.show_thinking)
                     } else {
                         raw
                     };
-                    if self.clipboard.write(&copy).is_ok() {
-                        self.clipboard.kill_ring.record_clipboard_write(copy);
+                    if self.core.clipboard.write(&copy).is_ok() {
+                        self.core.clipboard.kill_ring.record_clipboard_write(copy);
                     }
                 }
                 self.snap_transcript_cursor();

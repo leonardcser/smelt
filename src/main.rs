@@ -451,17 +451,17 @@ async fn main() {
         args.api_key_env.is_some(),
         startup_auth_error.take(),
     );
-    app.config.model_config = (&model_config).into();
+    app.core.config.model_config = (&model_config).into();
     app.extra_instructions = tui_instructions;
     app.skill_section = tui_skill_section;
     if let Some(accent) = cfg_accent {
         app.ui.theme_mut().set_accent(accent);
     }
     if let Some(mode) = mode_override {
-        app.config.mode = mode;
+        app.core.config.mode = mode;
     }
-    if !app.config.mode_cycle.contains(&app.config.mode) {
-        app.config.mode_cycle.push(app.config.mode);
+    if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
+        app.core.config.mode_cycle.push(app.core.config.mode);
     }
 
     if let Some(ref resume_val) = args.resume {
@@ -517,7 +517,7 @@ async fn main() {
             cwd: cwd.to_string_lossy().into_owned(),
             status: engine::registry::AgentStatus::Idle,
             task_slug: None,
-            session_id: app.session.id.clone(),
+            session_id: app.core.session.id.clone(),
             socket_path: socket_path.to_string_lossy().into_owned(),
             depth,
             started_at: timestamp_now(),
@@ -581,7 +581,7 @@ async fn main() {
                 cwd: cwd.to_string_lossy().into_owned(),
                 status: engine::registry::AgentStatus::Idle,
                 task_slug: None,
-                session_id: app.session.id.clone(),
+                session_id: app.core.session.id.clone(),
                 socket_path: socket_path.to_string_lossy().into_owned(),
                 depth: 0,
                 started_at: timestamp_now(),
@@ -598,8 +598,8 @@ async fn main() {
 
         println!();
         app.run(ctx_rx, args.message).await;
-        if !app.session.messages.is_empty() {
-            tui::session::print_resume_hint(&app.session.id);
+        if !app.core.session.messages.is_empty() {
+            tui::session::print_resume_hint(&app.core.session.id);
         }
 
         if multi_agent {

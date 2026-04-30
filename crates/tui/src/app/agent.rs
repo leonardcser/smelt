@@ -13,7 +13,7 @@ impl App {
         if let Some(reply_tx) = self.child_permission_replies.remove(&request_id) {
             let _ = reply_tx.send(engine::socket::PermissionReply { approved, message });
         } else {
-            self.engine.send(UiCommand::PermissionDecision {
+            self.core.engine.send(UiCommand::PermissionDecision {
                 request_id,
                 approved,
                 message,
@@ -29,13 +29,16 @@ impl App {
         self.begin_turn();
         self.show_user_message(display, content.image_labels());
         let text = content.text_content();
-        if self.session.first_user_message.is_none() {
-            self.session.first_user_message = Some(text.clone());
+        if self.core.session.first_user_message.is_none() {
+            self.core.session.first_user_message = Some(text.clone());
         }
         if !content.is_empty() {
-            self.session.messages.push(Message::user(content.clone()));
+            self.core
+                .session
+                .messages
+                .push(Message::user(content.clone()));
             self.sync_session_snapshot();
-            self.session.messages.pop();
+            self.core.session.messages.pop();
         }
         self.maybe_generate_title(Some(&text));
         self.dispatch_turn(content)
@@ -70,28 +73,29 @@ impl App {
         };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
-        self.cells
+        self.core
+            .cells
             .set_dyn("turn_start", std::rc::Rc::new(crate::app::cells::EventStub));
         self.drain_cells_pending();
         self.flush_lua_callbacks();
 
         let system_prompt = self.rebuild_system_prompt();
-        let plugin_tools = self.lua.plugin_tool_defs(self.config.mode);
+        let plugin_tools = self.core.lua.plugin_tool_defs(self.core.config.mode);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        self.engine.send(UiCommand::StartTurn {
+        self.core.engine.send(UiCommand::StartTurn {
             turn_id,
             content,
-            mode: self.config.mode,
-            model: self.config.model.clone(),
-            reasoning_effort: self.config.reasoning_effort,
-            history: self.session.messages.clone(),
-            api_base: Some(self.config.api_base.clone()),
+            mode: self.core.config.mode,
+            model: self.core.config.model.clone(),
+            reasoning_effort: self.core.config.reasoning_effort,
+            history: self.core.session.messages.clone(),
+            api_base: Some(self.core.config.api_base.clone()),
             api_key: Some(api_key),
-            session_id: self.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.session),
+            session_id: self.core.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.core.session),
             model_config_overrides: None,
             permission_overrides: None,
             system_prompt: Some(system_prompt),
@@ -113,7 +117,7 @@ impl App {
         // {file:...} substitutions, so scrub before the content lands in
         // history or is dispatched to the engine.
         let evaluated = crate::custom_commands::evaluate(&cmd.body);
-        let evaluated = if self.config.settings.redact_secrets {
+        let evaluated = if self.core.config.settings.redact_secrets {
             engine::redact::redact(&evaluated)
         } else {
             evaluated
@@ -121,11 +125,12 @@ impl App {
         let display = format!("/{}", cmd.name);
 
         if !evaluated.is_empty() {
-            self.session
+            self.core
+                .session
                 .messages
                 .push(Message::user(Content::text(evaluated.clone())));
             self.sync_session_snapshot();
-            self.session.messages.pop();
+            self.core.session.messages.pop();
         }
 
         // Resolve model/provider overrides
@@ -135,7 +140,7 @@ impl App {
             let resolved = match (target_model, target_provider) {
                 (Some(reference), provider) => {
                     match crate::config::resolve_model_ref_with_provider(
-                        &self.config.available_models,
+                        &self.core.config.available_models,
                         reference,
                         provider,
                     ) {
@@ -148,7 +153,7 @@ impl App {
                 }
                 (None, Some(provider)) => {
                     match crate::config::resolve_provider_ref(
-                        &self.config.available_models,
+                        &self.core.config.available_models,
                         provider,
                     ) {
                         Ok(model) => Some(model),
@@ -175,8 +180,8 @@ impl App {
                         .unwrap_or_default(),
                 ),
                 None => (
-                    self.config.model.clone(),
-                    self.config.api_base.clone(),
+                    self.core.config.model.clone(),
+                    self.core.config.api_base.clone(),
                     self.resolve_api_key().unwrap_or_default(),
                 ),
             }
@@ -192,7 +197,7 @@ impl App {
                 "high" => protocol::ReasoningEffort::High,
                 _ => protocol::ReasoningEffort::Off,
             })
-            .unwrap_or(self.config.reasoning_effort);
+            .unwrap_or(self.core.config.reasoning_effort);
 
         let model_config_overrides = {
             let o = &cmd.overrides;
@@ -242,8 +247,8 @@ impl App {
         self.sleep_inhibit.acquire();
         self.begin_turn();
         self.show_user_message(&display, vec![]);
-        if self.session.first_user_message.is_none() {
-            self.session.first_user_message = Some(display.clone());
+        if self.core.session.first_user_message.is_none() {
+            self.core.session.first_user_message = Some(display.clone());
         }
         self.maybe_generate_title(Some(&evaluated));
         {
@@ -253,17 +258,17 @@ impl App {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        self.engine.send(UiCommand::StartTurn {
+        self.core.engine.send(UiCommand::StartTurn {
             turn_id,
             content: Content::text(evaluated),
-            mode: self.config.mode,
+            mode: self.core.config.mode,
             model,
             reasoning_effort: reasoning,
-            history: self.session.messages.clone(),
+            history: self.core.session.messages.clone(),
             api_base: Some(api_base),
             api_key: Some(api_key),
-            session_id: self.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.session),
+            session_id: self.core.session.id.clone(),
+            session_dir: crate::session::dir_for(&self.core.session),
             model_config_overrides,
             permission_overrides,
             system_prompt: None,
@@ -282,7 +287,7 @@ impl App {
     /// where the history will be mutated immediately after.
     pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
-        self.engine.send(UiCommand::Cancel);
+        self.core.engine.send(UiCommand::Cancel);
         {
             self.working.finish(TurnOutcome::Interrupted);
         };
@@ -302,10 +307,10 @@ impl App {
     pub(crate) fn finish_turn(&mut self, cancelled: bool) {
         self.sleep_inhibit.release();
         if cancelled {
-            self.engine.send(UiCommand::Cancel);
+            self.core.engine.send(UiCommand::Cancel);
             self.kill_blocking_agents();
         }
-        self.cells.set_dyn(
+        self.core.cells.set_dyn(
             "turn_end",
             std::rc::Rc::new(crate::app::cells::TurnEnd { cancelled }),
         );
@@ -355,9 +360,10 @@ impl App {
             for (agent_id, data) in self.pending_agent_blocks.drain(..) {
                 meta.agent_blocks.insert(agent_id, data);
             }
-            self.session
+            self.core
+                .session
                 .turn_metas
-                .push((self.session.messages.len(), meta));
+                .push((self.core.session.messages.len(), meta));
         }
         self.snapshot_tokens();
         self.save_session();
@@ -384,7 +390,7 @@ impl App {
                 if !background {
                     if let Some(tokens) = usage.prompt_tokens {
                         if tokens > 0 {
-                            self.session.context_tokens = Some(tokens);
+                            self.core.session.context_tokens = Some(tokens);
                         }
                     }
                     if let Some(tps) = tokens_per_sec {
@@ -395,7 +401,7 @@ impl App {
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
-                self.session.session_cost_usd += cost;
+                self.core.session.session_cost_usd += cost;
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -403,7 +409,7 @@ impl App {
                         .as_millis() as u64,
                     prompt_tokens: usage.prompt_tokens.unwrap_or(0),
                     completion_tokens: usage.completion_tokens.unwrap_or(0),
-                    model: self.config.model.clone(),
+                    model: self.core.config.model.clone(),
                     cost_usd,
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_write_tokens: usage.cache_write_tokens,
@@ -415,7 +421,9 @@ impl App {
                 // routes through `agent.context_tokens` separately and
                 // doesn't touch this cell.
                 if !background {
-                    self.cells.set_dyn("tokens_used", std::rc::Rc::new(usage));
+                    self.core
+                        .cells
+                        .set_dyn("tokens_used", std::rc::Rc::new(usage));
                 }
                 SessionControl::Continue
             }
@@ -469,7 +477,7 @@ impl App {
                         args.clone(),
                     );
                 }
-                self.cells.set_dyn(
+                self.core.cells.set_dyn(
                     "tool_start",
                     std::rc::Rc::new(crate::app::cells::ToolStart {
                         tool: tool_name.clone(),
@@ -557,7 +565,7 @@ impl App {
                     }
                 }
                 if let Some(tool_name) = finished_tool_name {
-                    self.cells.set_dyn(
+                    self.core.cells.set_dyn(
                         "tool_end",
                         std::rc::Rc::new(crate::app::cells::ToolEnd {
                             tool: tool_name,
@@ -625,7 +633,7 @@ impl App {
                 SessionControl::Continue
             }
             EngineEvent::EngineAskResponse { id, content } => {
-                self.lua.fire_callback(id, &content);
+                self.core.lua.fire_callback(id, &content);
                 SessionControl::Continue
             }
             EngineEvent::Messages {
@@ -653,7 +661,8 @@ impl App {
                     tool_elapsed: std::collections::HashMap::new(),
                     agent_blocks: std::collections::HashMap::new(),
                 });
-                self.cells
+                self.core
+                    .cells
                     .set_dyn("turn_complete", std::rc::Rc::new(payload));
                 self.pending_turn_meta = meta;
                 SessionControl::Done
@@ -662,7 +671,7 @@ impl App {
                 {
                     self.working.finish(TurnOutcome::Done);
                 };
-                self.cells.set_dyn(
+                self.core.cells.set_dyn(
                     "turn_error",
                     std::rc::Rc::new(crate::app::cells::TurnError {
                         message: message.clone(),
@@ -699,7 +708,7 @@ impl App {
                 }
                 // Forward to engine so it enters the conversation history
                 // (deferred until current tool batch completes).
-                self.engine.send(protocol::UiCommand::AgentMessage {
+                self.core.engine.send(protocol::UiCommand::AgentMessage {
                     from_id,
                     from_slug,
                     message,
@@ -725,9 +734,10 @@ impl App {
                 ..
             } => {
                 let _guard = crate::lua::install_app_ptr(self);
-                let hooks = self.lua.evaluate_plugin_hooks(&tool_name, &args);
+                let hooks = self.core.lua.evaluate_plugin_hooks(&tool_name, &args);
                 drop(_guard);
-                self.engine
+                self.core
+                    .engine
                     .send(protocol::UiCommand::PluginToolHooksResult { request_id, hooks });
                 SessionControl::Continue
             }
@@ -737,7 +747,8 @@ impl App {
                 is_error,
                 metadata,
             } => {
-                self.lua
+                self.core
+                    .lua
                     .resolve_core_tool_call(request_id, content, is_error, metadata);
                 SessionControl::Continue
             }
@@ -758,10 +769,10 @@ impl App {
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
     ) {
-        let mode = self.config.mode;
-        let session_id = self.session.id.clone();
-        let session_dir = crate::session::dir_for(&self.session);
-        match self.lua.execute_plugin_tool(
+        let mode = self.core.config.mode;
+        let session_id = self.core.session.id.clone();
+        let session_dir = crate::session::dir_for(&self.core.session);
+        match self.core.lua.execute_plugin_tool(
             &tool_name,
             &args,
             request_id,
@@ -773,12 +784,14 @@ impl App {
             },
         ) {
             crate::lua::ToolExecResult::Immediate { content, is_error } => {
-                self.engine.send(protocol::UiCommand::PluginToolResult {
-                    request_id,
-                    call_id,
-                    content,
-                    is_error,
-                });
+                self.core
+                    .engine
+                    .send(protocol::UiCommand::PluginToolResult {
+                        request_id,
+                        call_id,
+                        content,
+                        is_error,
+                    });
             }
             crate::lua::ToolExecResult::Pending => {
                 // Result will be delivered via drive_tasks.
@@ -821,7 +834,7 @@ impl App {
                 self.handle_input_prediction(text);
             }
             EngineEvent::EngineAskResponse { id, content } => {
-                self.lua.fire_callback(id, &content);
+                self.core.lua.fire_callback(id, &content);
             }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);
@@ -865,8 +878,8 @@ impl App {
         if !self.pending_title {
             return;
         }
-        self.session.title = Some(title);
-        self.session.slug = Some(slug.clone());
+        self.core.session.title = Some(title);
+        self.core.session.slug = Some(slug.clone());
         self.set_task_label(slug.clone());
         self.pending_title = false;
         self.save_session();
@@ -882,26 +895,26 @@ impl App {
     }
 
     pub(super) fn api_key(&self) -> String {
-        std::env::var(&self.config.api_key_env).unwrap_or_default()
+        std::env::var(&self.core.config.api_key_env).unwrap_or_default()
     }
 
     pub(super) fn resolve_api_key(&mut self) -> Option<String> {
-        if self.config.api_key_env.is_empty() {
+        if self.core.config.api_key_env.is_empty() {
             return Some(String::new());
         }
-        match std::env::var(&self.config.api_key_env) {
+        match std::env::var(&self.core.config.api_key_env) {
             Ok(key) => Some(key),
             Err(std::env::VarError::NotPresent) => {
                 self.notify_error(format!(
                     "environment variable '{}' is not set but is required for API authentication",
-                    self.config.api_key_env
+                    self.core.config.api_key_env
                 ));
                 None
             }
             Err(std::env::VarError::NotUnicode(_)) => {
                 self.notify_error(format!(
                     "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
-                    self.config.api_key_env
+                    self.core.config.api_key_env
                 ));
                 None
             }
@@ -969,7 +982,7 @@ impl App {
 
     /// Drain newly spawned child handles and create TrackedAgent entries.
     pub(super) fn drain_spawned_children(&mut self) {
-        let children = self.engine.drain_spawned();
+        let children = self.core.engine.drain_spawned();
         for child in children {
             let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -1094,7 +1107,7 @@ impl App {
         }
 
         if session_cost_delta > 0.0 {
-            self.session.session_cost_usd += session_cost_delta;
+            self.core.session.session_cost_usd += session_cost_delta;
         }
 
         if !changed {
@@ -1365,7 +1378,7 @@ impl App {
                     let rt = self.runtime_approvals.read().unwrap();
                     rt.is_auto_approved(
                         &self.permissions,
-                        self.config.mode,
+                        self.core.config.mode,
                         &req.tool_name,
                         &req.args,
                         &req.desc,
@@ -1379,7 +1392,7 @@ impl App {
                 // Check mode-based permissions (e.g. Apply mode auto-allows writes).
                 if self
                     .permissions
-                    .decide(self.config.mode, &req.tool_name, &req.args, false)
+                    .decide(self.core.config.mode, &req.tool_name, &req.args, false)
                     == Decision::Allow
                 {
                     self.send_permission_decision(req.request_id, true, None);
@@ -1399,9 +1412,11 @@ impl App {
                 }
 
                 // Prepare dialog options.
-                let downgraded =
-                    self.permissions
-                        .was_downgraded(self.config.mode, &req.tool_name, &req.args);
+                let downgraded = self.permissions.was_downgraded(
+                    self.core.config.mode,
+                    &req.tool_name,
+                    &req.args,
+                );
                 req.outside_dir = if downgraded && !outside_paths.is_empty() {
                     // Only offer the dir option when the Ask is specifically
                     // from the workspace restriction (downgraded from Allow).
@@ -1449,15 +1464,15 @@ impl App {
                     options: labels,
                     cwd_label: crate::app::dialogs::confirm::cwd_label(),
                 };
-                let handle_id = self.confirms.register(*req, choices);
-                self.cells.set_dyn(
+                let handle_id = self.core.confirms.register(*req, choices);
+                self.core.cells.set_dyn(
                     "confirm_requested",
                     std::rc::Rc::new(crate::app::cells::ConfirmRequested {
                         handle_id,
                         ..snapshot
                     }),
                 );
-                self.lua.fire_confirm_open(handle_id);
+                self.core.lua.fire_confirm_open(handle_id);
                 LoopAction::Continue
             }
         }
