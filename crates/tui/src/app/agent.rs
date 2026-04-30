@@ -33,9 +33,9 @@ impl App {
             self.session.first_user_message = Some(text.clone());
         }
         if !content.is_empty() {
-            self.history.push(Message::user(content.clone()));
+            self.session.messages.push(Message::user(content.clone()));
             self.sync_session_snapshot();
-            self.history.pop();
+            self.session.messages.pop();
         }
         self.maybe_generate_title(Some(&text));
         self.dispatch_turn(content)
@@ -85,7 +85,7 @@ impl App {
             mode: self.config.mode,
             model: self.config.model.clone(),
             reasoning_effort: self.config.reasoning_effort,
-            history: self.history.clone(),
+            history: self.session.messages.clone(),
             api_base: Some(self.config.api_base.clone()),
             api_key: Some(api_key),
             session_id: self.session.id.clone(),
@@ -119,10 +119,11 @@ impl App {
         let display = format!("/{}", cmd.name);
 
         if !evaluated.is_empty() {
-            self.history
+            self.session
+                .messages
                 .push(Message::user(Content::text(evaluated.clone())));
             self.sync_session_snapshot();
-            self.history.pop();
+            self.session.messages.pop();
         }
 
         // Resolve model/provider overrides
@@ -256,7 +257,7 @@ impl App {
             mode: self.config.mode,
             model,
             reasoning_effort: reasoning,
-            history: self.history.clone(),
+            history: self.session.messages.clone(),
             api_base: Some(api_base),
             api_key: Some(api_key),
             session_id: self.session.id.clone(),
@@ -303,7 +304,7 @@ impl App {
             self.kill_blocking_agents();
         }
         let was_cancelled = cancelled;
-        let history = self.history.clone();
+        let history = self.session.messages.clone();
         self.lua
             .emit_data(crate::lua::AutocmdEvent::TurnEnd, |lua| {
                 let t = lua.create_table()?;
@@ -356,7 +357,9 @@ impl App {
             for (agent_id, data) in self.pending_agent_blocks.drain(..) {
                 meta.agent_blocks.insert(agent_id, data);
             }
-            self.session.turn_metas.push((self.history.len(), meta));
+            self.session
+                .turn_metas
+                .push((self.session.messages.len(), meta));
         }
         self.snapshot_tokens();
         self.save_session();

@@ -230,7 +230,7 @@ impl App {
                 self.agent = Some(turn);
             }
             InputOutcome::Compact { instructions } => {
-                if self.history.is_empty() {
+                if self.session.messages.is_empty() {
                     self.notify_error("nothing to compact".into());
                 } else {
                     self.compact_history(instructions);

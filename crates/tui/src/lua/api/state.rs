@@ -294,7 +294,8 @@ fn register_engine_and_session(
     engine_tbl.set(
         "history",
         lua.create_function(|lua, ()| {
-            let history = crate::lua::try_with_app(|app| app.history.clone()).unwrap_or_default();
+            let history =
+                crate::lua::try_with_app(|app| app.session.messages.clone()).unwrap_or_default();
             messages_to_lua(lua, &history)
         })?,
     )?;

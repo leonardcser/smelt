@@ -54,9 +54,9 @@ impl App {
     }
 
     /// Compact the transcript or notify "nothing to compact" when
-    /// `history` is empty.
+    /// `session.messages` is empty.
     pub(crate) fn compact_or_notify(&mut self, instructions: Option<String>) {
-        if self.history.is_empty() {
+        if self.session.messages.is_empty() {
             self.notify_error("nothing to compact".into());
         } else {
             self.compact_history(instructions);

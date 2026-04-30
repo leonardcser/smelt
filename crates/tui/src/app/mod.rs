@@ -124,7 +124,6 @@ pub struct App {
     /// `compute_transcript_cursor` to look up the glyph under the soft
     /// cursor.
     pub(crate) last_viewport_text: Vec<String>,
-    pub history: Vec<Message>,
     pub input_history: History,
     pub input: PromptState,
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
@@ -662,7 +661,6 @@ impl App {
             parser: crate::content::stream_parser::StreamParser::new(),
             transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
             last_viewport_text: Vec::new(),
-            history: Vec::new(),
             input_history: History::load(),
             input,
             exec_rx: None,
@@ -970,7 +968,7 @@ impl App {
         let _ = io::stdout().execute(EnableFocusChange);
         let _ = io::stdout().execute(EnableMouseCapture);
 
-        if !self.history.is_empty() {
+        if !self.session.messages.is_empty() {
             self.restore_screen();
             if let Some(ref slug) = self.session.slug {
                 self.set_task_label(slug.clone());
@@ -1157,7 +1155,7 @@ impl App {
             // ── Auto-start from pending agent messages ─────────────────
             if self.agent.is_none() && !self.pending_agent_messages.is_empty() {
                 let msgs = std::mem::take(&mut self.pending_agent_messages);
-                self.history.extend(msgs);
+                self.session.messages.extend(msgs);
                 let turn = self.begin_agent_message_turn();
                 self.agent = Some(turn);
             }
@@ -1487,7 +1485,7 @@ impl App {
             mode: self.config.mode,
             model: self.config.model.clone(),
             reasoning_effort: self.config.reasoning_effort,
-            history: self.history.clone(),
+            history: self.session.messages.clone(),
             api_base: Some(self.config.api_base.clone()),
             api_key: Some(self.api_key()),
             session_id: self.session.id.clone(),
@@ -1682,7 +1680,7 @@ impl App {
     fn send_btw_query(&self, question: String) {
         self.engine.send(UiCommand::Btw {
             question,
-            history: self.history.clone(),
+            history: self.session.messages.clone(),
             reasoning_effort: self.config.reasoning_effort,
         });
     }
@@ -1726,7 +1724,7 @@ impl App {
                     match incoming {
                         engine::socket::IncomingMessage::Message { from_id, from_slug, message } => {
                             self.forward_agent_message(&from_id, &from_slug, &message);
-                            self.history
+                            self.session.messages
                                 .push(protocol::Message::agent(&from_id, &from_slug, &message));
                             self.run_subagent_turn(
                                 Content::text(""),
@@ -1798,7 +1796,7 @@ impl App {
             mode: self.config.mode,
             model: self.config.model.clone(),
             reasoning_effort: self.config.reasoning_effort,
-            history: self.history.clone(),
+            history: self.session.messages.clone(),
             api_base: Some(self.config.api_base.clone()),
             api_key: Some(self.api_key()),
             session_id: self.session.id.clone(),
@@ -1866,7 +1864,7 @@ impl App {
                             });
                         }
                         EngineEvent::Messages { messages, .. } => {
-                            self.history = messages;
+                            self.session.messages = messages;
                         }
                         EngineEvent::BtwResponse { content } => {
                             if let Some(tx) = pending_query_tx.take() {
@@ -1882,11 +1880,11 @@ impl App {
                             break;
                         }
                         EngineEvent::TurnComplete { messages, .. } => {
-                            self.history = messages;
+                            self.session.messages = messages;
 
                             // Auto-return last assistant message to parent.
                             if let Some(socket) = parent_socket {
-                                if let Some(last_asst) = self.history.iter().rev().find(|m| m.role == protocol::Role::Assistant) {
+                                if let Some(last_asst) = self.session.messages.iter().rev().find(|m| m.role == protocol::Role::Assistant) {
                                     let text = last_asst.content.as_ref().map(|c| c.text_content()).unwrap_or_default();
                                     if !text.is_empty() {
                                         let slug = self.session.slug.as_deref().unwrap_or("");
