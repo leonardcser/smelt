@@ -14,10 +14,13 @@
 mod au;
 mod cell;
 mod cmd;
-mod dispatch;
 mod keymap;
+mod spawn;
 mod state;
+mod statusline;
+mod task;
 mod timer;
+mod tools;
 mod widgets;
 
 use super::{LuaRuntime, LuaShared};
@@ -53,7 +56,15 @@ impl LuaRuntime {
 
         state::register(lua, &smelt, shared)?;
         widgets::register(lua, &smelt, &smelt_ui, shared)?;
-        dispatch::register(lua, &smelt, &smelt_keymap, shared)?;
+        cmd::register(lua, &smelt, shared)?;
+        keymap::register(lua, &smelt_keymap, shared)?;
+        task::register(lua, &smelt, shared)?;
+        tools::register(lua, &smelt, shared)?;
+        statusline::register(lua, &smelt, shared)?;
+        timer::register(lua, &smelt)?;
+        cell::register(lua, &smelt)?;
+        au::register(lua, &smelt)?;
+        spawn::register(lua, &smelt, shared)?;
 
         smelt.set(
             "notify",
