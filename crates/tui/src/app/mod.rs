@@ -140,8 +140,6 @@ pub struct App {
     pub(crate) cwd: String,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
-    /// Latest observed input-token count for the active session.
-    pub context_tokens: Option<u32>,
     /// Short task label (slug) shown on the status bar after the throbber.
     pub task_label: Option<String>,
     /// A permission dialog is waiting for the user to stop typing.
@@ -244,19 +242,9 @@ pub struct App {
     compact_epoch: u64,
     /// The `compact_epoch` value when the last compaction was requested.
     pending_compact_epoch: u64,
-    /// Token count snapshots: `(history_len, tokens)` recorded after each turn
-    /// and before each compaction. On rewind, the most recent snapshot at or
-    /// before the truncation point is restored.
-    token_snapshots: Vec<(usize, u32)>,
-    /// Accumulated cost snapshots: `(history_len, cost_usd)`.
-    cost_snapshots: Vec<(usize, f64)>,
-    /// Per-turn metadata (elapsed, tps, status) keyed by history length.
-    turn_metas: Vec<(usize, protocol::TurnMeta)>,
     /// TurnMeta from the engine, consumed by `finish_turn`.
     pending_turn_meta: Option<protocol::TurnMeta>,
     pending_agent_blocks: Vec<(String, protocol::AgentBlockData)>,
-    /// Accumulated cost for the current session in USD.
-    pub session_cost_usd: f64,
     startup_auth_error: Option<String>,
     /// App-level focus (Prompt = editing buffer; History = navigating transcript).
     pub app_focus: AppFocus,
@@ -685,7 +673,6 @@ impl App {
             cwd,
             session: session::Session::new(),
             shared_session,
-            context_tokens: None,
             task_label: None,
             pending_dialog: false,
             pending_quit: false,
@@ -726,12 +713,8 @@ impl App {
             next_turn_id: 1,
             compact_epoch: 0,
             pending_compact_epoch: 0,
-            token_snapshots: Vec::new(),
-            cost_snapshots: Vec::new(),
-            turn_metas: Vec::new(),
             pending_turn_meta: None,
             pending_agent_blocks: Vec::new(),
-            session_cost_usd: 0.0,
             startup_auth_error,
             app_focus: AppFocus::Prompt,
             transcript_window: {
@@ -989,9 +972,6 @@ impl App {
 
         if !self.history.is_empty() {
             self.restore_screen();
-            if let Some(tokens) = self.session.context_tokens {
-                self.context_tokens = Some(tokens);
-            }
             if let Some(ref slug) = self.session.slug {
                 self.set_task_label(slug.clone());
             }

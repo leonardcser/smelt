@@ -175,7 +175,7 @@ fn cmd_cost(app: &mut App, _: Option<String>) -> CommandAction {
         &app.config.model_config,
     );
     let lines = crate::metrics::render_session_cost(
-        app.session_cost_usd,
+        app.session.session_cost_usd,
         &app.config.model,
         turns,
         &resolved,

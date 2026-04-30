@@ -48,6 +48,11 @@ pub struct Session {
     /// to `token_snapshots`.
     #[serde(default)]
     pub turn_metas: Vec<(usize, TurnMeta)>,
+    /// Running session cost in USD. Mirrors the last entry in
+    /// `cost_snapshots` between turns; updated incrementally as token
+    /// usage events arrive within a turn.
+    #[serde(default)]
+    pub session_cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +117,7 @@ impl Session {
             token_snapshots: Vec::new(),
             cost_snapshots: Vec::new(),
             turn_metas: Vec::new(),
+            session_cost_usd: 0.0,
         }
     }
 
@@ -153,6 +159,7 @@ impl Session {
             token_snapshots: self.token_snapshots.clone(),
             cost_snapshots: self.cost_snapshots.clone(),
             turn_metas: self.turn_metas.clone(),
+            session_cost_usd: self.session_cost_usd,
         }
     }
 }

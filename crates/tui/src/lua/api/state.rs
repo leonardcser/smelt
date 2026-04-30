@@ -55,8 +55,11 @@ fn register_engine_and_session(
         app_read!(lua, |app| app.config.reasoning_effort.label().to_string()),
     )?;
     engine_tbl.set("is_busy", app_read!(lua, |app| app.agent.is_some()))?;
-    engine_tbl.set("cost", app_read!(lua, |app| app.session_cost_usd))?;
-    engine_tbl.set("context_tokens", app_read!(lua, |app| app.context_tokens))?;
+    engine_tbl.set("cost", app_read!(lua, |app| app.session.session_cost_usd))?;
+    engine_tbl.set(
+        "context_tokens",
+        app_read!(lua, |app| app.session.context_tokens),
+    )?;
     engine_tbl.set(
         "context_window",
         app_read!(lua, |app| app.config.context_window),
