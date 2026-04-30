@@ -27,8 +27,16 @@ Then read:
 - Verify at session end: `cargo fmt && cargo clippy --workspace
   --all-targets -- -D warnings && cargo nextest run --workspace &&
   refactor/check.sh`.
-- Append one bullet to the active `P<n>.md` "Sub-phases landed" with the
-  commit SHA. One line. Detail belongs in the commit message, not the doc.
+- Append one bullet to the active `P<n>.md` "Sub-phases landed":
+  `**<id>** (\`<sha>\`) — <one-line summary>.`
+  **One line.** No paragraphs, no nested bullets, no rephrasing the
+  commit body. The body lives in `git log`; this file is an index.
+  If you can't fit the summary on one line, you're duplicating the
+  commit message — trim.
+- If the sub-phase produced a non-obvious decision worth re-litigating
+  later, add one bullet to "Decisions made":
+  `**<title>** (\`<sha>\`) — <one line>.` Same one-line rule.
+  Reasoning lives in the commit message, not here.
 - Mark the sub-phase landed in `REFACTOR.md`.
 - Update `INVENTORY.md` Status columns for files you touched.
 - Commit with conventional commits (`feat(tui): …`, `refactor(ui): …`).
