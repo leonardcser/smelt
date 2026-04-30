@@ -52,4 +52,11 @@ impl Confirms {
     pub(crate) fn take(&mut self, id: u64) -> Option<ConfirmEntry> {
         self.pending.remove(&id)
     }
+
+    /// `true` when no dialog request is registered. The main-loop
+    /// tick reads this to publish the `confirms_pending` cell so
+    /// plugin / statusline subscribers fan out from one signal.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
 }

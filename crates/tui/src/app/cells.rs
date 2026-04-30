@@ -19,11 +19,14 @@
 //! the value as it stood at the moment of the `set`, even if later
 //! writes overwrite the slot before the drain.
 //!
-//! Today every cell is Lua-defined (`smelt.cell.new`); built-in
-//! Rust-typed cells (`vim_mode`, `agent_mode`, …) and Rust-side
-//! subscribers migrate in P2.a.4c.
+//! Lua-defined cells (`smelt.cell.new`) store their value as a
+//! `LuaCellValue` wrapping an `mlua::RegistryKey`. Built-in Rust-typed
+//! cells (`vim_mode`, `agent_mode`, …) store the typed Rust value
+//! directly and rely on a per-`TypeId` `LuaProjector` registered on
+//! the registry to convert `&dyn Any` to `mlua::Value` at fire time
+//! (drain pump) or at read time (`smelt.cell.get`).
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -33,26 +36,33 @@ use crate::lua::LuaHandle;
 /// stable `mlua::RegistryKey` so it survives Lua GC; Lua-side
 /// `smelt.cell.get(name)` resolves the key back to a Lua value, and
 /// the drain pump does the same when firing Lua subscribers.
-/// Rust-typed built-ins (a.4c) carry their typed Rust value directly
-/// and register a per-cell converter the drain pump uses to project
-/// them into Lua at fire time.
+/// Rust-typed built-ins carry their typed Rust value directly and
+/// rely on the per-`TypeId` projector to project them into Lua at
+/// fire time.
 pub struct LuaCellValue {
     pub key: mlua::RegistryKey,
 }
+
+/// Per-`TypeId` converter from a stored cell value (`&dyn Any`) to a
+/// Lua value. Registered with `Cells::register_lua_projector`; called
+/// by the drain pump and by `Cells::get_lua` / `Cells::project_to_lua`.
+/// Returns `mlua::Value::Nil` when conversion isn't possible (Lua
+/// allocation failure, type mismatch).
+pub type LuaProjector = Box<dyn Fn(&dyn Any, &mlua::Lua) -> mlua::Value>;
 
 /// Stable id returned by `subscribe_kind` and consumed by
 /// `unsubscribe`.
 pub type SubscriptionId = u64;
 
 /// What kind of callback to fire when a cell changes. Today only the
-/// `Lua` variant ships; P2.a.4c adds `Rust(Rc<dyn Fn(&dyn Any)>)`
-/// for built-in subscribers (statusline spec bindings, plugin-tool
-/// hook routing, …).
+/// `Lua` variant ships; a Rust variant lands when the first Rust-side
+/// built-in subscriber surfaces (e.g. statusline spec bindings).
 #[derive(Clone)]
 pub enum SubscriberKind {
     /// Handle to an `mlua::Function` stashed in the Lua registry. The
     /// drain pump resolves it against the live Lua state at fire time
-    /// and projects the cell value through a per-type Lua converter.
+    /// and projects the cell value through the per-`TypeId`
+    /// `LuaProjector` registered on the registry.
     Lua(Rc<LuaHandle>),
 }
 
@@ -92,17 +102,77 @@ pub struct PendingFire {
 }
 
 /// Typed name → value registry plus a pending-fire queue.
-#[derive(Default)]
 pub struct Cells {
     slots: HashMap<String, Slot>,
     glob_subs: Vec<GlobSubscriber>,
     pending: Vec<PendingFire>,
     next_id: SubscriptionId,
+    lua_projectors: HashMap<TypeId, LuaProjector>,
+}
+
+impl Default for Cells {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cells {
     pub fn new() -> Self {
-        Self::default()
+        let mut s = Self {
+            slots: HashMap::new(),
+            glob_subs: Vec::new(),
+            pending: Vec::new(),
+            next_id: 0,
+            lua_projectors: HashMap::new(),
+        };
+        // Lua-defined cells: resolve the stable RegistryKey and hand
+        // back the live Lua value. Without this, `smelt.cell.get`
+        // and Lua subscribers would see Nil for cells created via
+        // `smelt.cell.new`.
+        s.register_lua_projector::<LuaCellValue, _>(|v, lua| {
+            lua.registry_value::<mlua::Value>(&v.key)
+                .unwrap_or(mlua::Value::Nil)
+        });
+        s
+    }
+
+    /// Register a converter from a stored cell value of type `T` to
+    /// `mlua::Value`. The drain pump and `get_lua` use it whenever a
+    /// cell's slot value is a `T` (matched by `TypeId`).
+    pub fn register_lua_projector<T, F>(&mut self, project: F)
+    where
+        T: Any + 'static,
+        F: Fn(&T, &mlua::Lua) -> mlua::Value + 'static,
+    {
+        let wrapper: LuaProjector = Box::new(move |any, lua| match any.downcast_ref::<T>() {
+            Some(v) => project(v, lua),
+            None => mlua::Value::Nil,
+        });
+        self.lua_projectors.insert(TypeId::of::<T>(), wrapper);
+    }
+
+    /// Project the cell value at `name` to a Lua value via the
+    /// registered projector for its concrete type. Returns `Nil`
+    /// when the cell isn't declared, when no projector is registered
+    /// for the value's `TypeId`, or when the projector itself yields
+    /// `Nil` (e.g. dropped registry key).
+    pub fn get_lua(&self, name: &str, lua: &mlua::Lua) -> mlua::Value {
+        let Some(slot) = self.slots.get(name) else {
+            return mlua::Value::Nil;
+        };
+        self.project_to_lua(&*slot.value, lua)
+    }
+
+    /// Project an arbitrary `&dyn Any` through the registered
+    /// projector matching its concrete type. The drain pump calls
+    /// this against each pending fire's value snapshot before
+    /// invoking Lua subscribers.
+    pub fn project_to_lua(&self, value: &dyn Any, lua: &mlua::Lua) -> mlua::Value {
+        let tid = (*value).type_id();
+        match self.lua_projectors.get(&tid) {
+            Some(p) => p(value, lua),
+            None => mlua::Value::Nil,
+        }
     }
 
     /// Declare a cell with its initial value. Idempotent — calling
@@ -116,14 +186,6 @@ impl Cells {
                 subscribers: Vec::new(),
             },
         );
-    }
-
-    /// Read the current value of `name` as an opaque trait object.
-    /// Returns `None` when the cell isn't declared. Callers downcast
-    /// via `Rc::downcast` or borrow as `&dyn Any` for the more common
-    /// `downcast_ref::<T>()` shape.
-    pub fn get_dyn(&self, name: &str) -> Option<&Rc<dyn Any>> {
-        self.slots.get(name).map(|s| &s.value)
     }
 
     /// Overwrite the cell's value and queue every direct + matching
@@ -225,6 +287,103 @@ impl Cells {
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
+
+    /// Publish `value` to the cell at `name` only when it differs from
+    /// the current slot. Returns `true` when a write fired (and queued
+    /// subscribers); `false` when the cell is undeclared, the stored
+    /// value's type doesn't match `T`, or the new value equals the old.
+    /// Lets the main-loop tick fan out diff-driven cells (`vim_mode`,
+    /// `confirms_pending`, …) without firing subscribers on no-op
+    /// re-publishes.
+    pub fn publish_if_changed<T>(&mut self, name: &str, value: T) -> bool
+    where
+        T: PartialEq + Any + 'static,
+    {
+        let Some(slot) = self.slots.get(name) else {
+            return false;
+        };
+        if let Some(cur) = slot.value.downcast_ref::<T>() {
+            if *cur == value {
+                return false;
+            }
+        }
+        self.set_dyn(name, Rc::new(value))
+    }
+}
+
+/// Initial values App passes to `register_builtin_cells` so the
+/// stateful cells start with the same content the underlying source
+/// fields hold (mode, model, vim_mode, …) — ensures plugin authors
+/// reading `smelt.cell("agent_mode"):get()` at startup see the right
+/// value before any flip publishes.
+pub struct BuiltinSeeds {
+    pub vim_mode: String,
+    pub agent_mode: String,
+    pub model: String,
+    pub reasoning: String,
+    pub cwd: String,
+    pub session_title: String,
+    pub branch: String,
+}
+
+/// Sentinel placeholder for event-shaped cells whose payload type and
+/// setter haven't migrated yet. The `()` projector returns `nil`, so
+/// Lua subscribers fire with `nil` until the real payload type lands
+/// (a.4c.2 / a.4c.3).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EventStub;
+
+/// Register projectors for primitive types we publish, declare every
+/// built-in cell with its initial value (or an `EventStub` placeholder
+/// for event-shaped cells whose payload type lands in a.4c.2/.3), and
+/// return the populated `Cells` ready for subscriber registration.
+pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
+    let mut cells = Cells::new();
+
+    // Primitive projectors covering every type a.4c.1 publishes plus
+    // headroom for a.4c.2's clock + token counters.
+    cells.register_lua_projector::<String, _>(|s, lua| match lua.create_string(s.as_str()) {
+        Ok(s) => mlua::Value::String(s),
+        Err(_) => mlua::Value::Nil,
+    });
+    cells.register_lua_projector::<bool, _>(|b, _| mlua::Value::Boolean(*b));
+    cells.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
+    cells.register_lua_projector::<u64, _>(|n, _| mlua::Value::Integer(*n as i64));
+    cells.register_lua_projector::<u8, _>(|n, _| mlua::Value::Integer(*n as i64));
+    // `EventStub` projector: explicit `nil`. Means a Lua subscriber
+    // attached to an event-shaped cell sees `nil` until the cell's
+    // setter migrates to publish a typed payload.
+    cells.register_lua_projector::<EventStub, _>(|_, _| mlua::Value::Nil);
+
+    // Stateful cells (typed payloads, primitive projectors). Every
+    // setter chokepoint that publishes calls `cells.set_dyn(name,
+    // Rc::new(value))` after the underlying field flips.
+    cells.declare("vim_mode", seeds.vim_mode);
+    cells.declare("agent_mode", seeds.agent_mode);
+    cells.declare("model", seeds.model);
+    cells.declare("reasoning", seeds.reasoning);
+    cells.declare("confirms_pending", false);
+    cells.declare("tokens_used", 0u64);
+    cells.declare("errors", 0u32);
+    cells.declare("cwd", seeds.cwd);
+    cells.declare("session_title", seeds.session_title);
+    cells.declare("branch", seeds.branch);
+    cells.declare("now", String::new());
+    cells.declare("spinner_frame", 0u8);
+
+    // Event-shaped cells: declared with an `EventStub` placeholder so
+    // `smelt.cell.subscribe` works today; setters land later (turn
+    // events with EngineBridge in a.11; confirm/session lifecycle as
+    // their App-side handlers migrate).
+    cells.declare("history", EventStub);
+    cells.declare("turn_complete", EventStub);
+    cells.declare("turn_error", EventStub);
+    cells.declare("confirm_requested", EventStub);
+    cells.declare("confirm_resolved", EventStub);
+    cells.declare("session_started", EventStub);
+    cells.declare("session_ended", EventStub);
+
+    cells
 }
 
 #[cfg(test)]
@@ -239,26 +398,35 @@ mod tests {
     }
 
     #[test]
-    fn declare_then_get_dyn_returns_initial_value() {
+    fn declare_then_get_lua_returns_initial_value() {
+        let lua = Lua::new();
         let mut c = Cells::new();
+        c.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
         c.declare("count", 7u32);
-        let v = c.get_dyn("count").expect("declared");
-        assert_eq!(v.downcast_ref::<u32>(), Some(&7u32));
+        match c.get_lua("count", &lua) {
+            mlua::Value::Integer(7) => {}
+            other => panic!("expected Integer(7), got {other:?}"),
+        }
     }
 
     #[test]
-    fn get_dyn_returns_none_for_undeclared() {
+    fn get_lua_returns_nil_for_undeclared() {
+        let lua = Lua::new();
         let c = Cells::new();
-        assert!(c.get_dyn("missing").is_none());
+        assert!(matches!(c.get_lua("missing", &lua), mlua::Value::Nil));
     }
 
     #[test]
     fn set_dyn_updates_value() {
+        let lua = Lua::new();
         let mut c = Cells::new();
+        c.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
         c.declare("count", 0u32);
         assert!(c.set_dyn("count", Rc::new(42u32)));
-        let v = c.get_dyn("count").unwrap();
-        assert_eq!(v.downcast_ref::<u32>(), Some(&42u32));
+        match c.get_lua("count", &lua) {
+            mlua::Value::Integer(42) => {}
+            other => panic!("expected Integer(42), got {other:?}"),
+        }
     }
 
     #[test]
@@ -365,12 +533,15 @@ mod tests {
     fn redeclare_resets_value_and_drops_subscribers() {
         let lua = Lua::new();
         let mut c = Cells::new();
+        c.register_lua_projector::<bool, _>(|b, _| mlua::Value::Boolean(*b));
         c.declare("flag", false);
         c.subscribe_kind("flag", SubscriberKind::Lua(handle(&lua, "function() end")))
             .unwrap();
         c.declare("flag", true);
-        let v = c.get_dyn("flag").unwrap();
-        assert_eq!(v.downcast_ref::<bool>(), Some(&true));
+        match c.get_lua("flag", &lua) {
+            mlua::Value::Boolean(true) => {}
+            other => panic!("expected Boolean(true), got {other:?}"),
+        }
         c.set_dyn("flag", Rc::new(false));
         // Redeclare dropped the prior subscriber.
         assert!(!c.has_pending());
@@ -469,9 +640,56 @@ mod tests {
         let key = lua.create_registry_value(value).unwrap();
         let mut c = Cells::new();
         c.declare("greeting", LuaCellValue { key });
-        let v = c.get_dyn("greeting").unwrap();
-        let lv = v.downcast_ref::<LuaCellValue>().unwrap();
-        let resolved: String = lua.registry_value(&lv.key).unwrap();
-        assert_eq!(resolved, "hello");
+        match c.get_lua("greeting", &lua) {
+            mlua::Value::String(s) => {
+                assert_eq!(s.to_str().unwrap(), "hello");
+            }
+            other => panic!("expected String(hello), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_seeds_declare_every_cell() {
+        let lua = Lua::new();
+        let cells = build_with_builtins(BuiltinSeeds {
+            vim_mode: "Insert".into(),
+            agent_mode: "normal".into(),
+            model: "anthropic/claude-opus-4-7".into(),
+            reasoning: "off".into(),
+            cwd: "/tmp/work".into(),
+            session_title: String::new(),
+            branch: String::new(),
+        });
+
+        // Stateful cells with primitive projectors return their seeds.
+        for (name, expected) in [
+            ("vim_mode", "Insert"),
+            ("agent_mode", "normal"),
+            ("model", "anthropic/claude-opus-4-7"),
+            ("reasoning", "off"),
+            ("cwd", "/tmp/work"),
+        ] {
+            match cells.get_lua(name, &lua) {
+                mlua::Value::String(s) => assert_eq!(s.to_str().unwrap(), expected),
+                other => panic!("cell {name}: expected String({expected}), got {other:?}"),
+            }
+        }
+
+        // Event-shaped cells project to nil while their setters are
+        // un-migrated.
+        for name in [
+            "history",
+            "turn_complete",
+            "turn_error",
+            "confirm_requested",
+            "confirm_resolved",
+            "session_started",
+            "session_ended",
+        ] {
+            assert!(
+                matches!(cells.get_lua(name, &lua), mlua::Value::Nil),
+                "cell {name} should project to Nil"
+            );
+        }
     }
 }

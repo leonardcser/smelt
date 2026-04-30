@@ -470,22 +470,15 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // `smelt.cell.get(name)` returns the cell's current value or
-    // `nil` when undeclared / when the cell stores a typed Rust
-    // value without a Lua converter (none today; built-in
-    // converters land with a.4c).
+    // `nil` when undeclared / when no projector is registered for
+    // the cell's value type.
     cell_tbl.set(
         "get",
         lua.create_function(|lua, name: String| -> LuaResult<mlua::Value> {
-            let key = crate::lua::try_with_app(|app| {
-                let v = app.cells.get_dyn(&name)?;
-                let lv = v.downcast_ref::<LuaCellValue>()?;
-                // mlua::RegistryKey isn't Clone, so resolve a fresh
-                // copy of the value here while we hold `&Lua`. The
-                // returned value is owned by the caller's Lua state.
-                lua.registry_value::<mlua::Value>(&lv.key).ok()
-            })
-            .flatten();
-            Ok(key.unwrap_or(mlua::Value::Nil))
+            Ok(
+                crate::lua::try_with_app(|app| app.cells.get_lua(&name, lua))
+                    .unwrap_or(mlua::Value::Nil),
+            )
         })?,
     )?;
 
@@ -596,13 +589,10 @@ impl mlua::UserData for CellHandle {
         use std::rc::Rc;
 
         methods.add_method("get", |lua, this, _: ()| -> LuaResult<mlua::Value> {
-            let key = crate::lua::try_with_app(|app| {
-                let v = app.cells.get_dyn(&this.name)?;
-                let lv = v.downcast_ref::<LuaCellValue>()?;
-                lua.registry_value::<mlua::Value>(&lv.key).ok()
-            })
-            .flatten();
-            Ok(key.unwrap_or(mlua::Value::Nil))
+            Ok(
+                crate::lua::try_with_app(|app| app.cells.get_lua(&this.name, lua))
+                    .unwrap_or(mlua::Value::Nil),
+            )
         });
 
         methods.add_method("set", |lua, this, value: mlua::Value| -> LuaResult<bool> {
@@ -650,8 +640,7 @@ fn register_au(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     // `smelt.au.on(name, fn)` — thin alias over
     // `smelt.cell(name):subscribe(fn)`. The cell must already be
-    // declared (built-in cells land in P2.a.4c; until then a missing
-    // cell returns `nil`).
+    // declared; subscribing to an undeclared name returns `nil`.
     au_tbl.set(
         "on",
         lua.create_function(

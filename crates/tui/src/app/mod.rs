@@ -560,6 +560,16 @@ impl App {
         // Load workspace rules from disk into them at startup.
         let runtime_approvals = engine.runtime_approvals();
 
+        let cells = cells::build_with_builtins(cells::BuiltinSeeds {
+            vim_mode: format!("{:?}", ui::VimMode::Insert),
+            agent_mode: mode.as_str().to_string(),
+            model: model.clone(),
+            reasoning: reasoning_effort.label().to_string(),
+            cwd: cwd.clone(),
+            session_title: String::new(),
+            branch: String::new(),
+        });
+
         let (ui, transcript_display_buf, well_known) = {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = ui::Ui::new();
@@ -712,7 +722,7 @@ impl App {
             agent: None,
             confirms: confirms::Confirms::new(),
             timers: timers::Timers::new(),
-            cells: cells::Cells::new(),
+            cells,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
@@ -797,41 +807,43 @@ impl App {
     /// subscribe_kind / unsubscribe` composes cleanly with the TLS
     /// app pointer.
     ///
+    /// Snapshot the App-side fields that back diff-driven cells and
+    /// publish through `Cells` whenever they differ from the last
+    /// published value. Runs once per main-loop tick so a Lua
+    /// subscriber on `vim_mode` / `confirms_pending` sees every flip
+    /// without each individual mutation point having to call
+    /// `cells.set_dyn`.
+    pub fn publish_diff_cells(&mut self) {
+        self.cells
+            .publish_if_changed("vim_mode", format!("{:?}", self.vim_mode));
+        self.cells
+            .publish_if_changed("confirms_pending", !self.confirms.is_empty());
+    }
+
     /// Direct subscribers see the Lua function called as `func(value)`;
     /// glob subscribers see `func(name, value)` so a pattern handler
     /// can branch per cell name (matching nvim's `pattern`-augmented
-    /// autocmd ergonomics).
-    ///
-    /// Today every cell value is a `LuaCellValue` (Lua-defined
-    /// cells only); Rust-typed built-ins migrate in P2.a.4c with
-    /// their per-type Lua converters. Until then, a Lua subscriber
-    /// against a non-Lua cell is silently skipped.
+    /// autocmd ergonomics). The cell value is converted to Lua via
+    /// the per-`TypeId` projector registered on `Cells`; values with
+    /// no registered projector surface as `nil`.
     pub fn drain_cells_pending(&mut self) {
         if !self.cells.has_pending() {
             return;
         }
         let fires = self.cells.drain_pending();
+        let lua = &self.lua.lua;
         for fire in fires {
+            let value = self.cells.project_to_lua(&*fire.value, lua);
             for cb in &fire.callbacks {
                 let cells::SubscriberKind::Lua(handle) = &cb.kind;
-                let Some(lv) = fire.value.downcast_ref::<cells::LuaCellValue>() else {
-                    // Rust-typed cell with a Lua subscriber
-                    // — converter lands with a.4c.
-                    continue;
-                };
-                let lua = &self.lua.lua;
                 let func = match lua.registry_value::<mlua::Function>(&handle.key) {
                     Ok(f) => f,
                     Err(_) => continue,
                 };
-                let value: mlua::Value = match lua.registry_value::<mlua::Value>(&lv.key) {
-                    Ok(v) => v,
-                    Err(_) => mlua::Value::Nil,
-                };
                 let result = if cb.is_glob {
-                    func.call::<()>((fire.name.clone(), value))
+                    func.call::<()>((fire.name.clone(), value.clone()))
                 } else {
-                    func.call::<()>(value)
+                    func.call::<()>(value.clone())
                 };
                 if let Err(e) = result {
                     self.lua.record_error(format!("cell `{}`: {e}", fire.name));
@@ -1128,6 +1140,7 @@ impl App {
             let _app_guard = crate::lua::install_app_ptr(self);
             // ── Lua timer + notification pump ────────────────────────────
             self.tick_timers();
+            self.publish_diff_cells();
             self.drain_cells_pending();
             self.drive_lua_tasks();
             let (items, tick_errors) = self.lua.tick_statusline();

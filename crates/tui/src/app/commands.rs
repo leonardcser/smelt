@@ -393,6 +393,7 @@ impl App {
         if old != self.config.model {
             let from = old;
             let to = self.config.model.clone();
+            self.cells.set_dyn("model", std::rc::Rc::new(to.clone()));
             self.lua
                 .emit_data(crate::lua::AutocmdEvent::ModelChange, |lua| {
                     let t = lua.create_table()?;
@@ -431,6 +432,8 @@ impl App {
         if old != mode {
             let from = old.as_str().to_string();
             let to = mode.as_str().to_string();
+            self.cells
+                .set_dyn("agent_mode", std::rc::Rc::new(to.clone()));
             self.lua
                 .emit_data(crate::lua::AutocmdEvent::ModeChange, |lua| {
                     let t = lua.create_table()?;
@@ -464,6 +467,8 @@ impl App {
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.config.reasoning_effort = effort;
         state::set_reasoning_effort(effort);
+        self.cells
+            .set_dyn("reasoning", std::rc::Rc::new(effort.label().to_string()));
         self.engine.send(UiCommand::SetReasoningEffort { effort });
     }
 }

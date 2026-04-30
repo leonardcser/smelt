@@ -445,15 +445,37 @@ bridges, then the aggregate.
     fires `fn(name, value)` for every match; `smelt.au.{on,fire}`
     aliases `subscribe_kind` / `set_dyn`. Drain pump branches on a
     `is_glob` flag per queued callback.
-  - **a.4c** — built-in cell migrations: stateful slots
-    (`vim_mode`, `agent_mode`, `model`, `reasoning`,
-    `confirms_pending`, `tokens_used`, `errors`, `cwd`,
-    `session_title`, `branch`, `now`, `spinner_frame`) and
-    event-shaped cells (`history`, `turn_complete`, `turn_error`,
-    `confirm_requested`, `confirm_resolved`, `session_started`,
-    `session_ended`) declared at startup; existing setters
-    publish through `Cells`. Statusline + plugin subscribers
-    fan out from one registry.
+  - **a.4c** — built-in cell migrations. Splits because the
+    machinery + simple-typed setters, the timer-driven cells, and
+    the event-shaped cells (some gated on EngineBridge) are each
+    natural single-session units:
+    - **a.4c.1** ✅ — `LuaProjector` machinery on `Cells` (per-`TypeId`
+      converter from `&dyn Any` to `mlua::Value`); `LuaCellValue`
+      projector built in. `build_with_builtins(BuiltinSeeds)` declares
+      every built-in cell (12 stateful + 7 event-shaped) at startup
+      with primitive projectors for `String / bool / u32 / u64 / u8`
+      plus an `EventStub` placeholder projector for un-migrated
+      events. Stateful setter chokepoints publish: `agent_mode`
+      (`App::set_mode`), `model` (`apply_model`), `reasoning`
+      (`set_reasoning_effort`); `vim_mode` and `confirms_pending`
+      fan out from a per-tick `App::publish_diff_cells` so the
+      every-mutation-point of `vim_mode` and the register/take
+      pair on `Confirms` don't each need a publish call.
+      Remaining stateful migrations (`tokens_used`, `errors`, `cwd`,
+      `session_title`, `branch`) ride a.4c.2 / a.4c.3 alongside
+      their event handlers.
+    - **a.4c.2** — timer-driven cells (`now`, `spinner_frame`) +
+      `tokens_used` (engine-event fan-out). `now` driven by a 1Hz
+      `Timers` entry; `spinner_frame` driven from the existing
+      animation tick; `tokens_used` published from the `EngineEvent::TokenUsage`
+      handler. Custom `TokenUsage → Lua table` projector.
+    - **a.4c.3** — event-shaped cells (`history`, `turn_complete`,
+      `turn_error`, `confirm_requested`, `confirm_resolved`,
+      `session_started`, `session_ended`) wired to their existing
+      handlers; payload projectors for `TurnMeta`, `TurnError`,
+      handle ids, etc. Some entries (`turn_complete`, `turn_error`)
+      fold cleanly into `EngineBridge` once a.11 lands; others
+      (confirm/session lifecycle) are App-side.
 - **a.5** ✅ — `Timers { set, every, cancel }` carve-out: storage
   lifts off `LuaShared.timers` onto `app::timers::Timers` on `App`;
   `App::tick_timers` drains via `Timers::drain_due` (re-arms
