@@ -37,16 +37,18 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
         ),
         None => (name_arg, None),
     };
-    app.cells
+    app.core
+        .cells
         .set_dyn("cmd_pre", std::rc::Rc::new(name.to_string()));
     app.drain_cells_pending();
-    let outcome = if !name.is_empty() && app.lua.has_command(name) {
-        app.lua.run_command(name, arg);
+    let outcome = if !name.is_empty() && app.core.lua.has_command(name) {
+        app.core.lua.run_command(name, arg);
         CommandAction::Continue
     } else {
         app.handle_command(&normalized)
     };
-    app.cells
+    app.core
+        .cells
         .set_dyn("cmd_post", std::rc::Rc::new(name.to_string()));
     app.drain_cells_pending();
     app.flush_lua_callbacks();
@@ -174,13 +176,13 @@ fn cmd_stats(app: &mut App, _: Option<String>) -> CommandAction {
 fn cmd_cost(app: &mut App, _: Option<String>) -> CommandAction {
     let turns = app.user_turns().len();
     let resolved = engine::pricing::resolve(
-        &app.config.model,
-        &app.config.provider_type,
-        &app.config.model_config,
+        &app.core.config.model,
+        &app.core.config.provider_type,
+        &app.core.config.model_config,
     );
     let lines = crate::metrics::render_session_cost(
-        app.session.session_cost_usd,
-        &app.config.model,
+        app.core.session.session_cost_usd,
+        &app.core.config.model,
         turns,
         &resolved,
     );
@@ -234,7 +236,7 @@ impl App {
                 self.agent = Some(turn);
             }
             InputOutcome::Compact { instructions } => {
-                if self.session.messages.is_empty() {
+                if self.core.session.messages.is_empty() {
                     self.notify_error("nothing to compact".into());
                 } else {
                     self.compact_history(instructions);
@@ -372,6 +374,7 @@ impl App {
     /// nothing if the key is not found.
     pub(crate) fn apply_model(&mut self, key: &str) {
         let Some(resolved) = self
+            .core
             .config
             .available_models
             .iter()
@@ -380,23 +383,24 @@ impl App {
         else {
             return;
         };
-        let old = self.config.model.clone();
-        self.config.model = resolved.model_name.clone();
-        self.config.api_base = resolved.api_base.clone();
-        self.config.api_key_env = resolved.api_key_env.clone();
-        self.config.provider_type = resolved.provider_type.clone();
-        self.config.model_config = (&resolved.config).into();
+        let old = self.core.config.model.clone();
+        self.core.config.model = resolved.model_name.clone();
+        self.core.config.api_base = resolved.api_base.clone();
+        self.core.config.api_key_env = resolved.api_key_env.clone();
+        self.core.config.provider_type = resolved.provider_type.clone();
+        self.core.config.model_config = (&resolved.config).into();
         let api_key = self.resolve_api_key().unwrap_or_default();
         state::set_selected_model(resolved.key.clone());
-        self.engine.send(UiCommand::SetModel {
-            model: self.config.model.clone(),
-            api_base: self.config.api_base.clone(),
+        self.core.engine.send(UiCommand::SetModel {
+            model: self.core.config.model.clone(),
+            api_base: self.core.config.api_base.clone(),
             api_key,
-            provider_type: self.config.provider_type.clone(),
+            provider_type: self.core.config.provider_type.clone(),
         });
-        if old != self.config.model {
-            self.cells
-                .set_dyn("model", std::rc::Rc::new(self.config.model.clone()));
+        if old != self.core.config.model {
+            self.core
+                .cells
+                .set_dyn("model", std::rc::Rc::new(self.core.config.model.clone()));
         }
     }
 
@@ -404,11 +408,11 @@ impl App {
     /// input/screen. Centralizes the pattern that used to be scattered across
     /// the command handlers.
     pub(super) fn update_settings<F: FnOnce(&mut state::ResolvedSettings)>(&mut self, f: F) {
-        f(&mut self.config.settings);
-        self.input.set_vim_enabled(self.config.settings.vim);
+        f(&mut self.core.config.settings);
+        self.input.set_vim_enabled(self.core.config.settings.vim);
         self.transcript_window
-            .set_vim_enabled(self.config.settings.vim);
-        state::save_settings(&self.config.settings);
+            .set_vim_enabled(self.core.config.settings.vim);
+        state::save_settings(&self.core.config.settings);
     }
 
     /// Replace all resolved settings at once (from a settings dialog result),
@@ -420,52 +424,61 @@ impl App {
     /// Set the agent mode, persist it, and notify the engine. Marks the
     /// screen dirty so the mode indicator refreshes.
     pub(crate) fn set_mode(&mut self, mode: Mode) {
-        let old = self.config.mode;
-        self.config.mode = mode;
-        state::set_mode(self.config.mode);
+        let old = self.core.config.mode;
+        self.core.config.mode = mode;
+        state::set_mode(self.core.config.mode);
         // Publish the new mode first so plugins can (un)register tools
         // and prompt sections for the new mode before we snapshot them
         // for the engine.
         if old != mode {
-            self.cells
+            self.core
+                .cells
                 .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
             self.drain_cells_pending();
         }
         let system_prompt = self.rebuild_system_prompt();
-        let plugin_tools = self.lua.plugin_tool_defs(self.config.mode);
-        self.engine.send(UiCommand::SetMode {
-            mode: self.config.mode,
+        let plugin_tools = self.core.lua.plugin_tool_defs(self.core.config.mode);
+        self.core.engine.send(UiCommand::SetMode {
+            mode: self.core.config.mode,
             system_prompt: Some(system_prompt),
             plugin_tools: Some(plugin_tools),
         });
     }
 
     pub(crate) fn toggle_mode(&mut self) {
-        let next = self.config.mode.cycle_within(&self.config.mode_cycle);
+        let next = self
+            .core
+            .config
+            .mode
+            .cycle_within(&self.core.config.mode_cycle);
         self.set_mode(next);
     }
 
     pub(super) fn cycle_reasoning(&mut self) {
         let next = self
+            .core
             .config
             .reasoning_effort
-            .cycle_within(&self.config.reasoning_cycle);
+            .cycle_within(&self.core.config.reasoning_cycle);
         self.set_reasoning_effort(next);
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
-        self.config.reasoning_effort = effort;
+        self.core.config.reasoning_effort = effort;
         state::set_reasoning_effort(effort);
-        self.cells
+        self.core
+            .cells
             .set_dyn("reasoning", std::rc::Rc::new(effort.label().to_string()));
-        self.engine.send(UiCommand::SetReasoningEffort { effort });
+        self.core
+            .engine
+            .send(UiCommand::SetReasoningEffort { effort });
     }
 }
 
 /// Copy text to the system clipboard using platform commands.
 ///
 /// Reached only through `SystemSink::write` — every clipboard write
-/// in the runtime flows through `app.clipboard.write()` so vim,
+/// in the runtime flows through `app.core.clipboard.write()` so vim,
 /// emacs, transcript yank, and Lua `smelt.clipboard` share one path.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
@@ -508,7 +521,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 /// ring in that case.
 ///
 /// Reached only through `SystemSink::read` — every clipboard read in
-/// the runtime flows through `app.clipboard.read()`.
+/// the runtime flows through `app.core.clipboard.read()`.
 fn paste_from_clipboard() -> Option<String> {
     use std::process::{Command, Stdio};
 

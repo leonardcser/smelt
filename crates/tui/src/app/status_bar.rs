@@ -28,7 +28,7 @@ impl App {
             }
             crate::app::AppFocus::Content => {
                 let total_lines = self
-                    .full_transcript_display_text(self.config.settings.show_thinking)
+                    .full_transcript_display_text(self.core.config.settings.show_thinking)
                     .len();
                 if total_lines == 0 {
                     return None;
@@ -87,7 +87,7 @@ impl App {
         let pill_label: Option<String> = if live {
             Some(if is_compacting {
                 "compacting".into()
-            } else if self.config.settings.show_slug {
+            } else if self.core.config.settings.show_slug {
                 self.task_label
                     .as_deref()
                     .map(String::from)
@@ -95,7 +95,7 @@ impl App {
             } else {
                 "working".into()
             })
-        } else if self.config.settings.show_slug {
+        } else if self.core.config.settings.show_slug {
             self.task_label.as_deref().map(String::from)
         } else {
             None
@@ -171,7 +171,7 @@ impl App {
         }
 
         // Mode indicator.
-        let mode = self.config.mode;
+        let mode = self.core.config.mode;
         let (mode_icon, mode_name, mode_fg) = match mode {
             protocol::Mode::Plan => ("◇ ", "plan", theme_plan_fg),
             protocol::Mode::Apply => ("→ ", "apply", theme_apply_fg),
@@ -191,7 +191,7 @@ impl App {
 
         // Throbber spans (timer, tok/s, etc.).
         let throbber_spans = self.working.throbber_spans(
-            self.config.settings.show_tps,
+            self.core.config.settings.show_tps,
             theme_muted_fg.unwrap_or(Color::Reset),
         );
         // Live-turn spans lead with the spinner glyph (already included
@@ -239,7 +239,7 @@ impl App {
         }
 
         // Running procs.
-        let running_procs = self.engine.processes().running_count();
+        let running_procs = self.core.engine.processes().running_count();
         if running_procs > 0 {
             let label = if running_procs == 1 {
                 "1 proc".into()

@@ -83,7 +83,7 @@ impl App {
                     // open cmdline.
                     return false;
                 }
-                let lua = &self.lua;
+                let lua = &self.core.lua;
                 let mut lua_invoke =
                     |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
@@ -201,9 +201,10 @@ impl App {
                         // Empty submit with queued messages: pop and send the
                         // oldest one immediately.
                         let queued = self.queued_messages.remove(0);
-                        if let Some(cmd) =
-                            crate::custom_commands::resolve(queued.trim(), self.config.multi_agent)
-                        {
+                        if let Some(cmd) = crate::custom_commands::resolve(
+                            queued.trim(),
+                            self.core.config.multi_agent,
+                        ) {
                             let turn = self.begin_custom_command_turn(cmd);
                             self.agent = Some(turn);
                         } else {
@@ -266,7 +267,7 @@ impl App {
         // owns focus — overlay-leaf dispatch happens upstream.
         if let Event::Key(k) = *ev {
             if self.ui.focused_overlay().is_none() {
-                let lua = &self.lua;
+                let lua = &self.core.lua;
                 let mut lua_invoke =
                     |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
@@ -285,7 +286,7 @@ impl App {
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
                 let vim_mode = self.current_vim_mode_label();
-                let handled = self.lua.run_keymap(&chord, vim_mode.as_deref());
+                let handled = self.core.lua.run_keymap(&chord, vim_mode.as_deref());
                 if handled {
                     self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
@@ -454,7 +455,7 @@ impl App {
             ev,
             Some(&mut self.input_history),
             &mut self.vim_mode,
-            &mut self.clipboard,
+            &mut self.core.clipboard,
         );
         self.dispatch_input_action(action)
     }
@@ -527,7 +528,7 @@ impl App {
             ) {
                 EscAction::VimToNormal => {
                     self.input
-                        .handle_event(ev, None, &mut self.vim_mode, &mut self.clipboard);
+                        .handle_event(ev, None, &mut self.vim_mode, &mut self.core.clipboard);
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -555,7 +556,7 @@ impl App {
             ev,
             Some(&mut self.input_history),
             &mut self.vim_mode,
-            &mut self.clipboard,
+            &mut self.core.clipboard,
         );
         match input_action {
             Action::Submit {
@@ -734,7 +735,9 @@ impl App {
             CommandAction::Continue => {}
         }
         if trimmed.starts_with('/') {
-            if let Some(cmd) = crate::custom_commands::resolve(trimmed, self.config.multi_agent) {
+            if let Some(cmd) =
+                crate::custom_commands::resolve(trimmed, self.core.config.multi_agent)
+            {
                 return InputOutcome::CustomCommand(Box::new(cmd));
             }
             if crate::completer::Completer::is_command(trimmed) {
@@ -747,7 +750,8 @@ impl App {
         }
 
         // Publish input_submit so Lua plugins can observe/log.
-        self.cells
+        self.core
+            .cells
             .set_dyn("input_submit", std::rc::Rc::new(trimmed.to_string()));
         self.drain_cells_pending();
         self.flush_lua_callbacks();
@@ -773,7 +777,7 @@ impl App {
     pub(crate) fn close_overlay_leaf(&mut self, win_id: ui::WinId) {
         crate::picker::forget(self, win_id);
         for id in self.ui.win_close(win_id) {
-            self.lua.remove_callback(id);
+            self.core.lua.remove_callback(id);
         }
     }
 
@@ -796,7 +800,7 @@ impl App {
         let Some(root) = overlay.layout.leaves_in_order().into_iter().next() else {
             return;
         };
-        let lua = &self.lua;
+        let lua = &self.core.lua;
         let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
@@ -822,11 +826,11 @@ impl App {
     /// Called after every cursor motion to skip non-selectable gutters
     /// and padding now that the cursor operates in display-text space.
     pub(super) fn snap_transcript_cursor(&mut self) {
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let snapped = self.snap_cpos_to_selectable(
             &rows,
             self.transcript_window.cpos,
-            self.config.settings.show_thinking,
+            self.core.config.settings.show_thinking,
         );
         if snapped != self.transcript_window.cpos {
             self.transcript_window.cpos = snapped;

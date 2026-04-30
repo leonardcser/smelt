@@ -67,14 +67,14 @@ pub(crate) struct RegisteredCommand {
 /// `try_with_app`; returns empty when no app pointer is installed
 /// (e.g. early startup).
 pub fn list_commands() -> Vec<(String, Option<String>)> {
-    try_with_app(|app| app.lua.list_commands_with_desc()).unwrap_or_default()
+    try_with_app(|app| app.core.lua.list_commands_with_desc()).unwrap_or_default()
 }
 
 /// Return every Lua-registered command that declared an `args` list,
 /// as `("/cmd", args)` pairs. Used by `PromptState::command_arg_sources`
 /// to drive the secondary arg picker that opens after `/cmd <space>`.
 pub fn list_command_args() -> Vec<(String, Vec<String>)> {
-    try_with_app(|app| app.lua.list_command_args()).unwrap_or_default()
+    try_with_app(|app| app.core.lua.list_command_args()).unwrap_or_default()
 }
 
 /// True if `input` (e.g. `/pick-test` or `/pick-test arg`) matches a
@@ -87,7 +87,7 @@ pub fn is_lua_command(input: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
+    try_with_app(|app| app.core.lua.has_command(name)).unwrap_or(false)
 }
 
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
@@ -295,7 +295,7 @@ pub(crate) fn drop_displaced_lua_handle(
     displaced: Option<ui::Callback>,
 ) {
     if let Some(ui::Callback::Lua(ui::LuaHandle(old))) = displaced {
-        app.lua.remove_callback(old);
+        app.core.lua.remove_callback(old);
     }
 }
 

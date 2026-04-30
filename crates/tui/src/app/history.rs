@@ -8,7 +8,7 @@ impl App {
     /// message; `content` is what gets sent to the engine. Both are scrubbed
     /// so the UI and the LLM see the same redacted form.
     pub(super) fn redact_user_submission(&self, content: &mut Content, display: &mut String) {
-        if self.config.settings.redact_secrets {
+        if self.core.config.settings.redact_secrets {
             engine::redact::redact_content(content);
             *display = engine::redact::redact(display);
         }
@@ -22,10 +22,10 @@ impl App {
     }
 
     pub(super) fn set_history(&mut self, messages: Vec<Message>) {
-        self.session.messages = messages;
+        self.core.session.messages = messages;
         self.sync_session_snapshot();
-        let count = self.session.messages.len();
-        self.cells.set_dyn(
+        let count = self.core.session.messages.len();
+        self.core.cells.set_dyn(
             "history",
             std::rc::Rc::new(crate::app::cells::HistoryDelta {
                 kind: "set".into(),
@@ -35,12 +35,12 @@ impl App {
     }
 
     pub(super) fn sync_session_snapshot(&mut self) {
-        self.session.updated_at_ms = session::now_ms();
-        self.session.mode = Some(self.config.mode.as_str().to_string());
-        self.session.reasoning_effort = Some(self.config.reasoning_effort);
-        self.session.model = Some(self.current_model_key());
+        self.core.session.updated_at_ms = session::now_ms();
+        self.core.session.mode = Some(self.core.config.mode.as_str().to_string());
+        self.core.session.reasoning_effort = Some(self.core.config.reasoning_effort);
+        self.core.session.model = Some(self.current_model_key());
         if let Ok(mut guard) = self.shared_session.lock() {
-            *guard = Some(self.session.clone());
+            *guard = Some(self.core.session.clone());
         }
     }
 
@@ -48,53 +48,59 @@ impl App {
     /// resuming a session restores the same provider (auth method), even
     /// when the same model name is configured under multiple providers.
     fn current_model_key(&self) -> String {
-        self.config
+        self.core
+            .config
             .available_models
             .iter()
             .find(|m| {
-                m.model_name == self.config.model
-                    && m.api_base == self.config.api_base
-                    && m.api_key_env == self.config.api_key_env
-                    && m.provider_type == self.config.provider_type
+                m.model_name == self.core.config.model
+                    && m.api_base == self.core.config.api_base
+                    && m.api_key_env == self.core.config.api_key_env
+                    && m.provider_type == self.core.config.provider_type
             })
             .map(|m| m.key.clone())
-            .unwrap_or_else(|| self.config.model.clone())
+            .unwrap_or_else(|| self.core.config.model.clone())
     }
 
     /// Record current token count and cost so they can be restored on rewind.
     pub(super) fn snapshot_tokens(&mut self) {
-        if let Some(tokens) = self.session.context_tokens {
-            self.session
+        if let Some(tokens) = self.core.session.context_tokens {
+            self.core
+                .session
                 .token_snapshots
-                .push((self.session.messages.len(), tokens));
+                .push((self.core.session.messages.len(), tokens));
         }
-        let cost = self.session.session_cost_usd;
-        self.session
+        let cost = self.core.session.session_cost_usd;
+        self.core
+            .session
             .cost_snapshots
-            .push((self.session.messages.len(), cost));
+            .push((self.core.session.messages.len(), cost));
     }
 
     pub(super) fn fork_session(&mut self) {
-        if self.session.messages.is_empty() {
+        if self.core.session.messages.is_empty() {
             self.notify_error("nothing to fork".into());
             return;
         }
         self.save_session();
         self.flush_persist();
-        let original_id = self.session.id.clone();
-        let forked = self.session.fork();
-        self.session = forked;
+        let original_id = self.core.session.id.clone();
+        let forked = self.core.session.fork();
+        self.core.session = forked;
         self.save_session();
         self.flush_persist();
-        self.cells
+        self.core
+            .cells
             .set_dyn("session_ended", std::rc::Rc::new(original_id.clone()));
-        self.cells
-            .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
-        self.cells.set_dyn(
+        self.core.cells.set_dyn(
+            "session_started",
+            std::rc::Rc::new(self.core.session.id.clone()),
+        );
+        self.core.cells.set_dyn(
             "history",
             std::rc::Rc::new(crate::app::cells::HistoryDelta {
                 kind: "forked".into(),
-                count: self.session.messages.len(),
+                count: self.core.session.messages.len(),
             }),
         );
         self.notify(format!("forked from {original_id}"));
@@ -103,9 +109,9 @@ impl App {
     pub fn reset_session(&mut self) {
         // Cancel any in-flight engine work (agent turn, title generation, etc.)
         // before clearing state so stale events don't restore old data.
-        self.engine.send(UiCommand::Cancel);
-        let old_id = self.session.id.clone();
-        self.session.messages.clear();
+        self.core.engine.send(UiCommand::Cancel);
+        let old_id = self.core.session.id.clone();
+        self.core.session.messages.clear();
         self.pending_agent_blocks.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
@@ -118,19 +124,22 @@ impl App {
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
         self.input.store.clear();
-        self.engine.processes().clear();
+        self.core.engine.processes().clear();
         self.reset_subagents_for_new_session();
-        self.session = session::Session::new();
+        self.core.session = session::Session::new();
         self.pending_title = false;
         self.compact_epoch += 1;
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = None;
         }
-        self.cells
+        self.core
+            .cells
             .set_dyn("session_ended", std::rc::Rc::new(old_id));
-        self.cells
-            .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
-        self.cells.set_dyn(
+        self.core.cells.set_dyn(
+            "session_started",
+            std::rc::Rc::new(self.core.session.id.clone()),
+        );
+        self.core.cells.set_dyn(
             "history",
             std::rc::Rc::new(crate::app::cells::HistoryDelta {
                 kind: "cleared".into(),
@@ -139,11 +148,11 @@ impl App {
         );
         // Drain stale engine events so old Messages snapshots don't
         // restore history into the freshly cleared session.
-        while self.engine.try_recv().is_ok() {}
+        while self.core.engine.try_recv().is_ok() {}
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
-        let old_id = self.session.id.clone();
+        let old_id = self.core.session.id.clone();
         // Resume starts a fresh session view: stop/clear existing subagents tabs.
         self.reset_subagents_for_new_session();
         self.flush_persist();
@@ -157,16 +166,16 @@ impl App {
             self.set_reasoning_effort(effort);
         }
         // Only restore model/API settings if not overridden by CLI.
-        if !self.config.cli_model_override
-            && !self.config.cli_api_base_override
-            && !self.config.cli_api_key_env_override
+        if !self.core.config.cli_model_override
+            && !self.core.config.cli_api_base_override
+            && !self.core.config.cli_api_key_env_override
         {
             if let Some(ref model_key) = loaded.model {
                 // Prefer an exact key match so the original provider/auth method
                 // is restored. Fall back to a unique bare model name for
                 // sessions saved before the key was persisted.
                 let resolved_key =
-                    crate::config::resolve_model_ref(&self.config.available_models, model_key)
+                    crate::config::resolve_model_ref(&self.core.config.available_models, model_key)
                         .ok()
                         .map(|resolved| resolved.key.clone());
                 if let Some(key) = resolved_key {
@@ -175,19 +184,22 @@ impl App {
             }
         }
 
-        self.session = loaded;
-        if let Some(ref slug) = self.session.slug {
+        self.core.session = loaded;
+        if let Some(ref slug) = self.core.session.slug {
             self.set_task_label(slug.clone());
         }
         // Defensive scrub: drop any snapshots beyond restored history.
-        let hist_len = self.session.messages.len();
-        self.session
+        let hist_len = self.core.session.messages.len();
+        self.core
+            .session
             .token_snapshots
             .retain(|(len, _)| *len <= hist_len);
-        self.session
+        self.core
+            .session
             .cost_snapshots
             .retain(|(len, _)| *len <= hist_len);
-        self.session.session_cost_usd = self
+        self.core.session.session_cost_usd = self
+            .core
             .session
             .cost_snapshots
             .last()
@@ -198,23 +210,26 @@ impl App {
         self.input.clear();
         self.input.store.clear();
         self.pending_title = false;
-        self.engine.processes().clear();
+        self.core.engine.processes().clear();
         self.compact_epoch += 1;
         self.sync_session_snapshot();
-        self.cells
+        self.core
+            .cells
             .set_dyn("session_ended", std::rc::Rc::new(old_id));
-        self.cells
-            .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
-        self.cells.set_dyn(
+        self.core.cells.set_dyn(
+            "session_started",
+            std::rc::Rc::new(self.core.session.id.clone()),
+        );
+        self.core.cells.set_dyn(
             "history",
             std::rc::Rc::new(crate::app::cells::HistoryDelta {
                 kind: "loaded".into(),
-                count: self.session.messages.len(),
+                count: self.core.session.messages.len(),
             }),
         );
         // Drain stale engine events so old snapshots don't overwrite
         // the loaded session's state.
-        while self.engine.try_recv().is_ok() {}
+        while self.core.engine.try_recv().is_ok() {}
     }
 
     // ── History / session ────────────────────────────────────────────────
@@ -226,18 +241,18 @@ impl App {
 
     fn rebuild_screen_from_history(&mut self) {
         self.clear_transcript();
-        if let Some(ref slug) = self.session.slug {
+        if let Some(ref slug) = self.core.session.slug {
             self.set_task_label(slug.clone());
         }
-        if self.session.messages.is_empty() {
+        if self.core.session.messages.is_empty() {
             return;
         }
 
         let mut tool_outputs: HashMap<String, ToolOutput> = HashMap::new();
         let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
         let mut agent_blocks: HashMap<String, protocol::AgentBlockData> = HashMap::new();
-        let render_cache = session::load_render_cache(&self.session);
-        for msg in &self.session.messages {
+        let render_cache = session::load_render_cache(&self.core.session);
+        for msg in &self.core.session.messages {
             if matches!(msg.role, Role::Tool) {
                 if let Some(ref id) = msg.tool_call_id {
                     let text = msg
@@ -263,7 +278,7 @@ impl App {
             }
         }
 
-        for (_, meta) in &self.session.turn_metas {
+        for (_, meta) in &self.core.session.turn_metas {
             tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
             agent_blocks.extend(
                 meta.agent_blocks
@@ -275,7 +290,7 @@ impl App {
         let mut blocking_agent_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        let messages = self.session.messages.clone();
+        let messages = self.core.session.messages.clone();
         for msg in &messages {
             match msg.role {
                 Role::User => {
@@ -443,27 +458,27 @@ impl App {
             }
         }
 
-        if let Some((_, meta)) = self.session.turn_metas.last() {
+        if let Some((_, meta)) = self.core.session.turn_metas.last() {
             self.working.restore_from_turn_meta(meta);
         }
 
         // Reattach the persisted layout cache, if any. Must happen *after*
         // every block has been pushed so the cache vector lengths match.
         // Per-block width validity is enforced inside `import_layout_cache`.
-        if let Some(layout_cache) = session::load_layout_cache(&self.session) {
+        if let Some(layout_cache) = session::load_layout_cache(&self.core.session) {
             self.import_layout_cache(layout_cache);
         }
     }
 
     pub fn save_session(&mut self) {
         let _perf = crate::perf::begin("session:save");
-        if self.session.messages.is_empty() {
+        if self.core.session.messages.is_empty() {
             return;
         }
         self.sync_session_snapshot();
         // Skip persisting render/layout caches when redaction is enabled —
         // they contain raw source text from tool output that would leak secrets.
-        let (render_cache, layout_cache) = if self.config.settings.redact_secrets {
+        let (render_cache, layout_cache) = if self.core.config.settings.redact_secrets {
             (None, None)
         } else {
             (
@@ -481,7 +496,7 @@ impl App {
             .map(|(filename, data_url)| crate::persist::Blob { filename, data_url })
             .collect();
         self.persister.save(crate::persist::PersistRequest {
-            session: self.session.clone(),
+            session: self.core.session.clone(),
             blobs,
             render_cache,
             layout_cache,
@@ -504,6 +519,7 @@ impl App {
             return;
         }
         let last_user_idx = self
+            .core
             .session
             .messages
             .iter()
@@ -511,6 +527,7 @@ impl App {
         let last_user_message = match (last_user_idx, current_message) {
             (_, Some(msg)) if !msg.is_empty() => msg.to_string(),
             (Some(i), _) => self
+                .core
                 .session
                 .messages
                 .get(i)
@@ -529,7 +546,7 @@ impl App {
         }
         // Tail of assistant text after the last user message (bounded to 1000 chars).
         let tail_start = last_user_idx.map(|i| i + 1).unwrap_or(0);
-        let mut assistant_tail: String = self.session.messages[tail_start..]
+        let mut assistant_tail: String = self.core.session.messages[tail_start..]
             .iter()
             .filter(|m| matches!(m.role, protocol::Role::Assistant))
             .filter_map(|m| m.content.as_ref().map(|c| c.text_content()))
@@ -547,11 +564,11 @@ impl App {
             &serde_json::json!({
                 "user_chars": last_user_message.len(),
                 "assistant_chars": assistant_tail.len(),
-                "current_title": self.session.title,
+                "current_title": self.core.session.title,
             }),
         );
         self.pending_title = true;
-        self.engine.send(UiCommand::GenerateTitle {
+        self.core.engine.send(UiCommand::GenerateTitle {
             last_user_message,
             assistant_tail,
         });
@@ -566,8 +583,8 @@ impl App {
         {
             self.working.begin(TurnPhase::Compacting);
         };
-        self.engine.send(UiCommand::Compact {
-            history: self.session.messages.clone(),
+        self.core.engine.send(UiCommand::Compact {
+            history: self.core.session.messages.clone(),
             instructions,
         });
     }
@@ -583,11 +600,11 @@ impl App {
         // Replace history with the compacted messages (summary + kept turns).
         // Old snapshots key into pre-compaction positions and are no longer
         // valid, but the running cost carries forward.
-        self.session.messages = messages;
-        self.session.token_snapshots.clear();
-        self.session.cost_snapshots.clear();
-        self.session.turn_metas.clear();
-        self.session.context_tokens = None;
+        self.core.session.messages = messages;
+        self.core.session.token_snapshots.clear();
+        self.core.session.cost_snapshots.clear();
+        self.core.session.turn_metas.clear();
+        self.core.session.context_tokens = None;
 
         self.restore_screen();
         self.save_session();
@@ -598,13 +615,13 @@ impl App {
     }
 
     pub(super) fn maybe_auto_compact(&mut self) {
-        if !self.config.settings.auto_compact {
+        if !self.core.config.settings.auto_compact {
             return;
         }
-        let Some(ctx) = self.config.context_window else {
+        let Some(ctx) = self.core.config.context_window else {
             return;
         };
-        let Some(tokens) = self.session.context_tokens else {
+        let Some(tokens) = self.core.session.context_tokens else {
             return;
         };
         if tokens as u64 * 100 >= ctx as u64 * engine::compact_threshold_percent() {
@@ -622,7 +639,7 @@ impl App {
 
         let mut user_count = 0;
         let mut hist_idx = 0;
-        for (i, msg) in self.session.messages.iter().enumerate() {
+        for (i, msg) in self.core.session.messages.iter().enumerate() {
             if matches!(msg.role, Role::User) {
                 user_count += 1;
                 if user_count > user_turns_to_keep {
@@ -635,6 +652,7 @@ impl App {
 
         // Extract image (label, data_url) pairs from the target message before truncating.
         let images: Vec<(String, String)> = self
+            .core
             .session
             .messages
             .get(hist_idx)
@@ -653,17 +671,19 @@ impl App {
             })
             .unwrap_or_default();
 
-        self.session.messages.truncate(hist_idx);
-        truncate_keyed(&mut self.session.token_snapshots, hist_idx);
-        truncate_keyed(&mut self.session.cost_snapshots, hist_idx);
-        truncate_keyed(&mut self.session.turn_metas, hist_idx);
-        self.session.session_cost_usd = self
+        self.core.session.messages.truncate(hist_idx);
+        truncate_keyed(&mut self.core.session.token_snapshots, hist_idx);
+        truncate_keyed(&mut self.core.session.cost_snapshots, hist_idx);
+        truncate_keyed(&mut self.core.session.turn_metas, hist_idx);
+        self.core.session.session_cost_usd = self
+            .core
             .session
             .cost_snapshots
             .last()
             .map(|&(_, c)| c)
             .unwrap_or(0.0);
-        self.session.context_tokens = self.session.token_snapshots.last().map(|&(_, t)| t);
+        self.core.session.context_tokens =
+            self.core.session.token_snapshots.last().map(|&(_, t)| t);
         self.truncate_to(block_idx);
         self.reset_session_permissions();
         self.compact_epoch += 1;

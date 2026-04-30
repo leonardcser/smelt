@@ -48,7 +48,7 @@ impl App {
             crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
         };
         if target == crate::app::AppFocus::Content
-            && !self.has_transcript_content(self.config.settings.show_thinking)
+            && !self.has_transcript_content(self.core.config.settings.show_thinking)
         {
             return;
         }
@@ -63,7 +63,7 @@ impl App {
     /// resumed session has stale/zero state and the first key press
     /// is a no-op until the user triggers a click-to-position.
     fn refocus_content(&mut self) {
-        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
             .refocus(&rows, viewport, &mut self.vim_mode);
@@ -77,7 +77,7 @@ impl App {
         let tw = self.transcript_width() as u16;
         let snap = self
             .transcript
-            .snapshot(tw, self.config.settings.show_thinking);
+            .snapshot(tw, self.core.config.settings.show_thinking);
         if snap.rows.is_empty() {
             return None;
         }

@@ -37,7 +37,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "_render_title",
         lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
             crate::lua::with_app(|app| {
-                let req = match app.confirms.get(handle_id) {
+                let req = match app.core.confirms.get(handle_id) {
                     Some(e) => e.req.clone(),
                     None => return,
                 };
@@ -55,7 +55,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "_back_tab",
         lua.create_function(|_, handle_id: u64| {
             let auto_allowed = crate::lua::with_app(|app| {
-                let entry = match app.confirms.get(handle_id) {
+                let entry = match app.core.confirms.get(handle_id) {
                     Some(e) => e,
                     None => return false,
                 };
@@ -66,7 +66,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 app.toggle_mode();
                 if app
                     .permissions
-                    .decide(app.config.mode, &tool_name, &args, false)
+                    .decide(app.core.config.mode, &tool_name, &args, false)
                     == engine::permissions::Decision::Allow
                 {
                     app.set_active_status(
@@ -74,8 +74,8 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         crate::app::transcript_model::ToolStatus::Pending,
                     );
                     app.send_permission_decision(request_id, true, None);
-                    app.confirms.take(handle_id);
-                    app.cells.set_dyn(
+                    app.core.confirms.take(handle_id);
+                    app.core.cells.set_dyn(
                         "confirm_resolved",
                         std::rc::Rc::new(ConfirmResolved {
                             handle_id,
@@ -99,7 +99,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(
             |_, (handle_id, choice_idx, message): (u64, usize, Option<String>)| {
                 crate::lua::with_app(|app| {
-                    let entry = match app.confirms.take(handle_id) {
+                    let entry = match app.core.confirms.take(handle_id) {
                         Some(e) => e,
                         None => return,
                     };
@@ -108,7 +108,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         .get(choice_idx.saturating_sub(1))
                         .cloned()
                         .unwrap_or(ConfirmChoice::No);
-                    app.cells.set_dyn(
+                    app.core.cells.set_dyn(
                         "confirm_resolved",
                         std::rc::Rc::new(ConfirmResolved {
                             handle_id,

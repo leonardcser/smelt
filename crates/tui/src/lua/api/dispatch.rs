@@ -286,7 +286,7 @@ fn register_tools(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> Lu
                 let content: String = result.get("content").unwrap_or_default();
                 let is_error: bool = result.get("is_error").unwrap_or(false);
                 crate::lua::with_app(|app| {
-                    app.engine.send(protocol::UiCommand::PluginToolResult {
+                    app.core.engine.send(protocol::UiCommand::PluginToolResult {
                         request_id,
                         call_id,
                         content,
@@ -312,7 +312,7 @@ fn register_tools(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> Lu
             )| {
                 let arg_map = lua_table_to_args(lua, &args);
                 crate::lua::with_app(|app| {
-                    app.engine.send(protocol::UiCommand::CallCoreTool {
+                    app.core.engine.send(protocol::UiCommand::CallCoreTool {
                         request_id,
                         parent_call_id,
                         tool_name,
@@ -380,7 +380,9 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
             let key = lua.create_registry_value(handler)?;
             Ok(crate::lua::try_with_app(|app| {
-                app.timers.set(Duration::from_millis(ms), LuaHandle { key })
+                app.core
+                    .timers
+                    .set(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
         })?,
@@ -395,7 +397,8 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
             let key = lua.create_registry_value(handler)?;
             Ok(crate::lua::try_with_app(|app| {
-                app.timers
+                app.core
+                    .timers
                     .every(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
@@ -404,7 +407,7 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     timer_tbl.set(
         "cancel",
         lua.create_function(|_, id: u64| {
-            Ok(crate::lua::try_with_app(|app| app.timers.cancel(id)).unwrap_or(false))
+            Ok(crate::lua::try_with_app(|app| app.core.timers.cancel(id)).unwrap_or(false))
         })?,
     )?;
     smelt.set("timer", timer_tbl)?;
@@ -417,7 +420,9 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
             let key = lua.create_registry_value(handler)?;
             crate::lua::try_with_app(|app| {
-                app.timers.set(Duration::from_millis(ms), LuaHandle { key })
+                app.core
+                    .timers
+                    .set(Duration::from_millis(ms), LuaHandle { key })
             });
             Ok(())
         })?,
@@ -441,7 +446,7 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, initial): (String, mlua::Value)| -> LuaResult<()> {
                 let key = lua.create_registry_value(initial)?;
                 crate::lua::try_with_app(|app| {
-                    app.cells.declare(name, LuaCellValue { key });
+                    app.core.cells.declare(name, LuaCellValue { key });
                 });
                 Ok(())
             },
@@ -455,7 +460,7 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "get",
         lua.create_function(|lua, name: String| -> LuaResult<mlua::Value> {
             Ok(
-                crate::lua::try_with_app(|app| app.cells.get_lua(&name, lua))
+                crate::lua::try_with_app(|app| app.core.cells.get_lua(&name, lua))
                     .unwrap_or(mlua::Value::Nil),
             )
         })?,
@@ -470,7 +475,7 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, value): (String, mlua::Value)| -> LuaResult<bool> {
                 let key = lua.create_registry_value(value)?;
                 Ok(crate::lua::try_with_app(|app| {
-                    app.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
+                    app.core.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
                 })
                 .unwrap_or(false))
             },
@@ -486,7 +491,8 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, handler): (String, mlua::Function)| -> LuaResult<mlua::Value> {
                 let key = lua.create_registry_value(handler)?;
                 let id = crate::lua::try_with_app(|app| {
-                    app.cells
+                    app.core
+                        .cells
                         .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
@@ -504,7 +510,10 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     cell_tbl.set(
         "unsubscribe",
         lua.create_function(|_, (name, id): (String, u64)| -> LuaResult<bool> {
-            Ok(crate::lua::try_with_app(|app| app.cells.unsubscribe(&name, id)).unwrap_or(false))
+            Ok(
+                crate::lua::try_with_app(|app| app.core.cells.unsubscribe(&name, id))
+                    .unwrap_or(false),
+            )
         })?,
     )?;
 
@@ -523,7 +532,8 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 })?;
                 let key = lua.create_registry_value(handler)?;
                 Ok(crate::lua::try_with_app(|app| {
-                    app.cells
+                    app.core
+                        .cells
                         .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .unwrap_or(0))
@@ -536,7 +546,10 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     cell_tbl.set(
         "glob_unsubscribe",
         lua.create_function(|_, id: u64| -> LuaResult<bool> {
-            Ok(crate::lua::try_with_app(|app| app.cells.unsubscribe_glob(id)).unwrap_or(false))
+            Ok(
+                crate::lua::try_with_app(|app| app.core.cells.unsubscribe_glob(id))
+                    .unwrap_or(false),
+            )
         })?,
     )?;
 
@@ -569,7 +582,7 @@ impl mlua::UserData for CellHandle {
 
         methods.add_method("get", |lua, this, _: ()| -> LuaResult<mlua::Value> {
             Ok(
-                crate::lua::try_with_app(|app| app.cells.get_lua(&this.name, lua))
+                crate::lua::try_with_app(|app| app.core.cells.get_lua(&this.name, lua))
                     .unwrap_or(mlua::Value::Nil),
             )
         });
@@ -577,7 +590,9 @@ impl mlua::UserData for CellHandle {
         methods.add_method("set", |lua, this, value: mlua::Value| -> LuaResult<bool> {
             let key = lua.create_registry_value(value)?;
             Ok(crate::lua::try_with_app(|app| {
-                app.cells.set_dyn(&this.name, Rc::new(LuaCellValue { key }))
+                app.core
+                    .cells
+                    .set_dyn(&this.name, Rc::new(LuaCellValue { key }))
             })
             .unwrap_or(false))
         });
@@ -587,7 +602,8 @@ impl mlua::UserData for CellHandle {
             |lua, this, handler: mlua::Function| -> LuaResult<mlua::Value> {
                 let key = lua.create_registry_value(handler)?;
                 let id = crate::lua::try_with_app(|app| {
-                    app.cells
+                    app.core
+                        .cells
                         .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
@@ -600,7 +616,7 @@ impl mlua::UserData for CellHandle {
 
         methods.add_method("unsubscribe", |_, this, id: u64| -> LuaResult<bool> {
             Ok(
-                crate::lua::try_with_app(|app| app.cells.unsubscribe(&this.name, id))
+                crate::lua::try_with_app(|app| app.core.cells.unsubscribe(&this.name, id))
                     .unwrap_or(false),
             )
         });
@@ -626,7 +642,8 @@ fn register_au(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, handler): (String, mlua::Function)| -> LuaResult<mlua::Value> {
                 let key = lua.create_registry_value(handler)?;
                 let id = crate::lua::try_with_app(|app| {
-                    app.cells
+                    app.core
+                        .cells
                         .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
                 })
                 .flatten();
@@ -647,7 +664,7 @@ fn register_au(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             |lua, (name, payload): (String, mlua::Value)| -> LuaResult<bool> {
                 let key = lua.create_registry_value(payload)?;
                 Ok(crate::lua::try_with_app(|app| {
-                    app.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
+                    app.core.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
                 })
                 .unwrap_or(false))
             },

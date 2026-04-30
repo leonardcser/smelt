@@ -372,7 +372,7 @@ impl App {
                 false
             }
             CommandAction::Compact { instructions } => {
-                if self.session.messages.is_empty() {
+                if self.core.session.messages.is_empty() {
                     self.notify_error("nothing to compact".into());
                 } else {
                     self.compact_history(instructions);
@@ -396,7 +396,7 @@ impl App {
         if self.cmdline_completer.is_none() {
             let typed = self.cmdline_text();
             let mut comp = Completer::commands(0);
-            let lua_cmds = self.lua.command_names();
+            let lua_cmds = self.core.lua.command_names();
             if !lua_cmds.is_empty() {
                 let mut items: Vec<CompletionItem> = comp.all_items().to_vec();
                 for name in lua_cmds {

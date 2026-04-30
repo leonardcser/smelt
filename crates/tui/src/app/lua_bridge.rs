@@ -34,7 +34,7 @@ impl App {
             return;
         }
         self.last_prompt_text = current_text.clone();
-        let lua = &self.lua;
+        let lua = &self.core.lua;
         let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
@@ -53,7 +53,7 @@ impl App {
     /// inbox. Call after any Lua handler dispatch.
     pub(super) fn flush_lua_callbacks(&mut self) {
         self.drain_lua_invocations();
-        self.lua.pump_task_events();
+        self.core.lua.pump_task_events();
     }
 
     /// Drain the pending-invocation queue built up during
@@ -72,17 +72,18 @@ impl App {
     /// App` reborrow.
     pub(super) fn drain_lua_invocations(&mut self) {
         loop {
-            let pending = self.lua.drain_invocations();
+            let pending = self.core.lua.drain_invocations();
             if pending.is_empty() {
                 return;
             }
             // Phase 1: collect (func, payload_table, handle_id) tuples.
-            // Uses the `&mut self` borrow on self.lua.
+            // Uses the `&mut self` borrow on self.core.lua.
             let prepared: Vec<(mlua::Function, mlua::Table, u64)> = pending
                 .into_iter()
                 .filter_map(|inv| {
                     let (func, payload) =
-                        self.lua
+                        self.core
+                            .lua
                             .prepare_invocation(inv.handle, inv.win, &inv.payload)?;
                     Some((func, payload, inv.handle.0))
                 })
@@ -95,7 +96,7 @@ impl App {
             for (func, payload, handle_id) in prepared {
                 if let Err(e) = func.call::<()>(payload) {
                     crate::lua::try_with_app(|app| {
-                        app.lua.record_callback_error(handle_id, e);
+                        app.core.lua.record_callback_error(handle_id, e);
                     });
                 }
             }
@@ -112,7 +113,7 @@ impl App {
     /// resolved inside `apply_ui_op`.
     pub(super) fn drive_lua_tasks(&mut self) {
         self.flush_lua_callbacks();
-        let outs = self.lua.drive_tasks();
+        let outs = self.core.lua.drive_tasks();
         // Drain the ops pushed by the coroutine *before* it yielded —
         // a task that calls `buf.create` + `buf.set_lines` right
         // before `dialog.open` needs those ops applied now so the
@@ -126,12 +127,14 @@ impl App {
                     content,
                     is_error,
                 } => {
-                    self.engine.send(protocol::UiCommand::PluginToolResult {
-                        request_id,
-                        call_id,
-                        content,
-                        is_error,
-                    });
+                    self.core
+                        .engine
+                        .send(protocol::UiCommand::PluginToolResult {
+                            request_id,
+                            call_id,
+                            content,
+                            is_error,
+                        });
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {
                     self.notify_error(msg);
