@@ -464,11 +464,12 @@ bridges, then the aggregate.
       Remaining stateful migrations (`tokens_used`, `errors`, `cwd`,
       `session_title`, `branch`) ride a.4c.2 / a.4c.3 alongside
       their event handlers.
-    - **a.4c.2** — timer-driven cells (`now`, `spinner_frame`) +
-      `tokens_used` (engine-event fan-out). `now` driven by a 1Hz
-      `Timers` entry; `spinner_frame` driven from the existing
-      animation tick; `tokens_used` published from the `EngineEvent::TokenUsage`
-      handler. Custom `TokenUsage → Lua table` projector.
+    - **a.4c.2** ✅ — `now` (epoch seconds u64) + `spinner_frame` (u8)
+      ride per-tick `publish_diff_cells`; `tokens_used` publishes from
+      the `EngineEvent::TokenUsage` handler with a custom
+      `TokenUsage → Lua table` projector. Auxiliary (background)
+      requests are excluded so a subscriber sees only user-visible
+      context flow.
     - **a.4c.3** — event-shaped cells (`history`, `turn_complete`,
       `turn_error`, `confirm_requested`, `confirm_resolved`,
       `session_started`, `session_ended`) wired to their existing
