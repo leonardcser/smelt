@@ -125,6 +125,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `content/viewport.rs`                     | 265  | Viewport scroll state                                       | merged              | P1.d      | pending | Into Window scroll state                                                                                    |
 | `custom_commands.rs`                      | 322  | User-defined slash commands                                 | moved-to-lua        | P4.e      | pending | Plugin commands.lua                                                                                         |
 | `format.rs`                               | 276  | Text formatting helpers                                     | kept                | none      | pending | Utility                                                                                                     |
+| `fs.rs`                                   | 138  | Filesystem capability (sync std::fs primitives: read / write / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size) | kept                | P3.a      | landed  | Pure I/O, no policy. Engine tool absorption (file_state, read_file, etc.) waits for those tools' migration to Lua in P5.b. |
 | `fuzzy/mod.rs`                            | 170  | Fuzzy matching capability (`tui::fuzzy::fuzzy_score`)       | kept                | P3.a      | landed  | Folder module; absorbed `completer/score.rs` as `fuzzy::score`.                                             |
 | `input/buffer.rs`                         | 403  | Prompt edit buffer                                          | restructured        | P1.a/P4   | partial | Final merge into Buffer stays P1.a-tail. |
 | `input/completer_bridge.rs`               | 281  | Completer integration                                       | restructured        | P1.d/P4   | pending | Ghost-text extmark + picker Overlay                                                                         |
@@ -144,6 +145,8 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `lua/api/cmd.rs`                          | 77   | `smelt.cmd.{register,run,list}` — slash command registry     | added               | P3.b      | landed  | Writes to `LuaShared.commands`.                                                                                              |
 | `lua/api/diff.rs`                         | 33   | `smelt.diff.render(buf, { old, new, path })` inline diff     | added               | P3.b      | landed  | Reuses `print_inline_diff` + `to_buffer::render_into_buffer`.                                                                 |
 | `lua/api/frontend.rs`                     | 33   | `smelt.frontend.{kind,is_interactive}` reads `Core.frontend` | added               | P3.c      | landed  | Today reads always return `Tui` since only `TuiApp` installs the TLS app pointer; switches to real dispatch with P2.b.5b.    |
+| `lua/api/fs.rs`                           | 145  | `smelt.fs.{read,write,exists,is_file,is_dir,read_dir,mkdir,mkdir_all,remove_file,remove_dir,remove_dir_all,rename,copy,mtime,size}` | added | P3.c | landed | Host-tier; thin wrapper over `tui::fs` using the `(value, err)` Lua convention. |
+| `lua/api/os.rs`                           | 73   | `smelt.os.{getenv,setenv,unsetenv,platform,arch,tempdir,home,cwd,set_cwd,pid}` | added | P3.c | landed | Host-tier; pure Rust `std::env` surface — no Rust capability module backs it. |
 | `lua/api/engine.rs`                       | 175  | `smelt.engine.{model,reasoning_effort,is_busy,cost,context_tokens,context_window,set_model,set_reasoning_effort,submit,cancel,compact,ask,history,models}` | added | P3.b | landed | Live engine reads + turn-driver writes; `ask` opens the auxiliary-task channel via `LuaShared.callbacks`. Mode get/set/cycle live under `smelt.mode`.                     |
 | `lua/api/mode.rs`                         | 37   | `smelt.mode.{get,set,cycle}` over `protocol::Mode`           | added               | P3.c      | landed  | Top-level namespace per Decision #9 (avoids future `smelt.subprocess` collision).                                              |
 | `lua/api/fuzzy.rs`                        | 19   | `smelt.fuzzy.score` thin Lua surface over `tui::fuzzy::fuzzy_score` | added         | P3.b      | landed  | Folder-module capability is consumed via the binding here.                                                                    |
@@ -318,15 +321,17 @@ Live as `crates/tui/src/<name>.rs` (or small folder if needed):
 | `tui::parse`    | markdown / diff / syntax          | `content/highlight/{inline,diff,syntax,util}` + `content/stream_parser` |
 | `tui::process`  | short-lived spawn / streaming / kill | `engine/tools/background` + per-tool subprocess code (foreground)   |
 | `tui::subprocess` | long-lived child: spawn · send · on_event · wait · kill | `engine/socket.rs` + `engine/registry.rs` + the multi-agent IPC pieces of `engine/agent.rs` |
-| `tui::fs`       | read / write / edit / glob / lock | `engine/tools/{read_file,write_file,edit_file,glob,file_state}`         |
 | `tui::http`     | fetch / cache / redirects         | `engine/tools/{web_cache,web_shared}`                                   |
 | `tui::html`     | html → markdown                   | extracted from `engine/tools/web_fetch`                                 |
 | `tui::notebook` | Jupyter JSON ops                  | extracted from `engine/tools/notebook`                                  |
 | `tui::grep`     | ripgrep wrapper                   | `engine/tools/grep`                                                     |
 | `tui::permissions` | all permission policy: bash AST · pattern match · workspace check · runtime approvals · workspace JSON store | folds entire `engine/permissions/{approvals,bash,rules,workspace,tests}.rs` + `tui/workspace_permissions.rs` |
 
-`tui::fuzzy` (landed `b537d1a`) and `tui::path` (landed `de7fb87`) live
-in the main `crates/tui/src/` table above.
+`tui::fuzzy` (landed `b537d1a`), `tui::path` (landed `de7fb87`), and
+`tui::fs` (landed this session) live in the main `crates/tui/src/`
+table above. `tui::fs` shipped as sync std::fs primitives only; the
+engine tool absorption (`file_state`, `read_file`, `write_file`,
+`edit_file`, `glob`) waits on those tools migrating to Lua in P5.b.
 
 ## Unclear — needs explicit decision
 
