@@ -836,7 +836,7 @@ impl PromptState {
                     self.insert_image("clipboard.png".into(), url);
                     return Action::Redraw;
                 }
-                if let Some(text) = crate::app::commands::paste_from_clipboard() {
+                if let Some(text) = clipboard.read() {
                     if !text.is_empty() {
                         self.save_undo(mode);
                         if self.has_selection(mode) {

@@ -67,7 +67,8 @@ impl LuaRuntime {
         smelt.set(
             "clipboard",
             lua.create_function(|_, text: String| {
-                crate::app::commands::copy_to_clipboard(&text).map_err(LuaError::RuntimeError)?;
+                crate::lua::with_app(|app| app.clipboard.write(&text))
+                    .map_err(LuaError::RuntimeError)?;
                 Ok(())
             })?,
         )?;

@@ -469,7 +469,11 @@ impl App {
 }
 
 /// Copy text to the system clipboard using platform commands.
-pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
+///
+/// Reached only through `SystemSink::write` — every clipboard write
+/// in the runtime flows through `app.clipboard.write()` so vim,
+/// emacs, transcript yank, and Lua `smelt.clipboard` share one path.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -508,7 +512,10 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
 /// Returns `None` when the platform helper fails or the clipboard is
 /// empty / holds non-text data — callers should fall back to the kill
 /// ring in that case.
-pub(crate) fn paste_from_clipboard() -> Option<String> {
+///
+/// Reached only through `SystemSink::read` — every clipboard read in
+/// the runtime flows through `app.clipboard.read()`.
+fn paste_from_clipboard() -> Option<String> {
     use std::process::{Command, Stdio};
 
     let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
