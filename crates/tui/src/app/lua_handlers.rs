@@ -8,20 +8,11 @@ use super::{Host, TuiApp};
 
 impl TuiApp {
     /// Run a slash command. Mirrors the user typing `:<line>` into
-    /// the cmdline — handles `Quit`, `CancelAndClear`, `Compact`,
-    /// `Exec`, `Continue` action returns from `crate::api::cmd::run`.
+    /// the cmdline. Lua command bodies do their own side effects via
+    /// `with_app`; the only `CommandAction` left to forward is `Exec`
+    /// for shell escapes (`! cmd`).
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
         match crate::api::cmd::run(self, line) {
-            crate::app::CommandAction::Quit => {
-                self.pending_quit = true;
-            }
-            crate::app::CommandAction::CancelAndClear => {
-                self.reset_session();
-                self.agent = None;
-            }
-            crate::app::CommandAction::Compact { instructions } => {
-                self.compact_or_notify(instructions);
-            }
             crate::app::CommandAction::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);

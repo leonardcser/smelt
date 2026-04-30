@@ -325,7 +325,6 @@ enum EventOutcome {
     Redraw,
     Quit,
     CancelAgent,
-    CancelAndClear,
     /// Interrupt the running agent and immediately start a new turn
     /// with the oldest queued message.
     InterruptWithQueued,
@@ -341,11 +340,6 @@ enum EventOutcome {
 
 pub enum CommandAction {
     Continue,
-    Quit,
-    CancelAndClear,
-    Compact {
-        instructions: Option<String>,
-    },
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
@@ -383,11 +377,6 @@ fn classify_startup_command(input: &str) -> Option<&'static str> {
 enum InputOutcome {
     Continue,
     StartAgent,
-    CancelAndClear,
-    Compact {
-        instructions: Option<String>,
-    },
-    Quit,
     CustomCommand(Box<crate::custom_commands::CustomCommand>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
@@ -1037,9 +1026,9 @@ impl TuiApp {
                     self.exec_kill = Some(kill);
                 }
             } else if trimmed == "/resume" || trimmed == "/settings" {
-                // Both are Lua-registered commands now; run through the
-                // normal dispatcher so the Lua handler fires.
-                self.handle_command(trimmed);
+                // Both are Lua-registered commands; route through the
+                // unified dispatcher so the Lua handler fires.
+                self.apply_lua_command(trimmed);
             } else if let Some(reason) = classify_startup_command(trimmed) {
                 self.notify_error(format!("\"{}\" {}", trimmed, reason));
             } else {

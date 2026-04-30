@@ -155,18 +155,6 @@ impl TuiApp {
                 self.queued_messages = remaining;
                 false
             }
-            EventOutcome::CancelAndClear => {
-                engine::log::entry(
-                    engine::log::Level::Info,
-                    "agent_stop",
-                    &serde_json::json!({
-                        "reason": "user_cancel_and_clear",
-                    }),
-                );
-                self.reset_session();
-                self.agent = None;
-                false
-            }
             EventOutcome::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
@@ -725,13 +713,6 @@ impl TuiApp {
         // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();
         match super::commands::run_command(self, trimmed) {
-            CommandAction::Quit => return InputOutcome::Quit,
-            CommandAction::CancelAndClear => {
-                return InputOutcome::CancelAndClear;
-            }
-            CommandAction::Compact { instructions } => {
-                return InputOutcome::Compact { instructions }
-            }
             CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }

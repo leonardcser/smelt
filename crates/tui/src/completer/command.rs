@@ -4,11 +4,7 @@ use super::{Completer, CompleterKind, CompletionItem};
 
 impl Completer {
     pub fn is_command(s: &str) -> bool {
-        let base = s.split_whitespace().next().unwrap_or(s);
-        let slash_name = base.strip_prefix('/').unwrap_or("");
-        crate::app::commands::is_rust_command(slash_name)
-            || crate::custom_commands::is_custom_command(s)
-            || crate::lua::is_lua_command(s)
+        crate::custom_commands::is_custom_command(s) || crate::lua::is_lua_command(s)
     }
 
     /// Returns the argument hint for a command that accepts arguments.
@@ -42,13 +38,7 @@ impl Completer {
     }
 
     pub fn commands(anchor: usize) -> Self {
-        let mut all_items: Vec<CompletionItem> = crate::app::commands::rust_command_items()
-            .map(|(label, desc)| CompletionItem {
-                label: label.into(),
-                description: Some(desc.into()),
-                ..Default::default()
-            })
-            .collect();
+        let mut all_items: Vec<CompletionItem> = Vec::new();
         let custom = crate::custom_commands::list();
         let custom_names: HashSet<&str> = custom.iter().map(|(n, _)| n.as_str()).collect();
         for (name, desc) in crate::builtin_commands::list() {
