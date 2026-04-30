@@ -683,21 +683,17 @@ same thing.
 ### P2.d — `EngineBridge`
 
 Drains `engine.event_rx` in the `select!`. Translates events into
-direct host calls:
+direct host calls. Splits:
 
-- `TextDelta` → `Buffer::append(span)` (Rust-only, no Lua per chunk).
-- `ToolStarted`/`Finished` / block-end → `Buffer::attach`'s
-  `on_block` callback fires at semantic boundaries.
-- `RequestPermission` → `Confirms::register`, gates next pull until
-  `is_clear()`.
-- `TurnComplete`, `TokenUsage`, etc. → `cells.set(name, payload)`.
-  Subscribers (statusline spec bindings, plugin `smelt.au.on`
-  callbacks) fan out from the same registry.
-- **Tests (L2):** clock-injection seam lands here — `Instant::now` /
-  `SystemTime::now` flow through a `Clock` handle on `Core` so tests can
-  freeze time. Pre-P0 scenarios re-point at the refactored engine; goldens
-  are reviewed with `cargo insta review` and re-blessed where the diff
-  reflects intended structural changes. See `TESTING.md` § L2 + Determinism.
+- **P2.d.1** ✅ — engine event handlers relocate from `agent.rs` to
+  `engine_bridge.rs` as free functions over `&mut TuiApp`.
+- **P2.d.2 (deferred)** — full target fold (`TextDelta` →
+  `Buffer::append`; `ToolStarted/Finished` / block-end →
+  `Buffer::attach`'s `on_block`; `RequestPermission` →
+  `Confirms::register`; `TurnComplete` / `TokenUsage` →
+  `cells.set`). Gated on P1.a tail (`Buffer::attach`).
+- **Tests (L2):** clock-injection seam deferred (no L2 harness);
+  manual walks + `cargo nextest` remain the parity gate.
 
 ### P2.e — Single `select!` loop
 
