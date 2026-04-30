@@ -10,6 +10,37 @@ use crate::lua::LuaRuntime;
 use crate::session::Session;
 use engine::EngineHandle;
 
+/// Which frontend wraps this `Core`. Read by `smelt.frontend.kind()` /
+/// `is_interactive()` so tools can branch between human-facing and
+/// headless paths without touching `Ui`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontendKind {
+    /// Interactive terminal — `TuiApp` over a `ui::Ui`.
+    Tui,
+    /// One-shot CLI — `smelt -p "..."` / `--headless`. No Ui, no human input.
+    Headless,
+    /// Persistent worker spawned by a parent smelt — `--agent <id>`. JSON
+    /// over a Unix socket. No Ui, no human input.
+    Subagent,
+}
+
+impl FrontendKind {
+    /// Stable lowercase name surfaced to Lua: `"tui" | "headless" | "subagent"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FrontendKind::Tui => "tui",
+            FrontendKind::Headless => "headless",
+            FrontendKind::Subagent => "subagent",
+        }
+    }
+
+    /// True iff there's a human at the terminal able to answer prompts.
+    /// Only `Tui` is interactive; both headless variants run unattended.
+    pub fn is_interactive(self) -> bool {
+        matches!(self, FrontendKind::Tui)
+    }
+}
+
 pub struct Core {
     /// Connection + behaviour configuration: model / api_base /
     /// api_key_env / provider_type / available_models / model_config /
@@ -48,6 +79,11 @@ pub struct Core {
     /// the agent loop drains. P2.d will fold the engine-event drain
     /// into this type.
     pub(crate) engine: EngineBridge,
+    /// Which frontend (TUI / headless one-shot / subagent worker) is
+    /// running this core. Set at construction by the wrapping
+    /// `TuiApp::new` / `HeadlessApp::new` call site; surfaced to Lua
+    /// via `smelt.frontend.kind()` / `is_interactive()`.
+    pub frontend: FrontendKind,
 }
 
 impl Core {
@@ -55,7 +91,7 @@ impl Core {
     /// fresh `EngineHandle`. Both `TuiApp::new` (TUI) and `HeadlessApp::new`
     /// (one-shot / subagent) call this — the only single source of
     /// truth for the eight subsystem fields' construction.
-    pub fn new(config: AppConfig, engine: EngineHandle) -> Self {
+    pub fn new(config: AppConfig, engine: EngineHandle, frontend: FrontendKind) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -78,6 +114,7 @@ impl Core {
             cells,
             lua: LuaRuntime::new(),
             engine: EngineBridge::new(engine),
+            frontend,
         }
     }
 }

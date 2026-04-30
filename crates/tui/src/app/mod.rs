@@ -27,7 +27,7 @@ pub(crate) mod transcript_present;
 pub(crate) mod working;
 
 pub use app_config::AppConfig;
-pub use core::Core;
+pub use core::{Core, FrontendKind};
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
 pub(crate) use host::Host;
@@ -602,7 +602,7 @@ impl TuiApp {
         };
 
         Self {
-            core: core::Core::new(app_config, engine),
+            core: core::Core::new(app_config, engine, FrontendKind::Tui),
             transcript: crate::content::transcript::Transcript::new(),
             parser: crate::content::stream_parser::StreamParser::new(),
             transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
