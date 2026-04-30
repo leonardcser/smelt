@@ -175,6 +175,52 @@ impl Ui {
         count
     }
 
+    /// Resolve a primary-button Down/Drag/Up against the splits-leaf
+    /// hit-test, latching a `HitTarget::Window(win)` capture on Down
+    /// so subsequent Drag rows continue routing to the same Window
+    /// even if the pointer drifts off its rect. Returns
+    /// `Some((win, click_count))` when the host should forward the
+    /// event to that Window's per-pane handler; `None` for any other
+    /// kind, for hits outside splits leaves, or for orphan Drag/Up
+    /// arriving without an established capture.
+    ///
+    /// `click_count` is the value [`Self::record_click`] returns on
+    /// Down (1 / 2 / 3) and `0` for Drag/Up (no fresh click). Up
+    /// clears the capture as a side-effect; on Down, capture is set
+    /// before this method returns.
+    ///
+    /// Coexists with `Ui::dispatch_event`'s scrollbar capture: when
+    /// `Ui::dispatch_event` claimed the event (scrollbar drag, wheel
+    /// on overlay, modal click-outside), the host returns early and
+    /// never calls this method. When `Ui::dispatch_event` returned
+    /// `Ignored`, this method runs.
+    pub fn resolve_split_mouse(&mut self, me: crossterm::event::MouseEvent) -> Option<(WinId, u8)> {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        match me.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let win = match self.hit_test(me.row, me.column, None)? {
+                    HitTarget::Window(w) if self.splits.contains_leaf(w) => w,
+                    _ => return None,
+                };
+                self.set_capture(HitTarget::Window(win));
+                let count = self.record_click(me.row, me.column);
+                Some((win, count))
+            }
+            MouseEventKind::Drag(MouseButton::Left) => match self.capture {
+                Some(HitTarget::Window(win)) => Some((win, 0)),
+                _ => None,
+            },
+            MouseEventKind::Up(MouseButton::Left) => match self.capture {
+                Some(HitTarget::Window(win)) => {
+                    self.clear_capture();
+                    Some((win, 0))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Publish the splits layout for this frame. Leaves of the tree
     /// become the painted splits; their rects are resolved against
     /// the current terminal area on demand. If the focused window is
@@ -2840,5 +2886,108 @@ mod tests {
         assert_eq!(status, Status::Ignored);
         assert_eq!(ui.capture(), None);
         let _ = win;
+    }
+
+    fn raw_mouse_event(
+        kind: crossterm::event::MouseEventKind,
+        row: u16,
+        col: u16,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            row,
+            column: col,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn resolve_split_mouse_down_latches_window_capture_and_records_click() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        // Click on content (col 5, row 3) — not on the scrollbar.
+        let me = raw_mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            3,
+            5,
+        );
+        let resolved = ui.resolve_split_mouse(me);
+        assert_eq!(resolved, Some((win, 1)));
+        assert_eq!(ui.capture(), Some(HitTarget::Window(win)));
+        // A second Down on the same cell increments the click count.
+        let resolved = ui.resolve_split_mouse(me);
+        assert_eq!(resolved, Some((win, 2)));
+    }
+
+    #[test]
+    fn resolve_split_mouse_drag_routes_to_captured_window_off_rect() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        ui.set_capture(HitTarget::Window(win));
+        // Drag at (50, 50) — well outside the leaf rect — still routes
+        // to `win` because capture is latched.
+        let drag = raw_mouse_event(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            50,
+            50,
+        );
+        let resolved = ui.resolve_split_mouse(drag);
+        assert_eq!(resolved, Some((win, 0)));
+        assert_eq!(ui.capture(), Some(HitTarget::Window(win)));
+    }
+
+    #[test]
+    fn resolve_split_mouse_up_clears_window_capture() {
+        let mut ui = make_ui();
+        let win = make_scrollbar_split(&mut ui);
+        ui.set_capture(HitTarget::Window(win));
+        let up = raw_mouse_event(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            0,
+            0,
+        );
+        let resolved = ui.resolve_split_mouse(up);
+        assert_eq!(resolved, Some((win, 0)));
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn resolve_split_mouse_down_on_scrollbar_returns_none() {
+        let mut ui = make_ui();
+        let _win = make_scrollbar_split(&mut ui);
+        // Click on the scrollbar column — Ui::dispatch_event handles
+        // that gesture; resolve_split_mouse declines.
+        let me = raw_mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            3,
+            19,
+        );
+        assert_eq!(ui.resolve_split_mouse(me), None);
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn resolve_split_mouse_orphan_drag_returns_none() {
+        let mut ui = make_ui();
+        let _win = make_scrollbar_split(&mut ui);
+        let drag = raw_mouse_event(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            3,
+            5,
+        );
+        assert_eq!(ui.resolve_split_mouse(drag), None);
+    }
+
+    #[test]
+    fn resolve_split_mouse_non_left_returns_none() {
+        let mut ui = make_ui();
+        let _win = make_scrollbar_split(&mut ui);
+        let me = raw_mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right),
+            3,
+            5,
+        );
+        assert_eq!(ui.resolve_split_mouse(me), None);
+        assert_eq!(ui.capture(), None);
     }
 }
