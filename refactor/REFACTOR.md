@@ -304,11 +304,22 @@ completer decompose alongside. Sub-phases land independently.
   - **5f.2b** ✅ — lift `motions` + `text_objects` to top-level primitives.
   - **5f.2c** ✅ — collapse `vim/` dirs to flat modules.
   - **5f.2d** — flatten dispatcher to recipe-style registrations (gated on Lua keymap registry from P3.b/P4).
-- **D.6** — completer state machine decomposes:
-  - Ghost text → extmark in `"completer"` namespace on prompt Buffer.
-  - Picker dropdown → Overlay (already shipped in C.9c.4; this sub-phase folds sync into a Lua recipe).
-  - Behaviour → keymap recipe on prompt Window.
-  - `crates/tui/src/completer/` + `attachment/` collapse along these axes.
+- **D.6** — completer state machine decomposes. Splits across sessions
+  because the "behaviour → keymap recipe" piece is gated on the Lua
+  keymap registry from P3.b/P4:
+  - **D.6a** ✅ — `Window::render` paints virt-text from extmarks;
+    `virtual_text_at` walks every namespace (NsId ascending, matches
+    the `highlights_at` precedent). Foundational primitive consumed by
+    D.6b's ghost-text storage migration.
+  - **D.6b** — ghost text storage moves from `App::input_prediction`
+    to a `"completer"`-namespace virt-text extmark on the prompt
+    Buffer; `compute_prompt` drops its prediction special-case.
+  - **D.6c** — picker dropdown sync (already an Overlay since C.9c.4)
+    folds into a Lua recipe (gated on P3.b/P4).
+  - **D.6d** — completer behaviour becomes a keymap recipe on the
+    prompt Window (gated on P3.b/P4).
+  - **D.6e** — `crates/tui/src/completer/` + `attachment/` collapse
+    along these axes.
 
 End state for `Window`: cursor, scroll, selection, keymap recipe id,
 focusable flag, gutters; `render(buf, grid)`,
