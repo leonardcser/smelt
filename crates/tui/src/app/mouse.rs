@@ -221,7 +221,7 @@ impl TuiApp {
     /// source bytes. Yank text is re-sliced from source so soft-wrap
     /// `\n`s don't leak into the clipboard.
     fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let Some(vp) = self.viewport_for(ui::PROMPT_WIN) else {
+        let Some(vp) = ui::UiHost::viewport_for(self, ui::PROMPT_WIN) else {
             return;
         };
         let usable = vp.content_width as usize;
@@ -311,12 +311,16 @@ impl TuiApp {
     /// instead of empty padding), and lets the window mutate its own
     /// selection state.
     fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
+        let Some(rows) = ui::UiHost::rows_for(self, ui::TRANSCRIPT_WIN) else {
+            return;
+        };
         if rows.is_empty() {
             return;
         }
-        let (soft, hard) = self.transcript_line_breaks(self.core.config.settings.show_thinking);
-        let Some(viewport) = self.viewport_for(ui::TRANSCRIPT_WIN) else {
+        let Some((soft, hard)) = ui::UiHost::breaks_for(self, ui::TRANSCRIPT_WIN) else {
+            return;
+        };
+        let Some(viewport) = ui::UiHost::viewport_for(self, ui::TRANSCRIPT_WIN) else {
             return;
         };
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
@@ -377,13 +381,5 @@ impl TuiApp {
         } else if owner == ui::PROMPT_WIN {
             self.input.win.scroll_top = scroll_top;
         }
-    }
-
-    /// Lookup the currently-painted viewport for a known split owner.
-    /// `Window::viewport` is the source of truth; the host writes it
-    /// at paint time and reads back whenever a mouse event needs the
-    /// last-painted geometry.
-    fn viewport_for(&self, owner: ui::WinId) -> Option<ui::WindowViewport> {
-        self.ui.win(owner).and_then(|w| w.viewport)
     }
 }

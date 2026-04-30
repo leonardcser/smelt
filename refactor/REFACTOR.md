@@ -638,7 +638,7 @@ binding TLS split are each natural single-session units:
     viewport mirrors; **c.2** ✅ click-count onto `Ui`; **c.3** ✅
     scrollbar drag into `Ui::dispatch_event`; **c.4** ✅ wheel scroll
     via `Ui::hit_test`; **c.5a** ✅ Down/Drag/Up via
-    `resolve_split_mouse` + Window capture; **c.5b** per-pane data
+    `resolve_split_mouse` + Window capture; **c.5b** ✅ per-pane data
     via `UiHost`; **c.5c** unified `Window::handle` (b.4b); **c.6**
     drag autoscroll.
 - **P2.b.5** — Lua bindings TLS split: `crate::lua::with_host` /
