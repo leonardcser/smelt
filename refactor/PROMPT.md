@@ -39,6 +39,11 @@ Then read:
   Reasoning lives in the commit message, not here.
 - Mark the sub-phase landed in `REFACTOR.md`.
 - Update `INVENTORY.md` Status columns for files you touched.
+  **Notes column is forward-looking only** — what's still pending or
+  blocking, not what just landed. Don't paste commit-body prose, don't
+  enumerate per-sub-phase changes, don't accumulate "P2.a.X did Y / P2.a.Z
+  did W" history. The Status column carries the state; git log carries
+  the history; the Notes are a one-sentence pointer at most.
 - Commit with conventional commits (`feat(tui): …`, `refactor(ui): …`).
 
 ## Stop

@@ -447,50 +447,9 @@ Loop returns to `select!`, idle.
 
 ---
 
-## Holes the trace surfaced (resolve in this commit)
+## Not exercised here
 
-These are issues found writing the trace. Each gets a fix landed in
-the same change as this doc.
-
-1. **`ToolDispatcher` wiring.** The puml shows a trait but didn't say
-   how engine reaches it. **Decision:** Option A — engine takes
-   `Box<dyn ToolDispatcher>` at `engine::start(config, dispatcher)`.
-   The trait's methods are `async`; the engine task awaits them on
-   the same tokio thread. P5.a lists the trait shape; the wiring
-   sentence needs adding.
-
-2. **Mid-block turn end.** What happens when the LLM stops streaming
-   inside an open code fence? **Decision:** the markdown parser
-   flushes the open block on `turn_complete` with `incomplete: true`.
-   The Lua `on_block` handler highlights it the same way. Add to
-   ARCHITECTURE § Streaming.
-
-3. **`smelt.permissions.rules_for(mode, kind)`.** Used by `bash.lua`'s
-   hook. The capability namespace lists `set_rules` for writing but
-   we hadn't named the read accessor. Add `rules_for(mode, kind)` to
-   the FFI surface in REFACTOR P3.c and ARCHITECTURE Tools section.
-
-4. **Focus restore after dialog close.** The dialog overlay grabs
-   focus via `set_focus(dialog_button_window)`, which pushes the
-   prior focus onto `focus_history`. On overlay close, focus pops.
-   **Decision:** `Ui::overlay_close` automatically pops
-   `focus_history`. Document in ARCHITECTURE § Focus.
-
-5. **`smelt.process.run` vs `smelt.process.spawn`.** Trace used
-   `run` for synchronous-with-output, but P3.a only listed `spawn`.
-   **Decision:** `tui::process` exposes both: `spawn` (returns a
-   handle for streaming) and `run` (awaits output, returns
-   `{stdout, stderr, exit_code}`). Add to REFACTOR P3.a.
-
-These holes are small — the design held up under the trace.
-
-## What the trace did not exercise
-
-- Multi-agent (covered separately by `tui::subprocess` design).
-- Vim Visual selection / yank with extmark `YankSubst`.
-- Mouse interaction (HitTarget routing, scrollbar drag).
-- Compaction / title-generation auxiliary task routing.
-- Cancellation (`Ctrl-C` mid-stream).
-
-If any of those feel under-specified after P0, write a follow-up
-trace. They're all P2/P5 territory.
+Multi-agent (see ARCHITECTURE § Multi-agent), vim Visual yank with
+`YankSubst`, mouse routing (HitTarget + scrollbar drag), compaction /
+title-generation auxiliary routing, cancellation. Write a follow-up
+trace if any feels under-specified.
