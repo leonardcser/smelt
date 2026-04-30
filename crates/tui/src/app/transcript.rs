@@ -266,38 +266,6 @@ impl TuiApp {
         (soft, hard)
     }
 
-    pub fn nav_col_to_display_col(
-        &mut self,
-        abs_row: usize,
-        nav_col: usize,
-        show_thinking: bool,
-    ) -> usize {
-        let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
-        let snap_rows = snap.row_cells.len();
-        if abs_row < snap_rows {
-            snap.nav_col_to_display_col(abs_row, nav_col)
-        } else {
-            nav_col
-        }
-    }
-
-    pub fn display_col_to_nav_col(
-        &mut self,
-        abs_row: usize,
-        display_col: usize,
-        show_thinking: bool,
-    ) -> usize {
-        let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
-        let snap_rows = snap.row_cells.len();
-        if abs_row < snap_rows {
-            snap.display_col_to_nav_col(abs_row, display_col)
-        } else {
-            display_col
-        }
-    }
-
     pub fn block_text_at_row(&mut self, abs_row: usize, show_thinking: bool) -> Option<String> {
         let tw = self.transcript_width() as u16;
         // Prefer the block's raw markdown source (text-bearing variants
