@@ -61,6 +61,11 @@ pub(crate) struct RegisteredCommand {
     pub(crate) handle: LuaHandle,
     pub(crate) description: Option<String>,
     pub(crate) args: Vec<String>,
+    /// Free-form completion placeholder shown dimmed after the slash
+    /// when the user types `/name `. `Some("<question>")` renders as
+    /// `<question>`. Mutually exclusive with `args` (a static picker
+    /// list); when both are set, `args` wins via the arg-source path.
+    pub(crate) arg_hint: Option<String>,
     /// May this command run while the agent is mid-turn? Defaults to
     /// `true`. Plugins like `/compact` / `/fork` / `/resume` set
     /// `while_busy = false` so the dispatcher rejects them with
@@ -668,6 +673,18 @@ impl LuaRuntime {
             .ok()?
             .get(name)
             .map(|c| !c.while_busy)
+    }
+
+    /// Free-form completion placeholder a Lua plugin declared via
+    /// `cmd.register(name, fn, { arg_hint = "<question>" })`. Returns
+    /// `None` for commands without a hint or for unknown names.
+    pub fn command_arg_hint(&self, name: &str) -> Option<String> {
+        self.shared
+            .commands
+            .lock()
+            .ok()?
+            .get(name)
+            .and_then(|c| c.arg_hint.clone())
     }
 
     /// Names of all Lua-registered commands (for completion).
