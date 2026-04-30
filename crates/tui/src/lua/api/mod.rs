@@ -8,6 +8,7 @@ mod au;
 mod bash;
 mod buf;
 mod cell;
+mod clipboard;
 mod cmd;
 mod diff;
 mod engine;
@@ -104,14 +105,7 @@ impl LuaRuntime {
                 Ok(())
             })?,
         )?;
-        smelt.set(
-            "clipboard",
-            lua.create_function(|_, text: String| {
-                crate::lua::with_app(|app| app.core.clipboard.write(&text))
-                    .map_err(LuaError::RuntimeError)?;
-                Ok(())
-            })?,
-        )?;
+        clipboard::register(lua, &smelt)?;
 
         smelt.set("ui", smelt_ui)?;
         smelt.set("keymap", smelt_keymap)?;
