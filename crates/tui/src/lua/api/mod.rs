@@ -29,6 +29,7 @@ mod path;
 mod permissions;
 mod process;
 mod prompt;
+mod reasoning;
 mod session;
 mod settings;
 mod shell;
@@ -78,6 +79,7 @@ impl LuaRuntime {
         transcript::register(lua, &smelt)?;
         engine::register(lua, &smelt, shared)?;
         mode::register(lua, &smelt)?;
+        reasoning::register(lua, &smelt)?;
         session::register(lua, &smelt)?;
         process::register(lua, &smelt)?;
         shell::register(lua, &smelt)?;
