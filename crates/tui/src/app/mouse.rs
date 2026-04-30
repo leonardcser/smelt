@@ -179,17 +179,18 @@ impl App {
         if matches!(self.layout.hit_test(row, 0), content::HitRegion::Prompt) {
             self.app_focus = crate::app::AppFocus::Prompt;
             // Prompt's `edit_buf.buf` is the source buffer (≠ wrapped
-            // display rows). `win_cursor.move_vertical` operates on
+            // display rows). The vertical-motion helper operates on
             // source rows; the renderer's `ensure_cursor_visible`
             // (Step 6) syncs `scroll_top` to keep the cursor visible.
             // Once 7b lands the row-space adapter, this collapses into
             // a shared `Window::scroll_by_lines` call with the rest.
-            let buf = self.input.win.edit_buf.buf.clone();
-            let new_pos = self
-                .input
-                .win
-                .win_cursor
-                .move_vertical(&buf, self.input.win.cpos, delta);
+            let (new_pos, new_want) = ui::text::vertical_move(
+                &self.input.win.edit_buf.buf,
+                self.input.win.cpos,
+                delta,
+                self.input.win.curswant,
+            );
+            self.input.win.curswant = Some(new_want);
             if new_pos != self.input.win.cpos {
                 self.input.win.cpos = new_pos;
             }
@@ -280,10 +281,10 @@ impl App {
         }
 
         // Pre-call: translate source-byte state on `state.win` into
-        // wrapped-row-byte space. cpos, vim Visual anchor, win_cursor
+        // wrapped-row-byte space. cpos, vim Visual anchor, selection
         // anchor, and the two drag anchors all need translation.
         let saved_src_cpos = self.input.win.cpos;
-        let saved_src_anchor = self.input.win.win_cursor.anchor();
+        let saved_src_anchor = self.input.win.selection_anchor;
         let saved_src_dword = self.input.win.drag_anchor_word;
         let saved_src_dline = self.input.win.drag_anchor_line;
         let saved_vim_visual_anchor = self
@@ -294,10 +295,7 @@ impl App {
             .and_then(|_| ui::Vim::visual_anchor(&self.input.win.vim_state, self.vim_mode));
 
         self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
-        self.input
-            .win
-            .win_cursor
-            .set_anchor(saved_src_anchor.map(|a| wrap.src_to_wrapped(a)));
+        self.input.win.selection_anchor = saved_src_anchor.map(|a| wrap.src_to_wrapped(a));
         self.input.win.drag_anchor_word =
             saved_src_dword.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
         self.input.win.drag_anchor_line =
@@ -327,7 +325,7 @@ impl App {
         // bytes. `Window::mouse_up` already cleared its anchors, so
         // reading them after Up just yields `None`.
         let new_w_cpos = self.input.win.cpos;
-        let new_w_anchor = self.input.win.win_cursor.anchor();
+        let new_w_anchor = self.input.win.selection_anchor;
         let new_w_dword = self.input.win.drag_anchor_word;
         let new_w_dline = self.input.win.drag_anchor_line;
         let new_w_vim_anchor = self
@@ -338,10 +336,7 @@ impl App {
             .and_then(|_| ui::Vim::visual_anchor(&self.input.win.vim_state, self.vim_mode));
 
         self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
-        self.input
-            .win
-            .win_cursor
-            .set_anchor(new_w_anchor.map(|a| wrap.wrapped_to_src(a)));
+        self.input.win.selection_anchor = new_w_anchor.map(|a| wrap.wrapped_to_src(a));
         self.input.win.drag_anchor_word =
             new_w_dword.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
         self.input.win.drag_anchor_line =

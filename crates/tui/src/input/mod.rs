@@ -123,7 +123,7 @@ impl PromptState {
                 return Some(range);
             }
         }
-        self.win.win_cursor.range(self.win.cpos)
+        self.win.selection_range_at(self.win.cpos)
     }
 
     /// Selection range to *render* with the selection-bg style. Falls
@@ -151,7 +151,7 @@ impl PromptState {
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
     pub fn clear_selection(&mut self) {
-        self.win.win_cursor.clear_anchor();
+        self.win.selection_anchor = None;
     }
 
     /// End the active completer session, queueing its picker overlay
@@ -186,14 +186,14 @@ impl PromptState {
                 .vim_state
                 .begin_visual(mode, crate::vim::VimMode::Visual, start);
         } else {
-            self.win.win_cursor.set_anchor(Some(start));
+            self.win.selection_anchor = Some(start);
         }
         Some((start, end))
     }
 
     /// Start or extend selection at current cursor position (non-vim shift+key).
     fn extend_selection(&mut self) {
-        self.win.win_cursor.extend(self.win.cpos);
+        self.win.extend_selection(self.win.cpos);
     }
 
     /// Delete the currently selected text, returning it. Handles attachment cleanup.
@@ -203,7 +203,7 @@ impl PromptState {
         self.remove_attachments_in_range(start, end);
         self.win.edit_buf.buf.drain(start..end);
         self.win.cpos = start;
-        self.win.win_cursor.clear_anchor();
+        self.win.selection_anchor = None;
         Some(deleted)
     }
 
@@ -270,7 +270,7 @@ impl PromptState {
         self.win.edit_buf.attachment_ids.clear();
         self.close_completer();
         self.from_paste = false;
-        self.win.win_cursor.clear_anchor();
+        self.win.selection_anchor = None;
         // Note: stash and store are intentionally NOT cleared here.
     }
 
@@ -285,7 +285,7 @@ impl PromptState {
         self.win.edit_buf.buf = text;
         self.win.cpos = cpos;
         self.win.edit_buf.attachment_ids.clear();
-        self.win.win_cursor.clear_anchor();
+        self.win.selection_anchor = None;
         self.from_paste = false;
         self.close_completer();
         self.recompute_completer();
@@ -487,7 +487,7 @@ impl PromptState {
             action,
             KeyAction::MoveUp | KeyAction::MoveDown | KeyAction::SelectUp | KeyAction::SelectDown
         ) {
-            self.win.win_cursor.clear_curswant();
+            self.win.curswant = None;
         }
         // Selection actions extend; editing actions consume; everything else clears.
         let is_select = matches!(
@@ -596,10 +596,13 @@ impl PromptState {
                 }
             }
             KeyAction::MoveUp => {
-                let new_pos =
-                    self.win
-                        .win_cursor
-                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, -1);
+                let (new_pos, new_want) = ui::text::vertical_move(
+                    &self.win.edit_buf.buf,
+                    self.win.cpos,
+                    -1,
+                    self.win.curswant,
+                );
+                self.win.curswant = Some(new_want);
                 if new_pos != self.win.cpos {
                     self.win.cpos = new_pos;
                     self.recompute_completer();
@@ -607,7 +610,7 @@ impl PromptState {
                 } else if let Some(entry) = history.and_then(|h| h.up(&self.win.edit_buf.buf)) {
                     self.win.edit_buf.buf = entry.to_string();
                     self.win.cpos = 0;
-                    self.win.win_cursor.clear_curswant();
+                    self.win.curswant = None;
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -615,10 +618,13 @@ impl PromptState {
                 }
             }
             KeyAction::MoveDown => {
-                let new_pos =
-                    self.win
-                        .win_cursor
-                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, 1);
+                let (new_pos, new_want) = ui::text::vertical_move(
+                    &self.win.edit_buf.buf,
+                    self.win.cpos,
+                    1,
+                    self.win.curswant,
+                );
+                self.win.curswant = Some(new_want);
                 if new_pos != self.win.cpos {
                     self.win.cpos = new_pos;
                     self.recompute_completer();
@@ -626,7 +632,7 @@ impl PromptState {
                 } else if let Some(entry) = history.and_then(|h| h.down()) {
                     self.win.edit_buf.buf = entry.to_string();
                     self.win.cpos = self.win.edit_buf.buf.len();
-                    self.win.win_cursor.clear_curswant();
+                    self.win.curswant = None;
                     self.sync_completer();
                     Action::Redraw
                 } else {
@@ -868,18 +874,26 @@ impl PromptState {
             }
             KeyAction::SelectUp => {
                 self.extend_selection();
-                self.win.cpos =
-                    self.win
-                        .win_cursor
-                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, -1);
+                let (new_pos, new_want) = ui::text::vertical_move(
+                    &self.win.edit_buf.buf,
+                    self.win.cpos,
+                    -1,
+                    self.win.curswant,
+                );
+                self.win.curswant = Some(new_want);
+                self.win.cpos = new_pos;
                 Action::Redraw
             }
             KeyAction::SelectDown => {
                 self.extend_selection();
-                self.win.cpos =
-                    self.win
-                        .win_cursor
-                        .move_vertical(&self.win.edit_buf.buf, self.win.cpos, 1);
+                let (new_pos, new_want) = ui::text::vertical_move(
+                    &self.win.edit_buf.buf,
+                    self.win.cpos,
+                    1,
+                    self.win.curswant,
+                );
+                self.win.curswant = Some(new_want);
+                self.win.cpos = new_pos;
                 Action::Redraw
             }
             KeyAction::SelectWordForward => {
@@ -1657,7 +1671,7 @@ mod tests {
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
-        assert_eq!(input.win.win_cursor.anchor(), Some(0));
+        assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 1);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 1)));
     }
@@ -1670,7 +1684,7 @@ mod tests {
         input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, ui::VimMode::Insert);
-        assert_eq!(input.win.win_cursor.anchor(), Some(0));
+        assert_eq!(input.win.selection_anchor, Some(0));
         assert_eq!(input.win.cpos, 3);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((0, 3)));
     }
@@ -1734,7 +1748,7 @@ mod tests {
         input.win.cpos = 5;
         input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
-        assert_eq!(input.win.win_cursor.anchor(), Some(5));
+        assert_eq!(input.win.selection_anchor, Some(5));
         assert_eq!(input.win.cpos, 3);
         assert_eq!(input.selection_range(ui::VimMode::Insert), Some((3, 5)));
     }
@@ -1745,7 +1759,7 @@ mod tests {
         input.win.edit_buf.buf = "hello world foo".to_string();
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectWordForward, ui::VimMode::Insert);
-        assert_eq!(input.win.win_cursor.anchor(), Some(0));
+        assert_eq!(input.win.selection_anchor, Some(0));
         // word_forward_pos from 0 should be 6 (start of "world").
         assert_eq!(input.win.cpos, 6);
         input.test_action(KeyAction::Backspace, ui::VimMode::Insert);
@@ -1833,7 +1847,7 @@ mod tests {
         let mut input = PromptState::new();
         input.win.edit_buf.buf = "hello".to_string();
         input.win.cpos = 3;
-        input.win.win_cursor.set_anchor(Some(3));
+        input.win.selection_anchor = Some(3);
         assert_eq!(input.selection_range(ui::VimMode::Insert), None);
     }
 
@@ -1892,7 +1906,7 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectLeft, ui::VimMode::Insert);
         assert_eq!(input.win.cpos, 0);
-        assert_eq!(input.win.win_cursor.anchor(), Some(0));
+        assert_eq!(input.win.selection_anchor, Some(0));
     }
 
     #[test]
@@ -1986,7 +2000,7 @@ mod tests {
         let id = input.store.insert_paste("pasted".to_string());
         input.win.edit_buf.attachment_ids.push(id);
         // Select "b[paste]c" (bytes 1..5 — marker is 3 bytes)
-        input.win.win_cursor.set_anchor(Some(1));
+        input.win.selection_anchor = Some(1);
         input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1; // b + marker + c
         assert!(input.selection_range(ui::VimMode::Insert).is_some());
         let deleted = input.delete_selection(ui::VimMode::Insert);

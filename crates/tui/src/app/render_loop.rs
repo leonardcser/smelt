@@ -82,7 +82,7 @@ impl App {
     /// `follow_tail` is on, snap `scroll_top` to the bottom so content
     /// appended below stays visible across viewport resizes.
     fn adjust_tail_scroll(&mut self) {
-        let has_selection = self.transcript_window.win_cursor.anchor().is_some();
+        let has_selection = self.transcript_window.selection_anchor.is_some();
         let in_vim_visual = self.transcript_window.vim.is_some()
             && matches!(
                 self.vim_mode,

@@ -3,8 +3,8 @@
 //! Vim borrows the input's live `buf`/`cpos`/`attachment_ids` plus the
 //! `UndoHistory` owned by `PromptState`, the **single global** `VimMode`
 //! owned by `App`, the **single global** `Clipboard` (kill ring + platform
-//! sink) also owned by `App`, and the per-Window `WindowCursor` +
-//! `VimWindowState` (Visual anchor, last `f`/`t`, `curswant`) carried on
+//! sink) also owned by `App`, and the per-Window `curswant` +
+//! `VimWindowState` (Visual anchor, last `f`/`t`) carried on
 //! `ui::Window`. Vim itself holds only in-flight key-sequence state.
 
 use super::{Action, History, PromptState};
@@ -47,7 +47,7 @@ impl PromptState {
                 history: &mut self.win.edit_buf.history,
                 clipboard,
                 mode,
-                cursor: &mut self.win.win_cursor,
+                curswant: &mut self.win.curswant,
                 vim_state: &mut self.win.vim_state,
             };
             vim.handle_key(key_ev, &mut ctx)

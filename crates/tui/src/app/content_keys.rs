@@ -119,12 +119,11 @@ impl App {
                 | KeyAction::MoveEndOfLine
                 | KeyAction::MoveWordForward
                 | KeyAction::MoveWordBackward => {
-                    self.transcript_window.win_cursor.clear_anchor();
+                    self.transcript_window.selection_anchor = None;
                 }
                 _ if extending => {
-                    self.transcript_window
-                        .win_cursor
-                        .extend(self.transcript_window.cpos);
+                    let cpos = self.transcript_window.cpos;
+                    self.transcript_window.extend_selection(cpos);
                 }
                 _ => {}
             }
