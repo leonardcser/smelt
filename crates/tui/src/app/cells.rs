@@ -30,6 +30,8 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use protocol::TokenUsage;
+
 use crate::lua::LuaHandle;
 
 /// Cell value wrapper for Lua-originated cells. Stores the value as a
@@ -354,6 +356,31 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     // attached to an event-shaped cell sees `nil` until the cell's
     // setter migrates to publish a typed payload.
     cells.register_lua_projector::<EventStub, _>(|_, _| mlua::Value::Nil);
+    // `TokenUsage` projector: project the typed payload into a Lua
+    // table mirroring the protocol struct. `None` fields are absent
+    // (no key) so plugins can `usage.prompt_tokens or 0` without
+    // tripping nil-arithmetic.
+    cells.register_lua_projector::<TokenUsage, _>(|u, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        if let Some(n) = u.prompt_tokens {
+            let _ = t.set("prompt_tokens", n);
+        }
+        if let Some(n) = u.completion_tokens {
+            let _ = t.set("completion_tokens", n);
+        }
+        if let Some(n) = u.cache_read_tokens {
+            let _ = t.set("cache_read_tokens", n);
+        }
+        if let Some(n) = u.cache_write_tokens {
+            let _ = t.set("cache_write_tokens", n);
+        }
+        if let Some(n) = u.reasoning_tokens {
+            let _ = t.set("reasoning_tokens", n);
+        }
+        mlua::Value::Table(t)
+    });
 
     // Stateful cells (typed payloads, primitive projectors). Every
     // setter chokepoint that publishes calls `cells.set_dyn(name,
@@ -363,12 +390,17 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("model", seeds.model);
     cells.declare("reasoning", seeds.reasoning);
     cells.declare("confirms_pending", false);
-    cells.declare("tokens_used", 0u64);
+    cells.declare("tokens_used", TokenUsage::default());
     cells.declare("errors", 0u32);
     cells.declare("cwd", seeds.cwd);
     cells.declare("session_title", seeds.session_title);
     cells.declare("branch", seeds.branch);
-    cells.declare("now", String::new());
+    // `now` carries unix epoch seconds; Lua plugins format with
+    // `os.date("%H:%M:%S", smelt.cell("now"):get())`. App publishes
+    // through `publish_diff_cells` so subscribers fire when the
+    // second changes (loop must already be awake — idle ticks
+    // genuinely have nothing to display).
+    cells.declare("now", 0u64);
     cells.declare("spinner_frame", 0u8);
 
     // Event-shaped cells: declared with an `EventStub` placeholder so
@@ -690,6 +722,68 @@ mod tests {
                 matches!(cells.get_lua(name, &lua), mlua::Value::Nil),
                 "cell {name} should project to Nil"
             );
+        }
+
+        // `now` initialises at 0 (epoch); `spinner_frame` at 0; both
+        // project as Lua integers via the u64 / u8 projectors.
+        assert!(matches!(
+            cells.get_lua("now", &lua),
+            mlua::Value::Integer(0)
+        ));
+        assert!(matches!(
+            cells.get_lua("spinner_frame", &lua),
+            mlua::Value::Integer(0)
+        ));
+
+        // `tokens_used` initialises as `TokenUsage::default()` whose
+        // every field is `None`; the projector returns an empty table.
+        match cells.get_lua("tokens_used", &lua) {
+            mlua::Value::Table(t) => {
+                assert_eq!(t.len().unwrap(), 0);
+                assert_eq!(t.pairs::<String, i64>().count(), 0);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn token_usage_projector_emits_named_fields() {
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        // The TokenUsage projector lives in build_with_builtins; mirror
+        // the registration here so the unit test is hermetic.
+        c.register_lua_projector::<TokenUsage, _>(|u, lua| {
+            let Ok(t) = lua.create_table() else {
+                return mlua::Value::Nil;
+            };
+            if let Some(n) = u.prompt_tokens {
+                let _ = t.set("prompt_tokens", n);
+            }
+            if let Some(n) = u.completion_tokens {
+                let _ = t.set("completion_tokens", n);
+            }
+            mlua::Value::Table(t)
+        });
+        c.declare(
+            "tokens_used",
+            TokenUsage {
+                prompt_tokens: Some(1234),
+                completion_tokens: Some(456),
+                ..Default::default()
+            },
+        );
+        match c.get_lua("tokens_used", &lua) {
+            mlua::Value::Table(t) => {
+                assert_eq!(t.get::<i64>("prompt_tokens").unwrap(), 1234);
+                assert_eq!(t.get::<i64>("completion_tokens").unwrap(), 456);
+                // Absent fields surface as nil — not 0 — so plugins can
+                // distinguish "no data" from "0 tokens".
+                assert!(matches!(
+                    t.get::<mlua::Value>("reasoning_tokens").unwrap(),
+                    mlua::Value::Nil
+                ));
+            }
+            other => panic!("expected Table, got {other:?}"),
         }
     }
 }

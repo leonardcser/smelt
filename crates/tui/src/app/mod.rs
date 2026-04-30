@@ -810,14 +810,31 @@ impl App {
     /// Snapshot the App-side fields that back diff-driven cells and
     /// publish through `Cells` whenever they differ from the last
     /// published value. Runs once per main-loop tick so a Lua
-    /// subscriber on `vim_mode` / `confirms_pending` sees every flip
-    /// without each individual mutation point having to call
-    /// `cells.set_dyn`.
+    /// subscriber on `vim_mode` / `confirms_pending` / `now` /
+    /// `spinner_frame` sees every flip without each individual
+    /// mutation point having to call `cells.set_dyn`. `now` and
+    /// `spinner_frame` follow the same diff pattern so subscribers
+    /// fire only on second-rollover / frame-rollover, not every tick.
     pub fn publish_diff_cells(&mut self) {
         self.cells
             .publish_if_changed("vim_mode", format!("{:?}", self.vim_mode));
         self.cells
             .publish_if_changed("confirms_pending", !self.confirms.is_empty());
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.cells.publish_if_changed("now", now_secs);
+        // Spinner advances only while a turn is animating; outside of
+        // a live turn the frame stays at 0 so a subscriber sees a
+        // single rollover when the turn ends and never fires again.
+        let frame = self
+            .working
+            .elapsed()
+            .filter(|_| self.working.is_animating())
+            .map(|e| crate::content::spinner_frame_index(e) as u8)
+            .unwrap_or(0);
+        self.cells.publish_if_changed("spinner_frame", frame);
     }
 
     /// Direct subscribers see the Lua function called as `func(value)`;

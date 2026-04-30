@@ -411,6 +411,14 @@ impl App {
                     cache_write_tokens: usage.cache_write_tokens,
                     reasoning_tokens: usage.reasoning_tokens,
                 });
+                // Auxiliary requests (title, compaction, btw, predict)
+                // are excluded so a `tokens_used` subscriber sees only
+                // the user-visible context flow. Sub-agent token usage
+                // routes through `agent.context_tokens` separately and
+                // doesn't touch this cell.
+                if !background {
+                    self.cells.set_dyn("tokens_used", std::rc::Rc::new(usage));
+                }
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {
