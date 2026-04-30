@@ -123,24 +123,29 @@ impl App {
         // vim enabled wins, then the split under `app_focus`. If a
         // non-vim overlay leaf has focus, no mode shows — those
         // windows have no buffer cursor, same model nvim uses.
-        let focused_window_with_vim = self
+        let focused_window_has_vim = self
             .ui
             .focused_window()
-            .and_then(|w| w.vim.as_ref().map(|v| v.mode()));
-        let (vim_enabled, vim_mode) = if let Some(mode) = focused_window_with_vim {
-            (true, Some(mode))
+            .map(|w| w.vim.is_some())
+            .unwrap_or(false);
+        let (vim_enabled, vim_mode) = if focused_window_has_vim {
+            (true, Some(self.vim_mode))
         } else if self.ui.focused_overlay().is_some() {
             (false, None)
         } else {
             match self.app_focus {
-                crate::app::AppFocus::Content => (
-                    self.transcript_window.vim.is_some(),
-                    self.transcript_window.vim.as_ref().map(|v| v.mode()),
-                ),
+                crate::app::AppFocus::Content => {
+                    let has_vim = self.transcript_window.vim.is_some();
+                    (has_vim, has_vim.then_some(self.vim_mode))
+                }
                 crate::app::AppFocus::Prompt => {
-                    let mut mode = self.input.vim_mode();
+                    let mut mode = if self.input.vim_enabled() {
+                        Some(self.vim_mode)
+                    } else {
+                        None
+                    };
                     if self.mouse_drag_active {
-                        mode = Some(crate::vim::ViMode::Visual);
+                        mode = Some(crate::vim::VimMode::Visual);
                     }
                     (self.input.vim_enabled() || self.mouse_drag_active, mode)
                 }
@@ -149,8 +154,8 @@ impl App {
         if vim_enabled {
             let vim_label = content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
             let vim_fg = match vim_mode {
-                Some(crate::vim::ViMode::Insert) => Color::AnsiValue(78),
-                Some(crate::vim::ViMode::Visual) | Some(crate::vim::ViMode::VisualLine) => {
+                Some(crate::vim::VimMode::Insert) => Color::AnsiValue(78),
+                Some(crate::vim::VimMode::Visual) | Some(crate::vim::VimMode::VisualLine) => {
                     Color::AnsiValue(176)
                 }
                 _ => Color::AnsiValue(74),

@@ -83,10 +83,11 @@ impl App {
     /// appended below stays visible across viewport resizes.
     fn adjust_tail_scroll(&mut self) {
         let has_selection = self.transcript_window.win_cursor.anchor().is_some();
-        let in_vim_visual = matches!(
-            self.transcript_window.vim.as_ref().map(|v| v.mode()),
-            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
-        );
+        let in_vim_visual = self.transcript_window.vim.is_some()
+            && matches!(
+                self.vim_mode,
+                crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine
+            );
         let freeze = has_selection || in_vim_visual || self.mouse_drag_active;
         if !freeze && self.transcript_window.follow_tail {
             self.transcript_window.scroll_top = u16::MAX;
@@ -256,6 +257,7 @@ impl App {
                 queued,
                 stash: &self.input.stash,
                 input: &self.input,
+                vim_mode: self.vim_mode,
                 prediction,
                 width: term_w,
                 height: prompt_height,

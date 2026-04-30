@@ -25,6 +25,16 @@ pub(super) fn register(
     register_dialog(lua, smelt_ui)?;
     register_prompt(lua, smelt)?;
     register_settings(lua, smelt)?;
+    register_vim(lua, smelt)?;
+    Ok(())
+}
+
+fn register_vim(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    // smelt.vim.mode — read the App-owned single-global VimMode.
+    // Returns "Normal" / "Insert" / "Visual" / "VisualLine".
+    let vim_tbl = lua.create_table()?;
+    vim_tbl.set("mode", app_read!(lua, |app| format!("{:?}", app.vim_mode)))?;
+    smelt.set("vim", vim_tbl)?;
     Ok(())
 }
 
@@ -289,18 +299,16 @@ fn register_win(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
     )?;
     win_tbl.set(
         "mode",
-        app_read!(lua, |app| match app.app_focus {
-            crate::app::AppFocus::Content => app
-                .transcript_window
-                .vim
-                .as_ref()
-                .map(|v| format!("{:?}", v.mode()))
-                .unwrap_or_default(),
-            crate::app::AppFocus::Prompt => app
-                .input
-                .vim_mode()
-                .map(|m| format!("{m:?}"))
-                .unwrap_or_default(),
+        app_read!(lua, |app| {
+            let has_vim = match app.app_focus {
+                crate::app::AppFocus::Content => app.transcript_window.vim.is_some(),
+                crate::app::AppFocus::Prompt => app.input.vim_enabled(),
+            };
+            if has_vim {
+                format!("{:?}", app.vim_mode)
+            } else {
+                String::new()
+            }
         }),
     )?;
     win_tbl.set(
@@ -544,7 +552,8 @@ fn register_prompt(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "set_text",
         lua.create_function(|_, text: String| {
             crate::lua::with_app(|app| {
-                crate::api::buf::replace(&mut app.input, text, None);
+                let mode = app.vim_mode;
+                crate::api::buf::replace(&mut app.input, text, None, mode);
             });
             Ok(())
         })?,

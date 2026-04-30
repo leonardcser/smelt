@@ -21,7 +21,7 @@ use text_objects::text_object;
 // ── Public types ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ViMode {
+pub enum VimMode {
     Insert,
     Normal,
     Visual,
@@ -49,10 +49,10 @@ pub enum Action {
 
 /// Shared mutable state that vim needs to operate on.
 ///
-/// Vim no longer owns a private register or undo history — those live on
-/// `InputState` (as the kill ring and the single `UndoHistory`). The caller
-/// bundles them here along with the live buffer so vim can read and mutate
-/// them without any post-keystroke synchronization.
+/// `mode` is the **single global** App-owned `VimMode`; vim reads and
+/// writes it through this reference rather than owning a private copy.
+/// The kill ring and undo history live on the caller too (no
+/// post-keystroke synchronization).
 ///
 /// `clipboard` bridges yank / paste with the system clipboard: yanks
 /// mirror into it, pastes pull from it when it was updated externally
@@ -64,6 +64,7 @@ pub struct VimContext<'a> {
     pub kill_ring: &'a mut KillRing,
     pub history: &'a mut UndoHistory,
     pub clipboard: &'a mut dyn crate::clipboard::Clipboard,
+    pub mode: &'a mut VimMode,
 }
 
 impl VimContext<'_> {
@@ -193,7 +194,6 @@ enum SubState {
 // ── Vim state ───────────────────────────────────────────────────────────────
 
 pub struct Vim {
-    mode: ViMode,
     sub: SubState,
     /// Count accumulated before the operator (or before a standalone motion).
     count1: Option<usize>,
@@ -219,7 +219,6 @@ impl Default for Vim {
 impl Vim {
     pub fn new() -> Self {
         Self {
-            mode: ViMode::Insert,
             sub: SubState::Ready,
             count1: None,
             count2: None,
@@ -229,15 +228,11 @@ impl Vim {
         }
     }
 
-    pub fn mode(&self) -> ViMode {
-        self.mode
-    }
-
     /// Returns the visual selection range (start, end) as byte offsets when
-    /// in visual or visual-line mode. The range is always ordered (start <= end).
-    pub fn visual_range(&self, buf: &str, cpos: usize) -> Option<(usize, usize)> {
-        match self.mode {
-            ViMode::Visual => {
+    /// `mode` is Visual or VisualLine. Range is always ordered (start <= end).
+    pub fn visual_range(&self, buf: &str, cpos: usize, mode: VimMode) -> Option<(usize, usize)> {
+        match mode {
+            VimMode::Visual => {
                 let anchor = self.visual_anchor.min(buf.len());
                 let cursor = cpos.min(buf.len());
                 let (a, b) = if anchor <= cursor {
@@ -247,7 +242,7 @@ impl Vim {
                 };
                 Some((a, b))
             }
-            ViMode::VisualLine => {
+            VimMode::VisualLine => {
                 let anchor = self.visual_anchor.min(buf.len());
                 let cursor = cpos.min(buf.len());
                 let start = line_start(buf, anchor).min(line_start(buf, cursor));
@@ -258,8 +253,10 @@ impl Vim {
         }
     }
 
-    pub fn set_mode(&mut self, mode: ViMode) {
-        self.mode = mode;
+    /// Write a new mode through `mode_ref` and clear in-flight key state.
+    /// Use when the caller has the mode handy outside a `VimContext`.
+    pub fn set_mode(&mut self, mode_ref: &mut VimMode, mode: VimMode) {
+        *mode_ref = mode;
         self.sub = SubState::Ready;
         self.reset_counts();
     }
@@ -278,35 +275,36 @@ impl Vim {
         self.curswant = c;
     }
 
-    /// Anchor visual selection at `cpos` and enter the requested visual
-    /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
-    /// selection originates at the click rather than the previous
-    /// cursor position.
     /// Read the Visual-mode anchor byte. Returns `Some(byte)` only
     /// while in `Visual`/`VisualLine`; `None` in Normal/Insert. Used by
     /// the prompt mouse adapter to translate between source-byte and
     /// wrapped-byte spaces across `Window::handle_mouse` calls.
-    pub fn visual_anchor(&self) -> Option<usize> {
-        match self.mode {
-            ViMode::Visual | ViMode::VisualLine => Some(self.visual_anchor),
+    pub fn visual_anchor(&self, mode: VimMode) -> Option<usize> {
+        match mode {
+            VimMode::Visual | VimMode::VisualLine => Some(self.visual_anchor),
             _ => None,
         }
     }
 
-    pub fn begin_visual(&mut self, mode: ViMode, cpos: usize) {
-        self.mode = mode;
+    /// Anchor a visual selection at `cpos` and enter the requested visual
+    /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
+    /// selection originates at the click rather than the previous cursor
+    /// position. Writes through `mode_ref` so the App-owned VimMode
+    /// sees the transition.
+    pub fn begin_visual(&mut self, mode_ref: &mut VimMode, mode: VimMode, cpos: usize) {
+        *mode_ref = mode;
         self.sub = SubState::Ready;
         self.reset_counts();
         self.visual_anchor = cpos;
     }
 
     /// Process a key event. Reads and mutates `ctx` (buffer, cursor,
-    /// attachments, kill ring, undo history) as needed.
+    /// attachments, kill ring, undo history, mode) as needed.
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
-        match self.mode {
-            ViMode::Insert => self.handle_insert(key, ctx),
-            ViMode::Normal => self.handle_normal(key, ctx),
-            ViMode::Visual | ViMode::VisualLine => self.handle_visual(key, ctx),
+        match *ctx.mode {
+            VimMode::Insert => self.handle_insert(key, ctx),
+            VimMode::Normal => self.handle_normal(key, ctx),
+            VimMode::Visual | VimMode::VisualLine => self.handle_visual(key, ctx),
         }
     }
 
@@ -323,7 +321,7 @@ impl Vim {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                self.enter_normal(ctx.buf, ctx.cpos);
+                self.enter_normal(ctx);
                 Action::Consumed
             }
             // Ctrl+W / Ctrl+U → pass through to main handler (kill ring support).
@@ -517,7 +515,7 @@ impl Vim {
                 let end = line_end(ctx.buf, *ctx.cpos);
                 ctx.yank_range(*ctx.cpos, end, false);
                 ctx.buf.drain(*ctx.cpos..end);
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'Y' => {
@@ -562,7 +560,7 @@ impl Vim {
                     ctx.yank_range(*ctx.cpos, end, false);
                     ctx.buf.drain(*ctx.cpos..end);
                 }
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'S' => {
@@ -571,7 +569,7 @@ impl Vim {
                 ctx.yank_range(start, end, false);
                 ctx.buf.drain(start..end);
                 *ctx.cpos = start;
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'r' => {
@@ -666,13 +664,13 @@ impl Vim {
             // ── Visual mode ─────────────────────────────────────────────
             'v' => {
                 self.visual_anchor = *ctx.cpos;
-                self.mode = ViMode::Visual;
+                *ctx.mode = VimMode::Visual;
                 self.reset_pending();
                 Action::Consumed
             }
             'V' => {
                 self.visual_anchor = *ctx.cpos;
-                self.mode = ViMode::VisualLine;
+                *ctx.mode = VimMode::VisualLine;
                 self.reset_pending();
                 Action::Consumed
             }
@@ -681,14 +679,14 @@ impl Vim {
             'i' => {
                 self.take_count();
                 ctx.save_undo();
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'I' => {
                 self.take_count();
                 ctx.save_undo();
                 *ctx.cpos = first_non_blank(ctx.buf, *ctx.cpos);
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'a' => {
@@ -697,14 +695,14 @@ impl Vim {
                 if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                     *ctx.cpos = advance_chars(ctx.buf, *ctx.cpos, 1);
                 }
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'A' => {
                 self.take_count();
                 ctx.save_undo();
                 *ctx.cpos = line_end(ctx.buf, *ctx.cpos);
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'o' => {
@@ -712,7 +710,7 @@ impl Vim {
                 let eol = line_end(ctx.buf, *ctx.cpos);
                 ctx.buf.insert(eol, '\n');
                 *ctx.cpos = eol + 1;
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'O' => {
@@ -720,7 +718,7 @@ impl Vim {
                 let sol = line_start(ctx.buf, *ctx.cpos);
                 ctx.buf.insert(sol, '\n');
                 *ctx.cpos = sol;
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 Action::Consumed
             }
 
@@ -998,7 +996,7 @@ impl Vim {
         // Non-char keys.
         match key.code {
             KeyCode::Esc => {
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
             KeyCode::Left => {
@@ -1035,21 +1033,21 @@ impl Vim {
         }
         match c {
             // ── Escape visual mode ─────────────────────────────────────
-            'v' if self.mode == ViMode::Visual => {
-                self.exit_visual();
+            'v' if *ctx.mode == VimMode::Visual => {
+                self.exit_visual(ctx);
                 Action::Consumed
             }
-            'V' if self.mode == ViMode::VisualLine => {
-                self.exit_visual();
+            'V' if *ctx.mode == VimMode::VisualLine => {
+                self.exit_visual(ctx);
                 Action::Consumed
             }
             // Switch between visual modes
-            'v' if self.mode == ViMode::VisualLine => {
-                self.mode = ViMode::Visual;
+            'v' if *ctx.mode == VimMode::VisualLine => {
+                *ctx.mode = VimMode::Visual;
                 Action::Consumed
             }
-            'V' if self.mode == ViMode::Visual => {
-                self.mode = ViMode::VisualLine;
+            'V' if *ctx.mode == VimMode::Visual => {
+                *ctx.mode = VimMode::VisualLine;
                 Action::Consumed
             }
 
@@ -1060,14 +1058,14 @@ impl Vim {
             }
             'S' => {
                 // Visual S forces linewise, then changes.
-                self.mode = ViMode::VisualLine;
+                *ctx.mode = VimMode::VisualLine;
                 self.handle_visual_char('c', ctx)
             }
 
             // ── Operators on selection ──────────────────────────────────
             'd' | 'x' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
-                    let linewise = self.mode == ViMode::VisualLine;
+                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                    let linewise = *ctx.mode == VimMode::VisualLine;
                     ctx.save_undo();
                     ctx.yank_range(start, end, linewise);
                     if linewise {
@@ -1084,7 +1082,7 @@ impl Vim {
                                 *ctx.cpos =
                                     first_non_blank_at(ctx.buf, line_start(ctx.buf, *ctx.cpos));
                             }
-                            self.exit_visual();
+                            self.exit_visual(ctx);
                             return Action::Consumed;
                         } else {
                             end
@@ -1096,12 +1094,12 @@ impl Vim {
                     *ctx.cpos = start.min(ctx.buf.len());
                     clamp_normal(ctx.buf, ctx.cpos);
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
             'c' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
-                    let linewise = self.mode == ViMode::VisualLine;
+                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                    let linewise = *ctx.mode == VimMode::VisualLine;
                     ctx.save_undo();
                     ctx.yank_range(start, end, linewise);
                     if linewise {
@@ -1114,28 +1112,28 @@ impl Vim {
                         ctx.buf.drain(start..end);
                         *ctx.cpos = start;
                     }
-                    self.mode = ViMode::Insert;
+                    *ctx.mode = VimMode::Insert;
                     self.sub = SubState::Ready;
                     self.reset_counts();
                     return Action::Consumed;
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
             'y' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
-                    let linewise = self.mode == ViMode::VisualLine;
+                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
+                    let linewise = *ctx.mode == VimMode::VisualLine;
                     ctx.yank_range(start, end, linewise);
                     ctx.kill_ring.mark_yanked();
                     *ctx.cpos = start;
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
 
             // ── Case toggling on selection ─────────────────────────────
             '~' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
+                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
                     ctx.save_undo();
                     let toggled: String = ctx.buf[start..end]
                         .chars()
@@ -1149,31 +1147,31 @@ impl Vim {
                         .collect();
                     ctx.buf.replace_range(start..end, &toggled);
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
             'U' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
+                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
                     ctx.save_undo();
                     let upper = ctx.buf[start..end].to_uppercase();
                     ctx.buf.replace_range(start..end, &upper);
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
             'u' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
+                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
                     ctx.save_undo();
                     let lower = ctx.buf[start..end].to_lowercase();
                     ctx.buf.replace_range(start..end, &lower);
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
 
             // ── Join lines ─────────────────────────────────────────────
             'J' => {
-                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
+                if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
                     ctx.save_undo();
                     let mut pos = start;
                     let mut remaining = end;
@@ -1194,7 +1192,7 @@ impl Vim {
                     }
                     *ctx.cpos = start;
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
 
@@ -1202,7 +1200,7 @@ impl Vim {
             'p' | 'P' => {
                 ctx.sync_paste_from_clipboard();
                 if !ctx.register().is_empty() {
-                    if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos) {
+                    if let Some((start, end)) = self.visual_range(ctx.buf, *ctx.cpos, *ctx.mode) {
                         ctx.save_undo();
                         let old = ctx.buf[start..end].to_string();
                         let text = ctx.register().to_string();
@@ -1218,7 +1216,7 @@ impl Vim {
                         }
                     }
                 }
-                self.exit_visual();
+                self.exit_visual(ctx);
                 Action::Consumed
             }
 
@@ -1756,7 +1754,7 @@ impl Vim {
                 ctx.yank_range(start, end, false);
                 ctx.buf.drain(start..end);
                 *ctx.cpos = start;
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 self.reset_counts();
                 return Action::Consumed;
             }
@@ -1819,7 +1817,7 @@ impl Vim {
                 ctx.yank_range(content_start, content_end, true);
                 ctx.buf.drain(content_start..content_end);
                 *ctx.cpos = content_start;
-                self.enter_insert_mode();
+                self.enter_insert_mode(ctx);
                 return Action::Consumed;
             }
             Op::Yank => {
@@ -1835,27 +1833,27 @@ impl Vim {
 
     // ── Mode transitions ────────────────────────────────────────────────
 
-    fn enter_insert_mode(&mut self) {
-        self.mode = ViMode::Insert;
+    fn enter_insert_mode(&mut self, ctx: &mut VimContext<'_>) {
+        *ctx.mode = VimMode::Insert;
         self.sub = SubState::Ready;
     }
 
-    fn exit_visual(&mut self) {
-        self.mode = ViMode::Normal;
+    fn exit_visual(&mut self, ctx: &mut VimContext<'_>) {
+        *ctx.mode = VimMode::Normal;
         self.reset_pending();
     }
 
-    fn enter_normal(&mut self, buf: &str, cpos: &mut usize) {
-        self.mode = ViMode::Normal;
+    fn enter_normal(&mut self, ctx: &mut VimContext<'_>) {
+        *ctx.mode = VimMode::Normal;
         self.sub = SubState::Ready;
         self.reset_counts();
         // Standard vim: cursor moves left one when leaving insert mode,
         // unless at the start of a line.
-        let sol = line_start(buf, *cpos);
-        if *cpos > sol {
-            *cpos = prev_char_boundary(buf, *cpos);
+        let sol = line_start(ctx.buf, *ctx.cpos);
+        if *ctx.cpos > sol {
+            *ctx.cpos = prev_char_boundary(ctx.buf, *ctx.cpos);
         }
-        clamp_normal(buf, cpos);
+        clamp_normal(ctx.buf, ctx.cpos);
     }
 
     // ── Count helpers ───────────────────────────────────────────────────
@@ -1912,7 +1910,9 @@ mod tests {
         }
     }
 
-    /// Owns the cross-call state (kill ring + undo history) that vim borrows.
+    /// Owns the cross-call state (kill ring + undo history + mode) that
+    /// vim borrows. `mode` mirrors the App-owned single-global VimMode in
+    /// production code; tests own one locally.
     struct TestHarness {
         vim: Vim,
         buf: String,
@@ -1920,12 +1920,12 @@ mod tests {
         attachments: Vec<AttachmentId>,
         kill_ring: KillRing,
         history: UndoHistory,
+        mode: VimMode,
     }
 
     impl TestHarness {
         fn new(text: &str) -> Self {
             let mut vim = Vim::new();
-            vim.mode = ViMode::Normal;
             vim.sub = SubState::Ready;
             Self {
                 vim,
@@ -1934,6 +1934,7 @@ mod tests {
                 attachments: Vec::new(),
                 kill_ring: KillRing::new(),
                 history: UndoHistory::new(None),
+                mode: VimMode::Normal,
             }
         }
 
@@ -1946,6 +1947,7 @@ mod tests {
                 kill_ring: &mut self.kill_ring,
                 history: &mut self.history,
                 clipboard: &mut clipboard,
+                mode: &mut self.mode,
             };
             self.vim.handle_key(k, &mut ctx)
         }
@@ -1962,6 +1964,7 @@ mod tests {
                 kill_ring: &mut self.kill_ring,
                 history: &mut self.history,
                 clipboard,
+                mode: &mut self.mode,
             };
             self.vim.handle_key(k, &mut ctx)
         }
@@ -2040,7 +2043,7 @@ mod tests {
         h.handle(key('c'));
         h.handle(key('w'));
         assert_eq!(h.buf, " world");
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2181,7 +2184,7 @@ mod tests {
     fn test_insert_ctrl_w_passthrough() {
         let mut h = TestHarness::new("hello");
         h.handle(key('i'));
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
         let result = h.handle(key_ctrl('w'));
         assert_eq!(result, Action::Passthrough);
     }
@@ -2205,7 +2208,7 @@ mod tests {
         h.handle(key('o'));
         assert_eq!(h.buf, "hello\n");
         assert_eq!(h.cpos, 6);
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
 
         // Esc → normal mode, cursor stays on empty trailing line.
         let esc = KeyEvent {
@@ -2215,7 +2218,7 @@ mod tests {
             state: KeyEventState::empty(),
         };
         h.handle(esc);
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
         assert_eq!(h.cpos, 6); // On the empty second line.
 
         // 'k' should go up to "hello" line.
@@ -2230,7 +2233,7 @@ mod tests {
     #[test]
     fn test_esc_moves_cursor_back() {
         let mut h = TestHarness::new("hello");
-        h.vim.mode = ViMode::Insert;
+        h.mode = VimMode::Insert;
         h.cpos = 5;
         let esc = KeyEvent {
             code: KeyCode::Esc,
@@ -2240,13 +2243,13 @@ mod tests {
         };
         h.handle(esc);
         assert_eq!(h.cpos, 4);
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
     fn test_esc_at_line_start_stays() {
         let mut h = TestHarness::new("hello");
-        h.vim.mode = ViMode::Insert;
+        h.mode = VimMode::Insert;
         h.cpos = 0;
         let esc = KeyEvent {
             code: KeyCode::Esc,
@@ -2380,11 +2383,11 @@ mod tests {
     fn test_visual_select_and_delete() {
         let mut h = TestHarness::new("hello world");
         h.handle(key('v'));
-        assert_eq!(h.vim.mode(), ViMode::Visual);
+        assert_eq!(h.mode, VimMode::Visual);
         h.handle(key('e'));
         h.handle(key('d'));
         assert_eq!(h.buf, " world");
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
@@ -2394,7 +2397,7 @@ mod tests {
         h.handle(key('e'));
         h.handle(key('y'));
         assert_eq!(h.buf, "hello world");
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
         h.handle(key('$'));
         h.handle(key('p'));
         assert_eq!(h.buf, "hello worldhello");
@@ -2407,7 +2410,7 @@ mod tests {
         h.handle(key('e'));
         h.handle(key('c'));
         assert_eq!(h.buf, " world");
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2415,10 +2418,10 @@ mod tests {
         let mut h = TestHarness::new("aaa\nbbb\nccc");
         h.cpos = 4;
         h.handle(key('V'));
-        assert_eq!(h.vim.mode(), ViMode::VisualLine);
+        assert_eq!(h.mode, VimMode::VisualLine);
         h.handle(key('d'));
         assert_eq!(h.buf, "aaa\nccc");
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
@@ -2435,7 +2438,7 @@ mod tests {
     fn test_visual_esc_returns_to_normal() {
         let mut h = TestHarness::new("hello");
         h.handle(key('v'));
-        assert_eq!(h.vim.mode(), ViMode::Visual);
+        assert_eq!(h.mode, VimMode::Visual);
         let esc = KeyEvent {
             code: KeyCode::Esc,
             modifiers: KeyModifiers::empty(),
@@ -2443,7 +2446,7 @@ mod tests {
             state: KeyEventState::empty(),
         };
         h.handle(esc);
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
@@ -2459,13 +2462,13 @@ mod tests {
     fn test_visual_switch_modes() {
         let mut h = TestHarness::new("hello");
         h.handle(key('v'));
-        assert_eq!(h.vim.mode(), ViMode::Visual);
+        assert_eq!(h.mode, VimMode::Visual);
         h.handle(key('V'));
-        assert_eq!(h.vim.mode(), ViMode::VisualLine);
+        assert_eq!(h.mode, VimMode::VisualLine);
         h.handle(key('v'));
-        assert_eq!(h.vim.mode(), ViMode::Visual);
+        assert_eq!(h.mode, VimMode::Visual);
         h.handle(key('v'));
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
@@ -2511,10 +2514,10 @@ mod tests {
     fn test_visual_empty_buffer() {
         let mut h = TestHarness::new("");
         h.handle(key('v'));
-        assert_eq!(h.vim.mode(), ViMode::Visual);
+        assert_eq!(h.mode, VimMode::Visual);
         h.handle(key('d'));
         assert_eq!(h.buf, "");
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
@@ -2544,7 +2547,7 @@ mod tests {
         h.handle(key('j'));
         h.handle(key('J'));
         assert_eq!(h.buf, "aaa bbb\nccc");
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
@@ -2606,7 +2609,7 @@ mod tests {
         h.handle(key('e'));
         h.handle(key('U'));
         assert_eq!(h.buf, "HELLO world");
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
     }
 
     #[test]
@@ -2669,7 +2672,7 @@ mod tests {
         h.handle(key('O'));
         assert_eq!(h.buf, "\nhello");
         assert_eq!(h.cpos, 0);
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2679,7 +2682,7 @@ mod tests {
         h.handle(key('O'));
         assert_eq!(h.buf, "aaa\n\nbbb");
         assert_eq!(h.cpos, 4);
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2690,7 +2693,7 @@ mod tests {
         h.handle(key('g'));
         h.handle(key('g'));
         assert_eq!(h.cpos, 0);
-        assert_eq!(h.vim.mode(), ViMode::Visual);
+        assert_eq!(h.mode, VimMode::Visual);
         h.handle(key('d'));
         assert_eq!(h.buf, "cc");
     }
@@ -2711,7 +2714,7 @@ mod tests {
         h.handle(key('V'));
         h.handle(key('c'));
         assert_eq!(h.buf, "aaa\n\nccc");
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2832,7 +2835,7 @@ mod tests {
         h.handle(key('c'));
         h.handle(key('w'));
         assert_eq!(h.buf, " world");
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2842,7 +2845,7 @@ mod tests {
         h.handle(key('c'));
         h.handle(key('w'));
         assert_eq!(h.buf, "helloworld");
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2928,7 +2931,7 @@ mod tests {
     fn test_insert_undo_groups_entire_session() {
         let mut h = TestHarness::new("");
         h.handle(key('i'));
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
         h.buf.push_str("abc");
         h.cpos = 3;
         let esc = KeyEvent {
@@ -2938,7 +2941,7 @@ mod tests {
             state: KeyEventState::empty(),
         };
         h.handle(esc);
-        assert_eq!(h.vim.mode(), ViMode::Normal);
+        assert_eq!(h.mode, VimMode::Normal);
         assert_eq!(h.buf, "abc");
         h.handle(key('u'));
         assert_eq!(h.buf, "");
@@ -2950,7 +2953,7 @@ mod tests {
         h.handle(key('c'));
         h.handle(key('w'));
         assert_eq!(h.buf, " world");
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
         h.buf.insert_str(0, "hi");
         h.cpos = 2;
         let esc = KeyEvent {
@@ -2972,7 +2975,7 @@ mod tests {
         h.handle(key('e'));
         h.handle(key('s'));
         assert_eq!(h.buf, " world");
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
     }
 
     #[test]
@@ -2982,7 +2985,7 @@ mod tests {
         h.handle(key('v'));
         h.handle(key('l'));
         h.handle(key('S'));
-        assert_eq!(h.vim.mode(), ViMode::Insert);
+        assert_eq!(h.mode, VimMode::Insert);
         assert!(h.buf.contains("aaa"));
         assert!(h.buf.contains("ccc"));
         assert!(!h.buf.contains("bbb"));

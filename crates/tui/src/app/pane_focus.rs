@@ -65,7 +65,8 @@ impl App {
     fn refocus_content(&mut self) {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
-        self.transcript_window.refocus(&rows, viewport);
+        self.transcript_window
+            .refocus(&rows, viewport, &mut self.vim_mode);
         self.snap_transcript_cursor();
     }
 

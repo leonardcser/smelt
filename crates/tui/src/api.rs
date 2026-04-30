@@ -37,8 +37,13 @@ pub mod buf {
     /// into the prompt (unqueue, resume restore, ghost accept). Direct
     /// `input.buf = …` writes skip these invariants and have been a
     /// recurring source of undo / completer / paste-state bugs.
-    pub fn replace(input: &mut PromptState, text: String, cursor: Option<usize>) {
-        input.replace_text(text, cursor);
+    pub fn replace(
+        input: &mut PromptState,
+        text: String,
+        cursor: Option<usize>,
+        mode: ui::VimMode,
+    ) {
+        input.replace_text(text, cursor, mode);
     }
 }
 

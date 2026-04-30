@@ -757,10 +757,11 @@ impl App {
         scroll_top: u16,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
-        let vim_visual = matches!(
-            self.transcript_window.vim.as_ref().map(|v| v.mode()),
-            Some(crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine)
-        );
+        let vim_visual = self.transcript_window.vim.is_some()
+            && matches!(
+                self.vim_mode,
+                crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine
+            );
         let anchor_set = self.transcript_window.win_cursor.anchor().is_some();
         let yank_flash = self
             .transcript_window
@@ -778,9 +779,9 @@ impl App {
         let buf = rows.join("\n");
         let cpos = self.transcript_window.compute_cpos(&rows);
         let active_selection = if let Some(vim) = self.transcript_window.vim.as_ref() {
-            match vim.mode() {
-                crate::vim::ViMode::Visual | crate::vim::ViMode::VisualLine => {
-                    vim.visual_range(&buf, cpos)
+            match self.vim_mode {
+                crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine => {
+                    vim.visual_range(&buf, cpos, self.vim_mode)
                 }
                 _ => self.transcript_window.win_cursor.range(cpos),
             }

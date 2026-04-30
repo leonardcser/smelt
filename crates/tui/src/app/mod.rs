@@ -314,7 +314,13 @@ pub struct App {
     /// drag enters `Visual`, restored on mouse-up so a drag from Insert
     /// lands the user back in Insert rather than Normal. `None` outside
     /// an active prompt drag.
-    pub prompt_drag_return_vim_mode: Option<crate::vim::ViMode>,
+    pub prompt_drag_return_vim_mode: Option<crate::vim::VimMode>,
+    /// **Single global** vim mode — the one source of truth read by
+    /// status bar, lua_bridge, and `smelt.vim.mode`. Vim dispatch
+    /// (Window / PromptState) writes through `&mut` references threaded
+    /// via `VimContext.mode` and `MouseCtx.vim_mode`. Defaults to
+    /// `Insert`, matching `Vim::new`'s historical default.
+    pub vim_mode: ui::VimMode,
     /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
     /// user-registered commands / keymaps / autocmds.
     pub lua: crate::lua::LuaRuntime,
@@ -453,7 +459,7 @@ enum InputOutcome {
 /// Mutable timer state shared across event handlers.
 struct Timers {
     last_esc: Option<Instant>,
-    esc_vim_mode: Option<vim::ViMode>,
+    esc_vim_mode: Option<vim::VimMode>,
     last_ctrlc: Option<Instant>,
     last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord. When set, the next key consumes the
@@ -759,6 +765,7 @@ impl App {
             drag_autoscroll_since: None,
             drag_on_scrollbar: None,
             prompt_drag_return_vim_mode: None,
+            vim_mode: ui::VimMode::Insert,
             lua: crate::lua::LuaRuntime::new(),
             extra_instructions: None,
             skill_section: None,

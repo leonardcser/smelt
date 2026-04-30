@@ -34,7 +34,9 @@ impl App {
             // keymap (e.g. Confirm's BackTab handler) or the cmdline's
             // text-edit recipe gets first dibs.
             if self.ui.focused_overlay().is_none() && self.cmdline_win.is_none() {
-                let ctx = self.input.key_context(self.agent.is_some(), false);
+                let ctx = self
+                    .input
+                    .key_context(self.agent.is_some(), false, self.vim_mode);
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
                         self.toggle_mode();
@@ -312,7 +314,7 @@ impl App {
         {
             let in_insert = match self.app_focus {
                 crate::app::AppFocus::Prompt => {
-                    !self.input.vim_enabled() || self.input.vim_in_insert_mode()
+                    !self.input.vim_enabled() || self.vim_mode == vim::VimMode::Insert
                 }
                 crate::app::AppFocus::Content => false,
             };
@@ -343,7 +345,7 @@ impl App {
                 ..
             })
         ) {
-            let in_normal = !self.input.vim_enabled() || !self.input.vim_in_insert_mode();
+            let in_normal = !self.input.vim_enabled() || self.vim_mode != vim::VimMode::Insert;
             if in_normal {
                 let double = t
                     .last_esc
@@ -359,8 +361,9 @@ impl App {
                             self.working.finish(TurnOutcome::Interrupted);
                         };
                         self.notify("compaction cancelled".into());
-                        if restore_mode == Some(vim::ViMode::Insert) {
-                            self.input.set_vim_mode(vim::ViMode::Insert);
+                        if restore_mode == Some(vim::VimMode::Insert) {
+                            self.input
+                                .set_vim_mode(&mut self.vim_mode, vim::VimMode::Insert);
                         }
                         return EventOutcome::Noop;
                     }
@@ -368,7 +371,7 @@ impl App {
                     if self.user_turns().is_empty() {
                         return EventOutcome::Noop;
                     }
-                    let line = if restore_mode == Some(vim::ViMode::Insert) {
+                    let line = if restore_mode == Some(vim::VimMode::Insert) {
                         "/rewind insert"
                     } else {
                         "/rewind"
@@ -378,7 +381,11 @@ impl App {
                 }
                 // Single Esc in normal mode — start timer.
                 t.last_esc = Some(Instant::now());
-                t.esc_vim_mode = self.input.vim_mode();
+                t.esc_vim_mode = if self.input.vim_enabled() {
+                    Some(self.vim_mode)
+                } else {
+                    None
+                };
                 if !self.input.vim_enabled() {
                     return EventOutcome::Noop;
                 }
@@ -386,7 +393,7 @@ impl App {
             } else {
                 // Vim insert mode — start double-Esc timer, fall through so
                 // handle_event processes the Esc and switches vim to normal.
-                t.esc_vim_mode = Some(vim::ViMode::Insert);
+                t.esc_vim_mode = Some(vim::VimMode::Insert);
                 t.last_esc = Some(Instant::now());
             }
         } else {
@@ -399,7 +406,7 @@ impl App {
         }) = ev
         {
             let ghost = self.input_prediction.is_some() && self.input.buf.is_empty();
-            let ctx = self.input.key_context(false, ghost);
+            let ctx = self.input.key_context(false, ghost, self.vim_mode);
 
             // Dismiss ghost text on keys that affect input content.
             // Transparent actions (mode toggles, redraw, etc.) preserve it.
@@ -408,7 +415,8 @@ impl App {
                     Some(KeyAction::AcceptGhostText) => {
                         let full = self.input_prediction.take().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
-                        crate::api::buf::replace(&mut self.input, line, None);
+                        let __mode = self.vim_mode;
+                        crate::api::buf::replace(&mut self.input, line, None, __mode);
                         return EventOutcome::Redraw;
                     }
                     Some(
@@ -451,7 +459,9 @@ impl App {
         }
 
         // Delegate to PromptState::handle_event (menu, completer, vim, editing).
-        let action = self.input.handle_event(ev, Some(&mut self.input_history));
+        let action = self
+            .input
+            .handle_event(ev, Some(&mut self.input_history), &mut self.vim_mode);
         self.dispatch_input_action(action)
     }
 
@@ -472,7 +482,7 @@ impl App {
             code, modifiers, ..
         }) = ev
         {
-            let ctx = self.input.key_context(true, false);
+            let ctx = self.input.key_context(true, false, self.vim_mode);
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
@@ -510,14 +520,19 @@ impl App {
                 ..
             })
         ) {
+            let cur_mode = if self.input.vim_enabled() {
+                Some(self.vim_mode)
+            } else {
+                None
+            };
             match resolve_agent_esc(
-                self.input.vim_mode(),
+                cur_mode,
                 !self.queued_messages.is_empty(),
                 &mut t.last_esc,
                 &mut t.esc_vim_mode,
             ) {
                 EscAction::VimToNormal => {
-                    self.input.handle_event(ev, None);
+                    self.input.handle_event(ev, None, &mut self.vim_mode);
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
@@ -525,12 +540,13 @@ impl App {
                         combined.push('\n');
                         combined.push_str(&self.input.buf);
                     }
-                    crate::api::buf::replace(&mut self.input, combined, None);
+                    let mode = self.vim_mode;
+                    crate::api::buf::replace(&mut self.input, combined, None, mode);
                     self.queued_messages.clear();
                 }
                 EscAction::Cancel { restore_vim } => {
                     if let Some(mode) = restore_vim {
-                        self.input.set_vim_mode(mode);
+                        self.input.set_vim_mode(&mut self.vim_mode, mode);
                     }
                     return EventOutcome::CancelAgent;
                 }
@@ -540,7 +556,9 @@ impl App {
         }
 
         // Everything else → PromptState::handle_event (type-ahead with history).
-        let input_action = self.input.handle_event(ev, Some(&mut self.input_history));
+        let input_action =
+            self.input
+                .handle_event(ev, Some(&mut self.input_history), &mut self.vim_mode);
         match input_action {
             Action::Submit {
                 mut content,
@@ -655,7 +673,8 @@ impl App {
         match status {
             Ok(s) if s.success() => match std::fs::read_to_string(tmp.path()) {
                 Ok(new) => {
-                    crate::api::buf::replace(&mut self.input, new, None);
+                    let __mode = self.vim_mode;
+                    crate::api::buf::replace(&mut self.input, new, None, __mode);
                 }
                 Err(e) => self.notify_error(format!("read tmp: {e}")),
             },

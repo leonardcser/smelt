@@ -65,7 +65,7 @@ impl App {
                 if self.app_focus == crate::app::AppFocus::Prompt {
                     if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
                         if let Some(vim) = self.input.win.vim.as_mut() {
-                            vim.set_mode(prev);
+                            vim.set_mode(&mut self.vim_mode, prev);
                         }
                     }
                 }
@@ -125,10 +125,10 @@ impl App {
                             return EventOutcome::Redraw;
                         }
                         self.drag_on_scrollbar = None;
-                        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-                            if let Some(vim) = self.input.win.vim.as_ref() {
-                                self.prompt_drag_return_vim_mode = Some(vim.mode());
-                            }
+                        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
+                            && self.input.win.vim.is_some()
+                        {
+                            self.prompt_drag_return_vim_mode = Some(self.vim_mode);
                         }
                         self.handle_prompt_mouse(me, count);
                         return EventOutcome::Redraw;
@@ -202,7 +202,7 @@ impl App {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
-            .scroll_by_lines(delta, &rows, viewport);
+            .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
     }
 
     /// Route a mouse event to the focused buffer surface's adapter.
@@ -286,7 +286,12 @@ impl App {
         let saved_src_anchor = self.input.win.win_cursor.anchor();
         let saved_src_dword = self.input.win.drag_anchor_word;
         let saved_src_dline = self.input.win.drag_anchor_line;
-        let saved_vim_visual_anchor = self.input.win.vim.as_ref().and_then(|v| v.visual_anchor());
+        let saved_vim_visual_anchor = self
+            .input
+            .win
+            .vim
+            .as_ref()
+            .and_then(|v| v.visual_anchor(self.vim_mode));
 
         self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
         self.input
@@ -299,7 +304,11 @@ impl App {
             saved_src_dline.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
         if let Some(vim) = self.input.win.vim.as_mut() {
             if let Some(a) = saved_vim_visual_anchor {
-                vim.begin_visual(crate::vim::ViMode::Visual, wrap.src_to_wrapped(a));
+                vim.begin_visual(
+                    &mut self.vim_mode,
+                    crate::vim::VimMode::Visual,
+                    wrap.src_to_wrapped(a),
+                );
             }
         }
 
@@ -310,6 +319,7 @@ impl App {
             hard_breaks: &wrap.hard_breaks,
             viewport: vp,
             click_count,
+            vim_mode: &mut self.vim_mode,
         };
         let action = self.input.win.handle_mouse(me, ctx);
 
@@ -320,7 +330,12 @@ impl App {
         let new_w_anchor = self.input.win.win_cursor.anchor();
         let new_w_dword = self.input.win.drag_anchor_word;
         let new_w_dline = self.input.win.drag_anchor_line;
-        let new_w_vim_anchor = self.input.win.vim.as_ref().and_then(|v| v.visual_anchor());
+        let new_w_vim_anchor = self
+            .input
+            .win
+            .vim
+            .as_ref()
+            .and_then(|v| v.visual_anchor(self.vim_mode));
 
         self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
         self.input
@@ -333,7 +348,11 @@ impl App {
             new_w_dline.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
         if let Some(vim) = self.input.win.vim.as_mut() {
             if let Some(a) = new_w_vim_anchor {
-                vim.begin_visual(crate::vim::ViMode::Visual, wrap.wrapped_to_src(a));
+                vim.begin_visual(
+                    &mut self.vim_mode,
+                    crate::vim::VimMode::Visual,
+                    wrap.wrapped_to_src(a),
+                );
             }
         }
 
@@ -362,6 +381,7 @@ impl App {
             hard_breaks: &hard,
             viewport,
             click_count,
+            vim_mode: &mut self.vim_mode,
         };
         let _ = self.transcript_window.handle_mouse(snapped, ctx);
     }

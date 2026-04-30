@@ -336,7 +336,8 @@ impl App {
                     combined.push('\n');
                     combined.push_str(&self.input.buf);
                 }
-                crate::api::buf::replace(&mut self.input, combined, None);
+                let __mode = self.vim_mode;
+                crate::api::buf::replace(&mut self.input, combined, None, __mode);
             }
         } else {
             {
