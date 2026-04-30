@@ -690,10 +690,6 @@ impl Ui {
         self.wins.get_mut(&id)
     }
 
-    pub fn win_list(&self) -> Vec<WinId> {
-        self.wins.keys().copied().collect()
-    }
-
     pub fn set_terminal_size(&mut self, w: u16, h: u16) {
         self.terminal_size = (w, h);
         self.compositor.resize(w, h);
@@ -720,11 +716,6 @@ impl Ui {
     /// focused — `focus()` is the canonical reader.
     pub fn focused_window(&self) -> Option<&Window> {
         self.wins.get(&self.focus()?)
-    }
-
-    pub fn focused_window_mut(&mut self) -> Option<&mut Window> {
-        let id = self.focus()?;
-        self.wins.get_mut(&id)
     }
 
     /// Focus a specific window. Accepts focusable splits leaves and
