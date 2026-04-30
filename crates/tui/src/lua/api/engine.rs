@@ -1,12 +1,12 @@
-//! `smelt.engine` bindings — live engine reads (busy state),
-//! turn-driver writes (submit, cancel, compact), and the `ask`
-//! auxiliary request primitive. Mode get/set/cycle live under
+//! `smelt.engine` bindings — turn-driver writes (cancel, compact),
+//! the `ask` auxiliary request primitive, and the
+//! `submit_builtin_command` entry point used by the built-in
+//! `/reflect` and `/simplify` plugins. Mode get/set/cycle live under
 //! `smelt.mode`; reasoning effort lives under `smelt.reasoning`;
 //! model get/set/list live under `smelt.model`; per-session cost /
 //! context-token / context-window / messages snapshot live under
 //! `smelt.session`.
 
-use super::app_read;
 use crate::lua::{LuaHandle, LuaShared};
 use mlua::prelude::*;
 use std::sync::Arc;
@@ -14,15 +14,6 @@ use std::sync::Arc;
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let engine_tbl = lua.create_table()?;
 
-    engine_tbl.set("is_busy", app_read!(lua, |app| app.agent.is_some()))?;
-
-    engine_tbl.set(
-        "submit",
-        lua.create_function(|_, v: String| {
-            crate::lua::with_app(|app| app.queued_messages.push(v));
-            Ok(())
-        })?,
-    )?;
     engine_tbl.set(
         "cancel",
         lua.create_function(|_, ()| {
