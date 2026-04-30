@@ -24,6 +24,14 @@ impl App {
     pub(super) fn set_history(&mut self, messages: Vec<Message>) {
         self.session.messages = messages;
         self.sync_session_snapshot();
+        let count = self.session.messages.len();
+        self.cells.set_dyn(
+            "history",
+            std::rc::Rc::new(crate::app::cells::HistoryDelta {
+                kind: "set".into(),
+                count,
+            }),
+        );
     }
 
     pub(super) fn sync_session_snapshot(&mut self) {
@@ -78,6 +86,17 @@ impl App {
         self.session = forked;
         self.save_session();
         self.flush_persist();
+        self.cells
+            .set_dyn("session_ended", std::rc::Rc::new(original_id.clone()));
+        self.cells
+            .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
+        self.cells.set_dyn(
+            "history",
+            std::rc::Rc::new(crate::app::cells::HistoryDelta {
+                kind: "forked".into(),
+                count: self.session.messages.len(),
+            }),
+        );
         self.notify(format!("forked from {original_id}"));
     }
 
@@ -85,6 +104,7 @@ impl App {
         // Cancel any in-flight engine work (agent turn, title generation, etc.)
         // before clearing state so stale events don't restore old data.
         self.engine.send(UiCommand::Cancel);
+        let old_id = self.session.id.clone();
         self.session.messages.clear();
         self.pending_agent_blocks.clear();
         self.reset_session_permissions();
@@ -106,12 +126,24 @@ impl App {
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = None;
         }
+        self.cells
+            .set_dyn("session_ended", std::rc::Rc::new(old_id));
+        self.cells
+            .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
+        self.cells.set_dyn(
+            "history",
+            std::rc::Rc::new(crate::app::cells::HistoryDelta {
+                kind: "cleared".into(),
+                count: 0,
+            }),
+        );
         // Drain stale engine events so old Messages snapshots don't
         // restore history into the freshly cleared session.
         while self.engine.try_recv().is_ok() {}
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
+        let old_id = self.session.id.clone();
         // Resume starts a fresh session view: stop/clear existing subagents tabs.
         self.reset_subagents_for_new_session();
         self.flush_persist();
@@ -169,6 +201,17 @@ impl App {
         self.engine.processes.clear();
         self.compact_epoch += 1;
         self.sync_session_snapshot();
+        self.cells
+            .set_dyn("session_ended", std::rc::Rc::new(old_id));
+        self.cells
+            .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
+        self.cells.set_dyn(
+            "history",
+            std::rc::Rc::new(crate::app::cells::HistoryDelta {
+                kind: "loaded".into(),
+                count: self.session.messages.len(),
+            }),
+        );
         // Drain stale engine events so old snapshots don't overwrite
         // the loaded session's state.
         while self.engine.try_recv().is_ok() {}

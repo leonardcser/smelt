@@ -30,7 +30,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use protocol::TokenUsage;
+use protocol::{TokenUsage, TurnMeta};
 
 use crate::lua::LuaHandle;
 
@@ -328,12 +328,44 @@ pub struct BuiltinSeeds {
     pub branch: String,
 }
 
-/// Sentinel placeholder for event-shaped cells whose payload type and
-/// setter haven't migrated yet. The `()` projector returns `nil`, so
-/// Lua subscribers fire with `nil` until the real payload type lands
-/// (a.4c.2 / a.4c.3).
+/// Sentinel placeholder for event-shaped cells whose setter hasn't
+/// fired yet. The `EventStub` projector returns `nil`; the typed
+/// projector (TurnMeta / TurnError / ConfirmResolved / HistoryDelta /
+/// String / u64 …) takes over the moment the first `set_dyn` writes
+/// the typed payload, since `Cells::project_to_lua` keys on the
+/// stored value's `TypeId`, not the slot's declared type.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EventStub;
+
+/// Payload for the `turn_error` cell. Engine emits `EngineEvent::TurnError`
+/// carrying just a message; the cell projects it as a Lua table so a
+/// subscriber written today still composes if the engine grows
+/// structured error fields later.
+#[derive(Debug, Default, Clone)]
+pub struct TurnError {
+    pub message: String,
+}
+
+/// Payload for the `confirm_resolved` cell. `decision` is a stable
+/// short string ("yes" | "no" | "always_session" | "always_workspace" |
+/// "always_pattern_session" | "always_pattern_workspace" |
+/// "always_dir_session" | "always_dir_workspace" | "auto_allow")
+/// matching the resolved `ConfirmChoice` variant + scope.
+#[derive(Debug, Clone)]
+pub struct ConfirmResolved {
+    pub handle_id: u64,
+    pub decision: String,
+}
+
+/// Payload for the `history` cell. `kind` is a short stable string
+/// ("set" | "cleared" | "forked" | "loaded") describing the mutation,
+/// `count` is the post-mutation `messages.len()` so a subscriber sees
+/// the new size without having to reach into App state.
+#[derive(Debug, Clone)]
+pub struct HistoryDelta {
+    pub kind: String,
+    pub count: usize,
+}
 
 /// Register projectors for primitive types we publish, declare every
 /// built-in cell with its initial value (or an `EventStub` placeholder
@@ -379,6 +411,53 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         if let Some(n) = u.reasoning_tokens {
             let _ = t.set("reasoning_tokens", n);
         }
+        mlua::Value::Table(t)
+    });
+    // `TurnMeta` projector: surface the per-turn metadata as a flat
+    // Lua table. `tool_elapsed` flattens to `{ [call_id] = ms }`;
+    // `agent_blocks` is omitted today (un-migrated payload shape will
+    // land alongside the agent-tools migration in P5).
+    cells.register_lua_projector::<TurnMeta, _>(|m, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("elapsed_ms", m.elapsed_ms);
+        if let Some(tps) = m.avg_tps {
+            let _ = t.set("avg_tps", tps);
+        }
+        let _ = t.set("interrupted", m.interrupted);
+        if let Ok(tools) = lua.create_table() {
+            for (k, v) in &m.tool_elapsed {
+                let _ = tools.set(k.as_str(), *v);
+            }
+            let _ = t.set("tool_elapsed", tools);
+        }
+        mlua::Value::Table(t)
+    });
+    // `TurnError`: `{ message = "…" }`.
+    cells.register_lua_projector::<TurnError, _>(|e, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("message", e.message.as_str());
+        mlua::Value::Table(t)
+    });
+    // `ConfirmResolved`: `{ handle_id = u64, decision = "yes" | "no" | … }`.
+    cells.register_lua_projector::<ConfirmResolved, _>(|r, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("handle_id", r.handle_id);
+        let _ = t.set("decision", r.decision.as_str());
+        mlua::Value::Table(t)
+    });
+    // `HistoryDelta`: `{ kind = "set" | "cleared" | "forked" | "loaded", count = n }`.
+    cells.register_lua_projector::<HistoryDelta, _>(|d, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("kind", d.kind.as_str());
+        let _ = t.set("count", d.count as i64);
         mlua::Value::Table(t)
     });
 
@@ -784,6 +863,98 @@ mod tests {
                 ));
             }
             other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_payload_projectors_emit_named_fields() {
+        let lua = Lua::new();
+        let cells = build_with_builtins(BuiltinSeeds {
+            vim_mode: "Insert".into(),
+            agent_mode: "normal".into(),
+            model: "m".into(),
+            reasoning: "off".into(),
+            cwd: "/".into(),
+            session_title: String::new(),
+            branch: String::new(),
+        });
+
+        // Set typed payloads via set_dyn — Cells::project_to_lua keys
+        // on the stored value's TypeId, so the typed projector takes
+        // over even though the slot was declared with EventStub.
+        let mut cells = cells;
+        let mut tool_elapsed = std::collections::HashMap::new();
+        tool_elapsed.insert("call_42".to_string(), 1500u64);
+        cells.set_dyn(
+            "turn_complete",
+            Rc::new(TurnMeta {
+                elapsed_ms: 12000,
+                avg_tps: Some(33.5),
+                interrupted: false,
+                tool_elapsed,
+                agent_blocks: std::collections::HashMap::new(),
+            }),
+        );
+        cells.set_dyn(
+            "turn_error",
+            Rc::new(TurnError {
+                message: "boom".into(),
+            }),
+        );
+        cells.set_dyn(
+            "confirm_resolved",
+            Rc::new(ConfirmResolved {
+                handle_id: 7,
+                decision: "always_session".into(),
+            }),
+        );
+        cells.set_dyn(
+            "history",
+            Rc::new(HistoryDelta {
+                kind: "set".into(),
+                count: 4,
+            }),
+        );
+        cells.set_dyn("session_started", Rc::new(String::from("sess-001")));
+        cells.set_dyn("confirm_requested", Rc::new(42u64));
+
+        match cells.get_lua("turn_complete", &lua) {
+            mlua::Value::Table(t) => {
+                assert_eq!(t.get::<i64>("elapsed_ms").unwrap(), 12000);
+                assert!((t.get::<f64>("avg_tps").unwrap() - 33.5).abs() < f64::EPSILON);
+                assert!(!t.get::<bool>("interrupted").unwrap());
+                let tools: mlua::Table = t.get("tool_elapsed").unwrap();
+                assert_eq!(tools.get::<i64>("call_42").unwrap(), 1500);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        match cells.get_lua("turn_error", &lua) {
+            mlua::Value::Table(t) => {
+                assert_eq!(t.get::<String>("message").unwrap(), "boom");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        match cells.get_lua("confirm_resolved", &lua) {
+            mlua::Value::Table(t) => {
+                assert_eq!(t.get::<i64>("handle_id").unwrap(), 7);
+                assert_eq!(t.get::<String>("decision").unwrap(), "always_session");
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        match cells.get_lua("history", &lua) {
+            mlua::Value::Table(t) => {
+                assert_eq!(t.get::<String>("kind").unwrap(), "set");
+                assert_eq!(t.get::<i64>("count").unwrap(), 4);
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+        match cells.get_lua("session_started", &lua) {
+            mlua::Value::String(s) => assert_eq!(s.to_str().unwrap(), "sess-001"),
+            other => panic!("expected String, got {other:?}"),
+        }
+        match cells.get_lua("confirm_requested", &lua) {
+            mlua::Value::Integer(42) => {}
+            other => panic!("expected Integer(42), got {other:?}"),
         }
     }
 }

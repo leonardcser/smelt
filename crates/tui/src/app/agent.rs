@@ -654,6 +654,15 @@ impl App {
                     return SessionControl::Continue;
                 }
                 self.set_history(messages);
+                let payload = meta.clone().unwrap_or(protocol::TurnMeta {
+                    elapsed_ms: 0,
+                    avg_tps: None,
+                    interrupted: false,
+                    tool_elapsed: std::collections::HashMap::new(),
+                    agent_blocks: std::collections::HashMap::new(),
+                });
+                self.cells
+                    .set_dyn("turn_complete", std::rc::Rc::new(payload));
                 self.pending_turn_meta = meta;
                 SessionControl::Done
             }
@@ -661,6 +670,12 @@ impl App {
                 {
                     self.working.finish(TurnOutcome::Done);
                 };
+                self.cells.set_dyn(
+                    "turn_error",
+                    std::rc::Rc::new(crate::app::cells::TurnError {
+                        message: message.clone(),
+                    }),
+                );
                 self.notify_error(message);
                 SessionControl::Done
             }
@@ -1428,6 +1443,8 @@ impl App {
                 // and resolves it on submit / dismiss.
                 let (_labels, choices) = crate::app::dialogs::confirm::build_options(&req);
                 let handle_id = self.confirms.register(*req, choices);
+                self.cells
+                    .set_dyn("confirm_requested", std::rc::Rc::new(handle_id));
                 self.lua.fire_confirm_open(handle_id);
                 LoopAction::Continue
             }
