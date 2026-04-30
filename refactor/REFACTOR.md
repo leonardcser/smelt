@@ -534,14 +534,12 @@ the contract the prior `(o.z, id.0)` composite key encoded
 explicitly. `overlay_close` becomes `position` + `remove`; lookups
 collapse to `iter().find_map`. Public API unchanged.
 
-#### P1.f.3 — `splits: LayoutTree` owned by `Ui`
+#### P1.f.3 — `splits: LayoutTree` owned by `Ui` ✅ landed
 
-Today the host (`tui`) builds a `LayoutTree` and pushes resolved rects
-to `Ui` per frame via `set_window_rect`. Move the tree onto `Ui` and
-have `Ui::render` resolve rects itself. `painted_splits: Vec<WinId>` +
-`split_rects: HashMap<WinId, Rect>` retire — leaves of the owned tree
-replace the registry; resolved rects come from the per-frame
-`resolve_layout` walk.
+`Ui::set_layout(tree)` replaces `register_painted_split` /
+`unregister_painted_split` / `set_window_rect`; rects resolve on
+demand. Status is a `Length(1)` leaf inside the prompt+status inner
+vbox; `compute_prompt`'s `fixed = chrome + 1` (status owns its row).
 
 #### P1.f.4 — `capture: Option<HitTarget>` for in-flight gestures
 

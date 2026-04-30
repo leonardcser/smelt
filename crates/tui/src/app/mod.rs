@@ -615,7 +615,6 @@ impl App {
                     gutters: ui::Gutters::default(),
                 },
             ));
-            ui.register_painted_split(ui::TRANSCRIPT_WIN);
             // Prompt: a Buffer-backed Window painted via `Ui::render`
             // from the post-layer closure. No compositor `Component`
             // layer — `compute_prompt` writes the unified buffer
@@ -630,8 +629,6 @@ impl App {
                     gutters: ui::Gutters::default(),
                 },
             ));
-            ui.register_painted_split(ui::PROMPT_WIN);
-            ui.set_focus(ui::PROMPT_WIN);
             // Status line: Buffer-backed Window painted directly via
             // `Window::render` from `Ui::render`'s post-layer closure.
             // No compositor `Component` layer — the buffer carries the
@@ -653,8 +650,18 @@ impl App {
             if let Some(win) = ui.win_mut(status_win) {
                 win.focusable = false;
             }
-            ui.set_window_rect(status_win, ui::Rect::new(h.saturating_sub(1), 0, w, 1));
-            ui.register_painted_split(status_win);
+            // Seed a minimal splits tree so overlay anchors (e.g.
+            // notifications targeting PROMPT_WIN) can resolve before
+            // the first render frame publishes the real layout via
+            // `Ui::set_layout`.
+            ui.set_layout(crate::content::layout::build_layout_tree(
+                &crate::content::layout::LayoutInput {
+                    term_height: h,
+                    prompt_height: 3,
+                },
+                status_win,
+            ));
+            ui.set_focus(ui::PROMPT_WIN);
             (
                 ui,
                 input_display_buf,
@@ -706,11 +713,9 @@ impl App {
             term_focused: true,
             working: working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
-            layout: content::layout::LayoutState::compute(&content::layout::LayoutInput {
-                term_width: 80,
-                term_height: 24,
-                prompt_height: 3,
-            }),
+            // The first frame's `render_normal` overwrites this via
+            // `LayoutState::from_ui` after publishing the splits tree.
+            layout: content::layout::LayoutState::default(),
             prompt_viewport: None,
             transcript_viewport: None,
             settings,

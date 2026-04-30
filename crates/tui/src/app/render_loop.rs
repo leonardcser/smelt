@@ -36,18 +36,24 @@ impl App {
         // ── Layout ──
         let natural_prompt_height =
             self.measure_prompt_height(&self.input, width, queued, prediction);
-        self.layout = content::layout::LayoutState::compute(&content::layout::LayoutInput {
-            term_width: term_w,
-            term_height: term_h,
-            prompt_height: natural_prompt_height,
-        });
+        // Publish the splits tree to `Ui`; it resolves rects against
+        // the current terminal area on demand. `LayoutState::from_ui`
+        // reads the resolved transcript / prompt / status rects back
+        // out for downstream sync.
+        self.ui.set_layout(content::layout::build_layout_tree(
+            &content::layout::LayoutInput {
+                term_height: term_h,
+                prompt_height: natural_prompt_height,
+            },
+            self.status_win,
+        ));
+        self.layout = content::layout::LayoutState::from_ui(&self.ui, self.status_win);
         let viewport_rows = self.layout.viewport_rows();
         let prompt_rect = self.layout.prompt;
         let prompt_height = prompt_rect.height;
 
-        let transcript_rect =
-            self.sync_transcript_layer(term_w, width, viewport_rows, has_transcript_cursor);
-        let prompt_input_rect = self.sync_prompt_layer(
+        self.sync_transcript_layer(term_w, width, viewport_rows, has_transcript_cursor);
+        self.sync_prompt_layer(
             term_w,
             prompt_rect,
             prompt_height,
@@ -62,13 +68,7 @@ impl App {
         self.working.set_paused(self.focused_overlay_blocks_agent());
         self.refresh_status_bar();
 
-        self.finalize_layer_rects(
-            transcript_rect,
-            prompt_rect,
-            prompt_input_rect,
-            term_w,
-            term_h,
-        );
+        self.finalize_layer_rects();
 
         self.sync_completer_overlay();
 
@@ -110,15 +110,14 @@ impl App {
     /// (cursor + viewport + scroll). Selection paints via extmarks in
     /// the buffer's `NS_SELECTION` namespace; soft cursor surfaces as
     /// `cursor_kind = Block { glyph, style }` so `Window::render`
-    /// paints the cell after extmark layering. Returns the rect so
-    /// `finalize_layer_rects` can publish it through `set_window_rect`.
+    /// paints the cell after extmark layering.
     fn sync_transcript_layer(
         &mut self,
         term_w: u16,
         width: usize,
         viewport_rows: u16,
         has_transcript_cursor: bool,
-    ) -> ui::Rect {
+    ) {
         let t_pad = self.transcript_gutters.pad_left;
         let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = self.project_transcript_buffer(
@@ -222,14 +221,12 @@ impl App {
             win.scroll_top = tdata.clamped_scroll;
             win.viewport = Some(transcript_viewport);
         }
-
-        transcript_rect
     }
 
     /// Populate the unified prompt buffer (chrome rows + visible
     /// input slice + bottom bar) and set the painted-split prompt
-    /// Window's cursor + viewport. Returns the input-area rect so
-    /// `prompt_viewport` (mouse routing) can latch onto it.
+    /// Window's cursor + viewport. Stashes the resolved input-area
+    /// rect on `self.prompt_viewport` for mouse routing.
     fn sync_prompt_layer(
         &mut self,
         term_w: u16,
@@ -238,7 +235,7 @@ impl App {
         queued: &[String],
         prediction: Option<&str>,
         has_prompt_cursor: bool,
-    ) -> ui::Rect {
+    ) {
         let bar_info = content::prompt_data::BarInfo {
             model_label: Some(self.model.clone()),
             reasoning_effort: self.reasoning_effort,
@@ -282,32 +279,27 @@ impl App {
         self.input.win.pending_recenter = false;
         self.input.win.last_render_cpos = Some(self.input.win.cpos);
 
-        let (prompt_input_rect, prompt_viewport) =
-            if let Some(ref ivp) = prompt_output.input_viewport {
-                let input_rect = ui::Rect::new(
-                    prompt_rect.top + ivp.top_row,
-                    0,
-                    prompt_rect.width,
-                    ivp.rows,
-                );
-                let viewport = ui::WindowViewport::new(
-                    input_rect,
-                    ivp.content_width,
+        let prompt_viewport = if let Some(ref ivp) = prompt_output.input_viewport {
+            let input_rect = ui::Rect::new(
+                prompt_rect.top + ivp.top_row,
+                0,
+                prompt_rect.width,
+                ivp.rows,
+            );
+            Some(ui::WindowViewport::new(
+                input_rect,
+                ivp.content_width,
+                ivp.total_rows,
+                ivp.scroll_top,
+                ui::ScrollbarState::new(
+                    prompt_rect.width.saturating_sub(1),
                     ivp.total_rows,
-                    ivp.scroll_top,
-                    ui::ScrollbarState::new(
-                        prompt_rect.width.saturating_sub(1),
-                        ivp.total_rows,
-                        ivp.rows,
-                    ),
-                );
-                (input_rect, Some(viewport))
-            } else {
-                (
-                    ui::Rect::new(prompt_rect.bottom(), 0, prompt_rect.width, 0),
-                    None,
-                )
-            };
+                    ivp.rows,
+                ),
+            ))
+        } else {
+            None
+        };
         self.prompt_viewport = prompt_viewport;
 
         // Drive the painted-split Window's cursor + scrollbar viewport
@@ -328,26 +320,13 @@ impl App {
             win.cursor_line = cur_line;
             win.viewport = prompt_viewport;
         }
-
-        prompt_input_rect
     }
 
-    fn finalize_layer_rects(
-        &mut self,
-        transcript_rect: ui::Rect,
-        prompt_rect: ui::Rect,
-        _prompt_input_rect: ui::Rect,
-        term_w: u16,
-        term_h: u16,
-    ) {
-        let status_rect = ui::Rect::new(term_h - 1, 0, term_w, 1);
-        // Publish split-window rects so overlay anchors targeting a
-        // window (e.g. notification toasts, prompt-docked pickers)
-        // can resolve, and so painted splits know where to paint.
-        self.ui.set_window_rect(ui::PROMPT_WIN, prompt_rect);
-        self.ui.set_window_rect(ui::TRANSCRIPT_WIN, transcript_rect);
-        self.ui.set_window_rect(self.status_win, status_rect);
-
+    fn finalize_layer_rects(&mut self) {
+        // Rect publishing is now implicit via `Ui::set_layout` at the
+        // top of `render_normal` — the splits tree resolves rects on
+        // demand. This pass only re-asserts focus when no overlay is
+        // up so app-pane focus tracks the user's intent.
         if self.ui.focused_overlay().is_none() {
             match self.app_focus {
                 crate::app::AppFocus::Prompt => {

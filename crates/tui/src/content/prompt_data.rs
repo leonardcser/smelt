@@ -571,7 +571,7 @@ fn compute_input_area(
     let is_exec_invalid = !plain_only && state.buf == "!";
     let total_content_rows = visual_lines.len();
 
-    let fixed = row_offset as usize + 1 + 1; // bottom bar + status line
+    let fixed = row_offset as usize + 1; // bottom bar (status is its own splits leaf)
     let max_content_rows = height.saturating_sub(fixed).max(1);
     let content_rows = total_content_rows.min(max_content_rows);
 
