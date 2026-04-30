@@ -356,7 +356,7 @@ impl App {
             for (agent_id, data) in self.pending_agent_blocks.drain(..) {
                 meta.agent_blocks.insert(agent_id, data);
             }
-            self.turn_metas.push((self.history.len(), meta));
+            self.session.turn_metas.push((self.history.len(), meta));
         }
         self.snapshot_tokens();
         self.save_session();
@@ -383,7 +383,6 @@ impl App {
                 if !background {
                     if let Some(tokens) = usage.prompt_tokens {
                         if tokens > 0 {
-                            self.context_tokens = Some(tokens);
                             self.session.context_tokens = Some(tokens);
                         }
                     }
@@ -395,7 +394,7 @@ impl App {
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
-                self.session_cost_usd += cost;
+                self.session.session_cost_usd += cost;
                 crate::metrics::append(&crate::metrics::MetricsEntry {
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1077,7 +1076,7 @@ impl App {
         }
 
         if session_cost_delta > 0.0 {
-            self.session_cost_usd += session_cost_delta;
+            self.session.session_cost_usd += session_cost_delta;
         }
 
         if !changed {

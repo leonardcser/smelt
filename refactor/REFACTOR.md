@@ -439,9 +439,18 @@ bridges, then the aggregate.
   16 fields bundle off `App` into `app::app_config::AppConfig`; call
   sites read through `self.config.*`. Keymap / theme path bindings
   ride later phases (P3.b / P5.d).
-- **a.7** — `Session { history, costs, turn_metas }`. (Sub-agent state
-  lives in Lua cells fed by `tui::subprocess` `on_event` callbacks —
-  see P5.b — not on `Session`.)
+- **a.7a** ✅ — Session snapshots data lift: drop the App-side
+  `context_tokens` / `token_snapshots` / `cost_snapshots` /
+  `turn_metas` / `session_cost_usd` shadow fields, route through
+  `self.session.*`; the `save_snapshots_to_session` /
+  `restore_snapshots_from_session` sync helpers retire (Session
+  is now SoT for cost/token/turn-meta state).
+- **a.7b** — `history` field follows the same path:
+  `App.history: Vec<Message>` collapses into `self.session.messages`.
+  ~70+ refs across `transcript.rs` / `agent.rs` / `history.rs` /
+  `mod.rs`; mechanical but worth its own session.
+  (Sub-agent state lives in Lua cells fed by `tui::subprocess`
+  `on_event` callbacks — see P5.b — not on `Session`.)
 - **a.8** — `Clipboard` already exists as `ui::Clipboard`. This step
   formalises it as a Core subsystem if any wiring is still loose.
 - **a.9** — `LuaRuntime` reshape: drop the parallel autocmd registry;

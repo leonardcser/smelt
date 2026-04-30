@@ -256,10 +256,10 @@ impl App {
             model_label: Some(self.config.model.clone()),
             reasoning_effort: self.config.reasoning_effort,
             show_tokens: self.config.settings.show_tokens,
-            context_tokens: self.context_tokens,
+            context_tokens: self.session.context_tokens,
             context_window: self.config.context_window,
             show_cost: self.config.settings.show_cost,
-            session_cost_usd: self.session_cost_usd,
+            session_cost_usd: self.session.session_cost_usd,
         };
 
         let prompt_output = {

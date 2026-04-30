@@ -82,15 +82,12 @@ impl App {
         }
     }
 
-    /// Load a saved session by id. Refreshes screen + token tally
-    /// and scrolls to bottom on success; silent no-op on missing id.
+    /// Load a saved session by id. Refreshes screen and scrolls to
+    /// bottom on success; silent no-op on missing id.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
         if let Some(loaded) = crate::session::load(id) {
             self.load_session(loaded);
             self.restore_screen();
-            if let Some(tokens) = self.session.context_tokens {
-                self.context_tokens = Some(tokens);
-            }
             self.finish_transcript_turn();
             self.transcript_window.scroll_to_bottom();
         }

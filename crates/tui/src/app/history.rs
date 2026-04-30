@@ -56,11 +56,14 @@ impl App {
 
     /// Record current token count and cost so they can be restored on rewind.
     pub(super) fn snapshot_tokens(&mut self) {
-        if let Some(tokens) = self.context_tokens {
-            self.token_snapshots.push((self.history.len(), tokens));
+        if let Some(tokens) = self.session.context_tokens {
+            self.session
+                .token_snapshots
+                .push((self.history.len(), tokens));
         }
-        self.cost_snapshots
-            .push((self.history.len(), self.session_cost_usd));
+        self.session
+            .cost_snapshots
+            .push((self.history.len(), self.session.session_cost_usd));
     }
 
     pub(super) fn fork_session(&mut self) {
@@ -83,11 +86,9 @@ impl App {
         // before clearing state so stale events don't restore old data.
         self.engine.send(UiCommand::Cancel);
         self.history.clear();
-        self.clear_snapshots();
         self.pending_agent_blocks.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
-        self.context_tokens = None;
         self.task_label = None;
         self.working.clear();
         self.input.win.scroll_top = 0;
@@ -147,7 +148,20 @@ impl App {
             self.set_task_label(slug.clone());
         }
         self.history = self.session.messages.clone();
-        self.restore_snapshots_from_session();
+        // Defensive scrub: drop any snapshots beyond restored history.
+        let hist_len = self.history.len();
+        self.session
+            .token_snapshots
+            .retain(|(len, _)| *len <= hist_len);
+        self.session
+            .cost_snapshots
+            .retain(|(len, _)| *len <= hist_len);
+        self.session.session_cost_usd = self
+            .session
+            .cost_snapshots
+            .last()
+            .map(|&(_, c)| c)
+            .unwrap_or(0.0);
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.input.clear();
@@ -207,7 +221,7 @@ impl App {
             }
         }
 
-        for (_, meta) in &self.turn_metas {
+        for (_, meta) in &self.session.turn_metas {
             tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
             agent_blocks.extend(
                 meta.agent_blocks
@@ -387,7 +401,7 @@ impl App {
             }
         }
 
-        if let Some((_, meta)) = self.turn_metas.last() {
+        if let Some((_, meta)) = self.session.turn_metas.last() {
             self.working.restore_from_turn_meta(meta);
         }
 
@@ -404,7 +418,6 @@ impl App {
         if self.history.is_empty() {
             return;
         }
-        self.save_snapshots_to_session();
         self.sync_session_snapshot();
         // Skip persisting render/layout caches when redaction is enabled —
         // they contain raw source text from tool output that would leak secrets.
@@ -527,12 +540,12 @@ impl App {
         // Old snapshots key into pre-compaction positions and are no longer
         // valid, but the running cost carries forward.
         self.history = messages;
-        let carried_cost = self.session_cost_usd;
-        self.clear_snapshots();
-        self.session_cost_usd = carried_cost;
+        self.session.token_snapshots.clear();
+        self.session.cost_snapshots.clear();
+        self.session.turn_metas.clear();
+        self.session.context_tokens = None;
 
         self.restore_screen();
-        self.context_tokens = None;
         self.save_session();
         {
             self.working.finish(TurnOutcome::Done);
@@ -547,7 +560,7 @@ impl App {
         let Some(ctx) = self.config.context_window else {
             return;
         };
-        let Some(tokens) = self.context_tokens else {
+        let Some(tokens) = self.session.context_tokens else {
             return;
         };
         if tokens as u64 * 100 >= ctx as u64 * engine::compact_threshold_percent() {
@@ -596,8 +609,16 @@ impl App {
             .unwrap_or_default();
 
         self.history.truncate(hist_idx);
-        self.truncate_snapshots_to(hist_idx);
-        self.context_tokens = self.token_snapshots.last().map(|&(_, t)| t);
+        truncate_keyed(&mut self.session.token_snapshots, hist_idx);
+        truncate_keyed(&mut self.session.cost_snapshots, hist_idx);
+        truncate_keyed(&mut self.session.turn_metas, hist_idx);
+        self.session.session_cost_usd = self
+            .session
+            .cost_snapshots
+            .last()
+            .map(|&(_, c)| c)
+            .unwrap_or(0.0);
+        self.session.context_tokens = self.session.token_snapshots.last().map(|&(_, t)| t);
         self.truncate_to(block_idx);
         self.reset_session_permissions();
         self.compact_epoch += 1;
@@ -619,37 +640,5 @@ impl App {
 fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
     while snapshots.last().is_some_and(|(len, _)| *len > hist_idx) {
         snapshots.pop();
-    }
-}
-
-impl App {
-    pub(super) fn clear_snapshots(&mut self) {
-        self.token_snapshots.clear();
-        self.cost_snapshots.clear();
-        self.turn_metas.clear();
-        self.session_cost_usd = 0.0;
-    }
-
-    pub(super) fn truncate_snapshots_to(&mut self, hist_idx: usize) {
-        truncate_keyed(&mut self.token_snapshots, hist_idx);
-        truncate_keyed(&mut self.cost_snapshots, hist_idx);
-        truncate_keyed(&mut self.turn_metas, hist_idx);
-        self.session_cost_usd = self.cost_snapshots.last().map(|&(_, c)| c).unwrap_or(0.0);
-    }
-
-    pub(super) fn save_snapshots_to_session(&mut self) {
-        self.session.token_snapshots = self.token_snapshots.clone();
-        self.session.cost_snapshots = self.cost_snapshots.clone();
-        self.session.turn_metas = self.turn_metas.clone();
-    }
-
-    pub(super) fn restore_snapshots_from_session(&mut self) {
-        let hist_len = self.history.len();
-        self.token_snapshots = self.session.token_snapshots.clone();
-        self.token_snapshots.retain(|(len, _)| *len <= hist_len);
-        self.cost_snapshots = self.session.cost_snapshots.clone();
-        self.cost_snapshots.retain(|(len, _)| *len <= hist_len);
-        self.turn_metas = self.session.turn_metas.clone();
-        self.session_cost_usd = self.cost_snapshots.last().map(|&(_, c)| c).unwrap_or(0.0);
     }
 }
