@@ -596,12 +596,15 @@ binding TLS split are each natural single-session units:
   `self.clipboard()` in `app/{mod,lua_handlers}.rs`; `app.timers()`
   in `lua/api/dispatch.rs`) so every method is reached from
   production code.
-- **P2.b.2** — `UiHost` trait in `crates/ui/src/lib.rs` with the
-  compositor-bearing surface (`ui / focus / fire_win_event /
-  buf_create / buf_mut / win_open / win_close / win_mut /
+- **P2.b.2** ✅ — `UiHost` trait in `crates/ui/src/lib.rs` with the
+  compositor-bearing surface (`ui / set_focus / fire_win_event /
+  buf_create / buf_mut / win_open_split / win_close / win_mut /
   overlay_open / overlay_close`). No `Host` supertrait — `ui`
-  cannot reference tui-defined `Host`. `TuiApp` impls `UiHost`
-  alongside its `Host` impl. `HeadlessApp` does not impl `UiHost`.
+  cannot reference tui-defined `Host`. `Ui` impls directly;
+  `TuiApp` impls `UiHost` alongside its `Host` impl by delegating
+  to `self.ui.X()`. `HeadlessApp` does not impl `UiHost`. First
+  consumers migrated through `cmdline.rs::open_cmdline` +
+  `events.rs::close_overlay_leaf`.
 - **P2.b.3** — Supporting types in `ui`:
   - `Event::{ Key | Mouse | Resize | FocusGained | FocusLost |
     Paste }` — ui-owned terminal-event enum (variants carry
