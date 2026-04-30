@@ -31,8 +31,9 @@ local function build_items()
 end
 
 smelt.cmd.picker("settings", {
-  desc      = "open settings menu",
-  items     = build_items,
-  on_enter  = function(item) if item._key then smelt.settings.toggle(item._key) end end,
-  stay_open = true,
+  desc       = "open settings menu",
+  items      = build_items,
+  on_enter   = function(item) if item._key then smelt.settings.toggle(item._key) end end,
+  stay_open  = true,
+  startup_ok = true,
 })

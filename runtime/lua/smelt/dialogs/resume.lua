@@ -169,4 +169,4 @@ smelt.cmd.register("resume", function()
       smelt.session.load(e.id)
     end
   end)
-end, { desc = "resume saved session", while_busy = false })
+end, { desc = "resume saved session", while_busy = false, startup_ok = true })

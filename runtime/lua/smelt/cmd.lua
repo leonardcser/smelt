@@ -73,5 +73,11 @@ function smelt.cmd.picker(name, opts)
     end
     if opts.prepare then opts.prepare() end
     run_picker_loop(opts)
-  end, { desc = opts.desc, args = args })
+  end, {
+    desc       = opts.desc,
+    args       = args,
+    arg_hint   = opts.arg_hint,
+    while_busy = opts.while_busy,
+    startup_ok = opts.startup_ok,
+  })
 end

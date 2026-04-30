@@ -71,6 +71,10 @@ pub(crate) struct RegisteredCommand {
     /// `while_busy = false` so the dispatcher rejects them with
     /// `cannot run /name while agent is working` instead of queueing.
     pub(crate) while_busy: bool,
+    /// May this command be invoked as a startup argument
+    /// (`smelt /name`)? Defaults to `false`; plugins that open a UI
+    /// useful at launch (`/resume`, `/settings`) opt in.
+    pub(crate) startup_ok: bool,
 }
 
 /// List all Lua-registered `/commands` as `(name, description)`.
@@ -685,6 +689,17 @@ impl LuaRuntime {
             .ok()?
             .get(name)
             .and_then(|c| c.arg_hint.clone())
+    }
+
+    /// Whether the registered command opted into `smelt /name` startup
+    /// invocation. `Some(true/false)` if registered, `None` otherwise.
+    pub fn command_startup_ok(&self, name: &str) -> Option<bool> {
+        self.shared
+            .commands
+            .lock()
+            .ok()?
+            .get(name)
+            .map(|c| c.startup_ok)
     }
 
     /// Names of all Lua-registered commands (for completion).

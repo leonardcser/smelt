@@ -38,6 +38,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let arg_hint: Option<String> = opts
                         .as_ref()
                         .and_then(|t| t.get::<Option<String>>("arg_hint").ok().flatten());
+                    let startup_ok: bool = opts
+                        .as_ref()
+                        .and_then(|t| t.get::<Option<bool>>("startup_ok").ok().flatten())
+                        .unwrap_or(false);
                     let key = lua.create_registry_value(handler)?;
                     if let Ok(mut map) = s.commands.lock() {
                         map.insert(
@@ -48,6 +52,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 args,
                                 arg_hint,
                                 while_busy,
+                                startup_ok,
                             },
                         );
                     }

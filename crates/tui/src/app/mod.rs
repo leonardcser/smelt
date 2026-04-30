@@ -346,21 +346,6 @@ pub enum CommandAction {
     ),
 }
 
-/// Classify input received as a CLI startup argument.
-/// Returns `None` if it's a normal message that should go to the agent.
-fn classify_startup_command(input: &str) -> Option<&'static str> {
-    if input.starts_with('!') {
-        return None; // handled separately (execute shell)
-    }
-    if !input.starts_with('/') || !crate::completer::Completer::is_command(input) {
-        return None; // normal message
-    }
-    match input {
-        "/resume" | "/settings" => None, // open their respective UI
-        _ => Some("has no effect as a startup argument"),
-    }
-}
-
 enum InputOutcome {
     Continue,
     StartAgent,
@@ -1012,13 +997,26 @@ impl TuiApp {
                     self.exec_rx = Some(rx);
                     self.exec_kill = Some(kill);
                 }
-            } else if trimmed == "/resume" || trimmed == "/settings" {
-                // Both are Lua-registered commands; route through the
-                // unified dispatcher so the Lua handler fires.
-                self.apply_lua_command(trimmed);
-            } else if let Some(reason) = classify_startup_command(trimmed) {
-                self.notify_error(format!("\"{}\" {}", trimmed, reason));
+            } else if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
+                // A registered slash command. If the plugin opted into
+                // `startup_ok = true`, run it through the unified
+                // dispatcher; otherwise notify the user that it has no
+                // useful effect at launch.
+                let name = trimmed
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if self.core.lua.command_startup_ok(name) == Some(true) {
+                    self.apply_lua_command(trimmed);
+                } else {
+                    self.notify_error(format!(
+                        "\"{}\" has no effect as a startup argument",
+                        trimmed
+                    ));
+                }
             } else {
+                // Plain message (or unrecognized slash) — submit it.
                 let content = Content::text(msg.clone());
                 let turn = self.begin_agent_turn(&msg, content);
                 self.agent = Some(turn);
@@ -1464,39 +1462,4 @@ where
     S: futures_core::Stream + Unpin,
 {
     std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── classify_startup_command ──────────────────────────────────────
-
-    #[test]
-    fn startup_normal_message_is_none() {
-        assert!(classify_startup_command("fix the bug").is_none());
-    }
-
-    #[test]
-    fn startup_shell_escape_is_none() {
-        assert!(classify_startup_command("!ls -la").is_none());
-    }
-
-    #[test]
-    fn startup_resume_is_none() {
-        // /resume opens its UI, not blocked
-        assert!(classify_startup_command("/resume").is_none());
-    }
-
-    #[test]
-    fn startup_settings_is_none() {
-        // /settings opens its UI, not blocked
-        assert!(classify_startup_command("/settings").is_none());
-    }
-
-    #[test]
-    fn startup_unknown_slash_not_a_command() {
-        // Not a recognized command — should pass through as a message
-        assert!(classify_startup_command("/unknown").is_none());
-    }
 }
