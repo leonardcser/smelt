@@ -8,6 +8,7 @@ pub mod config;
 pub mod content;
 pub mod custom_commands;
 pub mod format;
+pub mod fs;
 pub mod fuzzy;
 pub mod input;
 pub mod instructions;
