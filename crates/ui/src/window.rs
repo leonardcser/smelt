@@ -392,28 +392,13 @@ impl Window {
         self.selection_range_at(cpos)
     }
 
-    /// Select the word at `cpos` (vim "w" semantics: alphanumeric +
-    /// underscore). `transparent` byte positions are crossed by the
-    /// boundary walk as if they were word chars (used for soft-wrap
-    /// `\n` so a word broken across display rows selects as one unit);
-    /// must be sorted ascending. Cursor lands at the last char of the
-    /// selection so the visual-range render covers the whole word.
-    pub fn select_word_at_transparent(
-        &mut self,
-        cpos: usize,
-        transparent: &[usize],
-        rows: &[String],
-        buf: &str,
-        viewport_rows: u16,
-        mode: &mut VimMode,
-    ) -> Option<(usize, usize)> {
-        let (start, end) = crate::edit_buffer::word_range_at_transparent(buf, cpos, transparent)?;
-        self.finish_range_select(start, end, rows, viewport_rows, mode);
-        Some((start, end))
-    }
-
-    /// Vim "WORD" (capital W) variant of [`Self::select_word_at_transparent`]:
-    /// the token is any whitespace-delimited run, punctuation included.
+    /// Vim "WORD" (capital W) selection: the token at `cpos` is any
+    /// whitespace-delimited run, punctuation included. `transparent`
+    /// byte positions are crossed by the boundary walk as if they
+    /// were word chars (used for soft-wrap `\n` so a word broken
+    /// across display rows selects as one unit); must be sorted
+    /// ascending. Cursor lands at the last char of the selection so
+    /// the visual-range render covers the whole word.
     pub fn select_big_word_at_transparent(
         &mut self,
         cpos: usize,
@@ -951,18 +936,6 @@ impl Window {
         } else if cursor_line >= scroll_top + viewport {
             self.scroll_top = (cursor_line + 1 - viewport) as u16;
         }
-    }
-
-    /// If `follow_tail` is set, snap `scroll_top` to the last viewport
-    /// of `total_rows`. Generalizes the transcript's tail-follow auto-
-    /// snap so any append-only buffer surface can opt in via
-    /// `follow_tail = true`.
-    pub fn snap_to_bottom_if_following(&mut self, total_rows: usize, viewport_rows: u16) {
-        if !self.follow_tail {
-            return;
-        }
-        let viewport = viewport_rows as usize;
-        self.scroll_top = total_rows.saturating_sub(viewport) as u16;
     }
 
     pub fn scroll_by_lines(
