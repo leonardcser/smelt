@@ -346,8 +346,8 @@ async fn main() {
     // Create shared runtime approvals and load workspace rules.
     let runtime_approvals = {
         let cwd_str = cwd.to_string_lossy();
-        let rules = tui::workspace_permissions::load(&cwd_str);
-        let (ws_tools, ws_dirs) = tui::workspace_permissions::into_approvals(&rules);
+        let rules = tui::permissions::store::load(&cwd_str);
+        let (ws_tools, ws_dirs) = tui::permissions::store::into_approvals(&rules);
         let mut rt = engine::permissions::RuntimeApprovals::new();
         rt.load_workspace(ws_tools, ws_dirs);
         Arc::new(std::sync::RwLock::new(rt))
