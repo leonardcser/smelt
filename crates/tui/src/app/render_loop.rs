@@ -258,6 +258,7 @@ impl App {
                 stash: &self.input.stash,
                 input: &self.input,
                 vim_mode: self.vim_mode,
+                clipboard: &self.clipboard,
                 prediction,
                 width: term_w,
                 height: prompt_height,

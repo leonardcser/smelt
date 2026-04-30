@@ -1,16 +1,10 @@
 mod agent;
-pub mod commands;
-mod headless;
-mod transcript;
-pub(crate) mod transcript_cache;
-pub(crate) mod transcript_model;
-pub(crate) mod transcript_present;
-pub(crate) mod working;
-pub(crate) use commands::copy_to_clipboard;
 mod cmdline;
+pub mod commands;
 mod content_keys;
 pub(crate) mod dialogs;
 mod events;
+mod headless;
 mod history;
 mod lua_bridge;
 mod lua_handlers;
@@ -18,6 +12,11 @@ mod mouse;
 mod pane_focus;
 mod render_loop;
 mod status_bar;
+mod transcript;
+pub(crate) mod transcript_cache;
+pub(crate) mod transcript_model;
+pub(crate) mod transcript_present;
+pub(crate) mod working;
 
 pub use headless::{ColorMode, OutputFormat};
 
@@ -321,6 +320,11 @@ pub struct App {
     /// via `VimContext.mode` and `MouseCtx.vim_mode`. Defaults to
     /// `Insert`, matching `Vim::new`'s historical default.
     pub vim_mode: ui::VimMode,
+    /// **Single global** clipboard subsystem (kill ring + platform
+    /// sink). Vim and emacs yank/paste sites borrow this directly so
+    /// the prompt, the transcript, dialog inputs, and any future Lua
+    /// tools share one kill ring backed by the same system clipboard.
+    pub clipboard: ui::Clipboard,
     /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
     /// user-registered commands / keymaps / autocmds.
     pub lua: crate::lua::LuaRuntime,
@@ -766,6 +770,7 @@ impl App {
             drag_on_scrollbar: None,
             prompt_drag_return_vim_mode: None,
             vim_mode: ui::VimMode::Insert,
+            clipboard: ui::Clipboard::new(Box::new(commands::SystemSink)),
             lua: crate::lua::LuaRuntime::new(),
             extra_instructions: None,
             skill_section: None,
@@ -1237,16 +1242,10 @@ impl App {
             // a borrow on `self` that conflicts with other branches.
             let now = Instant::now();
             let yank_flash_active = self
-                .input
-                .win
+                .clipboard
                 .kill_ring
                 .yank_flash_until()
-                .is_some_and(|t| t > now)
-                || self
-                    .transcript_window
-                    .kill_ring
-                    .yank_flash_until()
-                    .is_some_and(|t| t > now);
+                .is_some_and(|t| t > now);
             let has_animation = self.ui.focused_overlay().is_some()
                 || self.has_active_exec()
                 || self.working.is_animating()

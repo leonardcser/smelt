@@ -133,7 +133,7 @@ impl PromptState {
         self.recompute_completer();
     }
 
-    pub(super) fn kill_to_end_of_line(&mut self) {
+    pub(super) fn kill_to_end_of_line(&mut self, clipboard: &mut ui::Clipboard) {
         let end = self.win.edit_buf.buf[self.win.cpos..]
             .find('\n')
             .map(|i| self.win.cpos + i)
@@ -141,11 +141,11 @@ impl PromptState {
         let killed = self.win.edit_buf.buf[self.win.cpos..end].to_string();
         self.remove_attachments_in_range(self.win.cpos, end);
         self.win.edit_buf.buf.drain(self.win.cpos..end);
-        self.kill_and_copy(killed);
+        self.kill_and_copy(killed, clipboard);
         self.recompute_completer();
     }
 
-    pub(super) fn kill_to_start_of_line(&mut self) {
+    pub(super) fn kill_to_start_of_line(&mut self, clipboard: &mut ui::Clipboard) {
         let start = self.win.edit_buf.buf[..self.win.cpos]
             .rfind('\n')
             .map(|i| i + 1)
@@ -154,7 +154,7 @@ impl PromptState {
         self.remove_attachments_in_range(start, self.win.cpos);
         self.win.edit_buf.buf.drain(start..self.win.cpos);
         self.win.cpos = start;
-        self.kill_and_copy(killed);
+        self.kill_and_copy(killed, clipboard);
         self.recompute_completer();
     }
 
@@ -392,10 +392,10 @@ impl PromptState {
     /// Records the clipboard write on the kill ring so subsequent
     /// pastes know this is *our* latest push (distinguished from an
     /// externally-updated clipboard).
-    pub(super) fn kill_and_copy(&mut self, text: String) {
-        if !text.is_empty() && crate::app::copy_to_clipboard(&text).is_ok() {
-            self.win.kill_ring.record_clipboard_write(text.clone());
+    pub(super) fn kill_and_copy(&mut self, text: String, clipboard: &mut ui::Clipboard) {
+        if !text.is_empty() && clipboard.write(&text).is_ok() {
+            clipboard.kill_ring.record_clipboard_write(text.clone());
         }
-        self.win.kill_ring.kill(text);
+        clipboard.kill_ring.kill(text);
     }
 }

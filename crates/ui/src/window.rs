@@ -1,7 +1,7 @@
 use crate::buffer::Buffer;
+use crate::clipboard::Clipboard;
 use crate::edit_buffer::EditBuffer;
 use crate::grid::{GridSlice, Style};
-use crate::kill_ring::KillRing;
 use crate::layout::{Gutters, Rect};
 use crate::text::{byte_to_cell, cell_to_byte};
 use crate::theme::Theme;
@@ -262,7 +262,6 @@ pub struct Window {
     pub cpos: usize,
     pub vim: Option<Vim>,
     pub win_cursor: WindowCursor,
-    pub kill_ring: KillRing,
     pub scroll_top: u16,
     pub cursor_line: u16,
     pub cursor_col: u16,
@@ -306,7 +305,6 @@ impl Window {
             cpos: 0,
             vim: None,
             win_cursor: WindowCursor::new(),
-            kill_ring: KillRing::new(),
             scroll_top: 0,
             cursor_line: 0,
             cursor_col: 0,
@@ -784,12 +782,13 @@ impl Window {
         rows: &[String],
         viewport_rows: u16,
         mode: &mut VimMode,
+        clipboard: &mut Clipboard,
     ) -> Option<Option<String>> {
         if rows.is_empty() {
             return None;
         }
         let offsets = self.mount(rows);
-        if !self.dispatch_vim_key(k, mode) {
+        if !self.dispatch_vim_key(k, mode, clipboard) {
             return None;
         }
         if let Some(vim) = self.vim.as_mut() {
@@ -797,18 +796,23 @@ impl Window {
                 vim.set_mode(mode, VimMode::Normal);
             }
         }
-        let yanked = self.kill_ring.current().to_string();
+        let yanked = clipboard.kill_ring.current().to_string();
         let yanked = if yanked.is_empty() {
             None
         } else {
-            self.kill_ring.set_with_linewise(String::new(), false);
+            clipboard.kill_ring.set_with_linewise(String::new(), false);
             Some(yanked)
         };
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         Some(yanked)
     }
 
-    fn dispatch_vim_key(&mut self, key: KeyEvent, mode: &mut VimMode) -> bool {
+    fn dispatch_vim_key(
+        &mut self,
+        key: KeyEvent,
+        mode: &mut VimMode,
+        clipboard: &mut Clipboard,
+    ) -> bool {
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
@@ -833,19 +837,12 @@ impl Window {
         };
         vim.set_curswant(self.win_cursor.curswant());
         let mut cpos = self.cpos;
-        // The transcript pushes yanked text to the clipboard at the
-        // caller (`content_keys::handle_content_vim_key`) because it
-        // needs `copy_display_range` to convert rendered text back to
-        // raw markdown. Using `NullClipboard` here avoids a redundant
-        // raw-text push from `yank_range`.
-        let mut clipboard = crate::clipboard::NullClipboard;
         let mut ctx = VimContext {
             buf: &mut self.edit_buf.buf,
             cpos: &mut cpos,
             attachments: &mut self.edit_buf.attachment_ids,
-            kill_ring: &mut self.kill_ring,
             history: &mut self.edit_buf.history,
-            clipboard: &mut clipboard,
+            clipboard,
             mode,
         };
         let action = vim.handle_key(key, &mut ctx);

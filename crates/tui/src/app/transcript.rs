@@ -764,7 +764,7 @@ impl App {
             );
         let anchor_set = self.transcript_window.win_cursor.anchor().is_some();
         let yank_flash = self
-            .transcript_window
+            .clipboard
             .kill_ring
             .yank_flash_range(std::time::Instant::now())
             .is_some();
@@ -792,7 +792,7 @@ impl App {
         // briefly paints over the yanked text after `y`-family vim ops
         // (mirrors nvim's `vim.highlight.on_yank`).
         let (s, e) = match active_selection.or_else(|| {
-            self.transcript_window
+            self.clipboard
                 .kill_ring
                 .yank_flash_range(std::time::Instant::now())
         }) {

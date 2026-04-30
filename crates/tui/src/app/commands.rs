@@ -513,13 +513,12 @@ pub(crate) fn paste_from_clipboard() -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
-/// `ui::clipboard::Clipboard` impl backed by the platform subprocess
-/// helpers. Passed into `VimContext` so vim yank / paste sites can
-/// read and write the system clipboard without pulling subprocess
-/// plumbing into the `ui` crate.
-pub(crate) struct SystemClipboard;
+/// `ui::Sink` impl backed by the platform subprocess helpers. Owned
+/// by the App-level `ui::Clipboard` so vim yank / paste sites push
+/// through the same path the prompt and transcript already use.
+pub(crate) struct SystemSink;
 
-impl ui::clipboard::Clipboard for SystemClipboard {
+impl ui::Sink for SystemSink {
     fn read(&mut self) -> Option<String> {
         paste_from_clipboard()
     }
