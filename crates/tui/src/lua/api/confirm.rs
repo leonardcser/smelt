@@ -28,7 +28,7 @@ use crate::app::dialogs::confirm;
 use crate::app::transcript_model::{ApprovalScope, ConfirmChoice};
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
-pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let confirm_tbl = lua.create_table()?;
 
     // smelt.confirm._render_title(buf_id, handle_id) — fill an

@@ -10,6 +10,7 @@ mod buf;
 mod cell;
 mod clipboard;
 mod cmd;
+mod confirm;
 mod diff;
 mod engine;
 mod fuzzy;
@@ -118,7 +119,7 @@ impl LuaRuntime {
         bash::register(lua, &smelt)?;
         notebook::register(lua, &smelt)?;
         // smelt.confirm.* primitives consumed by confirm.lua.
-        crate::lua::confirm_ops::register(lua, &smelt)?;
+        confirm::register(lua, &smelt)?;
 
         lua.globals().set("smelt", smelt)?;
 
