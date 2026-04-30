@@ -64,11 +64,7 @@ pub(crate) struct RustCommand {
     pub handler: fn(&mut TuiApp, Option<String>) -> CommandAction,
 }
 
-pub(crate) const RUST_COMMANDS: &[RustCommand] = &[RustCommand {
-    name: "compact",
-    desc: Some("compact conversation history"),
-    handler: cmd_compact,
-}];
+pub(crate) const RUST_COMMANDS: &[RustCommand] = &[];
 
 /// Visible `(name, desc)` pairs for the `/` completer. Hidden aliases
 /// (`/q`, `/qa`, …) are filtered out.
@@ -82,12 +78,6 @@ pub(crate) fn rust_command_items() -> impl Iterator<Item = (&'static str, &'stat
 /// command. Aliases included.
 pub(crate) fn is_rust_command(name: &str) -> bool {
     RUST_COMMANDS.iter().any(|c| c.name == name)
-}
-
-fn cmd_compact(_: &mut TuiApp, arg: Option<String>) -> CommandAction {
-    CommandAction::Compact {
-        instructions: arg.filter(|s| !s.is_empty()),
-    }
 }
 
 impl TuiApp {
