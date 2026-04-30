@@ -921,41 +921,57 @@ impl Buffer {
         }
     }
 
-    pub fn virtual_text_at(&self, line: usize) -> Option<VirtualText> {
-        let state = self.extmarks.ns(self.ns_virt_text)?;
-        for mark in state.extmarks.values() {
-            if mark.start_row != line {
+    /// Walk every namespace whose extmarks carry virt-text payloads
+    /// (not just `ns_virt_text`). Cross-namespace ordering is namespace-id
+    /// ascending so later-created namespaces paint after earlier ones;
+    /// within a namespace, BTreeMap iteration is by extmark id —
+    /// insertion order — so virt_texts from a single source paint in
+    /// registration order. Mirrors the `highlights_at` precedent.
+    pub fn virtual_text_at(&self, line: usize) -> Vec<VirtualText> {
+        let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
+        ns_ids.sort_by_key(|n| n.0);
+        let mut out = Vec::new();
+        for ns in ns_ids {
+            let Some(state) = self.extmarks.ns(ns) else {
                 continue;
-            }
-            if let ExtmarkPayload::VirtText { text, hl_group } = &mark.payload {
-                return Some(VirtualText {
-                    line: mark.start_row,
-                    col: mark.start_col,
-                    text: text.clone(),
-                    hl_group: hl_group.clone(),
-                });
+            };
+            for mark in state.extmarks.values() {
+                if mark.start_row != line {
+                    continue;
+                }
+                if let ExtmarkPayload::VirtText { text, hl_group } = &mark.payload {
+                    out.push(VirtualText {
+                        line: mark.start_row,
+                        col: mark.start_col,
+                        text: text.clone(),
+                        hl_group: hl_group.clone(),
+                    });
+                }
             }
         }
-        None
+        out
     }
 
     pub fn virtual_text(&self) -> Vec<VirtualText> {
-        let Some(state) = self.extmarks.ns(self.ns_virt_text) else {
-            return Vec::new();
-        };
-        state
-            .extmarks
-            .values()
-            .filter_map(|m| match &m.payload {
-                ExtmarkPayload::VirtText { text, hl_group } => Some(VirtualText {
-                    line: m.start_row,
-                    col: m.start_col,
-                    text: text.clone(),
-                    hl_group: hl_group.clone(),
-                }),
-                _ => None,
-            })
-            .collect()
+        let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
+        ns_ids.sort_by_key(|n| n.0);
+        let mut out = Vec::new();
+        for ns in ns_ids {
+            let Some(state) = self.extmarks.ns(ns) else {
+                continue;
+            };
+            for mark in state.extmarks.values() {
+                if let ExtmarkPayload::VirtText { text, hl_group } = &mark.payload {
+                    out.push(VirtualText {
+                        line: mark.start_row,
+                        col: mark.start_col,
+                        text: text.clone(),
+                        hl_group: hl_group.clone(),
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub fn set_mark(&mut self, name: String, line: usize, col: usize) {
@@ -1078,9 +1094,27 @@ mod tests {
     fn virtual_text_lifecycle() {
         let mut buf = make_buf();
         buf.set_virtual_text(0, "ghost".into(), None);
-        assert!(buf.virtual_text_at(0).is_some());
+        assert_eq!(buf.virtual_text_at(0).len(), 1);
+        assert_eq!(buf.virtual_text_at(0)[0].text, "ghost");
         buf.clear_virtual_text(0);
-        assert!(buf.virtual_text_at(0).is_none());
+        assert!(buf.virtual_text_at(0).is_empty());
+    }
+
+    #[test]
+    fn virtual_text_at_walks_every_namespace_in_nsid_order() {
+        // Two namespaces both anchor virt_text on row 0; the
+        // later-registered namespace appears after the earlier one in
+        // the returned Vec — same paint-order rule as `highlights_at`.
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["hi".into()]);
+        let ns_a = buf.create_namespace("a");
+        let ns_b = buf.create_namespace("b");
+        buf.set_extmark(ns_a, 0, 0, ExtmarkOpts::virt_text("from-a".into(), None));
+        buf.set_extmark(ns_b, 0, 0, ExtmarkOpts::virt_text("from-b".into(), None));
+        let vts = buf.virtual_text_at(0);
+        assert_eq!(vts.len(), 2);
+        assert_eq!(vts[0].text, "from-a");
+        assert_eq!(vts[1].text, "from-b");
     }
 
     #[test]

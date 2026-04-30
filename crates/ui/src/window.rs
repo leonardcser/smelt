@@ -1047,6 +1047,26 @@ impl Window {
                     slice.set(col, row, ch, style);
                 }
             }
+            // Virtual text painting: walk virt_text extmarks anchored
+            // on this row and overwrite cells starting at the
+            // extmark's `col`. Style resolves the extmark's `hl_group`
+            // through the theme (missing → `Style::default()`) and
+            // layers on top of `row_style` so cursor-row highlight
+            // bg shows through when the virt_text style omits bg.
+            for vt in buf.virtual_text_at(idx) {
+                let base = vt
+                    .hl_group
+                    .as_deref()
+                    .map(|g| ctx.theme.get(g))
+                    .unwrap_or_default();
+                let style = merge_styles(row_style, base);
+                for (col, ch) in (vt.col as u16..).zip(vt.text.chars()) {
+                    if col >= width {
+                        break;
+                    }
+                    slice.set(col, row, ch, style);
+                }
+            }
         }
 
         if let Some(viewport) = self.viewport {
@@ -1110,6 +1130,22 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
             track_style
         };
         slice.set(local_col, row_offset + row, ' ', style);
+    }
+}
+
+/// Layer a foreground `Style` on top of a base `Style`. Same merge
+/// rule as `merge_span_style` but for full `Style` values (used by
+/// virt-text painting where the extmark's `hl_group` resolves through
+/// the theme to a `Style`, not a `SpanStyle`).
+fn merge_styles(base: Style, top: Style) -> Style {
+    Style {
+        fg: top.fg.or(base.fg),
+        bg: top.bg.or(base.bg),
+        bold: base.bold || top.bold,
+        dim: base.dim || top.dim,
+        italic: base.italic || top.italic,
+        underline: base.underline || top.underline,
+        crossedout: base.crossedout || top.crossedout,
     }
 }
 
@@ -1480,6 +1516,125 @@ mod tests {
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
         w.render(&buf, &mut slice, &ctx);
         assert_eq!(grid.cell(0, 0).style.bg, bg.bg);
+    }
+
+    #[test]
+    fn render_paints_virt_text_after_line_content() {
+        // Set virt_text at col=2 ("hi") on row 0 — paints over the
+        // cells starting at col 2 with the virt_text characters.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["abc".into()]);
+        buf.set_virtual_text(0, "ghost".into(), None);
+        // `set_virtual_text` anchors at col=0; rewrite that extmark to
+        // anchor at col=3 (past line end) so it paints in the trailing
+        // space cells.
+        buf.clear_virtual_text(0);
+        let ns = buf.create_namespace("test");
+        buf.set_extmark(
+            ns,
+            0,
+            3,
+            crate::buffer::ExtmarkOpts::virt_text("xy".into(), None),
+        );
+        let w = make_win();
+        let theme = Theme::default();
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme,
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+        // Line content paints first (a, b, c) then virt_text starting
+        // at col 3 paints "xy".
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(2, 0).symbol, 'c');
+        assert_eq!(grid.cell(3, 0).symbol, 'x');
+        assert_eq!(grid.cell(4, 0).symbol, 'y');
+    }
+
+    #[test]
+    fn render_virt_text_resolves_hl_group_through_theme() {
+        // virt_text with `hl_group = "Ghost"` picks up the theme's
+        // `Ghost` style (dim) when painting.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["".into()]);
+        buf.set_virtual_text(0, "ghost".into(), Some("Ghost".into()));
+        let w = make_win();
+        let mut theme = Theme::default();
+        theme.set("Ghost", crate::grid::Style::dim());
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme,
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+        assert_eq!(grid.cell(0, 0).symbol, 'g');
+        assert!(grid.cell(0, 0).style.dim);
+        assert!(grid.cell(4, 0).style.dim);
+        // No virt_text paints past col 5; cell still default.
+        assert!(!grid.cell(5, 0).style.dim);
+    }
+
+    #[test]
+    fn render_clips_virt_text_at_slice_width() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["".into()]);
+        buf.set_virtual_text(0, "abcdefghij".into(), None);
+        let w = make_win();
+        let theme = Theme::default();
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: false,
+            cursor_shape: CursorShape::Hidden,
+            theme,
+        };
+        let mut grid = Grid::new(5, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 5, 1));
+        w.render(&buf, &mut slice, &ctx);
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(4, 0).symbol, 'e');
+        // Slice is only 5 cells wide; the rest of "fghij" never
+        // reaches the grid.
+    }
+
+    #[test]
+    fn render_layers_virt_text_on_cursor_row_bg() {
+        // virt_text with no bg of its own, painted on the cursor-
+        // highlighted row, picks up the cursor row bg through the
+        // merge.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["".into()]);
+        buf.set_virtual_text(0, "g".into(), Some("Ghost".into()));
+        let mut w = make_win();
+        w.cursor_line_highlight = true;
+        w.cursor_line = 0;
+        let mut theme = Theme::default();
+        let bg = crate::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        theme.set("CursorLine", bg);
+        // Ghost group only sets `dim`, not bg/fg.
+        theme.set("Ghost", crate::grid::Style::dim());
+        let ctx = DrawContext {
+            terminal_width: 40,
+            terminal_height: 10,
+            focused: true,
+            cursor_shape: CursorShape::Hidden,
+            theme,
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+        assert_eq!(grid.cell(0, 0).symbol, 'g');
+        assert_eq!(grid.cell(0, 0).style.bg, bg.bg);
+        assert!(grid.cell(0, 0).style.dim);
     }
 
     #[test]
