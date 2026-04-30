@@ -303,8 +303,7 @@ impl App {
         }
 
         let line = spans_to_buffer_line(&mut spans, width, status_bg, theme_muted_fg);
-        let status_buf = self.status_buf;
-        if let Some(buf) = self.ui.buf_mut(status_buf) {
+        if let Some(buf) = self.ui.win_buf_mut(self.well_known.statusline) {
             buf.set_all_lines(vec![line.text]);
             buf.clear_highlights(0, 1);
             for span in line.spans {
