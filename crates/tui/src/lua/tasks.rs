@@ -179,7 +179,7 @@ impl LuaRuntime {
         self.record_error(format!("callback `{handle_id}`: {err}"));
     }
 
-    /// Record a pending invocation from inside `ui.handle_key` /
+    /// Record a pending invocation from inside `ui.dispatch_event` /
     /// `ui.fire_win_event`. The ui dispatcher holds `&mut Ui` while the
     /// callback would fire, so firing Lua immediately would deny Lua
     /// bindings access to `&mut App` (they'd collide with the ui
@@ -197,7 +197,7 @@ impl LuaRuntime {
     }
 
     /// Drain every queued callback invocation. Called by the host after
-    /// `ui.handle_key` / `ui.fire_win_event` returns, under an
+    /// `ui.dispatch_event` / `ui.fire_win_event` returns, under an
     /// [`crate::lua::install_app_ptr`] scope so each Lua body can reach
     /// `&mut App` through [`crate::lua::with_app`].
     pub fn drain_invocations(&self) -> Vec<crate::lua::PendingInvocation> {

@@ -6,7 +6,7 @@
 //!
 //! Callbacks are either Rust closures (`FnMut(&mut CallbackCtx) ->
 //! CallbackResult`) or Lua handles. Both run through the same
-//! dispatcher in `Ui::handle_key` / `Ui::fire_win_event`. Side
+//! dispatcher in `Ui::dispatch_event` / `Ui::fire_win_event`. Side
 //! effects flow through the app-owned `AppOp` queue that Rust
 //! callbacks see via their shared ops handle, or through direct
 //! `ui::Ui` mutations — no return channel for effect strings.
@@ -121,7 +121,7 @@ impl Payload {
 pub enum CallbackResult {
     /// Callback handled the event; no further routing.
     Consumed,
-    /// Callback passes; the dispatcher reports `KeyResult::Ignored`
+    /// Callback passes; the dispatcher reports `DispatchOutcome::Ignored`
     /// (for keymap callbacks) or does nothing (for event callbacks).
     Pass,
     /// Consumed, and additionally fire a `WinEvent` on the same

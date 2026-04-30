@@ -378,10 +378,18 @@ owns the `dispatch_event` slot:
   `Ui::fire_win_event` (matches `UiHost::fire_win_event` from
   ARCHITECTURE.md), freeing the name for the terminal-event entry.
   Mechanical rename.
-- **F.6b** — introduce `Ui::dispatch_event(Event)` taking the
-  unified terminal `Event` and fanning out to keymap routing
-  (today's `handle_key_with_lua`) plus mouse routing (today's
-  `app::mouse::dispatch_*`) plus resize / focus / blur.
+- **F.6b** ✅ — `Ui::dispatch_event(Event, lua_invoke) -> DispatchOutcome`
+  over the unified terminal `Event`. Folds key dispatch (modal Esc +
+  focused-window keymap, replacing `handle_key_with_lua`) plus resize
+  (`set_terminal_size` becomes a side effect of `Event::Resize`) plus
+  the Ui-shaped slice of mouse routing (wheel-on-overlay absorb +
+  active-modal click-outside absorb). `KeyResult` retires for
+  `DispatchOutcome { Consumed, Ignored }`. The remainder of mouse
+  routing — soft-wrap translation, scrollbar drag, click-count
+  tracking, prompt/transcript cursor positioning — stays App-side
+  pre-P2 (Ui returns `Ignored` so tui's `handle_mouse` continues
+  routing); the full fold lands when P2's `Host` / `UiHost` traits
+  exist.
 
 End of P1: `ui` compiles in isolation. Has unit tests against fake
 grids. `tui` is still red — it consumes the new shapes in P2.

@@ -57,7 +57,7 @@ impl App {
     }
 
     /// Drain the pending-invocation queue built up during
-    /// `ui.handle_key` / `ui.fire_win_event`. Each Lua callback fires
+    /// `ui.dispatch_event` / `ui.fire_win_event`. Each Lua callback fires
     /// under an `install_app_ptr` scope so its body can reach `&mut App`
     /// through `crate::lua::with_app`. Until a binding uses it, this is
     /// behaviour-neutral: callbacks just fire after the ui borrow

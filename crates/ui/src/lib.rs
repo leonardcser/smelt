@@ -27,10 +27,15 @@ pub type AttachmentId = u64;
 /// and the event payload.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
-/// Outcome of routing a key event through `Ui::handle_key_with_lua`.
-/// `Consumed` = handler ran; `Ignored` = no handler matched.
+/// Outcome of routing a terminal event through [`Ui::dispatch_event`].
+/// `Consumed` = Ui handled the event end-to-end (focused-window
+/// keymap fired, modal Esc dismissed, terminal resize applied,
+/// modal-gated mouse absorbed). `Ignored` = Ui did not consume; the
+/// host should route through its own paths (App-level chords,
+/// prompt/transcript mouse routing, paste side effects, terminal
+/// focus tracking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyResult {
+pub enum DispatchOutcome {
     Consumed,
     Ignored,
 }
@@ -955,25 +960,86 @@ impl Ui {
         &mut self.theme
     }
 
-    pub fn handle_key(
+    /// Single Ui-side entry point for terminal events. Fans out by
+    /// variant:
+    ///
+    /// - [`Event::Key`] — routes through the focused window's keymap
+    ///   table (resolved via [`Ui::focus`]). Bare Esc on an active
+    ///   modal fires [`WinEvent::Dismiss`] on the modal's root leaf
+    ///   and closes the modal as a built-in; subsequent variants
+    ///   route through the regular [`Callbacks`] registry so
+    ///   `on_event("dismiss", …)` handlers can flush pending state.
+    ///   `lua_invoke` is called for each `Callback::Lua` with
+    ///   (handle, win, payload); side effects flow through host-side
+    ///   plumbing.
+    /// - [`Event::Resize`] — applies to [`Ui::set_terminal_size`] and
+    ///   reports `Consumed`. Hosts may still do additional resize
+    ///   work (cache invalidation, layout adapters) on top.
+    /// - [`Event::Mouse`] — absorbs wheel events that drift over a
+    ///   focused overlay (so they don't bleed into the transcript
+    ///   below) and absorbs clicks/drags outside the rect of an
+    ///   active modal overlay. All other mouse routing (drag, click
+    ///   counts, scrollbar, prompt/transcript cursor positioning)
+    ///   stays host-side; Ui returns `Ignored` so the host can
+    ///   continue routing.
+    /// - [`Event::FocusGained`] / [`Event::FocusLost`] /
+    ///   [`Event::Paste`] — Ui has no state to update; returns
+    ///   `Ignored` so hosts can track terminal focus / drive
+    ///   paste-side effects.
+    ///
+    /// [`Event::Key`]: crossterm::event::Event::Key
+    /// [`Event::Resize`]: crossterm::event::Event::Resize
+    /// [`Event::Mouse`]: crossterm::event::Event::Mouse
+    /// [`Event::FocusGained`]: crossterm::event::Event::FocusGained
+    /// [`Event::FocusLost`]: crossterm::event::Event::FocusLost
+    /// [`Event::Paste`]: crossterm::event::Event::Paste
+    pub fn dispatch_event(
         &mut self,
-        code: crossterm::event::KeyCode,
-        mods: crossterm::event::KeyModifiers,
-    ) -> KeyResult {
-        self.handle_key_with_lua(code, mods, &mut |_, _, _| {})
+        ev: crossterm::event::Event,
+        lua_invoke: &mut LuaInvoke,
+    ) -> DispatchOutcome {
+        use crossterm::event::{Event, KeyEvent, MouseEventKind};
+        match ev {
+            Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) => self.dispatch_key(code, modifiers, lua_invoke),
+            Event::Resize(w, h) => {
+                self.set_terminal_size(w, h);
+                DispatchOutcome::Consumed
+            }
+            Event::Mouse(me) => {
+                let is_scroll = matches!(
+                    me.kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight
+                );
+                if is_scroll && self.focused_overlay().is_some() {
+                    return DispatchOutcome::Consumed;
+                }
+                if let Some(modal_id) = self.active_modal() {
+                    let inside = self
+                        .overlay_hit_test(me.row, me.column, None)
+                        .is_some_and(|(id, _)| id == modal_id);
+                    if !inside {
+                        return DispatchOutcome::Consumed;
+                    }
+                }
+                DispatchOutcome::Ignored
+            }
+            // FocusGained / FocusLost / Paste, plus any future
+            // crossterm variants (the enum is `#[non_exhaustive]`).
+            _ => DispatchOutcome::Ignored,
+        }
     }
 
-    /// Dispatch a key event through the focused window's keymap
-    /// table. The focused `WinId` is resolved via [`Ui::focus`].
-    /// `lua_invoke` is called for each `Callback::Lua` with (handle,
-    /// payload). Side effects (app-level commands, etc.) flow through
-    /// `AppOp` from the host side.
-    pub fn handle_key_with_lua(
+    fn dispatch_key(
         &mut self,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
-    ) -> KeyResult {
+    ) -> DispatchOutcome {
         // Modal overlay built-in: bare Esc on an active modal closes
         // the topmost modal. Universal dismiss is fundamental
         // behaviour, not user-customisable. Before closing, fires
@@ -1002,11 +1068,11 @@ impl Ui {
                 if self.overlay(modal).is_some() {
                     let _ = self.overlay_close(modal);
                 }
-                return KeyResult::Consumed;
+                return DispatchOutcome::Consumed;
             }
         }
         let Some(win) = self.focus() else {
-            return KeyResult::Ignored;
+            return DispatchOutcome::Ignored;
         };
         let key = KeyBind::new(code, mods);
         // Pending follow-up dispatched after the keymap callback
@@ -1025,18 +1091,18 @@ impl Ui {
                     };
                     let r = inner(&mut ctx);
                     match r {
-                        CallbackResult::Consumed => KeyResult::Consumed,
-                        CallbackResult::Pass => KeyResult::Ignored,
+                        CallbackResult::Consumed => DispatchOutcome::Consumed,
+                        CallbackResult::Pass => DispatchOutcome::Ignored,
                         CallbackResult::Event(ev, payload) => {
                             follow_up = Some((ev, payload));
-                            KeyResult::Consumed
+                            DispatchOutcome::Consumed
                         }
                     }
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
                     lua_invoke(*handle, win, &payload);
-                    KeyResult::Consumed
+                    DispatchOutcome::Consumed
                 }
             };
             self.callbacks.restore_keymap(win, key, cb);
@@ -1051,24 +1117,24 @@ impl Ui {
                     };
                     let r = inner(&mut ctx);
                     match r {
-                        CallbackResult::Consumed => KeyResult::Consumed,
-                        CallbackResult::Pass => KeyResult::Ignored,
+                        CallbackResult::Consumed => DispatchOutcome::Consumed,
+                        CallbackResult::Pass => DispatchOutcome::Ignored,
                         CallbackResult::Event(ev, payload) => {
                             follow_up = Some((ev, payload));
-                            KeyResult::Consumed
+                            DispatchOutcome::Consumed
                         }
                     }
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
                     lua_invoke(*handle, win, &payload);
-                    KeyResult::Consumed
+                    DispatchOutcome::Consumed
                 }
             };
             self.callbacks.restore_key_fallback(win, cb);
             r
         } else {
-            KeyResult::Ignored
+            DispatchOutcome::Ignored
         };
 
         if let Some((ev, payload)) = follow_up {
@@ -1262,6 +1328,21 @@ mod tests {
         let mut ui = Ui::new();
         ui.set_terminal_size(80, 24);
         ui
+    }
+
+    /// Dispatch a bare key through `Ui::dispatch_event` with a no-op
+    /// `lua_invoke`. The Lua-runtime collaboration is exercised by
+    /// the `tui` integration tests; tests here only assert on
+    /// dispatcher behaviour.
+    fn dispatch_key(
+        ui: &mut Ui,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+    ) -> DispatchOutcome {
+        ui.dispatch_event(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(code, mods)),
+            &mut |_, _, _| {},
+        )
     }
 
     /// Open a Buffer-backed split Window at `win_id` and append it as
@@ -2096,11 +2177,12 @@ mod tests {
             ),
             cb,
         );
-        let result = ui.handle_key(
+        let result = dispatch_key(
+            &mut ui,
             crossterm::event::KeyCode::Char('q'),
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(result, DispatchOutcome::Consumed);
         assert!(ui.overlay(oid).is_none());
     }
 
@@ -2151,34 +2233,37 @@ mod tests {
             })),
         );
 
-        let result = ui.handle_key(
+        let result = dispatch_key(
+            &mut ui,
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(result, DispatchOutcome::Consumed);
         assert_eq!(*observed.lock().unwrap(), vec![7]);
     }
 
     #[test]
-    fn handle_key_esc_closes_active_modal() {
+    fn dispatch_event_esc_closes_active_modal() {
         let mut ui = make_ui();
         let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
         assert_eq!(ui.active_modal(), Some(id));
-        let result = ui.handle_key(
+        let result = dispatch_key(
+            &mut ui,
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(result, DispatchOutcome::Consumed);
         assert_eq!(ui.active_modal(), None);
     }
 
     #[test]
-    fn handle_key_esc_with_modifiers_does_not_dismiss_modal() {
+    fn dispatch_event_esc_with_modifiers_does_not_dismiss_modal() {
         let mut ui = make_ui();
         let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
         // Esc + Shift falls through to normal dispatch — built-in
         // dismiss is bare Esc only.
-        let _ = ui.handle_key(
+        let _ = dispatch_key(
+            &mut ui,
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::SHIFT,
         );
@@ -2211,11 +2296,12 @@ mod tests {
                 CallbackResult::Consumed
             })),
         );
-        let result = ui.handle_key(
+        let result = dispatch_key(
+            &mut ui,
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(result, DispatchOutcome::Consumed);
         assert_eq!(*count.lock().unwrap(), 1);
         assert!(ui.overlay(id).is_none());
     }
