@@ -87,47 +87,50 @@ impl TuiApp {
     /// Execute a command while the agent is running.
     /// Returns the `EventOutcome` to use, or `None` to queue as a message.
     pub(super) fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
-        // Not a command — will be queued as a user message.
-        // Skip shell escape check for pasted content
         let is_from_paste = self.input.skip_shell_escape();
-        if !input.starts_with('/')
-            && (!input.starts_with('!') || is_from_paste)
-            && !matches!(input, ":q" | ":qa" | ":wq" | ":wqa")
-        {
-            return None;
-        }
-        if input.starts_with('/') && !crate::completer::Completer::is_command(input) {
-            return None;
+
+        // Shell escape — `! cmd` (skipped while pasting). Dispatched
+        // unconditionally; `run_command` spawns the subprocess.
+        if input.starts_with('!') && !is_from_paste {
+            return match run_command(self, input) {
+                CommandAction::Exec(rx, kill) => Some(EventOutcome::Exec(rx, kill)),
+                CommandAction::Continue => Some(EventOutcome::Noop),
+            };
         }
 
-        // Custom commands need their own agent turn — queue them like regular
-        // messages so they run after the current turn finishes.
-        if input.starts_with('/') && crate::custom_commands::is_custom_command(input) {
+        // Slash- or colon-prefixed command. `:` is a vim-style alias for
+        // `/`; both dispatch through the same Lua registry. Anything else
+        // is queued as a regular user message.
+        let normalized = if let Some(rest) = input.strip_prefix(':') {
+            format!("/{rest}")
+        } else if input.starts_with('/') {
+            input.to_string()
+        } else {
+            return None;
+        };
+
+        if !crate::completer::Completer::is_command(&normalized) {
+            return None;
+        }
+        // Custom commands need their own agent turn — queue them so they
+        // run after the current turn finishes.
+        if crate::custom_commands::is_custom_command(&normalized) {
             return None;
         }
 
         // Access control: a command opts out of mid-turn execution
         // by registering with `{ while_busy = false }` (e.g. /compact,
-        // /fork, /resume). Shell escapes (`!cmd`) and the vim quit
-        // aliases (`:q`, `:qa`, `:wq`, `:wqa`) bypass this lookup —
-        // they aren't `/`-commands.
-        if let Some(rest) = input.strip_prefix('/') {
-            let name = rest
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('/');
-            if !name.is_empty() && self.core.lua.command_blocks_while_busy(name) == Some(true) {
-                self.notify_error(format!("cannot run /{name} while agent is working"));
-                return Some(EventOutcome::Noop);
-            }
+        // /fork, /resume).
+        let name = normalized
+            .strip_prefix('/')
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("");
+        if !name.is_empty() && self.core.lua.command_blocks_while_busy(name) == Some(true) {
+            self.notify_error(format!("cannot run /{name} while agent is working"));
+            return Some(EventOutcome::Noop);
         }
 
-        // Delegate to the unified handler. Lua command bodies do their
-        // own side effects via `with_app` (`smelt.quit`, `smelt.session.*`,
-        // ...); the only `CommandAction` left to forward up is `Exec` for
-        // shell escapes (`! cmd`).
-        match run_command(self, input) {
+        match run_command(self, &normalized) {
             CommandAction::Exec(rx, kill) => Some(EventOutcome::Exec(rx, kill)),
             CommandAction::Continue => Some(EventOutcome::Noop),
         }
