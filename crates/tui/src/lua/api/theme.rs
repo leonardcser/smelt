@@ -32,6 +32,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
     theme_tbl.set(
+        "link",
+        lua.create_function(|_, (from, to): (String, String)| {
+            crate::lua::with_ui_host(|host| host.ui().theme_mut().link(from, to));
+            Ok(())
+        })?,
+    )?;
+    theme_tbl.set(
         "snapshot",
         lua.create_function(|lua, ()| {
             let t = lua.create_table()?;
