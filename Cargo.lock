@@ -2894,6 +2894,7 @@ dependencies = [
  "base64",
  "crossterm",
  "dirs",
+ "ego-tree",
  "engine",
  "flate2",
  "futures-core",
@@ -2903,6 +2904,7 @@ dependencies = [
  "mlua",
  "protocol",
  "reqwest",
+ "scraper",
  "seahash",
  "serde",
  "serde_json",
@@ -2915,6 +2917,7 @@ dependencies = [
  "two-face",
  "ui",
  "unicode-width",
+ "url",
  "vt100",
 ]
 
