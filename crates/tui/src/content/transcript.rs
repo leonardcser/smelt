@@ -548,32 +548,8 @@ impl Transcript {
 
     // ── Accessors ─────────────────────────────────────────────────────
 
-    pub fn block_count(&self) -> usize {
-        self.history.len()
-    }
-
-    pub fn blocks(&self) -> Vec<Block> {
-        self.history
-            .order
-            .iter()
-            .filter_map(|id| self.history.blocks.get(id).cloned())
-            .collect()
-    }
-
-    pub fn tool_states_snapshot(&self) -> HashMap<String, ToolState> {
-        self.history.tool_states.clone()
-    }
-
     pub fn block(&self, id: BlockId) -> Option<&Block> {
         self.history.blocks.get(&id)
-    }
-
-    pub fn has_history(&self) -> bool {
-        !self.history.is_empty()
-    }
-
-    pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
-        self.history.tool_states.get(call_id)
     }
 
     pub fn block_view_state(&self, id: BlockId) -> ViewState {
@@ -586,25 +562,6 @@ impl Transcript {
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.history.drain_finished_blocks()
-    }
-
-    pub fn set_tool_state(&mut self, call_id: String, state: ToolState) {
-        self.history.tool_states.insert(call_id, state);
-    }
-
-    pub fn update_tool_state(
-        &mut self,
-        call_id: &str,
-        mutator: impl FnOnce(&mut ToolState),
-    ) -> bool {
-        let Some(state) = self.history.tool_states.get_mut(call_id) else {
-            return false;
-        };
-        mutator(state);
-        if let Some(id) = self.history.tool_block_id(call_id) {
-            self.history.invalidate_block_layout(id);
-        }
-        true
     }
 
     // ── Mutations ─────────────────────────────────────────────────────
