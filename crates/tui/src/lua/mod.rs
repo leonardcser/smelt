@@ -922,6 +922,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/quit.lua"),
     ),
     (
+        "smelt.plugins.compact",
+        include_str!("../../../../runtime/lua/smelt/plugins/compact.lua"),
+    ),
+    (
         "smelt.colorschemes.default",
         include_str!("../../../../runtime/lua/smelt/colorschemes/default.lua"),
     ),
@@ -949,6 +953,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.stats",
     "smelt.plugins.session",
     "smelt.plugins.quit",
+    "smelt.plugins.compact",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

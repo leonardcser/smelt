@@ -102,7 +102,7 @@ to invoke_ the feature.
 | `/quit`, `/exit`, `:q`, `:qa`, `:wq`, `:wqa`      | `runtime/lua/smelt/plugins/quit.lua` | P4.e                          | working — Lua command (`7c028d8`); flips `pending_quit` via `smelt.quit()` |
 | `/rewind`                                         | `plugins/rewind.lua`              | P4.d → `dialogs/rewind.lua`      | working |
 | `/resume`                                         | `plugins/resume.lua`              | P4.d → `dialogs/resume.lua`      | working |
-| `/compact [instructions]`                         | `app/commands.rs::cmd_compact`    | P4.e                             | working |
+| `/compact [instructions]`                         | `runtime/lua/smelt/plugins/compact.lua` | P4.e                       | working — Lua command (`abe9ed0`); wraps `smelt.engine.compact` |
 | `/fork`, `/branch`                                | `runtime/lua/smelt/plugins/session.lua` | P4.e                       | working — Lua command (`04f6419`); calls `smelt.session.fork()` |
 | `/model [provider/model]`                         | `plugins/model.lua`               | P4.e                             | working |
 | `/settings`                                       | `plugins/settings.lua`            | P4.e                             | working |
