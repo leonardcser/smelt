@@ -8,7 +8,7 @@ impl App {
     /// message; `content` is what gets sent to the engine. Both are scrubbed
     /// so the UI and the LLM see the same redacted form.
     pub(super) fn redact_user_submission(&self, content: &mut Content, display: &mut String) {
-        if self.settings.redact_secrets {
+        if self.config.settings.redact_secrets {
             engine::redact::redact_content(content);
             *display = engine::redact::redact(display);
         }
@@ -29,8 +29,8 @@ impl App {
     pub(super) fn sync_session_snapshot(&mut self) {
         self.session.messages = self.history.clone();
         self.session.updated_at_ms = session::now_ms();
-        self.session.mode = Some(self.mode.as_str().to_string());
-        self.session.reasoning_effort = Some(self.reasoning_effort);
+        self.session.mode = Some(self.config.mode.as_str().to_string());
+        self.session.reasoning_effort = Some(self.config.reasoning_effort);
         self.session.model = Some(self.current_model_key());
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(self.session.clone());
@@ -41,16 +41,17 @@ impl App {
     /// resuming a session restores the same provider (auth method), even
     /// when the same model name is configured under multiple providers.
     fn current_model_key(&self) -> String {
-        self.available_models
+        self.config
+            .available_models
             .iter()
             .find(|m| {
-                m.model_name == self.model
-                    && m.api_base == self.api_base
-                    && m.api_key_env == self.api_key_env
-                    && m.provider_type == self.provider_type
+                m.model_name == self.config.model
+                    && m.api_base == self.config.api_base
+                    && m.api_key_env == self.config.api_key_env
+                    && m.provider_type == self.config.provider_type
             })
             .map(|m| m.key.clone())
-            .unwrap_or_else(|| self.model.clone())
+            .unwrap_or_else(|| self.config.model.clone())
     }
 
     /// Record current token count and cost so they can be restored on rewind.
@@ -123,14 +124,16 @@ impl App {
             self.set_reasoning_effort(effort);
         }
         // Only restore model/API settings if not overridden by CLI.
-        if !self.cli_model_override && !self.cli_api_base_override && !self.cli_api_key_env_override
+        if !self.config.cli_model_override
+            && !self.config.cli_api_base_override
+            && !self.config.cli_api_key_env_override
         {
             if let Some(ref model_key) = loaded.model {
                 // Prefer an exact key match so the original provider/auth method
                 // is restored. Fall back to a unique bare model name for
                 // sessions saved before the key was persisted.
                 let resolved_key =
-                    crate::config::resolve_model_ref(&self.available_models, model_key)
+                    crate::config::resolve_model_ref(&self.config.available_models, model_key)
                         .ok()
                         .map(|resolved| resolved.key.clone());
                 if let Some(key) = resolved_key {
@@ -405,7 +408,7 @@ impl App {
         self.sync_session_snapshot();
         // Skip persisting render/layout caches when redaction is enabled —
         // they contain raw source text from tool output that would leak secrets.
-        let (render_cache, layout_cache) = if self.settings.redact_secrets {
+        let (render_cache, layout_cache) = if self.config.settings.redact_secrets {
             (None, None)
         } else {
             (
@@ -538,10 +541,10 @@ impl App {
     }
 
     pub(super) fn maybe_auto_compact(&mut self) {
-        if !self.settings.auto_compact {
+        if !self.config.settings.auto_compact {
             return;
         }
-        let Some(ctx) = self.context_window else {
+        let Some(ctx) = self.config.context_window else {
             return;
         };
         let Some(tokens) = self.context_tokens else {

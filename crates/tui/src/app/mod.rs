@@ -1,4 +1,5 @@
 mod agent;
+pub(crate) mod app_config;
 mod cmdline;
 pub mod commands;
 pub(crate) mod confirms;
@@ -104,14 +105,14 @@ pub enum AgentTrackStatus {
 // ── App ──────────────────────────────────────────────────────────────────────
 
 pub struct App {
-    pub model: String,
-    pub api_base: String,
-    pub api_key_env: String,
-    pub provider_type: String,
-    pub reasoning_effort: ReasoningEffort,
-    pub reasoning_cycle: Vec<ReasoningEffort>,
-    pub mode: Mode,
-    pub mode_cycle: Vec<Mode>,
+    /// Connection + behaviour configuration: model / api_base /
+    /// api_key_env / provider_type / available_models / model_config /
+    /// cli_*overrides / mode / mode_cycle / reasoning_effort /
+    /// reasoning_cycle / settings / multi_agent / context_window.
+    /// Populated by `App::new` from CLI args + saved state, then
+    /// mutated by user actions (Shift+Tab cycles `mode`, `/model`
+    /// rewrites `model`, etc.).
+    pub config: app_config::AppConfig,
     /// Block history, tool states, layout cache — the committed transcript.
     pub(crate) transcript: crate::content::transcript::Transcript,
     /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
@@ -139,7 +140,6 @@ pub struct App {
     pub(crate) cwd: String,
     pub session: session::Session,
     pub shared_session: Arc<Mutex<Option<Session>>>,
-    pub context_window: Option<u32>,
     /// Latest observed input-token count for the active session.
     pub context_tokens: Option<u32>,
     /// Short task label (slug) shown on the status bar after the throbber.
@@ -209,15 +209,12 @@ pub struct App {
     /// render. Used by mouse hit-testing, transcript cursor positioning,
     /// and focus-mouse routing.
     pub(crate) transcript_viewport: Option<ui::WindowViewport>,
-    pub settings: state::ResolvedSettings,
-    pub multi_agent: bool,
     /// Human-readable name for this agent.
     pub agent_id: String,
     /// All tracked subagents (blocking and background).
     pub agents: Vec<TrackedAgent>,
     /// Shared agent snapshots for live dialog updates.
     pub agent_snapshots: crate::app::SharedSnapshots,
-    pub available_models: Vec<crate::config::ResolvedModel>,
     pub engine: EngineHandle,
     pub(crate) permissions: Arc<Permissions>,
     /// The active turn's state, or `None` when the app is idle.
@@ -260,14 +257,6 @@ pub struct App {
     pending_agent_blocks: Vec<(String, protocol::AgentBlockData)>,
     /// Accumulated cost for the current session in USD.
     pub session_cost_usd: f64,
-    /// Active model config (for pricing lookups).
-    pub model_config: engine::ModelConfig,
-    /// Whether model was explicitly provided via CLI (takes precedence over session).
-    cli_model_override: bool,
-    /// Whether api_base was explicitly provided via CLI (takes precedence over session).
-    cli_api_base_override: bool,
-    /// Whether api_key_env was explicitly provided via CLI (takes precedence over session).
-    cli_api_key_env_override: bool,
     startup_auth_error: Option<String>,
     /// App-level focus (Prompt = editing buffer; History = navigating transcript).
     pub app_focus: AppFocus,
@@ -663,14 +652,24 @@ impl App {
         };
 
         Self {
-            model,
-            api_base,
-            api_key_env,
-            provider_type,
-            reasoning_effort,
-            reasoning_cycle,
-            mode,
-            mode_cycle,
+            config: app_config::AppConfig {
+                model,
+                api_base,
+                api_key_env,
+                provider_type,
+                available_models,
+                model_config: engine::ModelConfig::default(),
+                cli_model_override,
+                cli_api_base_override,
+                cli_api_key_env_override,
+                mode,
+                mode_cycle,
+                reasoning_effort,
+                reasoning_cycle,
+                settings,
+                multi_agent,
+                context_window: None,
+            },
             transcript: crate::content::transcript::Transcript::new(),
             parser: crate::content::stream_parser::StreamParser::new(),
             transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
@@ -686,7 +685,6 @@ impl App {
             cwd,
             session: session::Session::new(),
             shared_session,
-            context_window: None,
             context_tokens: None,
             task_label: None,
             pending_dialog: false,
@@ -707,12 +705,9 @@ impl App {
             layout: content::layout::LayoutState::default(),
             prompt_viewport: None,
             transcript_viewport: None,
-            settings,
-            multi_agent,
             agent_id: String::new(),
             agents: Vec::new(),
             agent_snapshots: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            available_models,
             engine,
             permissions,
             agent: None,
@@ -737,10 +732,6 @@ impl App {
             pending_turn_meta: None,
             pending_agent_blocks: Vec::new(),
             session_cost_usd: 0.0,
-            model_config: engine::ModelConfig::default(),
-            cli_model_override,
-            cli_api_base_override,
-            cli_api_key_env_override,
             startup_auth_error,
             app_focus: AppFocus::Prompt,
             transcript_window: {
@@ -778,7 +769,7 @@ impl App {
         let cwd = std::path::Path::new(&self.cwd);
         self.prompt_sections = crate::prompt_sections::build_defaults(
             cwd,
-            self.mode,
+            self.config.mode,
             true, // TUI is always interactive
             self.agent_prompt_config.as_ref(),
             self.skill_section.as_deref(),
@@ -788,7 +779,7 @@ impl App {
     }
 
     pub fn settings_state(&self) -> state::ResolvedSettings {
-        let mut s = self.settings.clone();
+        let mut s = self.config.settings.clone();
         s.vim = self.input.vim_enabled();
         s
     }
@@ -1114,7 +1105,7 @@ impl App {
             // ── Background polls ─────────────────────────────────────────
             if let Some(ref mut rx) = ctx_rx {
                 if let Ok(result) = rx.try_recv() {
-                    self.context_window = result;
+                    self.config.context_window = result;
                     ctx_rx = None;
                 }
             }
@@ -1169,7 +1160,9 @@ impl App {
             // ── Auto-start from leftover queued messages (one per turn) ──
             if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
-                if let Some(cmd) = crate::custom_commands::resolve(text.trim(), self.multi_agent) {
+                if let Some(cmd) =
+                    crate::custom_commands::resolve(text.trim(), self.config.multi_agent)
+                {
                     let turn = self.begin_custom_command_turn(cmd);
                     self.agent = Some(turn);
                 } else if !text.is_empty() {
@@ -1511,11 +1504,11 @@ impl App {
         self.engine.send(UiCommand::StartTurn {
             turn_id,
             content: Content::text(message),
-            mode: self.mode,
-            model: self.model.clone(),
-            reasoning_effort: self.reasoning_effort,
+            mode: self.config.mode,
+            model: self.config.model.clone(),
+            reasoning_effort: self.config.reasoning_effort,
             history: self.history.clone(),
-            api_base: Some(self.api_base.clone()),
+            api_base: Some(self.config.api_base.clone()),
             api_key: Some(self.api_key()),
             session_id: self.session.id.clone(),
             session_dir: crate::session::dir_for(&self.session),
@@ -1554,7 +1547,7 @@ impl App {
                     // Still need to handle side-effect events.
                     match ev {
                         EngineEvent::RequestPermission { request_id, .. } => {
-                            let approved = self.mode == Mode::Yolo;
+                            let approved = self.config.mode == Mode::Yolo;
                             self.engine.send(UiCommand::PermissionDecision {
                                 request_id,
                                 approved,
@@ -1628,7 +1621,7 @@ impl App {
                         headless::log_retry(attempt, delay_ms);
                     }
                     EngineEvent::RequestPermission { request_id, .. } => {
-                        let approved = self.mode == Mode::Yolo;
+                        let approved = self.config.mode == Mode::Yolo;
                         self.engine.send(UiCommand::PermissionDecision {
                             request_id,
                             approved,
@@ -1710,7 +1703,7 @@ impl App {
         self.engine.send(UiCommand::Btw {
             question,
             history: self.history.clone(),
-            reasoning_effort: self.reasoning_effort,
+            reasoning_effort: self.config.reasoning_effort,
         });
     }
 
@@ -1822,11 +1815,11 @@ impl App {
         self.engine.send(UiCommand::StartTurn {
             turn_id,
             content,
-            mode: self.mode,
-            model: self.model.clone(),
-            reasoning_effort: self.reasoning_effort,
+            mode: self.config.mode,
+            model: self.config.model.clone(),
+            reasoning_effort: self.config.reasoning_effort,
             history: self.history.clone(),
-            api_base: Some(self.api_base.clone()),
+            api_base: Some(self.config.api_base.clone()),
             api_key: Some(self.api_key()),
             session_id: self.session.id.clone(),
             session_dir: crate::session::dir_for(&self.session),

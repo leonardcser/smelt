@@ -202,7 +202,7 @@ impl App {
                         // oldest one immediately.
                         let queued = self.queued_messages.remove(0);
                         if let Some(cmd) =
-                            crate::custom_commands::resolve(queued.trim(), self.multi_agent)
+                            crate::custom_commands::resolve(queued.trim(), self.config.multi_agent)
                         {
                             let turn = self.begin_custom_command_turn(cmd);
                             self.agent = Some(turn);
@@ -734,7 +734,7 @@ impl App {
             CommandAction::Continue => {}
         }
         if trimmed.starts_with('/') {
-            if let Some(cmd) = crate::custom_commands::resolve(trimmed, self.multi_agent) {
+            if let Some(cmd) = crate::custom_commands::resolve(trimmed, self.config.multi_agent) {
                 return InputOutcome::CustomCommand(Box::new(cmd));
             }
             if crate::completer::Completer::is_command(trimmed) {
@@ -826,11 +826,11 @@ impl App {
     /// Called after every cursor motion to skip non-selectable gutters
     /// and padding now that the cursor operates in display-text space.
     pub(super) fn snap_transcript_cursor(&mut self) {
-        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
         let snapped = self.snap_cpos_to_selectable(
             &rows,
             self.transcript_window.cpos,
-            self.settings.show_thinking,
+            self.config.settings.show_thinking,
         );
         if snapped != self.transcript_window.cpos {
             self.transcript_window.cpos = snapped;

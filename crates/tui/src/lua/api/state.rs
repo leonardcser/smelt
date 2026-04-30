@@ -24,7 +24,7 @@ fn register_transcript(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     transcript_tbl.set(
         "text",
         app_read!(lua, |app| app
-            .full_transcript_display_text(app.settings.show_thinking)
+            .full_transcript_display_text(app.config.settings.show_thinking)
             .join("\n")),
     )?;
     transcript_tbl.set(
@@ -45,16 +45,22 @@ fn register_engine_and_session(
 ) -> LuaResult<()> {
     let engine_tbl = lua.create_table()?;
 
-    engine_tbl.set("model", app_read!(lua, |app| app.model.clone()))?;
-    engine_tbl.set("mode", app_read!(lua, |app| app.mode.as_str().to_string()))?;
+    engine_tbl.set("model", app_read!(lua, |app| app.config.model.clone()))?;
+    engine_tbl.set(
+        "mode",
+        app_read!(lua, |app| app.config.mode.as_str().to_string()),
+    )?;
     engine_tbl.set(
         "reasoning_effort",
-        app_read!(lua, |app| app.reasoning_effort.label().to_string()),
+        app_read!(lua, |app| app.config.reasoning_effort.label().to_string()),
     )?;
     engine_tbl.set("is_busy", app_read!(lua, |app| app.agent.is_some()))?;
     engine_tbl.set("cost", app_read!(lua, |app| app.session_cost_usd))?;
     engine_tbl.set("context_tokens", app_read!(lua, |app| app.context_tokens))?;
-    engine_tbl.set("context_window", app_read!(lua, |app| app.context_window))?;
+    engine_tbl.set(
+        "context_window",
+        app_read!(lua, |app| app.config.context_window),
+    )?;
 
     // smelt.session.*
     let session_tbl = lua.create_table()?;
@@ -161,7 +167,7 @@ fn register_engine_and_session(
         lua.create_function(|lua, ()| {
             let out = lua.create_table()?;
             if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
-                for (i, m) in app.available_models.iter().enumerate() {
+                for (i, m) in app.config.available_models.iter().enumerate() {
                     let entry = lua.create_table()?;
                     entry.set("key", m.key.clone())?;
                     entry.set("name", m.model_name.clone())?;

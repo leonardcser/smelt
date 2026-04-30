@@ -451,17 +451,17 @@ async fn main() {
         args.api_key_env.is_some(),
         startup_auth_error.take(),
     );
-    app.model_config = (&model_config).into();
+    app.config.model_config = (&model_config).into();
     app.extra_instructions = tui_instructions;
     app.skill_section = tui_skill_section;
     if let Some(accent) = cfg_accent {
         app.ui.theme_mut().set_accent(accent);
     }
     if let Some(mode) = mode_override {
-        app.mode = mode;
+        app.config.mode = mode;
     }
-    if !app.mode_cycle.contains(&app.mode) {
-        app.mode_cycle.push(app.mode);
+    if !app.config.mode_cycle.contains(&app.config.mode) {
+        app.config.mode_cycle.push(app.config.mode);
     }
 
     if let Some(ref resume_val) = args.resume {

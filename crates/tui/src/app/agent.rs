@@ -74,7 +74,7 @@ impl App {
         self.flush_lua_callbacks();
 
         let system_prompt = self.rebuild_system_prompt();
-        let plugin_tools = self.lua.plugin_tool_defs(self.mode);
+        let plugin_tools = self.lua.plugin_tool_defs(self.config.mode);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -82,11 +82,11 @@ impl App {
         self.engine.send(UiCommand::StartTurn {
             turn_id,
             content,
-            mode: self.mode,
-            model: self.model.clone(),
-            reasoning_effort: self.reasoning_effort,
+            mode: self.config.mode,
+            model: self.config.model.clone(),
+            reasoning_effort: self.config.reasoning_effort,
             history: self.history.clone(),
-            api_base: Some(self.api_base.clone()),
+            api_base: Some(self.config.api_base.clone()),
             api_key: Some(api_key),
             session_id: self.session.id.clone(),
             session_dir: crate::session::dir_for(&self.session),
@@ -111,7 +111,7 @@ impl App {
         // {file:...} substitutions, so scrub before the content lands in
         // history or is dispatched to the engine.
         let evaluated = crate::custom_commands::evaluate(&cmd.body);
-        let evaluated = if self.settings.redact_secrets {
+        let evaluated = if self.config.settings.redact_secrets {
             engine::redact::redact(&evaluated)
         } else {
             evaluated
@@ -132,7 +132,7 @@ impl App {
             let resolved = match (target_model, target_provider) {
                 (Some(reference), provider) => {
                     match crate::config::resolve_model_ref_with_provider(
-                        &self.available_models,
+                        &self.config.available_models,
                         reference,
                         provider,
                     ) {
@@ -144,7 +144,10 @@ impl App {
                     }
                 }
                 (None, Some(provider)) => {
-                    match crate::config::resolve_provider_ref(&self.available_models, provider) {
+                    match crate::config::resolve_provider_ref(
+                        &self.config.available_models,
+                        provider,
+                    ) {
                         Ok(model) => Some(model),
                         Err(err) => {
                             self.notify_error(err.to_string());
@@ -169,8 +172,8 @@ impl App {
                         .unwrap_or_default(),
                 ),
                 None => (
-                    self.model.clone(),
-                    self.api_base.clone(),
+                    self.config.model.clone(),
+                    self.config.api_base.clone(),
                     self.resolve_api_key().unwrap_or_default(),
                 ),
             }
@@ -186,7 +189,7 @@ impl App {
                 "high" => protocol::ReasoningEffort::High,
                 _ => protocol::ReasoningEffort::Off,
             })
-            .unwrap_or(self.reasoning_effort);
+            .unwrap_or(self.config.reasoning_effort);
 
         let model_config_overrides = {
             let o = &cmd.overrides;
@@ -250,7 +253,7 @@ impl App {
         self.engine.send(UiCommand::StartTurn {
             turn_id,
             content: Content::text(evaluated),
-            mode: self.mode,
+            mode: self.config.mode,
             model,
             reasoning_effort: reasoning,
             history: self.history.clone(),
@@ -400,7 +403,7 @@ impl App {
                         .as_millis() as u64,
                     prompt_tokens: usage.prompt_tokens.unwrap_or(0),
                     completion_tokens: usage.completion_tokens.unwrap_or(0),
-                    model: self.model.clone(),
+                    model: self.config.model.clone(),
                     cost_usd,
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_write_tokens: usage.cache_write_tokens,
@@ -738,7 +741,7 @@ impl App {
         tool_name: String,
         args: std::collections::HashMap<String, serde_json::Value>,
     ) {
-        let mode = self.mode;
+        let mode = self.config.mode;
         let session_id = self.session.id.clone();
         let session_dir = crate::session::dir_for(&self.session);
         match self.lua.execute_plugin_tool(
@@ -862,26 +865,26 @@ impl App {
     }
 
     pub(super) fn api_key(&self) -> String {
-        std::env::var(&self.api_key_env).unwrap_or_default()
+        std::env::var(&self.config.api_key_env).unwrap_or_default()
     }
 
     pub(super) fn resolve_api_key(&mut self) -> Option<String> {
-        if self.api_key_env.is_empty() {
+        if self.config.api_key_env.is_empty() {
             return Some(String::new());
         }
-        match std::env::var(&self.api_key_env) {
+        match std::env::var(&self.config.api_key_env) {
             Ok(key) => Some(key),
             Err(std::env::VarError::NotPresent) => {
                 self.notify_error(format!(
                     "environment variable '{}' is not set but is required for API authentication",
-                    self.api_key_env
+                    self.config.api_key_env
                 ));
                 None
             }
             Err(std::env::VarError::NotUnicode(_)) => {
                 self.notify_error(format!(
                     "environment variable '{}' contains non-Unicode data and cannot be used as an API key",
-                    self.api_key_env
+                    self.config.api_key_env
                 ));
                 None
             }
@@ -1345,7 +1348,7 @@ impl App {
                     let rt = self.runtime_approvals.read().unwrap();
                     rt.is_auto_approved(
                         &self.permissions,
-                        self.mode,
+                        self.config.mode,
                         &req.tool_name,
                         &req.args,
                         &req.desc,
@@ -1359,7 +1362,7 @@ impl App {
                 // Check mode-based permissions (e.g. Apply mode auto-allows writes).
                 if self
                     .permissions
-                    .decide(self.mode, &req.tool_name, &req.args, false)
+                    .decide(self.config.mode, &req.tool_name, &req.args, false)
                     == Decision::Allow
                 {
                     self.send_permission_decision(req.request_id, true, None);
@@ -1381,7 +1384,7 @@ impl App {
                 // Prepare dialog options.
                 let downgraded =
                     self.permissions
-                        .was_downgraded(self.mode, &req.tool_name, &req.args);
+                        .was_downgraded(self.config.mode, &req.tool_name, &req.args);
                 req.outside_dir = if downgraded && !outside_paths.is_empty() {
                     // Only offer the dir option when the Ask is specifically
                     // from the workspace restriction (downgraded from Allow).
