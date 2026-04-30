@@ -732,11 +732,11 @@ unit warrants it):
   sub-agents, MCP servers, long-running background commands. Wire
   format is opaque (stdio / socket); JSON framing is a convention
   the consumer enforces.
-- `tui::fs` — read / write / edit / glob / lock.
-- `tui::http` — fetch / cache / redirects.
-- `tui::html` — html → markdown.
+- `tui::fs` — read / write / edit / glob / lock. ✅ shell (`5de3054`).
+- `tui::http` — fetch / cache / redirects. ✅ shell (this session).
+- `tui::html` — html → markdown. ✅ shell (this session).
 - `tui::notebook` — Jupyter JSON ops.
-- `tui::grep` — ripgrep wrapper.
+- `tui::grep` — ripgrep wrapper. ✅ shell (this session).
 - `tui::path` — normalize / canonical / relative / expand_home. ✅ (`de7fb87`).
 - `tui::fuzzy` — fuzzy matching / scoring (folds `tui/fuzzy.rs` +
   `tui/completer/score.rs`). ✅ (`b537d1a`).
