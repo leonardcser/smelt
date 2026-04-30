@@ -31,6 +31,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             v
                         })
                         .unwrap_or_default();
+                    let while_busy: bool = opts
+                        .as_ref()
+                        .and_then(|t| t.get::<Option<bool>>("while_busy").ok().flatten())
+                        .unwrap_or(true);
                     let key = lua.create_registry_value(handler)?;
                     if let Ok(mut map) = s.commands.lock() {
                         map.insert(
@@ -39,6 +43,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 handle: LuaHandle { key },
                                 description: desc,
                                 args,
+                                while_busy,
                             },
                         );
                     }

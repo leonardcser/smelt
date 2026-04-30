@@ -106,10 +106,21 @@ impl TuiApp {
             return None;
         }
 
-        // Access control: some commands are blocked while running.
-        if let Err(reason) = is_allowed_while_running(input) {
-            self.notify_error(reason);
-            return Some(EventOutcome::Noop);
+        // Access control: a command opts out of mid-turn execution
+        // by registering with `{ while_busy = false }` (e.g. /compact,
+        // /fork, /resume). Shell escapes (`!cmd`) and the vim quit
+        // aliases (`:q`, `:qa`, `:wq`, `:wqa`) bypass this lookup —
+        // they aren't `/`-commands.
+        if let Some(rest) = input.strip_prefix('/') {
+            let name = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/');
+            if !name.is_empty() && self.core.lua.command_blocks_while_busy(name) == Some(true) {
+                self.notify_error(format!("cannot run /{name} while agent is working"));
+                return Some(EventOutcome::Noop);
+            }
         }
 
         // Delegate to the unified handler. Lua command bodies do their
