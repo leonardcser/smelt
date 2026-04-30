@@ -49,7 +49,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 /// One Lua-registered `/command` entry. Lives in `LuaShared.commands`
 /// so completers (`list_commands`, `list_command_args`, `is_lua_command`)
@@ -314,7 +313,7 @@ impl AutocmdEvent {
 /// `smelt.on`. Stored as a mlua `RegistryKey` so references survive
 /// across GC cycles and can be invoked from Rust handlers.
 pub(crate) struct LuaHandle {
-    key: mlua::RegistryKey,
+    pub(crate) key: mlua::RegistryKey,
 }
 
 /// Per-plugin-tool callable handles. `execute` is mandatory; the rest
@@ -374,7 +373,6 @@ pub(crate) struct LuaShared {
     pub(crate) commands: Mutex<HashMap<String, RegisteredCommand>>,
     pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     pub(crate) autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
-    pub(crate) timers: Mutex<Vec<(Instant, LuaHandle)>>,
     /// Statusline sources in registration order. A `Vec` (not a
     /// `HashMap`) so the on-screen left-to-right order matches the
     /// order plugins called `smelt.statusline.register`. Re-registering
@@ -441,7 +439,6 @@ impl Default for LuaShared {
             commands: Mutex::new(HashMap::new()),
             keymaps: Mutex::new(HashMap::new()),
             autocmds: Mutex::new(HashMap::new()),
-            timers: Mutex::new(Vec::new()),
             statusline_sources: Mutex::new(Vec::new()),
             plugin_tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
@@ -677,35 +674,6 @@ impl LuaRuntime {
         &self.lua
     }
 
-    /// Fire any `smelt.defer` timers whose deadline has passed.
-    pub fn tick_timers(&self) {
-        let now = Instant::now();
-        let due: Vec<LuaHandle> = match self.shared.timers.lock() {
-            Ok(mut q) => {
-                let mut keep = Vec::with_capacity(q.len());
-                let mut due = Vec::new();
-                for (deadline, handle) in q.drain(..) {
-                    if deadline > now {
-                        keep.push((deadline, handle));
-                    } else {
-                        due.push(handle);
-                    }
-                }
-                *q = keep;
-                due
-            }
-            Err(_) => return,
-        };
-        for handle in due {
-            let Ok(func) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-                continue;
-            };
-            if let Err(e) = func.call::<()>(()) {
-                self.record_error(format!("defer: {e}"));
-            }
-        }
-    }
-
     /// Call every registered statusline source and return the combined
     /// item list (appended to Rust-side built-ins at the status-bar
     /// layer). Each source returns either a single item table or a list
@@ -771,7 +739,7 @@ impl LuaRuntime {
         }
     }
 
-    fn record_error(&self, msg: String) {
+    pub(crate) fn record_error(&self, msg: String) {
         // Route through `smelt.notify_error` so tests that override
         // it (`install_test_notify`) capture errors emitted by the
         // runtime itself, not just user `smelt.notify_error(...)`
@@ -1554,26 +1522,6 @@ mod tests {
             drain_notifications(&rt),
             vec!["fired: block_done".to_string()]
         );
-    }
-
-    #[test]
-    fn defer_timer_fires_after_deadline() {
-        let rt = LuaRuntime::new();
-        install_test_notify(&rt);
-        rt.lua
-            .load(
-                r#"
-                    smelt.defer(0, function()
-                        smelt.notify("deferred")
-                    end)
-                "#,
-            )
-            .exec()
-            .expect("exec");
-        assert!(drain_notifications(&rt).is_empty());
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        rt.tick_timers();
-        assert_eq!(drain_notifications(&rt), vec!["deferred".to_string()]);
     }
 
     #[test]

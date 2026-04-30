@@ -14,6 +14,7 @@ mod mouse;
 mod pane_focus;
 mod render_loop;
 mod status_bar;
+pub(crate) mod timers;
 mod transcript;
 pub(crate) mod transcript_cache;
 pub(crate) mod transcript_model;
@@ -224,6 +225,11 @@ pub struct App {
     /// `smelt.confirm.open(handle_id)`; the Lua dialog reads it back
     /// through Rust primitives and resolves it on submit / dismiss.
     pub(crate) confirms: confirms::Confirms,
+    /// Scheduled Lua callbacks. `smelt.timer.set` /
+    /// `smelt.timer.every` / `smelt.timer.cancel` (and the
+    /// `smelt.defer` alias) all route here through `with_app`.
+    /// Drained each main-loop iteration via `App::tick_timers`.
+    pub(crate) timers: timers::Timers,
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
@@ -697,6 +703,7 @@ impl App {
             permissions,
             agent: None,
             confirms: confirms::Confirms::new(),
+            timers: timers::Timers::new(),
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
@@ -757,6 +764,20 @@ impl App {
             self.extra_instructions.as_deref(),
         );
         self.prompt_sections.assemble()
+    }
+
+    /// Drain timers whose deadline has passed: re-arm recurring entries,
+    /// drop one-shots, fire each callback after the borrow on `Timers`
+    /// releases so a callback that re-enters `app.timers.set/every/cancel`
+    /// composes cleanly with the TLS app pointer.
+    pub fn tick_timers(&mut self) {
+        let now = std::time::Instant::now();
+        let due = self.timers.drain_due(now, &self.lua.lua);
+        for func in due {
+            if let Err(e) = func.call::<()>(()) {
+                self.lua.record_error(format!("timer: {e}"));
+            }
+        }
     }
 
     pub fn settings_state(&self) -> state::ResolvedSettings {
@@ -1046,7 +1067,7 @@ impl App {
             // is field-disjoint from whatever the binding writes.
             let _app_guard = crate::lua::install_app_ptr(self);
             // ── Lua timer + notification pump ────────────────────────────
-            self.lua.tick_timers();
+            self.tick_timers();
             self.drive_lua_tasks();
             let (items, tick_errors) = self.lua.tick_statusline();
             self.custom_status_items = items;

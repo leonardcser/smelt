@@ -10,7 +10,7 @@ use crate::lua::{
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub(super) fn register(
     lua: &Lua,
@@ -23,7 +23,8 @@ pub(super) fn register(
     register_task(lua, smelt, shared)?;
     register_tools(lua, smelt, shared)?;
     register_statusline(lua, smelt, shared)?;
-    register_autocmd_and_timer(lua, smelt, shared)?;
+    register_autocmd(lua, smelt, shared)?;
+    register_timer(lua, smelt)?;
     register_spawn(lua, smelt, shared)?;
     Ok(())
 }
@@ -373,43 +374,73 @@ fn register_statusline(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
-fn register_autocmd_and_timer(
-    lua: &Lua,
-    smelt: &mlua::Table,
-    shared: &Arc<LuaShared>,
-) -> LuaResult<()> {
-    {
-        let s = shared.clone();
-        smelt.set(
-            "on",
-            lua.create_function(move |lua, (event, handler): (String, mlua::Function)| {
-                let Some(kind) = AutocmdEvent::from_lua_name(&event) else {
-                    return Err(LuaError::RuntimeError(format!("unknown event: {event}")));
-                };
-                let key = lua.create_registry_value(handler)?;
-                if let Ok(mut map) = s.autocmds.lock() {
-                    map.entry(kind).or_default().push(LuaHandle { key });
-                }
-                Ok(())
-            })?,
-        )?;
-    }
-    {
-        let s = shared.clone();
-        smelt.set(
-            "defer",
-            lua.create_function(move |lua, (ms, handler): (u64, mlua::Function)| {
-                let key = lua.create_registry_value(handler)?;
-                if let Ok(mut q) = s.timers.lock() {
-                    q.push((
-                        Instant::now() + Duration::from_millis(ms),
-                        LuaHandle { key },
-                    ));
-                }
-                Ok(())
-            })?,
-        )?;
-    }
+fn register_autocmd(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+    let s = shared.clone();
+    smelt.set(
+        "on",
+        lua.create_function(move |lua, (event, handler): (String, mlua::Function)| {
+            let Some(kind) = AutocmdEvent::from_lua_name(&event) else {
+                return Err(LuaError::RuntimeError(format!("unknown event: {event}")));
+            };
+            let key = lua.create_registry_value(handler)?;
+            if let Ok(mut map) = s.autocmds.lock() {
+                map.entry(kind).or_default().push(LuaHandle { key });
+            }
+            Ok(())
+        })?,
+    )?;
+    Ok(())
+}
+
+fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    let timer_tbl = lua.create_table()?;
+    timer_tbl.set(
+        "set",
+        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
+            let key = lua.create_registry_value(handler)?;
+            Ok(crate::lua::try_with_app(|app| {
+                app.timers.set(Duration::from_millis(ms), LuaHandle { key })
+            })
+            .unwrap_or(0))
+        })?,
+    )?;
+    timer_tbl.set(
+        "every",
+        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
+            if ms == 0 {
+                return Err(LuaError::RuntimeError(
+                    "smelt.timer.every: period must be > 0".into(),
+                ));
+            }
+            let key = lua.create_registry_value(handler)?;
+            Ok(crate::lua::try_with_app(|app| {
+                app.timers
+                    .every(Duration::from_millis(ms), LuaHandle { key })
+            })
+            .unwrap_or(0))
+        })?,
+    )?;
+    timer_tbl.set(
+        "cancel",
+        lua.create_function(|_, id: u64| {
+            Ok(crate::lua::try_with_app(|app| app.timers.cancel(id)).unwrap_or(false))
+        })?,
+    )?;
+    smelt.set("timer", timer_tbl)?;
+
+    // `smelt.defer(ms, fn)` — alias for `smelt.timer.set` kept for the
+    // nvim-shaped one-shot ergonomics. Returns nothing so existing
+    // callers stay untouched.
+    smelt.set(
+        "defer",
+        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
+            let key = lua.create_registry_value(handler)?;
+            crate::lua::try_with_app(|app| {
+                app.timers.set(Duration::from_millis(ms), LuaHandle { key })
+            });
+            Ok(())
+        })?,
+    )?;
     Ok(())
 }
 
