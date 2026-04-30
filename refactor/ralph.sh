@@ -49,6 +49,12 @@ while :; do
 
   before=$(git rev-parse HEAD)
 
+  # Clear any stale sentinels left by a previous iteration. The agent
+  # only writes one when its precondition is genuinely true *now*; a
+  # leftover from a prior run would otherwise short-circuit this
+  # iteration's exit check before the agent even ran.
+  rm -f refactor/.ralph-done refactor/.ralph-needs-input
+
   # Fresh tmux window running interactive claude with auto-permission.
   # `RALPH_ITER=1` tells refactor/hooks/stop_gate.sh to close this window
   # when the agent stops cleanly, so the loop advances on its own.
