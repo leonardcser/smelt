@@ -25,6 +25,7 @@ pub(super) fn register(
     register_statusline(lua, smelt, shared)?;
     register_autocmd(lua, smelt, shared)?;
     register_timer(lua, smelt)?;
+    register_cell(lua, smelt)?;
     register_spawn(lua, smelt, shared)?;
     Ok(())
 }
@@ -441,6 +442,100 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(())
         })?,
     )?;
+    Ok(())
+}
+
+fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    use crate::app::cells::{LuaCellValue, SubscriberKind};
+    use std::rc::Rc;
+
+    let cell_tbl = lua.create_table()?;
+
+    // `smelt.cell.new(name, initial)` declares a cell and stores
+    // `initial` as its starting value. Idempotent: redeclaring resets
+    // the value and drops every prior subscriber. Returns nothing —
+    // callers pass the same `name` to `get` / `set` / `subscribe`.
+    cell_tbl.set(
+        "new",
+        lua.create_function(
+            |lua, (name, initial): (String, mlua::Value)| -> LuaResult<()> {
+                let key = lua.create_registry_value(initial)?;
+                crate::lua::try_with_app(|app| {
+                    app.cells.declare(name, LuaCellValue { key });
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    // `smelt.cell.get(name)` returns the cell's current value or
+    // `nil` when undeclared / when the cell stores a typed Rust
+    // value without a Lua converter (none today; built-in
+    // converters land with a.4c).
+    cell_tbl.set(
+        "get",
+        lua.create_function(|lua, name: String| -> LuaResult<mlua::Value> {
+            let key = crate::lua::try_with_app(|app| {
+                let v = app.cells.get_dyn(&name)?;
+                let lv = v.downcast_ref::<LuaCellValue>()?;
+                // mlua::RegistryKey isn't Clone, so resolve a fresh
+                // copy of the value here while we hold `&Lua`. The
+                // returned value is owned by the caller's Lua state.
+                lua.registry_value::<mlua::Value>(&lv.key).ok()
+            })
+            .flatten();
+            Ok(key.unwrap_or(mlua::Value::Nil))
+        })?,
+    )?;
+
+    // `smelt.cell.set(name, value)` replaces the cell's value and
+    // queues every subscriber for fire on the next drain. Returns
+    // `true` on success, `false` when the cell isn't declared.
+    cell_tbl.set(
+        "set",
+        lua.create_function(
+            |lua, (name, value): (String, mlua::Value)| -> LuaResult<bool> {
+                let key = lua.create_registry_value(value)?;
+                Ok(crate::lua::try_with_app(|app| {
+                    app.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
+                })
+                .unwrap_or(false))
+            },
+        )?,
+    )?;
+
+    // `smelt.cell.subscribe(name, fn)` registers a Lua callback to
+    // fire each time `name` is `set`. Returns the subscription id
+    // `unsubscribe` accepts, or `nil` when `name` isn't declared.
+    cell_tbl.set(
+        "subscribe",
+        lua.create_function(
+            |lua, (name, handler): (String, mlua::Function)| -> LuaResult<mlua::Value> {
+                let key = lua.create_registry_value(handler)?;
+                let id = crate::lua::try_with_app(|app| {
+                    app.cells
+                        .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
+                })
+                .flatten();
+                Ok(match id {
+                    Some(id) => mlua::Value::Integer(id as i64),
+                    None => mlua::Value::Nil,
+                })
+            },
+        )?,
+    )?;
+
+    // `smelt.cell.unsubscribe(name, id)` drops the subscription and
+    // returns `true` on success, `false` when the cell or id is
+    // unknown.
+    cell_tbl.set(
+        "unsubscribe",
+        lua.create_function(|_, (name, id): (String, u64)| -> LuaResult<bool> {
+            Ok(crate::lua::try_with_app(|app| app.cells.unsubscribe(&name, id)).unwrap_or(false))
+        })?,
+    )?;
+
+    smelt.set("cell", cell_tbl)?;
     Ok(())
 }
 
