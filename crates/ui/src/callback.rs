@@ -6,7 +6,7 @@
 //!
 //! Callbacks are either Rust closures (`FnMut(&mut CallbackCtx) ->
 //! CallbackResult`) or Lua handles. Both run through the same
-//! dispatcher in `Ui::handle_key` / `Ui::dispatch_event`. Side
+//! dispatcher in `Ui::handle_key` / `Ui::fire_win_event`. Side
 //! effects flow through the app-owned `AppOp` queue that Rust
 //! callbacks see via their shared ops handle, or through direct
 //! `ui::Ui` mutations — no return channel for effect strings.
@@ -126,7 +126,7 @@ pub enum CallbackResult {
     Pass,
     /// Consumed, and additionally fire a `WinEvent` on the same
     /// window with the given payload. The dispatcher translates
-    /// this into a follow-up `Ui::dispatch_event` after the Rust
+    /// this into a follow-up `Ui::fire_win_event` after the Rust
     /// callback returns. Lets a built-in keymap callback (e.g. a
     /// list's Enter binding) trigger the same on-event handlers
     /// (`smelt.win.on_event(win, "submit", fn)`).

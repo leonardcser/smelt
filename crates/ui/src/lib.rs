@@ -548,7 +548,7 @@ impl Ui {
         self.callbacks.clear_event_by_id(win, ev, id)
     }
 
-    /// Dispatch a window event to its registered callbacks.
+    /// Fire a `WinEvent` on a window's registered callbacks.
     /// `lua_invoke` is called for each `Callback::Lua` with
     /// (handle, payload). Side effects flow through the `AppOp` queue
     /// that Rust callbacks have via `shared.ops` — no return channel.
@@ -557,7 +557,11 @@ impl Ui {
     /// declaration order). `dialog.lua` registers handlers on the
     /// `win_id` returned from `_open` (which is the root); events
     /// fired on any leaf bubble up so mixed dialogs hear them.
-    pub fn dispatch_event(
+    ///
+    /// Matches `UiHost::fire_win_event` from the target architecture
+    /// — when `Host` / `UiHost` land in P2, this is the method the
+    /// trait method delegates to.
+    pub fn fire_win_event(
         &mut self,
         win: WinId,
         ev: WinEvent,
@@ -685,7 +689,7 @@ impl Ui {
     /// it registers WinEvent callbacks against. `None` when `win`
     /// isn't part of any open overlay.
     ///
-    /// `dispatch_event` redirects to this root so handlers fire
+    /// `fire_win_event` redirects to this root so handlers fire
     /// regardless of which leaf the user actually interacted with
     /// — necessary for mixed dialogs where multiple leaves are
     /// interactive (e.g. options + input).
@@ -975,7 +979,7 @@ impl Ui {
         // behaviour, not user-customisable. Before closing, fires
         // `WinEvent::Dismiss` on the modal's root leaf so dialog-side
         // `on_event("dismiss", …)` handlers can flush pending state
-        // (e.g. unsubmitted input text). `dispatch_event` already
+        // (e.g. unsubmitted input text). `fire_win_event` already
         // redirects leaf events to the root, so a single dispatch
         // suffices regardless of which leaf has focus. Leaves can
         // register their own callbacks for `q` / `Ctrl+C` / Submit
@@ -989,7 +993,7 @@ impl Ui {
                     .overlay(modal)
                     .and_then(|o| o.layout.leaves_in_order().first().copied())
                 {
-                    self.dispatch_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
+                    self.fire_win_event(root, WinEvent::Dismiss, Payload::None, lua_invoke);
                 }
                 // The Lua dismiss handler may have already called
                 // `smelt.win.close(...)` (which routes through
@@ -1068,7 +1072,7 @@ impl Ui {
         };
 
         if let Some((ev, payload)) = follow_up {
-            self.dispatch_event(win, ev, payload, lua_invoke);
+            self.fire_win_event(win, ev, payload, lua_invoke);
         }
 
         result
@@ -1081,7 +1085,7 @@ impl Ui {
     pub fn dispatch_tick(&mut self, lua_invoke: &mut LuaInvoke) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {
-            self.dispatch_event(win, WinEvent::Tick, Payload::None, lua_invoke);
+            self.fire_win_event(win, WinEvent::Tick, Payload::None, lua_invoke);
         }
     }
 
@@ -2104,7 +2108,7 @@ mod tests {
     fn callback_result_event_dispatches_winevent_after_keymap() {
         // A built-in keymap callback (e.g. a list's Enter binding)
         // returns `CallbackResult::Event(Submit, payload)`. The
-        // dispatcher must follow up with `dispatch_event` so any
+        // dispatcher must follow up with `fire_win_event` so any
         // registered `on_event(win, "submit", ...)` handler fires.
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
@@ -2190,7 +2194,7 @@ mod tests {
         // once per leaf — so dialog.lua's single handler runs once
         // and the parked task resumes once. Non-root leaves with
         // their own Dismiss callbacks are addressed via root
-        // redirect inside `dispatch_event`.
+        // redirect inside `fire_win_event`.
         let mut ui = make_ui();
         let a = WinId(60);
         let b = WinId(61);
@@ -2217,10 +2221,10 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_event_on_non_root_leaf_redirects_to_root() {
+    fn fire_win_event_on_non_root_leaf_redirects_to_root() {
         // When a callback fires `WinEvent::Submit` on a non-root
         // leaf (e.g. an input panel below an options panel),
-        // `dispatch_event` redirects to the overlay's root so the
+        // `fire_win_event` redirects to the overlay's root so the
         // dialog.lua handler registered on the root sees it.
         let mut ui = make_ui();
         let a = WinId(70);
@@ -2237,7 +2241,7 @@ mod tests {
             })),
         );
         // Fire Submit on the NON-root leaf; root's callback should fire.
-        ui.dispatch_event(b, WinEvent::Submit, Payload::None, &mut |_, _, _| {});
+        ui.fire_win_event(b, WinEvent::Submit, Payload::None, &mut |_, _, _| {});
         assert!(*saw.lock().unwrap());
     }
 

@@ -303,7 +303,7 @@ fn open_dialog_via_overlay(
 
     // The "root" leaf is always the first declared leaf — that's
     // the WinId returned to dialog.lua as the dialog's identity.
-    // `Ui::dispatch_event` redirects WinEvents fired on any leaf
+    // `Ui::fire_win_event` redirects WinEvents fired on any leaf
     // up to this root, so dialog.lua's single registration hears
     // events from every interactive leaf in mixed dialogs. Focus
     // is independent: it lands on `focus_target` (the first

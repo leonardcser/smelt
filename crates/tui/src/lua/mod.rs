@@ -400,7 +400,7 @@ pub(crate) struct LuaShared {
     /// Lua module pumps its own inbox each tick.
     pub(crate) task_inbox: Mutex<Vec<TaskEvent>>,
     /// Pending Lua keymap / event callback invocations. Recorded during
-    /// `ui.handle_key` / `ui.dispatch_event` (where `&mut Ui` is held
+    /// `ui.handle_key` / `ui.fire_win_event` (where `&mut Ui` is held
     /// and the Lua body therefore cannot call back into App state),
     /// drained by App right after the ui call returns so each Lua body
     /// runs with the TLS app pointer installed and sole access to App.

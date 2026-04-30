@@ -811,7 +811,7 @@ impl App {
         let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
-        self.ui.dispatch_event(
+        self.ui.fire_win_event(
             root,
             ui::WinEvent::Dismiss,
             ui::Payload::None,
