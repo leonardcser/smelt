@@ -4,37 +4,35 @@ use crate::app::transcript_model::{BlockHistory, LayoutKey, ViewState};
 use ui::buffer::Buffer;
 use ui::Theme;
 
+/// Namespace name for transcript selection extmarks. Created on the
+/// transcript display buffer at startup; populated each frame from the
+/// active vim Visual / mouse drag / yank-flash range and read by
+/// `Window::render` (which walks all namespaces in NsId order, so
+/// selection paints over projection highlights).
+pub(crate) const NS_SELECTION: &str = "transcript.selection";
+
+/// Projection cache for the transcript buffer. Tracks the last
+/// (generation, width, show_thinking) it projected at so repeated
+/// renders short-circuit when nothing changed. The buffer itself
+/// lives in `Ui::bufs`; the projection borrows it through `project`.
 pub(crate) struct TranscriptProjection {
-    buf: Buffer,
     generation: u64,
     width: u16,
     show_thinking: bool,
 }
 
 impl TranscriptProjection {
-    pub(crate) fn new(buf: Buffer) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            buf,
             generation: u64::MAX,
             width: 0,
             show_thinking: false,
         }
     }
 
-    pub(crate) fn buf(&self) -> &Buffer {
-        &self.buf
-    }
-
-    pub(crate) fn buf_mut(&mut self) -> &mut Buffer {
-        &mut self.buf
-    }
-
-    pub(crate) fn total_lines(&self) -> usize {
-        self.buf.line_count()
-    }
-
     pub(crate) fn project(
         &mut self,
+        buf: &mut Buffer,
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
@@ -80,7 +78,7 @@ impl TranscriptProjection {
             lines.push(project_display_line(dline, theme));
         }
 
-        apply_to_buffer(&mut self.buf, &lines);
+        apply_to_buffer(buf, &lines);
 
         self.generation = gen;
         self.width = width;

@@ -24,10 +24,20 @@ pub(crate) struct TranscriptData {
     pub viewport: ui::WindowViewport,
 }
 
+/// Soft cursor placement carried back from `compute_transcript_cursor`
+/// to the painted-split sync. `(col, row)` is viewport-relative;
+/// `glyph` is the buffer character under the cursor cell so the block
+/// cursor renders the same glyph.
+pub(crate) struct SoftCursor {
+    pub col: u16,
+    pub row: u16,
+    pub glyph: char,
+}
+
 pub(crate) struct TranscriptCursor {
     pub clamped_line: u16,
     pub clamped_col: u16,
-    pub soft_cursor: Option<crate::content::window_view::SoftCursor>,
+    pub soft_cursor: Option<SoftCursor>,
 }
 
 impl App {
@@ -618,7 +628,8 @@ impl App {
         changed
     }
 
-    /// Project transcript blocks into a `ui::Buffer`. Gated by generation —
+    /// Project transcript blocks into the transcript display buffer
+    /// (`Ui::bufs[transcript_display_buf]`). Gated by generation —
     /// skips work when nothing changed since the last projection.
     pub(crate) fn project_transcript_buffer(
         &mut self,
@@ -640,7 +651,12 @@ impl App {
                 Vec::new()
             };
 
+        let buf = self
+            .ui
+            .buf_mut(self.transcript_display_buf)
+            .expect("transcript_display_buf must be registered at startup");
         self.transcript_projection.project(
+            buf,
             &mut self.transcript.history,
             tw as u16,
             show_thinking,
@@ -648,7 +664,7 @@ impl App {
             &ephemeral_lines,
         );
 
-        let total_rows = self.transcript_projection.total_lines() as u16;
+        let total_rows = buf.line_count() as u16;
 
         let geom =
             crate::content::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
@@ -662,7 +678,6 @@ impl App {
 
         // Snapshot visible rows for the soft-cursor glyph lookup in
         // `compute_transcript_cursor`.
-        let buf = self.transcript_projection.buf();
         let start = clamped_scroll as usize;
         let end = (start + viewport_rows as usize).min(buf.line_count());
         self.last_viewport_text = buf.get_lines(start, end).to_vec();
@@ -724,7 +739,7 @@ impl App {
         TranscriptCursor {
             clamped_line: line,
             clamped_col: history_cursor_col,
-            soft_cursor: Some(crate::content::window_view::SoftCursor {
+            soft_cursor: Some(SoftCursor {
                 col,
                 row: line,
                 glyph: under,

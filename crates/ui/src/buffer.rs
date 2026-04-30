@@ -359,14 +359,6 @@ pub struct Buffer {
     /// copies when the Arc is actually shared.
     lines: Arc<Vec<String>>,
     extmarks: ExtmarkStore,
-    /// Cached per-line `Span` slices, derived from `extmarks`. Keyed
-    /// off `(content_tick, marks_tick)`; rebuilt by
-    /// `materialized_highlights` / `materialized_decorations` when the
-    /// inputs change. The `Arc` lets `BufferView::sync_from_buffer`
-    /// refcount-bump instead of cloning.
-    cached_highlights: Arc<Vec<Vec<Span>>>,
-    cached_decorations: Arc<Vec<LineDecoration>>,
-    cache_tick: u64,
     modifiable: bool,
     buftype: BufType,
     /// Bumped on lines mutation.
@@ -419,9 +411,6 @@ impl Buffer {
             id,
             lines: Arc::new(vec![String::new()]),
             extmarks,
-            cached_highlights: Arc::new(vec![Vec::new()]),
-            cached_decorations: Arc::new(vec![LineDecoration::default()]),
-            cache_tick: u64::MAX,
             modifiable: opts.modifiable,
             buftype: opts.buftype,
             changedtick: 0,
@@ -831,25 +820,36 @@ impl Buffer {
     }
 
     pub fn highlights_at(&self, line: usize) -> Vec<Span> {
-        let Some(state) = self.extmarks.ns(self.ns_highlights) else {
-            return Vec::new();
-        };
+        // Walk every namespace whose extmarks carry highlight payloads,
+        // not just `ns_highlights`. Cross-namespace ordering is
+        // namespace-id ascending so later-created namespaces (e.g. the
+        // transcript's `selection` namespace registered after
+        // `ns_highlights`) paint on top of earlier ones. Within a
+        // namespace, BTreeMap iteration is by extmark id — insertion
+        // order — so spans from a single source paint in registration
+        // order. Highlight extmarks today are single-row (matching the
+        // nvim convention where line-spanning highlights are emitted
+        // per-row by the parser); end-row is recorded but not yet
+        // split here.
+        let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
+        ns_ids.sort_by_key(|n| n.0);
         let mut out = Vec::new();
-        for mark in state.extmarks.values() {
-            if mark.start_row != line {
-                // Highlight extmarks today are single-row (matching
-                // the nvim convention where line-spanning highlights
-                // are emitted per-row by the parser). End-row is
-                // recorded but not yet split here.
+        for ns in ns_ids {
+            let Some(state) = self.extmarks.ns(ns) else {
                 continue;
-            }
-            if let ExtmarkPayload::Highlight { style, meta } = &mark.payload {
-                out.push(Span {
-                    col_start: mark.start_col as u16,
-                    col_end: mark.end_col as u16,
-                    style: style.clone(),
-                    meta: meta.clone(),
-                });
+            };
+            for mark in state.extmarks.values() {
+                if mark.start_row != line {
+                    continue;
+                }
+                if let ExtmarkPayload::Highlight { style, meta } = &mark.payload {
+                    out.push(Span {
+                        col_start: mark.start_col as u16,
+                        col_end: mark.end_col as u16,
+                        style: style.clone(),
+                        meta: meta.clone(),
+                    });
+                }
             }
         }
         out
@@ -1004,73 +1004,6 @@ impl Buffer {
         for id in to_remove {
             self.del_extmark(ns, id);
         }
-    }
-
-    // ── Materialized accessors for BufferView Arc-clone path ───────
-
-    fn rebuild_caches(&mut self) {
-        let n = self.lines.len();
-        let mut hl: Vec<Vec<Span>> = vec![Vec::new(); n];
-        let mut dec: Vec<LineDecoration> = vec![LineDecoration::default(); n];
-        if let Some(state) = self.extmarks.ns(self.ns_highlights) {
-            for mark in state.extmarks.values() {
-                let row = mark.start_row;
-                if row >= n {
-                    continue;
-                }
-                if let ExtmarkPayload::Highlight { style, meta } = &mark.payload {
-                    hl[row].push(Span {
-                        col_start: mark.start_col as u16,
-                        col_end: mark.end_col as u16,
-                        style: style.clone(),
-                        meta: meta.clone(),
-                    });
-                }
-            }
-        }
-        if let Some(state) = self.extmarks.ns(self.ns_decorations) {
-            for mark in state.extmarks.values() {
-                let row = mark.start_row;
-                if row >= n {
-                    continue;
-                }
-                if let ExtmarkPayload::Decoration(d) = &mark.payload {
-                    dec[row] = d.clone();
-                }
-            }
-        }
-        self.cached_highlights = Arc::new(hl);
-        self.cached_decorations = Arc::new(dec);
-        self.cache_tick = self.changedtick.wrapping_add(self.marks_tick);
-    }
-
-    fn ensure_caches(&mut self) {
-        let want = self.changedtick.wrapping_add(self.marks_tick);
-        if self.cache_tick != want {
-            self.rebuild_caches();
-        }
-    }
-
-    /// Shared handle to the per-line highlight vec — used by views
-    /// that want to `Arc::clone` instead of rebuilding their own copy.
-    /// Materialized lazily from the extmark store.
-    pub fn highlights_arc(&mut self) -> &Arc<Vec<Vec<Span>>> {
-        self.ensure_caches();
-        &self.cached_highlights
-    }
-
-    pub fn lines_arc(&self) -> &Arc<Vec<String>> {
-        &self.lines
-    }
-
-    pub fn decorations_arc(&mut self) -> &Arc<Vec<LineDecoration>> {
-        self.ensure_caches();
-        &self.cached_decorations
-    }
-
-    pub fn decorations(&mut self) -> &[LineDecoration] {
-        self.ensure_caches();
-        &self.cached_decorations
     }
 }
 
@@ -1244,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_namespace_isolates_marks() {
+    fn custom_namespace_highlights_surface_alongside_default() {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["text".into()]);
         let ns = buf.create_namespace("syntax");
@@ -1254,12 +1187,15 @@ mod tests {
             0,
             ExtmarkOpts::highlight(4, SpanStyle::fg(Color::Red), SpanMeta::default()),
         );
-        // The convenience getter only sees `NS_HIGHLIGHTS`; custom
-        // namespaces are read via `extmarks(ns)`.
-        assert_eq!(buf.highlights_at(0).len(), 0);
+        // Highlight payloads in any namespace are visible to
+        // `highlights_at` so parsers / selection / search can
+        // partition decoration into independent namespaces while
+        // sharing the same paint pass.
+        assert_eq!(buf.highlights_at(0).len(), 1);
         assert_eq!(buf.extmarks(ns).len(), 1);
         buf.del_extmark(ns, id);
         assert_eq!(buf.extmarks(ns).len(), 0);
+        assert_eq!(buf.highlights_at(0).len(), 0);
     }
 
     #[test]
@@ -1417,24 +1353,6 @@ mod tests {
         assert!(buf.yank_text_for_range(0, 0, 0, 0).is_none());
         assert!(buf.yank_text_for_range(0, 5, 0, 3).is_none());
         assert!(buf.yank_text_for_range(99, 0, 99, 1).is_none());
-    }
-
-    #[test]
-    fn highlights_arc_is_materialized_from_extmarks() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["abc".into()]);
-        buf.add_highlight(0, 0, 3, SpanStyle::bold());
-        let arc = buf.highlights_arc().clone();
-        assert_eq!(arc[0].len(), 1);
-        assert_eq!(arc[0][0].col_start, 0);
-        // Re-reading without mutation reuses the same Arc.
-        let arc2 = buf.highlights_arc().clone();
-        assert!(Arc::ptr_eq(&arc, &arc2));
-        // After a mutation, a new Arc is materialized.
-        buf.add_highlight(0, 0, 1, SpanStyle::dim());
-        let arc3 = buf.highlights_arc().clone();
-        assert!(!Arc::ptr_eq(&arc, &arc3));
-        assert_eq!(arc3[0].len(), 2);
     }
 
     /// Drives [`Buffer::ensure_rendered_at`] with a stub parser so

@@ -335,9 +335,16 @@ pub struct App {
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
     /// Stable `BufId` for the prompt input's styled display buffer.
-    /// Populated each frame by `compute_prompt` and read by the
-    /// `prompt_input` WindowView layer.
+    /// Populated each frame by `compute_prompt` and consumed by the
+    /// painted-split path on `Ui::wins[PROMPT_WIN]`.
     pub(super) input_display_buf: ui::BufId,
+    /// Stable `BufId` for the transcript's display buffer.
+    /// `project_transcript_buffer` rewrites its lines + highlight
+    /// extmarks each frame; the painted-split path on
+    /// `Ui::wins[TRANSCRIPT_WIN]` consumes them via `Window::render`.
+    /// Selection bg lands as extmarks in the dedicated
+    /// `NS_SELECTION` namespace so paint ordering is stable.
+    pub(super) transcript_display_buf: ui::BufId,
     /// `WinId` of the status-line Window. The status line is a
     /// Buffer-backed Window registered as a painted split — `Ui::render`
     /// paints it via `Window::render` from the post-layer closure, no
@@ -571,7 +578,7 @@ impl App {
         // Load workspace rules from disk into them at startup.
         let runtime_approvals = engine.runtime_approvals();
 
-        let (ui, input_display_buf, status_win, status_buf) = {
+        let (ui, input_display_buf, transcript_display_buf, status_win, status_buf) = {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = ui::Ui::new();
             ui.set_terminal_size(w, h);
@@ -592,14 +599,29 @@ impl App {
                 modifiable: true,
                 buftype: ui::buffer::BufType::Prompt,
             });
-            let transcript_view = crate::content::window_view::WindowView::new();
-            ui.add_layer(
-                "transcript",
-                Box::new(transcript_view),
-                ui::Rect::new(0, 0, w, h),
-                0,
-            );
-            ui.register_split("transcript", ui::TRANSCRIPT_WIN);
+            // Transcript: a Buffer-backed Window painted via `Ui::render`
+            // from the post-layer closure. No compositor `Component`
+            // layer — `project_transcript_buffer` writes the projected
+            // lines + highlight extmarks each frame, and the painted-
+            // split path consumes them via `Window::render`. Selection
+            // bg lands as extmarks in a dedicated `selection`
+            // namespace registered ahead so the painted layering wins.
+            let transcript_display_buf = ui.buf_create(ui::buffer::BufCreateOpts {
+                modifiable: true,
+                buftype: ui::buffer::BufType::Nofile,
+            });
+            if let Some(buf) = ui.buf_mut(transcript_display_buf) {
+                buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
+            }
+            assert!(ui.win_open_split_at(
+                ui::TRANSCRIPT_WIN,
+                transcript_display_buf,
+                ui::SplitConfig {
+                    region: "transcript".into(),
+                    gutters: ui::Gutters::default(),
+                },
+            ));
+            ui.register_painted_split(ui::TRANSCRIPT_WIN);
             // Prompt: a Buffer-backed Window painted via `Ui::render`
             // from the post-layer closure. No compositor `Component`
             // layer — `compute_prompt` writes the unified buffer
@@ -639,7 +661,13 @@ impl App {
             }
             ui.set_window_rect(status_win, ui::Rect::new(h.saturating_sub(1), 0, w, 1));
             ui.register_painted_split(status_win);
-            (ui, input_display_buf, status_win, status_buf)
+            (
+                ui,
+                input_display_buf,
+                transcript_display_buf,
+                status_win,
+                status_buf,
+            )
         };
 
         Self {
@@ -653,15 +681,8 @@ impl App {
             mode_cycle,
             transcript: crate::content::transcript::Transcript::new(),
             parser: crate::content::stream_parser::StreamParser::new(),
-            transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(
-                ui::buffer::Buffer::new(
-                    ui::BufId(0),
-                    ui::buffer::BufCreateOpts {
-                        modifiable: true,
-                        buftype: ui::buffer::BufType::Nofile,
-                    },
-                ),
-            ),
+            transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
+            transcript_display_buf,
             last_viewport_text: Vec::new(),
             history: Vec::new(),
             input_history: History::load(),
@@ -739,7 +760,7 @@ impl App {
             transcript_window: {
                 let mut w = ui::Window::new(
                     ui::TRANSCRIPT_WIN,
-                    ui::BufId(0),
+                    transcript_display_buf,
                     ui::SplitConfig {
                         region: "transcript".into(),
                         gutters: ui::Gutters::default(),
