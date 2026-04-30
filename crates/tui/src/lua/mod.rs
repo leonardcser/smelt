@@ -61,6 +61,11 @@ pub(crate) struct RegisteredCommand {
     pub(crate) handle: LuaHandle,
     pub(crate) description: Option<String>,
     pub(crate) args: Vec<String>,
+    /// May this command run while the agent is mid-turn? Defaults to
+    /// `true`. Plugins like `/compact` / `/fork` / `/resume` set
+    /// `while_busy = false` so the dispatcher rejects them with
+    /// `cannot run /name while agent is working` instead of queueing.
+    pub(crate) while_busy: bool,
 }
 
 /// List all Lua-registered `/commands` as `(name, description)`.
@@ -650,6 +655,19 @@ impl LuaRuntime {
             .lock()
             .map(|m| m.contains_key(name))
             .unwrap_or(false)
+    }
+
+    /// `Some(true)` if the registered command opted out of running
+    /// while the agent is mid-turn (`while_busy = false`).
+    /// `Some(false)` if it's registered and allowed. `None` if no
+    /// command by that name is registered.
+    pub fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
+        self.shared
+            .commands
+            .lock()
+            .ok()?
+            .get(name)
+            .map(|c| !c.while_busy)
     }
 
     /// Names of all Lua-registered commands (for completion).

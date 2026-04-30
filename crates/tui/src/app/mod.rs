@@ -346,19 +346,6 @@ pub enum CommandAction {
     ),
 }
 
-/// Check whether a command is allowed while the agent is running.
-/// Returns `Err(reason)` for commands that are blocked.
-fn is_allowed_while_running(input: &str) -> Result<(), String> {
-    match input {
-        _ if input == "/compact" || input.starts_with("/compact ") => {
-            Err("cannot compact while agent is working".into())
-        }
-        "/resume" => Err("cannot resume while agent is working".into()),
-        "/fork" => Err("cannot fork while agent is working".into()),
-        _ => Ok(()),
-    }
-}
-
 /// Classify input received as a CLI startup argument.
 /// Returns `None` if it's a normal message that should go to the agent.
 fn classify_startup_command(input: &str) -> Option<&'static str> {
@@ -1484,30 +1471,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── is_allowed_while_running ─────────────────────────────────────
-
-    #[test]
-    fn running_allowed_commands() {
-        assert!(is_allowed_while_running("/vim").is_ok());
-        assert!(is_allowed_while_running("/export").is_ok());
-        assert!(is_allowed_while_running("/ps").is_ok());
-        assert!(is_allowed_while_running("/exit").is_ok());
-        assert!(is_allowed_while_running("/quit").is_ok());
-        assert!(is_allowed_while_running("/clear").is_ok());
-        assert!(is_allowed_while_running("/model").is_ok());
-        assert!(is_allowed_while_running("/settings").is_ok());
-        assert!(is_allowed_while_running("/theme").is_ok());
-        assert!(is_allowed_while_running("/stats").is_ok());
-        assert!(is_allowed_while_running("/cost").is_ok());
-        assert!(is_allowed_while_running("!ls").is_ok());
-    }
-
-    #[test]
-    fn running_blocked_commands() {
-        assert!(is_allowed_while_running("/compact").is_err());
-        assert!(is_allowed_while_running("/resume").is_err());
-    }
 
     // ── classify_startup_command ──────────────────────────────────────
 
