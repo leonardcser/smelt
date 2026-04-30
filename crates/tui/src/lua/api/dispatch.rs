@@ -4,6 +4,7 @@
 //! statusline sources, and spawned tasks.
 
 use super::{lua_table_to_args, lua_table_to_json};
+use crate::app::Host;
 use crate::lua::{LuaHandle, LuaShared, PluginToolHandles, TaskCompletion, TaskEvent};
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
@@ -407,7 +408,7 @@ fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     timer_tbl.set(
         "cancel",
         lua.create_function(|_, id: u64| {
-            Ok(crate::lua::try_with_app(|app| app.core.timers.cancel(id)).unwrap_or(false))
+            Ok(crate::lua::try_with_app(|app| app.timers().cancel(id)).unwrap_or(false))
         })?,
     )?;
     smelt.set("timer", timer_tbl)?;

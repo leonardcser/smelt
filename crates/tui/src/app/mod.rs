@@ -12,6 +12,7 @@ mod events;
 mod headless;
 pub(crate) mod headless_app;
 mod history;
+pub(crate) mod host;
 mod lua_bridge;
 mod lua_handlers;
 mod mouse;
@@ -29,6 +30,7 @@ pub use app_config::AppConfig;
 pub use core::Core;
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
+pub(crate) use host::Host;
 
 /// Snapshot of a tracked agent's state, published by the main loop
 /// and consumed by the agents dialog.
@@ -780,7 +782,7 @@ impl TuiApp {
     /// the per-`TypeId` projector registered on `Cells`; values with
     /// no registered projector surface as `nil`.
     pub fn drain_cells_pending(&mut self) {
-        if !self.core.cells.has_pending() {
+        if !self.cells().has_pending() {
             return;
         }
         let fires = self.core.cells.drain_pending();
@@ -1034,7 +1036,7 @@ impl TuiApp {
         // Lua runs at startup so those reads land on the real TuiApp.
         {
             let _guard = crate::lua::install_app_ptr(self);
-            self.core.lua.load_plugins();
+            self.lua().load_plugins();
             self.core.cells.set_dyn(
                 "session_started",
                 std::rc::Rc::new(self.core.session.id.clone()),
@@ -1146,9 +1148,9 @@ impl TuiApp {
             }
 
             // ── Drain engine events (paused only for Confirm) ──
-            if self.core.confirms.is_clear() {
+            if self.confirms().is_clear() {
                 loop {
-                    let ev = match self.core.engine.try_recv() {
+                    let ev = match self.engine().try_recv() {
                         Ok(ev) => ev,
                         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -1212,7 +1214,7 @@ impl TuiApp {
             // ── Auto-start from pending agent messages ─────────────────
             if self.agent.is_none() && !self.pending_agent_messages.is_empty() {
                 let msgs = std::mem::take(&mut self.pending_agent_messages);
-                self.core.session.messages.extend(msgs);
+                self.session().messages.extend(msgs);
                 let turn = self.begin_agent_message_turn();
                 self.agent = Some(turn);
             }

@@ -4,7 +4,7 @@
 //! settings toggle, transcript yank, and so on.
 
 use super::transcript_model::ConfirmChoice;
-use super::TuiApp;
+use super::{Host, TuiApp};
 
 impl TuiApp {
     /// Run a slash command. Mirrors the user typing `:<line>` into
@@ -99,8 +99,8 @@ impl TuiApp {
         let abs_row = self.transcript_window.cursor_abs_row();
         if let Some(text) = self.block_text_at_row(abs_row, self.core.config.settings.show_thinking)
         {
-            if self.core.clipboard.write(&text).is_ok() {
-                self.core.clipboard.kill_ring.record_clipboard_write(text);
+            if self.clipboard().write(&text).is_ok() {
+                self.clipboard().kill_ring.record_clipboard_write(text);
             }
             self.notify("block copied".into());
         } else {
