@@ -83,17 +83,12 @@ impl App {
                     // open cmdline.
                     return false;
                 }
-                let KeyEvent {
-                    code, modifiers, ..
-                } = k;
                 let lua = &self.lua;
                 let mut lua_invoke =
                     |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
-                let _ = self
-                    .ui
-                    .handle_key_with_lua(code, modifiers, &mut lua_invoke);
+                let _ = self.ui.dispatch_event(Event::Key(k), &mut lua_invoke);
                 self.flush_lua_callbacks();
                 return false;
             }
@@ -265,24 +260,19 @@ impl App {
         // Split-scoped ("buffer-local") Lua keymaps win over global
         // ones — matches nvim's buffer-local > global priority. The
         // focused split (prompt_input / transcript) is resolved inside
-        // `handle_key_with_lua` via the registered split layer-id map.
+        // `Ui::dispatch_event` via the registered split layer-id map.
         // Used by `smelt.prompt.open_picker` to capture Enter / Esc /
         // arrows while a picker is active. Skipped when an overlay
         // owns focus — overlay-leaf dispatch happens upstream.
         if let Event::Key(k) = *ev {
             if self.ui.focused_overlay().is_none() {
-                let KeyEvent {
-                    code, modifiers, ..
-                } = k;
                 let lua = &self.lua;
                 let mut lua_invoke =
                     |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
-                let result = self
-                    .ui
-                    .handle_key_with_lua(code, modifiers, &mut lua_invoke);
-                if matches!(result, ui::KeyResult::Consumed) {
+                let result = self.ui.dispatch_event(Event::Key(k), &mut lua_invoke);
+                if matches!(result, ui::DispatchOutcome::Consumed) {
                     self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
                 }
@@ -701,7 +691,9 @@ impl App {
         let width_changed = w != self.last_width;
         self.last_width = w;
         self.last_height = h;
-        self.ui.set_terminal_size(w, h);
+        let _ = self
+            .ui
+            .dispatch_event(Event::Resize(w, h), &mut |_, _, _| {});
         if width_changed {
             self.invalidate_for_width(w);
         }

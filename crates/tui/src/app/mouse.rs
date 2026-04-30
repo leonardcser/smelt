@@ -7,38 +7,29 @@ use std::time::{Duration, Instant};
 impl App {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
-        use crossterm::event::MouseButton;
-        // Wheel routing over an overlay. A focused overlay (picker /
-        // cmdline / dialog) absorbs vertical scroll outright so a
-        // pointer that drifts off its rect doesn't bleed wheel events
-        // into the transcript behind it.
-        //
-        // Under this model wheel moves the viewport only (scroll_top)
-        // and never the selection — `panel_scroll_by` is the primitive.
-        let is_scroll = matches!(
-            me.kind,
-            MouseEventKind::ScrollUp
-                | MouseEventKind::ScrollDown
-                | MouseEventKind::ScrollLeft
-                | MouseEventKind::ScrollRight
-        );
-        if is_scroll && self.ui.focused_overlay().is_some() {
-            return EventOutcome::Redraw;
-        }
-
-        // Modal gate. With an active modal overlay up, clicks / drags
-        // outside its rect are absorbed (no selection extension, no
-        // cursor repositioning in the transcript behind). Clicks
-        // inside the overlay continue to the normal path below so
-        // scrollbar-drag hit-test and overlay-aware handlers run.
-        if let Some(modal_id) = self.ui.active_modal() {
-            let inside = self
-                .ui
-                .overlay_hit_test(me.row, me.column, None)
-                .is_some_and(|(id, _)| id == modal_id);
-            if !inside {
-                return EventOutcome::Noop;
-            }
+        use crossterm::event::{Event, MouseButton};
+        // Wheel-over-overlay absorb + active-modal click-outside
+        // absorb both live in `Ui::dispatch_event(Event::Mouse(_))`.
+        // For wheel-on-overlay we surface a redraw so the pointer
+        // hover updates; for modal absorb the redraw matters less but
+        // is still cheap. Anything Ui doesn't claim (`Ignored`) keeps
+        // flowing through the App-side routing below.
+        if matches!(
+            self.ui.dispatch_event(Event::Mouse(me), &mut |_, _, _| {}),
+            ui::DispatchOutcome::Consumed
+        ) {
+            let is_scroll = matches!(
+                me.kind,
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            );
+            return if is_scroll {
+                EventOutcome::Redraw
+            } else {
+                EventOutcome::Noop
+            };
         }
 
         if self.layout.hit_test(me.row, me.column) == content::HitRegion::Status {
