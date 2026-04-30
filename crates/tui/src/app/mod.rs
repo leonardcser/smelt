@@ -204,14 +204,6 @@ pub struct TuiApp {
     /// rows). Updated each frame in `render_normal`; read by mouse
     /// hit-testing and viewport-rows estimation.
     pub layout: content::layout::LayoutState,
-    /// Buffer viewport for the prompt input text area, recorded after
-    /// paint. Used by scrollbar click/drag and input-focus mouse
-    /// routing.
-    pub(crate) prompt_viewport: Option<ui::WindowViewport>,
-    /// Buffer viewport for the transcript window, recorded after each
-    /// render. Used by mouse hit-testing, transcript cursor positioning,
-    /// and focus-mouse routing.
-    pub(crate) transcript_viewport: Option<ui::WindowViewport>,
     /// Human-readable name for this agent.
     pub agent_id: String,
     /// All tracked subagents (blocking and background).
@@ -654,8 +646,6 @@ impl TuiApp {
             // The first frame's `render_normal` overwrites this via
             // `LayoutState::from_ui` after publishing the splits tree.
             layout: content::layout::LayoutState::default(),
-            prompt_viewport: None,
-            transcript_viewport: None,
             agent_id: String::new(),
             agents: Vec::new(),
             agent_snapshots: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

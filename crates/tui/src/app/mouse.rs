@@ -106,7 +106,7 @@ impl TuiApp {
                 // use, so click cadence / drag anchors / yank-on-
                 // release / theme selection bg are shared.
                 let _ = double;
-                if let Some(vp) = self.prompt_viewport {
+                if let Some(vp) = self.viewport_for(ui::PROMPT_WIN) {
                     if vp.contains(me.row, me.column) {
                         self.app_focus = crate::app::AppFocus::Prompt;
                         if self.begin_scrollbar_drag_if_hit(me.row, me.column, ui::PROMPT_WIN) {
@@ -255,7 +255,7 @@ impl TuiApp {
     /// source bytes. Yank text is re-sliced from source so soft-wrap
     /// `\n`s don't leak into the clipboard.
     fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let Some(vp) = self.prompt_viewport else {
+        let Some(vp) = self.viewport_for(ui::PROMPT_WIN) else {
             return;
         };
         let usable = vp.content_width as usize;
@@ -350,7 +350,7 @@ impl TuiApp {
             return;
         }
         let (soft, hard) = self.transcript_line_breaks(self.core.config.settings.show_thinking);
-        let Some(viewport) = self.transcript_viewport else {
+        let Some(viewport) = self.viewport_for(ui::TRANSCRIPT_WIN) else {
             return;
         };
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
@@ -436,13 +436,10 @@ impl TuiApp {
     }
 
     /// Lookup the currently-painted viewport for a known split owner.
+    /// `Window::viewport` is the source of truth; the host writes it
+    /// at paint time and reads back whenever a mouse event needs the
+    /// last-painted geometry.
     fn viewport_for(&self, owner: ui::WinId) -> Option<ui::WindowViewport> {
-        if owner == ui::TRANSCRIPT_WIN {
-            self.transcript_viewport
-        } else if owner == ui::PROMPT_WIN {
-            self.prompt_viewport
-        } else {
-            None
-        }
+        self.ui.win(owner).and_then(|w| w.viewport)
     }
 }
