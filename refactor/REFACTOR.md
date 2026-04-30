@@ -723,10 +723,8 @@ Land each as `crates/tui/src/<name>.rs` (or a small folder if the
 unit warrants it):
 
 - `tui::parse` — markdown / diff / syntax (delegates to syntect, LCS).
-- `tui::process` — short-lived shell commands. `spawn(cmd, args, opts)
-  -> Handle` for streaming control; `run(cmd, args, opts)` awaits
-  exit and returns `{ stdout, stderr, exit_code }` (used by `bash`,
-  glob, grep, one-shot helpers). Group / kill / cancel on the handle.
+- `tui::process` — short-lived shell commands. ✅ `run` shipped
+  (this session); streaming `spawn -> Handle` rides P5.b.
 - `tui::subprocess` — long-lived child with bidirectional event
   channel (`spawn`, `send`, `on_event`, `wait`, `kill`). Used by
   sub-agents, MCP servers, long-running background commands. Wire
@@ -735,7 +733,7 @@ unit warrants it):
 - `tui::fs` — read / write / edit / glob / lock. ✅ shell (`5de3054`).
 - `tui::http` — fetch / cache / redirects. ✅ shell (this session).
 - `tui::html` — html → markdown. ✅ shell (this session).
-- `tui::notebook` — Jupyter JSON ops.
+- `tui::notebook` — Jupyter JSON ops. ✅ shell (this session).
 - `tui::grep` — ripgrep wrapper. ✅ shell (this session).
 - `tui::path` — normalize / canonical / relative / expand_home. ✅ (`de7fb87`).
 - `tui::fuzzy` — fuzzy matching / scoring (folds `tui/fuzzy.rs` +
