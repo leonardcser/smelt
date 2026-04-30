@@ -532,16 +532,6 @@ impl BlockHistory {
         self.bump_generation();
     }
 
-    /// Iterator over `BlockId`s currently in the `Streaming` state, in
-    /// insertion order. Callers use this to find "the live block" for
-    /// an in-flight stream without tracking separate handles.
-    pub(crate) fn streaming_block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
-        self.order
-            .iter()
-            .copied()
-            .filter(|id| matches!(self.status(*id), Status::Streaming))
-    }
-
     /// `BlockId` of the most recent `Block::ToolCall` whose `call_id` matches.
     pub(crate) fn tool_block_id(&self, call_id: &str) -> Option<BlockId> {
         self.order.iter().rev().copied().find(|id| {
@@ -859,26 +849,6 @@ mod tests {
         // Flipping to Done doesn't change rendering.
         history.set_status(streaming_id, Status::Done);
         assert!(history.total_rows(80, false) > base_rows);
-    }
-
-    #[test]
-    fn streaming_block_ids_filters_on_status() {
-        let mut history = BlockHistory::new();
-        let a = history.push(Block::Text {
-            content: "a".into(),
-        });
-        let b = history.push(Block::Text {
-            content: "b".into(),
-        });
-        history.set_status(b, Status::Streaming);
-        let streaming: Vec<BlockId> = history.streaming_block_ids().collect();
-        assert_eq!(streaming, vec![b]);
-        history.set_status(a, Status::Streaming);
-        let streaming: Vec<BlockId> = history.streaming_block_ids().collect();
-        assert_eq!(streaming, vec![a, b]);
-        history.set_status(b, Status::Done);
-        let streaming: Vec<BlockId> = history.streaming_block_ids().collect();
-        assert_eq!(streaming, vec![a]);
     }
 
     #[test]

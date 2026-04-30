@@ -47,61 +47,6 @@ pub mod buf {
     }
 }
 
-/// Per-block mutations on the transcript — view state (collapsed /
-/// trimmed / expanded) and lifecycle status (streaming / done). This
-/// is the surface "click to expand", "collapse long tool output",
-/// "agent re-runs a block" and similar features will grow against.
-///
-/// Only view state + status land in this slice; `append_text`,
-/// `rewrite`, `invoke`, and per-block keymaps arrive in Stage 3.5's
-/// subsequent slices as the `active_*` → live-block collapse progresses.
-pub mod block {
-    use crate::app::transcript_model::{Block, BlockId, Status, ViewState};
-    use crate::app::TuiApp;
-
-    /// Current view state of a block.
-    pub fn view_state(app: &TuiApp, id: BlockId) -> ViewState {
-        app.block_view_state(id)
-    }
-
-    /// Set a block's view state. Invalidates that block's layout cache
-    /// so the next frame re-lays-out against the new state.
-    pub fn set_view_state(app: &mut TuiApp, id: BlockId, state: ViewState) {
-        app.set_block_view_state(id, state);
-    }
-
-    /// Current lifecycle status of a block.
-    pub fn status(app: &TuiApp, id: BlockId) -> Status {
-        app.block_status(id)
-    }
-
-    /// Set a block's lifecycle status.
-    pub fn set_status(app: &mut TuiApp, id: BlockId, status: Status) {
-        app.set_block_status(id, status);
-    }
-
-    /// Push a new `Streaming` block onto the transcript and return its
-    /// `BlockId`. The id is stable across subsequent `rewrite` calls —
-    /// the canonical handle for live-updating a block as a stream
-    /// arrives.
-    pub fn push_streaming(app: &mut TuiApp, block: Block) -> BlockId {
-        app.push_streaming(block)
-    }
-
-    /// Replace the content of an existing block in place. Preserves
-    /// `BlockId`, `Status`, and `ViewState`; the layout cache
-    /// auto-invalidates via the content-hash component of `LayoutKey`.
-    pub fn rewrite(app: &mut TuiApp, id: BlockId, block: Block) {
-        app.rewrite_block(id, block);
-    }
-
-    /// `BlockId`s of blocks currently in `Status::Streaming`, in
-    /// transcript order.
-    pub fn streaming_ids(app: &TuiApp) -> Vec<BlockId> {
-        app.streaming_block_ids()
-    }
-}
-
 /// Command dispatch — the single entry point for `/cmd` and `:cmd`
 /// style actions. Internal handlers and (future) plugin handlers both
 /// register here; keybindings resolve to names that route through
