@@ -85,7 +85,10 @@ pub struct Ui {
     /// Overlay storage. Each overlay is a positioned LayoutTree of
     /// windows; `Ui::overlay_open` returns an `OverlayId` and
     /// `resolve_anchor` is the per-frame positioning primitive.
-    overlays: HashMap<OverlayId, Overlay>,
+    /// `Vec` preserves insertion order naturally — used as the
+    /// secondary sort key in z-order ties (see
+    /// [`Self::overlays_in_z_order`]).
+    overlays: Vec<(OverlayId, Overlay)>,
     next_overlay_id: u32,
     /// Stack of prior focused windows. `set_focus` pushes the
     /// outgoing focus here; the overlay close paths walk back through
@@ -126,7 +129,7 @@ impl Ui {
             callbacks: Callbacks::new(),
             split_rects: HashMap::new(),
             theme: Theme::new(),
-            overlays: HashMap::new(),
+            overlays: Vec::new(),
             next_overlay_id: 1,
             focus_history: Vec::new(),
             focus: None,
@@ -218,7 +221,7 @@ impl Ui {
         self.next_overlay_id += 1;
         let modal = overlay.modal;
         let first_leaf = overlay.layout.leaves_in_order().into_iter().next();
-        self.overlays.insert(id, overlay);
+        self.overlays.push((id, overlay));
         if modal {
             if let Some(leaf) = first_leaf {
                 self.set_focus(leaf);
@@ -237,7 +240,8 @@ impl Ui {
     /// closed overlay is preserved untouched, and `focus_history`
     /// is left alone.
     pub fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
-        let removed = self.overlays.remove(&id)?;
+        let pos = self.overlays.iter().position(|(oid, _)| *oid == id)?;
+        let (_, removed) = self.overlays.remove(pos);
         if let Some(focused) = self.focus {
             if removed.layout.contains_leaf(focused) {
                 self.focus = None;
@@ -260,19 +264,24 @@ impl Ui {
     }
 
     pub fn overlay(&self, id: OverlayId) -> Option<&Overlay> {
-        self.overlays.get(&id)
+        self.overlays
+            .iter()
+            .find_map(|(oid, ov)| (*oid == id).then_some(ov))
     }
 
     pub fn overlay_mut(&mut self, id: OverlayId) -> Option<&mut Overlay> {
-        self.overlays.get_mut(&id)
+        self.overlays
+            .iter_mut()
+            .find_map(|(oid, ov)| (*oid == id).then_some(ov))
     }
 
     /// Iterate overlays in stacking order (lowest `z` first; ties
-    /// broken by insertion order via `OverlayId`).
+    /// broken by insertion order — the live vec already carries
+    /// insertion order, and `sort_by_key` is stable).
     pub fn overlays_in_z_order(&self) -> Vec<(OverlayId, &Overlay)> {
         let mut entries: Vec<(OverlayId, &Overlay)> =
             self.overlays.iter().map(|(id, o)| (*id, o)).collect();
-        entries.sort_by_key(|(id, o)| (o.z, id.0));
+        entries.sort_by_key(|(_, o)| o.z);
         entries
     }
 
@@ -341,7 +350,7 @@ impl Ui {
     ) -> Option<(OverlayId, OverlayHitTarget)> {
         let modal_z = self
             .active_modal()
-            .and_then(|id| self.overlays.get(&id).map(|o| o.z));
+            .and_then(|id| self.overlay(id).map(|o| o.z));
         // Topmost first.
         let mut resolved = self.resolve_overlays(cursor);
         resolved.reverse();
@@ -640,7 +649,7 @@ impl Ui {
     /// interactive (e.g. options + input).
     pub fn overlay_root_for_leaf(&self, win: WinId) -> Option<WinId> {
         let id = self.overlay_for_leaf(win)?;
-        let ov = self.overlays.get(&id)?;
+        let ov = self.overlay(id)?;
         ov.layout.leaves_in_order().first().copied()
     }
 
@@ -671,7 +680,7 @@ impl Ui {
         let Some(modal_id) = self.active_modal() else {
             return false;
         };
-        let Some(modal) = self.overlays.get(&modal_id) else {
+        let Some(modal) = self.overlay(modal_id) else {
             return false;
         };
         let leaves: Vec<WinId> = modal
