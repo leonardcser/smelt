@@ -1545,11 +1545,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_exit_is_blocked() {
-        assert!(classify_startup_command("/exit").is_some());
-    }
-
-    #[test]
     fn startup_compact_is_blocked() {
         assert!(classify_startup_command("/compact").is_some());
     }

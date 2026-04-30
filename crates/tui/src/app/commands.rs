@@ -64,43 +64,11 @@ pub(crate) struct RustCommand {
     pub handler: fn(&mut TuiApp, Option<String>) -> CommandAction,
 }
 
-pub(crate) const RUST_COMMANDS: &[RustCommand] = &[
-    RustCommand {
-        name: "exit",
-        desc: Some("exit the app"),
-        handler: cmd_quit,
-    },
-    RustCommand {
-        name: "quit",
-        desc: Some("exit the app"),
-        handler: cmd_quit,
-    },
-    RustCommand {
-        name: "q",
-        desc: None,
-        handler: cmd_quit,
-    },
-    RustCommand {
-        name: "qa",
-        desc: None,
-        handler: cmd_quit,
-    },
-    RustCommand {
-        name: "wq",
-        desc: None,
-        handler: cmd_quit,
-    },
-    RustCommand {
-        name: "wqa",
-        desc: None,
-        handler: cmd_quit,
-    },
-    RustCommand {
-        name: "compact",
-        desc: Some("compact conversation history"),
-        handler: cmd_compact,
-    },
-];
+pub(crate) const RUST_COMMANDS: &[RustCommand] = &[RustCommand {
+    name: "compact",
+    desc: Some("compact conversation history"),
+    handler: cmd_compact,
+}];
 
 /// Visible `(name, desc)` pairs for the `/` completer. Hidden aliases
 /// (`/q`, `/qa`, …) are filtered out.
@@ -114,10 +82,6 @@ pub(crate) fn rust_command_items() -> impl Iterator<Item = (&'static str, &'stat
 /// command. Aliases included.
 pub(crate) fn is_rust_command(name: &str) -> bool {
     RUST_COMMANDS.iter().any(|c| c.name == name)
-}
-
-fn cmd_quit(_: &mut TuiApp, _: Option<String>) -> CommandAction {
-    CommandAction::Quit
 }
 
 fn cmd_compact(_: &mut TuiApp, arg: Option<String>) -> CommandAction {
