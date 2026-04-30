@@ -1141,10 +1141,11 @@ impl TuiApp {
                         }
                     };
                     // Take the TurnState out for the duration of the
-                    // dispatch so `handle_engine_event` can borrow its
-                    // fields while we still hold `&mut self`.
+                    // dispatch so `engine_bridge::handle_event` can
+                    // borrow its fields while we still hold `&mut self`.
                     let action = if let Some(mut ag) = self.agent.take() {
-                        let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
+                        let ctrl =
+                            engine_bridge::handle_event(self, ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
@@ -1155,7 +1156,7 @@ impl TuiApp {
                         action
                     } else {
                         // No active turn — handle out-of-band events.
-                        self.handle_engine_event_idle(ev);
+                        engine_bridge::handle_idle_event(self, ev);
                         LoopAction::Continue
                     };
                     match action {
@@ -1389,7 +1390,8 @@ impl TuiApp {
 
                 Some(ev) = self.core.engine.recv(), if self.core.confirms.is_clear() => {
                     if let Some(mut ag) = self.agent.take() {
-                        let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
+                        let ctrl =
+                            engine_bridge::handle_event(self, ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
@@ -1402,7 +1404,7 @@ impl TuiApp {
                         }
                     } else {
                         // No active turn — handle out-of-band events.
-                        self.handle_engine_event_idle(ev);
+                        engine_bridge::handle_idle_event(self, ev);
                     }
                     // Don't render here — deferred to the frame timer or
                     // top-of-loop render to batch rapid engine events into
