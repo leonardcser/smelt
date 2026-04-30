@@ -805,12 +805,12 @@ const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/dialog.lua"),
     ),
     (
-        "smelt/picker.lua",
-        include_str!("../../../../runtime/lua/smelt/picker.lua"),
+        "smelt/widgets/picker.lua",
+        include_str!("../../../../runtime/lua/smelt/widgets/picker.lua"),
     ),
     (
-        "smelt/prompt_picker.lua",
-        include_str!("../../../../runtime/lua/smelt/prompt_picker.lua"),
+        "smelt/widgets/prompt_picker.lua",
+        include_str!("../../../../runtime/lua/smelt/widgets/prompt_picker.lua"),
     ),
     (
         "smelt/cmd.lua",
