@@ -12,6 +12,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     session_tbl.set("cwd", app_read!(lua, |app| app.cwd.clone()))?;
     session_tbl.set(
+        "cost",
+        app_read!(lua, |app| app.core.session.session_cost_usd),
+    )?;
+    session_tbl.set(
+        "context_tokens",
+        app_read!(lua, |app| app.core.session.context_tokens),
+    )?;
+    session_tbl.set(
+        "context_window",
+        app_read!(lua, |app| app.core.config.context_window),
+    )?;
+    session_tbl.set(
         "created_at_ms",
         app_read!(lua, |app| app.core.session.created_at_ms),
     )?;
