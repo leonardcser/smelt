@@ -301,7 +301,7 @@ fn register_win(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaR
         "mode",
         app_read!(lua, |app| {
             let has_vim = match app.app_focus {
-                crate::app::AppFocus::Content => app.transcript_window.vim.is_some(),
+                crate::app::AppFocus::Content => app.transcript_window.vim_enabled,
                 crate::app::AppFocus::Prompt => app.input.vim_enabled(),
             };
             if has_vim {

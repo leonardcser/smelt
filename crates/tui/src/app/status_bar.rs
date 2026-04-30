@@ -126,7 +126,7 @@ impl App {
         let focused_window_has_vim = self
             .ui
             .focused_window()
-            .map(|w| w.vim.is_some())
+            .map(|w| w.vim_enabled)
             .unwrap_or(false);
         let (vim_enabled, vim_mode) = if focused_window_has_vim {
             (true, Some(self.vim_mode))
@@ -135,7 +135,7 @@ impl App {
         } else {
             match self.app_focus {
                 crate::app::AppFocus::Content => {
-                    let has_vim = self.transcript_window.vim.is_some();
+                    let has_vim = self.transcript_window.vim_enabled;
                     (has_vim, has_vim.then_some(self.vim_mode))
                 }
                 crate::app::AppFocus::Prompt => {

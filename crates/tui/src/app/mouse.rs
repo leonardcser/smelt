@@ -64,7 +64,7 @@ impl App {
                 }
                 if self.app_focus == crate::app::AppFocus::Prompt {
                     if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
-                        if self.input.win.vim.is_some() {
+                        if self.input.win.vim_enabled {
                             self.input.win.vim_state.set_mode(&mut self.vim_mode, prev);
                         }
                     }
@@ -126,7 +126,7 @@ impl App {
                         }
                         self.drag_on_scrollbar = None;
                         if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
-                            && self.input.win.vim.is_some()
+                            && self.input.win.vim_enabled
                         {
                             self.prompt_drag_return_vim_mode = Some(self.vim_mode);
                         }
@@ -290,9 +290,9 @@ impl App {
         let saved_vim_visual_anchor = self
             .input
             .win
-            .vim
-            .as_ref()
-            .and_then(|_| ui::Vim::visual_anchor(&self.input.win.vim_state, self.vim_mode));
+            .vim_enabled
+            .then(|| ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .flatten();
 
         self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
         self.input.win.selection_anchor = saved_src_anchor.map(|a| wrap.src_to_wrapped(a));
@@ -300,7 +300,7 @@ impl App {
             saved_src_dword.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
         self.input.win.drag_anchor_line =
             saved_src_dline.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
-        if self.input.win.vim.is_some() {
+        if self.input.win.vim_enabled {
             if let Some(a) = saved_vim_visual_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
@@ -331,9 +331,9 @@ impl App {
         let new_w_vim_anchor = self
             .input
             .win
-            .vim
-            .as_ref()
-            .and_then(|_| ui::Vim::visual_anchor(&self.input.win.vim_state, self.vim_mode));
+            .vim_enabled
+            .then(|| ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .flatten();
 
         self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
         self.input.win.selection_anchor = new_w_anchor.map(|a| wrap.wrapped_to_src(a));
@@ -341,7 +341,7 @@ impl App {
             new_w_dword.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
         self.input.win.drag_anchor_line =
             new_w_dline.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
-        if self.input.win.vim.is_some() {
+        if self.input.win.vim_enabled {
             if let Some(a) = new_w_vim_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,

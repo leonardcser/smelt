@@ -757,7 +757,7 @@ impl App {
         scroll_top: u16,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
-        let vim_visual = self.transcript_window.vim.is_some()
+        let vim_visual = self.transcript_window.vim_enabled
             && matches!(
                 self.vim_mode,
                 crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine
@@ -778,10 +778,10 @@ impl App {
         }
         let buf = rows.join("\n");
         let cpos = self.transcript_window.compute_cpos(&rows);
-        let active_selection = if self.transcript_window.vim.is_some() {
+        let active_selection = if self.transcript_window.vim_enabled {
             match self.vim_mode {
                 crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine => {
-                    ui::Vim::visual_range(
+                    ui::vim::visual_range(
                         &self.transcript_window.vim_state,
                         &buf,
                         cpos,

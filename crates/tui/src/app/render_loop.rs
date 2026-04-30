@@ -83,7 +83,7 @@ impl App {
     /// appended below stays visible across viewport resizes.
     fn adjust_tail_scroll(&mut self) {
         let has_selection = self.transcript_window.selection_anchor.is_some();
-        let in_vim_visual = self.transcript_window.vim.is_some()
+        let in_vim_visual = self.transcript_window.vim_enabled
             && matches!(
                 self.vim_mode,
                 crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine

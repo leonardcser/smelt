@@ -318,7 +318,7 @@ pub struct App {
     /// status bar, lua_bridge, and `smelt.vim.mode`. Vim dispatch
     /// (Window / PromptState) writes through `&mut` references threaded
     /// via `VimContext.mode` and `MouseCtx.vim_mode`. Defaults to
-    /// `Insert`, matching `Vim::new`'s historical default.
+    /// `Insert`, matching the historical default.
     pub vim_mode: ui::VimMode,
     /// **Single global** clipboard subsystem (kill ring + platform
     /// sink). Vim and emacs yank/paste sites borrow this directly so

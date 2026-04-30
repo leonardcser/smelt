@@ -5,7 +5,7 @@ use crate::grid::{GridSlice, Style};
 use crate::layout::{Gutters, Rect};
 use crate::text::{self, byte_to_cell, cell_to_byte};
 use crate::theme::Theme;
-use crate::vim::{Action, Vim, VimContext, VimMode, VimWindowState};
+use crate::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use crate::{BufId, WinId};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
@@ -259,11 +259,12 @@ pub struct Window {
 
     pub edit_buf: EditBuffer,
     pub cpos: usize,
-    pub vim: Option<Vim>,
+    /// Vim mode is enabled on this Window. Combined with `vim_state`
+    /// it gates the keystroke dispatcher in `dispatch_vim_key`.
+    pub vim_enabled: bool,
     /// Persistent per-Window vim state (Visual anchor, last `f`/`t`
-    /// target). Lives on `Window` rather than `Vim` so the in-flight
-    /// key-sequence state on `Vim` stays the only thing scoped to a
-    /// single keystroke run; vim reads/writes through `VimContext`.
+    /// target, in-flight key-sequence state). Always present; the
+    /// `vim_enabled` flag controls whether it's consulted.
     pub vim_state: VimWindowState,
     /// Shift-selection anchor. Vim Visual's `v`/`V` set this too (via
     /// `set_selection_anchor`) so paint/copy read one range. `None`
@@ -316,7 +317,7 @@ impl Window {
             viewport: None,
             edit_buf: EditBuffer::readonly(),
             cpos: 0,
-            vim: None,
+            vim_enabled: false,
             vim_state: VimWindowState::default(),
             selection_anchor: None,
             curswant: None,
@@ -339,18 +340,10 @@ impl Window {
     // ── Vim ────────────────────────────────────────────────────────────
 
     pub fn set_vim_enabled(&mut self, enabled: bool) {
-        if enabled {
-            if self.vim.is_none() {
-                self.vim = Some(Vim::new());
-            }
-        } else {
-            self.vim = None;
+        self.vim_enabled = enabled;
+        if !enabled {
             self.selection_anchor = None;
         }
-    }
-
-    pub fn vim_enabled(&self) -> bool {
-        self.vim.is_some()
     }
 
     // ── Cursor ─────────────────────────────────────────────────────────
@@ -378,8 +371,8 @@ impl Window {
 
     pub fn selection_range(&self, rows: &[String], mode: VimMode) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(rows);
-        if self.vim.is_some() {
-            if let Some(range) = Vim::visual_range(&self.vim_state, &rows.join("\n"), cpos, mode) {
+        if self.vim_enabled {
+            if let Some(range) = vim::visual_range(&self.vim_state, &rows.join("\n"), cpos, mode) {
                 return Some(range);
             }
         }
@@ -461,7 +454,7 @@ impl Window {
         self.cpos = end.saturating_sub(1).max(start);
         let offsets = Self::line_start_offsets(rows);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
-        if self.vim.is_some() {
+        if self.vim_enabled {
             self.vim_state.begin_visual(mode, VimMode::Visual, start);
         } else {
             self.selection_anchor = Some(start);
@@ -486,7 +479,7 @@ impl Window {
             self.cursor_positioned = false;
             return;
         }
-        if self.vim.is_some() && *mode != VimMode::Normal {
+        if self.vim_enabled && *mode != VimMode::Normal {
             self.vim_state.set_mode(mode, VimMode::Normal);
         }
         if !self.cursor_positioned {
@@ -687,7 +680,7 @@ impl Window {
                 // reads cpos directly; non-vim uses `selection_anchor`).
                 self.drag_anchor_word = None;
                 self.drag_anchor_line = None;
-                if self.vim.is_some() {
+                if self.vim_enabled {
                     self.vim_state
                         .begin_visual(ctx.vim_mode, VimMode::Visual, cpos);
                 } else {
@@ -722,7 +715,7 @@ impl Window {
             self.extend_word_anchored_drag(ctx, buf);
         } else if self.drag_anchor_line.is_some() {
             self.extend_line_anchored_drag(ctx, buf);
-        } else if self.vim.is_none() {
+        } else if !self.vim_enabled {
             self.extend_selection(self.cpos);
         }
         MouseAction::Consumed
@@ -735,7 +728,7 @@ impl Window {
         // same lifecycle for free — no bespoke clear-anchor code in
         // the host adapters. Clipboard side effects are the host's
         // job; Window only owns its selection state.
-        if self.vim.is_some() && matches!(*ctx.vim_mode, VimMode::Visual | VimMode::VisualLine) {
+        if self.vim_enabled && matches!(*ctx.vim_mode, VimMode::Visual | VimMode::VisualLine) {
             self.vim_state.set_mode(ctx.vim_mode, VimMode::Normal);
         }
         self.selection_anchor = None;
@@ -767,7 +760,7 @@ impl Window {
             (we.saturating_sub(1).max(ws), ws)
         };
         self.cpos = new_cpos;
-        if self.vim.is_some() {
+        if self.vim_enabled {
             self.vim_state
                 .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
         } else {
@@ -794,7 +787,7 @@ impl Window {
             (le.saturating_sub(1).max(ls), ls)
         };
         self.cpos = new_cpos;
-        if self.vim.is_some() {
+        if self.vim_enabled {
             self.vim_state
                 .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
         } else {
@@ -819,7 +812,7 @@ impl Window {
         if !self.dispatch_vim_key(k, mode, clipboard) {
             return None;
         }
-        if self.vim.is_some() && *mode == VimMode::Insert {
+        if self.vim_enabled && *mode == VimMode::Insert {
             self.vim_state.set_mode(mode, VimMode::Normal);
         }
         let yanked = clipboard.kill_ring.current().to_string();
@@ -839,9 +832,9 @@ impl Window {
         mode: &mut VimMode,
         clipboard: &mut Clipboard,
     ) -> bool {
-        let Some(vim) = self.vim.as_mut() else {
+        if !self.vim_enabled {
             return false;
-        };
+        }
         let key = match key.code {
             KeyCode::Up => KeyEvent {
                 code: KeyCode::Char('k'),
@@ -872,7 +865,7 @@ impl Window {
             curswant: &mut self.curswant,
             vim_state: &mut self.vim_state,
         };
-        let action = vim.handle_key(key, &mut ctx);
+        let action = vim::handle_key(key, &mut ctx);
         self.cpos = cpos;
         !matches!(action, Action::Passthrough)
     }
@@ -941,7 +934,7 @@ impl Window {
             text::vertical_move(&self.edit_buf.buf, self.cpos, delta, self.curswant);
         self.curswant = Some(new_want);
         self.cpos = new_cpos;
-        if self.vim.is_some() && *mode == VimMode::Insert {
+        if self.vim_enabled && *mode == VimMode::Insert {
             self.vim_state.set_mode(mode, VimMode::Normal);
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
