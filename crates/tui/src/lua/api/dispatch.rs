@@ -26,6 +26,7 @@ pub(super) fn register(
     register_autocmd(lua, smelt, shared)?;
     register_timer(lua, smelt)?;
     register_cell(lua, smelt)?;
+    register_au(lua, smelt)?;
     register_spawn(lua, smelt, shared)?;
     Ok(())
 }
@@ -535,7 +536,157 @@ fn register_cell(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    // `smelt.cell:glob_subscribe(pattern, fn)` fires `fn(name, value)`
+    // for every cell whose name matches the glob pattern. Returns the
+    // id `glob_unsubscribe` accepts. Errors when `pattern` is not a
+    // valid glob.
+    cell_tbl.set(
+        "glob_subscribe",
+        lua.create_function(
+            |lua,
+             (_self, pattern, handler): (mlua::Value, String, mlua::Function)|
+             -> LuaResult<u64> {
+                let pat = glob::Pattern::new(&pattern).map_err(|e| {
+                    LuaError::RuntimeError(format!("invalid glob `{pattern}`: {e}"))
+                })?;
+                let key = lua.create_registry_value(handler)?;
+                Ok(crate::lua::try_with_app(|app| {
+                    app.cells
+                        .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
+                })
+                .unwrap_or(0))
+            },
+        )?,
+    )?;
+
+    // `smelt.cell.glob_unsubscribe(id)` drops a glob subscription and
+    // returns `true` on success, `false` when `id` is unknown.
+    cell_tbl.set(
+        "glob_unsubscribe",
+        lua.create_function(|_, id: u64| -> LuaResult<bool> {
+            Ok(crate::lua::try_with_app(|app| app.cells.unsubscribe_glob(id)).unwrap_or(false))
+        })?,
+    )?;
+
+    // `smelt.cell(name)` returns a `CellHandle` userdata bound to
+    // `name`. Methods `:get()`, `:set(v)`, `:subscribe(fn)`,
+    // `:unsubscribe(id)` route to the same registry the flat API
+    // uses — `cell.new(name, …)` must have run first.
+    let mt = lua.create_table()?;
+    mt.set(
+        "__call",
+        lua.create_function(|_, (_tbl, name): (mlua::Table, String)| Ok(CellHandle { name }))?,
+    )?;
+    cell_tbl.set_metatable(Some(mt))?;
+
     smelt.set("cell", cell_tbl)?;
+    Ok(())
+}
+
+/// Userdata handle returned by `smelt.cell(name)`. Stores the cell
+/// name; methods reach the live `Cells` registry via the TLS app
+/// pointer the same way the flat `smelt.cell.*` bindings do.
+struct CellHandle {
+    name: String,
+}
+
+impl mlua::UserData for CellHandle {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        use crate::app::cells::{LuaCellValue, SubscriberKind};
+        use std::rc::Rc;
+
+        methods.add_method("get", |lua, this, _: ()| -> LuaResult<mlua::Value> {
+            let key = crate::lua::try_with_app(|app| {
+                let v = app.cells.get_dyn(&this.name)?;
+                let lv = v.downcast_ref::<LuaCellValue>()?;
+                lua.registry_value::<mlua::Value>(&lv.key).ok()
+            })
+            .flatten();
+            Ok(key.unwrap_or(mlua::Value::Nil))
+        });
+
+        methods.add_method("set", |lua, this, value: mlua::Value| -> LuaResult<bool> {
+            let key = lua.create_registry_value(value)?;
+            Ok(crate::lua::try_with_app(|app| {
+                app.cells.set_dyn(&this.name, Rc::new(LuaCellValue { key }))
+            })
+            .unwrap_or(false))
+        });
+
+        methods.add_method(
+            "subscribe",
+            |lua, this, handler: mlua::Function| -> LuaResult<mlua::Value> {
+                let key = lua.create_registry_value(handler)?;
+                let id = crate::lua::try_with_app(|app| {
+                    app.cells
+                        .subscribe_kind(&this.name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
+                })
+                .flatten();
+                Ok(match id {
+                    Some(id) => mlua::Value::Integer(id as i64),
+                    None => mlua::Value::Nil,
+                })
+            },
+        );
+
+        methods.add_method("unsubscribe", |_, this, id: u64| -> LuaResult<bool> {
+            Ok(
+                crate::lua::try_with_app(|app| app.cells.unsubscribe(&this.name, id))
+                    .unwrap_or(false),
+            )
+        });
+
+        methods.add_method("name", |_, this, _: ()| -> LuaResult<String> {
+            Ok(this.name.clone())
+        });
+    }
+}
+
+fn register_au(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+    use crate::app::cells::{LuaCellValue, SubscriberKind};
+    use std::rc::Rc;
+
+    let au_tbl = lua.create_table()?;
+
+    // `smelt.au.on(name, fn)` — thin alias over
+    // `smelt.cell(name):subscribe(fn)`. The cell must already be
+    // declared (built-in cells land in P2.a.4c; until then a missing
+    // cell returns `nil`).
+    au_tbl.set(
+        "on",
+        lua.create_function(
+            |lua, (name, handler): (String, mlua::Function)| -> LuaResult<mlua::Value> {
+                let key = lua.create_registry_value(handler)?;
+                let id = crate::lua::try_with_app(|app| {
+                    app.cells
+                        .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(LuaHandle { key })))
+                })
+                .flatten();
+                Ok(match id {
+                    Some(id) => mlua::Value::Integer(id as i64),
+                    None => mlua::Value::Nil,
+                })
+            },
+        )?,
+    )?;
+
+    // `smelt.au.fire(name, payload)` — thin alias over
+    // `smelt.cell(name):set(payload)`. Returns `true` on success,
+    // `false` when the cell isn't declared.
+    au_tbl.set(
+        "fire",
+        lua.create_function(
+            |lua, (name, payload): (String, mlua::Value)| -> LuaResult<bool> {
+                let key = lua.create_registry_value(payload)?;
+                Ok(crate::lua::try_with_app(|app| {
+                    app.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
+                })
+                .unwrap_or(false))
+            },
+        )?,
+    )?;
+
+    smelt.set("au", au_tbl)?;
     Ok(())
 }
 

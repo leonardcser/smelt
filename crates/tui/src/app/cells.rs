@@ -2,12 +2,15 @@
 //! subscriber notification.
 //!
 //! Each cell is one `Rc<dyn Any>` slot keyed by name plus a list of
-//! subscribers. Writes (`set_dyn`) snapshot the new value and the
-//! subscriber list into a pending fire queue; the loop drains the
-//! queue at a safe point (after the current `&mut Cells` / `&mut App`
-//! borrow releases) so subscriber bodies can re-enter `Cells` / other
-//! subsystems freely. Same "queue, release the borrow, then fire"
-//! pattern Timers and Lua keymap dispatch already use.
+//! direct subscribers; the registry also carries a flat list of
+//! `glob_subs` whose `glob::Pattern` is matched against every cell
+//! name on `set_dyn`. Writes (`set_dyn`) snapshot the new value and
+//! the union of (direct + matching glob) subscribers into a pending
+//! fire queue; the loop drains the queue at a safe point (after the
+//! current `&mut Cells` / `&mut App` borrow releases) so subscriber
+//! bodies can re-enter `Cells` / other subsystems freely. Same
+//! "queue, release the borrow, then fire" pattern Timers and Lua
+//! keymap dispatch already use.
 //!
 //! `Rc<dyn Any>` is intentionally `!Send`-friendly: `Cells` lives on
 //! the `!Send` `App` and Lua values (carried as `mlua::RegistryKey`
@@ -58,9 +61,24 @@ struct Subscriber {
     kind: SubscriberKind,
 }
 
+struct GlobSubscriber {
+    id: SubscriptionId,
+    pattern: glob::Pattern,
+    kind: SubscriberKind,
+}
+
 struct Slot {
     value: Rc<dyn Any>,
     subscribers: Vec<Subscriber>,
+}
+
+/// One queued callback inside a `PendingFire`. `is_glob` lets the
+/// drain pump pick the right call shape: direct subscribers receive
+/// `(value)`, glob subscribers receive `(name, value)` — matching
+/// nvim's `pattern`-augmented autocmd ergonomics.
+pub struct PendingCallback {
+    pub kind: SubscriberKind,
+    pub is_glob: bool,
 }
 
 /// One queued notification: the value snapshot at the moment of `set`
@@ -70,13 +88,14 @@ struct Slot {
 pub struct PendingFire {
     pub name: String,
     pub value: Rc<dyn Any>,
-    pub callbacks: Vec<SubscriberKind>,
+    pub callbacks: Vec<PendingCallback>,
 }
 
 /// Typed name → value registry plus a pending-fire queue.
 #[derive(Default)]
 pub struct Cells {
     slots: HashMap<String, Slot>,
+    glob_subs: Vec<GlobSubscriber>,
     pending: Vec<PendingFire>,
     next_id: SubscriptionId,
 }
@@ -107,20 +126,34 @@ impl Cells {
         self.slots.get(name).map(|s| &s.value)
     }
 
-    /// Overwrite the cell's value and queue every subscriber for
-    /// firing at the next drain. Returns `true` on success, `false`
-    /// when `name` is undeclared.
+    /// Overwrite the cell's value and queue every direct + matching
+    /// glob subscriber for firing at the next drain. Returns `true`
+    /// on success, `false` when `name` is undeclared.
     pub fn set_dyn(&mut self, name: &str, value: Rc<dyn Any>) -> bool {
         let Some(slot) = self.slots.get_mut(name) else {
             return false;
         };
         slot.value = value;
-        if slot.subscribers.is_empty() {
+        let mut callbacks: Vec<PendingCallback> = slot
+            .subscribers
+            .iter()
+            .map(|s| PendingCallback {
+                kind: s.kind.clone(),
+                is_glob: false,
+            })
+            .collect();
+        for g in &self.glob_subs {
+            if g.pattern.matches(name) {
+                callbacks.push(PendingCallback {
+                    kind: g.kind.clone(),
+                    is_glob: true,
+                });
+            }
+        }
+        if callbacks.is_empty() {
             return true;
         }
         let snapshot = Rc::clone(&slot.value);
-        let callbacks: Vec<SubscriberKind> =
-            slot.subscribers.iter().map(|s| s.kind.clone()).collect();
         self.pending.push(PendingFire {
             name: name.to_string(),
             value: snapshot,
@@ -151,6 +184,31 @@ impl Cells {
             return false;
         };
         slot.subscribers.remove(idx);
+        true
+    }
+
+    /// Register a glob subscriber that fires for every cell whose
+    /// name matches `pattern`. Subscribers are walked in registration
+    /// order at every `set_dyn`. Returns the id `unsubscribe_glob`
+    /// accepts.
+    pub fn glob_subscribe(
+        &mut self,
+        pattern: glob::Pattern,
+        kind: SubscriberKind,
+    ) -> SubscriptionId {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.glob_subs.push(GlobSubscriber { id, pattern, kind });
+        id
+    }
+
+    /// Remove the glob subscriber with `id`. Returns `true` if a
+    /// subscriber was found and removed; `false` otherwise.
+    pub fn unsubscribe_glob(&mut self, id: SubscriptionId) -> bool {
+        let Some(idx) = self.glob_subs.iter().position(|g| g.id == id) else {
+            return false;
+        };
+        self.glob_subs.remove(idx);
         true
     }
 
@@ -236,6 +294,7 @@ mod tests {
         assert_eq!(fires.len(), 1);
         assert_eq!(fires[0].name, "count");
         assert_eq!(fires[0].callbacks.len(), 1);
+        assert!(!fires[0].callbacks[0].is_glob);
         // Snapshot carries the post-set value.
         assert_eq!(fires[0].value.downcast_ref::<u32>(), Some(&5u32));
     }
@@ -327,6 +386,80 @@ mod tests {
                 SubscriberKind::Lua(handle(&lua, "function() end"))
             )
             .is_none());
+    }
+
+    #[test]
+    fn glob_subscribe_fires_for_matching_names() {
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        c.declare("agent:1:status", "idle");
+        c.declare("agent:2:status", "idle");
+        c.declare("vim_mode", "Insert");
+        let id = c.glob_subscribe(
+            glob::Pattern::new("agent:*:status").unwrap(),
+            SubscriberKind::Lua(handle(&lua, "function() end")),
+        );
+        // Sequential ids share the next_id counter with direct subs.
+        assert!(id == 0);
+        c.set_dyn("agent:1:status", Rc::new("running"));
+        c.set_dyn("vim_mode", Rc::new("Normal"));
+        let fires = c.drain_pending();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].name, "agent:1:status");
+        assert_eq!(fires[0].callbacks.len(), 1);
+        assert!(fires[0].callbacks[0].is_glob);
+    }
+
+    #[test]
+    fn glob_and_direct_subscribers_both_fire() {
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        c.declare("turn_complete", false);
+        c.subscribe_kind(
+            "turn_complete",
+            SubscriberKind::Lua(handle(&lua, "function() end")),
+        )
+        .unwrap();
+        c.glob_subscribe(
+            glob::Pattern::new("turn_*").unwrap(),
+            SubscriberKind::Lua(handle(&lua, "function() end")),
+        );
+        c.set_dyn("turn_complete", Rc::new(true));
+        let fires = c.drain_pending();
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].callbacks.len(), 2);
+        // Direct subscriber appears before glob in registration order.
+        assert!(!fires[0].callbacks[0].is_glob);
+        assert!(fires[0].callbacks[1].is_glob);
+    }
+
+    #[test]
+    fn unsubscribe_glob_removes_callback() {
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        c.declare("foo", 0u32);
+        let id = c.glob_subscribe(
+            glob::Pattern::new("*").unwrap(),
+            SubscriberKind::Lua(handle(&lua, "function() end")),
+        );
+        assert!(c.unsubscribe_glob(id));
+        c.set_dyn("foo", Rc::new(1u32));
+        assert!(!c.has_pending());
+        // Unsubscribing again is a no-op.
+        assert!(!c.unsubscribe_glob(id));
+    }
+
+    #[test]
+    fn glob_subscriber_does_not_fire_for_undeclared_name() {
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        c.glob_subscribe(
+            glob::Pattern::new("*").unwrap(),
+            SubscriberKind::Lua(handle(&lua, "function() end")),
+        );
+        // No declared cell, so set_dyn returns false and queues nothing.
+        assert!(!c.set_dyn("missing", Rc::new(1u32)));
+        assert!(!c.has_pending());
     }
 
     #[test]
