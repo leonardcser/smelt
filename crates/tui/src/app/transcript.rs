@@ -408,16 +408,6 @@ impl TuiApp {
             .finalize_active_tools(&mut self.transcript.history);
     }
 
-    pub fn finalize_active_tools(&mut self) {
-        self.parser
-            .finalize_active_tools(&mut self.transcript.history);
-    }
-
-    pub fn finalize_active_tools_as(&mut self, status: ToolStatus) {
-        self.parser
-            .finalize_active_tools_as(&mut self.transcript.history, status);
-    }
-
     pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
         self.transcript.tool_state(call_id)
     }
