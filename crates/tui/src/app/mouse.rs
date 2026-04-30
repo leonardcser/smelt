@@ -56,92 +56,84 @@ impl TuiApp {
         if self.layout.hit_test(me.row, me.column) == content::HitRegion::Status {
             return EventOutcome::Noop;
         }
-        // Drag + release drive tmux-style click-drag-copy. Works in
-        // both the prompt and the content pane — each extends its own
-        // buffer's selection anchor.
+
+        // Wheel scroll routes through `Ui::hit_test` directly — no
+        // capture, no per-pane Down/Drag/Up state to thread.
         match me.kind {
-            MouseEventKind::Drag(MouseButton::Left) => {
-                self.mouse_drag_active = true;
-                self.extend_selection_to(me);
+            MouseEventKind::ScrollUp => {
+                self.scroll_under_mouse(me.row, me.column, -3);
                 return EventOutcome::Redraw;
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                // `Window::mouse_up` self-guards bare clicks (no yank,
-                // no clear-on-empty) and handles its own anchor cleanup,
-                // so both branches just dispatch unconditionally.
-                self.dispatch_focused_mouse(me, 0);
-                if self.app_focus == crate::app::AppFocus::Prompt {
+            MouseEventKind::ScrollDown => {
+                self.scroll_under_mouse(me.row, me.column, 3);
+                return EventOutcome::Redraw;
+            }
+            _ => {}
+        }
+
+        // Down/Drag/Up Left for splits-leaf Windows fold into
+        // `Ui::resolve_split_mouse`: hit-test → window resolution +
+        // click-count tracking + `HitTarget::Window` capture so a
+        // drag started on the prompt continues routing to the
+        // prompt even if the pointer drifts onto the transcript.
+        // The host's role narrows to per-pane forwarding +
+        // app_focus / vim-mode side effects bracketing the call.
+        if let Some((win, count)) = self.ui.resolve_split_mouse(me) {
+            let is_down = matches!(me.kind, MouseEventKind::Down(MouseButton::Left));
+            let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
+            let is_drag = matches!(me.kind, MouseEventKind::Drag(MouseButton::Left));
+            if is_drag {
+                self.mouse_drag_active = true;
+            } else if is_up {
+                self.mouse_drag_active = false;
+                self.drag_autoscroll_since = None;
+            }
+            if win == ui::PROMPT_WIN {
+                if is_down {
+                    self.app_focus = crate::app::AppFocus::Prompt;
+                    if self.input.win.vim_enabled {
+                        self.prompt_drag_return_vim_mode = Some(self.vim_mode);
+                    }
+                }
+                self.handle_prompt_mouse(me, count);
+                if is_up {
                     if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
                         if self.input.win.vim_enabled {
                             self.input.win.vim_state.set_mode(&mut self.vim_mode, prev);
                         }
                     }
                 }
-                self.mouse_drag_active = false;
-                self.drag_autoscroll_since = None;
+            } else if win == ui::TRANSCRIPT_WIN {
+                if is_down && !self.has_transcript_content(self.core.config.settings.show_thinking)
+                {
+                    return EventOutcome::Noop;
+                }
+                if is_down {
+                    self.app_focus = crate::app::AppFocus::Content;
+                }
+                self.handle_content_mouse(me, count);
+            }
+            return EventOutcome::Redraw;
+        }
+
+        // Down on a non-Window region (e.g. a chrome or a click that
+        // hits no splits leaf): promote focus to Prompt when the
+        // layout maps it to the prompt/status zone, mirroring the
+        // pre-fold focus-shift behaviour.
+        if matches!(me.kind, MouseEventKind::Down(_))
+            && matches!(
+                self.layout.hit_test(me.row, me.column),
+                content::HitRegion::Prompt | content::HitRegion::Status
+            )
+        {
+            if self.app_focus != crate::app::AppFocus::Prompt {
+                self.app_focus = crate::app::AppFocus::Prompt;
                 return EventOutcome::Redraw;
             }
-            _ => {}
+            return EventOutcome::Noop;
         }
 
-        match me.kind {
-            MouseEventKind::ScrollUp => {
-                self.scroll_under_mouse(me.row, me.column, -3);
-                EventOutcome::Redraw
-            }
-            MouseEventKind::ScrollDown => {
-                self.scroll_under_mouse(me.row, me.column, 3);
-                EventOutcome::Redraw
-            }
-            MouseEventKind::Down(_) => {
-                // 2 → word-select + copy, 3 → line-select + copy. The
-                // 400ms / same-cell / cap-at-3 policy lives on `Ui`.
-                let count = self.ui.record_click(me.row, me.column);
-                let double = count == 2;
-
-                // Prompt input area: route Down through the unified
-                // `Window::handle_mouse` path (via the prompt mouse
-                // adapter, which handles source ↔ wrapped translation).
-                // Same primitive transcript and dialog buffer panels
-                // use, so click cadence / drag anchors / yank-on-
-                // release / theme selection bg are shared.
-                let _ = double;
-                if let Some(vp) = self.viewport_for(ui::PROMPT_WIN) {
-                    if vp.contains(me.row, me.column) {
-                        self.app_focus = crate::app::AppFocus::Prompt;
-                        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
-                            && self.input.win.vim_enabled
-                        {
-                            self.prompt_drag_return_vim_mode = Some(self.vim_mode);
-                        }
-                        self.handle_prompt_mouse(me, count);
-                        return EventOutcome::Redraw;
-                    }
-                }
-
-                if matches!(
-                    self.layout.hit_test(me.row, me.column),
-                    content::HitRegion::Prompt | content::HitRegion::Status
-                ) {
-                    if self.app_focus != crate::app::AppFocus::Prompt {
-                        self.app_focus = crate::app::AppFocus::Prompt;
-                        return EventOutcome::Redraw;
-                    }
-                    return EventOutcome::Noop;
-                }
-                if !self.has_transcript_content(self.core.config.settings.show_thinking) {
-                    return EventOutcome::Noop;
-                }
-                self.app_focus = crate::app::AppFocus::Content;
-                // Route the event through the `Viewport` recorded by
-                // the last paint: content clicks delegate to the
-                // transcript Window's mouse handler. Scrollbar clicks
-                // are absorbed earlier by `Ui::dispatch_event`.
-                self.handle_content_mouse(me, count);
-                EventOutcome::Redraw
-            }
-            _ => EventOutcome::Noop,
-        }
+        EventOutcome::Noop
     }
 
     /// Scroll the pane under the mouse cursor by `delta` lines (positive
@@ -186,24 +178,6 @@ impl TuiApp {
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
             .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
-    }
-
-    /// Route a mouse event to the focused buffer surface's adapter.
-    /// Both adapters wrap `Window::handle_mouse` with the per-surface
-    /// row/break/viewport plumbing, so all the TuiApp layer needs is the
-    /// focus dispatch.
-    fn dispatch_focused_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        match self.app_focus {
-            crate::app::AppFocus::Content => self.handle_content_mouse(me, click_count),
-            crate::app::AppFocus::Prompt => self.handle_prompt_mouse(me, click_count),
-        }
-    }
-
-    /// Drag handler: scrollbar drags are absorbed Ui-side; this only
-    /// fires for content drags, which extend the focused buffer's
-    /// selection.
-    fn extend_selection_to(&mut self, me: MouseEvent) {
-        self.dispatch_focused_mouse(me, 0);
     }
 
     /// Frame-tick hook: if the user is mid-drag with the content cursor

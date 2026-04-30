@@ -224,15 +224,10 @@ Tail deferred (gated on transcript-pipeline migration onto
   per-block Buffer; `TranscriptSnapshot` composes from per-block
   Buffers.
 - `transcript_cache.rs` deletion (per-parser IR caches replace it).
-  Parsed metadata (LCS for diffs, syntect tokens for code) lives as
-  extmarks in dedicated namespaces. No separate IR cache file.
-- `edit_buffer.rs` merge into `Buffer` (~250 references; pairs
-  naturally with P1.d when vim state machine decomposes).
-- `YankSubst` consumers — original picks (hidden-thinking elision,
-  prompt attachment expansion) turned out to be wrong fits;
-  consumers come with the transcript migration.
-- `Buffer::wrap_at` consumers — same situation; pre-wrapping in
-  `DisplayLine` is removed when transcript moves onto Buffer.
+  Parsed metadata lives as extmarks in dedicated namespaces.
+- `edit_buffer.rs` merge into `Buffer` (~250 refs; pairs with P1.d).
+- `YankSubst` + `Buffer::wrap_at` consumers — both come with the
+  transcript migration; original pick fits turned out wrong.
 
 ### P1.b — `LayoutTree` ✅ landed
 
@@ -640,10 +635,12 @@ binding TLS split are each natural single-session units:
     methods become private helpers.
   - **P2.b.4c** — pre-P2 mouse/key routing folds into
     `Ui::dispatch_event` through `UiHost`. Outside-in: **c.1** ✅ drop
-    viewport mirrors → `Ui::win(id)?.viewport`; **c.2** ✅ click-count
-    onto `Ui`; **c.3** ✅ scrollbar drag into `Ui::dispatch_event`;
-    **c.4** ✅ wheel scroll via `Ui::hit_test`; **c.5** per-pane
-    Down/Drag/Up onto `Window::handle` (b.4b); **c.6** drag autoscroll.
+    viewport mirrors; **c.2** ✅ click-count onto `Ui`; **c.3** ✅
+    scrollbar drag into `Ui::dispatch_event`; **c.4** ✅ wheel scroll
+    via `Ui::hit_test`; **c.5a** ✅ Down/Drag/Up via
+    `resolve_split_mouse` + Window capture; **c.5b** per-pane data
+    via `UiHost`; **c.5c** unified `Window::handle` (b.4b); **c.6**
+    drag autoscroll.
 - **P2.b.5** — Lua bindings TLS split: `crate::lua::with_host` /
   `with_ui_host` exposes the right trait depending on the
   binding's declaration. UiHost-only Lua bindings (`smelt.ui /
