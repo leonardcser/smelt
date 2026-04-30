@@ -1413,13 +1413,8 @@ impl App {
                 // dialog (runtime/lua/smelt/confirm.lua) reads the
                 // request back through `smelt.confirm._*` primitives
                 // and resolves it on submit / dismiss.
-                let handle_id = self.next_confirm_handle;
-                self.next_confirm_handle = self.next_confirm_handle.wrapping_add(1);
                 let (_labels, choices) = crate::app::dialogs::confirm::build_options(&req);
-                self.confirm_requests.insert(
-                    handle_id,
-                    crate::app::dialogs::confirm::ConfirmEntry { req: *req, choices },
-                );
+                let handle_id = self.confirms.register(*req, choices);
                 self.lua.fire_confirm_open(handle_id);
                 LoopAction::Continue
             }

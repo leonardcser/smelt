@@ -420,11 +420,15 @@ bridges, then the aggregate.
   stays on `TuiApp` after the Core split.
 - **a.2** ✅ — `WellKnown` adds `cmdline: Option<WinId>` (today's
   `App::cmdline_win`).
-- **a.3** — `Confirms { requests, next_handle, is_clear() }`. Today's
-  `confirm_requests` map carries a `ConfirmEntry` (request + choices);
-  the target stores `oneshot::Sender<Decision>` — that rewrite folds
-  in here so the Lua dialog drives one resolve channel rather than
-  polling the map.
+- **a.3a** ✅ — `Confirms` data carve-out: `pending: HashMap<u64,
+  ConfirmEntry>` + `next_handle: u64` move off App into a typed
+  subsystem with `register / get / take`. `ConfirmEntry` relocates
+  from `dialogs/confirm.rs` to `app/confirms.rs`.
+- **a.3b** — oneshot::Sender swap: the Lua dialog drives one resolve
+  channel rather than polling the map; `Confirms::is_clear()` lands
+  here as the engine-drain gate consumed by `EngineBridge` (a.11).
+  Gated on `Cells` (a.4) so the dialog reads the request payload via
+  the `confirm_requested` cell instead of looking it up by handle.
 - **a.4** — `Cells` registry (typed name → value + subscribers). New
   primitive; built-in cells migrate from scattered App fields
   (`vim_mode`, `agent_mode` via `mode`, …).

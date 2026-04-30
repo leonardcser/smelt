@@ -22,14 +22,6 @@ use crate::content::display::{ColorRole, ColorValue};
 use crate::content::layout_out::SpanCollector;
 use ui::BufId;
 
-/// Live Confirm request held in `App::confirm_requests` while the
-/// Lua dialog is open. The choices array is populated by
-/// `build_options` so resolve can look up the user's pick by index.
-pub(crate) struct ConfirmEntry {
-    pub req: ConfirmRequest,
-    pub choices: Vec<ConfirmChoice>,
-}
-
 /// Render the ` tool: desc Allow?` title into `buf_id`. The tool name
 /// shows in the accent color; the desc is bash-highlit when the tool
 /// is `bash` (or the preview is a bash body — multi-line commands

@@ -757,8 +757,8 @@ impl LuaRuntime {
 
     /// Fire `smelt.confirm.open(handle_id)`. Called by the agent loop
     /// when an LLM tool call needs user approval — `agent.rs` registers
-    /// the request in `App::confirm_requests` first, then this method
-    /// hands the handle to the Lua dialog runner.
+    /// the request via `App::confirms.register` first, then this
+    /// method hands the handle to the Lua dialog runner.
     pub fn fire_confirm_open(&self, handle_id: u64) {
         let result: mlua::Result<()> = (|| {
             let smelt: mlua::Table = self.lua.globals().get("smelt")?;
