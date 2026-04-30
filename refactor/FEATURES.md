@@ -243,7 +243,7 @@ to invoke_ the feature.
 | `smelt.cmd.picker`                                      | `cmd.lua`                           | P3.b                                       | working        |
 | `smelt.tools.register`                                  | `lua/tasks.rs` (PluginToolEnv)      | P3.b → `lua/api/tools.rs`                  | working        |
 | `smelt.on(event, fn)` (autocmd subscribe)               | `lua/api/dispatch.rs` + `lua/mod.rs::AutocmdEvent` | P3.c (kept; aliased as `smelt.au.on`)      | working        |
-| `smelt.au.on` / `smelt.au.fire` namespace               | _missing today: only `smelt.on` and internal Rust-side fire exist_ | P3.c (full namespace + plugin custom events) | offline-pre-P3 |
+| `smelt.au.on` / `smelt.au.fire` namespace               | `lua/api/dispatch.rs::register_au` + `app/cells.rs` | P2.a.4b (landed; thin alias over `Cells::{subscribe_kind, set_dyn}`) | working |
 | Built-in autocmd events: `TurnStart`, `TurnEnd`, `ModeChange`, `ModelChange`, `ToolStart`, `ToolEnd`, `BlockDone`, `CmdPre`, `CmdPost`, `SessionStart`, `InputSubmit`, `Shutdown` | `lua/mod.rs::AutocmdEvent` | P3.c (extend to ARCHITECTURE.md table: `AgentModeChanged`, `VimModeChanged`, `ReasoningChanged`, `BranchChanged`, `HistoryChanged`, `TokenUsageUpdated`, `TurnComplete`, `TurnError`, `SessionStarted`, `SessionEnded`, `ConfirmRequested`, `ConfirmResolved`) | working |
 | `smelt.keymap.set`                                      | `lua/api/dispatch.rs`               | P3.b                                       | working        |
 | `smelt.keymap.help`                                     | `plugins/help.lua` reads            | P3.b                                       | working        |
@@ -269,7 +269,7 @@ to invoke_ the feature.
 | `smelt.buf.*` (create/lines/text/extmark)               | `lua/api/widgets.rs`                | P3.b → `lua/api/buf.rs` (extmarks!)        | working        |
 | `smelt.win.*`                                           | `lua/api/widgets.rs`                | P3.b → `lua/api/win.rs`                    | working        |
 | `smelt.statusline.register/set`                         | `lua/api/dispatch.rs`               | P4.c (cells-driven spec)                   | working        |
-| `smelt.cell.new/get/set/subscribe`                      | `lua/api/dispatch.rs` + `app/cells.rs` | P2.a.4a (landed); a.4b adds userdata-handle ergonomics + `glob_subscribe` | working        |
+| `smelt.cell.new/get/set/subscribe`                      | `lua/api/dispatch.rs` + `app/cells.rs` | P2.a.4b (landed; `smelt.cell(name)` handle + `:glob_subscribe` shipped); a.4c migrates built-ins | working |
 | `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/dispatch.rs`               | thin alias over `smelt.timer.set`          | working        |
 | `smelt.timer.set/every/cancel` namespace                | `lua/api/dispatch.rs` + `app/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |
 | `smelt.parse / fs / http / html / notebook / path / os` | _missing today_                     | P3.c                                       | offline-pre-P3 |

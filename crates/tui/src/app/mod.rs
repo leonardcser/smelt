@@ -797,6 +797,11 @@ impl App {
     /// subscribe_kind / unsubscribe` composes cleanly with the TLS
     /// app pointer.
     ///
+    /// Direct subscribers see the Lua function called as `func(value)`;
+    /// glob subscribers see `func(name, value)` so a pattern handler
+    /// can branch per cell name (matching nvim's `pattern`-augmented
+    /// autocmd ergonomics).
+    ///
     /// Today every cell value is a `LuaCellValue` (Lua-defined
     /// cells only); Rust-typed built-ins migrate in P2.a.4c with
     /// their per-type Lua converters. Until then, a Lua subscriber
@@ -808,7 +813,7 @@ impl App {
         let fires = self.cells.drain_pending();
         for fire in fires {
             for cb in &fire.callbacks {
-                let cells::SubscriberKind::Lua(handle) = cb;
+                let cells::SubscriberKind::Lua(handle) = &cb.kind;
                 let Some(lv) = fire.value.downcast_ref::<cells::LuaCellValue>() else {
                     // Rust-typed cell with a Lua subscriber
                     // — converter lands with a.4c.
@@ -823,7 +828,12 @@ impl App {
                     Ok(v) => v,
                     Err(_) => mlua::Value::Nil,
                 };
-                if let Err(e) = func.call::<()>(value) {
+                let result = if cb.is_glob {
+                    func.call::<()>((fire.name.clone(), value))
+                } else {
+                    func.call::<()>(value)
+                };
+                if let Err(e) = result {
                     self.lua.record_error(format!("cell `{}`: {e}", fire.name));
                 }
             }
