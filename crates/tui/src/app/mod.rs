@@ -1152,8 +1152,6 @@ impl TuiApp {
                 } else if !text.is_empty() {
                     let outcome = self.process_input(&text);
                     let content = Content::text(text.clone());
-                    // Quit is ignored here: a queued "/exit" shouldn't terminate
-                    // the main loop from this re-entry point.
                     self.apply_input_outcome(outcome, content, &text);
                 }
             }
