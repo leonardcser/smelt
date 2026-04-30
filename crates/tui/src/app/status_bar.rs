@@ -145,7 +145,7 @@ impl App {
                         None
                     };
                     if self.mouse_drag_active {
-                        mode = Some(crate::vim::VimMode::Visual);
+                        mode = Some(ui::VimMode::Visual);
                     }
                     (self.input.vim_enabled() || self.mouse_drag_active, mode)
                 }
@@ -154,10 +154,8 @@ impl App {
         if vim_enabled {
             let vim_label = content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
             let vim_fg = match vim_mode {
-                Some(crate::vim::VimMode::Insert) => Color::AnsiValue(78),
-                Some(crate::vim::VimMode::Visual) | Some(crate::vim::VimMode::VisualLine) => {
-                    Color::AnsiValue(176)
-                }
+                Some(ui::VimMode::Insert) => Color::AnsiValue(78),
+                Some(ui::VimMode::Visual) | Some(ui::VimMode::VisualLine) => Color::AnsiValue(176),
                 _ => Color::AnsiValue(74),
             };
             spans.push(StatusSpan {

@@ -443,8 +443,14 @@ App / Buffer / Window / Clipboard. Splits across sessions:
   (`Option<Vim>` → `vim_enabled: bool`; methods → free fns /
   `VimWindowState`); **5f.2b** ✅ lifted `motions` / `text_objects`
   out of `vim/` as `crate::motions` + `crate::text_objects`
-  primitives; `FindKind` moved with them; **5f.2c** flatten
-  dispatcher to recipe-style registrations and delete the directory.
+  primitives; `FindKind` moved with them; **5f.2c** ✅ collapsed
+  both `vim/` directories — `crates/ui/src/vim/mod.rs` →
+  `crates/ui/src/vim.rs`; `crates/tui/src/vim/` re-export shim
+  retired; tui-side imports route through `ui::vim::*` /
+  `ui::VimMode` directly. Dispatcher flatten to recipe-style
+  registrations defers to **5f.2d** (gated on the keymap-recipe
+  registry that lands with P3.b/P4 — recipes are Lua territory,
+  so a Rust-side flat table would be throwaway scaffolding).
 
 #### P1.d.6 — Completer state machine decomposes
 

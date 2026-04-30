@@ -84,10 +84,7 @@ impl App {
     fn adjust_tail_scroll(&mut self) {
         let has_selection = self.transcript_window.selection_anchor.is_some();
         let in_vim_visual = self.transcript_window.vim_enabled
-            && matches!(
-                self.vim_mode,
-                crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine
-            );
+            && matches!(self.vim_mode, ui::VimMode::Visual | ui::VimMode::VisualLine);
         let freeze = has_selection || in_vim_visual || self.mouse_drag_active;
         if !freeze && self.transcript_window.follow_tail {
             self.transcript_window.scroll_top = u16::MAX;
