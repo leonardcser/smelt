@@ -91,21 +91,16 @@ pub struct Ui {
     /// outgoing focus here; the overlay close paths walk back through
     /// it for the most recent still-existing focusable window.
     focus_history: Vec<WinId>,
-    /// Currently focused overlay leaf, if any. When set, takes
-    /// precedence over `painted_split_focus` in `focus()` and routes
-    /// key events to the leaf's callback registry. Cleared when the
-    /// containing overlay closes.
-    overlay_focus: Option<WinId>,
+    /// Currently focused window — the single source of truth for
+    /// keyboard focus. May refer to an overlay leaf or a painted
+    /// split; the discrimination is derived at lookup time
+    /// (`overlay_for_leaf` vs `painted_splits.contains`).
+    focus: Option<WinId>,
     /// Split-shaped windows painted directly via `Window::render` from
     /// `Ui::render`'s post-layer pass. Painted before overlays so
     /// overlays draw on top. Rect comes from `split_rects` (set per
     /// frame via `set_window_rect`).
     painted_splits: Vec<WinId>,
-    /// Focused painted split, if any. Key dispatch and `focus()`
-    /// consult this after `overlay_focus`. Set by `set_focus` when the
-    /// target is a focusable painted split; cleared when focus moves
-    /// elsewhere or the painted split unregisters.
-    painted_split_focus: Option<WinId>,
 }
 
 /// Reserved `WinId` for the main prompt input window. Stable id so Lua
@@ -134,9 +129,8 @@ impl Ui {
             overlays: HashMap::new(),
             next_overlay_id: 1,
             focus_history: Vec::new(),
-            overlay_focus: None,
+            focus: None,
             painted_splits: Vec::new(),
-            painted_split_focus: None,
         }
     }
 
@@ -154,8 +148,8 @@ impl Ui {
     /// registered.
     pub fn unregister_painted_split(&mut self, win_id: WinId) {
         self.painted_splits.retain(|&w| w != win_id);
-        if self.painted_split_focus == Some(win_id) {
-            self.painted_split_focus = None;
+        if self.focus == Some(win_id) {
+            self.focus = None;
         }
     }
 
@@ -244,23 +238,22 @@ impl Ui {
     /// is left alone.
     pub fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
         let removed = self.overlays.remove(&id)?;
-        if let Some(focused) = self.focus() {
+        if let Some(focused) = self.focus {
             if removed.layout.contains_leaf(focused) {
-                self.overlay_focus = None;
-                self.painted_split_focus = None;
+                self.focus = None;
                 while let Some(prior) = self.focus_history.pop() {
                     if self.overlay_for_leaf(prior).is_some() {
-                        self.overlay_focus = Some(prior);
+                        self.focus = Some(prior);
                         return Some(removed);
                     }
                     if self.painted_splits.contains(&prior)
                         && self.wins.get(&prior).map(|w| w.focusable).unwrap_or(false)
                     {
-                        self.painted_split_focus = Some(prior);
+                        self.focus = Some(prior);
                         return Some(removed);
                     }
                 }
-                // History exhausted — leave both focus slots cleared.
+                // History exhausted — focus stays cleared.
             }
         }
         Some(removed)
@@ -579,10 +572,7 @@ impl Ui {
     /// over painted-split focus (a modal overlay's input claim
     /// suppresses split dispatch).
     pub fn focus(&self) -> Option<WinId> {
-        if let Some(win) = self.overlay_focus {
-            return Some(win);
-        }
-        self.painted_split_focus
+        self.focus
     }
 
     /// Currently focused `Window`, if its id is registered in
@@ -608,31 +598,21 @@ impl Ui {
     /// Re-focusing the already-focused window is a no-op (no history
     /// push).
     pub fn set_focus(&mut self, win: WinId) -> bool {
-        let prior = self.focus();
+        let prior = self.focus;
         if prior == Some(win) {
             return true;
         }
-        if self.painted_splits.contains(&win) {
-            let focusable = self.wins.get(&win).map(|w| w.focusable).unwrap_or(false);
-            if !focusable {
-                return false;
-            }
-            if let Some(p) = prior {
-                self.focus_history.push(p);
-            }
-            self.overlay_focus = None;
-            self.painted_split_focus = Some(win);
-            return true;
+        let is_painted_split = self.painted_splits.contains(&win)
+            && self.wins.get(&win).map(|w| w.focusable).unwrap_or(false);
+        let is_overlay_leaf = self.overlay_for_leaf(win).is_some();
+        if !is_painted_split && !is_overlay_leaf {
+            return false;
         }
-        if self.overlay_for_leaf(win).is_some() {
-            if let Some(p) = prior {
-                self.focus_history.push(p);
-            }
-            self.overlay_focus = Some(win);
-            self.painted_split_focus = None;
-            return true;
+        if let Some(p) = prior {
+            self.focus_history.push(p);
         }
-        false
+        self.focus = Some(win);
+        true
     }
 
     /// Return the `OverlayId` of an open overlay whose `LayoutTree`
@@ -798,7 +778,8 @@ impl Ui {
         &self,
         resolved: &[(OverlayId, Rect, Overlay)],
     ) -> Option<(u16, u16)> {
-        let focus = self.overlay_focus?;
+        let focus = self.focus?;
+        self.overlay_for_leaf(focus)?;
         for (_id, rect, overlay) in resolved {
             let leaf_rects = layout::resolve_layout(&overlay.layout, *rect);
             let Some(leaf_rect) = leaf_rects.get(&focus) else {
@@ -824,7 +805,10 @@ impl Ui {
     /// `cursor_col` are viewport-relative and we add them to the rect's
     /// origin.
     fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
-        let focus = self.painted_split_focus?;
+        let focus = self.focus?;
+        if !self.painted_splits.contains(&focus) {
+            return None;
+        }
         let win = self.wins.get(&focus)?;
         if !matches!(win.cursor_kind, Some(crate::window::CursorKind::Hardware)) {
             return None;
@@ -1800,7 +1784,7 @@ mod tests {
         w.cursor_kind = Some(crate::window::CursorKind::Hardware);
         w.cursor_line = 0;
         w.cursor_col = 0;
-        // No focus call → painted_split_focus stays None.
+        // No focus call → focus stays None.
         assert_eq!(ui.focused_painted_split_cursor(), None);
     }
 
