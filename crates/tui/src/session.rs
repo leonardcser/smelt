@@ -171,26 +171,6 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-pub fn time_ago(ts_ms: u64, now_ms: u64) -> String {
-    let delta = now_ms.saturating_sub(ts_ms) / 1000;
-    if delta < 60 {
-        return format!("{}s ago", delta.max(1));
-    }
-    if delta < 60 * 60 {
-        return format!("{}m ago", (delta / 60).max(1));
-    }
-    if delta < 60 * 60 * 24 {
-        return format!("{}h ago", (delta / 3600).max(1));
-    }
-    if delta < 60 * 60 * 24 * 7 {
-        return format!("{}d ago", (delta / 86400).max(1));
-    }
-    if delta < 60 * 60 * 24 * 30 {
-        return format!("{}w ago", (delta / 604800).max(1));
-    }
-    format!("{}mo ago", (delta / 2592000).max(1))
-}
-
 // ── Save / Load / Delete ─────────────────────────────────────────────────────
 
 /// Return the directory for a session on disk.
@@ -435,23 +415,6 @@ fn compute_text_bytes(messages: &[Message]) -> u64 {
     total
 }
 
-/// Format a byte count as a human-readable string (e.g. "12.3 KB").
-pub fn format_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
-    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let b = bytes as f64;
-    if b < KB {
-        format!("{bytes}B")
-    } else if b < MB {
-        format!("{:.1}KB", b / KB)
-    } else if b < GB {
-        format!("{:.1}MB", b / MB)
-    } else {
-        format!("{:.1}GB", b / GB)
-    }
-}
-
 /// Read session.json, compute text_bytes, and rewrite meta.json to cache it.
 fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
     let Ok(contents) = fs::read_to_string(session_dir.join("session.json")) else {
@@ -486,21 +449,6 @@ fn build_search_blob(messages: &[Message]) -> String {
         }
     }
     out
-}
-
-/// Load the searchable content blob for a session. If the `content.txt`
-/// sidecar is missing (legacy sessions), regenerate it from `session.json`
-/// and cache it on disk.
-pub fn load_search_blob(session_id: &str) -> Option<String> {
-    let session_dir = sessions_dir().join(session_id);
-    if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
-        return Some(contents);
-    }
-    let full = fs::read_to_string(session_dir.join("session.json")).ok()?;
-    let session: Session = serde_json::from_str(&full).ok()?;
-    let blob = build_search_blob(&session.messages);
-    atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
-    Some(blob)
 }
 
 fn write_meta(session_dir: &std::path::Path, meta: &SessionMeta) {
@@ -614,17 +562,6 @@ fn new_session_id(now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn time_ago_formats() {
-        let now = 10_000_000_000u64;
-        assert_eq!(time_ago(now - 1_000, now), "1s ago");
-        assert_eq!(time_ago(now - 60_000, now), "1m ago");
-        assert_eq!(time_ago(now - 3_600_000, now), "1h ago");
-        assert_eq!(time_ago(now - 86_400_000, now), "1d ago");
-        assert_eq!(time_ago(now - 604_800_000, now), "1w ago");
-        assert_eq!(time_ago(now - 2_592_000_000, now), "1mo ago");
-    }
 
     #[test]
     fn session_id_is_full_sha256_hex() {
