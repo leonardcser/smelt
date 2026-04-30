@@ -497,9 +497,11 @@ App / Buffer / Window / Clipboard. Splits across sessions:
   (`sub`/`count1`/`count2`) + count/mode helpers hoist onto
   `VimWindowState`; `Vim` collapses to ZST kept as `Option<Vim>`
   enable marker on Window.
-- **5f** — Cursor / scroll / selection / Visual anchor → Window.
-  Delete `crates/ui/src/vim/` + `window_cursor.rs`. Vim becomes a
-  per-Window keymap recipe (Rust; Lua recipes are P3.b).
+- **5f.1** ✅ landed — inline `WindowCursor` (anchor + curswant)
+  onto `Window`; delete `window_cursor.rs`. `VimContext::cursor`
+  shrinks to `curswant: &mut Option<usize>`.
+- **5f.2** — Vim becomes a per-Window keymap recipe (Rust; Lua
+  recipes are P3.b). Delete `crates/ui/src/vim/`.
 
 #### P1.d.6 — Completer state machine decomposes
 

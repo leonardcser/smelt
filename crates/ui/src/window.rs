@@ -3,10 +3,9 @@ use crate::clipboard::Clipboard;
 use crate::edit_buffer::EditBuffer;
 use crate::grid::{GridSlice, Style};
 use crate::layout::{Gutters, Rect};
-use crate::text::{byte_to_cell, cell_to_byte};
+use crate::text::{self, byte_to_cell, cell_to_byte};
 use crate::theme::Theme;
 use crate::vim::{Action, Vim, VimContext, VimMode, VimWindowState};
-use crate::window_cursor::WindowCursor;
 use crate::{BufId, WinId};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
@@ -266,7 +265,16 @@ pub struct Window {
     /// key-sequence state on `Vim` stays the only thing scoped to a
     /// single keystroke run; vim reads/writes through `VimContext`.
     pub vim_state: VimWindowState,
-    pub win_cursor: WindowCursor,
+    /// Shift-selection anchor. Vim Visual's `v`/`V` set this too (via
+    /// `set_selection_anchor`) so paint/copy read one range. `None`
+    /// means no active selection.
+    pub selection_anchor: Option<usize>,
+    /// Preferred display column for vertical motion. Set by the first
+    /// vertical motion after a horizontal one; preserved across
+    /// subsequent vertical motions so the cursor returns to the wanted
+    /// column on longer lines. Measured in terminal cells, so wide
+    /// glyphs (`⏺`, CJK) don't throw the column off.
+    pub curswant: Option<usize>,
     pub scroll_top: u16,
     pub cursor_line: u16,
     pub cursor_col: u16,
@@ -310,7 +318,8 @@ impl Window {
             cpos: 0,
             vim: None,
             vim_state: VimWindowState::default(),
-            win_cursor: WindowCursor::new(),
+            selection_anchor: None,
+            curswant: None,
             scroll_top: 0,
             cursor_line: 0,
             cursor_col: 0,
@@ -336,7 +345,7 @@ impl Window {
             }
         } else {
             self.vim = None;
-            self.win_cursor.clear_anchor();
+            self.selection_anchor = None;
         }
     }
 
@@ -350,6 +359,23 @@ impl Window {
         self.scroll_top as usize + self.cursor_line as usize
     }
 
+    /// Latch `selection_anchor` at `cpos` if none is set. Called before
+    /// a shift-movement so the first extension anchors where the
+    /// cursor was before the key.
+    pub fn extend_selection(&mut self, cpos: usize) {
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(cpos);
+        }
+    }
+
+    /// Selection as a `(start, end)` byte pair against `cpos`. Returns
+    /// `None` when no anchor is set or the anchor equals `cpos`.
+    pub fn selection_range_at(&self, cpos: usize) -> Option<(usize, usize)> {
+        let a = self.selection_anchor?;
+        let (lo, hi) = if a <= cpos { (a, cpos) } else { (cpos, a) };
+        (lo != hi).then_some((lo, hi))
+    }
+
     pub fn selection_range(&self, rows: &[String], mode: VimMode) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(rows);
         if self.vim.is_some() {
@@ -357,7 +383,7 @@ impl Window {
                 return Some(range);
             }
         }
-        self.win_cursor.range(cpos)
+        self.selection_range_at(cpos)
     }
 
     /// Select the word at `cpos` (vim "w" semantics: alphanumeric +
@@ -438,7 +464,7 @@ impl Window {
         if self.vim.is_some() {
             self.vim_state.begin_visual(mode, VimMode::Visual, start);
         } else {
-            self.win_cursor.set_anchor(Some(start));
+            self.selection_anchor = Some(start);
         }
     }
 
@@ -475,8 +501,8 @@ impl Window {
             let offsets = self.mount(rows);
             self.sync_from_cpos(rows, &offsets, viewport_rows);
         }
-        if self.win_cursor.curswant().is_none() {
-            self.win_cursor.set_curswant(Some(self.cursor_col as usize));
+        if self.curswant.is_none() {
+            self.curswant = Some(self.cursor_col as usize);
         }
     }
 
@@ -493,10 +519,7 @@ impl Window {
         let target_line = (self.scroll_top + cursor_line) as usize;
         let target_line = target_line.min(rows.len() - 1);
         let line = &rows[target_line];
-        let want = self
-            .win_cursor
-            .curswant()
-            .unwrap_or(self.cursor_col as usize);
+        let want = self.curswant.unwrap_or(self.cursor_col as usize);
         let col_bytes = cell_to_byte(line, want);
         self.cpos = offsets[target_line] + col_bytes;
         self.cursor_col = byte_to_cell(line, col_bytes) as u16;
@@ -661,14 +684,14 @@ impl Window {
                 // Single click: anchor a Visual selection at the click
                 // so a subsequent drag grows from this point. Vim and
                 // non-vim paths anchor differently (vim's Visual range
-                // reads cpos directly; non-vim uses `WindowCursor`).
+                // reads cpos directly; non-vim uses `selection_anchor`).
                 self.drag_anchor_word = None;
                 self.drag_anchor_line = None;
                 if self.vim.is_some() {
                     self.vim_state
                         .begin_visual(ctx.vim_mode, VimMode::Visual, cpos);
                 } else {
-                    self.win_cursor.set_anchor(Some(cpos));
+                    self.selection_anchor = Some(cpos);
                 }
                 MouseAction::Capture
             }
@@ -700,7 +723,7 @@ impl Window {
         } else if self.drag_anchor_line.is_some() {
             self.extend_line_anchored_drag(ctx, buf);
         } else if self.vim.is_none() {
-            self.win_cursor.extend(self.cpos);
+            self.extend_selection(self.cpos);
         }
         MouseAction::Consumed
     }
@@ -715,7 +738,7 @@ impl Window {
         if self.vim.is_some() && matches!(*ctx.vim_mode, VimMode::Visual | VimMode::VisualLine) {
             self.vim_state.set_mode(ctx.vim_mode, VimMode::Normal);
         }
-        self.win_cursor.clear_anchor();
+        self.selection_anchor = None;
         self.drag_anchor_word = None;
         self.drag_anchor_line = None;
         MouseAction::Consumed
@@ -748,7 +771,7 @@ impl Window {
             self.vim_state
                 .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
         } else {
-            self.win_cursor.set_anchor(Some(new_anchor));
+            self.selection_anchor = Some(new_anchor);
         }
     }
 
@@ -775,7 +798,7 @@ impl Window {
             self.vim_state
                 .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
         } else {
-            self.win_cursor.set_anchor(Some(new_anchor));
+            self.selection_anchor = Some(new_anchor);
         }
     }
 
@@ -846,7 +869,7 @@ impl Window {
             history: &mut self.edit_buf.history,
             clipboard,
             mode,
-            cursor: &mut self.win_cursor,
+            curswant: &mut self.curswant,
             vim_state: &mut self.vim_state,
         };
         let action = vim.handle_key(key, &mut ctx);
@@ -856,7 +879,7 @@ impl Window {
 
     /// Shift `scroll_top` by `delta` rows, clamped to
     /// `[0, total_lines - viewport_rows]`. Intentionally does **not**
-    /// touch `cpos`, `cursor_line`, or `win_cursor` — wheel / scrollbar
+    /// touch `cpos`, `cursor_line`, or curswant — wheel / scrollbar
     /// scrolling moves the viewport only, letting the cursor scroll out
     /// of view until the next keyboard motion or click re-anchors it.
     /// Matches tmux copy-mode semantics: "wheel pans the buffer,
@@ -914,9 +937,9 @@ impl Window {
             return;
         }
         let offsets = self.mount(rows);
-        let new_cpos = self
-            .win_cursor
-            .move_vertical(&self.edit_buf.buf, self.cpos, delta);
+        let (new_cpos, new_want) =
+            text::vertical_move(&self.edit_buf.buf, self.cpos, delta, self.curswant);
+        self.curswant = Some(new_want);
         self.cpos = new_cpos;
         if self.vim.is_some() && *mode == VimMode::Insert {
             self.vim_state.set_mode(mode, VimMode::Normal);
@@ -947,7 +970,7 @@ impl Window {
         let col_bytes = cell_to_byte(line, col);
         self.cpos = offsets[line_idx] + col_bytes;
         let landed_col = byte_to_cell(line, col_bytes);
-        self.win_cursor.set_curswant(Some(landed_col));
+        self.curswant = Some(landed_col);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);
         self.follow_tail = self.scroll_top >= max_scroll;
@@ -1260,7 +1283,7 @@ mod tests {
         assert_eq!(r, MouseAction::Capture);
         assert_eq!(w.cursor_line, 1);
         assert_eq!(w.cursor_col, 7);
-        assert!(w.win_cursor.anchor().is_some());
+        assert!(w.selection_anchor.is_some());
     }
 
     #[test]

@@ -15,7 +15,6 @@ pub mod theme;
 pub mod undo;
 pub mod vim;
 pub mod window;
-pub mod window_cursor;
 
 mod id;
 
@@ -57,7 +56,6 @@ pub use window::{
     CursorKind, DrawContext, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit,
     Window, WindowViewport,
 };
-pub use window_cursor::WindowCursor;
 
 use std::collections::HashMap;
 

@@ -8,7 +8,6 @@ use crate::text::{
     char_class, line_end, line_start, word_backward_pos, word_forward_pos, CharClass,
 };
 use crate::undo::{UndoEntry, UndoHistory};
-use crate::window_cursor::WindowCursor;
 use crate::AttachmentId;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use motions::{
@@ -55,9 +54,11 @@ pub enum Action {
 /// `clipboard` is the App-owned `Clipboard` subsystem (kill ring +
 /// platform sink): yanks mirror into the sink, pastes pull from it
 /// when it was updated externally (see `KillRing::last_clipboard_write`).
-/// `cursor` carries the per-Window `curswant` (preferred vertical-motion
-/// column) and selection anchor; `vim_state` carries the per-Window
-/// persistent vim state (Visual anchor, last `f`/`t` target).
+/// `curswant` is the per-Window preferred vertical-motion column (in
+/// terminal cells, so wide glyphs don't throw column off); vim's
+/// `j`/`k` motions read and write it. `vim_state` carries the
+/// per-Window persistent vim state (Visual anchor, last `f`/`t`
+/// target) plus in-flight key-sequence state.
 pub struct VimContext<'a> {
     pub buf: &'a mut String,
     pub cpos: &'a mut usize,
@@ -65,7 +66,7 @@ pub struct VimContext<'a> {
     pub history: &'a mut UndoHistory,
     pub clipboard: &'a mut Clipboard,
     pub mode: &'a mut VimMode,
-    pub cursor: &'a mut WindowCursor,
+    pub curswant: &'a mut Option<usize>,
     pub vim_state: &'a mut VimWindowState,
 }
 
@@ -507,7 +508,7 @@ impl Vim {
     fn handle_normal_char(&mut self, c: char, ctx: &mut VimContext<'_>) -> Action {
         // Clear desired column for any non-vertical motion.
         if c != 'j' && c != 'k' && !c.is_ascii_digit() {
-            ctx.cursor.clear_curswant();
+            *ctx.curswant = None;
         }
 
         // Count digit accumulation.
@@ -816,15 +817,15 @@ impl Vim {
             'j' => {
                 let n = ctx.vim_state.take_count();
                 if ctx.buf.contains('\n') {
-                    let (new_pos, col) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
+                    let (new_pos, col) = move_down_col(ctx.buf, *ctx.cpos, *ctx.curswant);
                     if new_pos == *ctx.cpos && n <= 1 {
                         ctx.vim_state.reset_pending();
                         return Action::HistoryNext;
                     }
-                    ctx.cursor.set_curswant(Some(col));
+                    *ctx.curswant = Some(col);
                     *ctx.cpos = new_pos;
                     for _ in 1..n {
-                        (*ctx.cpos, _) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
+                        (*ctx.cpos, _) = move_down_col(ctx.buf, *ctx.cpos, *ctx.curswant);
                     }
                     clamp_normal(ctx.buf, ctx.cpos);
                     return Action::Consumed;
@@ -839,15 +840,15 @@ impl Vim {
             'k' => {
                 let n = ctx.vim_state.take_count();
                 if ctx.buf.contains('\n') {
-                    let (new_pos, col) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
+                    let (new_pos, col) = move_up_col(ctx.buf, *ctx.cpos, *ctx.curswant);
                     if new_pos == *ctx.cpos && n <= 1 {
                         ctx.vim_state.reset_pending();
                         return Action::HistoryPrev;
                     }
-                    ctx.cursor.set_curswant(Some(col));
+                    *ctx.curswant = Some(col);
                     *ctx.cpos = new_pos;
                     for _ in 1..n {
-                        (*ctx.cpos, _) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
+                        (*ctx.cpos, _) = move_up_col(ctx.buf, *ctx.cpos, *ctx.curswant);
                     }
                     clamp_normal(ctx.buf, ctx.cpos);
                     return Action::Consumed;
@@ -907,7 +908,7 @@ impl Vim {
             }
             '0' => {
                 *ctx.cpos = line_start(ctx.buf, *ctx.cpos);
-                ctx.cursor.clear_curswant();
+                *ctx.curswant = None;
                 ctx.vim_state.reset_pending();
                 Action::Consumed
             }
@@ -1061,7 +1062,7 @@ impl Vim {
 
     fn handle_visual_char(&mut self, c: char, ctx: &mut VimContext<'_>) -> Action {
         if c != 'j' && c != 'k' && !c.is_ascii_digit() {
-            ctx.cursor.clear_curswant();
+            *ctx.curswant = None;
         }
         match c {
             // ── Escape visual mode ─────────────────────────────────────
@@ -1289,8 +1290,8 @@ impl Vim {
                 let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     let col;
-                    (*ctx.cpos, col) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
-                    ctx.cursor.set_curswant(Some(col));
+                    (*ctx.cpos, col) = move_down_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                    *ctx.curswant = Some(col);
                 }
                 clamp_normal(ctx.buf, ctx.cpos);
                 Action::Consumed
@@ -1299,8 +1300,8 @@ impl Vim {
                 let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     let col;
-                    (*ctx.cpos, col) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
-                    ctx.cursor.set_curswant(Some(col));
+                    (*ctx.cpos, col) = move_up_col(ctx.buf, *ctx.cpos, *ctx.curswant);
+                    *ctx.curswant = Some(col);
                 }
                 clamp_normal(ctx.buf, ctx.cpos);
                 Action::Consumed
@@ -1966,10 +1967,10 @@ mod tests {
     }
 
     /// Owns the cross-call state (clipboard + kill ring + undo history +
-    /// mode + window cursor + per-window vim state) that vim borrows.
+    /// mode + curswant + per-window vim state) that vim borrows.
     /// `mode` mirrors the App-owned single-global VimMode in production
-    /// code; tests own one locally. `cursor` and `vim_state` mirror the
-    /// per-Window state that production carries on `ui::Window`.
+    /// code; tests own one locally. `curswant` and `vim_state` mirror
+    /// the per-Window state that production carries on `ui::Window`.
     struct TestHarness {
         vim: Vim,
         buf: String,
@@ -1978,7 +1979,7 @@ mod tests {
         clipboard: Clipboard,
         history: UndoHistory,
         mode: VimMode,
-        cursor: WindowCursor,
+        curswant: Option<usize>,
         vim_state: VimWindowState,
     }
 
@@ -1996,7 +1997,7 @@ mod tests {
                 clipboard,
                 history: UndoHistory::new(None),
                 mode: VimMode::Normal,
-                cursor: WindowCursor::new(),
+                curswant: None,
                 vim_state: VimWindowState::default(),
             }
         }
@@ -2009,7 +2010,7 @@ mod tests {
                 history: &mut self.history,
                 clipboard: &mut self.clipboard,
                 mode: &mut self.mode,
-                cursor: &mut self.cursor,
+                curswant: &mut self.curswant,
                 vim_state: &mut self.vim_state,
             };
             self.vim.handle_key(k, &mut ctx)

@@ -762,7 +762,7 @@ impl App {
                 self.vim_mode,
                 crate::vim::VimMode::Visual | crate::vim::VimMode::VisualLine
             );
-        let anchor_set = self.transcript_window.win_cursor.anchor().is_some();
+        let anchor_set = self.transcript_window.selection_anchor.is_some();
         let yank_flash = self
             .clipboard
             .kill_ring
@@ -788,10 +788,10 @@ impl App {
                         self.vim_mode,
                     )
                 }
-                _ => self.transcript_window.win_cursor.range(cpos),
+                _ => self.transcript_window.selection_range_at(cpos),
             }
         } else {
-            self.transcript_window.win_cursor.range(cpos)
+            self.transcript_window.selection_range_at(cpos)
         };
         // Fall back to the yank-flash range so the selection bg
         // briefly paints over the yanked text after `y`-family vim ops
