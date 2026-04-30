@@ -493,8 +493,10 @@ App / Buffer / Window / Clipboard. Splits across sessions:
   on Window + `WindowCursor.curswant`. Vim now in-flight only.
 - **5d** — Registers, dot-repeat, undo → Buffer. Pairs with
   `edit_buffer.rs` merge (P1.a-tail).
-- **5e** — In-flight key state (`sub`/`count1`/`count2`) → Window;
-  Vim becomes ZST / free-function module.
+- **5e** ✅ landed (`dfa1fad`) — in-flight key state
+  (`sub`/`count1`/`count2`) + count/mode helpers hoist onto
+  `VimWindowState`; `Vim` collapses to ZST kept as `Option<Vim>`
+  enable marker on Window.
 - **5f** — Cursor / scroll / selection / Visual anchor → Window.
   Delete `crates/ui/src/vim/` + `window_cursor.rs`. Vim becomes a
   per-Window keymap recipe (Rust; Lua recipes are P3.b).
