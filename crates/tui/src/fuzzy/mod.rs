@@ -1,3 +1,5 @@
+pub mod score;
+
 /// Fuzzy match with relevance scoring.
 /// Returns `None` if no match, `Some(score)` if matched.
 /// Lower score = better match.
