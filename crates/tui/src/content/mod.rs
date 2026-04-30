@@ -23,9 +23,7 @@ pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
 pub(crate) use status::BarSpan;
 pub use status::{StatusPosition, StyleState};
 
-use crate::utils::format_duration;
 use crossterm::{style::Color, terminal};
-use std::collections::HashMap;
 
 pub use context::{LayoutContext, PaintContext};
 pub use display::DisplayBlock;
@@ -125,11 +123,6 @@ pub fn term_width() -> usize {
 
 pub fn term_height() -> usize {
     terminal::size().map(|(_, h)| h as usize).unwrap_or(24)
-}
-
-pub fn tool_timeout_label(args: &HashMap<String, serde_json::Value>) -> Option<String> {
-    let ms = args.get("timeout_ms").and_then(|v| v.as_u64())?;
-    Some(format!("timeout: {}", format_duration(ms / 1000)))
 }
 
 pub(super) fn format_tokens(n: u32) -> String {

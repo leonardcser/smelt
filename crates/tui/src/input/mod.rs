@@ -175,22 +175,6 @@ impl PromptState {
         self.completer = Some(CompleterSession::new(comp));
     }
 
-    /// Select the word at `cpos`. Used by mouse double-click. `mode` is
-    /// the TuiApp-owned single-global VimMode written through when vim is
-    /// enabled.
-    pub fn select_word_at(&mut self, cpos: usize, mode: &mut VimMode) -> Option<(usize, usize)> {
-        let (start, end) = self.win.edit_buf.word_range_at(cpos)?;
-        self.win.cpos = end.saturating_sub(1).max(start);
-        if self.win.vim_enabled {
-            self.win
-                .vim_state
-                .begin_visual(mode, VimMode::Visual, start);
-        } else {
-            self.win.selection_anchor = Some(start);
-        }
-        Some((start, end))
-    }
-
     /// Start or extend selection at current cursor position (non-vim shift+key).
     fn extend_selection(&mut self) {
         self.win.extend_selection(self.win.cpos);
@@ -228,17 +212,6 @@ impl PromptState {
         if self.win.vim_enabled {
             self.win.vim_state.set_mode(mode_ref, new);
         }
-    }
-
-    pub fn take_buffer(&mut self) -> (String, usize) {
-        let buf = std::mem::take(&mut self.win.edit_buf.buf);
-        let cpos = std::mem::replace(&mut self.win.cpos, 0);
-        (buf, cpos)
-    }
-
-    pub fn set_buffer(&mut self, buf: String, cpos: usize) {
-        self.win.edit_buf.buf = buf;
-        self.win.cpos = cpos.min(self.win.edit_buf.buf.len());
     }
 
     /// Reconcile the kill ring with the system clipboard before an
