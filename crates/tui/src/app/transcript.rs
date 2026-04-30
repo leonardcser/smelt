@@ -41,18 +41,6 @@ pub(crate) struct TranscriptCursor {
 }
 
 impl TuiApp {
-    pub fn block_count(&self) -> usize {
-        self.transcript.block_count()
-    }
-
-    pub fn blocks(&self) -> Vec<Block> {
-        self.transcript.blocks()
-    }
-
-    pub fn tool_states_snapshot(&self) -> HashMap<String, ToolState> {
-        self.transcript.tool_states_snapshot()
-    }
-
     pub fn start_active_agent(&mut self, agent_id: String) {
         self.parser
             .start_active_agent(&mut self.transcript.history, agent_id);
@@ -82,11 +70,6 @@ impl TuiApp {
     pub fn finish_active_agent(&mut self, agent_id: &str) {
         self.parser
             .finish_active_agent(&mut self.transcript.history, agent_id);
-    }
-
-    pub fn finish_all_active_agents(&mut self) {
-        self.parser
-            .finish_all_active_agents(&mut self.transcript.history);
     }
 
     pub fn begin_turn(&mut self) {
@@ -283,27 +266,6 @@ impl TuiApp {
         (soft, hard)
     }
 
-    pub fn full_transcript_nav_text(&mut self, show_thinking: bool) -> Vec<String> {
-        let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
-        let mut rows = snap.nav_rows();
-        if self.has_ephemeral(show_thinking) {
-            let mut col = SpanCollector::new(tw);
-            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
-            for line in col.finish().lines {
-                let mut s = String::new();
-                for span in &line.spans {
-                    if !span.meta.selectable {
-                        continue;
-                    }
-                    s.push_str(&span.text);
-                }
-                rows.push(s);
-            }
-        }
-        rows
-    }
-
     pub fn nav_col_to_display_col(
         &mut self,
         abs_row: usize,
@@ -408,10 +370,6 @@ impl TuiApp {
             .finalize_active_tools(&mut self.transcript.history);
     }
 
-    pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
-        self.transcript.tool_state(call_id)
-    }
-
     pub fn block_view_state(&self, id: BlockId) -> ViewState {
         self.transcript.block_view_state(id)
     }
@@ -422,18 +380,6 @@ impl TuiApp {
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.transcript.drain_finished_blocks()
-    }
-
-    pub fn update_tool_state(
-        &mut self,
-        call_id: &str,
-        mutator: impl FnOnce(&mut ToolState),
-    ) -> bool {
-        self.transcript.update_tool_state(call_id, mutator)
-    }
-
-    pub fn set_tool_state(&mut self, call_id: String, state: ToolState) {
-        self.transcript.set_tool_state(call_id, state);
     }
 
     /// Invalidate the width-dependent block layout cache when the
@@ -448,10 +394,6 @@ impl TuiApp {
     pub fn clear_transcript(&mut self) {
         self.transcript.history.clear();
         self.parser.clear();
-    }
-
-    pub fn has_history(&self) -> bool {
-        self.transcript.has_history()
     }
 
     pub fn export_render_cache(&self) -> Option<RenderCache> {
