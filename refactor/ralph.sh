@@ -55,8 +55,11 @@ while :; do
   iter_win=$(tmux new-window -n "ralph-$iter" -c "$PWD" -P -F '#{window_id}' \
     "RALPH_ITER=1 claude --permission-mode auto --effort xhigh")
 
-  # Wait for claude's TUI to come up before sending input.
-  sleep 4
+  # Wait for claude's TUI to come up before sending input. Generous
+  # because AGENTS.md auto-loads several large refactor/*.md files;
+  # too short and the bracketed paste lands before claude enables
+  # bracketed-paste mode and gets eaten.
+  sleep 10
 
   # Paste the prompt as a bracketed paste (so embedded newlines don't
   # auto-submit), then send a single Enter to submit.
