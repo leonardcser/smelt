@@ -1,64 +1,14 @@
-//! Registration surfaces — every binding here writes to `LuaShared`
-//! state that other Lua-side code reads back later: command handlers,
-//! keymap chords, autocmd subscribers, deferred timers, plugin tools,
-//! statusline sources, and spawned tasks.
+//! `smelt.tools` bindings — register / unregister plugin tools and
+//! resolve their results back to the engine. `__send_call` is the
+//! private dispatch that the `_bootstrap.lua` wrapper around
+//! `smelt.tools.call` mints request ids for and yields after.
 
 use super::{lua_table_to_args, lua_table_to_json};
-use crate::lua::{LuaHandle, LuaShared, PluginToolHandles, TaskCompletion, TaskEvent};
+use crate::lua::{LuaHandle, LuaShared, PluginToolHandles};
 use mlua::prelude::*;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-pub(super) fn register(
-    lua: &Lua,
-    smelt: &mlua::Table,
-    smelt_keymap: &mlua::Table,
-    shared: &Arc<LuaShared>,
-) -> LuaResult<()> {
-    super::cmd::register(lua, smelt, shared)?;
-    super::keymap::register(lua, smelt_keymap, shared)?;
-    register_task(lua, smelt, shared)?;
-    register_tools(lua, smelt, shared)?;
-    register_statusline(lua, smelt, shared)?;
-    super::timer::register(lua, smelt)?;
-    super::cell::register(lua, smelt)?;
-    super::au::register(lua, smelt)?;
-    register_spawn(lua, smelt, shared)?;
-    Ok(())
-}
-
-fn register_task(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let task_tbl = lua.create_table()?;
-    {
-        let s = shared.clone();
-        task_tbl.set(
-            "alloc",
-            lua.create_function(move |_, ()| {
-                Ok(s.next_external_id.fetch_add(1, Ordering::Relaxed))
-            })?,
-        )?;
-    }
-    {
-        let s = shared.clone();
-        task_tbl.set(
-            "resume",
-            lua.create_function(move |lua, (id, value): (u64, mlua::Value)| {
-                let key = lua.create_registry_value(value)?;
-                if let Ok(mut inbox) = s.task_inbox.lock() {
-                    inbox.push(TaskEvent::ExternalResolved {
-                        external_id: id,
-                        value: key,
-                    });
-                }
-                Ok(())
-            })?,
-        )?;
-    }
-    smelt.set("task", task_tbl)?;
-    Ok(())
-}
-
-fn register_tools(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let tools_tbl = lua.create_table()?;
     let s = shared.clone();
     let tools_register = lua.create_function(move |lua, def: mlua::Table| {
@@ -183,70 +133,5 @@ fn register_tools(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> Lu
         )?,
     )?;
     smelt.set("tools", tools_tbl)?;
-    Ok(())
-}
-
-fn register_statusline(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let statusline_tbl = lua.create_table()?;
-    {
-        let s = shared.clone();
-        statusline_tbl.set(
-            "register",
-            lua.create_function(
-                move |lua, (name, handler, opts): (String, mlua::Function, Option<mlua::Table>)| {
-                    let default_align_right = opts
-                        .as_ref()
-                        .and_then(|t| t.get::<Option<String>>("align").ok().flatten())
-                        .map(|s| s == "right")
-                        .unwrap_or(false);
-                    let key = lua.create_registry_value(handler)?;
-                    let source = crate::lua::StatusSource {
-                        handle: LuaHandle { key },
-                        default_align_right,
-                    };
-                    if let Ok(mut sources) = s.statusline_sources.lock() {
-                        if let Some(existing) = sources.iter_mut().find(|(n, _)| n == &name) {
-                            existing.1 = source;
-                        } else {
-                            sources.push((name, source));
-                        }
-                    }
-                    Ok(())
-                },
-            )?,
-        )?;
-    }
-    {
-        let s = shared.clone();
-        statusline_tbl.set(
-            "unregister",
-            lua.create_function(move |_, name: String| {
-                if let Ok(mut sources) = s.statusline_sources.lock() {
-                    sources.retain(|(n, _)| n != &name);
-                }
-                Ok(())
-            })?,
-        )?;
-    }
-    smelt.set("statusline", statusline_tbl)?;
-    Ok(())
-}
-
-fn register_spawn(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let s = shared.clone();
-    smelt.set(
-        "spawn",
-        lua.create_function(move |lua, handler: mlua::Function| {
-            if let Ok(mut rt) = s.tasks.lock() {
-                rt.spawn(
-                    lua,
-                    handler,
-                    mlua::MultiValue::new(),
-                    TaskCompletion::FireAndForget,
-                )?;
-            }
-            Ok(())
-        })?,
-    )?;
     Ok(())
 }
