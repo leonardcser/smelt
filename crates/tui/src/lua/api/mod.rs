@@ -13,7 +13,9 @@
 
 mod au;
 mod cell;
+mod cmd;
 mod dispatch;
+mod keymap;
 mod state;
 mod timer;
 mod widgets;
