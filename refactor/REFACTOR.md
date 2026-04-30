@@ -440,12 +440,11 @@ bridges, then the aggregate.
     (no consumers yet — drain wiring lands with a.4b's first Lua
     subscriber). Tests cover declare / get / set / subscribe /
     drain_pending.
-  - **a.4b** — Lua bindings: `smelt.cell.new`, `smelt.cell(name):
-    {get,set,subscribe}`, `smelt.cell:glob_subscribe`, and the
-    `smelt.au.{on,fire}` alias over the same registry. Main-loop
-    drain pump fires Rust + Lua subscribers between event
-    handlers (sole-`&mut App` window after `with_app` borrows
-    release).
+  - **a.4b** ✅ — `smelt.cell(name)` returns a `CellHandle` userdata
+    with `:get/:set/:subscribe/:unsubscribe`; `smelt.cell:glob_subscribe`
+    fires `fn(name, value)` for every match; `smelt.au.{on,fire}`
+    aliases `subscribe_kind` / `set_dyn`. Drain pump branches on a
+    `is_glob` flag per queued callback.
   - **a.4c** — built-in cell migrations: stateful slots
     (`vim_mode`, `agent_mode`, `model`, `reasoning`,
     `confirms_pending`, `tokens_used`, `errors`, `cwd`,
