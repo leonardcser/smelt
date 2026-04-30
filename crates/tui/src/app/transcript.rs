@@ -858,7 +858,6 @@ impl App {
         state: &crate::input::PromptState,
         width: usize,
         queued: &[String],
-        prediction: Option<&str>,
     ) -> u16 {
         let usable = width.saturating_sub(2);
         let text_w = usable.saturating_sub(2).max(1);
@@ -874,13 +873,8 @@ impl App {
             }
         }
 
-        let show_prediction = prediction.is_some() && state.buf.is_empty();
-        let input_rows: u16 = if show_prediction {
-            1
-        } else {
-            let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.buf, &[], 0, usable);
-            visual_lines.len() as u16
-        };
+        let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.buf, &[], 0, usable);
+        let input_rows = visual_lines.len() as u16;
 
         queued_rows + stash + 1 + input_rows + 1 + 1
     }

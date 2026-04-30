@@ -248,7 +248,7 @@ impl App {
     ///  6. Overlay keys   — notifications, btw block dismiss
     fn dispatch_common(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
         if matches!(ev, Event::Paste(_)) {
-            self.input_prediction = None;
+            self.clear_prompt_completer();
         }
         if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
@@ -395,7 +395,8 @@ impl App {
             code, modifiers, ..
         }) = ev
         {
-            let ghost = self.input_prediction.is_some() && self.input.buf.is_empty();
+            let ghost_text = self.prompt_completer_text();
+            let ghost = ghost_text.is_some() && self.input.buf.is_empty();
             let ctx = self.input.key_context(false, ghost, self.vim_mode);
 
             // Dismiss ghost text on keys that affect input content.
@@ -403,7 +404,7 @@ impl App {
             if ghost {
                 match keymap::lookup(code, modifiers, &ctx) {
                     Some(KeyAction::AcceptGhostText) => {
-                        let full = self.input_prediction.take().unwrap();
+                        let full = self.take_prompt_completer().unwrap();
                         let line = full.lines().next().unwrap_or(&full).to_string();
                         let __mode = self.vim_mode;
                         crate::api::buf::replace(&mut self.input, line, None, __mode);
@@ -416,7 +417,7 @@ impl App {
                         | KeyAction::ToggleStash,
                     ) => {}
                     _ => {
-                        self.input_prediction = None;
+                        self.clear_prompt_completer();
                     }
                 }
             }

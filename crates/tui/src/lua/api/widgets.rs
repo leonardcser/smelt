@@ -434,14 +434,14 @@ fn register_ghost_text(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     ghost_text_tbl.set(
         "set",
         lua.create_function(|_, text: String| {
-            crate::lua::with_app(|app| app.input_prediction = Some(text));
+            crate::lua::with_app(|app| app.set_prompt_completer(text));
             Ok(())
         })?,
     )?;
     ghost_text_tbl.set(
         "clear",
         lua.create_function(|_, ()| {
-            crate::lua::with_app(|app| app.input_prediction = None);
+            crate::lua::with_app(|app| app.clear_prompt_completer());
             Ok(())
         })?,
     )?;

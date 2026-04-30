@@ -4,10 +4,17 @@ use super::selection::{
 };
 use super::status::BarSpan;
 use crate::input::PromptState;
-use ui::buffer::{Buffer, SpanStyle};
+use ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, SpanStyle};
 use ui::grid::Style;
 
 use crossterm::style::Color;
+
+/// Namespace name for the prompt buffer's input-prediction (ghost text)
+/// extmark. `compute_prompt` reads-and-re-anchors this each frame so
+/// the dim suggestion follows the visible input row as chrome shifts;
+/// `App::{set,clear,take}_prompt_completer` mutate the storage from
+/// outside the render path.
+pub(crate) const COMPLETER_NS: &str = "completer";
 
 /// Intermediate representation for a chrome row inside the prompt:
 /// queued message, stash indicator, top/bottom bar. `compute_prompt`
@@ -35,7 +42,6 @@ pub(crate) struct PromptInput<'a> {
     pub input: &'a PromptState,
     pub vim_mode: ui::VimMode,
     pub clipboard: &'a ui::Clipboard,
-    pub prediction: Option<&'a str>,
     pub width: u16,
     pub height: u16,
     pub has_prompt_cursor: bool,
@@ -86,6 +92,18 @@ pub(crate) fn compute_prompt(
 ) -> PromptOutput {
     let width = input.width as usize;
     let usable = width.saturating_sub(2);
+
+    // ── Read prediction storage (custom namespaces survive
+    // `set_all_lines`, but the line index from the previous frame
+    // may be stale; we re-anchor below).
+    let completer_ns = buf.create_namespace(COMPLETER_NS);
+    let prediction: Option<String> = buf.extmarks(completer_ns).into_iter().find_map(|(_, m)| {
+        if let ExtmarkPayload::VirtText { text, .. } = &m.payload {
+            Some(text.clone())
+        } else {
+            None
+        }
+    });
 
     // ── Chrome rows (queued, stash, top bar) ──
     let mut chrome_rows: Vec<WindowRow> = Vec::new();
@@ -144,6 +162,27 @@ pub(crate) fn compute_prompt(
     buf.clear_highlights(0, total_lines);
     for (line, s, e, style) in all_highlights {
         buf.add_highlight(line, s, e, style);
+    }
+
+    // Re-anchor the prediction extmark. Visible position: input row
+    // col 1 (past the leading space) when the buffer is empty.
+    // Otherwise, park at `total_lines` (one past last) so the storage
+    // survives without rendering — `Window::render` only walks rows
+    // 0..line_count. Buffer mutation paths
+    // (`App::clear_prompt_completer` etc.) drop the storage entirely.
+    buf.clear_namespace(completer_ns, 0, usize::MAX);
+    if let Some(text) = prediction {
+        let row = if input.input.buf.is_empty() {
+            input_offset
+        } else {
+            total_lines
+        };
+        buf.set_extmark(
+            completer_ns,
+            row,
+            1,
+            ExtmarkOpts::virt_text(text, Some("GhostText".into())),
+        );
     }
 
     let cursor = input_area
@@ -544,7 +583,6 @@ fn compute_input_area(
 ) -> InputArea {
     let height = input.height as usize;
     let state = input.input;
-    let prediction = input.prediction;
 
     let spans = build_display_spans(&state.buf, &state.attachment_ids, &state.store);
     let display_buf = spans_to_string(&spans);
@@ -600,66 +638,9 @@ fn compute_input_area(
         0
     };
 
-    let show_prediction = prediction.is_some() && state.buf.is_empty();
     let mut cursor_pos: Option<(u16, u16)> = None;
     let mut cursor_style_out: Option<(Style, char)> = None;
     let mut highlights: Vec<(usize, u16, u16, SpanStyle)> = Vec::new();
-
-    if show_prediction {
-        let pred = prediction.unwrap();
-        let first_line = pred.lines().next().unwrap_or(pred);
-        let max_chars = usable.saturating_sub(1);
-        let mut chars_iter = first_line.chars().take(max_chars);
-        let line = if let Some(first) = chars_iter.next() {
-            let rest: String = chars_iter.collect();
-            if input.has_prompt_cursor {
-                let (fg, bg) = cursor_style(theme);
-                let cursor_char_style = Style {
-                    fg: Some(fg),
-                    bg: Some(bg),
-                    ..Style::default()
-                };
-                cursor_pos = Some((1, 0));
-                cursor_style_out = Some((cursor_char_style, first));
-                format!(" {first}{rest}")
-            } else {
-                format!(" {}{}", first, rest)
-            }
-        } else {
-            if input.has_prompt_cursor {
-                let (fg, bg) = cursor_style(theme);
-                cursor_pos = Some((1, 0));
-                cursor_style_out = Some((
-                    Style {
-                        fg: Some(fg),
-                        bg: Some(bg),
-                        ..Style::default()
-                    },
-                    ' ',
-                ));
-            }
-            " ".to_string()
-        };
-        if let Some((first, rest_start)) = first_prediction_split(first_line, max_chars) {
-            if !input.has_prompt_cursor {
-                let end = 1 + first.chars().count() as u16 + rest_start.chars().count() as u16;
-                highlights.push((0, 1, end, SpanStyle::dim()));
-            } else if !rest_start.is_empty() {
-                let start = 2;
-                let end = start + rest_start.chars().count() as u16;
-                highlights.push((0, start, end, SpanStyle::dim()));
-            }
-        }
-        return InputArea {
-            lines: vec![line],
-            highlights,
-            cursor_pos,
-            cursor_style: cursor_style_out,
-            scroll_offset: 0,
-            total_content_rows: 0,
-            visible_rows: 1,
-        };
-    }
 
     let mut lines: Vec<String> = visual_lines
         .iter()
@@ -728,7 +709,7 @@ fn compute_input_area(
         }
     }
 
-    if cursor_line >= total_content_rows && input.has_prompt_cursor && !show_prediction {
+    if cursor_line >= total_content_rows && input.has_prompt_cursor {
         let (fg, bg) = cursor_style(theme);
         cursor_pos = Some((1, content_rows.saturating_sub(1) as u16));
         cursor_style_out = Some((
@@ -750,13 +731,6 @@ fn compute_input_area(
         total_content_rows,
         visible_rows: content_rows as u16,
     }
-}
-
-fn first_prediction_split(line: &str, max_chars: usize) -> Option<(String, String)> {
-    let mut chars_iter = line.chars().take(max_chars);
-    let first = chars_iter.next()?;
-    let rest: String = chars_iter.collect();
-    Some((first.to_string(), rest))
 }
 
 /// Append the input row's styled segments as `(line_idx, col_start,
@@ -1038,7 +1012,6 @@ mod tests {
             input: &input_state,
             vim_mode: ui::VimMode::Insert,
             clipboard: &test_clipboard,
-            prediction: None,
             width: 80,
             height: 10,
             has_prompt_cursor: true,
