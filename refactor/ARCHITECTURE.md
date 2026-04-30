@@ -302,7 +302,7 @@ Built-in cells the runtime ships (stateful slots and pure events both):
 | `history`             | `Cell<HistoryDelta>` (event)         | Message appended / mutated / cleared       |
 | `turn_complete`       | `Cell<TurnMeta>` (event)             | Engine emits TurnComplete                  |
 | `turn_error`          | `Cell<TurnError>` (event)            | Engine emits TurnError                     |
-| `confirm_requested`   | `Cell<HandleId>` (event)             | Engine emits RequestPermission             |
+| `confirm_requested`   | `Cell<ConfirmRequested>` (event)     | Engine emits RequestPermission             |
 | `confirm_resolved`    | `Cell<{handle_id, decision}>` (event)| User answered                              |
 | `session_started`     | `Cell<SessionId>` (event)            | New session                                |
 | `session_ended`       | `Cell<SessionId>` (event)            | Session cleared / forked                   |

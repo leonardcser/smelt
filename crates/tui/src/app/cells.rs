@@ -367,6 +367,26 @@ pub struct HistoryDelta {
     pub count: usize,
 }
 
+/// Payload for the `confirm_requested` cell. Carries the full request
+/// snapshot the dialog needs to render — tool / desc / args / outside
+/// dir / approval-pattern globs / pre-built option labels — so the Lua
+/// dialog reads the request data straight from the cell instead of
+/// looking it up by handle. `handle_id` keys the `_resolve` /
+/// `_render_title` / `_back_tab` Rust-side primitives that still need
+/// to find the underlying `Confirms` entry.
+#[derive(Debug, Clone)]
+pub struct ConfirmRequested {
+    pub handle_id: u64,
+    pub tool_name: String,
+    pub desc: String,
+    pub summary: Option<String>,
+    pub args: std::collections::HashMap<String, serde_json::Value>,
+    pub outside_dir: Option<String>,
+    pub approval_patterns: Vec<String>,
+    pub options: Vec<String>,
+    pub cwd_label: String,
+}
+
 /// Register projectors for primitive types we publish, declare every
 /// built-in cell with its initial value (or an `EventStub` placeholder
 /// for event-shaped cells whose payload type lands in a.4c.2/.3), and
@@ -458,6 +478,49 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         };
         let _ = t.set("kind", d.kind.as_str());
         let _ = t.set("count", d.count as i64);
+        mlua::Value::Table(t)
+    });
+    // `ConfirmRequested`: full request snapshot for the dialog.
+    // `args` projects through `json_to_lua` so nested objects / arrays
+    // round-trip into Lua tables; `outside_dir` is `nil` when absent
+    // (so plugins write `if req.outside_dir then ... end`).
+    cells.register_lua_projector::<ConfirmRequested, _>(|r, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("handle_id", r.handle_id);
+        let _ = t.set("tool_name", r.tool_name.as_str());
+        let _ = t.set("desc", r.desc.as_str());
+        let _ = t.set("summary", r.summary.clone().unwrap_or_default());
+        let _ = t.set("cwd_label", r.cwd_label.as_str());
+        match &r.outside_dir {
+            Some(s) => {
+                let _ = t.set("outside_dir", s.as_str());
+            }
+            None => {
+                let _ = t.set("outside_dir", mlua::Value::Nil);
+            }
+        }
+        if let Ok(patterns) = lua.create_table() {
+            for (i, p) in r.approval_patterns.iter().enumerate() {
+                let _ = patterns.set(i + 1, p.as_str());
+            }
+            let _ = t.set("approval_patterns", patterns);
+        }
+        if let Ok(opts) = lua.create_table() {
+            for (i, label) in r.options.iter().enumerate() {
+                let _ = opts.set(i + 1, label.as_str());
+            }
+            let _ = t.set("options", opts);
+        }
+        if let Ok(args) = lua.create_table() {
+            for (k, v) in &r.args {
+                if let Ok(lv) = crate::lua::json_to_lua(lua, v) {
+                    let _ = args.set(k.as_str(), lv);
+                }
+            }
+            let _ = t.set("args", args);
+        }
         mlua::Value::Table(t)
     });
 
@@ -916,7 +979,20 @@ mod tests {
             }),
         );
         cells.set_dyn("session_started", Rc::new(String::from("sess-001")));
-        cells.set_dyn("confirm_requested", Rc::new(42u64));
+        cells.set_dyn(
+            "confirm_requested",
+            Rc::new(ConfirmRequested {
+                handle_id: 42,
+                tool_name: "bash".into(),
+                desc: "ls".into(),
+                summary: None,
+                args: std::collections::HashMap::new(),
+                outside_dir: None,
+                approval_patterns: vec!["bash:ls".into()],
+                options: vec!["yes".into(), "no".into()],
+                cwd_label: "~/work".into(),
+            }),
+        );
 
         match cells.get_lua("turn_complete", &lua) {
             mlua::Value::Table(t) => {
@@ -953,8 +1029,22 @@ mod tests {
             other => panic!("expected String, got {other:?}"),
         }
         match cells.get_lua("confirm_requested", &lua) {
-            mlua::Value::Integer(42) => {}
-            other => panic!("expected Integer(42), got {other:?}"),
+            mlua::Value::Table(t) => {
+                assert_eq!(t.get::<i64>("handle_id").unwrap(), 42);
+                assert_eq!(t.get::<String>("tool_name").unwrap(), "bash");
+                assert_eq!(t.get::<String>("desc").unwrap(), "ls");
+                assert_eq!(t.get::<String>("cwd_label").unwrap(), "~/work");
+                let opts: mlua::Table = t.get("options").unwrap();
+                assert_eq!(opts.get::<String>(1).unwrap(), "yes");
+                assert_eq!(opts.get::<String>(2).unwrap(), "no");
+                let patterns: mlua::Table = t.get("approval_patterns").unwrap();
+                assert_eq!(patterns.get::<String>(1).unwrap(), "bash:ls");
+                assert!(matches!(
+                    t.get::<mlua::Value>("outside_dir").unwrap(),
+                    mlua::Value::Nil
+                ));
+            }
+            other => panic!("expected Table, got {other:?}"),
         }
     }
 }
