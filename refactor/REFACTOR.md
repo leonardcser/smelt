@@ -374,7 +374,7 @@ taking the unified `Event::{ Key | Mouse | Resize | Focus | Blur }`.
 Splits across two sessions because the WinEvent dispatcher already
 owns the `dispatch_event` slot:
 
-- **F.6a** — rename `Ui::dispatch_event(WinEvent)` →
+- **F.6a** ✅ — rename `Ui::dispatch_event(WinEvent)` →
   `Ui::fire_win_event` (matches `UiHost::fire_win_event` from
   ARCHITECTURE.md), freeing the name for the terminal-event entry.
   Mechanical rename.
