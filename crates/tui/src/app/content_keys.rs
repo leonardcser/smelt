@@ -227,16 +227,26 @@ impl TuiApp {
     /// see the rendered text rather than the raw markdown.
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
-        let viewport = self.viewport_rows_estimate();
+        let viewport_rows = self.viewport_rows_estimate();
+        // EventCtx carries a full `WindowViewport`, but key dispatch
+        // reads only `viewport.rect.height`. Synthesise a minimal one
+        // from the layout's row count — `viewport_rows_estimate()`
+        // returns the layout-derived height even before the transcript
+        // has painted, where `UiHost::viewport_for` would still be `None`.
+        let viewport =
+            ui::WindowViewport::new(ui::Rect::new(0, 0, 0, viewport_rows), 0, 0, 0, None);
         let status = {
             let prev_sink = self.core.clipboard.swap_sink(Box::new(ui::NullSink));
-            let r = self.transcript_window.handle_key(
-                k,
-                &rows,
+            let ctx = ui::EventCtx {
+                rows: &rows,
+                soft_breaks: &[],
+                hard_breaks: &[],
                 viewport,
-                &mut self.vim_mode,
-                &mut self.core.clipboard,
-            );
+                click_count: 1,
+                vim_mode: &mut self.vim_mode,
+                clipboard: &mut self.core.clipboard,
+            };
+            let r = self.transcript_window.handle(ui::Event::Key(k), ctx);
             self.core.clipboard.swap_sink(prev_sink);
             r
         };

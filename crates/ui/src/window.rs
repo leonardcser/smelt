@@ -165,6 +165,28 @@ impl WindowViewport {
     }
 }
 
+/// Per-call context for [`Window::handle`] and the per-event
+/// helpers underneath it. The window itself does not store row
+/// layout or viewport geometry — they're recomputed each frame and
+/// supplied here so a single `Window` primitive can drive
+/// heterogeneous backings (transcript display projection, dialog
+/// buffer panel, plain split window).
+///
+/// Bundles per-pane data the host computed (rows, soft/hard breaks,
+/// viewport, click count, vim mode, clipboard). Key dispatch reads
+/// `rows` / `viewport.rect.height` / `vim_mode` / `clipboard`; mouse
+/// dispatch reads everything except `clipboard`. Hosts pass full
+/// data on every event — the unused fields are zero-cost references.
+pub struct EventCtx<'a> {
+    pub rows: &'a [String],
+    pub soft_breaks: &'a [usize],
+    pub hard_breaks: &'a [usize],
+    pub viewport: WindowViewport,
+    pub click_count: u8,
+    pub vim_mode: &'a mut VimMode,
+    pub clipboard: &'a mut Clipboard,
+}
+
 /// Per-call context for [`Window::handle_mouse`]. The window itself
 /// does not store row layout or viewport geometry — they're recomputed
 /// each frame and supplied here so a single `Window` primitive can
@@ -579,6 +601,46 @@ impl Window {
         offsets
     }
 
+    // ── Unified event dispatch ────────────────────────────────────────
+
+    /// Single public entry consuming an `Event` plus per-pane `ctx`.
+    /// Dispatches `Key` events to the vim/edit key path and `Mouse`
+    /// events to the cursor/selection path; non-input events return
+    /// `Status::Ignored` so the host can route them itself
+    /// (terminal-focus tracking, paste-side effects, resize bookkeeping).
+    ///
+    /// Hosts populate `ctx` from `UiHost::rows_for` / `breaks_for` /
+    /// `viewport_for` plus the App-owned `vim_mode` and clipboard
+    /// before calling. Unused fields per event kind (e.g. clipboard
+    /// for mouse, breaks for keys) are passed through as zero-cost
+    /// references — Window simply doesn't read them.
+    pub fn handle(&mut self, ev: crate::event::Event, ctx: EventCtx<'_>) -> Status {
+        use crate::event::Event;
+        match ev {
+            Event::Key(k) => self.handle_key(
+                k,
+                ctx.rows,
+                ctx.viewport.rect.height,
+                ctx.vim_mode,
+                ctx.clipboard,
+            ),
+            Event::Mouse(me) => self.handle_mouse(
+                me,
+                MouseCtx {
+                    rows: ctx.rows,
+                    soft_breaks: ctx.soft_breaks,
+                    hard_breaks: ctx.hard_breaks,
+                    viewport: ctx.viewport,
+                    click_count: ctx.click_count,
+                    vim_mode: ctx.vim_mode,
+                },
+            ),
+            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => {
+                Status::Ignored
+            }
+        }
+    }
+
     // ── Mouse dispatch ─────────────────────────────────────────────────
 
     /// Handle a single mouse event using the supplied `MouseCtx`
@@ -591,7 +653,7 @@ impl Window {
     /// successive `Drag` events extend by the right unit. Clipboard
     /// side effects are the host's job — Window only mutates its own
     /// selection state.
-    pub fn handle_mouse(&mut self, event: MouseEvent, mut ctx: MouseCtx) -> Status {
+    pub(crate) fn handle_mouse(&mut self, event: MouseEvent, mut ctx: MouseCtx) -> Status {
         // Build the joined buffer once and pass it down. Mouse helpers
         // operate on this `&str` instead of `self.edit_buf.buf`, which
         // lets surfaces whose `edit_buf.buf` is *not* `rows.join("\n")`
@@ -788,7 +850,7 @@ impl Window {
 
     // ── Key dispatch ───────────────────────────────────────────────────
 
-    pub fn handle_key(
+    pub(crate) fn handle_key(
         &mut self,
         k: KeyEvent,
         rows: &[String],

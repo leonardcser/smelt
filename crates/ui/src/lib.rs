@@ -50,7 +50,7 @@ pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{VimMode, VimWindowState};
 pub use window::{
-    CursorShape, DrawContext, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window,
+    CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window,
     WindowViewport,
 };
 

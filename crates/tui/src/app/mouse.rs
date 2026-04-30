@@ -238,16 +238,17 @@ impl TuiApp {
             }
         }
 
-        // Build the same `MouseCtx` shape the transcript uses.
-        let ctx = ui::MouseCtx {
+        // Build the same `EventCtx` shape the transcript uses.
+        let ctx = ui::EventCtx {
             rows: &wrap.rows,
             soft_breaks: &wrap.soft_breaks,
             hard_breaks: &wrap.hard_breaks,
             viewport: vp,
             click_count,
             vim_mode: &mut self.vim_mode,
+            clipboard: &mut self.core.clipboard,
         };
-        let action = self.input.win.handle_mouse(me, ctx);
+        let action = self.input.win.handle(ui::Event::Mouse(me), ctx);
 
         // Post-call: translate state on `state.win` back to source
         // bytes. `Window::mouse_up` already cleared its anchors, so
@@ -302,15 +303,18 @@ impl TuiApp {
             return;
         };
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
-        let ctx = ui::MouseCtx {
+        let ctx = ui::EventCtx {
             rows: &rows,
             soft_breaks: &soft,
             hard_breaks: &hard,
             viewport,
             click_count,
             vim_mode: &mut self.vim_mode,
+            clipboard: &mut self.core.clipboard,
         };
-        let _ = self.transcript_window.handle_mouse(snapped, ctx);
+        let _ = self
+            .transcript_window
+            .handle(ui::Event::Mouse(snapped), ctx);
     }
 
     /// Translate `me`'s screen column into a *selectable* column for the
