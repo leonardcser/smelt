@@ -53,7 +53,7 @@ while :; do
   # `RALPH_ITER=1` tells refactor/hooks/stop_gate.sh to close this window
   # when the agent stops cleanly, so the loop advances on its own.
   iter_win=$(tmux new-window -n "ralph-$iter" -c "$PWD" -P -F '#{window_id}' \
-    "RALPH_ITER=1 claude --permission-mode auto --effort xhigh")
+    "RALPH_ITER=1 claude --permission-mode auto --effort high")
 
   # Wait for claude's TUI to come up before sending input. Generous
   # because AGENTS.md auto-loads several large refactor/*.md files;
