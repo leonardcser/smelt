@@ -371,7 +371,7 @@ pub struct HistoryDelta {
 /// every turn termination — natural end (paired with `turn_complete`),
 /// cancel (Esc / Ctrl-C / mode switch), or error. `cancelled = true`
 /// for the cancel/error legs; subscribers needing the message list
-/// query `smelt.engine.history()` from the callback.
+/// query `smelt.session.messages()` from the callback.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
     pub cancelled: bool,

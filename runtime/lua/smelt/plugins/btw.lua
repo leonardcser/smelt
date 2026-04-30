@@ -31,7 +31,7 @@ smelt.cmd.register("btw", function(args)
     end
     tick()
 
-    local history = smelt.engine.history()
+    local history = smelt.session.messages()
     local messages = {}
     for _, msg in ipairs(history) do
       table.insert(messages, { role = msg.role, content = msg.content or "" })

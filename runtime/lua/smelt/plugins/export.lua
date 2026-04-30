@@ -2,7 +2,7 @@
 --
 -- Opens a 2-option dialog: copy the conversation as markdown to the
 -- clipboard, or write it to a timestamped file in the cwd. Pure Lua
--- composition over primitives (session metadata, engine.history(),
+-- composition over primitives (session metadata, session.messages(),
 -- smelt.clipboard, io.open) — the host has no export-specific Rust.
 
 local function format_timestamp(ms)
@@ -75,7 +75,7 @@ local function format_markdown()
   end
 
   -- Build a lookup: tool_call_id -> (content, is_error).
-  local history = smelt.engine.history()
+  local history = smelt.session.messages()
   local tool_results = {}
   for _, msg in ipairs(history) do
     if msg.role == "tool" and msg.tool_call_id and msg.content then
@@ -119,7 +119,7 @@ local function format_markdown()
 end
 
 smelt.cmd.register("export", function()
-  if #smelt.engine.history() == 0 then
+  if #smelt.session.messages() == 0 then
     smelt.notify_error("nothing to export")
     return
   end

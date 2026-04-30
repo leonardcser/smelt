@@ -1,7 +1,8 @@
 //! `smelt.session` bindings — current session metadata, turn list,
-//! rewind, list / load / delete persisted sessions.
+//! messages snapshot, rewind, list / load / delete persisted sessions.
 
 use super::app_read;
+use crate::lua::messages_to_lua;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -33,6 +34,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         app_read!(lua, |app| crate::session::dir_for(&app.core.session)
             .display()
             .to_string()),
+    )?;
+    session_tbl.set(
+        "messages",
+        lua.create_function(|lua, ()| {
+            let messages = crate::lua::try_with_app(|app| app.core.session.messages.clone())
+                .unwrap_or_default();
+            messages_to_lua(lua, &messages)
+        })?,
     )?;
     session_tbl.set(
         "turns",

@@ -16,7 +16,7 @@ smelt.au.on("turn_end", function(payload)
 
   smelt.ui.ghost_text.clear()
 
-  local history = smelt.engine.history()
+  local history = smelt.session.messages()
 
   -- Collect last 3 user messages + last assistant message.
   local user_msgs = {}
