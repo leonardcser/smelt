@@ -35,9 +35,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         .as_ref()
                         .and_then(|t| t.get::<Option<bool>>("while_busy").ok().flatten())
                         .unwrap_or(true);
-                    let arg_hint: Option<String> = opts
-                        .as_ref()
-                        .and_then(|t| t.get::<Option<String>>("arg_hint").ok().flatten());
                     let startup_ok: bool = opts
                         .as_ref()
                         .and_then(|t| t.get::<Option<bool>>("startup_ok").ok().flatten())
@@ -50,7 +47,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 handle: LuaHandle { key },
                                 description: desc,
                                 args,
-                                arg_hint,
                                 while_busy,
                                 startup_ok,
                             },
