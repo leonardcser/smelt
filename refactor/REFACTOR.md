@@ -424,11 +424,13 @@ bridges, then the aggregate.
   ConfirmEntry>` + `next_handle: u64` move off App into a typed
   subsystem with `register / get / take`. `ConfirmEntry` relocates
   from `dialogs/confirm.rs` to `app/confirms.rs`.
-- **a.3b** — oneshot::Sender swap: the Lua dialog drives one resolve
-  channel rather than polling the map; `Confirms::is_clear()` lands
-  here as the engine-drain gate consumed by `EngineBridge` (a.11).
-  Gated on `Cells` (a.4) so the dialog reads the request payload via
-  the `confirm_requested` cell instead of looking it up by handle.
+- **a.3b** ✅ — `confirm_requested` cell carries a typed
+  `ConfirmRequested` snapshot (handle_id, tool / desc / args /
+  options / approval patterns / outside dir / cwd label);
+  `confirm.lua` reads it via `smelt.cell("confirm_requested"):get()`
+  and the `_get` Lua primitive retires. `Confirms::is_clear()` is
+  the canonical predicate the engine-drain gate consumes (P2.a.11
+  swaps the focused-overlay `blocks_agent` flag for it).
 - **a.4** — `Cells` registry (typed name → value + subscribers). New
   primitive; built-in cells migrate from scattered App fields
   (`vim_mode`, `agent_mode` via `mode`, …). Splits across three
