@@ -330,28 +330,6 @@ focusable flag, gutters; `render(buf, grid)`,
 `(input, keys, output)` with `#[primary|]#` selection markers as
 the state machine breaks open. See `TESTING.md` § L1.
 
-### P1.e — `UiHost` trait + `Status` + event types
-
-`Host` itself is defined in `tui` (see P2.b) — it's the Ui-agnostic
-trait. `ui` only needs the Ui-shaped subset:
-
-- `UiHost: Host` (extension): `ui()`, `focus(WinId)`,
-  `fire_win_event(WinId, WinEvent)`, `buf_create`/`buf_mut`,
-  `win_open`/`win_close`/`win_mut`, `overlay_open`/`overlay_close`.
-  `Window::handle` takes `&mut dyn UiHost`.
-- No `request_redraw` — rendering is event-driven.
-- `Event::{ Key | Mouse | Resize | Focus | Blur }`.
-- `Status::{ Consumed | Capture | Ignored }`.
-- `WinEvent::{ Open | Close | FocusGained | Lost | Submit | Dismiss
-  | Select(idx) | TextChanged }`.
-- `FocusTarget::Window(WinId)`. `HitTarget::{ Window(WinId) |
-  Scrollbar { owner: WinId } | Chrome { owner: OverlayId } }`.
-
-The `Host` super-trait lives in `tui` (alongside `Core`); `ui` declares
-`UiHost: Host` and uses it for handler signatures. This keeps `ui`
-agnostic of the `Host` body while letting handlers reach `lua()` /
-`engine()` through the supertrait when they need to.
-
 ### P1.f — `Ui` facade
 
 End-state field set: `bufs: Map<BufId, Buffer>`, `wins: Map<WinId,
@@ -477,23 +455,54 @@ The TUI `main` builds `TuiApp` and runs its event loop. A
 `smelt --headless` (or sub-agent worker) builds `HeadlessApp` and
 runs the same loop, sans terminal events and sans `Ui` rendering.
 
-### P2.b — `Host` + `UiHost` impls
+### P2.b — `Host` + `UiHost` impls + supporting types
 
-Two traits live in `tui`:
+Two traits, plus the supporting `Status` / `Event` / `WinEvent` types
+the unified `Window::handle(event, ctx, host) -> Status` consumes:
 
 - `Host` (Ui-agnostic): `clipboard / cells / timers / lua / tools /
-  engine / session / confirms`. `Core` impls this.
-- `UiHost: Host` (compositor-aware): `ui / focus / fire_win_event /
-  buf_create / buf_mut / win_open / win_close / win_mut /
-  overlay_open / overlay_close`. `TuiApp` impls this on top of its
-  inner `Core`.
+  engine / session / confirms`. Lives in `tui`. `Core` impls this.
+- `UiHost`: `ui / focus / fire_win_event / buf_create / buf_mut /
+  win_open / win_close / win_mut / overlay_open / overlay_close`.
+  Lives in `ui` (no `Host` supertrait — `ui` cannot reference
+  tui-defined `Host`). `TuiApp` impls this on top of its inner
+  `Core` alongside its `Host` impl. `Window::handle` takes
+  `&mut dyn UiHost`.
+- `HeadlessApp` impls only `Host` — calling a `UiHost`-only Lua
+  binding from headless raises a runtime error. The TLS pointer
+  (`crate::lua::with_host` / `with_ui_host`) exposes the right
+  trait depending on the binding's declaration. Subsystem-scoped
+  borrows compose without fighting the borrow checker.
 
-`HeadlessApp` impls only `Host` — calling a `UiHost`-only Lua binding
-from headless raises a runtime error. Handlers in `ui` take
-`&mut dyn UiHost`. The TLS pointer (`crate::lua::with_host` /
-`with_ui_host`) exposes the right trait depending on the binding's
-declaration. Subsystem-scoped borrows compose without fighting the
-borrow checker.
+Supporting types added in `ui` at the same time:
+
+- `Event::{ Key | Mouse | Resize | FocusGained | FocusLost | Paste }`
+  — ui-owned terminal-event enum (variants carry crossterm payloads).
+  Replaces `crossterm::event::Event` at the `Ui::dispatch_event`
+  signature. Hosts translate at the App boundary.
+- `Status::{ Consumed | Capture | Ignored }` — `Window::handle`
+  return type. `Capture` requests in-flight gesture capture; the
+  host folds this into `Ui::set_capture`. `DispatchOutcome` (key/
+  mouse pre-flight at `Ui::dispatch_event`) collapses into `Status`
+  here, since the unified handler's exit shape is what callers
+  branch on.
+- `WinEvent` shape: existing variants (`Open / Close / FocusGained /
+  FocusLost / Submit / TextChanged / Dismiss / SelectionChanged /
+  Tick`) align with the target. Payload-in-variant (`Select(idx)`)
+  is deferred until a real consumer surfaces — today's `Payload`
+  parameter carries the index, and the registry key benefits from
+  staying `Hash + Eq` without internal data.
+- `FocusTarget::Window(WinId)` lives as the semantic alias for
+  keyboard focus; `HitTarget::{ Window(WinId) | Scrollbar { owner:
+  WinId } | Chrome { owner: OverlayId } }` already shipped in P1.c.
+
+`Window::handle_key` + `Window::handle_mouse` collapse onto a single
+`Window::handle(Event, &mut DrawContext, &mut dyn UiHost) -> Status`
+in this sub-phase. Pre-P2 mouse/key routing in tui (soft-wrap
+translation, click-count tracking, scrollbar drag, prompt/transcript
+cursor positioning) folds into Ui-side dispatch reaching through
+`UiHost` for App state — the full mouse fold P1.f.6b deferred to
+"when P2's Host / UiHost traits exist."
 
 ### P2.c — `Cells` reactive layer + event bus
 

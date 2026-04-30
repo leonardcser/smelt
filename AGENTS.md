@@ -30,4 +30,4 @@ operating rules.
 @refactor/DECISIONS.md
 @refactor/TRACE.md
 @refactor/TESTING.md
-@refactor/P1.md
+@refactor/P2.md
