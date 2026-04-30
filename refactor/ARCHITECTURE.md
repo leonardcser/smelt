@@ -515,8 +515,12 @@ trait UiHost: Host {
 ```
 
 `Core` impls `Host`. `TuiApp` impls both `Host` and `UiHost`.
-`HeadlessApp` impls only `Host`. `Window::handle` takes
-`&mut dyn UiHost`. Lua bindings divide by trait:
+`HeadlessApp` impls only `Host`. `Window::handle(Event, EventCtx)`
+reads per-pane data from `EventCtx`; the host builds the ctx via
+`UiHost::{rows_for, breaks_for, viewport_for}` plus the App-owned
+`vim_mode` and clipboard before the call, so Window doesn't reborrow
+through a host trait while the caller holds `&mut self.window_field`.
+Lua bindings divide by trait:
 
 - **Host-only bindings** (work in headless and tui):
   `smelt.cell`, `smelt.timer`, `smelt.au`, `smelt.clipboard`,

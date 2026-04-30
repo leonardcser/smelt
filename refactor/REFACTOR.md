@@ -622,25 +622,27 @@ binding TLS split are each natural single-session units:
     shipped in P1.c.
 - **P2.b.4** — `Window::handle_key` + `Window::handle_mouse`
   collapse onto a single
-  `Window::handle(Event, &mut DrawContext, &mut dyn UiHost) -> Status`.
+  `Window::handle(Event, ctx) -> Status`.
   Pre-P2 mouse/key routing in tui (soft-wrap translation,
   click-count tracking, scrollbar drag, prompt/transcript cursor
   positioning) folds into Ui-side dispatch reaching through
   `UiHost` for App state — the full mouse fold P1.f.6b deferred to
   "when P2's Host / UiHost traits exist." Splits:
-  - **P2.b.4a** — `handle_key` returns `ui::Status`; kill-ring
+  - **P2.b.4a** ✅ — `handle_key` returns `ui::Status`; kill-ring
     inspection moves to the single caller (`handle_content_vim_key`).
-  - **P2.b.4b** — introduce `Window::handle(ui::Event, ctx, &mut
-    dyn UiHost) -> Status` as the public entry; today's per-event
-    methods become private helpers.
+  - **P2.b.4b** ✅ — `Window::handle(ui::Event, EventCtx) -> Status`
+    as the public entry; per-event methods are now `pub(crate)`
+    helpers (= c.5c). No host arg: per-pane data flows through
+    `EventCtx`, host builds it via `UiHost::{rows_for, breaks_for,
+    viewport_for}` plus the App-owned `vim_mode` and clipboard.
   - **P2.b.4c** — pre-P2 mouse/key routing folds into
     `Ui::dispatch_event` through `UiHost`. Outside-in: **c.1** ✅ drop
     viewport mirrors; **c.2** ✅ click-count onto `Ui`; **c.3** ✅
     scrollbar drag into `Ui::dispatch_event`; **c.4** ✅ wheel scroll
     via `Ui::hit_test`; **c.5a** ✅ Down/Drag/Up via
     `resolve_split_mouse` + Window capture; **c.5b** ✅ per-pane data
-    via `UiHost`; **c.5c** unified `Window::handle` (b.4b); **c.6** ✅
-    drag autoscroll.
+    via `UiHost`; **c.5c** ✅ unified `Window::handle` (= b.4b);
+    **c.6** ✅ drag autoscroll.
 - **P2.b.5** — Lua bindings TLS split: `crate::lua::with_host` /
   `with_ui_host` exposes the right trait depending on the
   binding's declaration. UiHost-only Lua bindings (`smelt.ui /
