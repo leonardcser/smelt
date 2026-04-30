@@ -639,8 +639,11 @@ binding TLS split are each natural single-session units:
     dyn UiHost) -> Status` as the public entry; today's per-event
     methods become private helpers.
   - **P2.b.4c** — pre-P2 mouse/key routing folds into
-    `Ui::dispatch_event` reaching through `UiHost`. Multi-session;
-    further split in REFACTOR.
+    `Ui::dispatch_event` through `UiHost`. Outside-in: **c.1** drop
+    viewport mirrors → `Ui::win(id)?.viewport`; **c.2** click-count
+    onto `Ui`; **c.3** scrollbar drag into `Ui::dispatch_event`;
+    **c.4** wheel scroll via `Ui::hit_test`; **c.5** per-pane
+    Down/Drag/Up onto `Window::handle` (b.4b); **c.6** drag autoscroll.
 - **P2.b.5** — Lua bindings TLS split: `crate::lua::with_host` /
   `with_ui_host` exposes the right trait depending on the
   binding's declaration. UiHost-only Lua bindings (`smelt.ui /
