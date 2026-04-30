@@ -71,12 +71,12 @@ pub struct Ui {
     terminal_size: (u16, u16),
     compositor: Compositor,
     callbacks: Callbacks,
-    /// Rects for the split windows the host laid out this frame
-    /// (PROMPT_WIN, TRANSCRIPT_WIN, …). Pushed in via
-    /// [`Ui::set_window_rect`] so overlay anchors that target a window
-    /// (e.g. notification toasts above the prompt) can resolve their
-    /// position without knowing layout specifics.
-    split_rects: HashMap<WinId, Rect>,
+    /// Splits layout tree. The host publishes a fresh tree each frame
+    /// via [`Ui::set_layout`]; rects are resolved against the current
+    /// terminal area on demand. Leaves of this tree are the painted
+    /// splits — Window::render paints each leaf in declaration order
+    /// from `Ui::render`'s post-layer pass, before overlays.
+    splits: LayoutTree,
     /// Theme registry — single source of truth for highlight groups.
     /// Cloned into every `DrawContext` at frame start so widgets read
     /// `ctx.theme.get(name)` instead of host-side colour constants. The
@@ -95,15 +95,10 @@ pub struct Ui {
     /// it for the most recent still-existing focusable window.
     focus_history: Vec<WinId>,
     /// Currently focused window — the single source of truth for
-    /// keyboard focus. May refer to an overlay leaf or a painted
-    /// split; the discrimination is derived at lookup time
-    /// (`overlay_for_leaf` vs `painted_splits.contains`).
+    /// keyboard focus. May refer to an overlay leaf or a splits-tree
+    /// leaf; the discrimination is derived at lookup time
+    /// (`overlay_for_leaf` vs `splits.contains_leaf`).
     focus: Option<WinId>,
-    /// Split-shaped windows painted directly via `Window::render` from
-    /// `Ui::render`'s post-layer pass. Painted before overlays so
-    /// overlays draw on top. Rect comes from `split_rects` (set per
-    /// frame via `set_window_rect`).
-    painted_splits: Vec<WinId>,
 }
 
 /// Reserved `WinId` for the main prompt input window. Stable id so Lua
@@ -127,40 +122,48 @@ impl Ui {
             terminal_size: (80, 24),
             compositor: Compositor::new(80, 24),
             callbacks: Callbacks::new(),
-            split_rects: HashMap::new(),
+            splits: LayoutTree::vbox(Vec::new()),
             theme: Theme::new(),
             overlays: Vec::new(),
             next_overlay_id: 1,
             focus_history: Vec::new(),
             focus: None,
-            painted_splits: Vec::new(),
         }
     }
 
-    /// Mark `win_id` as a painted split — the renderer will paint it
-    /// via `Window::render` from the post-layer closure, using the rect
-    /// last published via `set_window_rect`. Insertion order is paint
-    /// order. No-op if already registered.
-    pub fn register_painted_split(&mut self, win_id: WinId) {
-        if !self.painted_splits.contains(&win_id) {
-            self.painted_splits.push(win_id);
+    /// Publish the splits layout for this frame. Leaves of the tree
+    /// become the painted splits; their rects are resolved against
+    /// the current terminal area on demand. If the focused window is
+    /// no longer reachable as a splits leaf or overlay leaf after the
+    /// swap, focus is cleared.
+    pub fn set_layout(&mut self, tree: LayoutTree) {
+        self.splits = tree;
+        if let Some(focus) = self.focus {
+            if !self.splits.contains_leaf(focus) && self.overlay_for_leaf(focus).is_none() {
+                self.focus = None;
+            }
         }
     }
 
-    /// Stop painting `win_id` as a painted split. No-op if not
-    /// registered.
-    pub fn unregister_painted_split(&mut self, win_id: WinId) {
-        self.painted_splits.retain(|&w| w != win_id);
-        if self.focus == Some(win_id) {
-            self.focus = None;
-        }
+    /// Read-only view of the splits tree.
+    pub fn splits(&self) -> &LayoutTree {
+        &self.splits
     }
 
-    /// Publish a split window's current rect. Call each frame from the
-    /// host app's layout pass so overlay anchors targeting a window
-    /// (e.g. `Anchor::Win { target: PROMPT_WIN, … }`) can resolve.
-    pub fn set_window_rect(&mut self, win_id: WinId, rect: Rect) {
-        self.split_rects.insert(win_id, rect);
+    /// Resolve the splits tree against the current terminal area,
+    /// returning the rect for each leaf. Walks the tree on every call
+    /// — small trees in practice (3–4 leaves), so the cost is
+    /// negligible.
+    pub fn resolve_splits(&self) -> HashMap<WinId, Rect> {
+        let (w, h) = self.terminal_size;
+        let area = Rect::new(0, 0, w, h);
+        layout::resolve_layout(&self.splits, area)
+    }
+
+    /// Resolved rect for a single splits leaf, or `None` when `win`
+    /// isn't a leaf in the current splits tree.
+    pub fn split_rect(&self, win: WinId) -> Option<Rect> {
+        self.resolve_splits().get(&win).copied()
     }
 
     pub fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId {
@@ -250,7 +253,7 @@ impl Ui {
                         self.focus = Some(prior);
                         return Some(removed);
                     }
-                    if self.painted_splits.contains(&prior)
+                    if self.splits.contains_leaf(prior)
                         && self.wins.get(&prior).map(|w| w.focusable).unwrap_or(false)
                     {
                         self.focus = Some(prior);
@@ -309,13 +312,13 @@ impl Ui {
     }
 
     /// Unified hit-test for a screen position. Returns the target
-    /// the cell belongs to: an overlay leaf or chrome, or a painted
-    /// split window underneath. Overlays are checked first (topmost-z
-    /// to lowest, modal-aware — see `overlay_hit_test`); when no
-    /// overlay covers the point, walks painted splits in registration
-    /// order. `Scrollbar` results are reserved for the eventual
-    /// split-render path where Window publishes its scrollbar rect;
-    /// this method never returns `Scrollbar` yet.
+    /// the cell belongs to: an overlay leaf or chrome, or a splits
+    /// leaf underneath. Overlays are checked first (topmost-z to
+    /// lowest, modal-aware — see `overlay_hit_test`); when no overlay
+    /// covers the point, walks splits leaves in declaration order.
+    /// `Scrollbar` results are reserved for the eventual split-render
+    /// path where Window publishes its scrollbar rect; this method
+    /// never returns `Scrollbar` yet.
     pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
@@ -323,10 +326,11 @@ impl Ui {
                 OverlayHitTarget::Chrome => HitTarget::Chrome { owner: id },
             });
         }
-        for win in &self.painted_splits {
-            if let Some(rect) = self.split_rects.get(win) {
+        let split_rects = self.resolve_splits();
+        for win in self.splits.leaves_in_order() {
+            if let Some(rect) = split_rects.get(&win) {
                 if rect.contains(row, col) {
-                    return Some(HitTarget::Window(*win));
+                    return Some(HitTarget::Window(win));
                 }
             }
         }
@@ -378,16 +382,17 @@ impl Ui {
     /// Resolve every overlay's screen rect for the upcoming frame.
     /// Returns z-ordered entries (lowest first) for which the anchor
     /// resolved — overlays whose `Anchor::Cursor` requires a missing
-    /// `cursor`, or whose `Anchor::Win` target is absent from
-    /// `split_rects`, are skipped silently. The caller (compositor
+    /// `cursor`, or whose `Anchor::Win` target is absent from the
+    /// splits tree, are skipped silently. The caller (compositor
     /// integration in C.5+) feeds the cursor it knows from focus.
     pub fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
         let (term_w, term_h) = self.terminal_size;
+        let split_rects = self.resolve_splits();
         let ctx = overlay::AnchorContext {
             term_width: term_w,
             term_height: term_h,
             cursor,
-            win_rects: &self.split_rects,
+            win_rects: &split_rects,
         };
         let mut out = Vec::with_capacity(self.overlays.len());
         for (id, ov) in self.overlays_in_z_order() {
@@ -599,7 +604,7 @@ impl Ui {
         self.wins.get_mut(&id)
     }
 
-    /// Focus a specific window. Accepts focusable painted splits and
+    /// Focus a specific window. Accepts focusable splits leaves and
     /// overlay leaves (any leaf reachable in an open overlay's
     /// `LayoutTree`). Returns `false` when `win` is neither. On
     /// success, the prior focus is appended to `focus_history` so
@@ -611,10 +616,10 @@ impl Ui {
         if prior == Some(win) {
             return true;
         }
-        let is_painted_split = self.painted_splits.contains(&win)
+        let is_split_leaf = self.splits.contains_leaf(win)
             && self.wins.get(&win).map(|w| w.focusable).unwrap_or(false);
         let is_overlay_leaf = self.overlay_for_leaf(win).is_some();
-        if !is_painted_split && !is_overlay_leaf {
+        if !is_split_leaf && !is_overlay_leaf {
             return false;
         }
         if let Some(p) = prior {
@@ -714,12 +719,15 @@ impl Ui {
             .into_iter()
             .map(|(id, rect, ov)| (id, rect, ov.clone()))
             .collect();
-        // Snapshot painted splits with their rects so the post-layer
-        // closure can paint them without re-borrowing `self`.
+        // Snapshot splits leaves with their resolved rects so the
+        // post-layer closure can paint them without re-borrowing
+        // `self`.
+        let split_rects = self.resolve_splits();
         let painted_splits: Vec<(WinId, Rect)> = self
-            .painted_splits
-            .iter()
-            .filter_map(|win| self.split_rects.get(win).map(|r| (*win, *r)))
+            .splits
+            .leaves_in_order()
+            .into_iter()
+            .filter_map(|win| split_rects.get(&win).map(|r| (win, *r)))
             .collect();
         // Pre-pass: drive `Buffer::ensure_rendered_at` on each overlay
         // leaf at the width its leaf rect resolves to, so parsers
@@ -807,22 +815,22 @@ impl Ui {
     }
 
     /// Compute the absolute hardware cursor position for the focused
-    /// painted split. Returns `None` when no painted split is focused,
+    /// splits leaf. Returns `None` when focus isn't a splits leaf,
     /// the focused window has no `cursor_kind`, the kind is `Block`
     /// (paints in-place via `Window::render`), or its cursor coordinates
-    /// fall outside the published rect. `Window::cursor_line` /
+    /// fall outside the resolved rect. `Window::cursor_line` /
     /// `cursor_col` are viewport-relative and we add them to the rect's
     /// origin.
     fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
         let focus = self.focus?;
-        if !self.painted_splits.contains(&focus) {
+        if !self.splits.contains_leaf(focus) {
             return None;
         }
         let win = self.wins.get(&focus)?;
         if !matches!(win.cursor_kind, Some(crate::window::CursorKind::Hardware)) {
             return None;
         }
-        let rect = self.split_rects.get(&focus).copied()?;
+        let rect = self.split_rect(focus)?;
         let abs_y = rect.top + win.cursor_line;
         let abs_x = rect.left + win.cursor_col;
         if abs_y < rect.top + rect.height && abs_x < rect.left + rect.width {
@@ -1108,8 +1116,8 @@ mod tests {
         ui
     }
 
-    /// Open a Buffer-backed split Window at `win_id` and register it
-    /// as a focusable painted split — the test-only equivalent of what
+    /// Open a Buffer-backed split Window at `win_id` and append it as
+    /// a leaf to the splits tree — the test-only equivalent of what
     /// `App::new` does at startup for the prompt / transcript / status
     /// windows. Most focus / overlay tests just need a focusable target
     /// to exercise; this helper takes the boilerplate.
@@ -1123,7 +1131,14 @@ mod tests {
                 gutters: layout::Gutters::default(),
             },
         ));
-        ui.register_painted_split(win_id);
+        let mut leaves: Vec<(Constraint, LayoutTree)> = ui
+            .splits()
+            .leaves_in_order()
+            .into_iter()
+            .map(|w| (Constraint::Fill, LayoutTree::leaf(w)))
+            .collect();
+        leaves.push((Constraint::Fill, LayoutTree::leaf(win_id)));
+        ui.set_layout(LayoutTree::vbox(leaves));
     }
 
     #[test]
@@ -1258,8 +1273,36 @@ mod tests {
             },
         ));
         assert!(ui.resolve_overlays(None).is_empty());
-        // Once the target's rect is published, it resolves.
-        ui.set_window_rect(WinId(999), Rect::new(5, 10, 30, 8));
+        // Once the target lands as a splits leaf with a known rect,
+        // the overlay resolves anchored to it. Build a tree that
+        // produces rect (top=5, left=10, width=30, height=8) on an
+        // 80x24 terminal.
+        let target = WinId(999);
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        assert!(ui.win_open_split_at(
+            target,
+            buf,
+            SplitConfig {
+                region: "anchor".into(),
+                gutters: layout::Gutters::default(),
+            },
+        ));
+        // vbox: 5 rows blank + 8-row hbox (10 cols blank + 30-col leaf
+        // + fill) + fill below.
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(5), LayoutTree::vbox(Vec::new())),
+            (
+                Constraint::Length(8),
+                LayoutTree::hbox(vec![
+                    (Constraint::Length(10), LayoutTree::vbox(Vec::new())),
+                    (Constraint::Length(30), LayoutTree::leaf(target)),
+                    (Constraint::Fill, LayoutTree::vbox(Vec::new())),
+                ]),
+            ),
+            (Constraint::Fill, LayoutTree::vbox(Vec::new())),
+        ]);
+        ui.set_layout(tree);
+        assert_eq!(ui.split_rect(target), Some(Rect::new(5, 10, 30, 8)));
         let resolved = ui.resolve_overlays(None);
         assert_eq!(resolved.len(), 1);
         let (_, rect, _) = &resolved[0];
@@ -1667,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn set_focus_accepts_focusable_painted_split() {
+    fn set_focus_accepts_focusable_splits_leaf() {
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui
@@ -1679,13 +1722,16 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.register_painted_split(win);
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         assert!(ui.set_focus(win));
         assert_eq!(ui.focus(), Some(win));
     }
 
     #[test]
-    fn set_focus_rejects_non_focusable_painted_split() {
+    fn set_focus_rejects_non_focusable_splits_leaf() {
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui
@@ -1698,13 +1744,16 @@ mod tests {
             )
             .unwrap();
         ui.win_mut(win).unwrap().focusable = false;
-        ui.register_painted_split(win);
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         assert!(!ui.set_focus(win));
         assert_eq!(ui.focus(), None);
     }
 
     #[test]
-    fn unregister_painted_split_clears_focus() {
+    fn set_layout_drops_focus_when_focused_leaf_disappears() {
         let mut ui = make_ui();
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui
@@ -1716,16 +1765,21 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.register_painted_split(win);
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         ui.set_focus(win);
         assert_eq!(ui.focus(), Some(win));
-        ui.unregister_painted_split(win);
+        // New tree omits the focused leaf — focus clears.
+        ui.set_layout(LayoutTree::vbox(Vec::new()));
         assert_eq!(ui.focus(), None);
     }
 
     #[test]
     fn focused_painted_split_cursor_returns_hardware_cursor_position() {
         let mut ui = make_ui();
+        ui.set_terminal_size(20, 4);
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui
             .win_open_split(
@@ -1736,20 +1790,24 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.register_painted_split(win);
-        ui.set_window_rect(win, Rect::new(5, 2, 20, 4));
+        // Tree resolves to (top=0, left=0, width=20, height=4) — the
+        // full terminal — so cursor_line=1 / cursor_col=3 → (3, 1).
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         ui.set_focus(win);
         let w = ui.win_mut(win).unwrap();
         w.cursor_kind = Some(crate::window::CursorKind::Hardware);
         w.cursor_line = 1;
         w.cursor_col = 3;
-        // (rect.left=2, rect.top=5) + (cursor_col=3, cursor_line=1) = (5, 6).
-        assert_eq!(ui.focused_painted_split_cursor(), Some((5, 6)));
+        assert_eq!(ui.focused_painted_split_cursor(), Some((3, 1)));
     }
 
     #[test]
     fn focused_painted_split_cursor_returns_none_for_block_cursor() {
         let mut ui = make_ui();
+        ui.set_terminal_size(20, 4);
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui
             .win_open_split(
@@ -1760,8 +1818,10 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.register_painted_split(win);
-        ui.set_window_rect(win, Rect::new(0, 0, 20, 4));
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         ui.set_focus(win);
         let w = ui.win_mut(win).unwrap();
         w.cursor_kind = Some(crate::window::CursorKind::Block {
@@ -1777,6 +1837,7 @@ mod tests {
     #[test]
     fn focused_painted_split_cursor_returns_none_when_unfocused() {
         let mut ui = make_ui();
+        ui.set_terminal_size(20, 4);
         let buf = ui.buf_create(buffer::BufCreateOpts::default());
         let win = ui
             .win_open_split(
@@ -1787,8 +1848,10 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.register_painted_split(win);
-        ui.set_window_rect(win, Rect::new(0, 0, 20, 4));
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
         let w = ui.win_mut(win).unwrap();
         w.cursor_kind = Some(crate::window::CursorKind::Hardware);
         w.cursor_line = 0;
