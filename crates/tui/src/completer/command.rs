@@ -70,12 +70,15 @@ impl Completer {
         }
         let mut seen: HashSet<String> = all_items.iter().map(|i| i.label.clone()).collect();
         for (name, desc) in crate::lua::list_commands() {
+            // Hidden aliases (`q`, `qa`, …) declare `desc = nil` to stay
+            // out of the picker; they're still dispatchable by name.
+            let Some(desc) = desc else { continue };
             if !seen.insert(name.clone()) {
                 continue;
             }
             all_items.push(CompletionItem {
                 label: name,
-                description: desc,
+                description: Some(desc),
                 ..Default::default()
             });
         }

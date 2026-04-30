@@ -124,6 +124,13 @@ impl LuaRuntime {
                 Ok(())
             })?,
         )?;
+        smelt.set(
+            "quit",
+            lua.create_function(|_, ()| {
+                crate::lua::with_app(|app| app.pending_quit = true);
+                Ok(())
+            })?,
+        )?;
         clipboard::register(lua, &smelt)?;
 
         smelt.set("ui", smelt_ui)?;
