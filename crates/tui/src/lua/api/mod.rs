@@ -21,6 +21,7 @@ mod history;
 mod html;
 mod http;
 mod keymap;
+mod metrics;
 mod mode;
 mod notebook;
 mod os;
@@ -107,6 +108,7 @@ impl LuaRuntime {
         cell::register(lua, &smelt)?;
         au::register(lua, &smelt)?;
         spawn::register(lua, &smelt, shared)?;
+        metrics::register(lua, &smelt)?;
 
         smelt.set(
             "notify",
