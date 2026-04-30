@@ -108,8 +108,8 @@ to invoke_ the feature.
 | `/settings`                                       | `plugins/settings.lua`            | P4.e                             | working |
 | `/theme [name]`                                   | `plugins/theme.lua`               | P4.e + `colorschemes/`           | working |
 | `/color [name]`                                   | `plugins/color.lua`               | P4.e                             | working |
-| `/stats`                                          | `app/commands.rs::cmd_stats`      | P4.e                             | working — Overlay; Esc / q / Ctrl+C all dismiss |
-| `/cost`                                           | `app/commands.rs::cmd_cost`       | P4.e                             | working — same as `/stats` |
+| `/stats`                                          | `runtime/lua/smelt/plugins/stats.lua` | P4.e                         | working — Lua command (`11bd6c6`); `smelt.ui.dialog.open` over `smelt.metrics.stats_text`; q / ? / Esc dismiss |
+| `/cost`                                           | `runtime/lua/smelt/plugins/stats.lua` | P4.e                         | working — Lua command (`11bd6c6`); `smelt.metrics.session_cost_text` |
 | `/export`                                         | `plugins/export.lua`              | P4.e                             | working |
 | `/vim`                                            | `plugins/toggles.lua`             | P4.e                             | working |
 | `/thinking`                                       | `plugins/toggles.lua`             | P4.e                             | working |

@@ -120,16 +120,6 @@ pub(crate) const RUST_COMMANDS: &[RustCommand] = &[
         desc: Some("fork current session"),
         handler: cmd_fork,
     },
-    RustCommand {
-        name: "stats",
-        desc: Some("show token usage statistics"),
-        handler: cmd_stats,
-    },
-    RustCommand {
-        name: "cost",
-        desc: Some("show session cost"),
-        handler: cmd_cost,
-    },
 ];
 
 /// Visible `(name, desc)` pairs for the `/` completer. Hidden aliases
@@ -162,32 +152,6 @@ fn cmd_compact(_: &mut TuiApp, arg: Option<String>) -> CommandAction {
 
 fn cmd_fork(app: &mut TuiApp, _: Option<String>) -> CommandAction {
     app.fork_session();
-    CommandAction::Continue
-}
-
-fn cmd_stats(app: &mut TuiApp, _: Option<String>) -> CommandAction {
-    let entries = crate::metrics::load();
-    let stats = crate::metrics::render_stats(&entries);
-    let text = crate::metrics::render_stats_text(&stats);
-    crate::app::dialogs::text_modal::open(app, "stats", &text);
-    CommandAction::Continue
-}
-
-fn cmd_cost(app: &mut TuiApp, _: Option<String>) -> CommandAction {
-    let turns = app.user_turns().len();
-    let resolved = engine::pricing::resolve(
-        &app.core.config.model,
-        &app.core.config.provider_type,
-        &app.core.config.model_config,
-    );
-    let lines = crate::metrics::render_session_cost(
-        app.core.session.session_cost_usd,
-        &app.core.config.model,
-        turns,
-        &resolved,
-    );
-    let text = crate::metrics::render_cost_text(&lines);
-    crate::app::dialogs::text_modal::open(app, "cost", &text);
     CommandAction::Continue
 }
 
