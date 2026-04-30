@@ -435,8 +435,8 @@ impl Window {
         self.cpos = end.saturating_sub(1).max(start);
         let offsets = Self::line_start_offsets(rows);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
-        if let Some(vim) = self.vim.as_mut() {
-            vim.begin_visual(mode, &mut self.vim_state, VimMode::Visual, start);
+        if self.vim.is_some() {
+            self.vim_state.begin_visual(mode, VimMode::Visual, start);
         } else {
             self.win_cursor.set_anchor(Some(start));
         }
@@ -460,10 +460,8 @@ impl Window {
             self.cursor_positioned = false;
             return;
         }
-        if let Some(vim) = self.vim.as_mut() {
-            if *mode != VimMode::Normal {
-                vim.set_mode(mode, VimMode::Normal);
-            }
+        if self.vim.is_some() && *mode != VimMode::Normal {
+            self.vim_state.set_mode(mode, VimMode::Normal);
         }
         if !self.cursor_positioned {
             let total = rows.len();
@@ -666,8 +664,9 @@ impl Window {
                 // reads cpos directly; non-vim uses `WindowCursor`).
                 self.drag_anchor_word = None;
                 self.drag_anchor_line = None;
-                if let Some(vim) = self.vim.as_mut() {
-                    vim.begin_visual(ctx.vim_mode, &mut self.vim_state, VimMode::Visual, cpos);
+                if self.vim.is_some() {
+                    self.vim_state
+                        .begin_visual(ctx.vim_mode, VimMode::Visual, cpos);
                 } else {
                     self.win_cursor.set_anchor(Some(cpos));
                 }
@@ -713,10 +712,8 @@ impl Window {
         // same lifecycle for free — no bespoke clear-anchor code in
         // the host adapters. Clipboard side effects are the host's
         // job; Window only owns its selection state.
-        if let Some(vim) = self.vim.as_mut() {
-            if matches!(*ctx.vim_mode, VimMode::Visual | VimMode::VisualLine) {
-                vim.set_mode(ctx.vim_mode, VimMode::Normal);
-            }
+        if self.vim.is_some() && matches!(*ctx.vim_mode, VimMode::Visual | VimMode::VisualLine) {
+            self.vim_state.set_mode(ctx.vim_mode, VimMode::Normal);
         }
         self.win_cursor.clear_anchor();
         self.drag_anchor_word = None;
@@ -747,13 +744,9 @@ impl Window {
             (we.saturating_sub(1).max(ws), ws)
         };
         self.cpos = new_cpos;
-        if let Some(vim) = self.vim.as_mut() {
-            vim.begin_visual(
-                ctx.vim_mode,
-                &mut self.vim_state,
-                VimMode::Visual,
-                new_anchor,
-            );
+        if self.vim.is_some() {
+            self.vim_state
+                .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
         } else {
             self.win_cursor.set_anchor(Some(new_anchor));
         }
@@ -778,13 +771,9 @@ impl Window {
             (le.saturating_sub(1).max(ls), ls)
         };
         self.cpos = new_cpos;
-        if let Some(vim) = self.vim.as_mut() {
-            vim.begin_visual(
-                ctx.vim_mode,
-                &mut self.vim_state,
-                VimMode::Visual,
-                new_anchor,
-            );
+        if self.vim.is_some() {
+            self.vim_state
+                .begin_visual(ctx.vim_mode, VimMode::Visual, new_anchor);
         } else {
             self.win_cursor.set_anchor(Some(new_anchor));
         }
@@ -807,10 +796,8 @@ impl Window {
         if !self.dispatch_vim_key(k, mode, clipboard) {
             return None;
         }
-        if let Some(vim) = self.vim.as_mut() {
-            if *mode == VimMode::Insert {
-                vim.set_mode(mode, VimMode::Normal);
-            }
+        if self.vim.is_some() && *mode == VimMode::Insert {
+            self.vim_state.set_mode(mode, VimMode::Normal);
         }
         let yanked = clipboard.kill_ring.current().to_string();
         let yanked = if yanked.is_empty() {
@@ -931,10 +918,8 @@ impl Window {
             .win_cursor
             .move_vertical(&self.edit_buf.buf, self.cpos, delta);
         self.cpos = new_cpos;
-        if let Some(vim) = self.vim.as_mut() {
-            if *mode == VimMode::Insert {
-                vim.set_mode(mode, VimMode::Normal);
-            }
+        if self.vim.is_some() && *mode == VimMode::Insert {
+            self.vim_state.set_mode(mode, VimMode::Normal);
         }
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         let max_scroll = (rows.len() as u16).saturating_sub(viewport_rows);

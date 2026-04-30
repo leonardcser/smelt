@@ -181,13 +181,10 @@ impl PromptState {
     pub fn select_word_at(&mut self, cpos: usize, mode: &mut VimMode) -> Option<(usize, usize)> {
         let (start, end) = self.win.edit_buf.word_range_at(cpos)?;
         self.win.cpos = end.saturating_sub(1).max(start);
-        if let Some(vim) = self.win.vim.as_mut() {
-            vim.begin_visual(
-                mode,
-                &mut self.win.vim_state,
-                crate::vim::VimMode::Visual,
-                start,
-            );
+        if self.win.vim.is_some() {
+            self.win
+                .vim_state
+                .begin_visual(mode, crate::vim::VimMode::Visual, start);
         } else {
             self.win.win_cursor.set_anchor(Some(start));
         }
@@ -234,8 +231,8 @@ impl PromptState {
     /// Writes through `mode_ref` (the App-owned single global) and
     /// resets the in-flight key sequence on the prompt's Vim instance.
     pub fn set_vim_mode(&mut self, mode_ref: &mut VimMode, new: VimMode) {
-        if let Some(ref mut vim) = self.win.vim {
-            vim.set_mode(mode_ref, new);
+        if self.win.vim.is_some() {
+            self.win.vim_state.set_mode(mode_ref, new);
         }
     }
 
