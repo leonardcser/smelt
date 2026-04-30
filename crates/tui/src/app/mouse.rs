@@ -41,18 +41,6 @@ impl App {
             }
         }
 
-        if self.drag_on_layer.is_some()
-            && matches!(
-                me.kind,
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-            )
-            && matches!(me.kind, MouseEventKind::Up(MouseButton::Left))
-        {
-            self.drag_on_layer = None;
-            self.mouse_drag_active = false;
-            return EventOutcome::Redraw;
-        }
-
         if self.layout.hit_test(me.row, me.column) == content::HitRegion::Status {
             return EventOutcome::Noop;
         }

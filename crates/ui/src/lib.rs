@@ -1,7 +1,6 @@
 pub mod buffer;
 pub mod callback;
 pub mod clipboard;
-pub mod component;
 pub mod compositor;
 pub mod dialog;
 pub mod edit_buffer;
@@ -27,12 +26,19 @@ pub type AttachmentId = u64;
 /// and the event payload.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
+/// Outcome of routing a key event through `Ui::handle_key_with_lua`.
+/// `Consumed` = handler ran; `Ignored` = no handler matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyResult {
+    Consumed,
+    Ignored,
+}
+
 pub use buffer::{BufType, Buffer, BufferParser, Span, SpanStyle};
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
     WinEvent,
 };
-pub use component::{Component, CursorInfo, CursorStyle, DrawContext, KeyResult, WidgetEvent};
 pub use compositor::Compositor;
 pub use dialog::{PanelHeight, PanelSpec};
 pub use edit_buffer::EditBuffer;
@@ -47,8 +53,8 @@ pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{ViMode, Vim};
 pub use window::{
-    CursorKind, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window,
-    WindowViewport,
+    CursorKind, DrawContext, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit,
+    Window, WindowViewport,
 };
 pub use window_cursor::WindowCursor;
 
@@ -60,7 +66,6 @@ pub struct Ui {
     current_win: Option<WinId>,
     next_buf_id: u64,
     next_win_id: u64,
-    layout: Option<LayoutTree>,
     terminal_size: (u16, u16),
     compositor: Compositor,
     callbacks: Callbacks,
@@ -70,11 +75,6 @@ pub struct Ui {
     /// (e.g. notification toasts above the prompt) can resolve their
     /// position without knowing layout specifics.
     split_rects: HashMap<WinId, Rect>,
-    /// Compositor layer-id ↔ `WinId` for split windows. Lets the focused
-    /// split's per-window keymap fire from `handle_key_with_lua` and
-    /// the focus accessors translate compositor layer ids back to
-    /// `WinId`s.
-    splits: HashMap<String, WinId>,
     /// Theme registry — single source of truth for highlight groups.
     /// Cloned into every `DrawContext` at frame start so widgets read
     /// `ctx.theme.get(name)` instead of host-side colour constants. The
@@ -86,47 +86,29 @@ pub struct Ui {
     overlays: HashMap<OverlayId, Overlay>,
     next_overlay_id: u32,
     /// Stack of prior focused windows. `set_focus` pushes the
-    /// outgoing focus here; the compositor / overlay close paths
-    /// (later) walk back through it for the most recent
-    /// still-existing focusable window. The current focus is held
-    /// by the compositor as a layer id; this list is a parallel
-    /// view in `WinId` terms so the focus model speaks the same
-    /// language as the public `set_focus`/`focus` API.
+    /// outgoing focus here; the overlay close paths walk back through
+    /// it for the most recent still-existing focusable window.
     focus_history: Vec<WinId>,
-    /// Currently focused overlay leaf, if any. Overlay leaves are
-    /// not compositor layers — they live inside an `Overlay`'s
-    /// `LayoutTree` — so focus-on-overlay-leaf can't be expressed
-    /// via `compositor.focus(layer_id)`. When set, this takes
-    /// precedence over `compositor.focused()` in the public
-    /// `focus()` accessor and routes key events to the leaf's
-    /// callback registry. Cleared when the containing overlay
-    /// closes.
+    /// Currently focused overlay leaf, if any. When set, takes
+    /// precedence over `painted_split_focus` in `focus()` and routes
+    /// key events to the leaf's callback registry. Cleared when the
+    /// containing overlay closes.
     overlay_focus: Option<WinId>,
     /// Split-shaped windows painted directly via `Window::render` from
-    /// `Ui::render`'s post-layer pass — no compositor `Component` layer
-    /// needed. The status line lives here today; transcript and prompt
-    /// follow as P1.d migrates them off `WindowView`. Painted before
-    /// overlays so overlays still draw on top, matching the prior
-    /// status-as-compositor-layer order (overlays in the closure ran
-    /// after every compositor layer paint, including status z=500).
-    /// Rect comes from `split_rects` (set per frame via
-    /// `set_window_rect`).
+    /// `Ui::render`'s post-layer pass. Painted before overlays so
+    /// overlays draw on top. Rect comes from `split_rects` (set per
+    /// frame via `set_window_rect`).
     painted_splits: Vec<WinId>,
-    /// Focused painted split, if any. Painted splits don't carry a
-    /// compositor layer, so the compositor's focus slot can't track
-    /// them — this lives on `Ui` directly. Key dispatch and
-    /// `focus()` consult this ahead of `compositor.focused()`. Set
-    /// by `set_focus` when the target is a focusable painted split;
-    /// cleared when focus moves elsewhere or the painted split
-    /// unregisters.
+    /// Focused painted split, if any. Key dispatch and `focus()`
+    /// consult this after `overlay_focus`. Set by `set_focus` when the
+    /// target is a focusable painted split; cleared when focus moves
+    /// elsewhere or the painted split unregisters.
     painted_split_focus: Option<WinId>,
 }
 
-/// Reserved `WinId` for the main prompt input window. The prompt is
-/// rendered as a compositor layer (not inserted into `Ui::wins`), but
-/// callbacks (keymaps, `WinEvent` subscribers) are keyed by `WinId`,
-/// so we reserve a stable id so Lua can `smelt.win.on_event(prompt, …)`
-/// and `smelt.win.set_keymap(prompt, …)` like any other window.
+/// Reserved `WinId` for the main prompt input window. Stable id so Lua
+/// can `smelt.win.on_event(prompt, …)` and `smelt.win.set_keymap(prompt, …)`
+/// like any other window.
 pub const PROMPT_WIN: WinId = WinId(0);
 
 /// Reserved `WinId` for the transcript (scroll-back) window. Same
@@ -142,12 +124,10 @@ impl Ui {
             next_buf_id: 1,
             // 0 is reserved for PROMPT_WIN, 1 for TRANSCRIPT_WIN.
             next_win_id: 2,
-            layout: None,
             terminal_size: (80, 24),
             compositor: Compositor::new(80, 24),
             callbacks: Callbacks::new(),
             split_rects: HashMap::new(),
-            splits: HashMap::new(),
             theme: Theme::new(),
             overlays: HashMap::new(),
             next_overlay_id: 1,
@@ -175,17 +155,6 @@ impl Ui {
         if self.painted_split_focus == Some(win_id) {
             self.painted_split_focus = None;
         }
-    }
-
-    /// Bind a compositor split-layer id to a `WinId` so the focused
-    /// split flows through [`Ui::handle_key_with_lua`]. Call once per
-    /// split at startup.
-    pub fn register_split(&mut self, layer_id: impl Into<String>, win_id: WinId) {
-        self.splits.insert(layer_id.into(), win_id);
-    }
-
-    fn layer_to_win(&self, layer_id: &str) -> Option<WinId> {
-        self.splits.get(layer_id).copied()
     }
 
     /// Publish a split window's current rect. Call each frame from the
@@ -276,20 +245,20 @@ impl Ui {
         if let Some(focused) = self.focus() {
             if removed.layout.contains_leaf(focused) {
                 self.overlay_focus = None;
+                self.painted_split_focus = None;
                 while let Some(prior) = self.focus_history.pop() {
                     if self.overlay_for_leaf(prior).is_some() {
                         self.overlay_focus = Some(prior);
-                        self.compositor.clear_focus();
                         return Some(removed);
                     }
-                    if let Some(layer_id) = self.layer_id_for_win(prior) {
-                        self.compositor.focus(layer_id);
+                    if self.painted_splits.contains(&prior)
+                        && self.wins.get(&prior).map(|w| w.focusable).unwrap_or(false)
+                    {
+                        self.painted_split_focus = Some(prior);
                         return Some(removed);
                     }
                 }
-                // History exhausted — clear stale focus so the next
-                // input doesn't dispatch through a vanished layer.
-                self.compositor.clear_focus();
+                // History exhausted — leave both focus slots cleared.
             }
         }
         Some(removed)
@@ -336,13 +305,13 @@ impl Ui {
     }
 
     /// Unified hit-test for a screen position. Returns the target
-    /// the cell belongs to: an overlay leaf or chrome, or a split
-    /// window underneath. Overlays are checked first (topmost-z to
-    /// lowest, modal-aware — see `overlay_hit_test`); when no
-    /// overlay covers the point, falls back to the compositor's
-    /// split-layer lookup. `Scrollbar` results are reserved for the
-    /// eventual split-render path where Window publishes its
-    /// scrollbar rect; this method never returns `Scrollbar` yet.
+    /// the cell belongs to: an overlay leaf or chrome, or a painted
+    /// split window underneath. Overlays are checked first (topmost-z
+    /// to lowest, modal-aware — see `overlay_hit_test`); when no
+    /// overlay covers the point, walks painted splits in registration
+    /// order. `Scrollbar` results are reserved for the eventual
+    /// split-render path where Window publishes its scrollbar rect;
+    /// this method never returns `Scrollbar` yet.
     pub fn hit_test(&self, row: u16, col: u16, cursor: Option<(u16, u16)>) -> Option<HitTarget> {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
@@ -350,9 +319,14 @@ impl Ui {
                 OverlayHitTarget::Chrome => HitTarget::Chrome { owner: id },
             });
         }
-        let layer_id = self.compositor.hit_test(row, col)?;
-        let win = self.layer_to_win(layer_id)?;
-        Some(HitTarget::Window(win))
+        for win in &self.painted_splits {
+            if let Some(rect) = self.split_rects.get(win) {
+                if rect.contains(row, col) {
+                    return Some(HitTarget::Window(*win));
+                }
+            }
+        }
+        None
     }
 
     /// Hit-test a screen position against the open overlay set.
@@ -505,8 +479,8 @@ impl Ui {
     }
 
     /// Register a catch-all key handler for a window. Runs after
-    /// specific keymaps miss and before `Component::handle_key`.
-    /// Returns the displaced callback (if any).
+    /// specific keymaps miss. Returns the displaced callback (if
+    /// any).
     #[must_use]
     pub fn win_set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
         self.callbacks.set_key_fallback(win, cb)
@@ -597,39 +571,16 @@ impl Ui {
         self.terminal_size
     }
 
-    pub fn set_layout(&mut self, tree: LayoutTree) {
-        self.layout = Some(tree);
-    }
-
-    pub fn layout(&self) -> Option<&LayoutTree> {
-        self.layout.as_ref()
-    }
-
-    pub fn resolve_splits(&self) -> HashMap<WinId, Rect> {
-        let (w, h) = self.terminal_size;
-        match &self.layout {
-            Some(tree) => layout::resolve_layout(tree, Rect::new(0, 0, w, h)),
-            None => HashMap::new(),
-        }
-    }
-
     // ── Focus (canonical Win-typed API) ──────────────────────────
 
     /// Currently focused window, if any. Overlay-leaf focus wins
-    /// over compositor focus (a modal overlay's input claim
-    /// suppresses split dispatch). Falls back to the compositor's
-    /// focused layer translated to its `WinId` (split via
-    /// `register_split`).
+    /// over painted-split focus (a modal overlay's input claim
+    /// suppresses split dispatch).
     pub fn focus(&self) -> Option<WinId> {
         if let Some(win) = self.overlay_focus {
             return Some(win);
         }
-        if let Some(win) = self.painted_split_focus {
-            return Some(win);
-        }
-        self.compositor
-            .focused()
-            .and_then(|id| self.layer_to_win(id))
+        self.painted_split_focus
     }
 
     /// Currently focused `Window`, if its id is registered in
@@ -647,25 +598,16 @@ impl Ui {
         self.wins.get_mut(&id)
     }
 
-    /// Focus a specific window. Accepts splits (via their compositor
-    /// layer id) and overlay leaves (any leaf reachable in an open
-    /// overlay's `LayoutTree`). Returns `false` when `win` is
-    /// neither. On success, the prior focus is appended to
-    /// `focus_history` so close paths can pop back to the previous
-    /// focus target. Re-focusing the already-focused window is a
-    /// no-op (no history push).
+    /// Focus a specific window. Accepts focusable painted splits and
+    /// overlay leaves (any leaf reachable in an open overlay's
+    /// `LayoutTree`). Returns `false` when `win` is neither. On
+    /// success, the prior focus is appended to `focus_history` so
+    /// close paths can pop back to the previous focus target.
+    /// Re-focusing the already-focused window is a no-op (no history
+    /// push).
     pub fn set_focus(&mut self, win: WinId) -> bool {
         let prior = self.focus();
         if prior == Some(win) {
-            return true;
-        }
-        if let Some(layer_id) = self.layer_id_for_win(win) {
-            if let Some(p) = prior {
-                self.focus_history.push(p);
-            }
-            self.overlay_focus = None;
-            self.painted_split_focus = None;
-            self.compositor.focus(layer_id);
             return true;
         }
         if self.painted_splits.contains(&win) {
@@ -678,7 +620,6 @@ impl Ui {
             }
             self.overlay_focus = None;
             self.painted_split_focus = Some(win);
-            self.compositor.clear_focus();
             return true;
         }
         if self.overlay_for_leaf(win).is_some() {
@@ -687,7 +628,6 @@ impl Ui {
             }
             self.overlay_focus = Some(win);
             self.painted_split_focus = None;
-            self.compositor.clear_focus();
             return true;
         }
         false
@@ -756,7 +696,7 @@ impl Ui {
             .layout
             .leaves_in_order()
             .into_iter()
-            .filter(|w| self.layer_id_for_win(*w).is_some() || self.wins.contains_key(w))
+            .filter(|w| self.wins.contains_key(w))
             .collect();
         if leaves.is_empty() {
             return false;
@@ -775,45 +715,7 @@ impl Ui {
         self.set_focus(target)
     }
 
-    /// Resolve a `WinId` to its current compositor layer id. Splits
-    /// register their layer-id explicitly via `register_split`;
-    /// overlay leaves don't carry a compositor layer (their focus
-    /// flows through `overlay_focus`).
-    fn layer_id_for_win(&self, win: WinId) -> Option<String> {
-        self.splits
-            .iter()
-            .find(|(_, w)| **w == win)
-            .map(|(layer_id, _)| layer_id.clone())
-    }
-
-    // ── Layer management ─────────────────────────────────────────
-
-    pub fn add_layer(
-        &mut self,
-        id: impl Into<String>,
-        component: Box<dyn Component>,
-        rect: Rect,
-        zindex: u16,
-    ) {
-        self.compositor.add(id, component, rect, zindex);
-    }
-
-    pub fn set_layer_rect(&mut self, id: &str, rect: Rect) {
-        self.compositor.set_rect(id, rect);
-    }
-
-    pub fn focus_layer(&mut self, id: impl Into<String>) {
-        self.compositor.focus(id);
-    }
-
-    pub fn layer_mut<T: 'static>(&mut self, id: &str) -> Option<&mut T> {
-        self.compositor
-            .component_mut(id)?
-            .as_any_mut()
-            .downcast_mut::<T>()
-    }
-
-    // ── Compositor delegation ──────────────────────────────────────
+    // ── Renderer delegation ───────────────────────────────────────
 
     pub fn render<W: std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         let resolved = self.resolve_overlays(None);
@@ -952,12 +854,10 @@ impl Ui {
     }
 
     /// Dispatch a key event through the focused window's keymap
-    /// table, falling back to `Component::handle_key` if no binding
-    /// matches. Registered splits and overlay-leaf focus both flow
-    /// through here — the focused `WinId` is resolved via
-    /// [`Ui::focus`]. `lua_invoke` is called for each `Callback::Lua`
-    /// with (handle, payload). Side effects (app-level commands, etc.)
-    /// flow through `AppOp` from the host side.
+    /// table. The focused `WinId` is resolved via [`Ui::focus`].
+    /// `lua_invoke` is called for each `Callback::Lua` with (handle,
+    /// payload). Side effects (app-level commands, etc.) flow through
+    /// `AppOp` from the host side.
     pub fn handle_key_with_lua(
         &mut self,
         code: crossterm::event::KeyCode,
@@ -995,9 +895,8 @@ impl Ui {
                 return KeyResult::Consumed;
             }
         }
-        let focused = self.focus();
-        let Some(win) = focused else {
-            return self.compositor.handle_key(code, mods);
+        let Some(win) = self.focus() else {
+            return KeyResult::Ignored;
         };
         let key = KeyBind::new(code, mods);
         // Pending follow-up dispatched after the keymap callback
@@ -1017,7 +916,7 @@ impl Ui {
                     let r = inner(&mut ctx);
                     match r {
                         CallbackResult::Consumed => KeyResult::Consumed,
-                        CallbackResult::Pass => self.compositor.handle_key(code, mods),
+                        CallbackResult::Pass => KeyResult::Ignored,
                         CallbackResult::Event(ev, payload) => {
                             follow_up = Some((ev, payload));
                             KeyResult::Consumed
@@ -1043,7 +942,7 @@ impl Ui {
                     let r = inner(&mut ctx);
                     match r {
                         CallbackResult::Consumed => KeyResult::Consumed,
-                        CallbackResult::Pass => self.compositor.handle_key(code, mods),
+                        CallbackResult::Pass => KeyResult::Ignored,
                         CallbackResult::Event(ev, payload) => {
                             follow_up = Some((ev, payload));
                             KeyResult::Consumed
@@ -1059,29 +958,13 @@ impl Ui {
             self.callbacks.restore_key_fallback(win, cb);
             r
         } else {
-            self.compositor.handle_key(code, mods)
+            KeyResult::Ignored
         };
 
         if let Some((ev, payload)) = follow_up {
             self.dispatch_event(win, ev, payload, lua_invoke);
         }
 
-        // Auto-translate widget events into typed `WinEvent` callbacks
-        // when the focused window has a matching callback registered.
-        if let KeyResult::Action(action) = &result {
-            let mapped = match action {
-                WidgetEvent::Dismiss => Some((WinEvent::Dismiss, Payload::None)),
-                WidgetEvent::Select(index) => {
-                    Some((WinEvent::Submit, Payload::Selection { index: *index }))
-                }
-            };
-            if let Some((ev, payload)) = mapped {
-                if self.callbacks.has_event(win, ev) {
-                    self.dispatch_event(win, ev, payload, lua_invoke);
-                    return KeyResult::Consumed;
-                }
-            }
-        }
         result
     }
 
@@ -1228,6 +1111,24 @@ mod tests {
         let mut ui = Ui::new();
         ui.set_terminal_size(80, 24);
         ui
+    }
+
+    /// Open a Buffer-backed split Window at `win_id` and register it
+    /// as a focusable painted split — the test-only equivalent of what
+    /// `App::new` does at startup for the prompt / transcript / status
+    /// windows. Most focus / overlay tests just need a focusable target
+    /// to exercise; this helper takes the boilerplate.
+    fn make_split(ui: &mut Ui, win_id: WinId) {
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        assert!(ui.win_open_split_at(
+            win_id,
+            buf,
+            SplitConfig {
+                region: format!("test:{}", win_id.0),
+                gutters: layout::Gutters::default(),
+            },
+        ));
+        ui.register_painted_split(win_id);
     }
 
     #[test]
@@ -1387,18 +1288,8 @@ mod tests {
     #[test]
     fn focused_window_returns_window_for_split_with_inserted_win() {
         let mut ui = make_ui();
-        // wins.get(...) needs a real Window — open a split with a real buf.
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui
-            .win_open_split(
-                buf,
-                SplitConfig {
-                    region: "test".into(),
-                    gutters: layout::Gutters::default(),
-                },
-            )
-            .expect("split opens");
-        ui.register_split("a", win);
+        let win = WinId(7);
+        make_split(&mut ui, win);
         ui.set_focus(win);
         assert_eq!(ui.focused_window().map(|w| w.id), Some(win));
     }
@@ -1406,20 +1297,11 @@ mod tests {
     #[test]
     fn overlay_close_with_focus_inside_pops_to_prior() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let outside = ui
-            .win_open_split(
-                buf,
-                SplitConfig {
-                    region: "test".into(),
-                    gutters: layout::Gutters::default(),
-                },
-            )
-            .expect("split opens");
-        ui.register_split("outside", outside);
+        let outside = WinId(7);
+        make_split(&mut ui, outside);
         // Inside-the-overlay leaf id (stub_overlay uses WinId(99)).
         let inside = WinId(99);
-        ui.register_split("inside", inside);
+        make_split(&mut ui, inside);
         let id = ui.overlay_open(stub_overlay());
 
         ui.set_focus(outside);
@@ -1437,7 +1319,7 @@ mod tests {
     fn overlay_close_with_focus_outside_leaves_focus_alone() {
         let mut ui = make_ui();
         let outside = WinId(50);
-        ui.register_split("outside", outside);
+        make_split(&mut ui, outside);
         let id = ui.overlay_open(stub_overlay());
         ui.set_focus(outside);
         ui.overlay_close(id);
@@ -1448,7 +1330,7 @@ mod tests {
     fn overlay_close_with_exhausted_history_clears_focus() {
         let mut ui = make_ui();
         let inside = WinId(99); // stub_overlay's leaf
-        ui.register_split("inside", inside);
+        make_split(&mut ui, inside);
         let id = ui.overlay_open(stub_overlay());
         ui.set_focus(inside);
         // No prior focus — history empty.
@@ -1468,7 +1350,7 @@ mod tests {
     fn focused_overlay_returns_overlay_containing_focused_leaf() {
         let mut ui = make_ui();
         let win = WinId(99);
-        ui.register_split("dlg-leaf", win);
+        make_split(&mut ui, win);
         let id = ui.overlay_open(stub_overlay()); // stub uses Leaf(WinId(99))
         ui.set_focus(win);
         assert_eq!(ui.focused_overlay(), Some(id));
@@ -1478,7 +1360,7 @@ mod tests {
     fn focused_overlay_returns_none_when_focus_on_unrelated_split() {
         let mut ui = make_ui();
         let other = WinId(50);
-        ui.register_split("split", other);
+        make_split(&mut ui, other);
         ui.overlay_open(stub_overlay());
         ui.set_focus(other);
         assert_eq!(ui.focused_overlay(), None);
@@ -1514,7 +1396,7 @@ mod tests {
     fn set_focus_on_registered_split_focuses_the_win() {
         let mut ui = make_ui();
         let win = WinId(7);
-        ui.register_split("transcript", win);
+        make_split(&mut ui, win);
         assert!(ui.set_focus(win));
         assert_eq!(ui.focus(), Some(win));
         assert!(ui.focus_history().is_empty());
@@ -1525,8 +1407,8 @@ mod tests {
         let mut ui = make_ui();
         let a = WinId(7);
         let b = WinId(8);
-        ui.register_split("a", a);
-        ui.register_split("b", b);
+        make_split(&mut ui, a);
+        make_split(&mut ui, b);
         ui.set_focus(a);
         ui.set_focus(b);
         assert_eq!(ui.focus(), Some(b));
@@ -1537,7 +1419,7 @@ mod tests {
     fn set_focus_same_win_is_noop() {
         let mut ui = make_ui();
         let win = WinId(7);
-        ui.register_split("a", win);
+        make_split(&mut ui, win);
         ui.set_focus(win);
         assert!(ui.set_focus(win));
         assert!(ui.focus_history().is_empty());
@@ -1547,7 +1429,7 @@ mod tests {
     fn set_focus_chain_builds_history_in_order() {
         let mut ui = make_ui();
         for n in 1..=4 {
-            ui.register_split(format!("split:{n}"), WinId(n));
+            make_split(&mut ui, WinId(n));
         }
         ui.set_focus(WinId(1));
         ui.set_focus(WinId(2));
@@ -1644,7 +1526,7 @@ mod tests {
     fn focus_next_returns_false_outside_modal() {
         let mut ui = make_ui();
         let win = WinId(50);
-        ui.register_split("a", win);
+        make_split(&mut ui, win);
         ui.set_focus(win);
         // No modal open → focus cycling is a no-op (gated on P1.f).
         assert!(!ui.focus_next());
@@ -1657,8 +1539,8 @@ mod tests {
         let a = WinId(100);
         let b = WinId(101);
         let c = WinId(102);
-        for (id, w) in [("a", a), ("b", b), ("c", c)] {
-            ui.register_split(id, w);
+        for w in [a, b, c] {
+            make_split(&mut ui, w);
         }
         ui.overlay_open(modal_overlay_with_leaves(a, b, c));
         ui.set_focus(a);
@@ -1677,8 +1559,8 @@ mod tests {
         let a = WinId(100);
         let b = WinId(101);
         let c = WinId(102);
-        for (id, w) in [("a", a), ("b", b), ("c", c)] {
-            ui.register_split(id, w);
+        for w in [a, b, c] {
+            make_split(&mut ui, w);
         }
         ui.overlay_open(modal_overlay_with_leaves(a, b, c));
         ui.set_focus(a);
@@ -1694,8 +1576,8 @@ mod tests {
         let a = WinId(100);
         let c = WinId(102);
         // b (101) intentionally not registered.
-        ui.register_split("a", a);
-        ui.register_split("c", c);
+        make_split(&mut ui, a);
+        make_split(&mut ui, c);
         ui.overlay_open(modal_overlay_with_leaves(a, WinId(101), c));
         ui.set_focus(a);
         assert!(ui.focus_next());
