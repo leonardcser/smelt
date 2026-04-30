@@ -81,13 +81,6 @@ impl TuiApp {
         if let Some((win, count)) = self.ui.resolve_split_mouse(me) {
             let is_down = matches!(me.kind, MouseEventKind::Down(MouseButton::Left));
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
-            let is_drag = matches!(me.kind, MouseEventKind::Drag(MouseButton::Left));
-            if is_drag {
-                self.mouse_drag_active = true;
-            } else if is_up {
-                self.mouse_drag_active = false;
-                self.drag_autoscroll_since = None;
-            }
             if win == ui::PROMPT_WIN {
                 if is_down {
                     self.app_focus = crate::app::AppFocus::Prompt;
@@ -180,37 +173,22 @@ impl TuiApp {
             .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
     }
 
-    /// Frame-tick hook: if the user is mid-drag with the content cursor
-    /// on the top or bottom row of the viewport, scroll a single line
-    /// so the selection widens past the visible area. One-line-per-tick
-    /// avoids the choppy feel of multi-line jumps; the main loop ramps
-    /// its sleep interval down the longer the cursor stays at the edge,
-    /// which is how acceleration happens.
+    /// Frame-tick hook: if the user is mid-drag with the captured
+    /// window's cursor on the top or bottom row of its viewport, scroll
+    /// a single line so the selection widens past the visible area.
+    /// One-line-per-tick avoids the choppy feel of multi-line jumps;
+    /// the main loop ramps its sleep interval down the longer the
+    /// cursor stays at the edge, which is how acceleration happens.
+    /// Edge detection lives on `Ui::poll_drag_autoscroll`; per-pane
+    /// scroll-by-line action stays here so transcript-specific cursor
+    /// snapping rides with it.
     pub(super) fn tick_drag_autoscroll(&mut self) {
-        if !self.mouse_drag_active || self.app_focus != crate::app::AppFocus::Content {
-            self.drag_autoscroll_since = None;
-            return;
-        }
-        let viewport = self.viewport_rows_estimate();
-        if viewport == 0 {
-            self.drag_autoscroll_since = None;
-            return;
-        }
-        // `cursor_line` counts from the top of the viewport: 0 = top
-        // row, viewport-1 = bottom row. Top edge → cursor-up (-1) so the
-        // viewport scrolls to reveal older rows; bottom edge → cursor-
-        // down (+1) so newer rows come into view.
-        let delta: isize = if self.transcript_window.cursor_line == 0 {
-            -1
-        } else if self.transcript_window.cursor_line >= viewport.saturating_sub(1) {
-            1
-        } else {
-            self.drag_autoscroll_since = None;
+        let Some((win, delta)) = self.ui.poll_drag_autoscroll() else {
             return;
         };
-        self.drag_autoscroll_since
-            .get_or_insert_with(std::time::Instant::now);
-        self.move_content_cursor_by_lines(delta);
+        if win == ui::TRANSCRIPT_WIN && self.app_focus == crate::app::AppFocus::Content {
+            self.move_content_cursor_by_lines(delta);
+        }
     }
 
     /// Drive a prompt mouse event through `Window::handle_mouse` —

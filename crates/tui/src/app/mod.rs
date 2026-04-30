@@ -248,15 +248,6 @@ pub struct TuiApp {
     /// `WinEvent::TextChanged` on `PROMPT_WIN` so Lua subscribers
     /// (`smelt.win.on_event(prompt, "text_changed", …)`) get called.
     pub last_prompt_text: String,
-    /// Primary mouse button is held — we're mid-drag. The transcript
-    /// stays frozen from Down to Up so selected text can't shift
-    /// under the user's cursor while the agent streams new rows.
-    pub mouse_drag_active: bool,
-    /// When drag-autoscroll is currently engaged (cursor parked at a
-    /// viewport edge while the user holds mouse-1), the timestamp it
-    /// started. Used by `tick_drag_autoscroll` to ramp the scroll speed
-    /// up the longer the cursor stays at the edge.
-    pub drag_autoscroll_since: Option<std::time::Instant>,
     /// Prompt vim mode at the start of a mouse-drag. Set on mouse-down
     /// inside the prompt viewport (only when vim is enabled) before the
     /// drag enters `Visual`, restored on mouse-up so a drag from Insert
@@ -678,8 +669,6 @@ impl TuiApp {
                 w
             },
             last_prompt_text: String::new(),
-            mouse_drag_active: false,
-            drag_autoscroll_since: None,
             prompt_drag_return_vim_mode: None,
             vim_mode: ui::VimMode::Insert,
             extra_instructions: None,
@@ -1452,7 +1441,7 @@ impl TuiApp {
                     // event. An idle timer here would wake the loop
                     // every 80ms to redraw the same screen.
                     let since = last_frame.elapsed();
-                    let want = if let Some(started) = self.drag_autoscroll_since {
+                    let want = if let Some(started) = self.ui.drag_autoscroll_started() {
                         let held = started.elapsed().as_millis() as u64;
                         // Start at ~33 lines/sec (30 ms), ramp to ~200 lines/sec (5 ms).
                         let ms = 30u64.saturating_sub(held / 120).max(5);
@@ -1461,7 +1450,7 @@ impl TuiApp {
                         MIN_FRAME_INTERVAL
                     };
                     want.saturating_sub(since)
-                }), if has_animation || self.drag_autoscroll_since.is_some() => {
+                }), if has_animation || self.ui.drag_autoscroll_started().is_some() => {
                     // Auto-scroll while the user is mid-drag with the
                     // cursor parked on the top/bottom row of the
                     // transcript — extends selection past the viewport

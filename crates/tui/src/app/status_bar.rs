@@ -144,10 +144,11 @@ impl TuiApp {
                     } else {
                         None
                     };
-                    if self.mouse_drag_active {
+                    let drag_active = matches!(self.ui.capture(), Some(ui::HitTarget::Window(_)));
+                    if drag_active {
                         mode = Some(ui::VimMode::Visual);
                     }
-                    (self.input.vim_enabled() || self.mouse_drag_active, mode)
+                    (self.input.vim_enabled() || drag_active, mode)
                 }
             }
         };

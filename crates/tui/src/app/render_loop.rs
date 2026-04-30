@@ -98,7 +98,8 @@ impl TuiApp {
         let has_selection = self.transcript_window.selection_anchor.is_some();
         let in_vim_visual = self.transcript_window.vim_enabled
             && matches!(self.vim_mode, ui::VimMode::Visual | ui::VimMode::VisualLine);
-        let freeze = has_selection || in_vim_visual || self.mouse_drag_active;
+        let mouse_drag_active = matches!(self.ui.capture(), Some(ui::HitTarget::Window(_)));
+        let freeze = has_selection || in_vim_visual || mouse_drag_active;
         if !freeze && self.transcript_window.follow_tail {
             self.transcript_window.scroll_top = u16::MAX;
         }
