@@ -293,7 +293,7 @@ impl TuiApp {
         self.set_mode(next);
     }
 
-    pub(super) fn cycle_reasoning(&mut self) {
+    pub(crate) fn cycle_reasoning(&mut self) {
         let next = self
             .core
             .config
