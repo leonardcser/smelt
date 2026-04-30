@@ -2,16 +2,16 @@
 //!
 //! The data layer mirrors `nvim_buf_set_extmark`: a `Buffer` is a
 //! sequence of text lines plus a single store of `Extmark`s grouped
-//! into `Namespace`s. Highlight spans, line decorations, virtual text,
-//! and named marks are all extmarks tagged by namespace — one storage
-//! shape, queried per-line at render time.
+//! into `Namespace`s. Highlight spans, line decorations, and virtual
+//! text are all extmarks tagged by namespace — one storage shape,
+//! queried per-line at render time.
 //!
-//! The convenience methods `add_highlight`, `set_decoration`,
-//! `set_virtual_text`, `set_mark` create extmarks in well-known
-//! namespaces (`Buffer::NS_HIGHLIGHTS`, `NS_DECORATIONS`,
-//! `NS_VIRT_TEXT`, `NS_MARKS`). Code that wants nvim's full extmark
-//! ergonomics (custom namespace, `clear_namespace`, IDs) calls
-//! `create_namespace` + `set_extmark` directly.
+//! The convenience methods `add_highlight`, `set_decoration`, and
+//! `set_virtual_text` create extmarks in well-known namespaces
+//! (`Buffer::NS_HIGHLIGHTS`, `NS_DECORATIONS`, `NS_VIRT_TEXT`). Code
+//! that wants nvim's full extmark ergonomics (custom namespace,
+//! `clear_namespace`, IDs) calls `create_namespace` + `set_extmark`
+//! directly.
 
 use crate::BufId;
 use crossterm::style::Color;
@@ -54,7 +54,7 @@ pub trait BufferParser: Send + Sync {
 pub struct NsId(pub u32);
 
 /// Identifier returned by `Buffer::set_extmark`. Unique within a
-/// namespace; can be reused after `del_extmark`.
+/// namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtmarkId(pub u32);
 
@@ -144,13 +144,6 @@ pub struct VirtualText {
     pub hl_group: Option<String>,
 }
 
-/// Named position mark.
-#[derive(Clone, Debug)]
-pub struct Mark {
-    pub line: usize,
-    pub col: usize,
-}
-
 /// Cached soft-wrap result for one `(buffer, width)` pair. One entry
 /// per source line, each carrying the wrapped visual rows for that
 /// line.
@@ -218,7 +211,7 @@ pub enum YankSubst {
 
 /// Payload carried by an extmark. Each variant maps onto one of the
 /// public per-line getters (`highlights_at`, `decoration_at`,
-/// `virtual_text_at`, `get_mark`).
+/// `virtual_text_at`).
 #[derive(Clone, Debug)]
 pub enum ExtmarkPayload {
     Highlight {
@@ -229,11 +222,6 @@ pub enum ExtmarkPayload {
     VirtText {
         text: String,
         hl_group: Option<String>,
-    },
-    /// Named position mark. The `name` is the user-facing key; lookup
-    /// is via `get_mark(name)`.
-    NamedMark {
-        name: String,
     },
 }
 
@@ -271,15 +259,6 @@ impl ExtmarkOpts {
             end_row: None,
             end_col: None,
             payload: ExtmarkPayload::VirtText { text, hl_group },
-            yank: None,
-        }
-    }
-
-    pub fn named_mark(name: String) -> Self {
-        Self {
-            end_row: None,
-            end_col: None,
-            payload: ExtmarkPayload::NamedMark { name },
             yank: None,
         }
     }
@@ -363,9 +342,6 @@ pub struct Buffer {
     buftype: BufType,
     /// Bumped on lines mutation.
     changedtick: u64,
-    /// Bumped on extmark mutation. Rendering only reacts to the sum;
-    /// kept distinct to make cache invalidation precise.
-    marks_tick: u64,
     /// Soft-wrap result cached by `(changedtick, width)`. Multiple
     /// Windows on the same Buffer at the same width share one
     /// computation.
@@ -377,7 +353,6 @@ pub struct Buffer {
     ns_highlights: NsId,
     ns_decorations: NsId,
     ns_virt_text: NsId,
-    ns_marks: NsId,
     /// When set, `source` drives the visible lines: the parser
     /// re-runs `parse` into this buffer lazily when
     /// `ensure_rendered_at` is called with a different
@@ -398,15 +373,12 @@ impl Buffer {
     /// Default namespace name for virtual text created via
     /// `set_virtual_text`.
     pub const NS_VIRT_TEXT: &'static str = "buffer.virt_text";
-    /// Default namespace name for named marks created via `set_mark`.
-    pub const NS_MARKS: &'static str = "buffer.marks";
 
     pub fn new(id: BufId, opts: BufCreateOpts) -> Self {
         let mut extmarks = ExtmarkStore::default();
         let ns_highlights = extmarks.create_namespace(Self::NS_HIGHLIGHTS);
         let ns_decorations = extmarks.create_namespace(Self::NS_DECORATIONS);
         let ns_virt_text = extmarks.create_namespace(Self::NS_VIRT_TEXT);
-        let ns_marks = extmarks.create_namespace(Self::NS_MARKS);
         Self {
             id,
             lines: Arc::new(vec![String::new()]),
@@ -414,13 +386,11 @@ impl Buffer {
             modifiable: opts.modifiable,
             buftype: opts.buftype,
             changedtick: 0,
-            marks_tick: 0,
             wrap_cache: None,
             wrap_cache_key: None,
             ns_highlights,
             ns_decorations,
             ns_virt_text,
-            ns_marks,
             parser: None,
             source: String::new(),
             source_tick: 0,
@@ -516,16 +486,10 @@ impl Buffer {
         // Mirrors nvim's behavior: marks track edits, but a wholesale
         // line replacement is treated as "everything in this slice
         // is gone."
-        for ns in [
-            self.ns_highlights,
-            self.ns_decorations,
-            self.ns_virt_text,
-            self.ns_marks,
-        ] {
+        for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, start, end);
         }
         self.changedtick += 1;
-        self.marks_tick += 1;
     }
 
     pub fn set_all_lines(&mut self, lines: Vec<String>) {
@@ -538,20 +502,9 @@ impl Buffer {
         // Wholesale replacement: drop every extmark in the well-known
         // namespaces. (Custom namespaces persist; their owners decide
         // when to clear.)
-        for ns in [
-            self.ns_highlights,
-            self.ns_decorations,
-            self.ns_virt_text,
-            self.ns_marks,
-        ] {
+        for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, 0, usize::MAX);
         }
-        self.changedtick += 1;
-        self.marks_tick += 1;
-    }
-
-    pub fn append_line(&mut self, line: String) {
-        Arc::make_mut(&mut self.lines).push(line);
         self.changedtick += 1;
     }
 
@@ -626,9 +579,7 @@ impl Buffer {
             payload: opts.payload,
             yank: opts.yank,
         };
-        let id = self.extmarks.set_extmark(ns, mark);
-        self.marks_tick += 1;
-        id
+        self.extmarks.set_extmark(ns, mark)
     }
 
     /// Yank the text covered by `[start..end)` (inclusive of
@@ -766,22 +717,11 @@ impl Buffer {
         Some(out)
     }
 
-    /// Remove a previously-placed extmark. Returns the removed mark
-    /// or `None` if nothing matched.
-    pub fn del_extmark(&mut self, ns: NsId, id: ExtmarkId) -> Option<Extmark> {
-        let removed = self.extmarks.del_extmark(ns, id);
-        if removed.is_some() {
-            self.marks_tick += 1;
-        }
-        removed
-    }
-
     /// Clear every extmark in `ns` whose anchor lies within
     /// `[line_start, line_end)`. Pass `0..usize::MAX` to clear the
     /// whole namespace.
     pub fn clear_namespace(&mut self, ns: NsId, line_start: usize, line_end: usize) {
         self.extmarks.clear_namespace(ns, line_start, line_end);
-        self.marks_tick += 1;
     }
 
     /// Iterate every extmark in `ns`, in insertion order.
@@ -917,7 +857,7 @@ impl Buffer {
             .map(|(id, _)| id)
             .collect();
         for id in to_remove {
-            self.del_extmark(ns, id);
+            self.extmarks.del_extmark(ns, id);
         }
     }
 
@@ -950,76 +890,6 @@ impl Buffer {
             }
         }
         out
-    }
-
-    pub fn virtual_text(&self) -> Vec<VirtualText> {
-        let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
-        ns_ids.sort_by_key(|n| n.0);
-        let mut out = Vec::new();
-        for ns in ns_ids {
-            let Some(state) = self.extmarks.ns(ns) else {
-                continue;
-            };
-            for mark in state.extmarks.values() {
-                if let ExtmarkPayload::VirtText { text, hl_group } = &mark.payload {
-                    out.push(VirtualText {
-                        line: mark.start_row,
-                        col: mark.start_col,
-                        text: text.clone(),
-                        hl_group: hl_group.clone(),
-                    });
-                }
-            }
-        }
-        out
-    }
-
-    pub fn set_mark(&mut self, name: String, line: usize, col: usize) {
-        let ns = self.ns_marks;
-        let to_remove: Vec<ExtmarkId> = self
-            .extmarks(ns)
-            .into_iter()
-            .filter(|(_, m)| match &m.payload {
-                ExtmarkPayload::NamedMark { name: n } => n == &name,
-                _ => false,
-            })
-            .map(|(id, _)| id)
-            .collect();
-        for id in to_remove {
-            self.extmarks.del_extmark(ns, id);
-        }
-        self.set_extmark(ns, line, col, ExtmarkOpts::named_mark(name));
-    }
-
-    pub fn get_mark(&self, name: &str) -> Option<Mark> {
-        let state = self.extmarks.ns(self.ns_marks)?;
-        for mark in state.extmarks.values() {
-            if let ExtmarkPayload::NamedMark { name: n } = &mark.payload {
-                if n == name {
-                    return Some(Mark {
-                        line: mark.start_row,
-                        col: mark.start_col,
-                    });
-                }
-            }
-        }
-        None
-    }
-
-    pub fn delete_mark(&mut self, name: &str) {
-        let ns = self.ns_marks;
-        let to_remove: Vec<ExtmarkId> = self
-            .extmarks(ns)
-            .into_iter()
-            .filter(|(_, m)| match &m.payload {
-                ExtmarkPayload::NamedMark { name: n } => n == name,
-                _ => false,
-            })
-            .map(|(id, _)| id)
-            .collect();
-        for id in to_remove {
-            self.del_extmark(ns, id);
-        }
     }
 }
 
@@ -1086,7 +956,7 @@ mod tests {
         buf.set_all_lines(vec!["a".into()]);
         assert!(buf.changedtick() > t0);
         let t1 = buf.changedtick();
-        buf.append_line("b".into());
+        buf.set_all_lines(vec!["b".into()]);
         assert!(buf.changedtick() > t1);
     }
 
@@ -1115,15 +985,6 @@ mod tests {
         assert_eq!(vts.len(), 2);
         assert_eq!(vts[0].text, "from-a");
         assert_eq!(vts[1].text, "from-b");
-    }
-
-    #[test]
-    fn marks_lifecycle() {
-        let mut buf = make_buf();
-        buf.set_mark("a".into(), 0, 5);
-        assert_eq!(buf.get_mark("a").unwrap().col, 5);
-        buf.delete_mark("a");
-        assert!(buf.get_mark("a").is_none());
     }
 
     #[test]
@@ -1215,7 +1076,7 @@ mod tests {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["text".into()]);
         let ns = buf.create_namespace("syntax");
-        let id = buf.set_extmark(
+        buf.set_extmark(
             ns,
             0,
             0,
@@ -1227,7 +1088,7 @@ mod tests {
         // sharing the same paint pass.
         assert_eq!(buf.highlights_at(0).len(), 1);
         assert_eq!(buf.extmarks(ns).len(), 1);
-        buf.del_extmark(ns, id);
+        buf.clear_namespace(ns, 0, usize::MAX);
         assert_eq!(buf.extmarks(ns).len(), 0);
         assert_eq!(buf.highlights_at(0).len(), 0);
     }
