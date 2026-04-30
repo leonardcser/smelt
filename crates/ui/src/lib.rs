@@ -1342,6 +1342,32 @@ pub trait UiHost {
     /// that want to inspect its layout. Mirrors [`Ui::overlay_close`].
     #[must_use]
     fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay>;
+
+    /// Last-painted viewport rect + content width + scrollbar geometry
+    /// for `win`. Mirrors `Ui::win(win)?.viewport`. Hosts that project
+    /// per-pane geometry through other paths (compositor cache, splits
+    /// resolution) override this to keep one accessor canonical for
+    /// mouse routing.
+    fn viewport_for(&self, win: WinId) -> Option<WindowViewport>;
+
+    /// Display rows for `win` — the same `&[String]` shape that
+    /// [`MouseCtx::rows`] carries. The default implementation reads the
+    /// backing buffer's lines (one row per source line, no soft wrap).
+    /// Hosts override for windows whose painted rows differ from the
+    /// source: `TuiApp::PROMPT_WIN` returns wrapped rows;
+    /// `TuiApp::TRANSCRIPT_WIN` returns the projected display rows that
+    /// include ephemeral content. Returns `None` when the window or its
+    /// buffer is missing.
+    fn rows_for(&mut self, win: WinId) -> Option<Vec<String>>;
+
+    /// Soft and hard line-break byte positions in
+    /// `rows_for(win)?.join("\n")`. Soft positions mark word-wrap
+    /// continuations (transparent to word-select); hard positions mark
+    /// real `\n` separators (the unit triple-click extends to). The
+    /// default implementation treats every join as a hard break and
+    /// returns no soft breaks. Hosts override for wrapped panes.
+    /// Returns `None` when the window or its buffer is missing.
+    fn breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)>;
 }
 
 /// `Ui` impls `UiHost` so direct `&mut Ui` callers (tests, helpers
@@ -1384,6 +1410,29 @@ impl UiHost for Ui {
     }
     fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
         Ui::overlay_close(self, id)
+    }
+    fn viewport_for(&self, win: WinId) -> Option<WindowViewport> {
+        Ui::win(self, win).and_then(|w| w.viewport)
+    }
+    fn rows_for(&mut self, win: WinId) -> Option<Vec<String>> {
+        let buf_id = Ui::win(self, win)?.buf;
+        let buf = Ui::buf(self, buf_id)?;
+        Some(buf.lines().to_vec())
+    }
+    fn breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)> {
+        let buf_id = Ui::win(self, win)?.buf;
+        let buf = Ui::buf(self, buf_id)?;
+        let lines = buf.lines();
+        let mut hard = Vec::new();
+        let mut pos = 0usize;
+        for (i, l) in lines.iter().enumerate() {
+            pos += l.len();
+            if i + 1 < lines.len() {
+                hard.push(pos);
+                pos += 1;
+            }
+        }
+        Some((Vec::new(), hard))
     }
 }
 
@@ -2759,6 +2808,53 @@ mod tests {
         let cb_ids = UiHost::win_close(&mut ui, win);
         assert!(cb_ids.is_empty());
         assert!(ui.buf(buf).is_some());
+    }
+
+    // ── UiHost per-pane data accessors (P2.b.4c.5b) ──────────────────
+
+    #[test]
+    fn ui_host_per_pane_data_default_impl() {
+        // Ui's default `rows_for` / `breaks_for` / `viewport_for` cover
+        // any window the host hasn't overridden — buffer lines as rows,
+        // join positions as hard breaks, no soft wraps. Drives all
+        // three through `&mut dyn UiHost` so the trait shape is
+        // exercised end-to-end.
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        ui.buf_mut(buf)
+            .unwrap()
+            .set_all_lines(vec!["hello".into(), "world!".into(), "ok".into()]);
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "per-pane-default".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let rect = layout::Rect::new(0, 0, 20, 10);
+        ui.win_mut(win).unwrap().viewport = Some(window::WindowViewport::new(rect, 20, 0, 0, None));
+
+        fn assert_default_shape(host: &mut dyn UiHost, win: WinId) {
+            let vp = host.viewport_for(win).unwrap();
+            assert_eq!(vp.rect.width, 20);
+            let rows = host.rows_for(win).unwrap();
+            assert_eq!(rows, vec!["hello", "world!", "ok"]);
+            // "hello\nworld!\nok" — `\n` after "hello" lives at byte 5,
+            // `\n` after "world!" at byte 12. Both are hard breaks; soft
+            // breaks are empty for an unwrapped buffer.
+            let (soft, hard) = host.breaks_for(win).unwrap();
+            assert!(soft.is_empty(), "default impl emits no soft breaks");
+            assert_eq!(hard, vec![5, 12]);
+        }
+        assert_default_shape(&mut ui, win);
+
+        // Unknown window → `None` for every accessor.
+        let stranger = WinId(9999);
+        assert!(UiHost::viewport_for(&ui, stranger).is_none());
+        assert!(UiHost::rows_for(&mut ui, stranger).is_none());
+        assert!(UiHost::breaks_for(&mut ui, stranger).is_none());
     }
 
     #[test]
