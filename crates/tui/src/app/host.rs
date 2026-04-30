@@ -125,3 +125,48 @@ impl Host for HeadlessApp {
         self.core.confirms()
     }
 }
+
+/// `UiHost` impl for `TuiApp` — delegates every method to the inner
+/// `ui::Ui`. The trait itself lives in `ui::lib`; see its docs for
+/// the split between `Host` (Ui-agnostic) and `UiHost` (compositor-
+/// bearing). `HeadlessApp` deliberately does **not** impl `UiHost`;
+/// UiHost-only Lua bindings raise a runtime error when invoked from
+/// a headless context (wired in P2.b.5).
+impl ui::UiHost for TuiApp {
+    fn ui(&mut self) -> &mut ui::Ui {
+        &mut self.ui
+    }
+    fn set_focus(&mut self, win: ui::WinId) -> bool {
+        self.ui.set_focus(win)
+    }
+    fn fire_win_event(
+        &mut self,
+        win: ui::WinId,
+        ev: ui::WinEvent,
+        payload: ui::Payload,
+        lua_invoke: &mut ui::LuaInvoke,
+    ) {
+        self.ui.fire_win_event(win, ev, payload, lua_invoke)
+    }
+    fn buf_create(&mut self, opts: ui::buffer::BufCreateOpts) -> ui::BufId {
+        self.ui.buf_create(opts)
+    }
+    fn buf_mut(&mut self, id: ui::BufId) -> Option<&mut ui::Buffer> {
+        self.ui.buf_mut(id)
+    }
+    fn win_open_split(&mut self, buf: ui::BufId, config: ui::SplitConfig) -> Option<ui::WinId> {
+        self.ui.win_open_split(buf, config)
+    }
+    fn win_close(&mut self, id: ui::WinId) -> Vec<u64> {
+        self.ui.win_close(id)
+    }
+    fn win_mut(&mut self, id: ui::WinId) -> Option<&mut ui::Window> {
+        self.ui.win_mut(id)
+    }
+    fn overlay_open(&mut self, overlay: ui::Overlay) -> ui::OverlayId {
+        self.ui.overlay_open(overlay)
+    }
+    fn overlay_close(&mut self, id: ui::OverlayId) -> Option<ui::Overlay> {
+        self.ui.overlay_close(id)
+    }
+}

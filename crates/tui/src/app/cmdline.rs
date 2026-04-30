@@ -11,6 +11,7 @@ use super::*;
 use crossterm::event::KeyEvent;
 use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
+use ui::UiHost;
 use ui::{Constraint, LayoutTree, Overlay, SplitConfig};
 
 /// Visible prefix glyph rendered as the first cell of the cmdline
@@ -31,12 +32,12 @@ impl TuiApp {
             return;
         }
 
-        let buf = self.ui.buf_create(BufCreateOpts::default());
-        if let Some(b) = self.ui.buf_mut(buf) {
+        let buf = self.buf_create(BufCreateOpts::default());
+        if let Some(b) = self.buf_mut(buf) {
             b.set_all_lines(vec![PREFIX.to_string()]);
         }
 
-        let Some(win) = self.ui.win_open_split(
+        let Some(win) = self.win_open_split(
             buf,
             SplitConfig {
                 region: "cmdline_overlay".into(),
@@ -45,7 +46,7 @@ impl TuiApp {
         ) else {
             return;
         };
-        if let Some(w) = self.ui.win_mut(win) {
+        if let Some(w) = self.win_mut(win) {
             w.cursor_line = 0;
             w.cursor_col = PREFIX_LEN;
             w.scroll_top = 0;
@@ -59,10 +60,9 @@ impl TuiApp {
             LayoutTree::hbox(vec![(Constraint::Percentage(100), LayoutTree::leaf(win))]),
         )]);
         let _ = self
-            .ui
             .overlay_open(Overlay::new(layout, Anchor::ScreenBottom { above_rows: 1 }).modal(true));
 
-        self.ui.set_focus(win);
+        self.set_focus(win);
         self.well_known.cmdline = Some(win);
         self.cmdline_completer = None;
     }

@@ -1160,6 +1160,113 @@ impl Default for Ui {
     }
 }
 
+/// Compositor-bearing surface that frontends touching the screen
+/// expose. Sibling to the `Host` trait in `tui::app::host` —
+/// `UiHost` is **independent** of `Host` (no supertrait bound)
+/// because `ui` cannot reference tui-defined types. Frontends that
+/// need both impl each side by side.
+///
+/// Only `TuiApp` impls this trait. `HeadlessApp` does not — the
+/// UiHost-only Lua bindings (`smelt.ui`, `smelt.win`, `smelt.buf`,
+/// `smelt.statusline`) raise a runtime error when invoked from a
+/// headless context (wired in P2.b.5).
+///
+/// Method names mirror `Ui`'s inherent surface so call sites read
+/// the same whether they go through the trait or directly. `Ui`
+/// also impls this trait — useful for tests that want to exercise
+/// compositor-touching code without spinning up a full frontend.
+pub trait UiHost {
+    /// Borrow the inner `Ui` directly. Lets compositor-touching
+    /// code reach helpers (overlay enumeration, hit-test, focus
+    /// history, theme, render) without growing the trait surface.
+    fn ui(&mut self) -> &mut Ui;
+
+    /// Set keyboard focus to `win`. Returns `true` if focus
+    /// changed. Mirrors [`Ui::set_focus`].
+    fn set_focus(&mut self, win: WinId) -> bool;
+
+    /// Fire a `WinEvent` on `win`'s registered callbacks. Mirrors
+    /// [`Ui::fire_win_event`].
+    fn fire_win_event(
+        &mut self,
+        win: WinId,
+        ev: WinEvent,
+        payload: Payload,
+        lua_invoke: &mut LuaInvoke,
+    );
+
+    /// Create a fresh buffer with an auto-allocated `BufId`.
+    /// Mirrors [`Ui::buf_create`].
+    fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId;
+
+    /// Mutably borrow a buffer by id. Mirrors [`Ui::buf_mut`].
+    fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer>;
+
+    /// Open a split-tree window backed by `buf`. Mirrors
+    /// [`Ui::win_open_split`].
+    fn win_open_split(&mut self, buf: BufId, config: SplitConfig) -> Option<WinId>;
+
+    /// Close a window. Returns the Lua callback IDs that were
+    /// attached so the caller can drop them from the Lua-side
+    /// registry. Mirrors [`Ui::win_close`].
+    #[must_use]
+    fn win_close(&mut self, id: WinId) -> Vec<u64>;
+
+    /// Mutably borrow a window by id. Mirrors [`Ui::win_mut`].
+    fn win_mut(&mut self, id: WinId) -> Option<&mut Window>;
+
+    /// Register an overlay. Mirrors [`Ui::overlay_open`].
+    fn overlay_open(&mut self, overlay: Overlay) -> OverlayId;
+
+    /// Close an overlay. Returns the removed `Overlay` for callers
+    /// that want to inspect its layout. Mirrors [`Ui::overlay_close`].
+    #[must_use]
+    fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay>;
+}
+
+/// `Ui` impls `UiHost` so direct `&mut Ui` callers (tests, helpers
+/// that already hold the `Ui`) can dispatch through the trait too.
+/// Bodies use the explicit `Ui::method(self, …)` path syntax to
+/// disambiguate from the trait's same-named method.
+impl UiHost for Ui {
+    fn ui(&mut self) -> &mut Ui {
+        self
+    }
+    fn set_focus(&mut self, win: WinId) -> bool {
+        Ui::set_focus(self, win)
+    }
+    fn fire_win_event(
+        &mut self,
+        win: WinId,
+        ev: WinEvent,
+        payload: Payload,
+        lua_invoke: &mut LuaInvoke,
+    ) {
+        Ui::fire_win_event(self, win, ev, payload, lua_invoke)
+    }
+    fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId {
+        Ui::buf_create(self, opts)
+    }
+    fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer> {
+        Ui::buf_mut(self, id)
+    }
+    fn win_open_split(&mut self, buf: BufId, config: SplitConfig) -> Option<WinId> {
+        Ui::win_open_split(self, buf, config)
+    }
+    fn win_close(&mut self, id: WinId) -> Vec<u64> {
+        Ui::win_close(self, id)
+    }
+    fn win_mut(&mut self, id: WinId) -> Option<&mut Window> {
+        Ui::win_mut(self, id)
+    }
+    fn overlay_open(&mut self, overlay: Overlay) -> OverlayId {
+        Ui::overlay_open(self, overlay)
+    }
+    fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
+        Ui::overlay_close(self, id)
+    }
+}
+
 /// Paint one painted-split window into `grid` at `rect` via
 /// `Window::render`. Mirrors the leaf branch of `paint_layout_node` for
 /// split-shaped windows that paint outside the overlay layout system.
@@ -2460,5 +2567,77 @@ mod tests {
         // Leaf paints inside the border at (top+1, left+1) = (10, 20).
         assert_eq!(frame.cell(20, 10).symbol, 'o');
         assert_eq!(frame.cell(31, 10).symbol, 't');
+    }
+
+    // ── UiHost trait dispatch (P2.b.2) ───────────────────────────────
+
+    #[test]
+    fn ui_host_dispatch_round_trips_through_dyn() {
+        // Drive every UiHost method through `&mut dyn UiHost` so the
+        // trait shape is exercised end-to-end (not just the inherent
+        // path). Mirrors how P2.b.5's Lua bindings will reach the
+        // compositor — by trait, not by direct field access.
+        fn drive(host: &mut dyn UiHost) -> (BufId, WinId, OverlayId) {
+            let buf = host.buf_create(buffer::BufCreateOpts::default());
+            host.buf_mut(buf)
+                .unwrap()
+                .set_all_lines(vec!["uihost".into()]);
+            let win = host
+                .win_open_split(
+                    buf,
+                    SplitConfig {
+                        region: "uihost-test".into(),
+                        gutters: Gutters::default(),
+                    },
+                )
+                .unwrap();
+            host.win_mut(win).unwrap().cursor_col = 3;
+            // Hosting `win` in a modal overlay both makes it focusable
+            // (overlay leaf) and exercises `overlay_open`. The modal
+            // also auto-focuses the first leaf — re-asserting via the
+            // explicit `set_focus` keeps that method on the trait path.
+            let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]);
+            let oid =
+                host.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter).modal(true));
+            assert!(host.set_focus(win));
+            // `ui()` must yield the same compositor every other method
+            // mutates; assert the focused window matches what we just set.
+            assert_eq!(host.ui().focus(), Some(win));
+            (buf, win, oid)
+        }
+
+        let mut ui = make_ui();
+        let (buf, win, oid) = drive(&mut ui);
+
+        // Fire-event path through the trait. The callback observes the
+        // payload that the trait dispatch threaded through.
+        let saw = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let saw_cb = saw.clone();
+        ui.win_on_event(
+            win,
+            WinEvent::TextChanged,
+            Callback::Rust(Box::new(move |_| {
+                *saw_cb.lock().unwrap() = true;
+                CallbackResult::Consumed
+            })),
+        );
+        UiHost::fire_win_event(
+            &mut ui,
+            win,
+            WinEvent::TextChanged,
+            Payload::Text {
+                content: "uihost".into(),
+            },
+            &mut |_, _, _| {},
+        );
+        assert!(*saw.lock().unwrap());
+
+        // Close paths through the trait clean up the structures the
+        // open paths created.
+        let removed = UiHost::overlay_close(&mut ui, oid);
+        assert!(removed.is_some());
+        let cb_ids = UiHost::win_close(&mut ui, win);
+        assert!(cb_ids.is_empty());
+        assert!(ui.buf(buf).is_some());
     }
 }
