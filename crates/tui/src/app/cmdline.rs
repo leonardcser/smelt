@@ -351,8 +351,9 @@ impl TuiApp {
 
     /// Persist the current line into history (if non-empty and not a
     /// duplicate of the most-recent entry), close the overlay, then
-    /// dispatch the command. Returns `true` only when the command
-    /// resolved to `Quit`.
+    /// dispatch the command. Returns `true` when `pending_quit` is set
+    /// (e.g. the line was `q` / `quit` / `exit`) so the caller can break
+    /// the main loop on the next tick.
     fn cmdline_submit(&mut self) -> bool {
         let line = self.cmdline_text();
         let last = self.cmdline_history.last().cloned();
