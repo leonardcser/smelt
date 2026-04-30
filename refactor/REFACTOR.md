@@ -432,8 +432,15 @@ bridges, then the aggregate.
 - **a.4** — `Cells` registry (typed name → value + subscribers). New
   primitive; built-in cells migrate from scattered App fields
   (`vim_mode`, `agent_mode` via `mode`, …).
-- **a.5** — `Timers { set, every, cancel }`. Existing `smelt.defer`
-  callback queue is the seed; add `every` + cancellable handles.
+- **a.5** ✅ — `Timers { set, every, cancel }` carve-out: storage
+  lifts off `LuaShared.timers` onto `app::timers::Timers` on `App`;
+  `App::tick_timers` drains via `Timers::drain_due` (re-arms
+  recurring entries in place, drops one-shots); Lua bindings:
+  `smelt.timer.{set,every,cancel}` returning cancellable ids,
+  `smelt.defer` kept as a thin alias over `Timers::set`. Callbacks
+  re-entering `set` / `every` / `cancel` from inside their fire body
+  compose cleanly because `drain_due` releases `&mut Timers` before
+  the function calls happen.
 - **a.6** ✅ — `AppConfig` (provider triple, mode + reasoning cycles,
   settings, multi-agent toggle, model overrides, context window).
   16 fields bundle off `App` into `app::app_config::AppConfig`; call
