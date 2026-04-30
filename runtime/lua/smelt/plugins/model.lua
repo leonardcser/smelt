@@ -4,7 +4,7 @@
 -- of available models (matches on name + provider + key).
 
 local function models_list()
-  return smelt.engine.models() or {}
+  return smelt.model.list() or {}
 end
 
 local function build_items()
@@ -29,7 +29,7 @@ smelt.cmd.picker("model", {
   desc     = "switch model",
   args     = model_keys,
   items    = build_items,
-  apply    = function(arg) smelt.engine.set_model(arg) end,
+  apply    = function(arg) smelt.model.set(arg) end,
   prepare  = function()
     if #models_list() == 0 then smelt.notify_error("no models available") end
   end,

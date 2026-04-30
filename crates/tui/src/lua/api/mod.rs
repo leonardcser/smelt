@@ -23,6 +23,7 @@ mod http;
 mod keymap;
 mod metrics;
 mod mode;
+mod model;
 mod notebook;
 mod os;
 mod path;
@@ -79,6 +80,7 @@ impl LuaRuntime {
         transcript::register(lua, &smelt)?;
         engine::register(lua, &smelt, shared)?;
         mode::register(lua, &smelt)?;
+        model::register(lua, &smelt)?;
         reasoning::register(lua, &smelt)?;
         session::register(lua, &smelt)?;
         process::register(lua, &smelt)?;

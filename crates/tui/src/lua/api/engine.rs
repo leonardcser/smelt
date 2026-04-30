@@ -1,8 +1,9 @@
-//! `smelt.engine` bindings — live engine reads (model, busy state,
-//! cost, tokens), turn-driver writes (set_model, submit, cancel,
-//! compact), the `ask` auxiliary request primitive, and the
-//! message-history snapshot. Mode get/set/cycle live under
-//! `smelt.mode`; reasoning effort lives under `smelt.reasoning`.
+//! `smelt.engine` bindings — live engine reads (busy state, cost,
+//! tokens), turn-driver writes (submit, cancel, compact), the `ask`
+//! auxiliary request primitive, and the message-history snapshot.
+//! Mode get/set/cycle live under `smelt.mode`; reasoning effort
+//! lives under `smelt.reasoning`; model get/set/list live under
+//! `smelt.model`.
 
 use super::app_read;
 use crate::lua::{messages_to_lua, LuaHandle, LuaShared};
@@ -12,7 +13,6 @@ use std::sync::Arc;
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let engine_tbl = lua.create_table()?;
 
-    engine_tbl.set("model", app_read!(lua, |app| app.core.config.model.clone()))?;
     engine_tbl.set("is_busy", app_read!(lua, |app| app.agent.is_some()))?;
     engine_tbl.set(
         "cost",
@@ -27,34 +27,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         app_read!(lua, |app| app.core.config.context_window),
     )?;
 
-    engine_tbl.set(
-        "set_model",
-        lua.create_function(|_, v: String| {
-            crate::lua::with_app(|app| app.apply_model(&v));
-            Ok(())
-        })?,
-    )?;
-    // smelt.engine.models() → array of `{key, name, provider}`
-    // for the prompt-docked `/model` picker.
-    engine_tbl.set(
-        "models",
-        lua.create_function(|lua, ()| {
-            let out = lua.create_table()?;
-            if let Some(res) = crate::lua::try_with_app(|app| -> LuaResult<()> {
-                for (i, m) in app.core.config.available_models.iter().enumerate() {
-                    let entry = lua.create_table()?;
-                    entry.set("key", m.key.clone())?;
-                    entry.set("name", m.model_name.clone())?;
-                    entry.set("provider", m.provider_name.clone())?;
-                    out.set(i + 1, entry)?;
-                }
-                Ok(())
-            }) {
-                res?;
-            }
-            Ok(out)
-        })?,
-    )?;
     engine_tbl.set(
         "submit",
         lua.create_function(|_, v: String| {

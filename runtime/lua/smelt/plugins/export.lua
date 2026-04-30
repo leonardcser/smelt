@@ -57,7 +57,7 @@ local function format_markdown()
   end
 
   local meta = {}
-  local model = smelt.engine.model()
+  local model = smelt.model.get()
   if model and model ~= "" then
     table.insert(meta, "**Model:** " .. model)
   end
