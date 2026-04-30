@@ -318,18 +318,4 @@ to invoke_ the feature.
 
 ## Verification log
 
-After each phase, write a short note here.
-
-- **2026-04-28 — pre-P0 audit (4 parallel verification agents).** Counts confirmed: 27 slash commands, 19 distinct tools, 31 CLI flags, 12 settings keys, 12 theme presets, 62 KeyActions, ~6 mouse gesture classes, ~26 `smelt.*` namespaces, 12 autocmd events. Fixes applied:
-  - `run_in_background` clarified as a bash flag (not a separate tool).
-  - Theme presets corrected from "13 colors" to "12 colors" with the names enumerated.
-  - `smelt.au.*` namespace marked `offline-pre-P3` (only `smelt.on` exists today; `smelt.au` is the target alias).
-  - Built-in autocmd event names enumerated under the scripting surface.
-  - `Config: model overrides` row split: sampling overrides stay in `ModelConfigOverrides`; `tool_calling` actually lives on `ModelConfig`; `pricing` actually lives in `engine/pricing.rs`.
-  - Added rows for `Steer` / `Unsteer`, `Retrying`, auxiliary task routing, `Messages` snapshot, plugin tool hook flow (vs confirm dialog), tool call lifecycle states, per-turn telemetry.
-  - Added rows for granular vim sub-features (motions, text objects, operators, anchor flip, case toggles, dot-repeat) so they aren't lost behind the umbrella "Vim modes" entry.
-- **2026-04-28 — second-pass audit (4 parallel agents + manual verification).** Three false positives found and corrected; one missing dialog added:
-  - **Vim case toggle operators (`gu` / `gU` / `g~`) — false positive.** `handle_waiting_g` (`crates/ui/src/vim/mod.rs:1495`) only resolves `gg` (goto line). The cited `Uppercase` / `Lowercase` / `Capitalize` KeyActions are emacs-style Alt+U/L/C word operations bound at `keymap.rs:380/386/392`, not vim operators. Row split: vim's `~` (single-char Normal at line 581; `~`/`U`/`u` in Visual at line 1137) stays; emacs Alt+U/L/C gets its own row.
-  - **`smelt.clipboard` read — false positive.** `crates/tui/src/lua/api/mod.rs:67` registers a write-only `clipboard(text)` function. No read primitive exists. Row updated to "write-only today; read added in P3.b" so the P3 work is on the hook.
-  - **`/btw` dialog — missing row.** `plugins/btw.lua` opens a `smelt.ui.dialog.open` with a streaming-content panel and spinner pill while the engine answers. Listed only as a slash command, not as a dialog. Added a row in the Dialogs section.
-  - Re-verified by spot-check: 27 slash commands, 19 tools, 31 CLI flags, 12 settings keys, 12 theme presets — all still match. Vim motions / text objects / operators / dot-repeat / anchor flip rows confirmed against `vim/mod.rs`. Built-in autocmd events (12) still match `lua/mod.rs::AutocmdEvent` lines 97-112.
+After each phase, write a short note here. Pre-P0 audits (2026-04-28, two passes, parallel agents) blessed the matrix as the canonical surface — counts and source pointers verified against the live tree.
