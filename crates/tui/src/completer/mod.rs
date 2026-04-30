@@ -1,9 +1,8 @@
-use score::{query_match_score, split_words};
+use crate::fuzzy::score::{query_match_score, split_words};
 
 pub mod command;
 pub mod file;
 pub mod history;
-mod score;
 
 #[derive(Clone, Default)]
 pub struct CompletionItem {
