@@ -93,11 +93,6 @@ impl Grid {
         &self.cells[self.idx(x, y)]
     }
 
-    pub fn cell_mut(&mut self, x: u16, y: u16) -> &mut Cell {
-        let idx = self.idx(x, y);
-        &mut self.cells[idx]
-    }
-
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
         use unicode_width::UnicodeWidthChar;
         if x < self.width && y < self.height {
@@ -236,16 +231,6 @@ impl<'a> GridSlice<'a> {
             *self.grid.cell(self.area.left + x, self.area.top + y)
         } else {
             Cell::default()
-        }
-    }
-
-    /// Change the style of a cell in place, preserving its symbol.
-    /// Used to overlay effects (selection highlight, cursor tint).
-    pub fn set_style(&mut self, x: u16, y: u16, style: Style) {
-        if x < self.area.width && y < self.area.height {
-            let abs_x = self.area.left + x;
-            let abs_y = self.area.top + y;
-            self.grid.cell_mut(abs_x, abs_y).style = style;
         }
     }
 

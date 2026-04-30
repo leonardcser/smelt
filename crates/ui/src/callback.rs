@@ -90,32 +90,6 @@ pub enum Payload {
     Text { content: String },
 }
 
-impl Payload {
-    pub fn as_selection(&self) -> Option<usize> {
-        match self {
-            Payload::Selection { index } => Some(*index),
-            _ => None,
-        }
-    }
-
-    pub fn as_text(&self) -> Option<&str> {
-        match self {
-            Payload::Text { content } => Some(content.as_str()),
-            _ => None,
-        }
-    }
-
-    /// String form used when routing to Lua callbacks.
-    pub fn as_lua_string(&self) -> String {
-        match self {
-            Payload::None => String::new(),
-            Payload::Key { code, mods } => format!("{code:?}:{mods:?}"),
-            Payload::Selection { index } => index.to_string(),
-            Payload::Text { content } => content.clone(),
-        }
-    }
-}
-
 /// Result returned by a callback.
 #[derive(Clone, Debug)]
 pub enum CallbackResult {
@@ -266,14 +240,6 @@ impl Callbacks {
         self.key_fallback.insert(win, cb);
     }
 
-    /// True when at least one callback is registered for `(win, ev)`.
-    pub fn has_event(&self, win: WinId, ev: WinEvent) -> bool {
-        self.events
-            .get(&win)
-            .and_then(|t| t.get(&ev))
-            .is_some_and(|v| !v.is_empty())
-    }
-
     /// List every window that has at least one callback registered
     /// for `ev`. Used by `Ui::dispatch_tick`.
     pub fn wins_with_event(&self, ev: WinEvent) -> Vec<WinId> {
@@ -333,19 +299,6 @@ mod tests {
         let _ = cbs.clear_all(wid(1));
         assert!(cbs.take_keymap(wid(1), KeyBind::char('q')).is_none());
         assert!(cbs.take_event(wid(1), WinEvent::Submit).is_none());
-    }
-
-    #[test]
-    fn payload_lua_string() {
-        assert_eq!(Payload::None.as_lua_string(), "");
-        assert_eq!(Payload::Selection { index: 3 }.as_lua_string(), "3");
-        assert_eq!(
-            Payload::Text {
-                content: "hi".into()
-            }
-            .as_lua_string(),
-            "hi"
-        );
     }
 
     #[test]
