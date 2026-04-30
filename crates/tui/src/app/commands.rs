@@ -96,29 +96,9 @@ pub(crate) const RUST_COMMANDS: &[RustCommand] = &[
         handler: cmd_quit,
     },
     RustCommand {
-        name: "clear",
-        desc: Some("start new conversation"),
-        handler: cmd_clear,
-    },
-    RustCommand {
-        name: "new",
-        desc: Some("start new conversation"),
-        handler: cmd_clear,
-    },
-    RustCommand {
         name: "compact",
         desc: Some("compact conversation history"),
         handler: cmd_compact,
-    },
-    RustCommand {
-        name: "fork",
-        desc: Some("fork current session"),
-        handler: cmd_fork,
-    },
-    RustCommand {
-        name: "branch",
-        desc: Some("fork current session"),
-        handler: cmd_fork,
     },
 ];
 
@@ -140,19 +120,10 @@ fn cmd_quit(_: &mut TuiApp, _: Option<String>) -> CommandAction {
     CommandAction::Quit
 }
 
-fn cmd_clear(_: &mut TuiApp, _: Option<String>) -> CommandAction {
-    CommandAction::CancelAndClear
-}
-
 fn cmd_compact(_: &mut TuiApp, arg: Option<String>) -> CommandAction {
     CommandAction::Compact {
         instructions: arg.filter(|s| !s.is_empty()),
     }
-}
-
-fn cmd_fork(app: &mut TuiApp, _: Option<String>) -> CommandAction {
-    app.fork_session();
-    CommandAction::Continue
 }
 
 impl TuiApp {

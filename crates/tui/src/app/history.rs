@@ -77,7 +77,7 @@ impl TuiApp {
             .push((self.core.session.messages.len(), cost));
     }
 
-    pub(super) fn fork_session(&mut self) {
+    pub(crate) fn fork_session(&mut self) {
         if self.core.session.messages.is_empty() {
             self.notify_error("nothing to fork".into());
             return;
