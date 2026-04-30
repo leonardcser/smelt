@@ -267,212 +267,57 @@ Data + resolution + focus/hit-test layer + paint pipeline + first
 float migrations + Buffer-backed list/options/input panels landed
 (C.0 → C.8). C.9 splits across three sessions:
 
-- **C.9a** (landed) — `Anchor::ScreenBottom` for dock-bottom
-  positioning; overlay-path `collapse_when_empty` on Buffer-backed
-  leaves; delete the dead `OptionList` `has_shortcut || has_multi`
-  legacy branch (no consumers). Foundation work — no dialog flips
-  yet.
-- **C.9b** (landed) — flip `confirm.lua` to overlay path. Drop the
-  `kind = "input"` `collapse_when_empty` widget fallback and the
-  unreachable `dialog_open` call site behind it. Thread
-  `placement = "dock_bottom"` + `placement_height` through to
-  `Anchor::ScreenBottom { above_rows: 1 }` + `Percentage(height_pct)`.
-  Add `Overlay::blocks_agent` so confirm's engine-drain gate
-  survives. List leaves now fire `SelectionChanged` on cursor move
-  so confirm.lua tracks the selection across leaf transitions.
-- **C.9c.1** — delete the `dialog.rs` panel-multiplexing path now that
-  every dialog flipped to overlays in C.9b. `Dialog` widget +
-  `DialogConfig` + `PanelWidget` trait + `ListWidget` trait +
-  `PanelContent::Widget` variant + `PanelSnapshot` + `Ui::dialog_open`
-  / `dialog_mut` / `dialog` / `snapshot_dialog_panels` /
-  `focused_dialog_buffer_window` / `sync_float_content` go away. The
-  legacy widget shapes (`crates/ui/src/text_input.rs`,
-  `option_list.rs`) delete with them — their Lua-recipe replacements
-  landed in C.7.x / C.8. `WidgetEvent::{Submit, Cancel, SelectDefault}`
-  drop (no remaining emitters). `LuaInvoke`'s `&[PanelSnapshot]`
-  parameter goes; lua callbacks no longer pull-read panel state.
-  `PanelSpec` / `PanelHeight` / `PanelContent::Buffer` survive in
-  slimmed-down `dialog.rs` (still used by the overlay translator in
-  `tui::lua::ui_ops`). `_panel_focus` Lua FFI dies; `dialog.lua`
-  routes panel `:focus()` through `smelt.win.set_focus(leaf)` for
-  every panel kind (Rust `_open` returns leaves parallel-indexed to
-  `opts.panels`). `FloatConfig` / `Placement` stay alive — picker /
-  cmdline / notification still consume them.
-- **C.9c.2** — migrate notification to Overlay + Anchor. Replace
-  `Ui::notification_open` / `notification_mut` / the `Notification`
-  `Component` widget with a Buffer-backed overlay leaf positioned via
-  `Anchor::Win { target: PROMPT_WIN, attach: NW, row_offset: -1,
-  col_offset: 0 }` (extends `Anchor::Win` with offset support, mirroring
-  `Anchor::Cursor`). `App::open_notification` builds the toast as a
-  Buffer with `Bold` / `Dim` highlight extmarks for label / message;
-  `App::dismiss_notification` calls `close_float(win)` which cascades
-  through `overlay_close`. Drop `sync_notification_float`; the anchor
-  handles positioning. `crates/ui/src/notification.rs` deletes;
-  `Notification` / `NotificationLevel` / `NotificationStyle` retire
-  (level becomes a `bool is_error` param to `open_notification`).
-  `App::notification` keeps its leaf `WinId` shape — closing the leaf
-  cascades through `Ui::win_close` → `overlay_close`.
-- **C.9c.3** (landed) — migrate cmdline to Overlay + Anchor.
-  `Ui::cmdline_open` / `cmdline_mut` / `Ui::cmdline` and the `Cmdline`
-  widget (`crates/ui/src/cmdline.rs`) retire. The `:` cmdline becomes
-  a Buffer-backed input leaf inside a single-row modal overlay
-  anchored via `Anchor::ScreenBottom { above_rows: 1 }` so the status
-  bar stays visible. The leaf carries no Window-level keymap recipe;
-  `App::cmdline_handle_key` runs ahead of compositor dispatch and
-  owns every key (text edit, Backspace-on-empty dismiss, Up/Down
-  history nav, Tab/BackTab/Ctrl+JNKP completer cycling, Ctrl+W word
-  delete, Ctrl+U clear, Esc/Ctrl+C dismiss, Enter submit). Buffer
-  line 0 carries a literal `:` prefix (cursor clamps to columns
-  `>= 1`); submit strips the prefix before dispatch. `WidgetEvent::
-  {SubmitText, TextChanged}` retire (last emitter was the cmdline
-  widget). Overlay paint now `grid.clear`s the overlay rect first
-  so single-glyph modal lines (cmdline `:`) don't leak prompt /
-  statusline content. `Ui::render` resolves the focused-overlay-leaf
-  cursor through a new `compositor.render_with` closure return so
-  the cmdline draws a visible caret (also fixes invisible-cursor in
-  every overlay input panel). Global-chord guard in `events.rs` adds
-  `cmdline_win.is_none()` so Shift+Tab / Ctrl+T / Ctrl+L don't fire
-  while typing a command.
-- **C.9c.4** (landed) — migrate picker dropdown to Overlay + Anchor.
-  Prompt-docked completer picker becomes a Buffer-backed overlay leaf
-  with `cursor_line_highlight` painting selection (cmdline `:`
-  completer doesn't render a picker — C.9c.3's `cmdline_cycle_completer`
-  applies the selected label directly). New `crates/tui/src/picker.rs`
-  carries `PickerItem` + `PickerPlacement` (`ScreenCenter` /
-  `PromptDocked { max_rows }` / `Cursor` / `ScreenBottom`) and `open` /
-  `set_items` / `set_selected` / `forget` over the overlay primitive.
-  Items render as buffer lines `{indent}{prefix}{label}{padding}{description}`
-  with highlight extmarks for per-item accent (prefix only) and the
-  dim description column. Reversed mode (PromptDocked) writes items
-  in reverse so logical 0 sits on the bottom visual row. App-level
-  `picker_state: HashMap<WinId, PickerState>` tracks overlay id +
-  placement + reversed flag + max_rows so `set_items` can resize the
-  outer height constraint each frame; `close_float` calls
-  `picker::forget` before the overlay cascade. `crates/ui/src/picker.rs`
-  + `Ui::picker_open` / `Ui::picker_mut` + the `Picker` / `PickerItem`
-  / `PickerStyle` re-exports retire. `Window::render` drops the
-  `&& ctx.focused` gate on `cursor_line_highlight` so non-focusable
-  list leaves still paint selection. The legacy float-resolution unit
-  tests in `crates/ui/src/lib.rs` retire with the `Picker` Component
-  they relied on; surviving coverage is the overlay test suite next
-  door.
-- **C.9c.5** (landed) — delete the legacy float surface. `FloatConfig`
-  + `WinConfig::Float` + `Placement` (with `FitMax` / `FloatRelative`)
-  retire along with `Ui::focused_float` / `float_at` / `float_ids` /
-  `float_config{,_mut}` / `floats_z_ordered` / `resolve_float{,_rects}`
-  / `sync_float_rects` / `natural_layer_height` / `float_layer_id` /
-  `parse_float_layer_id`. `WinConfig` collapses to `SplitConfig`
-  directly; `Window::is_float` / `is_split` / `zindex` go with it.
-  Tui-side renames: `focused_float_blocks_agent` →
-  `focused_overlay_blocks_agent`, `close_focused_non_blocking_float` →
-  `close_focused_non_blocking_overlay`, `close_float` →
-  `close_overlay_leaf`, `sync_completer_float` →
-  `sync_completer_overlay`. `app/mouse.rs` swaps `focused_float` /
-  `float_at` for `focused_overlay` + `overlay_hit_test` against the
-  active modal. The `WidgetEvent` enum + `Component` trait deletion
-  defers to P1.d when their last consumers (StatusBar, BufferView,
-  WindowView) move into the overlay-leaf model.
+C.9 sub-phases (preparation → flip → demolition):
+
+- **C.9a** ✅ — `Anchor::ScreenBottom`; overlay-path `collapse_when_empty`; dead-branch deletion.
+- **C.9b** ✅ — flip `confirm.lua` to overlay path; `Overlay::blocks_agent`; list `SelectionChanged`.
+- **C.9c.1** ✅ — delete `dialog.rs` panel-multiplexing + `PanelWidget`/`ListWidget`/`Dialog` widget; `_open` returns parallel `leaves`.
+- **C.9c.2** ✅ — notification → Overlay + `Anchor::Win` row/col offsets; `Notification` widget retires.
+- **C.9c.3** ✅ — cmdline → Overlay + `Anchor::ScreenBottom`; `Ui::focused_overlay_cursor`; `paint_overlay` clears its rect.
+- **C.9c.4** ✅ — picker dropdown → Overlay; new `tui::picker` module.
+- **C.9c.5** ✅ — delete `FloatConfig` / `Placement` / `WinConfig::Float` + tui-side float renames.
 
 See `P1.md` for the sub-phase log.
 
 ### P1.d — `Window` as the only interactive unit
 
-P1.d takes the surface registered with the compositor (today three
-`Component` impls: `StatusBar`, `BufferView`, `WindowView`) and folds
-it into `Window::render(buf, slice, ctx)` — the same paint path
-overlay leaves use today via `paint_overlay`. The `Component` trait,
-`WidgetEvent::{Dismiss, Select}`, `BufferView`, `StatusBar`, and
-`WindowView` retire as their last consumers move. Vim and completer
-decompose alongside. Sub-phases land independently, each green at
-the boundary.
+Folds today's three `Component` impls (`StatusBar`, `BufferView`,
+`WindowView`) into `Window::render(buf, slice, ctx)` — same path
+overlay leaves use via `paint_overlay`. `Component` /
+`WidgetEvent::{Dismiss, Select}` / `BufferView` / `StatusBar` /
+`WindowView` retire as their last consumers move. Vim and
+completer decompose alongside. Sub-phases land independently.
 
-#### P1.d.1 — Buffer-backed status line ✅ landed (`65f90fb`)
+- **D.1** ✅ — Buffer-backed status line via `painted_splits`.
+- **D.2a** ✅ — `Window::render` scrollbar + block cursor; `Ui::painted_split_focus`.
+- **D.2b** ✅ — prompt → painted-split Window over `input_display_buf`.
+- **D.3** ✅ — transcript → painted-split Window; selection in `NS_SELECTION`.
+- **D.4** ✅ — `Component` + `WidgetEvent::{Dismiss, Select}` + `KeyResult::{Action, Capture}` retire; `Compositor` slims to renderer-only.
+- **D.5** — vim state machine decomposes. ~3500 LOC across App / Buffer / Window / Clipboard. Splits:
+  - **5a** ✅ — `VimMode` → App.
+  - **5b** ✅ — kill ring → App-level `Clipboard`.
+  - **5c** ✅ — persistent per-Window vim state → `VimWindowState`.
+  - **5d** — registers / dot-repeat / undo → Buffer (pairs with `edit_buffer.rs` merge).
+  - **5e** ✅ — in-flight key state hoists onto `VimWindowState`; `Vim` collapses to ZST.
+  - **5f.1** ✅ — inline `WindowCursor` onto `Window`; delete `window_cursor.rs`.
+  - **5f.2a** ✅ — drop `Vim` ZST; methods → free fns; `vim_enabled: bool`.
+  - **5f.2b** ✅ — lift `motions` + `text_objects` to top-level primitives.
+  - **5f.2c** ✅ — collapse `vim/` dirs to flat modules.
+  - **5f.2d** — flatten dispatcher to recipe-style registrations (gated on Lua keymap registry from P3.b/P4).
+- **D.6** — completer state machine decomposes:
+  - Ghost text → extmark in `"completer"` namespace on prompt Buffer.
+  - Picker dropdown → Overlay (already shipped in C.9c.4; this sub-phase folds sync into a Lua recipe).
+  - Behaviour → keymap recipe on prompt Window.
+  - `crates/tui/src/completer/` + `attachment/` collapse along these axes.
 
-Migrate the `"status"` compositor layer onto a Buffer-backed
-painted-split Window (the `painted_splits` mechanism prompt and
-transcript reuse). See `P1.md` for detail.
-
-#### P1.d.2 — Prompt onto Window::render ✅ landed
-
-Migrate the `"prompt"` / `"prompt_input"` compositor layers onto
-the painted-split path. Two sessions:
-
-- **5f.2a** ✅ (`482da6f`) — `Window::render` paints scrollbar +
-  block cursor; `Ui::painted_split_focus` lands.
-- **5f.2b** ✅ (`3dadb59`) — prompt migrates to a painted-split
-  Window over a unified `input_display_buf`; `WindowView` chrome
-  intermediate retires.
-
-#### P1.d.3 — Transcript onto Window::render ✅ landed (`51c3416`)
-
-Transcript becomes a painted-split Window over a fresh
-`transcript_display_buf`; selection lands in `NS_SELECTION`;
-`WindowView` / `BufferView` / `content/scrollbar.rs` retire. Soft
-wrap onto `Buffer::wrap_at` defers to P1.a-tail.
-
-#### P1.d.4 — Retire `Component` + `WidgetEvent::{Dismiss, Select}` ✅ landed
-
-`crates/ui/src/component.rs` retires; `Compositor` slims to
-renderer-only (grid + diff + render closure); `Ui` drops the
-`splits` / `add_layer` / `set_layer_rect` / `focus_layer` /
-`set_layout` / `resolve_splits` machinery. See `P1.md` for the
-detailed list.
-
-#### P1.d.5 — Vim state machine decomposes
-
-End state: `crates/ui/src/vim/` and `window_cursor.rs` deleted.
-~3500 LOC of intertwined per-prompt state redistributes across
-App / Buffer / Window / Clipboard. Splits across sessions:
-
-- **5a** ✅ landed (`1ffe67e`) — `VimMode` → App.
-- **5b** ✅ landed (`a590c9c`) — kill ring → App-level `Clipboard`.
-- **5c** ✅ landed (`e262f75`) — persistent per-Window vim state
-  (Visual anchor, last `f`/`t`, curswant mirror) → `VimWindowState`
-  on Window + `WindowCursor.curswant`. Vim now in-flight only.
-- **5d** — Registers, dot-repeat, undo → Buffer. Pairs with
-  `edit_buffer.rs` merge (P1.a-tail).
-- **5e** ✅ landed (`dfa1fad`) — in-flight key state
-  (`sub`/`count1`/`count2`) + count/mode helpers hoist onto
-  `VimWindowState`; `Vim` collapses to ZST kept as `Option<Vim>`
-  enable marker on Window.
-- **5f.1** ✅ landed — inline `WindowCursor` (anchor + curswant)
-  onto `Window`; delete `window_cursor.rs`. `VimContext::cursor`
-  shrinks to `curswant: &mut Option<usize>`.
-- **5f.2** — Vim becomes a per-Window keymap recipe; delete
-  `crates/ui/src/vim/`. Splits: **5f.2a** ✅ drop the `Vim` ZST
-  (`Option<Vim>` → `vim_enabled: bool`; methods → free fns /
-  `VimWindowState`); **5f.2b** ✅ lifted `motions` / `text_objects`
-  out of `vim/` as `crate::motions` + `crate::text_objects`
-  primitives; `FindKind` moved with them; **5f.2c** ✅ collapsed
-  both `vim/` directories — `crates/ui/src/vim/mod.rs` →
-  `crates/ui/src/vim.rs`; `crates/tui/src/vim/` re-export shim
-  retired; tui-side imports route through `ui::vim::*` /
-  `ui::VimMode` directly. Dispatcher flatten to recipe-style
-  registrations defers to **5f.2d** (gated on the keymap-recipe
-  registry that lands with P3.b/P4 — recipes are Lua territory,
-  so a Rust-side flat table would be throwaway scaffolding).
-
-#### P1.d.6 — Completer state machine decomposes
-
-- Ghost text → extmark in a `"completer"` namespace on the prompt
-  Buffer.
-- Picker dropdown → an `Overlay` over a list Window (already shipped
-  in C.9c.4; this sub-phase folds the sync logic into a Lua-shaped
-  recipe).
-- Behaviour → keymap recipe on the prompt Window.
-- Existing `crates/tui/src/completer/` and
-  `crates/tui/src/attachment/` collapse along these axes.
-
-`Window` ends with: cursor, scroll, selection, keymap recipe id,
+End state for `Window`: cursor, scroll, selection, keymap recipe id,
 focusable flag, gutters; `render(buf, grid)`,
-`handle(event, ctx, host) -> Status`; no multiple traits, no
+`handle(event, ctx, host) -> Status`. No multiple traits, no
 `Component`/`PanelWidget`.
 
-- **Tests (L1):** as the vim state machine breaks open (P1.d.5), the existing
-  vim unit tests rewrite to the Helix-style marker DSL — `(input, keys, output)`
-  3-tuples with `#[primary|]#` selection markers — added next to Buffer /
-  Window / vim-recipe code under `#[cfg(test)] mod tests`. The marker-DSL
-  parser (~100 LOC) lands there. See `TESTING.md` § L1.
+**Tests (L1):** vim unit tests port to Helix-style marker DSL
+`(input, keys, output)` with `#[primary|]#` selection markers as
+the state machine breaks open. See `TESTING.md` § L1.
 
 ### P1.e — `UiHost` trait + `Status` + event types
 
@@ -514,39 +359,10 @@ The whole rewrite is too big for one session; it splits into
 incremental sub-phases that each end green. Order is by what unblocks
 the rest.
 
-#### P1.f.1 — Collapse focus slots into a single `Ui::focus` ✅ landed
-
-Replace the dual `overlay_focus: Option<WinId>` + `painted_split_focus:
-Option<WinId>` storage with a single `focus: Option<WinId>` slot.
-Focus discrimination (overlay leaf vs painted split) becomes a
-lookup-time derivation via `overlay_for_leaf` / `painted_splits.contains`.
-`focused_overlay_cursor` and `focused_painted_split_cursor` filter
-the unified slot by kind. Behaviour identical; storage normalized.
-
-#### P1.f.2 — `overlays: HashMap<OverlayId, Overlay>` → `Vec<Overlay>` ✅ landed
-
-Storage swap: `Vec<(OverlayId, Overlay)>` keeping the stable
-`OverlayId(u32)` counter as the public handle. Insertion order is
-preserved naturally via `push`; `overlays_in_z_order` simplifies to
-a stable `sort_by_key(|_, o| o.z)` over a snapshot — Rust's stable
-sort holds the vec's insertion order for equal-z entries, which is
-the contract the prior `(o.z, id.0)` composite key encoded
-explicitly. `overlay_close` becomes `position` + `remove`; lookups
-collapse to `iter().find_map`. Public API unchanged.
-
-#### P1.f.3 — `splits: LayoutTree` owned by `Ui` ✅ landed
-
-`Ui::set_layout(tree)` replaces `register_painted_split` /
-`unregister_painted_split` / `set_window_rect`; rects resolve on
-demand. Status is a `Length(1)` leaf inside the prompt+status inner
-vbox; `compute_prompt`'s `fixed = chrome + 1` (status owns its row).
-
-#### P1.f.4 — `capture: Option<HitTarget>` for in-flight gestures
-
-Move drag-state tracking from `app/mouse.rs` onto `Ui::capture`.
-`Ui::dispatch_event` consults capture before hit_test; mouse-up
-clears it. Auto-clears when the captured target unregisters
-(painted split removed, overlay closed).
+- **F.1** ✅ — collapse dual focus slots into a single `Ui::focus`.
+- **F.2** ✅ — `overlays: HashMap` → `Vec<(OverlayId, Overlay)>`.
+- **F.3** ✅ — `splits: LayoutTree` owned by `Ui`; `set_layout(tree)`.
+- **F.4** ✅ — `capture: Option<HitTarget>` for in-flight gestures.
 
 #### P1.f.5 — Global `cursor_shape: CursorShape`
 
