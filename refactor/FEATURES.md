@@ -99,7 +99,7 @@ to invoke_ the feature.
 | Command                                           | Source today                      | Restored by                      | Status  |
 | ------------------------------------------------- | --------------------------------- | -------------------------------- | ------- |
 | `/clear`, `/new`                                  | `runtime/lua/smelt/plugins/session.lua` | P4.e                       | working — Lua command (`04f6419`); calls `smelt.session.reset()` |
-| `/quit`, `/exit`, `:q`, `:qa`, `:wq`, `:wqa`      | `app/commands.rs::cmd_quit`       | P4.e                             | working |
+| `/quit`, `/exit`, `:q`, `:qa`, `:wq`, `:wqa`      | `runtime/lua/smelt/plugins/quit.lua` | P4.e                          | working — Lua command (`7c028d8`); flips `pending_quit` via `smelt.quit()` |
 | `/rewind`                                         | `plugins/rewind.lua`              | P4.d → `dialogs/rewind.lua`      | working |
 | `/resume`                                         | `plugins/resume.lua`              | P4.d → `dialogs/resume.lua`      | working |
 | `/compact [instructions]`                         | `app/commands.rs::cmd_compact`    | P4.e                             | working |
