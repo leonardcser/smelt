@@ -183,9 +183,7 @@ impl TuiApp {
                         } else {
                             self.process_input(&text)
                         };
-                        if self.apply_input_outcome(outcome, content, &display) {
-                            return true;
-                        }
+                        self.apply_input_outcome(outcome, content, &display);
                     } else if !self.queued_messages.is_empty() {
                         // Empty submit with queued messages: pop and send the
                         // oldest one immediately.
@@ -196,9 +194,7 @@ impl TuiApp {
                         } else {
                             let outcome = self.process_input(&queued);
                             let content = Content::text(queued.clone());
-                            if self.apply_input_outcome(outcome, content, &queued) {
-                                return true;
-                            }
+                            self.apply_input_outcome(outcome, content, &queued);
                         }
                     }
                 }
