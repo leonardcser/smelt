@@ -371,390 +371,6 @@ impl TuiApp {
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Idle);
     }
 
-    // ── Engine events ────────────────────────────────────────────────────
-
-    pub fn handle_engine_event(
-        &mut self,
-        ev: EngineEvent,
-        turn_id: u64,
-        pending: &mut Vec<PendingTool>,
-    ) -> SessionControl {
-        match ev {
-            EngineEvent::Ready => SessionControl::Continue,
-            EngineEvent::TokenUsage {
-                usage,
-                tokens_per_sec,
-                cost_usd,
-                background,
-            } => {
-                if !background {
-                    if let Some(tokens) = usage.prompt_tokens {
-                        if tokens > 0 {
-                            self.core.session.context_tokens = Some(tokens);
-                        }
-                    }
-                    if let Some(tps) = tokens_per_sec {
-                        self.working.record_tokens_per_sec(tps);
-                    }
-                    {
-                        self.working.begin(TurnPhase::Working);
-                    };
-                }
-                let cost = cost_usd.unwrap_or(0.0);
-                self.core.session.session_cost_usd += cost;
-                crate::metrics::append(&crate::metrics::MetricsEntry {
-                    timestamp_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                    prompt_tokens: usage.prompt_tokens.unwrap_or(0),
-                    completion_tokens: usage.completion_tokens.unwrap_or(0),
-                    model: self.core.config.model.clone(),
-                    cost_usd,
-                    cache_read_tokens: usage.cache_read_tokens,
-                    cache_write_tokens: usage.cache_write_tokens,
-                    reasoning_tokens: usage.reasoning_tokens,
-                });
-                // Auxiliary requests (title, compaction, btw, predict)
-                // are excluded so a `tokens_used` subscriber sees only
-                // the user-visible context flow. Sub-agent token usage
-                // routes through `agent.context_tokens` separately and
-                // doesn't touch this cell.
-                if !background {
-                    self.core
-                        .cells
-                        .set_dyn("tokens_used", std::rc::Rc::new(usage));
-                }
-                SessionControl::Continue
-            }
-            EngineEvent::ToolOutput { call_id, chunk } => {
-                self.append_active_output(&call_id, &chunk);
-                SessionControl::Continue
-            }
-            EngineEvent::Steered { text, count } => {
-                self.flush_streaming_thinking();
-                self.flush_streaming_text();
-                let drain_n = count.min(self.queued_messages.len());
-                self.queued_messages.drain(..drain_n);
-                if drain_n > 0 {
-                    self.push_block(Block::User {
-                        text,
-                        image_labels: vec![],
-                    });
-                }
-                SessionControl::Continue
-            }
-            EngineEvent::ThinkingDelta { delta } => {
-                self.append_streaming_thinking(&delta);
-                SessionControl::Continue
-            }
-            EngineEvent::Thinking { content } => {
-                self.push_block(Block::Thinking { content });
-                SessionControl::Continue
-            }
-            EngineEvent::TextDelta { delta } => {
-                self.append_streaming_text(&delta);
-                SessionControl::Continue
-            }
-            EngineEvent::Text { content } => {
-                self.flush_streaming_text();
-                self.push_block(Block::Text { content });
-                SessionControl::Continue
-            }
-            EngineEvent::ToolStarted {
-                call_id,
-                tool_name,
-                args,
-                summary,
-            } => {
-                self.flush_streaming_thinking();
-                self.flush_streaming_text();
-                if tool_name != "spawn_agent" {
-                    self.start_tool(
-                        call_id.clone(),
-                        tool_name.clone(),
-                        summary.clone(),
-                        args.clone(),
-                    );
-                }
-                self.core.cells.set_dyn(
-                    "tool_start",
-                    std::rc::Rc::new(crate::app::cells::ToolStart {
-                        tool: tool_name.clone(),
-                        args: args.clone(),
-                    }),
-                );
-                self.drain_cells_pending();
-                self.flush_lua_callbacks();
-                pending.push(PendingTool {
-                    call_id,
-                    name: tool_name,
-                    args,
-                });
-                SessionControl::Continue
-            }
-            EngineEvent::ToolFinished {
-                call_id,
-                result,
-                elapsed_ms,
-            } => {
-                let mut finished_tool_name: Option<String> = None;
-                let mut finished_is_error = false;
-                if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
-                    let removed = pending.remove(idx);
-                    if removed.name == "spawn_agent" {
-                        let agent_id = result
-                            .content
-                            .strip_prefix("agent ")
-                            .and_then(|s| s.split_whitespace().next())
-                            .unwrap_or("")
-                            .to_string();
-                        self.finish_active_agent(&agent_id);
-                        if let Some(idx) = self
-                            .agents
-                            .iter()
-                            .position(|a| a.agent_id == agent_id && a.blocking)
-                        {
-                            let agent = &self.agents[idx];
-                            self.pending_agent_blocks.push((
-                                agent.agent_id.clone(),
-                                protocol::AgentBlockData {
-                                    slug: agent.slug.clone(),
-                                    tool_calls: agent
-                                        .tool_calls
-                                        .iter()
-                                        .map(|tc| protocol::AgentToolData {
-                                            tool_name: tc.tool_name.clone(),
-                                            summary: tc.summary.clone(),
-                                            elapsed_ms: tc.elapsed.map(|d| d.as_millis() as u64),
-                                            is_error: matches!(tc.status, ToolStatus::Err),
-                                        })
-                                        .collect(),
-                                },
-                            ));
-                            let pid = agent.pid;
-                            engine::registry::kill_agent(pid);
-                            self.agents.remove(idx);
-                            self.refresh_agent_counts();
-                            self.sync_agent_snapshots();
-                        }
-                    } else {
-                        finished_tool_name = Some(removed.name.clone());
-                        finished_is_error = result.is_error;
-                        let status = if result.is_error {
-                            ToolStatus::Err
-                        } else {
-                            ToolStatus::Ok
-                        };
-                        let render_cache =
-                            crate::app::transcript_cache::build_tool_output_render_cache(
-                                &removed.name,
-                                &removed.args,
-                                &result.content,
-                                result.is_error,
-                                result.metadata.as_ref(),
-                            );
-                        let output = Some(Box::new(ToolOutput {
-                            content: result.content,
-                            is_error: result.is_error,
-                            metadata: result.metadata,
-                            render_cache,
-                        }));
-                        let elapsed = elapsed_ms.map(Duration::from_millis);
-                        self.finish_tool(&call_id, status, output, elapsed);
-                    }
-                }
-                if let Some(tool_name) = finished_tool_name {
-                    self.core.cells.set_dyn(
-                        "tool_end",
-                        std::rc::Rc::new(crate::app::cells::ToolEnd {
-                            tool: tool_name,
-                            is_error: finished_is_error,
-                            elapsed_ms,
-                        }),
-                    );
-                    self.drain_cells_pending();
-                    self.flush_lua_callbacks();
-                }
-                self.refresh_agent_counts();
-                SessionControl::Continue
-            }
-            EngineEvent::RequestPermission {
-                request_id,
-                call_id,
-                tool_name,
-                args,
-                confirm_message,
-                approval_patterns,
-                summary,
-            } => SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
-                call_id,
-                tool_name,
-                desc: confirm_message,
-                args,
-                approval_patterns,
-                outside_dir: None,
-                summary,
-                request_id,
-            })),
-            EngineEvent::Retrying { delay_ms, attempt } => {
-                self.working.begin(TurnPhase::Retrying {
-                    delay: Duration::from_millis(delay_ms),
-                    attempt,
-                });
-                SessionControl::Continue
-            }
-            EngineEvent::ProcessCompleted { id, exit_code } => {
-                self.handle_process_completed(id, exit_code);
-                SessionControl::Continue
-            }
-            EngineEvent::CompactionComplete { messages } => {
-                if self.pending_compact_epoch != self.compact_epoch {
-                    {
-                        self.working.finish(TurnOutcome::Done);
-                    };
-                    return SessionControl::Continue;
-                }
-                self.apply_compaction(messages);
-                SessionControl::Continue
-            }
-            EngineEvent::TitleGenerated { title, slug } => {
-                self.handle_title_generated(title, slug);
-                SessionControl::Continue
-            }
-            EngineEvent::BtwResponse { content } => {
-                let _ = content;
-                SessionControl::Continue
-            }
-            EngineEvent::InputPrediction { text, generation } => {
-                if generation == self.predict_generation {
-                    self.handle_input_prediction(text);
-                }
-                SessionControl::Continue
-            }
-            EngineEvent::EngineAskResponse { id, content } => {
-                self.core.lua.fire_callback(id, &content);
-                SessionControl::Continue
-            }
-            EngineEvent::Messages {
-                turn_id: id,
-                messages,
-            } => {
-                if id == turn_id {
-                    self.set_history(messages);
-                }
-                SessionControl::Continue
-            }
-            EngineEvent::TurnComplete {
-                turn_id: id,
-                messages,
-                meta,
-            } => {
-                if id != turn_id {
-                    return SessionControl::Continue;
-                }
-                self.set_history(messages);
-                let payload = meta.clone().unwrap_or(protocol::TurnMeta {
-                    elapsed_ms: 0,
-                    avg_tps: None,
-                    interrupted: false,
-                    tool_elapsed: std::collections::HashMap::new(),
-                    agent_blocks: std::collections::HashMap::new(),
-                });
-                self.core
-                    .cells
-                    .set_dyn("turn_complete", std::rc::Rc::new(payload));
-                self.pending_turn_meta = meta;
-                SessionControl::Done
-            }
-            EngineEvent::TurnError { message } => {
-                {
-                    self.working.finish(TurnOutcome::Done);
-                };
-                self.core.cells.set_dyn(
-                    "turn_error",
-                    std::rc::Rc::new(crate::app::cells::TurnError {
-                        message: message.clone(),
-                    }),
-                );
-                self.notify_error(message);
-                SessionControl::Done
-            }
-            EngineEvent::Shutdown { .. } => SessionControl::Done,
-            EngineEvent::AgentExited {
-                agent_id,
-                exit_code,
-            } => {
-                self.handle_agent_exited(&agent_id, exit_code);
-                SessionControl::Continue
-            }
-            EngineEvent::AgentMessage {
-                from_id,
-                from_slug,
-                message,
-            } => {
-                // Suppress AgentMessage rendering for blocking agents — their
-                // result flows through the spawn_agent tool output instead.
-                let is_blocking = self
-                    .agents
-                    .iter()
-                    .any(|a| a.agent_id == from_id && a.blocking);
-                if !is_blocking {
-                    self.push_block(Block::AgentMessage {
-                        from_id: from_id.clone(),
-                        from_slug: from_slug.clone(),
-                        content: message.clone(),
-                    });
-                }
-                // Forward to engine so it enters the conversation history
-                // (deferred until current tool batch completes).
-                self.core.engine.send(protocol::UiCommand::AgentMessage {
-                    from_id,
-                    from_slug,
-                    message,
-                });
-                SessionControl::Continue
-            }
-            EngineEvent::ExecutePluginTool {
-                request_id,
-                call_id,
-                tool_name,
-                args,
-            } => {
-                // Plugins open their own confirm dialogs via
-                // `smelt.ui.dialog.open` from inside `execute`. The
-                // core no longer special-cases plugin tools here.
-                self.handle_plugin_tool(request_id, call_id, tool_name, args);
-                SessionControl::Continue
-            }
-            EngineEvent::EvaluatePluginToolHooks {
-                request_id,
-                tool_name,
-                args,
-                ..
-            } => {
-                let _guard = crate::lua::install_app_ptr(self);
-                let hooks = self.core.lua.evaluate_plugin_hooks(&tool_name, &args);
-                drop(_guard);
-                self.core
-                    .engine
-                    .send(protocol::UiCommand::PluginToolHooksResult { request_id, hooks });
-                SessionControl::Continue
-            }
-            EngineEvent::CoreToolResult {
-                request_id,
-                content,
-                is_error,
-                metadata,
-            } => {
-                self.core
-                    .lua
-                    .resolve_core_tool_call(request_id, content, is_error, metadata);
-                SessionControl::Continue
-            }
-        }
-    }
-
     /// Execute a plugin-defined tool by calling the Lua handler registered for
     /// it. If no handler is found, returns an error result to the engine.
     ///
@@ -762,7 +378,7 @@ impl TuiApp {
     /// completes synchronously and the result is forwarded right away.
     /// A handler that yields (e.g. via `smelt.ui.dialog.open`) parks;
     /// its result arrives later through `drive_tasks()`.
-    fn handle_plugin_tool(
+    pub(super) fn handle_plugin_tool(
         &mut self,
         request_id: u64,
         call_id: String,
@@ -799,82 +415,7 @@ impl TuiApp {
         }
     }
 
-    /// Handle engine events that arrive when no agent turn is active.
-    pub(super) fn handle_engine_event_idle(&mut self, ev: EngineEvent) {
-        match ev {
-            // Ignore stale Messages snapshots from cancelled/completed turns.
-            // These would overwrite a freshly cleared history (e.g. after /clear).
-            EngineEvent::Messages { .. } => {}
-            EngineEvent::TurnComplete { messages, .. }
-                // Accept final messages from a just-cancelled turn so that
-                // partial assistant content and tool results are persisted.
-                // Don't rebuild the screen — the displayed blocks already
-                // reflect what the user saw at cancel time.
-                if !messages.is_empty() =>
-            {
-                self.set_history(messages);
-                self.save_session();
-            }
-            EngineEvent::CompactionComplete { messages } => {
-                if self.pending_compact_epoch != self.compact_epoch {
-                    self.working.finish(TurnOutcome::Done);
-                    return;
-                }
-                self.apply_compaction(messages);
-            }
-            EngineEvent::TitleGenerated { title, slug } => {
-                self.handle_title_generated(title, slug);
-            }
-            EngineEvent::BtwResponse { content } => {
-                let _ = content;
-            }
-            EngineEvent::InputPrediction { text, generation }
-                if generation == self.predict_generation =>
-            {
-                self.handle_input_prediction(text);
-            }
-            EngineEvent::EngineAskResponse { id, content } => {
-                self.core.lua.fire_callback(id, &content);
-            }
-            EngineEvent::ProcessCompleted { id, exit_code } => {
-                self.handle_process_completed(id, exit_code);
-            }
-            EngineEvent::TurnError { message } => {
-                self.working.finish(TurnOutcome::Done);
-                self.notify_error(message);
-            }
-            EngineEvent::AgentExited {
-                agent_id,
-                exit_code,
-            } => {
-                self.handle_agent_exited(&agent_id, exit_code);
-            }
-            EngineEvent::AgentMessage {
-                from_id,
-                from_slug,
-                message,
-            } => {
-                let is_blocking = self
-                    .agents
-                    .iter()
-                    .any(|a| a.agent_id == from_id && a.blocking);
-                if !is_blocking {
-                    self.push_block(Block::AgentMessage {
-                        from_id: from_id.clone(),
-                        from_slug: from_slug.clone(),
-                        content: message.clone(),
-                    });
-                    // Queue as an Agent role message to trigger a turn without
-                    // rendering a duplicate User block.
-                    self.pending_agent_messages
-                        .push(protocol::Message::agent(&from_id, &from_slug, &message));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_title_generated(&mut self, title: String, slug: String) {
+    pub(super) fn handle_title_generated(&mut self, title: String, slug: String) {
         if !self.pending_title {
             return;
         }
@@ -888,7 +429,7 @@ impl TuiApp {
         engine::registry::update_slug(std::process::id(), &slug);
     }
 
-    fn handle_input_prediction(&mut self, text: String) {
+    pub(super) fn handle_input_prediction(&mut self, text: String) {
         if self.input.buf.is_empty() {
             self.set_prompt_completer(text);
         }
@@ -940,7 +481,7 @@ impl TuiApp {
         }
     }
 
-    fn handle_agent_exited(&mut self, agent_id: &str, exit_code: Option<i32>) {
+    pub(super) fn handle_agent_exited(&mut self, agent_id: &str, exit_code: Option<i32>) {
         if let Some(c) = exit_code {
             if c != 0 {
                 self.push_block(Block::Hint {
@@ -1138,7 +679,7 @@ impl TuiApp {
     }
 
     /// Update the shared snapshots so the /agents dialog sees live data.
-    fn sync_agent_snapshots(&self) {
+    pub(super) fn sync_agent_snapshots(&self) {
         let snaps: Vec<crate::app::AgentSnapshot> = self
             .agents
             .iter()
@@ -1153,7 +694,7 @@ impl TuiApp {
         *self.agent_snapshots.lock().unwrap() = snaps;
     }
 
-    fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
+    pub(super) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
         let msg = match exit_code {
             Some(0) => format!("Background process {id} has finished."),
             Some(c) => format!("Background process {id} exited with code {c}."),
