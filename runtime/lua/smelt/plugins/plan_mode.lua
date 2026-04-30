@@ -137,7 +137,7 @@ local function activate()
             {
               label = "yes, and auto-apply",
               action = "approve",
-              on_select = function() smelt.engine.set_mode("apply") end,
+              on_select = function() smelt.mode.set("apply") end,
             },
             { label = "yes", action = "approve" },
             { label = "no",  action = "deny"    },
@@ -176,5 +176,5 @@ end)
 
 -- If we're already in plan mode at session start, activate.
 smelt.au.on("session_started", function()
-  if smelt.engine.mode() == "plan" then activate() end
+  if smelt.mode.get() == "plan" then activate() end
 end)
