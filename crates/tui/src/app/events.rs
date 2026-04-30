@@ -33,7 +33,7 @@ impl App {
             // and no cmdline overlay is open — otherwise the dialog's
             // keymap (e.g. Confirm's BackTab handler) or the cmdline's
             // text-edit recipe gets first dibs.
-            if self.ui.focused_overlay().is_none() && self.cmdline_win.is_none() {
+            if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
                 let ctx = self
                     .input
                     .key_context(self.agent.is_some(), false, self.vim_mode);
