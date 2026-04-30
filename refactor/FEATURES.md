@@ -254,6 +254,7 @@ to invoke_ the feature.
 | `smelt.engine.model` / `models` / `set_model`           | `lua/api/state.rs`                  | P3.b                                       | working        |
 | `smelt.engine.history`                                  | `lua/api/state.rs`                  | P3.b                                       | working        |
 | `smelt.engine.cancel`                                   | `lua/api/state.rs`                  | P3.b                                       | working        |
+| `smelt.reasoning.{get,set,cycle}`                       | `lua/api/reasoning.rs`              | P4.e (carved from `smelt.engine`)          | working        |
 | `smelt.ui.dialog.open` / `open_handle`                  | `dialog.lua` + `lua/api/widgets.rs` | P3.b → `lua/api/ui.rs`                     | working        |
 | `smelt.ui.picker`                                       | `picker.lua` + `lua/api/widgets.rs` | P3.b                                       | working        |
 | `smelt.ui.ghost_text`                                   | `lua/api/widgets.rs`                | P3.b                                       | working        |
