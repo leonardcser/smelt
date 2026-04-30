@@ -55,4 +55,4 @@ smelt.cmd.register("btw", function(args)
       },
     })
   end)
-end, { desc = "ask a side question", arg_hint = "<question>" })
+end, { desc = "ask a side question" })

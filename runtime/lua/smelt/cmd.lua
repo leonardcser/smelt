@@ -76,7 +76,6 @@ function smelt.cmd.picker(name, opts)
   end, {
     desc       = opts.desc,
     args       = args,
-    arg_hint   = opts.arg_hint,
     while_busy = opts.while_busy,
     startup_ok = opts.startup_ok,
   })
