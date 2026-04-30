@@ -472,12 +472,13 @@ them. Soft-wrap onto `Buffer::wrap_at` is still pending — wrap state
 remains a per-line projection step until the `BufferParser` hooks
 land in P1.a-tail.
 
-#### P1.d.4 — Retire `Component` + `WidgetEvent::{Dismiss, Select}`
+#### P1.d.4 — Retire `Component` + `WidgetEvent::{Dismiss, Select}` ✅ landed
 
-With every consumer migrated, delete the trait + the two surviving
-event variants. `crates/ui/src/component.rs`
-retires. The compositor becomes overlay-aware only — no
-`Box<dyn Component>` storage.
+`crates/ui/src/component.rs` retires; `Compositor` slims to
+renderer-only (grid + diff + render closure); `Ui` drops the
+`splits` / `add_layer` / `set_layer_rect` / `focus_layer` /
+`set_layout` / `resolve_splits` machinery. See `P1.md` for the
+detailed list.
 
 #### P1.d.5 — Vim state machine decomposes
 

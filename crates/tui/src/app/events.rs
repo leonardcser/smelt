@@ -54,10 +54,9 @@ impl App {
         }
 
         // Overlay focus: when an overlay leaf is focused (or a modal
-        // overlay is active), route keys through the compositor.
-        // The Callbacks registry handles per-window keymaps,
-        // auto-dispatches widget actions into `WinEvent::Submit/Dismiss`,
-        // and any Rust callbacks queue `AppOp`s drained below. Mouse
+        // overlay is active), route keys through the focused leaf's
+        // keymap registry. Per-window keymaps fire from `Callbacks`;
+        // any Rust callbacks queue `AppOp`s drained below. Mouse
         // events fall through so the regular `handle_mouse` path can
         // run wheel/scrollbar logic over the overlay's rect.
         if self.ui.focused_overlay().is_some() || self.ui.active_modal().is_some() {

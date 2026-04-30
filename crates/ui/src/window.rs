@@ -1,14 +1,27 @@
 use crate::buffer::Buffer;
-use crate::component::DrawContext;
 use crate::edit_buffer::EditBuffer;
 use crate::grid::{GridSlice, Style};
 use crate::kill_ring::KillRing;
 use crate::layout::{Gutters, Rect};
 use crate::text::{byte_to_cell, cell_to_byte};
+use crate::theme::Theme;
 use crate::vim::{Action, ViMode, Vim, VimContext};
 use crate::window_cursor::WindowCursor;
 use crate::{BufId, WinId};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+
+/// Per-frame paint context handed to `Window::render`. Carries terminal
+/// size + theme so renderers don't reach back into the host.
+#[derive(Default, Clone)]
+pub struct DrawContext {
+    pub terminal_width: u16,
+    pub terminal_height: u16,
+    pub focused: bool,
+    /// Theme registry resolved per-frame from `Ui`. Renderers read named
+    /// highlight groups (`"Visual"`, `"SmeltAccent"`, …) via
+    /// `theme.get(name)`; missing names return `Style::default()`.
+    pub theme: Theme,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewportHit {

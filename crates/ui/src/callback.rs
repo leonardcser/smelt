@@ -11,9 +11,7 @@
 //! callbacks see via their shared ops handle, or through direct
 //! `ui::Ui` mutations — no return channel for effect strings.
 //!
-//! This is the single behavior mechanism. No `Dialog` /
-//! `DialogBehavior` trait exists; `Component::handle_key` remains as
-//! the fallback for generic nav when no keymap matches.
+//! This is the single behavior mechanism for window input.
 use crate::WinId;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
@@ -123,16 +121,15 @@ impl Payload {
 pub enum CallbackResult {
     /// Callback handled the event; no further routing.
     Consumed,
-    /// Callback passes; fall through to `Component::handle_key`
-    /// (for keymap callbacks) or do nothing (for event callbacks).
+    /// Callback passes; the dispatcher reports `KeyResult::Ignored`
+    /// (for keymap callbacks) or does nothing (for event callbacks).
     Pass,
     /// Consumed, and additionally fire a `WinEvent` on the same
     /// window with the given payload. The dispatcher translates
     /// this into a follow-up `Ui::dispatch_event` after the Rust
     /// callback returns. Lets a built-in keymap callback (e.g. a
     /// list's Enter binding) trigger the same on-event handlers
-    /// (`smelt.win.on_event(win, "submit", fn)`) that
-    /// Component-emitted `WidgetEvent`s would.
+    /// (`smelt.win.on_event(win, "submit", fn)`).
     Event(WinEvent, Payload),
 }
 
@@ -181,10 +178,9 @@ pub struct Callbacks {
     keymaps: HashMap<WinId, HashMap<KeyBind, Callback>>,
     events: HashMap<WinId, HashMap<WinEvent, Vec<Callback>>>,
     /// Per-window fallback key handler tried after specific `keymaps`
-    /// miss and before `Component::handle_key` runs. Useful for
-    /// catch-all filter inputs (`Resume` types any printable char
-    /// into its query buffer) where enumerating every chord would
-    /// be absurd.
+    /// miss. Useful for catch-all filter inputs (`Resume` types any
+    /// printable char into its query buffer) where enumerating every
+    /// chord would be absurd.
     key_fallback: HashMap<WinId, Callback>,
 }
 
@@ -255,9 +251,8 @@ impl Callbacks {
     }
 
     /// Register a per-window fallback key handler. Runs after
-    /// specific `keymaps` miss and before `Component::handle_key`.
-    /// Returns the displaced `Callback` (if any) so Lua-side handles
-    /// can be cleaned up.
+    /// specific `keymaps` miss. Returns the displaced `Callback` (if
+    /// any) so Lua-side handles can be cleaned up.
     #[must_use]
     pub fn set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
         self.key_fallback.insert(win, cb)
@@ -272,8 +267,6 @@ impl Callbacks {
     }
 
     /// True when at least one callback is registered for `(win, ev)`.
-    /// Used by the auto-dispatch path to decide whether to translate
-    /// widget `KeyResult::Action` strings into event dispatches.
     pub fn has_event(&self, win: WinId, ev: WinEvent) -> bool {
         self.events
             .get(&win)
