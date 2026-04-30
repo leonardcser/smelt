@@ -2,8 +2,44 @@
 //! messages snapshot, rewind, list / load / delete persisted sessions.
 
 use super::app_read;
-use crate::lua::messages_to_lua;
 use mlua::prelude::*;
+
+fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Table> {
+    let tbl = lua.create_table()?;
+    for (i, msg) in msgs.iter().enumerate() {
+        let entry = lua.create_table()?;
+        let role = match msg.role {
+            protocol::Role::System => "system",
+            protocol::Role::User => "user",
+            protocol::Role::Assistant => "assistant",
+            protocol::Role::Tool => "tool",
+            protocol::Role::Agent => "agent",
+        };
+        entry.set("role", role)?;
+        if let Some(ref c) = msg.content {
+            entry.set("content", c.text_content())?;
+        }
+        if let Some(ref tc) = msg.tool_calls {
+            let calls = lua.create_table()?;
+            for (j, call) in tc.iter().enumerate() {
+                let ct = lua.create_table()?;
+                ct.set("id", call.id.as_str())?;
+                ct.set("name", call.function.name.as_str())?;
+                ct.set("arguments", call.function.arguments.as_str())?;
+                calls.set(j + 1, ct)?;
+            }
+            entry.set("tool_calls", calls)?;
+        }
+        if let Some(ref id) = msg.tool_call_id {
+            entry.set("tool_call_id", id.as_str())?;
+        }
+        if msg.is_error {
+            entry.set("is_error", true)?;
+        }
+        tbl.set(i + 1, entry)?;
+    }
+    Ok(tbl)
+}
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let session_tbl = lua.create_table()?;
