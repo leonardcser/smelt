@@ -34,7 +34,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "_get",
         lua.create_function(|lua, handle_id: u64| {
             let snapshot = crate::lua::with_app(|app| {
-                let entry = app.confirm_requests.get(&handle_id)?;
+                let entry = app.confirms.get(handle_id)?;
                 let req = &entry.req;
                 let (labels, _) = confirm::build_options(req);
                 Some(RequestSnapshot {
@@ -61,7 +61,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "_render_title",
         lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
             crate::lua::with_app(|app| {
-                let req = match app.confirm_requests.get(&handle_id) {
+                let req = match app.confirms.get(handle_id) {
                     Some(e) => e.req.clone(),
                     None => return,
                 };
@@ -79,7 +79,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "_back_tab",
         lua.create_function(|_, handle_id: u64| {
             let auto_allowed = crate::lua::with_app(|app| {
-                let entry = match app.confirm_requests.get(&handle_id) {
+                let entry = match app.confirms.get(handle_id) {
                     Some(e) => e,
                     None => return false,
                 };
@@ -96,7 +96,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         crate::app::transcript_model::ToolStatus::Pending,
                     );
                     app.send_permission_decision(request_id, true, None);
-                    app.confirm_requests.remove(&handle_id);
+                    app.confirms.take(handle_id);
                     true
                 } else {
                     false
@@ -114,7 +114,7 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(
             |_, (handle_id, choice_idx, message): (u64, usize, Option<String>)| {
                 crate::lua::with_app(|app| {
-                    let entry = match app.confirm_requests.remove(&handle_id) {
+                    let entry = match app.confirms.take(handle_id) {
                         Some(e) => e,
                         None => return,
                     };

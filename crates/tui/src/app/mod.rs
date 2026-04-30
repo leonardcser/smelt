@@ -1,6 +1,7 @@
 mod agent;
 mod cmdline;
 pub mod commands;
+pub(crate) mod confirms;
 mod content_keys;
 pub(crate) mod dialogs;
 mod events;
@@ -225,11 +226,10 @@ pub struct App {
     /// through every call chain.
     pub(crate) agent: Option<TurnState>,
     /// Pending Confirm dialog requests, keyed by Lua-side handle id.
-    /// `agent.rs` inserts a request before firing `smelt.confirm.open
-    /// (handle_id)`; the Lua dialog reads it back through Rust
-    /// primitives and removes it on resolve / dismiss.
-    pub(crate) confirm_requests: HashMap<u64, crate::app::dialogs::confirm::ConfirmEntry>,
-    pub(crate) next_confirm_handle: u64,
+    /// `agent.rs` registers a request before firing
+    /// `smelt.confirm.open(handle_id)`; the Lua dialog reads it back
+    /// through Rust primitives and resolves it on submit / dismiss.
+    pub(crate) confirms: confirms::Confirms,
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
@@ -716,8 +716,7 @@ impl App {
             engine,
             permissions,
             agent: None,
-            confirm_requests: HashMap::new(),
-            next_confirm_handle: 1,
+            confirms: confirms::Confirms::new(),
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
