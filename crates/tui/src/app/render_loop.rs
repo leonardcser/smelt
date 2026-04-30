@@ -110,7 +110,7 @@ impl App {
     /// for this frame.
     fn compute_cursor_ownership(&self) -> (bool, bool) {
         let overlay_owns_cursor = self.ui.focused_overlay().is_some();
-        let cmdline_active = self.cmdline_win.is_some();
+        let cmdline_active = self.well_known.cmdline.is_some();
         let suppress = cmdline_active || overlay_owns_cursor;
         let has_prompt_cursor = !suppress
             && self.term_focused

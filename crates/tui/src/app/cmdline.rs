@@ -21,12 +21,13 @@ const PREFIX_LEN: u16 = 1;
 
 impl App {
     pub fn cmdline_is_focused(&self) -> bool {
-        self.cmdline_win
+        self.well_known
+            .cmdline
             .is_some_and(|win| self.ui.focus() == Some(win))
     }
 
     pub fn open_cmdline(&mut self) {
-        if self.cmdline_win.is_some() {
+        if self.well_known.cmdline.is_some() {
             return;
         }
 
@@ -62,12 +63,12 @@ impl App {
             .overlay_open(Overlay::new(layout, Anchor::ScreenBottom { above_rows: 1 }).modal(true));
 
         self.ui.set_focus(win);
-        self.cmdline_win = Some(win);
+        self.well_known.cmdline = Some(win);
         self.cmdline_completer = None;
     }
 
     fn close_cmdline(&mut self) {
-        if let Some(win) = self.cmdline_win.take() {
+        if let Some(win) = self.well_known.cmdline.take() {
             self.close_overlay_leaf(win);
         }
         self.cmdline_completer = None;
@@ -75,7 +76,7 @@ impl App {
 
     /// Read the cmdline's typed text (without the leading prefix).
     fn cmdline_text(&self) -> String {
-        let Some(win) = self.cmdline_win else {
+        let Some(win) = self.well_known.cmdline else {
             return String::new();
         };
         let buf_id = self.ui.win(win).map(|w| w.buf);
@@ -89,7 +90,7 @@ impl App {
     /// Replace the cmdline buffer with `prefix + payload` and place the
     /// cursor at column `prefix_len + cursor_in_payload`.
     fn cmdline_set_payload(&mut self, payload: &str, cursor_in_payload: usize) {
-        let Some(win) = self.cmdline_win else {
+        let Some(win) = self.well_known.cmdline else {
             return;
         };
         let new_line = format!("{PREFIX}{payload}");
@@ -106,7 +107,7 @@ impl App {
     /// Cursor position within the payload (always `>= 0`). Returns 0
     /// when the cmdline isn't open.
     fn cmdline_cursor_in_payload(&self) -> usize {
-        let Some(win) = self.cmdline_win else {
+        let Some(win) = self.well_known.cmdline else {
             return 0;
         };
         let cur = self.ui.win(win).map(|w| w.cursor_col).unwrap_or(PREFIX_LEN);
@@ -286,7 +287,7 @@ impl App {
         let count = payload.chars().count() as i32;
         let cur = self.cmdline_cursor_in_payload() as i32;
         let new = (cur + delta).clamp(0, count) as usize;
-        if let Some(win) = self.cmdline_win {
+        if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
                 w.cursor_col = PREFIX_LEN + new as u16;
             }
@@ -294,7 +295,7 @@ impl App {
     }
 
     fn cmdline_move_home(&mut self) {
-        if let Some(win) = self.cmdline_win {
+        if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
                 w.cursor_col = PREFIX_LEN;
             }
@@ -303,7 +304,7 @@ impl App {
 
     fn cmdline_move_end(&mut self) {
         let count = self.cmdline_text().chars().count() as u16;
-        if let Some(win) = self.cmdline_win {
+        if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
                 w.cursor_col = PREFIX_LEN + count;
             }

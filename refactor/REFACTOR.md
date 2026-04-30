@@ -418,7 +418,7 @@ bridges, then the aggregate.
   the well-known `WinId`s off App. `Ui::win_buf{,_id,_mut}` helpers
   resolve `WinId` → backing `Buffer`. Lives on the outer App today;
   stays on `TuiApp` after the Core split.
-- **a.2** — `WellKnown` adds `cmdline: Option<WinId>` (today's
+- **a.2** ✅ — `WellKnown` adds `cmdline: Option<WinId>` (today's
   `App::cmdline_win`).
 - **a.3** — `Confirms { requests, next_handle, is_clear() }`. Today's
   `confirm_requests` map carries a `ConfirmEntry` (request + choices);

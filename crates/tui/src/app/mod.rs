@@ -162,12 +162,6 @@ pub struct App {
     /// `None` when no toast. Closing the leaf via `close_overlay_leaf`
     /// cascades through `overlay_close` to remove the overlay.
     pub notification: Option<ui::WinId>,
-    /// Leaf `WinId` of the open `:` cmdline overlay, if visible.
-    /// `cmdline_handle_key` mutates the leaf's buffer + cursor
-    /// directly through `&mut self`. Closing the leaf via
-    /// `close_overlay_leaf` cascades through `overlay_close` to remove the
-    /// overlay.
-    pub cmdline_win: Option<ui::WinId>,
     /// Persistent `:` history across open/close cycles. Most-recent
     /// at the back; submit appends (dedup'd against the previous
     /// entry).
@@ -335,9 +329,10 @@ pub struct App {
 }
 
 /// The well-known split-tree windows that smelt always carries:
-/// the prompt, the transcript, and the statusline. Buffers are
-/// reached through `Ui::win_buf{,_mut}(WinId)` — there's exactly
-/// one `Buffer` per well-known `Window`.
+/// the prompt, the transcript, and the statusline, plus the
+/// transient cmdline overlay leaf. Buffers are reached through
+/// `Ui::win_buf{,_mut}(WinId)` — there's exactly one `Buffer` per
+/// well-known `Window`.
 pub struct WellKnown {
     /// Prompt input window. Stable id `ui::PROMPT_WIN`. Its buffer
     /// is rewritten each frame by `compute_prompt` (chrome rows +
@@ -352,6 +347,12 @@ pub struct WellKnown {
     /// buffer carries one line; `refresh_status_bar` rewrites it
     /// each frame.
     pub statusline: ui::WinId,
+    /// Leaf `WinId` of the open `:` cmdline overlay, if visible.
+    /// `cmdline_handle_key` mutates the leaf's buffer + cursor
+    /// directly through `&mut self`. Closing the leaf via
+    /// `close_overlay_leaf` cascades through `overlay_close` to
+    /// remove the overlay.
+    pub cmdline: Option<ui::WinId>,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -656,6 +657,7 @@ impl App {
                     prompt: ui::PROMPT_WIN,
                     transcript: ui::TRANSCRIPT_WIN,
                     statusline: status_win,
+                    cmdline: None,
                 },
             )
         };
@@ -692,7 +694,6 @@ impl App {
             custom_status_items: Vec::new(),
             statusline_last_errors: HashMap::new(),
             notification: None,
-            cmdline_win: None,
             cmdline_history: Vec::new(),
             cmdline_history_browse: None,
             cmdline_history_stash: String::new(),
