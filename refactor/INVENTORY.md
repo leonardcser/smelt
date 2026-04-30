@@ -187,6 +187,8 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `notebook.rs`                             | 195  | Jupyter notebook capability (typed `Notebook { cells, metadata }`, `parse`, `source_to_string`, `cell_index_by_id`, `is_notebook_path`) | kept                | P3.a      | landed  | Pure read shapes. Apply-edit / atomic-write semantics ride P5.b alongside `notebook_edit`'s migration to Lua.                                                                                                            |
 | `path.rs`                                 | 159  | Path arithmetic (normalize / canonical / relative / expand_home) | kept           | P3.a      | landed  | Pure capability; no filesystem touch outside `canonical`. Lua surface lives at `lua/api/path.rs`.           |
 | `perf.rs`                                 | 286  | Profiling guards                                            | kept                | P7        | pending | Review at end                                                                                               |
+| `permissions/mod.rs`                      | 12   | `tui::permissions` capability namespace root                | kept                | P3.a      | landed  | Re-exports `store`. Engine permission policy (`bash` / `rules` / `workspace` / `approvals`) lands here in P5.c. |
+| `permissions/store.rs`                    | 202  | Workspace approval rules (JSON store: load / save / add_tool / add_dir / into_approvals) | kept | P3.a | landed  | Relocated from top-level `workspace_permissions.rs`. Lua tool hooks call via `crate::permissions::store::*` (FFI). |
 | `persist.rs`                              | 153  | Session save/load                                           | merged              | P2        | pending | Into Session subsystem                                                                                      |
 | `picker.rs`                               | 314  | Buffer-backed picker overlay (open / set_items / set_selected) | restructured     | P1.c/P4  | partial | P4 moves the recipe behind `widgets/picker.lua`. |
 | `process.rs`                              | 165  | Process capability (sync `Command::output()` over `std::process` with cwd / env / stdin / timeout; returns `{ stdout, stderr, exit_code, timed_out }`) | kept                | P3.a      | landed  | Pure short-lived spawn-and-wait. Streaming `spawn(cmd, args, opts) -> Handle` lands when `engine/tools/background.rs` registry folds in alongside bash / process-tool migrations to Lua in P5.b.                          |
@@ -197,7 +199,6 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `theme.rs`                                | 368  | Theme bridge: populate_ui_theme + OSC11 detect + PRESETS    | narrowed            | P1.0      | landed  | Bridge fns + presets only; atomic globals collapsed onto `ui::Theme`. |
 | `utils.rs`                                | 87   | General utilities                                           | kept                | none      | pending | Utility                                                                                                     |
 | `window.rs`                               | 35   | Window wrapper (gutters, follow_tail)                       | merged              | P1.d      | pending | Into ui::Window                                                                                             |
-| `workspace_permissions.rs`                | 202  | Workspace approval rules                                    | moved-to-capability | P3.a      | pending | Folds into `tui::permissions::store` (workspace JSON store); Lua tool hooks call via FFI                    |
 
 ## `crates/engine/src/`
 
@@ -333,13 +334,17 @@ Live as `crates/tui/src/<name>.rs` (or small folder if needed):
 | `tui::html`     | html → markdown                   | extracted from `engine/tools/web_fetch`                                 |
 | `tui::notebook` | Jupyter JSON ops                  | extracted from `engine/tools/notebook`                                  |
 | `tui::grep`     | ripgrep wrapper                   | `engine/tools/grep`                                                     |
-| `tui::permissions` | all permission policy: bash AST · pattern match · workspace check · runtime approvals · workspace JSON store | folds entire `engine/permissions/{approvals,bash,rules,workspace,tests}.rs` + `tui/workspace_permissions.rs` |
+| `tui::permissions` | all permission policy: bash AST · pattern match · workspace check · runtime approvals · workspace JSON store | folds entire `engine/permissions/{approvals,bash,rules,workspace,tests}.rs` (the `workspace JSON store` half landed `e34da06` as `tui::permissions::store`) |
 
-`tui::fuzzy` (landed `b537d1a`), `tui::path` (landed `de7fb87`), and
-`tui::fs` (landed this session) live in the main `crates/tui/src/`
-table above. `tui::fs` shipped as sync std::fs primitives only; the
-engine tool absorption (`file_state`, `read_file`, `write_file`,
-`edit_file`, `glob`) waits on those tools migrating to Lua in P5.b.
+`tui::fuzzy` (landed `b537d1a`), `tui::path` (landed `de7fb87`),
+`tui::fs` (landed `5de3054`), and `tui::permissions::store` (landed
+`e34da06`, namespace shell) live in the main `crates/tui/src/` table
+above. `tui::fs` shipped as sync std::fs primitives only; the engine
+tool absorption (`file_state`, `read_file`, `write_file`, `edit_file`,
+`glob`) waits on those tools migrating to Lua in P5.b. `tui::permissions`
+shipped as a namespace seeded with the workspace JSON store; the engine
+permission policy (`bash` / `rules` / `workspace` / `approvals` + the
+1617-line test suite) lands here in P5.c when engine becomes policy-free.
 
 ## Unclear — needs explicit decision
 
