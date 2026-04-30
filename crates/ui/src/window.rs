@@ -795,26 +795,19 @@ impl Window {
         viewport_rows: u16,
         mode: &mut VimMode,
         clipboard: &mut Clipboard,
-    ) -> Option<Option<String>> {
+    ) -> Status {
         if rows.is_empty() {
-            return None;
+            return Status::Ignored;
         }
         let offsets = self.mount(rows);
         if !self.dispatch_vim_key(k, mode, clipboard) {
-            return None;
+            return Status::Ignored;
         }
         if self.vim_enabled && *mode == VimMode::Insert {
             self.vim_state.set_mode(mode, VimMode::Normal);
         }
-        let yanked = clipboard.kill_ring.current().to_string();
-        let yanked = if yanked.is_empty() {
-            None
-        } else {
-            clipboard.kill_ring.set_with_linewise(String::new(), false);
-            Some(yanked)
-        };
         self.sync_from_cpos(rows, &offsets, viewport_rows);
-        Some(yanked)
+        Status::Consumed
     }
 
     fn dispatch_vim_key(

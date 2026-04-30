@@ -228,7 +228,7 @@ impl TuiApp {
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
-        let result = {
+        let status = {
             let prev_sink = self.core.clipboard.swap_sink(Box::new(ui::NullSink));
             let r = self.transcript_window.handle_key(
                 k,
@@ -240,22 +240,25 @@ impl TuiApp {
             self.core.clipboard.swap_sink(prev_sink);
             r
         };
-        match result {
-            None => false,
-            Some(yanked) => {
-                if let Some(raw) = yanked {
-                    let copy = if let Some((s, e)) = self.core.clipboard.kill_ring.source_range() {
-                        self.copy_display_range(s, e, self.core.config.settings.show_thinking)
-                    } else {
-                        raw
-                    };
-                    if self.core.clipboard.write(&copy).is_ok() {
-                        self.core.clipboard.kill_ring.record_clipboard_write(copy);
-                    }
-                }
-                self.snap_transcript_cursor();
-                true
+        if matches!(status, ui::Status::Ignored) {
+            return false;
+        }
+        let raw = self.core.clipboard.kill_ring.current().to_string();
+        if !raw.is_empty() {
+            let copy = if let Some((s, e)) = self.core.clipboard.kill_ring.source_range() {
+                self.copy_display_range(s, e, self.core.config.settings.show_thinking)
+            } else {
+                raw
+            };
+            self.core
+                .clipboard
+                .kill_ring
+                .set_with_linewise(String::new(), false);
+            if self.core.clipboard.write(&copy).is_ok() {
+                self.core.clipboard.kill_ring.record_clipboard_write(copy);
             }
         }
+        self.snap_transcript_cursor();
+        true
     }
 }
