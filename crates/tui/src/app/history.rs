@@ -118,7 +118,7 @@ impl App {
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
         self.input.store.clear();
-        self.engine.processes.clear();
+        self.engine.processes().clear();
         self.reset_subagents_for_new_session();
         self.session = session::Session::new();
         self.pending_title = false;
@@ -198,7 +198,7 @@ impl App {
         self.input.clear();
         self.input.store.clear();
         self.pending_title = false;
-        self.engine.processes.clear();
+        self.engine.processes().clear();
         self.compact_epoch += 1;
         self.sync_session_snapshot();
         self.cells
