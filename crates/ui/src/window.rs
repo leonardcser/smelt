@@ -16,6 +16,12 @@ pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub focused: bool,
+    /// Global cursor shape for this frame. Only meaningful when
+    /// `focused` is true — non-focused windows ignore it. `Block` paints
+    /// the glyph + style at `(cursor_col, cursor_line)` after extmark
+    /// layering; `Hardware` flows through `Ui::render` to the terminal
+    /// caret and is inert in `Window::render`; `Hidden` paints nothing.
+    pub cursor_shape: CursorShape,
     /// Theme registry resolved per-frame from `Ui`. Renderers read named
     /// highlight groups (`"Visual"`, `"SmeltAccent"`, …) via
     /// `theme.get(name)`; missing names return `Style::default()`.
@@ -210,22 +216,30 @@ pub struct SplitConfig {
     pub gutters: Gutters,
 }
 
-/// How the focused window's cursor renders. `Window::cursor_line` /
-/// `cursor_col` carry the viewport-relative position; `CursorKind`
-/// only describes the paint shape.
+/// How the focused window's cursor renders. Single global on `Ui`;
+/// the focused window's `cursor_line` / `cursor_col` carry the
+/// viewport-relative position.
 ///
+/// * `Hidden` — no cursor paints anywhere. Read-only viewers, modal
+///   dialogs without an input target, or any frame where focus does
+///   not point at a window expecting a caret.
 /// * `Hardware` — the terminal's native caret. `Ui::render` pulls
-///   the absolute (col, row) and emits a `cursor::MoveTo` after the
-///   diff flush. Used for plain text-input fields (cmdline, prompt
-///   in Insert mode, dialog input panels).
-/// * `Block { glyph, style }` — paint the cell at `(cursor_col,
-///   cursor_line)` with `glyph` + `style` and suppress the hardware
-///   caret on this window. Used for vim Normal/Visual modes and the
+///   the absolute (col, row) for the focused window and emits a
+///   `cursor::MoveTo` after the diff flush. Used for plain text-input
+///   fields (cmdline, prompt in Insert mode, dialog input panels).
+/// * `Block { glyph, style }` — paint the cell at the focused window's
+///   `(cursor_col, cursor_line)` with `glyph` + `style` and suppress
+///   the hardware caret. Used for vim Normal/Visual modes and the
 ///   ghost-text "cursor on prediction" preview.
-#[derive(Clone, Debug)]
-pub enum CursorKind {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorShape {
+    #[default]
+    Hidden,
     Hardware,
-    Block { glyph: char, style: Style },
+    Block {
+        glyph: char,
+        style: Style,
+    },
 }
 
 pub struct Window {
@@ -240,14 +254,6 @@ pub struct Window {
     /// `kind="list"` dialog leaves) flip this on so the selected
     /// row reads at a glance.
     pub cursor_line_highlight: bool,
-
-    /// Optional cursor render kind. `None` means no cursor at all
-    /// (read-only viewers, non-focusable splits). `Some` says the
-    /// window contributes a cursor when focused — `Hardware` flows
-    /// through `Ui::render` to the terminal caret; `Block` paints
-    /// in-place via `Window::render`. Position is always
-    /// viewport-relative `(cursor_col, cursor_line)`.
-    pub cursor_kind: Option<CursorKind>,
 
     /// Per-frame viewport geometry. When `Some`, `Window::render`
     /// paints the scrollbar from the viewport's `scrollbar` state.
@@ -313,7 +319,6 @@ impl Window {
             config,
             focusable: true,
             cursor_line_highlight: false,
-            cursor_kind: None,
             viewport: None,
             edit_buf: EditBuffer::readonly(),
             cpos: 0,
@@ -986,11 +991,11 @@ impl Window {
     ///
     /// When `viewport.scrollbar` is set, the scrollbar paints over
     /// the right edge column the viewport designates. When
-    /// `cursor_kind == Block`, the block cursor cell paints over
-    /// `(cursor_col, cursor_line)` after extmark layering. The
-    /// `Hardware` cursor variant is read by `Ui::render` and emitted
-    /// as a `cursor::MoveTo` after the diff flush — `Window::render`
-    /// itself does nothing for it.
+    /// `ctx.focused` is true and `ctx.cursor_shape == Block`, the
+    /// block cursor cell paints over `(cursor_col, cursor_line)`
+    /// after extmark layering. The `Hardware` cursor variant is read
+    /// by `Ui::render` and emitted as a `cursor::MoveTo` after the
+    /// diff flush — `Window::render` itself does nothing for it.
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
         let width = slice.width();
         let height = slice.height();
@@ -1048,9 +1053,11 @@ impl Window {
             paint_scrollbar(slice, viewport, &ctx.theme);
         }
 
-        if let Some(CursorKind::Block { glyph, style }) = &self.cursor_kind {
-            if self.cursor_col < width && self.cursor_line < height {
-                slice.set(self.cursor_col, self.cursor_line, *glyph, *style);
+        if ctx.focused {
+            if let CursorShape::Block { glyph, style } = ctx.cursor_shape {
+                if self.cursor_col < width && self.cursor_line < height {
+                    slice.set(self.cursor_col, self.cursor_line, glyph, style);
+                }
             }
         }
     }
@@ -1150,6 +1157,7 @@ mod tests {
             terminal_width: 40,
             terminal_height: 10,
             focused: false,
+            cursor_shape: CursorShape::Hidden,
             theme: Theme::default(),
         }
     }
@@ -1348,6 +1356,7 @@ mod tests {
             terminal_width: 40,
             terminal_height: 10,
             focused: true,
+            cursor_shape: CursorShape::Hidden,
             theme,
         };
         let mut grid = Grid::new(10, 3);
@@ -1377,6 +1386,7 @@ mod tests {
             terminal_width: 40,
             terminal_height: 10,
             focused: true,
+            cursor_shape: CursorShape::Hidden,
             theme,
         };
         let mut grid = Grid::new(10, 2);
@@ -1400,6 +1410,7 @@ mod tests {
             terminal_width: 40,
             terminal_height: 10,
             focused: false,
+            cursor_shape: CursorShape::Hidden,
             theme,
         };
         let mut grid = Grid::new(10, 1);
@@ -1432,6 +1443,7 @@ mod tests {
             terminal_width: 40,
             terminal_height: 10,
             focused: true,
+            cursor_shape: CursorShape::Hidden,
             theme,
         };
         let mut grid = Grid::new(10, 1);
@@ -1461,6 +1473,7 @@ mod tests {
             terminal_width: 40,
             terminal_height: 10,
             focused: false,
+            cursor_shape: CursorShape::Hidden,
             theme,
         };
         let mut grid = Grid::new(10, 2);
@@ -1477,13 +1490,15 @@ mod tests {
         w.cursor_line = 0;
         w.cursor_col = 1;
         let cursor_style = crate::grid::Style::bg(crossterm::style::Color::White);
-        w.cursor_kind = Some(CursorKind::Block {
+        let mut ctx = ctx();
+        ctx.focused = true;
+        ctx.cursor_shape = CursorShape::Block {
             glyph: 'b',
             style: cursor_style,
-        });
+        };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
-        w.render(&buf, &mut slice, &ctx());
+        w.render(&buf, &mut slice, &ctx);
         // Block cursor paints the glyph and overrides the buffer-text bg.
         assert_eq!(grid.cell(1, 0).symbol, 'b');
         assert_eq!(grid.cell(1, 0).style.bg, cursor_style.bg);
@@ -1493,20 +1508,45 @@ mod tests {
     }
 
     #[test]
+    fn render_skips_block_cursor_when_unfocused() {
+        // Block cursor only paints on the focused window — non-focused
+        // windows (other splits, overlay leaves under modals) ignore
+        // the global cursor_shape.
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["abc".into()]);
+        let mut w = make_win();
+        w.cursor_line = 0;
+        w.cursor_col = 1;
+        let mut ctx = ctx();
+        ctx.focused = false;
+        ctx.cursor_shape = CursorShape::Block {
+            glyph: 'X',
+            style: crate::grid::Style::default(),
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+        // Buffer text stays; no `X` painted.
+        assert_eq!(grid.cell(1, 0).symbol, 'b');
+    }
+
+    #[test]
     fn render_block_cursor_outside_slice_is_clipped() {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
         let mut w = make_win();
         w.cursor_line = 5;
         w.cursor_col = 99;
-        w.cursor_kind = Some(CursorKind::Block {
+        let mut ctx = ctx();
+        ctx.focused = true;
+        ctx.cursor_shape = CursorShape::Block {
             glyph: '!',
             style: crate::grid::Style::default(),
-        });
+        };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
         // Should not panic, no `!` written anywhere.
-        w.render(&buf, &mut slice, &ctx());
+        w.render(&buf, &mut slice, &ctx);
         for col in 0..10 {
             assert_ne!(grid.cell(col, 0).symbol, '!');
         }
@@ -1521,10 +1561,12 @@ mod tests {
         let mut w = make_win();
         w.cursor_line = 0;
         w.cursor_col = 1;
-        w.cursor_kind = Some(CursorKind::Hardware);
+        let mut ctx = ctx();
+        ctx.focused = true;
+        ctx.cursor_shape = CursorShape::Hardware;
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
-        w.render(&buf, &mut slice, &ctx());
+        w.render(&buf, &mut slice, &ctx);
         // Buffer text untouched at the cursor col.
         assert_eq!(grid.cell(1, 0).symbol, 'b');
     }
@@ -1550,6 +1592,7 @@ mod tests {
             terminal_width: 20,
             terminal_height: 10,
             focused: false,
+            cursor_shape: CursorShape::Hidden,
             theme,
         };
         let mut grid = Grid::new(20, 10);
@@ -1580,6 +1623,7 @@ mod tests {
             terminal_width: 20,
             terminal_height: 10,
             focused: false,
+            cursor_shape: CursorShape::Hidden,
             theme,
         };
         let mut grid = Grid::new(20, 10);
