@@ -909,6 +909,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.plugins.toggles",
         include_str!("../../../../runtime/lua/smelt/plugins/toggles.lua"),
     ),
+    (
+        "smelt.colorschemes.default",
+        include_str!("../../../../runtime/lua/smelt/colorschemes/default.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
