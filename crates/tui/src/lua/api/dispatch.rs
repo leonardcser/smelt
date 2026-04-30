@@ -8,7 +8,6 @@ use crate::lua::{LuaHandle, LuaShared, PluginToolHandles, TaskCompletion, TaskEv
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub(super) fn register(
     lua: &Lua,
@@ -21,7 +20,7 @@ pub(super) fn register(
     register_task(lua, smelt, shared)?;
     register_tools(lua, smelt, shared)?;
     register_statusline(lua, smelt, shared)?;
-    register_timer(lua, smelt)?;
+    super::timer::register(lua, smelt)?;
     register_cell(lua, smelt)?;
     register_au(lua, smelt)?;
     register_spawn(lua, smelt, shared)?;
@@ -370,61 +369,6 @@ fn register_statusline(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
     smelt.set("statusline", statusline_tbl)?;
-    Ok(())
-}
-
-fn register_timer(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let timer_tbl = lua.create_table()?;
-    timer_tbl.set(
-        "set",
-        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
-            let key = lua.create_registry_value(handler)?;
-            Ok(crate::lua::try_with_host(|host| {
-                host.timers()
-                    .set(Duration::from_millis(ms), LuaHandle { key })
-            })
-            .unwrap_or(0))
-        })?,
-    )?;
-    timer_tbl.set(
-        "every",
-        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
-            if ms == 0 {
-                return Err(LuaError::RuntimeError(
-                    "smelt.timer.every: period must be > 0".into(),
-                ));
-            }
-            let key = lua.create_registry_value(handler)?;
-            Ok(crate::lua::try_with_host(|host| {
-                host.timers()
-                    .every(Duration::from_millis(ms), LuaHandle { key })
-            })
-            .unwrap_or(0))
-        })?,
-    )?;
-    timer_tbl.set(
-        "cancel",
-        lua.create_function(|_, id: u64| {
-            Ok(crate::lua::try_with_host(|host| host.timers().cancel(id)).unwrap_or(false))
-        })?,
-    )?;
-    smelt.set("timer", timer_tbl)?;
-
-    // `smelt.defer(ms, fn)` — alias for `smelt.timer.set` kept for the
-    // nvim-shaped one-shot ergonomics. Returns nothing so existing
-    // callers stay untouched.
-    smelt.set(
-        "defer",
-        lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
-            let key = lua.create_registry_value(handler)?;
-            crate::lua::try_with_app(|app| {
-                app.core
-                    .timers
-                    .set(Duration::from_millis(ms), LuaHandle { key })
-            });
-            Ok(())
-        })?,
-    )?;
     Ok(())
 }
 

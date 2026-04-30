@@ -13,6 +13,7 @@
 
 mod dispatch;
 mod state;
+mod timer;
 mod widgets;
 
 use super::{LuaRuntime, LuaShared};
