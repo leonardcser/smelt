@@ -11,6 +11,8 @@
 //! Top-level convenience bindings (notify, clipboard, confirm) and shared
 //! helpers (color/theme/json conversion) live here.
 
+mod au;
+mod cell;
 mod dispatch;
 mod state;
 mod timer;
