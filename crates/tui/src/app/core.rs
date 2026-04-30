@@ -2,10 +2,13 @@
 //! terminal compositor. Lives behind `App.core` until the
 //! `TuiApp` / `HeadlessApp` split (a.12b) wraps it directly.
 
-use super::{app_config::AppConfig, cells::Cells, confirms::Confirms, engine_bridge::EngineBridge};
-use crate::app::timers::Timers;
+use super::{
+    app_config::AppConfig, cells, cells::Cells, commands, confirms::Confirms,
+    engine_bridge::EngineBridge, timers::Timers,
+};
 use crate::lua::LuaRuntime;
 use crate::session::Session;
+use engine::EngineHandle;
 
 pub struct Core {
     /// Connection + behaviour configuration: model / api_base /
@@ -45,4 +48,36 @@ pub struct Core {
     /// the agent loop drains. P2.d will fold the engine-event drain
     /// into this type.
     pub(crate) engine: EngineBridge,
+}
+
+impl Core {
+    /// Build the headless-safe core from a populated `AppConfig` and a
+    /// fresh `EngineHandle`. Both `App::new` (TUI) and `HeadlessApp::new`
+    /// (one-shot / subagent) call this — the only single source of
+    /// truth for the eight subsystem fields' construction.
+    pub fn new(config: AppConfig, engine: EngineHandle) -> Self {
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_default();
+        let cells = cells::build_with_builtins(cells::BuiltinSeeds {
+            vim_mode: format!("{:?}", ui::VimMode::Insert),
+            agent_mode: config.mode.as_str().to_string(),
+            model: config.model.clone(),
+            reasoning: config.reasoning_effort.label().to_string(),
+            cwd,
+            session_title: String::new(),
+            branch: String::new(),
+        });
+        Self {
+            config,
+            session: Session::new(),
+            confirms: Confirms::new(),
+            clipboard: ui::Clipboard::new(Box::new(commands::SystemSink)),
+            timers: Timers::new(),
+            cells,
+            lua: LuaRuntime::new(),
+            engine: EngineBridge::new(engine),
+        }
+    }
 }

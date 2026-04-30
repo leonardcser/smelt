@@ -894,10 +894,6 @@ impl App {
         }
     }
 
-    pub(super) fn api_key(&self) -> String {
-        std::env::var(&self.core.config.api_key_env).unwrap_or_default()
-    }
-
     pub(super) fn resolve_api_key(&mut self) -> Option<String> {
         if self.core.config.api_key_env.is_empty() {
             return Some(String::new());

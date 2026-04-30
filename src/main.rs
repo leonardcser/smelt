@@ -431,51 +431,11 @@ async fn main() {
         None
     };
 
-    // Build the TUI app.
-    let mut app = tui::app::App::new(
-        model,
-        initial_api_base,
-        api_key_env,
-        initial_provider_type,
-        Arc::clone(&permissions),
-        engine_handle,
-        settings,
-        multi_agent,
-        reasoning_effort,
-        reasoning_cycle,
-        mode_cycle,
-        shared_session,
-        available_models,
-        args.model.is_some(),
-        args.api_base.is_some(),
-        args.api_key_env.is_some(),
-        startup_auth_error.take(),
-    );
-    app.core.config.model_config = (&model_config).into();
-    app.extra_instructions = tui_instructions;
-    app.skill_section = tui_skill_section;
-    if let Some(accent) = cfg_accent {
-        app.ui.theme_mut().set_accent(accent);
-    }
-    if let Some(mode) = mode_override {
-        app.core.config.mode = mode;
-    }
-    if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
-        app.core.config.mode_cycle.push(app.core.config.mode);
-    }
-
-    if let Some(ref resume_val) = args.resume {
-        if resume_val.is_empty() {
-            // Open the resume dialog inside `run()` so dismissal goes
-            // through the normal dialog lifecycle (clear_dialog_area).
-            args.message = Some("/resume".to_string());
-        } else if let Some(loaded) = tui::session::load(resume_val) {
-            app.load_session(loaded);
-        } else {
-            eprintln!("error: session '{}' not found", resume_val);
-            std::process::exit(1);
-        }
-    }
+    let color_mode = match args.color {
+        ColorMode::Auto => tui::app::ColorMode::Auto,
+        ColorMode::Always => tui::app::ColorMode::Always,
+        ColorMode::Never => tui::app::ColorMode::Never,
+    };
 
     if args.subagent {
         let parent_pid = args.parent_pid.unwrap();
@@ -502,6 +462,28 @@ async fn main() {
             .to_string_lossy()
             .into_owned();
 
+        let app_config = build_headless_config(
+            model,
+            initial_api_base,
+            api_key_env,
+            initial_provider_type,
+            available_models,
+            (&model_config).into(),
+            args.model.is_some(),
+            args.api_base.is_some(),
+            args.api_key_env.is_some(),
+            mode_override,
+            mode_cycle,
+            reasoning_effort,
+            reasoning_cycle,
+            settings,
+            multi_agent,
+            cfg.settings.context_window,
+        );
+        let core = tui::app::Core::new(app_config, engine_handle);
+        let sink = tui::app::HeadlessSink::new_subagent(color_mode);
+        let mut headless = tui::app::HeadlessApp::new(core, sink);
+
         // Register in the agent registry (update the pre-registered entry).
         let branch = engine::paths::git_branch(&cwd);
         let agent_id = engine::registry::read_entry(my_pid)
@@ -517,14 +499,15 @@ async fn main() {
             cwd: cwd.to_string_lossy().into_owned(),
             status: engine::registry::AgentStatus::Idle,
             task_slug: None,
-            session_id: app.core.session.id.clone(),
+            session_id: headless.core.session.id.clone(),
             socket_path: socket_path.to_string_lossy().into_owned(),
             depth,
             started_at: timestamp_now(),
         })
         .expect("failed to register agent");
 
-        app.run_subagent(args.message.unwrap(), parent_pid, socket_rx)
+        headless
+            .run_subagent(args.message.unwrap(), parent_pid, socket_rx)
             .await;
 
         engine::registry::cleanup_self(my_pid);
@@ -533,20 +516,77 @@ async fn main() {
             OutputFormat::Text => tui::app::OutputFormat::Text,
             OutputFormat::Json => tui::app::OutputFormat::Json,
         };
-        let color_mode = match args.color {
-            ColorMode::Auto => tui::app::ColorMode::Auto,
-            ColorMode::Always => tui::app::ColorMode::Always,
-            ColorMode::Never => tui::app::ColorMode::Never,
-        };
-        app.run_headless(
-            args.message.unwrap(),
-            output_format,
-            color_mode,
-            args.verbose,
-            headless_cancel,
-        )
-        .await;
+        let app_config = build_headless_config(
+            model,
+            initial_api_base,
+            api_key_env,
+            initial_provider_type,
+            available_models,
+            (&model_config).into(),
+            args.model.is_some(),
+            args.api_base.is_some(),
+            args.api_key_env.is_some(),
+            mode_override,
+            mode_cycle,
+            reasoning_effort,
+            reasoning_cycle,
+            settings,
+            multi_agent,
+            cfg.settings.context_window,
+        );
+        let core = tui::app::Core::new(app_config, engine_handle);
+        let sink = tui::app::HeadlessSink::new(output_format, color_mode, args.verbose);
+        let mut headless = tui::app::HeadlessApp::new(core, sink);
+        headless
+            .run_oneshot(args.message.unwrap(), headless_cancel)
+            .await;
     } else {
+        // Build the TUI app.
+        let mut app = tui::app::App::new(
+            model,
+            initial_api_base,
+            api_key_env,
+            initial_provider_type,
+            Arc::clone(&permissions),
+            engine_handle,
+            settings,
+            multi_agent,
+            reasoning_effort,
+            reasoning_cycle,
+            mode_cycle,
+            shared_session,
+            available_models,
+            args.model.is_some(),
+            args.api_base.is_some(),
+            args.api_key_env.is_some(),
+            startup_auth_error.take(),
+        );
+        app.core.config.model_config = (&model_config).into();
+        app.extra_instructions = tui_instructions;
+        app.skill_section = tui_skill_section;
+        if let Some(accent) = cfg_accent {
+            app.ui.theme_mut().set_accent(accent);
+        }
+        if let Some(mode) = mode_override {
+            app.core.config.mode = mode;
+        }
+        if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
+            app.core.config.mode_cycle.push(app.core.config.mode);
+        }
+
+        if let Some(ref resume_val) = args.resume {
+            if resume_val.is_empty() {
+                // Open the resume dialog inside `run()` so dismissal goes
+                // through the normal dialog lifecycle (clear_dialog_area).
+                args.message = Some("/resume".to_string());
+            } else if let Some(loaded) = tui::session::load(resume_val) {
+                app.load_session(loaded);
+            } else {
+                eprintln!("error: session '{}' not found", resume_val);
+                std::process::exit(1);
+            }
+        }
+
         // Redirect stderr to a log file so stray output from system processes
         // (e.g. polkit, PAM) or libraries doesn't corrupt the TUI display.
         redirect_stderr();
@@ -607,6 +647,54 @@ async fn main() {
         }
     }
     tui::perf::print_summary();
+}
+
+/// Assemble the `AppConfig` for a headless / subagent frontend from
+/// resolved CLI + config inputs. No saved-state seeding (predictable
+/// behaviour from the CLI invocation) — the TUI path layers
+/// `state::State::load()` on top of its own fields inside `App::new`.
+#[allow(clippy::too_many_arguments)]
+fn build_headless_config(
+    model: String,
+    api_base: String,
+    api_key_env: String,
+    provider_type: String,
+    available_models: Vec<tui::config::ResolvedModel>,
+    model_config: engine::ModelConfig,
+    cli_model_override: bool,
+    cli_api_base_override: bool,
+    cli_api_key_env_override: bool,
+    mode_override: Option<protocol::Mode>,
+    mode_cycle: Vec<protocol::Mode>,
+    reasoning_effort: protocol::ReasoningEffort,
+    reasoning_cycle: Vec<protocol::ReasoningEffort>,
+    settings: tui::state::ResolvedSettings,
+    multi_agent: bool,
+    context_window: Option<u32>,
+) -> tui::app::AppConfig {
+    let mode = mode_override.unwrap_or(protocol::Mode::Normal);
+    let mut mode_cycle = mode_cycle;
+    if !mode_cycle.contains(&mode) {
+        mode_cycle.push(mode);
+    }
+    tui::app::AppConfig {
+        model,
+        api_base,
+        api_key_env,
+        provider_type,
+        available_models,
+        model_config,
+        cli_model_override,
+        cli_api_base_override,
+        cli_api_key_env_override,
+        mode,
+        mode_cycle,
+        reasoning_effort,
+        reasoning_cycle,
+        settings,
+        multi_agent,
+        context_window,
+    }
 }
 
 /// Redirect stderr (fd 2) to a file in the logs directory so that any stray
