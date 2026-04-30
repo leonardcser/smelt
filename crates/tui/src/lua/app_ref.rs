@@ -78,3 +78,39 @@ pub fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
     // SAFETY: same contract as `with_app`.
     Some(unsafe { f(ptr.as_ptr().as_mut().expect("app ptr must be non-null")) })
 }
+
+/// Borrow the installed frontend as `&mut dyn Host` for the duration
+/// of `f`. Host-tier Lua bindings (cells, timers, engine, clipboard,
+/// session, confirms, lua, autocmds) reach through here so they
+/// compose without locking the whole frontend struct, and so they
+/// stay headless-safe once `P2.b.5b` lets `HeadlessApp` install into
+/// the same TLS slot. Panics if the pointer is unset (same contract
+/// as `with_app`).
+///
+/// `pub(crate)` because `Host` itself is `pub(crate)` — neither leaks
+/// outside the crate.
+pub(crate) fn with_host<R>(f: impl FnOnce(&mut dyn crate::app::Host) -> R) -> R {
+    with_app(|app| f(app))
+}
+
+/// `try_` variant of `with_host` that returns `None` instead of
+/// panicking when no frontend is installed.
+pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn crate::app::Host) -> R) -> Option<R> {
+    try_with_app(|app| f(app))
+}
+
+/// Borrow the installed frontend as `&mut dyn ui::UiHost` for the
+/// duration of `f`. UiHost-only Lua bindings (`smelt.ui` / `.win` /
+/// `.buf` / `.statusline`) reach through here. Once `P2.b.5b` lets
+/// `HeadlessApp` install into the TLS slot, this dispatcher will
+/// surface a runtime error from headless contexts (today every
+/// installed frontend impls `UiHost`).
+pub fn with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> R {
+    with_app(|app| f(app))
+}
+
+/// `try_` variant of `with_ui_host` that returns `None` instead of
+/// panicking when no frontend is installed.
+pub fn try_with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> Option<R> {
+    try_with_app(|app| f(app))
+}

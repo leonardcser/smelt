@@ -645,8 +645,12 @@ binding TLS split are each natural single-session units:
   `with_ui_host` exposes the right trait depending on the
   binding's declaration. UiHost-only Lua bindings (`smelt.ui /
   .win / .buf / .statusline`) raise a runtime error from a
-  `HeadlessApp`. Subsystem-scoped borrows compose without
-  fighting the borrow checker.
+  `HeadlessApp`. Subsystem-scoped borrows compose. Splits:
+  - **P2.b.5a** — `with_host` / `with_ui_host` trait-typed
+    dispatchers over today's TLS pointer; `with_app` retained.
+  - **P2.b.5b** — TLS slot carries Tui or Headless; UiHost from
+    headless raises. Lands with first headless Lua driver (P2.c).
+  - **P2.b.5c** — bulk-migrate `with_app` callsites; drop alias.
 
 ### P2.c — `Cells` reactive layer + event bus
 

@@ -122,7 +122,7 @@ fn register_engine_and_session(
         "list",
         lua.create_function(|lua, ()| {
             let current_id =
-                crate::lua::try_with_app(|app| app.core.session.id.clone()).unwrap_or_default();
+                crate::lua::try_with_host(|host| host.session().id.clone()).unwrap_or_default();
             let sessions = crate::session::list_sessions();
             let out = lua.create_table()?;
             let mut idx = 1;
