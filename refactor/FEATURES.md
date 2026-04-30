@@ -274,7 +274,10 @@ to invoke_ the feature.
 | `smelt.path` (`normalize / canonical / relative / expand / join / parent / basename / extension / is_absolute`) | `lua/api/path.rs` + `tui/path.rs` | P3.a + P3.c (landed `de7fb87`) | working |
 | `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.os` (`getenv / setenv / unsetenv / platform / arch / tempdir / home / cwd / set_cwd / pid`) | `lua/api/os.rs` | P3.c (landed this session) | working |
-| `smelt.parse / http / html / notebook / grep` | _missing today_                     | P3.c                                       | offline-pre-P3 |
+| `smelt.grep` (`run(pattern, path, opts)` over ripgrep — content / files_with_matches / count modes; case / multiline / context / glob / type / timeout) | `lua/api/grep.rs` + `tui/grep.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.http` (`get(url, opts)` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.html` (`title / links / to_text` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.parse / notebook` | _missing today_                     | P3.c                                       | offline-pre-P3 |
 
 ## Headless / non-TUI modes
 

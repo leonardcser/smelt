@@ -17,7 +17,7 @@ futures-core = "0.3"
 syntect = "5.3.0"
 two-face = "0.5.1"
 similar = "2.7.0"
-reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "rustls", "blocking"] }
 base64 = "0.22.1"
 unicode-width = "0.2.2"
 sha2 = "0.10.9"
@@ -28,6 +28,9 @@ seahash = "4.1.0"
 minijinja = "2.18.0"
 mlua = { version = "0.11.6", features = ["lua54", "vendored"] }
 dirs = "6.0.0"
+scraper = "0.26.0"
+ego-tree = "0.11.0"
+url = "2.5.8"
 
 [dev-dependencies]
 vt100 = "0.16.2"
