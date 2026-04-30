@@ -1,27 +1,25 @@
-//! `smelt.*` binding setup. `LuaRuntime::register_api` orchestrates four
-//! domain modules — each one builds a coherent subtree of the `smelt`
-//! global via a `register_*` helper:
-//!
-//! - [`state`] — live engine reads (transcript, engine, session, process,
-//!   shell, agent, permissions, history, fuzzy).
-//! - [`widgets`] — UI primitives (theme, buf, win, ui.*, prompt, settings).
-//! - [`dispatch`] — registration surfaces (cmd, keymap, task, tools,
-//!   statusline, on, defer, spawn).
-//!
-//! Top-level convenience bindings (notify, clipboard, confirm) and shared
-//! helpers (color/theme/json conversion) live here.
+//! `smelt.*` binding setup. `LuaRuntime::register_api` wires one
+//! Rust module per top-level `smelt.<name>` namespace, plus a few
+//! cross-cutting top-level bindings (notify, clipboard, confirm)
+//! and shared helpers (color / theme / json conversion).
 
 mod au;
+mod buf;
 mod cell;
 mod cmd;
 mod keymap;
+mod prompt;
+mod settings;
 mod spawn;
 mod state;
 mod statusline;
 mod task;
+mod theme;
 mod timer;
 mod tools;
-mod widgets;
+mod ui;
+mod vim;
+mod win;
 
 use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
@@ -55,7 +53,13 @@ impl LuaRuntime {
         smelt.set("version", crate::api::VERSION)?;
 
         state::register(lua, &smelt, shared)?;
-        widgets::register(lua, &smelt, &smelt_ui, shared)?;
+        theme::register(lua, &smelt)?;
+        buf::register(lua, &smelt, shared)?;
+        win::register(lua, &smelt, shared)?;
+        ui::register(lua, &smelt_ui)?;
+        prompt::register(lua, &smelt)?;
+        settings::register(lua, &smelt)?;
+        vim::register(lua, &smelt)?;
         cmd::register(lua, &smelt, shared)?;
         keymap::register(lua, &smelt_keymap, shared)?;
         task::register(lua, &smelt, shared)?;
@@ -181,7 +185,7 @@ fn rgb_to_ansi_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * band(r) + 6 * band(g) + band(b)
 }
 
-/// Map a Lua-facing role name to its `ui::Theme` highlight group.
+/// Map a Lua-facing role name to its `::ui::Theme` highlight group.
 fn role_to_group(role: &str) -> Option<&'static str> {
     Some(match role {
         "accent" => "SmeltAccent",
@@ -197,10 +201,10 @@ fn role_to_group(role: &str) -> Option<&'static str> {
     })
 }
 
-/// Resolved color for a `ui::Theme` highlight group: prefer fg, then
+/// Resolved color for a `::ui::Theme` highlight group: prefer fg, then
 /// bg, then `Color::Reset`. Matches the convention used by
 /// `to_buffer::resolve` for `ColorRole` lookups.
-fn group_color(theme: &ui::Theme, group: &str) -> crossterm::style::Color {
+fn group_color(theme: &::ui::Theme, group: &str) -> crossterm::style::Color {
     let style = theme.get(group);
     style
         .fg
@@ -209,7 +213,7 @@ fn group_color(theme: &ui::Theme, group: &str) -> crossterm::style::Color {
 }
 
 /// Read a named theme role from `theme`. Returns `None` for unknown names.
-pub(super) fn theme_role_get(theme: &ui::Theme, role: &str) -> Option<crossterm::style::Color> {
+pub(super) fn theme_role_get(theme: &::ui::Theme, role: &str) -> Option<crossterm::style::Color> {
     role_to_group(role).map(|g| group_color(theme, g))
 }
 
@@ -217,7 +221,7 @@ pub(super) fn theme_role_get(theme: &ui::Theme, role: &str) -> Option<crossterm:
 /// mutable. Caller must `populate_ui_theme` afterwards (or wait for
 /// the next frame's render-loop bridge) to flush the new value into
 /// the corresponding highlight group.
-pub(super) fn theme_role_set(theme: &mut ui::Theme, role: &str, ansi: u8) -> LuaResult<()> {
+pub(super) fn theme_role_set(theme: &mut ::ui::Theme, role: &str, ansi: u8) -> LuaResult<()> {
     match role {
         "accent" => {
             theme.set_accent(ansi);
@@ -237,7 +241,7 @@ pub(super) fn theme_role_set(theme: &mut ui::Theme, role: &str, ansi: u8) -> Lua
 
 /// List of (role_name, current_color) pairs for `theme.snapshot()`.
 pub(super) fn theme_snapshot_pairs(
-    theme: &ui::Theme,
+    theme: &::ui::Theme,
 ) -> Vec<(&'static str, crossterm::style::Color)> {
     [
         "accent",
@@ -339,8 +343,8 @@ pub(super) fn lua_table_to_args(
 mod tests {
     use super::*;
 
-    fn theme() -> ui::Theme {
-        let mut t = ui::Theme::new();
+    fn theme() -> ::ui::Theme {
+        let mut t = ::ui::Theme::new();
         crate::theme::populate_ui_theme(&mut t);
         t
     }
