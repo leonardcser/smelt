@@ -89,7 +89,7 @@ impl TuiApp {
                     |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
-                let _ = self.ui.dispatch_event(Event::Key(k), &mut lua_invoke);
+                let _ = self.ui.dispatch_event(ui::Event::Key(k), &mut lua_invoke);
                 self.flush_lua_callbacks();
                 return false;
             }
@@ -273,8 +273,8 @@ impl TuiApp {
                     |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
-                let result = self.ui.dispatch_event(Event::Key(k), &mut lua_invoke);
-                if matches!(result, ui::DispatchOutcome::Consumed) {
+                let result = self.ui.dispatch_event(ui::Event::Key(k), &mut lua_invoke);
+                if matches!(result, ui::Status::Consumed) {
                     self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
                 }
@@ -696,7 +696,7 @@ impl TuiApp {
         self.last_height = h;
         let _ = self
             .ui
-            .dispatch_event(Event::Resize(w, h), &mut |_, _, _| {});
+            .dispatch_event(ui::Event::Resize(w, h), &mut |_, _, _| {});
         if width_changed {
             self.invalidate_for_width(w);
         }

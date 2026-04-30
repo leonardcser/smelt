@@ -605,24 +605,22 @@ binding TLS split are each natural single-session units:
   to `self.ui.X()`. `HeadlessApp` does not impl `UiHost`. First
   consumers migrated through `cmdline.rs::open_cmdline` +
   `events.rs::close_overlay_leaf`.
-- **P2.b.3** — Supporting types in `ui`:
+- **P2.b.3** ✅ — Supporting types in `ui`:
   - `Event::{ Key | Mouse | Resize | FocusGained | FocusLost |
-    Paste }` — ui-owned terminal-event enum (variants carry
-    crossterm payloads). Replaces `crossterm::event::Event` at the
-    `Ui::dispatch_event` signature. Hosts translate at the App
-    boundary.
-  - `Status::{ Consumed | Capture | Ignored }` — replaces
-    `DispatchOutcome` (key/mouse pre-flight at `Ui::dispatch_event`)
-    and `MouseAction` (Window::handle_mouse return). `Capture`
-    requests in-flight gesture capture; the host folds it into
-    `Ui::set_capture`.
-  - `WinEvent` shape: existing variants (`Open / Close /
-    FocusGained / FocusLost / Submit / TextChanged / Dismiss /
-    SelectionChanged / Tick`) already align with the target.
-    Payload-in-variant (`Select(idx)`) is deferred until a real
-    consumer surfaces — today's `Payload` parameter carries the
-    index, and the registry key benefits from staying `Hash + Eq`
-    without internal data.
+    Paste }` lives in `crates/ui/src/event.rs`; variants carry
+    crossterm payloads and `From<crossterm::event::Event>` keeps
+    host-boundary conversion a one-liner. `Ui::dispatch_event`
+    consumes the new enum; tui's three call sites
+    (`events.rs::dispatch_terminal_event` key + resize,
+    `mouse.rs::handle_mouse` wheel/modal pre-flight) construct
+    `ui::Event::Key(_)` / `Mouse(_)` / `Resize(_)` directly.
+  - `Status::{ Consumed | Capture | Ignored }` replaces
+    `DispatchOutcome` (key/mouse pre-flight) and `MouseAction`
+    (`Window::handle_mouse` return). One outcome enum,
+    `Capture` is still meaningful only on the mouse path; the
+    host folds it into `Ui::set_capture`.
+  - `WinEvent` shape unchanged — payload-in-variant (`Select(idx)`)
+    deferred until a real consumer surfaces.
   - `FocusTarget::Window(WinId)` lives as the semantic alias for
     keyboard focus; `HitTarget::{ Window(WinId) | Scrollbar {
     owner: WinId } | Chrome { owner: OverlayId } }` already

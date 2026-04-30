@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
-        use crossterm::event::{Event, MouseButton};
+        use crossterm::event::MouseButton;
         // Wheel-over-overlay absorb + active-modal click-outside
         // absorb both live in `Ui::dispatch_event(Event::Mouse(_))`.
         // For wheel-on-overlay we surface a redraw so the pointer
@@ -15,8 +15,9 @@ impl TuiApp {
         // is still cheap. Anything Ui doesn't claim (`Ignored`) keeps
         // flowing through the TuiApp-side routing below.
         if matches!(
-            self.ui.dispatch_event(Event::Mouse(me), &mut |_, _, _| {}),
-            ui::DispatchOutcome::Consumed
+            self.ui
+                .dispatch_event(ui::Event::Mouse(me), &mut |_, _, _| {}),
+            ui::Status::Consumed
         ) {
             let is_scroll = matches!(
                 me.kind,

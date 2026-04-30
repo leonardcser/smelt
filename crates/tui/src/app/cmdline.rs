@@ -120,7 +120,7 @@ impl TuiApp {
     /// handled but stay alive, and `None` only when the key isn't
     /// ours. The overlay leaf carries no callbacks so a `None` return
     /// silently swallows the key — same as the legacy widget's
-    /// `DispatchOutcome::Ignored` path.
+    /// `Status::Ignored` path.
     pub(super) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {

@@ -1,6 +1,7 @@
 use crate::buffer::Buffer;
 use crate::clipboard::Clipboard;
 use crate::edit_buffer::EditBuffer;
+use crate::event::Status;
 use crate::grid::{GridSlice, Style};
 use crate::layout::{Gutters, Rect};
 use crate::text::{self, byte_to_cell, cell_to_byte};
@@ -162,21 +163,6 @@ impl WindowViewport {
             col: rel_col.min(max_col),
         })
     }
-}
-
-/// Result of a `Window::handle_mouse` call.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MouseAction {
-    /// Window handled the event and there's no host follow-up.
-    Consumed,
-    /// Window had nothing to do with the event (out-of-rect Down,
-    /// non-left button, etc.). Host may treat as fall-through.
-    Ignored,
-    /// Window took the gesture and asks the host to route subsequent
-    /// `Drag` / `Up` events back here even if the pointer leaves the
-    /// rect. Returned from `Down(Left)` whenever the click landed on
-    /// content.
-    Capture,
 }
 
 /// Per-call context for [`Window::handle_mouse`]. The window itself
@@ -605,7 +591,7 @@ impl Window {
     /// successive `Drag` events extend by the right unit. Clipboard
     /// side effects are the host's job — Window only mutates its own
     /// selection state.
-    pub fn handle_mouse(&mut self, event: MouseEvent, mut ctx: MouseCtx) -> MouseAction {
+    pub fn handle_mouse(&mut self, event: MouseEvent, mut ctx: MouseCtx) -> Status {
         // Build the joined buffer once and pass it down. Mouse helpers
         // operate on this `&str` instead of `self.edit_buf.buf`, which
         // lets surfaces whose `edit_buf.buf` is *not* `rows.join("\n")`
@@ -619,26 +605,26 @@ impl Window {
             MouseEventKind::Down(MouseButton::Left) => self.mouse_down(event, &mut ctx, &buf),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(event, &mut ctx, &buf),
             MouseEventKind::Up(MouseButton::Left) => self.mouse_up(&mut ctx, &buf),
-            _ => MouseAction::Ignored,
+            _ => Status::Ignored,
         }
     }
 
-    fn mouse_down(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> MouseAction {
+    fn mouse_down(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> Status {
         // Hit-test against the painted viewport: anything that lands
         // on the scrollbar or outside the rect is the host's problem
         // (scrollbar drag latching, focus shift, …).
         let Some(hit) = ctx.viewport.hit(event.row, event.column) else {
-            return MouseAction::Ignored;
+            return Status::Ignored;
         };
         let ViewportHit::Content {
             row: rel_row,
             col: rel_col,
         } = hit
         else {
-            return MouseAction::Ignored;
+            return Status::Ignored;
         };
         if ctx.rows.is_empty() {
-            return MouseAction::Consumed;
+            return Status::Consumed;
         }
 
         let viewport_rows = ctx.viewport.rect.height;
@@ -662,7 +648,7 @@ impl Window {
                     self.drag_anchor_word = Some((s, e));
                     self.drag_anchor_line = None;
                 }
-                MouseAction::Capture
+                Status::Capture
             }
             3 => {
                 if let Some((s, e)) = self.select_line_at(
@@ -676,7 +662,7 @@ impl Window {
                     self.drag_anchor_line = Some((s, e));
                     self.drag_anchor_word = None;
                 }
-                MouseAction::Capture
+                Status::Capture
             }
             _ => {
                 // Single click: anchor a Visual selection at the click
@@ -691,19 +677,19 @@ impl Window {
                 } else {
                     self.selection_anchor = Some(cpos);
                 }
-                MouseAction::Capture
+                Status::Capture
             }
         }
     }
 
-    fn mouse_drag(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> MouseAction {
+    fn mouse_drag(&mut self, event: MouseEvent, ctx: &mut MouseCtx, buf: &str) -> Status {
         // Drag past the rect edges still extends — clamp the cell to
         // the viewport's content area so the cursor lands on the
         // nearest visible position. Host handles edge-autoscroll on
         // a separate timer.
         let viewport_rows = ctx.viewport.rect.height;
         if viewport_rows == 0 || ctx.rows.is_empty() {
-            return MouseAction::Consumed;
+            return Status::Consumed;
         }
         let rel_row = event
             .row
@@ -723,10 +709,10 @@ impl Window {
         } else if !self.vim_enabled {
             self.extend_selection(self.cpos);
         }
-        MouseAction::Consumed
+        Status::Consumed
     }
 
-    fn mouse_up(&mut self, ctx: &mut MouseCtx, _buf: &str) -> MouseAction {
+    fn mouse_up(&mut self, ctx: &mut MouseCtx, _buf: &str) -> Status {
         // The user's gesture is over: clear all selection state so a
         // fresh click starts a fresh selection. Owning this here means
         // every consumer (transcript, prompt, dialog buffer) gets the
@@ -739,7 +725,7 @@ impl Window {
         self.selection_anchor = None;
         self.drag_anchor_word = None;
         self.drag_anchor_line = None;
-        MouseAction::Consumed
+        Status::Consumed
     }
 
     /// Word-anchored drag extension: keep the originally-double-clicked
@@ -1317,7 +1303,7 @@ mod tests {
             click_event(MouseEventKind::Down(MouseButton::Left), 1, 7),
             ctx,
         );
-        assert_eq!(r, MouseAction::Capture);
+        assert_eq!(r, Status::Capture);
         assert_eq!(w.cursor_line, 1);
         assert_eq!(w.cursor_col, 7);
         assert!(w.selection_anchor.is_some());
