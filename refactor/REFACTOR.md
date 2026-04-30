@@ -486,20 +486,18 @@ End state: `crates/ui/src/vim/` and `window_cursor.rs` deleted.
 ~3500 LOC of intertwined per-prompt state redistributes across
 App / Buffer / Window / Clipboard. Splits across sessions:
 
-- **5a** ✅ landed (`1ffe67e`) — `VimMode` → App single global
-  field; rename `ViMode` → `VimMode`. `Vim` loses its `mode`;
-  `VimContext` threads `&mut VimMode`. Adds `smelt.vim.mode` Lua
-  read.
-- **5b** ✅ landed (`a590c9c`) — kill ring → App-level
-  `ui::Clipboard` subsystem (kill_ring + sink); Window drops the
-  per-window `kill_ring` field; `VimContext` collapses kill_ring +
-  clipboard into one `&mut Clipboard`.
-- **5c** — Registers, dot-repeat, undo → **Buffer**. Pairs
-  with `edit_buffer.rs` merge (P1.a-tail).
-- **5d** — Cursor / scroll / selection / Visual anchor →
-  **Window**. Delete `crates/ui/src/vim/` + `window_cursor.rs`.
-  Vim becomes a per-Window keymap recipe (Rust; Lua recipes
-  are P3.b).
+- **5a** ✅ landed (`1ffe67e`) — `VimMode` → App.
+- **5b** ✅ landed (`a590c9c`) — kill ring → App-level `Clipboard`.
+- **5c** ✅ landed (`e262f75`) — persistent per-Window vim state
+  (Visual anchor, last `f`/`t`, curswant mirror) → `VimWindowState`
+  on Window + `WindowCursor.curswant`. Vim now in-flight only.
+- **5d** — Registers, dot-repeat, undo → Buffer. Pairs with
+  `edit_buffer.rs` merge (P1.a-tail).
+- **5e** — In-flight key state (`sub`/`count1`/`count2`) → Window;
+  Vim becomes ZST / free-function module.
+- **5f** — Cursor / scroll / selection / Visual anchor → Window.
+  Delete `crates/ui/src/vim/` + `window_cursor.rs`. Vim becomes a
+  per-Window keymap recipe (Rust; Lua recipes are P3.b).
 
 #### P1.d.6 — Completer state machine decomposes
 
