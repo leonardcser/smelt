@@ -486,11 +486,14 @@ End state: `crates/ui/src/vim/` and `window_cursor.rs` deleted.
 ~3500 LOC of intertwined per-prompt state redistributes across
 App / Buffer / Window / Clipboard. Splits across sessions:
 
-- **5a** — `VimMode` → App single global field; rename
-  `ViMode` → `VimMode`. `Vim` loses its `mode`; `VimContext`
-  threads `&mut VimMode`. Adds `smelt.vim.mode` Lua read.
-- **5b** — Kill ring → `Clipboard` subsystem (App-level
-  until Host lands in P2).
+- **5a** ✅ landed (`1ffe67e`) — `VimMode` → App single global
+  field; rename `ViMode` → `VimMode`. `Vim` loses its `mode`;
+  `VimContext` threads `&mut VimMode`. Adds `smelt.vim.mode` Lua
+  read.
+- **5b** ✅ landed (`a590c9c`) — kill ring → App-level
+  `ui::Clipboard` subsystem (kill_ring + sink); Window drops the
+  per-window `kill_ring` field; `VimContext` collapses kill_ring +
+  clipboard into one `&mut Clipboard`.
 - **5c** — Registers, dot-repeat, undo → **Buffer**. Pairs
   with `edit_buffer.rs` merge (P1.a-tail).
 - **5d** — Cursor / scroll / selection / Visual anchor →
