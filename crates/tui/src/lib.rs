@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod notebook;
 pub mod path;
 pub mod perf;
+pub mod permissions;
 pub mod persist;
 pub mod picker;
 pub mod process;
@@ -31,7 +32,6 @@ pub mod state;
 pub mod theme;
 pub mod utils;
 pub mod window;
-pub mod workspace_permissions;
 
 /// Expand `@path` and `"@path with spaces"` references in user input:
 /// if the path exists, append the file/directory contents.

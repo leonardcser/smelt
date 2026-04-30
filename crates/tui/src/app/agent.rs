@@ -733,7 +733,7 @@ impl TuiApp {
     pub(crate) fn sync_permissions(
         &mut self,
         session_entries: Vec<PermissionEntry>,
-        workspace_rules: Vec<crate::workspace_permissions::Rule>,
+        workspace_rules: Vec<crate::permissions::store::Rule>,
     ) {
         // Rebuild session approvals from flattened entries.
         let mut session_tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
@@ -749,16 +749,16 @@ impl TuiApp {
         }
 
         // Persist and reload workspace rules.
-        crate::workspace_permissions::save(&self.cwd, &workspace_rules);
-        let (ws_tools, ws_dirs) = crate::workspace_permissions::into_approvals(&workspace_rules);
+        crate::permissions::store::save(&self.cwd, &workspace_rules);
+        let (ws_tools, ws_dirs) = crate::permissions::store::into_approvals(&workspace_rules);
         let mut rt = self.runtime_approvals.write().unwrap();
         rt.set_session(session_tools, session_dirs);
         rt.load_workspace(ws_tools, ws_dirs);
     }
 
     fn reload_workspace_permissions(&mut self) {
-        let rules = crate::workspace_permissions::load(&self.cwd);
-        let (ws_tools, ws_dirs) = crate::workspace_permissions::into_approvals(&rules);
+        let rules = crate::permissions::store::load(&self.cwd);
+        let (ws_tools, ws_dirs) = crate::permissions::store::into_approvals(&rules);
         self.runtime_approvals
             .write()
             .unwrap()
@@ -805,7 +805,7 @@ impl TuiApp {
                             .add_session_tool(tool_name, vec![]);
                     }
                     ApprovalScope::Workspace => {
-                        crate::workspace_permissions::add_tool(&self.cwd, tool_name, vec![]);
+                        crate::permissions::store::add_tool(&self.cwd, tool_name, vec![]);
                         self.reload_workspace_permissions();
                     }
                 }
@@ -826,11 +826,7 @@ impl TuiApp {
                             .add_session_tool(tool_name, compiled);
                     }
                     ApprovalScope::Workspace => {
-                        crate::workspace_permissions::add_tool(
-                            &self.cwd,
-                            tool_name,
-                            patterns.clone(),
-                        );
+                        crate::permissions::store::add_tool(&self.cwd, tool_name, patterns.clone());
                         self.reload_workspace_permissions();
                     }
                 }
@@ -847,7 +843,7 @@ impl TuiApp {
                             .add_session_dir(std::path::PathBuf::from(dir));
                     }
                     ApprovalScope::Workspace => {
-                        crate::workspace_permissions::add_dir(&self.cwd, dir);
+                        crate::permissions::store::add_dir(&self.cwd, dir);
                         self.reload_workspace_permissions();
                     }
                 }

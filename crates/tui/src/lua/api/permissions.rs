@@ -1,7 +1,8 @@
 //! `smelt.permissions` bindings — list current session + workspace
 //! rules, sync a Lua-built ruleset back through the App. Pre-P5
-//! surface over `RuntimeApprovals` + `workspace_permissions`; moves
-//! into the full `tui::permissions` capability once that lands.
+//! surface over `RuntimeApprovals` + [`crate::permissions::store`];
+//! grows the rest of the `tui::permissions` capability surface in
+//! P5.c when engine permission policy lands here.
 
 use mlua::prelude::*;
 
@@ -29,7 +30,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
             out.set("session", session_arr)?;
             let workspace_arr = lua.create_table()?;
-            for (i, rule) in crate::workspace_permissions::load(&cwd)
+            for (i, rule) in crate::permissions::store::load(&cwd)
                 .into_iter()
                 .enumerate()
             {
@@ -59,7 +60,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         .push(crate::app::transcript_model::PermissionEntry { tool, pattern });
                 }
             }
-            let mut workspace_rules: Vec<crate::workspace_permissions::Rule> = Vec::new();
+            let mut workspace_rules: Vec<crate::permissions::store::Rule> = Vec::new();
             if let Ok(arr) = spec.get::<mlua::Table>("workspace") {
                 for row in arr.sequence_values::<mlua::Table>().flatten() {
                     let tool: String = row.get("tool").unwrap_or_default();
@@ -69,7 +70,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                             patterns.push(p);
                         }
                     }
-                    workspace_rules.push(crate::workspace_permissions::Rule { tool, patterns });
+                    workspace_rules.push(crate::permissions::store::Rule { tool, patterns });
                 }
             }
             crate::lua::with_app(|app| app.sync_permissions(session_entries, workspace_rules));
