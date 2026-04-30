@@ -248,10 +248,6 @@ pub struct TuiApp {
     /// `WinEvent::TextChanged` on `PROMPT_WIN` so Lua subscribers
     /// (`smelt.win.on_event(prompt, "text_changed", …)`) get called.
     pub last_prompt_text: String,
-    /// Last primary-mouse-Down time, cell, and click count. Successive
-    /// clicks on the same cell within a short window increment the
-    /// count: 2 → word-select, 3 → line-select.
-    pub last_click: Option<(Instant, u16, u16, u8)>,
     /// Primary mouse button is held — we're mid-drag. The transcript
     /// stays frozen from Down to Up so selected text can't shift
     /// under the user's cursor while the agent streams new rows.
@@ -682,7 +678,6 @@ impl TuiApp {
                 w
             },
             last_prompt_text: String::new(),
-            last_click: None,
             mouse_drag_active: false,
             drag_autoscroll_since: None,
             prompt_drag_return_vim_mode: None,

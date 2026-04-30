@@ -2,7 +2,6 @@
 
 use super::*;
 use crossterm::event::{MouseEvent, MouseEventKind};
-use std::time::{Duration, Instant};
 
 impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
@@ -79,24 +78,9 @@ impl TuiApp {
                 EventOutcome::Redraw
             }
             MouseEventKind::Down(_) => {
-                // Click-count tracking: successive primary-button Downs
-                // on the same cell within 400ms increment the count.
-                // 2 → word-select + copy, 3 → line-select + copy. After
-                // 3 the count wraps back to 1 so a fourth click starts
-                // a fresh gesture.
-                let now = Instant::now();
-                let count = match self.last_click {
-                    Some((t, r, c, n))
-                        if now.duration_since(t) < Duration::from_millis(400)
-                            && r == me.row
-                            && c == me.column
-                            && n < 3 =>
-                    {
-                        n + 1
-                    }
-                    _ => 1,
-                };
-                self.last_click = Some((now, me.row, me.column, count));
+                // 2 → word-select + copy, 3 → line-select + copy. The
+                // 400ms / same-cell / cap-at-3 policy lives on `Ui`.
+                let count = self.ui.record_click(me.row, me.column);
                 let double = count == 2;
 
                 // Prompt input area: route Down through the unified

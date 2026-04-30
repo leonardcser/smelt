@@ -101,6 +101,13 @@ pub struct Ui {
     /// captured target's owning split disappears (`set_layout`) or
     /// owning overlay closes (`overlay_close`).
     capture: Option<HitTarget>,
+    /// Last primary-button Down for click-count tracking. Successive
+    /// Downs on the same cell within 400ms increment the count up to
+    /// 3 (so the fourth click wraps back to 1). Tuple shape:
+    /// `(time, row, col, count)`. The host calls `record_click` on
+    /// each Down to get the next count. Once Ui owns Down dispatch
+    /// (P2.b.4c.5), this becomes an internal helper.
+    last_click: Option<(std::time::Instant, u16, u16, u8)>,
     /// Single global cursor shape for the focused window. The host
     /// sets this each frame from the focused window's mode/state
     /// (vim Insert → `Hardware`, vim Normal/Visual → `Block`,
@@ -138,8 +145,34 @@ impl Ui {
             focus_history: Vec::new(),
             focus: None,
             capture: None,
+            last_click: None,
             cursor_shape: CursorShape::Hidden,
         }
+    }
+
+    /// Record a primary-button Down for click-count tracking and
+    /// return the resulting count (1, 2, or 3). Successive Downs on
+    /// the same cell within 400ms increment up to 3; the fourth
+    /// click wraps back to 1 so a fresh gesture restarts. Hosts
+    /// call this on every primary-button Down before per-pane
+    /// dispatch — once Down dispatch lives in `Ui::dispatch_event`
+    /// (P2.b.4c.5), this becomes an internal helper.
+    pub fn record_click(&mut self, row: u16, col: u16) -> u8 {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let count = match self.last_click {
+            Some((t, r, c, n))
+                if now.duration_since(t) < Duration::from_millis(400)
+                    && r == row
+                    && c == col
+                    && n < 3 =>
+            {
+                n + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, row, col, count));
+        count
     }
 
     /// Publish the splits layout for this frame. Leaves of the tree
@@ -2615,5 +2648,18 @@ mod tests {
         let cb_ids = UiHost::win_close(&mut ui, win);
         assert!(cb_ids.is_empty());
         assert!(ui.buf(buf).is_some());
+    }
+
+    #[test]
+    fn record_click_caps_at_three_then_wraps() {
+        let mut ui = make_ui();
+        // Same cell, no time gap → climbs to 3, then wraps.
+        assert_eq!(ui.record_click(5, 7), 1);
+        assert_eq!(ui.record_click(5, 7), 2);
+        assert_eq!(ui.record_click(5, 7), 3);
+        assert_eq!(ui.record_click(5, 7), 1);
+        // Different cell resets the count.
+        assert_eq!(ui.record_click(5, 7), 2);
+        assert_eq!(ui.record_click(8, 7), 1);
     }
 }
