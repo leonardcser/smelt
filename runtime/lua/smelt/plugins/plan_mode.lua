@@ -165,9 +165,8 @@ local function deactivate()
   smelt.tools.unregister("exit_plan_mode")
 end
 
--- React to mode changes.
-smelt.on("mode_change", function()
-  local mode = smelt.engine.mode()
+-- React to mode changes via the `agent_mode` cell.
+smelt.au.on("agent_mode", function(mode)
   if mode == "plan" then
     activate()
   else
@@ -176,6 +175,6 @@ smelt.on("mode_change", function()
 end)
 
 -- If we're already in plan mode at session start, activate.
-smelt.on("session_start", function()
+smelt.au.on("session_started", function()
   if smelt.engine.mode() == "plan" then activate() end
 end)

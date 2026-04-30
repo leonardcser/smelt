@@ -37,14 +37,18 @@ pub fn run_command(app: &mut App, line: &str) -> CommandOutcome {
         ),
         None => (name_arg, None),
     };
-    app.lua.emit(crate::lua::AutocmdEvent::CmdPre);
+    app.cells
+        .set_dyn("cmd_pre", std::rc::Rc::new(name.to_string()));
+    app.drain_cells_pending();
     let outcome = if !name.is_empty() && app.lua.has_command(name) {
         app.lua.run_command(name, arg);
         CommandAction::Continue
     } else {
         app.handle_command(&normalized)
     };
-    app.lua.emit(crate::lua::AutocmdEvent::CmdPost);
+    app.cells
+        .set_dyn("cmd_post", std::rc::Rc::new(name.to_string()));
+    app.drain_cells_pending();
     app.flush_lua_callbacks();
     outcome
 }
@@ -391,16 +395,8 @@ impl App {
             provider_type: self.config.provider_type.clone(),
         });
         if old != self.config.model {
-            let from = old;
-            let to = self.config.model.clone();
-            self.cells.set_dyn("model", std::rc::Rc::new(to.clone()));
-            self.lua
-                .emit_data(crate::lua::AutocmdEvent::ModelChange, |lua| {
-                    let t = lua.create_table()?;
-                    t.set("from", from)?;
-                    t.set("to", to)?;
-                    Ok(t)
-                });
+            self.cells
+                .set_dyn("model", std::rc::Rc::new(self.config.model.clone()));
         }
     }
 
@@ -427,20 +423,13 @@ impl App {
         let old = self.config.mode;
         self.config.mode = mode;
         state::set_mode(self.config.mode);
-        // Fire ModeChange first so plugins can (un)register tools and prompt
-        // sections for the new mode before we snapshot them for the engine.
+        // Publish the new mode first so plugins can (un)register tools
+        // and prompt sections for the new mode before we snapshot them
+        // for the engine.
         if old != mode {
-            let from = old.as_str().to_string();
-            let to = mode.as_str().to_string();
             self.cells
-                .set_dyn("agent_mode", std::rc::Rc::new(to.clone()));
-            self.lua
-                .emit_data(crate::lua::AutocmdEvent::ModeChange, |lua| {
-                    let t = lua.create_table()?;
-                    t.set("from", from)?;
-                    t.set("to", to)?;
-                    Ok(t)
-                });
+                .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
+            self.drain_cells_pending();
         }
         let system_prompt = self.rebuild_system_prompt();
         let plugin_tools = self.lua.plugin_tool_defs(self.config.mode);

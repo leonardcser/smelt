@@ -5,11 +5,14 @@
 //! - **D1 bootstrap** — loads `~/.config/smelt/init.lua` at startup
 //!   (honouring `XDG_CONFIG_HOME`). Missing files are not errors.
 //! - **D2 api shim** — `smelt.version`, `smelt.cmd.register`,
-//!   `smelt.keymap.set`, `smelt.on` all accept Lua callables and store
-//!   them in per-category registries that the app polls on the tick.
-//! - **D3 autocmd dispatch** — `AutocmdRegistry` + `emit_autocmd` run
-//!   handlers synchronously; errors are logged and the next handler
-//!   runs.
+//!   `smelt.keymap.set`, `smelt.au.on` all accept Lua callables and
+//!   store them in per-category registries that the app polls on the
+//!   tick.
+//! - **D3 event dispatch** — every "autocmd-shaped" event flows
+//!   through `Cells`. App publishers call `cells.set_dyn(name,
+//!   payload)`; subscribers register via `smelt.au.on(name, fn)` (a
+//!   thin alias over `Cells::subscribe_kind`). One observer registry,
+//!   no parallel autocmd map.
 //! - **D4 user-command + keymap registration** — registration stores
 //!   `LuaRef` handles keyed by `(mode, chord)`; mode `"n"` matches
 //!   Normal, `"i"` Insert, `"v"` Visual, `""` matches any mode.
@@ -85,29 +88,6 @@ pub fn is_lua_command(input: &str) -> bool {
         return false;
     }
     try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
-}
-
-/// Event kinds the app emits into the Lua autocmd dispatcher.
-///
-/// "Simple" events carry no data — handlers receive the event name as
-/// a string argument.  "Data" events carry a Lua table with structured
-/// fields — handlers receive `(event_name, data_table)`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum AutocmdEvent {
-    // ── simple (no payload) ─────────────────────────────────────────
-    BlockDone,
-    CmdPre,
-    CmdPost,
-    SessionStart,
-    Shutdown,
-    // ── data-carrying ───────────────────────────────────────────────
-    TurnStart,
-    TurnEnd,
-    ModeChange,
-    ModelChange,
-    ToolStart,
-    ToolEnd,
-    InputSubmit,
 }
 
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
@@ -269,46 +249,6 @@ pub(crate) fn parse_win_event(name: &str) -> Option<ui::WinEvent> {
     })
 }
 
-impl AutocmdEvent {
-    pub fn lua_name(&self) -> &'static str {
-        match self {
-            Self::BlockDone => "block_done",
-            Self::CmdPre => "cmd_pre",
-            Self::CmdPost => "cmd_post",
-            Self::SessionStart => "session_start",
-            Self::Shutdown => "shutdown",
-            Self::TurnStart => "turn_start",
-            Self::TurnEnd => "turn_end",
-            Self::ModeChange => "mode_change",
-            Self::ModelChange => "model_change",
-            Self::ToolStart => "tool_start",
-            Self::ToolEnd => "tool_end",
-            Self::InputSubmit => "input_submit",
-        }
-    }
-
-    fn from_lua_name(s: &str) -> Option<Self> {
-        match s {
-            "block_done" => Some(Self::BlockDone),
-            "cmd_pre" => Some(Self::CmdPre),
-            "cmd_post" => Some(Self::CmdPost),
-            "session_start" => Some(Self::SessionStart),
-            "shutdown" => Some(Self::Shutdown),
-            "turn_start" => Some(Self::TurnStart),
-            "turn_end" => Some(Self::TurnEnd),
-            "mode_change" => Some(Self::ModeChange),
-            "model_change" => Some(Self::ModelChange),
-            "tool_start" => Some(Self::ToolStart),
-            "tool_end" => Some(Self::ToolEnd),
-            "input_submit" => Some(Self::InputSubmit),
-            // Legacy aliases
-            "stream_start" => Some(Self::TurnStart),
-            "stream_end" => Some(Self::TurnEnd),
-            _ => None,
-        }
-    }
-}
-
 /// A Lua callable registered via `smelt.cmd.register` / `smelt.keymap` /
 /// `smelt.on`. Stored as a mlua `RegistryKey` so references survive
 /// across GC cycles and can be invoked from Rust handlers.
@@ -372,7 +312,6 @@ pub(crate) struct StatusSource {
 pub(crate) struct LuaShared {
     pub(crate) commands: Mutex<HashMap<String, RegisteredCommand>>,
     pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
-    pub(crate) autocmds: Mutex<HashMap<AutocmdEvent, Vec<LuaHandle>>>,
     /// Statusline sources in registration order. A `Vec` (not a
     /// `HashMap`) so the on-screen left-to-right order matches the
     /// order plugins called `smelt.statusline.register`. Re-registering
@@ -438,7 +377,6 @@ impl Default for LuaShared {
         Self {
             commands: Mutex::new(HashMap::new()),
             keymaps: Mutex::new(HashMap::new()),
-            autocmds: Mutex::new(HashMap::new()),
             statusline_sources: Mutex::new(Vec::new()),
             plugin_tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
@@ -618,54 +556,6 @@ impl LuaRuntime {
             self.record_error(format!("keymap `{chord}`: {e}"));
         }
         true
-    }
-
-    /// Fire all handlers registered for `event` (simple — no data payload).
-    /// Handlers receive `(event_name)`.
-    pub fn emit(&self, event: AutocmdEvent) {
-        let funcs = self.collect_handlers(&event);
-        for func in funcs {
-            if let Err(e) = func.call::<()>(event.lua_name()) {
-                self.record_error(format!("autocmd `{}`: {e}", event.lua_name()));
-            }
-        }
-    }
-
-    /// Fire all handlers for `event` with a data table.
-    /// Handlers receive `(event_name, data_table)`.
-    /// `build_data` is called once to construct the table (only if handlers exist).
-    pub fn emit_data<F>(&self, event: AutocmdEvent, build_data: F)
-    where
-        F: FnOnce(&Lua) -> LuaResult<mlua::Table>,
-    {
-        let funcs = self.collect_handlers(&event);
-        if funcs.is_empty() {
-            return;
-        }
-        let data = match build_data(&self.lua) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("autocmd `{}` data: {e}", event.lua_name()));
-                return;
-            }
-        };
-        for func in funcs {
-            if let Err(e) = func.call::<()>((event.lua_name(), data.clone())) {
-                self.record_error(format!("autocmd `{}`: {e}", event.lua_name()));
-            }
-        }
-    }
-
-    fn collect_handlers(&self, event: &AutocmdEvent) -> Vec<mlua::Function> {
-        let Ok(map) = self.shared.autocmds.lock() else {
-            return Vec::new();
-        };
-        let Some(list) = map.get(event) else {
-            return Vec::new();
-        };
-        list.iter()
-            .filter_map(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok())
-            .collect()
     }
 
     /// Access the underlying Lua state so callers can build result
@@ -1504,27 +1394,6 @@ mod tests {
     }
 
     #[test]
-    fn autocmd_emit_fires_handlers() {
-        let rt = LuaRuntime::new();
-        install_test_notify(&rt);
-        rt.lua
-            .load(
-                r#"
-                    smelt.on("block_done", function(event)
-                        smelt.notify("fired: " .. event)
-                    end)
-                "#,
-            )
-            .exec()
-            .expect("exec");
-        rt.emit(AutocmdEvent::BlockDone);
-        assert_eq!(
-            drain_notifications(&rt),
-            vec!["fired: block_done".to_string()]
-        );
-    }
-
-    #[test]
     fn chord_string_formats_nvim_style() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers as M};
         let ev = |code, mods| KeyEvent::new(code, mods);
@@ -1672,52 +1541,5 @@ mod tests {
         let errs = drain_errors(&rt);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("broken"), "err: {}", errs[0]);
-    }
-
-    #[test]
-    fn emit_data_passes_table_to_handler() {
-        let rt = LuaRuntime::new();
-        install_test_notify(&rt);
-        rt.lua
-            .load(
-                r#"
-                    smelt.on("mode_change", function(event, data)
-                        smelt.notify(event .. ":" .. data.from .. "->" .. data.to)
-                    end)
-                "#,
-            )
-            .exec()
-            .expect("exec");
-        rt.emit_data(AutocmdEvent::ModeChange, |lua| {
-            let t = lua.create_table()?;
-            t.set("from", "normal")?;
-            t.set("to", "plan")?;
-            Ok(t)
-        });
-        assert_eq!(
-            drain_notifications(&rt),
-            vec!["mode_change:normal->plan".to_string()]
-        );
-    }
-
-    #[test]
-    fn legacy_stream_start_maps_to_turn_start() {
-        let rt = LuaRuntime::new();
-        install_test_notify(&rt);
-        rt.lua
-            .load(
-                r#"
-                    smelt.on("stream_start", function(event)
-                        smelt.notify("got: " .. event)
-                    end)
-                "#,
-            )
-            .exec()
-            .expect("exec");
-        rt.emit(AutocmdEvent::TurnStart);
-        assert_eq!(
-            drain_notifications(&rt),
-            vec!["got: turn_start".to_string()]
-        );
     }
 }

@@ -1097,7 +1097,9 @@ impl App {
         {
             let _guard = crate::lua::install_app_ptr(self);
             self.lua.load_plugins();
-            self.lua.emit(crate::lua::AutocmdEvent::SessionStart);
+            self.cells
+                .set_dyn("session_started", std::rc::Rc::new(self.session.id.clone()));
+            self.drain_cells_pending();
         }
         if let Some(err) = self.lua.load_error.take() {
             self.notify_error(format!("lua init: {err}"));
@@ -1176,8 +1178,10 @@ impl App {
                 }
             }
             for _id in self.drain_finished_blocks() {
-                self.lua.emit(crate::lua::AutocmdEvent::BlockDone);
+                self.cells
+                    .set_dyn("block_done", std::rc::Rc::new(crate::app::cells::EventStub));
             }
+            self.drain_cells_pending();
             self.flush_lua_callbacks();
             // Fire `WinEvent::Tick` on every window with a registered
             // Tick callback — e.g. Agents pulls a fresh subagent
@@ -1530,7 +1534,9 @@ impl App {
         if self.agent.is_some() {
             self.finish_turn(true);
         }
-        self.lua.emit(crate::lua::AutocmdEvent::Shutdown);
+        self.cells
+            .set_dyn("shutdown", std::rc::Rc::new(crate::app::cells::EventStub));
+        self.drain_cells_pending();
         self.save_session();
 
         let _ = io::stdout().execute(DisableMouseCapture);
