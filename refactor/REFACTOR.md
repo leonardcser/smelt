@@ -311,7 +311,7 @@ completer decompose alongside. Sub-phases land independently.
     `virtual_text_at` walks every namespace (NsId ascending, matches
     the `highlights_at` precedent). Foundational primitive consumed by
     D.6b's ghost-text storage migration.
-  - **D.6b** — ghost text storage moves from `App::input_prediction`
+  - **D.6b** ✅ — ghost text storage moves from `App::input_prediction`
     to a `"completer"`-namespace virt-text extmark on the prompt
     Buffer; `compute_prompt` drops its prediction special-case.
   - **D.6c** — picker dropdown sync (already an Overlay since C.9c.4)
