@@ -20,21 +20,37 @@ Then read:
 
 ## Land sub-phases
 
-A session lands **one or more** consecutive sub-phases. The sub-phase
-is still the natural unit — never split one across sessions or merge
-two into one commit. When a sub-phase finishes and the next is
-independent (no shared rewrites, no blocked decisions), keep going.
+**A session lands multiple consecutive sub-phases — three to five is
+typical, one is a failure mode.** The sub-phase is the planning unit;
+the session is the execution unit. Default is to keep going; exit is
+the exception.
 
-Stop after a sub-phase lands when:
+**Don't pre-split.** Attempt the sub-phase as written. If it turns
+out too large, split *after* you've landed the part that fits
+(`C.8` → `C.8a` / `C.8b`, land `C.8a`, continue with the next
+independent sub-phase). Splitting before writing code is the planning
+anti-pattern this loop most often falls into — it produces sessions
+whose only output is a docs commit recording the split.
 
-- The next sub-phase needs a decision you don't have (defer it, log
-  the question in `P<n>.md`, look for independent work elsewhere; if
-  nothing's independent, exit).
+**Bundle when seams overlap.** If the next sub-phase touches the same
+files, types, or borrow shapes you just edited, do both in this
+session. The sub-phase ID is a label; the commit boundary is yours.
+
+**No 4-level IDs.** `P2.b.4c` is the floor. A fourth nesting level
+means you're over-splitting — land the work instead.
+
+**Don't commit deferrals as standalone work.** "Recording a question"
+is one bullet in `P<n>.md` bundled into the next real commit — never
+its own `docs(refactor): record <X> question` commit. If your session
+would otherwise produce only a deferral commit, you've exited too
+early; go find independent work in this phase or an earlier one.
+
+Exit only when:
+
 - The active phase closes (`P<n>` goes `Status: done`).
-- Two consecutive failed attempts to land — exit, human looks.
-
-If a sub-phase you started can't finish cleanly, split it in
-`REFACTOR.md` (`C.8` → `C.8a` / `C.8b`), land what's done, exit.
+- Every remaining sub-phase across all open phases is blocked on an
+  unresolved decision (check earlier phases before concluding this).
+- Two consecutive failed attempts to land — human looks.
 
 For each sub-phase:
 

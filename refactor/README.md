@@ -30,12 +30,29 @@ file fates (`INVENTORY.md`), parity (`FEATURES.md`), test strategy
 
 ## Granularity
 
-**Sub-phase is the natural unit** (`C.7.3`, `C.8`, `C.9`, …). A session
-lands one or more consecutive sub-phases — don't split one across
-sessions, don't merge two into a single commit, don't swallow whole
-phases in one go. If a sub-phase turns out larger than fits one
-session, split it in `REFACTOR.md` (e.g. `C.8` → `C.8a` / `C.8b`),
-land `C.8a`, exit. The split is part of the work.
+**Sub-phase is the planning unit; the session is the execution unit.**
+A session lands **multiple** consecutive sub-phases — three to five
+is typical, one is a failure mode. Don't split one across sessions,
+don't merge two into a single commit, don't swallow whole phases in
+one go.
+
+**Don't pre-split.** Attempt the sub-phase as written. Only split it
+*mid-attempt*, after you've already landed the part that fits
+(`C.8` → `C.8a` / `C.8b`, land `C.8a`, continue with the next
+independent sub-phase). Splitting before writing any code — the
+single most common micro-session anti-pattern — turns the session
+into a planning exercise that produces a docs-only commit and exits.
+If the listed scope looks big, that's the session's work, not a
+signal to subdivide.
+
+**Cap nesting at 3 levels.** `P2.b.4c` is the floor. A fourth level
+(`P2.b.4c.5b`) means the splitter is running away — land the work
+instead of subdividing further.
+
+**Bundle adjacent sub-phases that share seams.** If the next
+sub-phase touches the same files, types, or borrow shapes as the
+one you just landed, do them together. The sub-phase ID is a label;
+the commit boundary is yours to choose.
 
 ## Greenness
 
@@ -52,12 +69,20 @@ land `C.8a`, exit. The split is part of the work.
 ## Stopping rule
 
 After a sub-phase lands green (HEAD, `cargo nextest`, `refactor/check.sh`,
-`P<n>.md`, `REFACTOR.md` all in sync), check the next un-landed sub-phase:
+`P<n>.md`, `REFACTOR.md` all in sync), **the default is to continue.**
+Check the next un-landed sub-phase:
 
-1. **Independent and unblocked** — keep going. Land it in this session.
-2. **Needs a decision you don't have** — defer dependents, log the
-   question in `P<n>.md`, look elsewhere; if nothing's independent, exit.
-3. **Active phase closes** — exit; the next session opens `P<n+1>`.
+1. **Independent and unblocked** — keep going. This is the common
+   case; expect to hit it 2-4 times per session.
+2. **Active phase closes** — exit; the next session opens `P<n+1>`.
+3. **Needs a decision you don't have** — defer dependents, log the
+   question in `P<n>.md`, then **look earlier in the phase or one
+   phase back for independent work**. Only exit when nothing in any
+   open phase is unblocked.
+
+A session that lands one sub-phase and exits on case 3 without
+checking for independent work elsewhere is the failure mode this
+rule is shaped against.
 
 Hard stops (exit immediately, regardless of remaining work):
 
@@ -66,6 +91,12 @@ Hard stops (exit immediately, regardless of remaining work):
   `gh auth login`). Record in `P<n>.md` "Open questions" and exit.
 - **Two consecutive failed attempts** to land a sub-phase. Exit, human
   looks.
+
+**Don't commit deferrals as standalone work.** "Recording a design
+question" is one bullet in `P<n>.md` "Open questions" — bundle it
+into the next real commit, never its own `docs(refactor): record <X>`
+commit. If the only thing your session produced is a deferral commit,
+you've exited too early; go back to step 1.
 
 **Ambiguity is not a stop reason** — see "The plan is not final" above. A
 clear better option means you pick it; a rippling unresolved decision means
