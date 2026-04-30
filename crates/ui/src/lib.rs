@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod compositor;
 pub mod dialog;
 pub mod edit_buffer;
+pub mod event;
 pub mod flush;
 pub mod grid;
 pub mod kill_ring;
@@ -27,19 +28,6 @@ pub type AttachmentId = u64;
 /// and the event payload.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
-/// Outcome of routing a terminal event through [`Ui::dispatch_event`].
-/// `Consumed` = Ui handled the event end-to-end (focused-window
-/// keymap fired, modal Esc dismissed, terminal resize applied,
-/// modal-gated mouse absorbed). `Ignored` = Ui did not consume; the
-/// host should route through its own paths (TuiApp-level chords,
-/// prompt/transcript mouse routing, paste side effects, terminal
-/// focus tracking).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchOutcome {
-    Consumed,
-    Ignored,
-}
-
 pub use buffer::{BufType, Buffer, BufferParser, Span, SpanStyle};
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
@@ -49,6 +37,7 @@ pub use clipboard::{Clipboard, NullSink, Sink};
 pub use compositor::Compositor;
 pub use dialog::{PanelHeight, PanelSpec};
 pub use edit_buffer::EditBuffer;
+pub use event::{Event, FocusTarget, Status};
 pub use flush::flush_diff;
 pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
@@ -61,8 +50,8 @@ pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{VimMode, VimWindowState};
 pub use window::{
-    CursorShape, DrawContext, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit,
-    Window, WindowViewport,
+    CursorShape, DrawContext, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window,
+    WindowViewport,
 };
 
 use std::collections::HashMap;
@@ -980,26 +969,15 @@ impl Ui {
     ///   [`Event::Paste`] — Ui has no state to update; returns
     ///   `Ignored` so hosts can track terminal focus / drive
     ///   paste-side effects.
-    ///
-    /// [`Event::Key`]: crossterm::event::Event::Key
-    /// [`Event::Resize`]: crossterm::event::Event::Resize
-    /// [`Event::Mouse`]: crossterm::event::Event::Mouse
-    /// [`Event::FocusGained`]: crossterm::event::Event::FocusGained
-    /// [`Event::FocusLost`]: crossterm::event::Event::FocusLost
-    /// [`Event::Paste`]: crossterm::event::Event::Paste
-    pub fn dispatch_event(
-        &mut self,
-        ev: crossterm::event::Event,
-        lua_invoke: &mut LuaInvoke,
-    ) -> DispatchOutcome {
-        use crossterm::event::{Event, KeyEvent, MouseEventKind};
+    pub fn dispatch_event(&mut self, ev: Event, lua_invoke: &mut LuaInvoke) -> Status {
+        use crossterm::event::{KeyEvent, MouseEventKind};
         match ev {
             Event::Key(KeyEvent {
                 code, modifiers, ..
             }) => self.dispatch_key(code, modifiers, lua_invoke),
             Event::Resize(w, h) => {
                 self.set_terminal_size(w, h);
-                DispatchOutcome::Consumed
+                Status::Consumed
             }
             Event::Mouse(me) => {
                 let is_scroll = matches!(
@@ -1010,21 +988,19 @@ impl Ui {
                         | MouseEventKind::ScrollRight
                 );
                 if is_scroll && self.focused_overlay().is_some() {
-                    return DispatchOutcome::Consumed;
+                    return Status::Consumed;
                 }
                 if let Some(modal_id) = self.active_modal() {
                     let inside = self
                         .overlay_hit_test(me.row, me.column, None)
                         .is_some_and(|(id, _)| id == modal_id);
                     if !inside {
-                        return DispatchOutcome::Consumed;
+                        return Status::Consumed;
                     }
                 }
-                DispatchOutcome::Ignored
+                Status::Ignored
             }
-            // FocusGained / FocusLost / Paste, plus any future
-            // crossterm variants (the enum is `#[non_exhaustive]`).
-            _ => DispatchOutcome::Ignored,
+            Event::FocusGained | Event::FocusLost | Event::Paste(_) => Status::Ignored,
         }
     }
 
@@ -1033,7 +1009,7 @@ impl Ui {
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
-    ) -> DispatchOutcome {
+    ) -> Status {
         // Modal overlay built-in: bare Esc on an active modal closes
         // the topmost modal. Universal dismiss is fundamental
         // behaviour, not user-customisable. Before closing, fires
@@ -1062,11 +1038,11 @@ impl Ui {
                 if self.overlay(modal).is_some() {
                     let _ = self.overlay_close(modal);
                 }
-                return DispatchOutcome::Consumed;
+                return Status::Consumed;
             }
         }
         let Some(win) = self.focus() else {
-            return DispatchOutcome::Ignored;
+            return Status::Ignored;
         };
         let key = KeyBind::new(code, mods);
         // Pending follow-up dispatched after the keymap callback
@@ -1085,18 +1061,18 @@ impl Ui {
                     };
                     let r = inner(&mut ctx);
                     match r {
-                        CallbackResult::Consumed => DispatchOutcome::Consumed,
-                        CallbackResult::Pass => DispatchOutcome::Ignored,
+                        CallbackResult::Consumed => Status::Consumed,
+                        CallbackResult::Pass => Status::Ignored,
                         CallbackResult::Event(ev, payload) => {
                             follow_up = Some((ev, payload));
-                            DispatchOutcome::Consumed
+                            Status::Consumed
                         }
                     }
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
                     lua_invoke(*handle, win, &payload);
-                    DispatchOutcome::Consumed
+                    Status::Consumed
                 }
             };
             self.callbacks.restore_keymap(win, key, cb);
@@ -1111,24 +1087,24 @@ impl Ui {
                     };
                     let r = inner(&mut ctx);
                     match r {
-                        CallbackResult::Consumed => DispatchOutcome::Consumed,
-                        CallbackResult::Pass => DispatchOutcome::Ignored,
+                        CallbackResult::Consumed => Status::Consumed,
+                        CallbackResult::Pass => Status::Ignored,
                         CallbackResult::Event(ev, payload) => {
                             follow_up = Some((ev, payload));
-                            DispatchOutcome::Consumed
+                            Status::Consumed
                         }
                     }
                 }
                 Callback::Lua(handle) => {
                     let payload = Payload::Key { code, mods };
                     lua_invoke(*handle, win, &payload);
-                    DispatchOutcome::Consumed
+                    Status::Consumed
                 }
             };
             self.callbacks.restore_key_fallback(win, cb);
             r
         } else {
-            DispatchOutcome::Ignored
+            Status::Ignored
         };
 
         if let Some((ev, payload)) = follow_up {
@@ -1439,9 +1415,9 @@ mod tests {
         ui: &mut Ui,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
-    ) -> DispatchOutcome {
+    ) -> Status {
         ui.dispatch_event(
-            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(code, mods)),
+            Event::Key(crossterm::event::KeyEvent::new(code, mods)),
             &mut |_, _, _| {},
         )
     }
@@ -2283,7 +2259,7 @@ mod tests {
             crossterm::event::KeyCode::Char('q'),
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, DispatchOutcome::Consumed);
+        assert_eq!(result, Status::Consumed);
         assert!(ui.overlay(oid).is_none());
     }
 
@@ -2339,7 +2315,7 @@ mod tests {
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, DispatchOutcome::Consumed);
+        assert_eq!(result, Status::Consumed);
         assert_eq!(*observed.lock().unwrap(), vec![7]);
     }
 
@@ -2353,7 +2329,7 @@ mod tests {
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, DispatchOutcome::Consumed);
+        assert_eq!(result, Status::Consumed);
         assert_eq!(ui.active_modal(), None);
     }
 
@@ -2402,7 +2378,7 @@ mod tests {
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         );
-        assert_eq!(result, DispatchOutcome::Consumed);
+        assert_eq!(result, Status::Consumed);
         assert_eq!(*count.lock().unwrap(), 1);
         assert!(ui.overlay(id).is_none());
     }
