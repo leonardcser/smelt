@@ -632,7 +632,15 @@ binding TLS split are each natural single-session units:
   click-count tracking, scrollbar drag, prompt/transcript cursor
   positioning) folds into Ui-side dispatch reaching through
   `UiHost` for App state — the full mouse fold P1.f.6b deferred to
-  "when P2's Host / UiHost traits exist."
+  "when P2's Host / UiHost traits exist." Splits:
+  - **P2.b.4a** — `handle_key` returns `ui::Status`; kill-ring
+    inspection moves to the single caller (`handle_content_vim_key`).
+  - **P2.b.4b** — introduce `Window::handle(ui::Event, ctx, &mut
+    dyn UiHost) -> Status` as the public entry; today's per-event
+    methods become private helpers.
+  - **P2.b.4c** — pre-P2 mouse/key routing folds into
+    `Ui::dispatch_event` reaching through `UiHost`. Multi-session;
+    further split in REFACTOR.
 - **P2.b.5** — Lua bindings TLS split: `crate::lua::with_host` /
   `with_ui_host` exposes the right trait depending on the
   binding's declaration. UiHost-only Lua bindings (`smelt.ui /

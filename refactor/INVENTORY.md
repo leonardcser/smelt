@@ -53,7 +53,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `vim.rs`              | 3043 | Vim state machine                             | deleted      | P1.d.5    | partial | 5d (registers/dot-repeat/undo → Buffer) + 5f.2d (recipe-style flatten, gated on Lua keymap registry) still pending. |
 | `motions.rs`          | 333  | Cursor-motion primitives over `&str` (h/j/k/l/w/b/e/f/F/t/T/%, FindKind) | renamed      | P1.d.5f.2b | landed  | Top-level primitive. |
 | `text_objects.rs`     | 157  | Vim-shaped text-object selection (iw/aw/i"/a"/i(/a(, etc.) | renamed      | P1.d.5f.2b | landed  | Top-level primitive. |
-| `window.rs`           | 1163 | Window viewport                               | restructured | P1.d/P2.b.3 | partial | `render(buf, slice, ctx)` + cursor + scrollbar paint operational; `handle_mouse` returns `ui::Status` (the `MouseAction` enum retired in favour of the shared dispatch outcome); per-Window vim state inline (`vim_state`, `selection_anchor`, `curswant`); virt-text paints after highlights. Remaining decomposition waits for P1.d.5d/f.2d. |
+| `window.rs`           | 1163 | Window viewport                               | restructured | P1.d/P2.b.3/P2.b.4a | partial | `render(buf, slice, ctx)` + cursor + scrollbar paint operational; `handle_key` and `handle_mouse` both return `ui::Status` (`Option<Option<String>>` retired; kill-ring inspection now lives at the caller); per-Window vim state inline (`vim_state`, `selection_anchor`, `curswant`); virt-text paints after highlights. Remaining decomposition waits for P2.b.4b unified `Window::handle` entry + P1.d.5d/f.2d. |
 
 ## `crates/tui/src/`
 
