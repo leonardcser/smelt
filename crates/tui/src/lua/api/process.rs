@@ -1,8 +1,17 @@
 //! `smelt.process` bindings — list, kill, read output, spawn
 //! background processes against the same `ProcessRegistry` the
 //! engine uses for `bash run_in_background=true`.
+//!
+//! `smelt.process.run` is the synchronous short-lived counterpart over
+//! `tui::process::run` — `Command::new(cmd).args(args).output()` with
+//! timeout, cwd, env, optional stdin. Long-lived bidirectional
+//! children land in `tui::subprocess` (P3.a).
 
 use mlua::prelude::*;
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::process;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let process_tbl = lua.create_table()?;
@@ -81,6 +90,52 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(id)
         })?,
     )?;
+    process_tbl.set(
+        "run",
+        lua.create_function(
+            |lua, (cmd, args, opts): (String, Option<Vec<String>>, Option<mlua::Table>)| {
+                let parsed = parse_run_options(opts.as_ref())?;
+                let args = args.unwrap_or_default();
+                match process::run(&cmd, &args, &parsed) {
+                    Ok(out) => Ok((Some(output_to_lua(lua, &out)?), None)),
+                    Err(err) => Ok((None, Some(err.to_string()))),
+                }
+            },
+        )?,
+    )?;
+
     smelt.set("process", process_tbl)?;
     Ok(())
+}
+
+fn parse_run_options(opts: Option<&mlua::Table>) -> LuaResult<process::Options> {
+    let Some(t) = opts else {
+        return Ok(process::Options::default());
+    };
+
+    let mut env = HashMap::new();
+    if let Some(e) = t.get::<Option<mlua::Table>>("env")? {
+        for pair in e.pairs::<String, String>() {
+            let (k, v) = pair?;
+            env.insert(k, v);
+        }
+    }
+
+    Ok(process::Options {
+        cwd: t.get::<Option<String>>("cwd")?,
+        env,
+        timeout: t
+            .get::<Option<u64>>("timeout_secs")?
+            .map(Duration::from_secs),
+        stdin: t.get::<Option<String>>("stdin")?,
+    })
+}
+
+fn output_to_lua(lua: &Lua, out: &process::Output) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("stdout", out.stdout.clone())?;
+    t.set("stderr", out.stderr.clone())?;
+    t.set("exit_code", out.exit_code)?;
+    t.set("timed_out", out.timed_out)?;
+    Ok(t)
 }
