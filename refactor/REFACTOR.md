@@ -426,12 +426,12 @@ bridges, then the aggregate.
   and the `_get` Lua primitive retires. `Confirms::is_clear()` is
   the canonical predicate the engine-drain gate consumes (P2.a.11
   swaps the focused-overlay `blocks_agent` flag for it).
-- **a.4** — `Cells` registry (typed name → value + subscribers). New
+- **a.4** ✅ — `Cells` registry (typed name → value + subscribers). New
   primitive; built-in cells migrate from scattered App fields
   (`vim_mode`, `agent_mode` via `mode`, …). Splits across three
   sessions because the registry shape, the Lua surface, and the
   built-in migrations are each natural single-session units:
-  - **a.4a** — `Cells` primitive type: typed name → value storage,
+  - **a.4a** ✅ — `Cells` primitive type: typed name → value storage,
     Rust-side subscribers, queue-then-drain so subscriber bodies
     run after `&mut Cells` releases. `cells: Cells` field on `App`
     (no consumers yet — drain wiring lands with a.4b's first Lua
@@ -654,7 +654,7 @@ binding TLS split are each natural single-session units:
     headless raises. Lands with first headless Lua driver (P2.c).
   - **P2.b.5c** — bulk-migrate `with_app` callsites; drop alias.
 
-### P2.c — `Cells` reactive layer + event bus
+### P2.c — `Cells` reactive layer + event bus ✅ landed via P2.a.4 + P2.a.9
 
 Cells is a single registry that doubles as the autocmd-style event
 bus. Built-ins:
@@ -695,11 +695,15 @@ direct host calls. Splits:
 - **Tests (L2):** clock-injection seam deferred (no L2 harness);
   manual walks + `cargo nextest` remain the parity gate.
 
-### P2.e — Single `select!` loop
+### P2.e — Single `select!` loop ✅ structurally landed
 
-One loop merges `terminal_rx`, `engine.event_rx`, `lua_callback_rx`,
-`cells_rx`, `timers_rx`. Each event handled = render runs; if the
-diff is empty, nothing flushes.
+Loop merges `terminal_rx` + `engine.event_rx` + `exec_rx` (for
+`/exec`) + `tokio::time::sleep` (animations + drag-autoscroll).
+Cells / timers / lua-callbacks queue from inside the loop and
+drain via `drain_cells_pending` / `tick_timers` /
+`flush_lua_callbacks`; render runs at top-of-loop. The "explicit
+per-arm render" polish moves to P6 with the streaming-pipeline
+tightening.
 
 End of P2: tree is green again. App is a thin coordinator over
 named subsystems. No god-struct, no inline engine drain, no
