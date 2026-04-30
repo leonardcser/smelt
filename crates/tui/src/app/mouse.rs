@@ -59,7 +59,7 @@ impl App {
                 // so both branches just dispatch unconditionally.
                 // Scrollbar drag is an App-owned gesture and takes the
                 // Up itself — the adapter call is skipped there.
-                if self.drag_on_scrollbar.is_none() {
+                if !matches!(self.ui.capture(), Some(ui::HitTarget::Scrollbar { .. })) {
                     self.dispatch_focused_mouse(me, 0);
                 }
                 if self.app_focus == crate::app::AppFocus::Prompt {
@@ -71,7 +71,7 @@ impl App {
                 }
                 self.mouse_drag_active = false;
                 self.drag_autoscroll_since = None;
-                self.drag_on_scrollbar = None;
+                self.ui.clear_capture();
                 return EventOutcome::Redraw;
             }
             _ => {}
@@ -117,14 +117,10 @@ impl App {
                 if let Some(vp) = self.prompt_viewport {
                     if vp.contains(me.row, me.column) {
                         self.app_focus = crate::app::AppFocus::Prompt;
-                        if self.begin_scrollbar_drag_if_hit(
-                            me.row,
-                            me.column,
-                            crate::app::AppFocus::Prompt,
-                        ) {
+                        if self.begin_scrollbar_drag_if_hit(me.row, me.column, ui::PROMPT_WIN) {
                             return EventOutcome::Redraw;
                         }
-                        self.drag_on_scrollbar = None;
+                        self.ui.clear_capture();
                         if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
                             && self.input.win.vim_enabled
                         {
@@ -153,14 +149,10 @@ impl App {
                 // the last paint: scrollbar clicks latch a
                 // `ScrollbarDrag`; content clicks delegate to the
                 // transcript Window's mouse handler.
-                if self.begin_scrollbar_drag_if_hit(
-                    me.row,
-                    me.column,
-                    crate::app::AppFocus::Content,
-                ) {
+                if self.begin_scrollbar_drag_if_hit(me.row, me.column, ui::TRANSCRIPT_WIN) {
                     return EventOutcome::Redraw;
                 }
-                self.drag_on_scrollbar = None;
+                self.ui.clear_capture();
                 self.handle_content_mouse(me, count);
                 EventOutcome::Redraw
             }
@@ -220,8 +212,8 @@ impl App {
     /// Drag handler: scrollbar drags re-snap the thumb; otherwise the
     /// event flows to the focused buffer adapter.
     fn extend_selection_to(&mut self, me: MouseEvent) {
-        if self.drag_on_scrollbar.is_some() {
-            self.apply_scrollbar_drag(me.row);
+        if let Some(ui::HitTarget::Scrollbar { owner }) = self.ui.capture() {
+            self.apply_scrollbar_drag(owner, me.row);
             return;
         }
         self.dispatch_focused_mouse(me, 0);
@@ -236,7 +228,7 @@ impl App {
     pub(super) fn tick_drag_autoscroll(&mut self) {
         if !self.mouse_drag_active
             || self.app_focus != crate::app::AppFocus::Content
-            || self.drag_on_scrollbar.is_some()
+            || matches!(self.ui.capture(), Some(ui::HitTarget::Scrollbar { .. }))
         {
             self.drag_autoscroll_since = None;
             return;
@@ -403,22 +395,13 @@ impl App {
         }
     }
 
-    /// Snap the viewport so the scrollbar thumb lands at screen row
-    /// `screen_row`. Uses the `Viewport` recorded by the last
-    /// paint — no re-measuring of the transcript on drag. Returns
-    /// `true` when the region has a visible scrollbar and the jump was
-    /// applied.
-    /// If `(row, col)` lands on the scrollbar of `target`'s pane, latch
-    /// a `ScrollbarDrag` that preserves the click's offset within the
-    /// thumb, and snap the buffer's scroll so the thumb stays under the
-    /// pointer. Returns `true` when the event was consumed.
-    fn begin_scrollbar_drag_if_hit(
-        &mut self,
-        row: u16,
-        col: u16,
-        target: crate::app::AppFocus,
-    ) -> bool {
-        let Some(vp) = self.viewport_for(target) else {
+    /// If `(row, col)` lands on the scrollbar of `owner`'s pane, latch
+    /// a `HitTarget::Scrollbar { owner }` capture on `Ui` so subsequent
+    /// drag rows continue mapping to it even when the pointer wanders
+    /// off the track. Snaps the buffer's scroll once so the thumb
+    /// re-centres under the pointer. Returns `true` when consumed.
+    fn begin_scrollbar_drag_if_hit(&mut self, row: u16, col: u16, owner: ui::WinId) -> bool {
+        let Some(vp) = self.viewport_for(owner) else {
             return false;
         };
         let Some(bar) = vp.scrollbar else {
@@ -427,53 +410,46 @@ impl App {
         if !bar.contains(vp.rect, row, col) {
             return false;
         }
-        self.drag_on_scrollbar = Some(crate::app::ScrollbarDragTarget::Focus(target));
-        self.apply_scrollbar_drag(row);
+        self.ui.set_capture(ui::HitTarget::Scrollbar { owner });
+        self.apply_scrollbar_drag(owner, row);
         true
     }
 
-    /// Apply an in-flight `ScrollbarDrag` to the current pointer row:
-    /// translate the thumb-relative anchor back into a thumb-top, then
-    /// into a buffer scroll offset via the region's proportional map.
-    fn apply_scrollbar_drag(&mut self, row: u16) {
-        let Some(target) = self.drag_on_scrollbar else {
+    /// Apply an in-flight scrollbar drag to the current pointer row:
+    /// translate the row into a thumb-top via the captured target's
+    /// scrollbar geometry, then into a buffer scroll offset via the
+    /// region's proportional map.
+    fn apply_scrollbar_drag(&mut self, owner: ui::WinId, row: u16) {
+        let Some(vp) = self.viewport_for(owner) else {
             return;
         };
-        match target {
-            crate::app::ScrollbarDragTarget::Focus(focus) => {
-                let Some(vp) = self.viewport_for(focus) else {
-                    return;
-                };
-                let Some(bar) = vp.scrollbar else {
-                    return;
-                };
-                let rel_row = row.saturating_sub(vp.rect.top);
-                let thumb_top = bar.thumb_top_for_click(rel_row);
-                let from_top = bar.scroll_from_top_for_thumb(thumb_top);
-                match focus {
-                    crate::app::AppFocus::Content => {
-                        self.transcript_window.scroll_top = from_top;
-                        let rows = self.full_transcript_display_text(self.settings.show_thinking);
-                        let viewport = self.viewport_rows_estimate();
-                        let max_scroll = (rows.len() as u16).saturating_sub(viewport);
-                        self.transcript_window.follow_tail =
-                            self.transcript_window.scroll_top >= max_scroll;
-                        self.transcript_window
-                            .reanchor_to_visible_row(&rows, viewport);
-                    }
-                    crate::app::AppFocus::Prompt => {
-                        self.input.win.scroll_top = from_top;
-                    }
-                }
-            }
+        let Some(bar) = vp.scrollbar else {
+            return;
+        };
+        let rel_row = row.saturating_sub(vp.rect.top);
+        let thumb_top = bar.thumb_top_for_click(rel_row);
+        let from_top = bar.scroll_from_top_for_thumb(thumb_top);
+        if owner == ui::TRANSCRIPT_WIN {
+            self.transcript_window.scroll_top = from_top;
+            let rows = self.full_transcript_display_text(self.settings.show_thinking);
+            let viewport = self.viewport_rows_estimate();
+            let max_scroll = (rows.len() as u16).saturating_sub(viewport);
+            self.transcript_window.follow_tail = self.transcript_window.scroll_top >= max_scroll;
+            self.transcript_window
+                .reanchor_to_visible_row(&rows, viewport);
+        } else if owner == ui::PROMPT_WIN {
+            self.input.win.scroll_top = from_top;
         }
     }
 
-    /// Lookup the currently-painted viewport for a pane.
-    fn viewport_for(&self, target: crate::app::AppFocus) -> Option<ui::WindowViewport> {
-        match target {
-            crate::app::AppFocus::Content => self.transcript_viewport,
-            crate::app::AppFocus::Prompt => self.prompt_viewport,
+    /// Lookup the currently-painted viewport for a known split owner.
+    fn viewport_for(&self, owner: ui::WinId) -> Option<ui::WindowViewport> {
+        if owner == ui::TRANSCRIPT_WIN {
+            self.transcript_viewport
+        } else if owner == ui::PROMPT_WIN {
+            self.prompt_viewport
+        } else {
+            None
         }
     }
 }

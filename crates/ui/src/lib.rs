@@ -99,6 +99,15 @@ pub struct Ui {
     /// leaf; the discrimination is derived at lookup time
     /// (`overlay_for_leaf` vs `splits.contains_leaf`).
     focus: Option<WinId>,
+    /// In-flight gesture capture target. When set, mouse routing
+    /// short-circuits hit-testing and delivers events to this target
+    /// directly until the gesture ends (mouse-up clears it). Used by
+    /// scrollbar drag — once the user grabs the thumb, subsequent
+    /// drag rows must continue mapping to the same scrollbar even if
+    /// the pointer wanders off the track. Auto-clears when the
+    /// captured target's owning split disappears (`set_layout`) or
+    /// owning overlay closes (`overlay_close`).
+    capture: Option<HitTarget>,
 }
 
 /// Reserved `WinId` for the main prompt input window. Stable id so Lua
@@ -128,6 +137,7 @@ impl Ui {
             next_overlay_id: 1,
             focus_history: Vec::new(),
             focus: None,
+            capture: None,
         }
     }
 
@@ -141,6 +151,11 @@ impl Ui {
         if let Some(focus) = self.focus {
             if !self.splits.contains_leaf(focus) && self.overlay_for_leaf(focus).is_none() {
                 self.focus = None;
+            }
+        }
+        if let Some(cap) = self.capture {
+            if !self.capture_target_alive(cap) {
+                self.capture = None;
             }
         }
     }
@@ -245,6 +260,19 @@ impl Ui {
     pub fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
         let pos = self.overlays.iter().position(|(oid, _)| *oid == id)?;
         let (_, removed) = self.overlays.remove(pos);
+        // Clear capture when the closing overlay owned the gesture —
+        // either chrome of this overlay or a leaf inside its layout.
+        if let Some(cap) = self.capture {
+            let owned = match cap {
+                HitTarget::Chrome { owner } => owner == id,
+                HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
+                    removed.layout.contains_leaf(w)
+                }
+            };
+            if owned {
+                self.capture = None;
+            }
+        }
         if let Some(focused) = self.focus {
             if removed.layout.contains_leaf(focused) {
                 self.focus = None;
@@ -709,6 +737,40 @@ impl Ui {
             return false;
         }
         self.set_focus(target)
+    }
+
+    // ── Capture (in-flight gesture) ──────────────────────────────
+
+    /// In-flight gesture target, if any. Mouse routing should consult
+    /// this before [`Self::hit_test`]: while a gesture is captured,
+    /// drag rows must continue flowing to the same target even if the
+    /// pointer drifts off its rect.
+    pub fn capture(&self) -> Option<HitTarget> {
+        self.capture
+    }
+
+    /// Latch a gesture target. Call on mouse-down once the host has
+    /// decided which target should own the in-flight gesture (e.g.
+    /// scrollbar hit). [`Self::clear_capture`] releases it on
+    /// mouse-up; [`Self::set_layout`] / [`Self::overlay_close`]
+    /// auto-release if the target's owning split or overlay
+    /// disappears.
+    pub fn set_capture(&mut self, target: HitTarget) {
+        self.capture = Some(target);
+    }
+
+    /// Release the in-flight gesture target. Idempotent.
+    pub fn clear_capture(&mut self) {
+        self.capture = None;
+    }
+
+    fn capture_target_alive(&self, target: HitTarget) -> bool {
+        match target {
+            HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
+                self.splits.contains_leaf(w) || self.overlay_for_leaf(w).is_some()
+            }
+            HitTarget::Chrome { owner } => self.overlays.iter().any(|(id, _)| *id == owner),
+        }
     }
 
     // ── Renderer delegation ───────────────────────────────────────
@@ -1774,6 +1836,97 @@ mod tests {
         // New tree omits the focused leaf — focus clears.
         ui.set_layout(LayoutTree::vbox(Vec::new()));
         assert_eq!(ui.focus(), None);
+    }
+
+    #[test]
+    fn capture_starts_unset() {
+        let ui = make_ui();
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn set_capture_then_clear_capture() {
+        let mut ui = make_ui();
+        let target = HitTarget::Scrollbar { owner: WinId(7) };
+        ui.set_capture(target);
+        assert_eq!(ui.capture(), Some(target));
+        ui.clear_capture();
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn set_layout_clears_capture_when_split_owner_disappears() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
+        ui.set_capture(HitTarget::Scrollbar { owner: win });
+        // Replacement tree omits `win` — capture must clear.
+        ui.set_layout(LayoutTree::vbox(Vec::new()));
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn set_layout_keeps_capture_when_split_owner_persists() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let tree = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]);
+        ui.set_layout(tree.clone());
+        let target = HitTarget::Scrollbar { owner: win };
+        ui.set_capture(target);
+        ui.set_layout(tree);
+        assert_eq!(ui.capture(), Some(target));
+    }
+
+    #[test]
+    fn overlay_close_clears_capture_for_overlay_chrome() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(stub_overlay());
+        ui.set_capture(HitTarget::Chrome { owner: id });
+        ui.overlay_close(id);
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn overlay_close_clears_capture_for_overlay_leaf() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(stub_overlay());
+        ui.set_capture(HitTarget::Window(WinId(99)));
+        ui.overlay_close(id);
+        // The gesture that captured the leaf ends with the overlay
+        // it lived in.
+        assert_eq!(ui.capture(), None);
+    }
+
+    #[test]
+    fn overlay_close_keeps_capture_for_unrelated_target() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(stub_overlay());
+        let other = WinId(50);
+        make_split(&mut ui, other);
+        ui.set_capture(HitTarget::Scrollbar { owner: other });
+        ui.overlay_close(id);
+        assert_eq!(ui.capture(), Some(HitTarget::Scrollbar { owner: other }));
     }
 
     #[test]
