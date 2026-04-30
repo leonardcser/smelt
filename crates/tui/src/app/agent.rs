@@ -322,7 +322,7 @@ impl TuiApp {
         // Commit active tools to block history but don't render yet —
         // the next draw_frame renders blocks + prompt atomically in one
         // synchronized update, avoiding a flash where the prompt disappears.
-        self.finalize_active_tools();
+        self.finish_transcript_turn();
         if cancelled {
             {
                 self.working.finish(TurnOutcome::Interrupted);
