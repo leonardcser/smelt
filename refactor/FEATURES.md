@@ -252,7 +252,7 @@ to invoke_ the feature.
 | `smelt.tools.call` (call tool from tool)                | `_bootstrap.lua`                    | P5                                         | working        |
 | `smelt.engine.ask`                                      | `lua/api/state.rs`                  | P3.b → `lua/api/engine.rs`                 | working        |
 | `smelt.model.{get,set,list}`                            | `lua/api/model.rs`                  | P4.e (carved from `smelt.engine`)          | working        |
-| `smelt.engine.history`                                  | `lua/api/state.rs`                  | P3.b                                       | working        |
+| `smelt.session.messages`                                | `lua/api/session.rs`                | P4.e (carved from `smelt.engine.history`)  | working        |
 | `smelt.engine.cancel`                                   | `lua/api/state.rs`                  | P3.b                                       | working        |
 | `smelt.reasoning.{get,set,cycle}`                       | `lua/api/reasoning.rs`              | P4.e (carved from `smelt.engine`)          | working        |
 | `smelt.ui.dialog.open` / `open_handle`                  | `dialog.lua` + `lua/api/widgets.rs` | P3.b → `lua/api/ui.rs`                     | working        |
