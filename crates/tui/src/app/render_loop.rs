@@ -141,7 +141,7 @@ impl App {
             width,
             viewport_rows,
             self.transcript_window.scroll_top,
-            self.settings.show_thinking,
+            self.config.settings.show_thinking,
         );
         self.transcript_window.scroll_top = tdata.clamped_scroll;
 
@@ -253,12 +253,12 @@ impl App {
         has_prompt_cursor: bool,
     ) {
         let bar_info = content::prompt_data::BarInfo {
-            model_label: Some(self.model.clone()),
-            reasoning_effort: self.reasoning_effort,
-            show_tokens: self.settings.show_tokens,
+            model_label: Some(self.config.model.clone()),
+            reasoning_effort: self.config.reasoning_effort,
+            show_tokens: self.config.settings.show_tokens,
             context_tokens: self.context_tokens,
-            context_window: self.context_window,
-            show_cost: self.settings.show_cost,
+            context_window: self.config.context_window,
+            show_cost: self.config.settings.show_cost,
             session_cost_usd: self.session_cost_usd,
         };
 

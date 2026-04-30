@@ -434,8 +434,11 @@ bridges, then the aggregate.
   (`vim_mode`, `agent_mode` via `mode`, …).
 - **a.5** — `Timers { set, every, cancel }`. Existing `smelt.defer`
   callback queue is the seed; add `every` + cancellable handles.
-- **a.6** — `AppConfig` (model/api/provider/settings/keymap/theme
-  path). Bundles today's scattered config fields on App.
+- **a.6** ✅ — `AppConfig` (provider triple, mode + reasoning cycles,
+  settings, multi-agent toggle, model overrides, context window).
+  16 fields bundle off `App` into `app::app_config::AppConfig`; call
+  sites read through `self.config.*`. Keymap / theme path bindings
+  ride later phases (P3.b / P5.d).
 - **a.7** — `Session { history, costs, turn_metas }`. (Sub-agent state
   lives in Lua cells fed by `tui::subprocess` `on_event` callbacks —
   see P5.b — not on `Session`.)

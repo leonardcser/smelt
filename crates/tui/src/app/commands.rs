@@ -169,9 +169,17 @@ fn cmd_stats(app: &mut App, _: Option<String>) -> CommandAction {
 
 fn cmd_cost(app: &mut App, _: Option<String>) -> CommandAction {
     let turns = app.user_turns().len();
-    let resolved = engine::pricing::resolve(&app.model, &app.provider_type, &app.model_config);
-    let lines =
-        crate::metrics::render_session_cost(app.session_cost_usd, &app.model, turns, &resolved);
+    let resolved = engine::pricing::resolve(
+        &app.config.model,
+        &app.config.provider_type,
+        &app.config.model_config,
+    );
+    let lines = crate::metrics::render_session_cost(
+        app.session_cost_usd,
+        &app.config.model,
+        turns,
+        &resolved,
+    );
     let text = crate::metrics::render_cost_text(&lines);
     crate::app::dialogs::text_modal::open(app, "cost", &text);
     CommandAction::Continue
@@ -359,26 +367,32 @@ impl App {
     /// Switch to a model by key, updating all relevant state. Silently does
     /// nothing if the key is not found.
     pub(crate) fn apply_model(&mut self, key: &str) {
-        let Some(resolved) = self.available_models.iter().find(|m| m.key == key).cloned() else {
+        let Some(resolved) = self
+            .config
+            .available_models
+            .iter()
+            .find(|m| m.key == key)
+            .cloned()
+        else {
             return;
         };
-        let old = self.model.clone();
-        self.model = resolved.model_name.clone();
-        self.api_base = resolved.api_base.clone();
-        self.api_key_env = resolved.api_key_env.clone();
-        self.provider_type = resolved.provider_type.clone();
-        self.model_config = (&resolved.config).into();
+        let old = self.config.model.clone();
+        self.config.model = resolved.model_name.clone();
+        self.config.api_base = resolved.api_base.clone();
+        self.config.api_key_env = resolved.api_key_env.clone();
+        self.config.provider_type = resolved.provider_type.clone();
+        self.config.model_config = (&resolved.config).into();
         let api_key = self.resolve_api_key().unwrap_or_default();
         state::set_selected_model(resolved.key.clone());
         self.engine.send(UiCommand::SetModel {
-            model: self.model.clone(),
-            api_base: self.api_base.clone(),
+            model: self.config.model.clone(),
+            api_base: self.config.api_base.clone(),
             api_key,
-            provider_type: self.provider_type.clone(),
+            provider_type: self.config.provider_type.clone(),
         });
-        if old != self.model {
+        if old != self.config.model {
             let from = old;
-            let to = self.model.clone();
+            let to = self.config.model.clone();
             self.lua
                 .emit_data(crate::lua::AutocmdEvent::ModelChange, |lua| {
                     let t = lua.create_table()?;
@@ -393,10 +407,11 @@ impl App {
     /// input/screen. Centralizes the pattern that used to be scattered across
     /// the command handlers.
     pub(super) fn update_settings<F: FnOnce(&mut state::ResolvedSettings)>(&mut self, f: F) {
-        f(&mut self.settings);
-        self.input.set_vim_enabled(self.settings.vim);
-        self.transcript_window.set_vim_enabled(self.settings.vim);
-        state::save_settings(&self.settings);
+        f(&mut self.config.settings);
+        self.input.set_vim_enabled(self.config.settings.vim);
+        self.transcript_window
+            .set_vim_enabled(self.config.settings.vim);
+        state::save_settings(&self.config.settings);
     }
 
     /// Replace all resolved settings at once (from a settings dialog result),
@@ -408,9 +423,9 @@ impl App {
     /// Set the agent mode, persist it, and notify the engine. Marks the
     /// screen dirty so the mode indicator refreshes.
     pub(crate) fn set_mode(&mut self, mode: Mode) {
-        let old = self.mode;
-        self.mode = mode;
-        state::set_mode(self.mode);
+        let old = self.config.mode;
+        self.config.mode = mode;
+        state::set_mode(self.config.mode);
         // Fire ModeChange first so plugins can (un)register tools and prompt
         // sections for the new mode before we snapshot them for the engine.
         if old != mode {
@@ -425,26 +440,29 @@ impl App {
                 });
         }
         let system_prompt = self.rebuild_system_prompt();
-        let plugin_tools = self.lua.plugin_tool_defs(self.mode);
+        let plugin_tools = self.lua.plugin_tool_defs(self.config.mode);
         self.engine.send(UiCommand::SetMode {
-            mode: self.mode,
+            mode: self.config.mode,
             system_prompt: Some(system_prompt),
             plugin_tools: Some(plugin_tools),
         });
     }
 
     pub(crate) fn toggle_mode(&mut self) {
-        let next = self.mode.cycle_within(&self.mode_cycle);
+        let next = self.config.mode.cycle_within(&self.config.mode_cycle);
         self.set_mode(next);
     }
 
     pub(super) fn cycle_reasoning(&mut self) {
-        let next = self.reasoning_effort.cycle_within(&self.reasoning_cycle);
+        let next = self
+            .config
+            .reasoning_effort
+            .cycle_within(&self.config.reasoning_cycle);
         self.set_reasoning_effort(next);
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
-        self.reasoning_effort = effort;
+        self.config.reasoning_effort = effort;
         state::set_reasoning_effort(effort);
         self.engine.send(UiCommand::SetReasoningEffort { effort });
     }

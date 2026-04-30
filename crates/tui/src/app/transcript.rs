@@ -769,7 +769,7 @@ impl App {
             return Vec::new();
         }
 
-        let rows = self.full_transcript_display_text(self.settings.show_thinking);
+        let rows = self.full_transcript_display_text(self.config.settings.show_thinking);
         if rows.is_empty() {
             return Vec::new();
         }
