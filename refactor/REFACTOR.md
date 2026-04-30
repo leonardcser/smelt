@@ -439,11 +439,12 @@ App / Buffer / Window / Clipboard. Splits across sessions:
   onto `Window`; delete `window_cursor.rs`. `VimContext::cursor`
   shrinks to `curswant: &mut Option<usize>`.
 - **5f.2** — Vim becomes a per-Window keymap recipe; delete
-  `crates/ui/src/vim/`. Splits: **5f.2a** drop the `Vim` ZST
+  `crates/ui/src/vim/`. Splits: **5f.2a** ✅ drop the `Vim` ZST
   (`Option<Vim>` → `vim_enabled: bool`; methods → free fns /
-  `VimWindowState`); **5f.2b** lift `motions` / `text_objects`
-  out of `vim/` as primitives; **5f.2c** flatten dispatcher to
-  recipe-style registrations and delete the directory.
+  `VimWindowState`); **5f.2b** ✅ lifted `motions` / `text_objects`
+  out of `vim/` as `crate::motions` + `crate::text_objects`
+  primitives; `FindKind` moved with them; **5f.2c** flatten
+  dispatcher to recipe-style registrations and delete the directory.
 
 #### P1.d.6 — Completer state machine decomposes
 
