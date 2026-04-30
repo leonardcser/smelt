@@ -517,8 +517,14 @@ bridges, then the aggregate.
   paste_from_clipboard}` drop `pub(crate)` — `SystemSink` is their only
   caller, every other clipboard touch in the runtime flows through the
   App-level subsystem.
-- **a.9** — `LuaRuntime` reshape: drop the parallel autocmd registry;
-  `smelt.au.*` routes through `Cells`.
+- **a.9** ✅ — parallel autocmd registry retires; every event flows
+  through `Cells`. 12 publisher callsites switch to
+  `cells.set_dyn(name, payload)`; `smelt.on` Lua binding deletes
+  in favour of `smelt.au.on`; built-in cell list extends with
+  `block_done` / `cmd_pre` / `cmd_post` / `shutdown` / `turn_start`
+  / `turn_end` / `tool_start` / `tool_end` / `input_submit`. mode
+  + model "change" events fold onto the `agent_mode` / `model`
+  cells (the new value is the payload); plugins update accordingly.
 - **a.10** — `ToolRuntime { registry: Map<name, LuaTool> }` — own
   type, impls `engine::ToolDispatcher` (depends on P5.a's trait
   shape — may defer).

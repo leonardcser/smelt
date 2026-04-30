@@ -746,14 +746,10 @@ impl App {
             return InputOutcome::Continue;
         }
 
-        // Fire InputSubmit event so Lua plugins can observe/log.
-        let input_text = trimmed.to_string();
-        self.lua
-            .emit_data(crate::lua::AutocmdEvent::InputSubmit, |lua| {
-                let t = lua.create_table()?;
-                t.set("text", input_text)?;
-                Ok(t)
-            });
+        // Publish input_submit so Lua plugins can observe/log.
+        self.cells
+            .set_dyn("input_submit", std::rc::Rc::new(trimmed.to_string()));
+        self.drain_cells_pending();
         self.flush_lua_callbacks();
 
         InputOutcome::StartAgent

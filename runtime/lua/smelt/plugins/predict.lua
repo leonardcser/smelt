@@ -1,21 +1,22 @@
 -- Built-in input prediction plugin.
 --
--- Hooks `turn_end` to predict the user's next message using a
--- lightweight background LLM call, displayed as ghost text.
+-- Subscribes to the `turn_end` cell to predict the user's next
+-- message using a lightweight background LLM call, displayed as
+-- ghost text.
 
 local SYSTEM = "You predict what a user will type next in a coding assistant conversation. "
   .. "Reply with ONLY the predicted message — no quotes, no explanation, "
   .. "no preamble. Keep it short (one sentence max). If you cannot predict, "
   .. "reply with an empty string."
 
-smelt.on("turn_end", function(_, data)
-  if data.cancelled then
+smelt.au.on("turn_end", function(payload)
+  if payload.cancelled then
     return
   end
 
   smelt.ui.ghost_text.clear()
 
-  local history = data.messages or {}
+  local history = smelt.engine.history()
 
   -- Collect last 3 user messages + last assistant message.
   local user_msgs = {}

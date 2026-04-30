@@ -70,7 +70,9 @@ impl App {
         };
         engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
-        self.lua.emit(crate::lua::AutocmdEvent::TurnStart);
+        self.cells
+            .set_dyn("turn_start", std::rc::Rc::new(crate::app::cells::EventStub));
+        self.drain_cells_pending();
         self.flush_lua_callbacks();
 
         let system_prompt = self.rebuild_system_prompt();
@@ -303,15 +305,11 @@ impl App {
             self.engine.send(UiCommand::Cancel);
             self.kill_blocking_agents();
         }
-        let was_cancelled = cancelled;
-        let history = self.session.messages.clone();
-        self.lua
-            .emit_data(crate::lua::AutocmdEvent::TurnEnd, |lua| {
-                let t = lua.create_table()?;
-                t.set("cancelled", was_cancelled)?;
-                t.set("messages", crate::lua::messages_to_lua(lua, &history)?)?;
-                Ok(t)
-            });
+        self.cells.set_dyn(
+            "turn_end",
+            std::rc::Rc::new(crate::app::cells::TurnEnd { cancelled }),
+        );
+        self.drain_cells_pending();
         self.flush_lua_callbacks();
         // Flush any in-flight streaming content before committing tools.
         self.flush_streaming_thinking();
@@ -471,19 +469,14 @@ impl App {
                         args.clone(),
                     );
                 }
-                let tool_name_for_lua = tool_name.clone();
-                let args_for_lua = args.clone();
-                self.lua
-                    .emit_data(crate::lua::AutocmdEvent::ToolStart, |lua| {
-                        let t = lua.create_table()?;
-                        t.set("tool", tool_name_for_lua)?;
-                        let args_tbl = lua.create_table()?;
-                        for (k, v) in &args_for_lua {
-                            args_tbl.set(k.as_str(), crate::lua::json_to_lua(lua, v)?)?;
-                        }
-                        t.set("args", args_tbl)?;
-                        Ok(t)
-                    });
+                self.cells.set_dyn(
+                    "tool_start",
+                    std::rc::Rc::new(crate::app::cells::ToolStart {
+                        tool: tool_name.clone(),
+                        args: args.clone(),
+                    }),
+                );
+                self.drain_cells_pending();
                 self.flush_lua_callbacks();
                 pending.push(PendingTool {
                     call_id,
@@ -564,16 +557,15 @@ impl App {
                     }
                 }
                 if let Some(tool_name) = finished_tool_name {
-                    let is_err = finished_is_error;
-                    let elapsed = elapsed_ms;
-                    self.lua
-                        .emit_data(crate::lua::AutocmdEvent::ToolEnd, |lua| {
-                            let t = lua.create_table()?;
-                            t.set("tool", tool_name)?;
-                            t.set("is_error", is_err)?;
-                            t.set("elapsed_ms", elapsed)?;
-                            Ok(t)
-                        });
+                    self.cells.set_dyn(
+                        "tool_end",
+                        std::rc::Rc::new(crate::app::cells::ToolEnd {
+                            tool: tool_name,
+                            is_error: finished_is_error,
+                            elapsed_ms,
+                        }),
+                    );
+                    self.drain_cells_pending();
                     self.flush_lua_callbacks();
                 }
                 self.refresh_agent_counts();

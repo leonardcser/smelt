@@ -4,9 +4,7 @@
 //! statusline sources, and spawned tasks.
 
 use super::{lua_table_to_args, lua_table_to_json};
-use crate::lua::{
-    AutocmdEvent, LuaHandle, LuaShared, PluginToolHandles, TaskCompletion, TaskEvent,
-};
+use crate::lua::{LuaHandle, LuaShared, PluginToolHandles, TaskCompletion, TaskEvent};
 use mlua::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -23,7 +21,6 @@ pub(super) fn register(
     register_task(lua, smelt, shared)?;
     register_tools(lua, smelt, shared)?;
     register_statusline(lua, smelt, shared)?;
-    register_autocmd(lua, smelt, shared)?;
     register_timer(lua, smelt)?;
     register_cell(lua, smelt)?;
     register_au(lua, smelt)?;
@@ -373,24 +370,6 @@ fn register_statusline(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
     smelt.set("statusline", statusline_tbl)?;
-    Ok(())
-}
-
-fn register_autocmd(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    let s = shared.clone();
-    smelt.set(
-        "on",
-        lua.create_function(move |lua, (event, handler): (String, mlua::Function)| {
-            let Some(kind) = AutocmdEvent::from_lua_name(&event) else {
-                return Err(LuaError::RuntimeError(format!("unknown event: {event}")));
-            };
-            let key = lua.create_registry_value(handler)?;
-            if let Ok(mut map) = s.autocmds.lock() {
-                map.entry(kind).or_default().push(LuaHandle { key });
-            }
-            Ok(())
-        })?,
-    )?;
     Ok(())
 }
 

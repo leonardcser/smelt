@@ -367,6 +367,36 @@ pub struct HistoryDelta {
     pub count: usize,
 }
 
+/// Payload for the `turn_end` cell. Fires from `App::finish_turn` on
+/// every turn termination — natural end (paired with `turn_complete`),
+/// cancel (Esc / Ctrl-C / mode switch), or error. `cancelled = true`
+/// for the cancel/error legs; subscribers needing the message list
+/// query `smelt.engine.history()` from the callback.
+#[derive(Debug, Clone)]
+pub struct TurnEnd {
+    pub cancelled: bool,
+}
+
+/// Payload for the `tool_start` cell. Fires once per tool invocation
+/// at engine `ToolStarted`. Args are the same JSON-shaped map the
+/// engine ships; nested objects round-trip through `json_to_lua`.
+#[derive(Debug, Clone)]
+pub struct ToolStart {
+    pub tool: String,
+    pub args: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Payload for the `tool_end` cell. Fires on engine `ToolFinished`
+/// after the result lands on the active tool entry. `is_error` mirrors
+/// the engine's flag; `elapsed_ms` is `None` when the engine didn't
+/// timestamp the run.
+#[derive(Debug, Clone)]
+pub struct ToolEnd {
+    pub tool: String,
+    pub is_error: bool,
+    pub elapsed_ms: Option<u64>,
+}
+
 /// Payload for the `confirm_requested` cell. Carries the full request
 /// snapshot the dialog needs to render — tool / desc / args / outside
 /// dir / approval-pattern globs / pre-built option labels — so the Lua
@@ -480,6 +510,42 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("count", d.count as i64);
         mlua::Value::Table(t)
     });
+    // `TurnEnd`: `{ cancelled = bool }`.
+    cells.register_lua_projector::<TurnEnd, _>(|e, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("cancelled", e.cancelled);
+        mlua::Value::Table(t)
+    });
+    // `ToolStart`: `{ tool = "...", args = {...} }`.
+    cells.register_lua_projector::<ToolStart, _>(|s, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("tool", s.tool.as_str());
+        if let Ok(args) = lua.create_table() {
+            for (k, v) in &s.args {
+                if let Ok(lv) = crate::lua::json_to_lua(lua, v) {
+                    let _ = args.set(k.as_str(), lv);
+                }
+            }
+            let _ = t.set("args", args);
+        }
+        mlua::Value::Table(t)
+    });
+    // `ToolEnd`: `{ tool = "...", is_error = bool, elapsed_ms = n? }`.
+    cells.register_lua_projector::<ToolEnd, _>(|s, lua| {
+        let Ok(t) = lua.create_table() else {
+            return mlua::Value::Nil;
+        };
+        let _ = t.set("tool", s.tool.as_str());
+        let _ = t.set("is_error", s.is_error);
+        if let Some(n) = s.elapsed_ms {
+            let _ = t.set("elapsed_ms", n);
+        }
+        mlua::Value::Table(t)
+    });
     // `ConfirmRequested`: full request snapshot for the dialog.
     // `args` projects through `json_to_lua` so nested objects / arrays
     // round-trip into Lua tables; `outside_dir` is `nil` when absent
@@ -556,6 +622,20 @@ pub fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("confirm_resolved", EventStub);
     cells.declare("session_started", EventStub);
     cells.declare("session_ended", EventStub);
+    // Migrated from the parallel autocmd registry in P2.a.9. Single
+    // observer mechanism: `smelt.au.on(name, fn)` and `smelt.cell:get`
+    // both reach into this registry. Cells with no payload carry an
+    // `EventStub` placeholder so a subscriber registered before the
+    // first publish reads `nil` rather than a synthetic default.
+    cells.declare("block_done", EventStub);
+    cells.declare("cmd_pre", String::new());
+    cells.declare("cmd_post", String::new());
+    cells.declare("shutdown", EventStub);
+    cells.declare("turn_start", EventStub);
+    cells.declare("turn_end", EventStub);
+    cells.declare("tool_start", EventStub);
+    cells.declare("tool_end", EventStub);
+    cells.declare("input_submit", String::new());
 
     cells
 }
