@@ -375,6 +375,7 @@ the rest.
 - **F.3** ✅ — `splits: LayoutTree` owned by `Ui`; `set_layout(tree)`.
 - **F.4** ✅ — `capture: Option<HitTarget>` for in-flight gestures.
 - **F.5** ✅ — `cursor_shape: CursorShape` global on `Ui`; `cursor_kind` retires from `Window`.
+- **F.7** ✅ — drop dead `current_win` field + accessors; `Ui::focus` is the single focused-window source of truth.
 
 #### P1.f.6 — `Ui::dispatch_event` consolidation
 
