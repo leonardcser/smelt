@@ -3,20 +3,28 @@
 //! cross-cutting top-level bindings (notify, clipboard, confirm)
 //! and shared helpers (color / theme / json conversion).
 
+mod agent;
 mod au;
 mod buf;
 mod cell;
 mod cmd;
+mod engine;
+mod fuzzy;
+mod history;
 mod keymap;
+mod permissions;
+mod process;
 mod prompt;
+mod session;
 mod settings;
+mod shell;
 mod spawn;
-mod state;
 mod statusline;
 mod task;
 mod theme;
 mod timer;
 mod tools;
+mod transcript;
 mod ui;
 mod vim;
 mod win;
@@ -52,7 +60,15 @@ impl LuaRuntime {
 
         smelt.set("version", crate::api::VERSION)?;
 
-        state::register(lua, &smelt, shared)?;
+        transcript::register(lua, &smelt)?;
+        engine::register(lua, &smelt, shared)?;
+        session::register(lua, &smelt)?;
+        process::register(lua, &smelt)?;
+        shell::register(lua, &smelt)?;
+        agent::register(lua, &smelt)?;
+        permissions::register(lua, &smelt)?;
+        fuzzy::register(lua, &smelt)?;
+        history::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
         buf::register(lua, &smelt, shared)?;
         win::register(lua, &smelt, shared)?;
