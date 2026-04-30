@@ -1,13 +1,13 @@
 //! `smelt.engine` bindings — live engine reads (busy state),
-//! turn-driver writes (submit, cancel, compact), the `ask` auxiliary
-//! request primitive, and the message-history snapshot. Mode
-//! get/set/cycle live under `smelt.mode`; reasoning effort lives
-//! under `smelt.reasoning`; model get/set/list live under
-//! `smelt.model`; per-session cost / context-token / context-window
-//! getters live under `smelt.session`.
+//! turn-driver writes (submit, cancel, compact), and the `ask`
+//! auxiliary request primitive. Mode get/set/cycle live under
+//! `smelt.mode`; reasoning effort lives under `smelt.reasoning`;
+//! model get/set/list live under `smelt.model`; per-session cost /
+//! context-token / context-window / messages snapshot live under
+//! `smelt.session`.
 
 use super::app_read;
-use crate::lua::{messages_to_lua, LuaHandle, LuaShared};
+use crate::lua::{LuaHandle, LuaShared};
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -133,16 +133,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             })?,
         )?;
     }
-
-    // smelt.engine.history() → [{role, content, tool_calls?, tool_call_id?}]
-    engine_tbl.set(
-        "history",
-        lua.create_function(|lua, ()| {
-            let history = crate::lua::try_with_app(|app| app.core.session.messages.clone())
-                .unwrap_or_default();
-            messages_to_lua(lua, &history)
-        })?,
-    )?;
 
     smelt.set("engine", engine_tbl)?;
     Ok(())
