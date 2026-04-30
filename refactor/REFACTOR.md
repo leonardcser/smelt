@@ -408,30 +408,43 @@ headless binary entry point builds `HeadlessApp`. Sub-agent workers
 
 ### P2.a — `Core` + frontends + carve subsystems
 
-Land each subsystem as its own struct, then aggregate:
+Land each subsystem as its own struct, then aggregate. Sub-phases
+land independently — each ends green and pushes one carve-out into
+its target shape. Order is by dependency: data-only carve-outs (no
+new behaviour) first, then the new reactive primitives, then the
+bridges, then the aggregate.
 
-- `AppConfig` — model/api/provider/settings/keymap/theme path.
-- `Session { history, costs, turn_metas }`. (Sub-agent state lives
-  in Lua cells fed by `tui::subprocess` `on_event` callbacks — see
-  P5.b — not on `Session`.)
-- `Confirms { requests: Map<HandleId, Sender<Decision>>, next_handle,
-  is_clear() }`.
-- `Clipboard` — platform sink + kill ring.
-- `Timers { set, set_interval, cancel }` — real timer registry.
-  Built-in `now` cell ticks here. Plugin timers live here.
-- `Cells { Map<CellName, Box<dyn Any>>, new, get, set, subscribe,
-  glob_subscribe }` — also the event bus (autocmds = subscriptions
-  over named cells).
-- `LuaRuntime` — plugin scripts, callback queue, coroutine tasks, TLS
-  Host pointer. **No separate autocmd registry** — `smelt.au.*` calls
-  through to `Cells`.
-- `ToolRuntime { registry: Map<name, LuaTool> }` — own type, impls
-  `engine::ToolDispatcher`.
-- `EngineBridge { drains event_rx → host calls }` — own type, owns
-  the `EngineHandle`.
-- `WellKnown { transcript, prompt, statusline, cmdline }` — holds the
-  well-known `WinId`s. **Lives on `TuiApp`, not `Core`** (headless has
-  no Windows).
+- **a.1** ✅ — `WellKnown { transcript, prompt, statusline }` carves
+  the well-known `WinId`s off App. `Ui::win_buf{,_id,_mut}` helpers
+  resolve `WinId` → backing `Buffer`. Lives on the outer App today;
+  stays on `TuiApp` after the Core split.
+- **a.2** — `WellKnown` adds `cmdline: Option<WinId>` (today's
+  `App::cmdline_win`).
+- **a.3** — `Confirms { requests, next_handle, is_clear() }`. Today's
+  `confirm_requests` map carries a `ConfirmEntry` (request + choices);
+  the target stores `oneshot::Sender<Decision>` — that rewrite folds
+  in here so the Lua dialog drives one resolve channel rather than
+  polling the map.
+- **a.4** — `Cells` registry (typed name → value + subscribers). New
+  primitive; built-in cells migrate from scattered App fields
+  (`vim_mode`, `agent_mode` via `mode`, …).
+- **a.5** — `Timers { set, every, cancel }`. Existing `smelt.defer`
+  callback queue is the seed; add `every` + cancellable handles.
+- **a.6** — `AppConfig` (model/api/provider/settings/keymap/theme
+  path). Bundles today's scattered config fields on App.
+- **a.7** — `Session { history, costs, turn_metas }`. (Sub-agent state
+  lives in Lua cells fed by `tui::subprocess` `on_event` callbacks —
+  see P5.b — not on `Session`.)
+- **a.8** — `Clipboard` already exists as `ui::Clipboard`. This step
+  formalises it as a Core subsystem if any wiring is still loose.
+- **a.9** — `LuaRuntime` reshape: drop the parallel autocmd registry;
+  `smelt.au.*` routes through `Cells`.
+- **a.10** — `ToolRuntime { registry: Map<name, LuaTool> }` — own
+  type, impls `engine::ToolDispatcher` (depends on P5.a's trait
+  shape — may defer).
+- **a.11** — `EngineBridge { drains event_rx → host calls }` — own
+  type, owns the `EngineHandle`.
+- **a.12** — Aggregate `Core` + `TuiApp` / `HeadlessApp`.
 
 Aggregate:
 
