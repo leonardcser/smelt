@@ -25,7 +25,7 @@ impl App {
 
     pub(super) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         self.sleep_inhibit.acquire();
-        self.input_prediction = None;
+        self.clear_prompt_completer();
         self.begin_turn();
         self.show_user_message(display, content.image_labels());
         let text = content.text_content();
@@ -45,7 +45,7 @@ impl App {
     /// No user message block is shown — the agent messages are already
     /// rendered as AgentMessage blocks.
     pub(super) fn begin_agent_message_turn(&mut self) -> TurnState {
-        self.input_prediction = None;
+        self.clear_prompt_completer();
         self.begin_turn();
         self.sync_session_snapshot();
         self.dispatch_turn(Content::text(""))
@@ -343,7 +343,7 @@ impl App {
             {
                 self.working.finish(TurnOutcome::Done);
             };
-            self.input_prediction = None;
+            self.clear_prompt_completer();
         }
         let meta = self
             .pending_turn_meta
@@ -857,7 +857,7 @@ impl App {
 
     fn handle_input_prediction(&mut self, text: String) {
         if self.input.buf.is_empty() {
-            self.input_prediction = Some(text);
+            self.set_prompt_completer(text);
         }
     }
 

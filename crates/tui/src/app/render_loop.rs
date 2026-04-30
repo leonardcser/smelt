@@ -23,13 +23,7 @@ impl App {
         } else {
             Vec::new()
         };
-        let prediction_owned: Option<String> = if show_queued {
-            None
-        } else {
-            self.input_prediction.clone()
-        };
         let queued: &[String] = &queued_owned;
-        let prediction: Option<&str> = prediction_owned.as_deref();
 
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
 
@@ -41,8 +35,7 @@ impl App {
         self.ui.set_cursor_shape(ui::CursorShape::Hidden);
 
         // ── Layout ──
-        let natural_prompt_height =
-            self.measure_prompt_height(&self.input, width, queued, prediction);
+        let natural_prompt_height = self.measure_prompt_height(&self.input, width, queued);
         // Publish the splits tree to `Ui`; it resolves rects against
         // the current terminal area on demand. `LayoutState::from_ui`
         // reads the resolved transcript / prompt / status rects back
@@ -65,7 +58,6 @@ impl App {
             prompt_rect,
             prompt_height,
             queued,
-            prediction,
             has_prompt_cursor,
         );
         // Freeze the live-turn timer + spinner whenever a blocking
@@ -258,7 +250,6 @@ impl App {
         prompt_rect: ui::Rect,
         prompt_height: u16,
         queued: &[String],
-        prediction: Option<&str>,
         has_prompt_cursor: bool,
     ) {
         let bar_info = content::prompt_data::BarInfo {
@@ -278,7 +269,6 @@ impl App {
                 input: &self.input,
                 vim_mode: self.vim_mode,
                 clipboard: &self.clipboard,
-                prediction,
                 width: term_w,
                 height: prompt_height,
                 has_prompt_cursor,

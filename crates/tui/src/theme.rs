@@ -245,6 +245,13 @@ pub fn populate_ui_theme(theme: &mut ui::Theme) {
     theme.set("CursorLine", Style::bg(cursor_line_bg));
     theme.set("Comment", Style::fg(muted));
     theme.set("ErrorMsg", Style::fg(Color::Red));
+    theme.set(
+        "GhostText",
+        Style {
+            dim: true,
+            ..Style::default()
+        },
+    );
 
     theme.set("SmeltAccent", Style::fg(theme.accent_color()));
     theme.set("SmeltSlug", Style::bg(theme.slug_color()));

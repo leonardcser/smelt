@@ -236,8 +236,6 @@ pub struct App {
     /// primitives and removes it on resolve / dismiss.
     pub(crate) confirm_requests: HashMap<u64, crate::app::dialogs::confirm::ConfirmEntry>,
     pub(crate) next_confirm_handle: u64,
-    /// Ghost text prediction for the input field.
-    pub input_prediction: Option<String>,
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
@@ -715,7 +713,6 @@ impl App {
             agent: None,
             confirm_requests: HashMap::new(),
             next_confirm_handle: 1,
-            input_prediction: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
@@ -792,6 +789,61 @@ impl App {
         let mut s = self.settings.clone();
         s.vim = self.input.vim_enabled();
         s
+    }
+
+    /// Read the prompt buffer's `"completer"`-namespace virt-text
+    /// extmark. The extmark IS the storage for input prediction
+    /// (ghost text); `compute_prompt` re-anchors it at the input
+    /// row each frame so `Window::render`'s virt-text walk paints
+    /// the dim suggestion past the leading space.
+    pub(crate) fn prompt_completer_text(&mut self) -> Option<String> {
+        let buf = self
+            .ui
+            .buf_mut(self.input_display_buf)
+            .expect("input_display_buf registered at startup");
+        let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
+        buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
+            if let ui::buffer::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
+                Some(text.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Replace the prompt buffer's prediction extmark with `text`.
+    /// Anchors at line 0, col 0 — `compute_prompt` re-anchors to the
+    /// visible input row on the next frame.
+    pub(crate) fn set_prompt_completer(&mut self, text: String) {
+        let buf = self
+            .ui
+            .buf_mut(self.input_display_buf)
+            .expect("input_display_buf registered at startup");
+        let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
+        buf.clear_namespace(ns, 0, usize::MAX);
+        buf.set_extmark(
+            ns,
+            0,
+            0,
+            ui::buffer::ExtmarkOpts::virt_text(text, Some("GhostText".into())),
+        );
+    }
+
+    pub(crate) fn clear_prompt_completer(&mut self) {
+        let buf = self
+            .ui
+            .buf_mut(self.input_display_buf)
+            .expect("input_display_buf registered at startup");
+        let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
+        buf.clear_namespace(ns, 0, usize::MAX);
+    }
+
+    pub(crate) fn take_prompt_completer(&mut self) -> Option<String> {
+        let text = self.prompt_completer_text();
+        if text.is_some() {
+            self.clear_prompt_completer();
+        }
+        text
     }
 
     /// Width available for transcript content. Reserves the rightmost
