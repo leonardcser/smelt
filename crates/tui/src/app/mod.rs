@@ -819,7 +819,7 @@ impl App {
         self.cells
             .publish_if_changed("vim_mode", format!("{:?}", self.vim_mode));
         self.cells
-            .publish_if_changed("confirms_pending", !self.confirms.is_empty());
+            .publish_if_changed("confirms_pending", !self.confirms.is_clear());
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

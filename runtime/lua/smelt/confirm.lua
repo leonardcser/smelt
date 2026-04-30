@@ -44,8 +44,14 @@ local function fill_preview(buf, req)
 end
 
 function smelt.confirm.open(handle_id)
-  local req = smelt.confirm._get(handle_id)
-  if not req then return end  -- registry entry vanished
+  -- Request payload (tool / desc / args / options / approval patterns
+  -- / outside_dir / cwd_label / handle_id) flows through the
+  -- `confirm_requested` cell. Bail if the cell snapshot doesn't match
+  -- this handle (a follow-up request flipped the cell before this
+  -- dialog opened — the next `fire_confirm_open` will hand us the
+  -- right one).
+  local req = smelt.cell("confirm_requested"):get()
+  if not req or req.handle_id ~= handle_id then return end
 
   local title_buf   = smelt.buf.create()
   local summary_buf = smelt.buf.create()

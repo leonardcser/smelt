@@ -78,6 +78,23 @@ fn render_title(
     sink.newline();
 }
 
+/// `~/path` rewrite over the process CWD. Shared between
+/// `build_options` (always-allow labels) and the
+/// `confirm_requested` cell payload (so a Lua plugin sees the same
+/// label the dialog renders).
+pub(crate) fn cwd_label() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| {
+            let home = engine::home_dir();
+            if let Ok(rel) = p.strip_prefix(&home) {
+                return Some(format!("~/{}", rel.display()));
+            }
+            p.to_str().map(String::from)
+        })
+        .unwrap_or_default()
+}
+
 /// `(labels, choices)` for the OptionList widget. The two arrays are
 /// parallel — index into `labels` matches the same `ConfirmChoice`
 /// entry. Yes / No are always first; "always allow …" variants vary
@@ -92,16 +109,7 @@ pub(crate) fn build_options(req: &ConfirmRequest) -> (Vec<String>, Vec<ConfirmCh
     labels.push("no".into());
     choices.push(ConfirmChoice::No);
 
-    let cwd_label = std::env::current_dir()
-        .ok()
-        .and_then(|p| {
-            let home = engine::home_dir();
-            if let Ok(rel) = p.strip_prefix(&home) {
-                return Some(format!("~/{}", rel.display()));
-            }
-            p.to_str().map(String::from)
-        })
-        .unwrap_or_default();
+    let cwd_label = cwd_label();
 
     let has_dir = req.outside_dir.is_some();
     let has_patterns = !req.approval_patterns.is_empty();
