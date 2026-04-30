@@ -163,7 +163,6 @@ impl TuiApp {
             tdata.clamped_scroll,
             ui::ScrollbarState::new(tdata.scrollbar_col + t_pad, tdata.total_rows, viewport_rows),
         );
-        self.transcript_viewport = Some(transcript_viewport);
 
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
@@ -315,7 +314,6 @@ impl TuiApp {
         } else {
             None
         };
-        self.prompt_viewport = prompt_viewport;
 
         // Drive the painted-split Window's cursor + scrollbar viewport
         // from the prompt output. `Ui::cursor_shape = Hardware` flows

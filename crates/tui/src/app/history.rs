@@ -118,8 +118,12 @@ impl TuiApp {
         self.task_label = None;
         self.working.clear();
         self.input.win.scroll_top = 0;
-        self.prompt_viewport = None;
-        self.transcript_viewport = None;
+        if let Some(w) = self.ui.win_mut(ui::PROMPT_WIN) {
+            w.viewport = None;
+        }
+        if let Some(w) = self.ui.win_mut(ui::TRANSCRIPT_WIN) {
+            w.viewport = None;
+        }
         self.clear_transcript();
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
