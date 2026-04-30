@@ -64,8 +64,8 @@ impl App {
                 }
                 if self.app_focus == crate::app::AppFocus::Prompt {
                     if let Some(prev) = self.prompt_drag_return_vim_mode.take() {
-                        if let Some(vim) = self.input.win.vim.as_mut() {
-                            vim.set_mode(&mut self.vim_mode, prev);
+                        if self.input.win.vim.is_some() {
+                            self.input.win.vim_state.set_mode(&mut self.vim_mode, prev);
                         }
                     }
                 }
@@ -302,11 +302,10 @@ impl App {
             saved_src_dword.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
         self.input.win.drag_anchor_line =
             saved_src_dline.map(|(s, e)| (wrap.src_to_wrapped(s), wrap.src_to_wrapped(e)));
-        if let Some(vim) = self.input.win.vim.as_mut() {
+        if self.input.win.vim.is_some() {
             if let Some(a) = saved_vim_visual_anchor {
-                vim.begin_visual(
+                self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    &mut self.input.win.vim_state,
                     crate::vim::VimMode::Visual,
                     wrap.src_to_wrapped(a),
                 );
@@ -347,11 +346,10 @@ impl App {
             new_w_dword.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
         self.input.win.drag_anchor_line =
             new_w_dline.map(|(s, e)| (wrap.wrapped_to_src(s), wrap.wrapped_to_src(e)));
-        if let Some(vim) = self.input.win.vim.as_mut() {
+        if self.input.win.vim.is_some() {
             if let Some(a) = new_w_vim_anchor {
-                vim.begin_visual(
+                self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    &mut self.input.win.vim_state,
                     crate::vim::VimMode::Visual,
                     wrap.wrapped_to_src(a),
                 );

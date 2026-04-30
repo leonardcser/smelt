@@ -146,8 +146,8 @@ impl VimContext<'_> {
 
 // ── Internal types ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
-enum Op {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Op {
     Delete,
     Change,
     Yank,
@@ -182,8 +182,9 @@ impl FindKind {
     }
 }
 
-#[derive(Clone, Copy)]
-enum SubState {
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum SubState {
+    #[default]
     Ready,
     WaitingOp(Op),
     WaitingG,
@@ -202,10 +203,11 @@ enum SubState {
 
 // ── Vim state ───────────────────────────────────────────────────────────────
 
-/// Persistent per-Window vim state. Outlives any single key sequence:
-/// `visual_anchor` survives until the next `v`/`V`; `last_find` lives
-/// for the lifetime of the Window so `;`/`,` repeats keep working
-/// across other commands.
+/// Per-Window vim state. Holds both the persistent slots that outlive any
+/// single key sequence (`visual_anchor`, `last_find`) and the in-flight
+/// key-sequence accumulators (`sub`, `count1`, `count2`) that are reset
+/// between commands. The split was historical — both live here now since
+/// both are per-Window and neither needs to survive Window destruction.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VimWindowState {
     /// Byte position of the Visual-mode anchor (where the most recent
@@ -215,32 +217,73 @@ pub struct VimWindowState {
     /// Last `f`/`t`/`F`/`T` target, replayed by `;` (same direction) or
     /// `,` (reversed).
     pub last_find: Option<(FindKind, char)>,
-}
-
-/// In-flight key-sequence state (operator pending, count accumulators,
-/// sub-state). Lives on `Vim` because it lasts only for the duration of
-/// one keystroke sequence — no consumer outside vim observes it.
-pub struct Vim {
-    sub: SubState,
+    /// In-flight sub-state for multi-key sequences (operator pending, find
+    /// pending, text-object pending). Reset to `Ready` at command boundaries.
+    pub(crate) sub: SubState,
     /// Count accumulated before the operator (or before a standalone motion).
-    count1: Option<usize>,
+    pub(crate) count1: Option<usize>,
     /// Count accumulated after the operator, before the motion.
-    count2: Option<usize>,
+    pub(crate) count2: Option<usize>,
 }
 
-impl Default for Vim {
-    fn default() -> Self {
-        Self::new()
+impl VimWindowState {
+    /// Pop count1 (defaulting to 1), clearing both count accumulators.
+    pub(crate) fn take_count(&mut self) -> usize {
+        let n = self.count1.unwrap_or(1);
+        self.count1 = None;
+        self.count2 = None;
+        n
+    }
+
+    /// Pop count1 * count2 (each defaulting to 1) and clear both.
+    pub(crate) fn effective_count(&mut self) -> usize {
+        let c1 = self.count1.unwrap_or(1);
+        let c2 = self.count2.unwrap_or(1);
+        self.count1 = None;
+        self.count2 = None;
+        c1 * c2
+    }
+
+    /// Clear count accumulators only — leaves `sub` untouched.
+    pub(crate) fn reset_counts(&mut self) {
+        self.count1 = None;
+        self.count2 = None;
+    }
+
+    /// Reset the entire pending sequence: `sub = Ready`, both counts cleared.
+    pub(crate) fn reset_pending(&mut self) {
+        self.sub = SubState::Ready;
+        self.reset_counts();
+    }
+
+    /// Write a new mode through `mode_ref` and clear the pending sequence.
+    /// Use when the caller has the mode handy outside a `VimContext`.
+    pub fn set_mode(&mut self, mode_ref: &mut VimMode, mode: VimMode) {
+        *mode_ref = mode;
+        self.reset_pending();
+    }
+
+    /// Anchor a visual selection at `cpos` and enter the requested visual
+    /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
+    /// selection originates at the click rather than the previous cursor
+    /// position.
+    pub fn begin_visual(&mut self, mode_ref: &mut VimMode, mode: VimMode, cpos: usize) {
+        *mode_ref = mode;
+        self.reset_pending();
+        self.visual_anchor = cpos;
     }
 }
 
+/// Marker type signalling that vim mode is enabled on the owning Window.
+/// All vim state lives on `VimWindowState` and `App.vim_mode`; `Vim` itself
+/// is a ZST that hangs the keystroke dispatcher off `Window::vim` so the
+/// `is_some()` check stays meaningful.
+#[derive(Clone, Copy, Default)]
+pub struct Vim;
+
 impl Vim {
     pub fn new() -> Self {
-        Self {
-            sub: SubState::Ready,
-            count1: None,
-            count2: None,
-        }
+        Self
     }
 
     /// Returns the visual selection range (start, end) as byte offsets when
@@ -273,14 +316,6 @@ impl Vim {
         }
     }
 
-    /// Write a new mode through `mode_ref` and clear in-flight key state.
-    /// Use when the caller has the mode handy outside a `VimContext`.
-    pub fn set_mode(&mut self, mode_ref: &mut VimMode, mode: VimMode) {
-        *mode_ref = mode;
-        self.sub = SubState::Ready;
-        self.reset_counts();
-    }
-
     /// Read the Visual-mode anchor byte. Returns `Some(byte)` only
     /// while in `Visual`/`VisualLine`; `None` in Normal/Insert. Used by
     /// the prompt mouse adapter to translate between source-byte and
@@ -290,25 +325,6 @@ impl Vim {
             VimMode::Visual | VimMode::VisualLine => Some(state.visual_anchor),
             _ => None,
         }
-    }
-
-    /// Anchor a visual selection at `cpos` and enter the requested visual
-    /// mode (`Visual` or `VisualLine`). Used by mouse drag-select so the
-    /// selection originates at the click rather than the previous cursor
-    /// position. Writes through `mode_ref` so the App-owned VimMode
-    /// sees the transition; writes the anchor through `state` so the
-    /// per-Window vim state stays the source of truth.
-    pub fn begin_visual(
-        &mut self,
-        mode_ref: &mut VimMode,
-        state: &mut VimWindowState,
-        mode: VimMode,
-        cpos: usize,
-    ) {
-        *mode_ref = mode;
-        self.sub = SubState::Ready;
-        self.reset_counts();
-        state.visual_anchor = cpos;
     }
 
     /// Process a key event. Reads and mutates `ctx` (buffer, cursor,
@@ -396,10 +412,10 @@ impl Vim {
         }
 
         // Handle sub-states first.
-        match self.sub {
+        match ctx.vim_state.sub {
             SubState::WaitingR => return self.handle_waiting_r(key, ctx),
             SubState::WaitingZ => {
-                self.sub = SubState::Ready;
+                ctx.vim_state.sub = SubState::Ready;
                 return if matches!(key.code, KeyCode::Char('z')) {
                     Action::CenterScroll
                 } else {
@@ -419,9 +435,11 @@ impl Vim {
                 // Could be digit, motion, text object prefix (i/a), or same-key (dd/cc/yy).
                 if let KeyCode::Char(c) = key.code {
                     // Digit accumulation for count2.
-                    if c.is_ascii_digit() && (c != '0' || self.count2.is_some()) {
-                        self.count2 =
-                            Some(self.count2.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+                    if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count2.is_some()) {
+                        ctx.vim_state.count2 = Some(
+                            ctx.vim_state.count2.unwrap_or(0) * 10
+                                + c.to_digit(10).unwrap() as usize,
+                        );
                         return Action::Consumed;
                     }
                     // Same operator key → linewise (dd, cc, yy).
@@ -430,7 +448,7 @@ impl Vim {
                     }
                     // Text object prefix.
                     if c == 'i' || c == 'a' {
-                        self.sub = SubState::WaitingTextObj(op, c == 'i');
+                        ctx.vim_state.sub = SubState::WaitingTextObj(op, c == 'i');
                         return Action::Consumed;
                     }
                 }
@@ -438,8 +456,8 @@ impl Vim {
                 let result = self.execute_op_motion(key, op, ctx);
                 // Don't reset if execute_op_motion transitioned to a new substate
                 // (e.g. WaitingOpFind for df/dt combos).
-                if matches!(self.sub, SubState::WaitingOp(_)) {
-                    self.reset_pending();
+                if matches!(ctx.vim_state.sub, SubState::WaitingOp(_)) {
+                    ctx.vim_state.reset_pending();
                 }
                 return result;
             }
@@ -456,7 +474,7 @@ impl Vim {
         // Non-char keys in normal mode.
         match key.code {
             KeyCode::Esc => {
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             KeyCode::Enter => Action::Submit,
@@ -493,23 +511,24 @@ impl Vim {
         }
 
         // Count digit accumulation.
-        if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) {
-            self.count1 = Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+        if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count1.is_some()) {
+            ctx.vim_state.count1 =
+                Some(ctx.vim_state.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
             return Action::Consumed;
         }
 
         match c {
             // ── Operators ───────────────────────────────────────────────
             'd' => {
-                self.sub = SubState::WaitingOp(Op::Delete);
+                ctx.vim_state.sub = SubState::WaitingOp(Op::Delete);
                 Action::Consumed
             }
             'c' => {
-                self.sub = SubState::WaitingOp(Op::Change);
+                ctx.vim_state.sub = SubState::WaitingOp(Op::Change);
                 Action::Consumed
             }
             'y' => {
-                self.sub = SubState::WaitingOp(Op::Yank);
+                ctx.vim_state.sub = SubState::WaitingOp(Op::Yank);
                 Action::Consumed
             }
 
@@ -520,7 +539,7 @@ impl Vim {
                 ctx.yank_range(*ctx.cpos, end, false);
                 ctx.buf.drain(*ctx.cpos..end);
                 clamp_normal(ctx.buf, ctx.cpos);
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             'C' => {
@@ -535,13 +554,13 @@ impl Vim {
                 let (start, end) = current_line_range(ctx.buf, *ctx.cpos);
                 ctx.yank_range(start, end, true);
                 ctx.clipboard.kill_ring.mark_yanked();
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
 
             // ── Direct edits ────────────────────────────────────────────
             'x' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                     ctx.save_undo();
                     let end = advance_chars(ctx.buf, *ctx.cpos, n);
@@ -549,11 +568,11 @@ impl Vim {
                     ctx.buf.drain(*ctx.cpos..end);
                     clamp_normal(ctx.buf, ctx.cpos);
                 }
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             'X' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 if *ctx.cpos > 0 {
                     ctx.save_undo();
                     let start = retreat_chars(ctx.buf, *ctx.cpos, n);
@@ -562,11 +581,11 @@ impl Vim {
                     *ctx.cpos = start;
                     clamp_normal(ctx.buf, ctx.cpos);
                 }
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             's' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 ctx.save_undo();
                 if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                     let end = advance_chars(ctx.buf, *ctx.cpos, n);
@@ -586,11 +605,11 @@ impl Vim {
                 Action::Consumed
             }
             'r' => {
-                self.sub = SubState::WaitingR;
+                ctx.vim_state.sub = SubState::WaitingR;
                 Action::Consumed
             }
             '~' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                     ctx.save_undo();
                     for _ in 0..n {
@@ -609,7 +628,7 @@ impl Vim {
                     }
                     clamp_normal(ctx.buf, ctx.cpos);
                 }
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
 
@@ -678,32 +697,32 @@ impl Vim {
             'v' => {
                 ctx.vim_state.visual_anchor = *ctx.cpos;
                 *ctx.mode = VimMode::Visual;
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             'V' => {
                 ctx.vim_state.visual_anchor = *ctx.cpos;
                 *ctx.mode = VimMode::VisualLine;
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
 
             // ── Enter insert mode ───────────────────────────────────────
             'i' => {
-                self.take_count();
+                ctx.vim_state.take_count();
                 ctx.save_undo();
                 self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'I' => {
-                self.take_count();
+                ctx.vim_state.take_count();
                 ctx.save_undo();
                 *ctx.cpos = first_non_blank(ctx.buf, *ctx.cpos);
                 self.enter_insert_mode(ctx);
                 Action::Consumed
             }
             'a' => {
-                self.take_count();
+                ctx.vim_state.take_count();
                 ctx.save_undo();
                 if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
                     *ctx.cpos = advance_chars(ctx.buf, *ctx.cpos, 1);
@@ -712,7 +731,7 @@ impl Vim {
                 Action::Consumed
             }
             'A' => {
-                self.take_count();
+                ctx.vim_state.take_count();
                 ctx.save_undo();
                 *ctx.cpos = line_end(ctx.buf, *ctx.cpos);
                 self.enter_insert_mode(ctx);
@@ -737,69 +756,69 @@ impl Vim {
 
             // ── Find ────────────────────────────────────────────────────
             'f' => {
-                self.sub = SubState::WaitingFind(FindKind::Forward);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::Forward);
                 Action::Consumed
             }
             'F' => {
-                self.sub = SubState::WaitingFind(FindKind::Backward);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::Backward);
                 Action::Consumed
             }
             't' => {
-                self.sub = SubState::WaitingFind(FindKind::ForwardTill);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::ForwardTill);
                 Action::Consumed
             }
             'T' => {
-                self.sub = SubState::WaitingFind(FindKind::BackwardTill);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::BackwardTill);
                 Action::Consumed
             }
             ';' => {
                 if let Some((kind, ch)) = ctx.vim_state.last_find {
-                    let n = self.take_count();
+                    let n = ctx.vim_state.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind, ch, n);
                 }
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             ',' => {
                 if let Some((kind, ch)) = ctx.vim_state.last_find {
-                    let n = self.take_count();
+                    let n = ctx.vim_state.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind.reversed(), ch, n);
                 }
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
 
             // ── Wait-for-second-char ────────────────────────────────────
             'g' => {
-                self.sub = SubState::WaitingG;
+                ctx.vim_state.sub = SubState::WaitingG;
                 Action::Consumed
             }
             'z' => {
-                self.sub = SubState::WaitingZ;
+                ctx.vim_state.sub = SubState::WaitingZ;
                 Action::Consumed
             }
 
             // ── Motions ─────────────────────────────────────────────────
             'h' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = move_left(ctx.buf, *ctx.cpos);
                 }
                 Action::Consumed
             }
             'l' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = move_right_normal(ctx.buf, *ctx.cpos);
                 }
                 Action::Consumed
             }
             'j' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 if ctx.buf.contains('\n') {
                     let (new_pos, col) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
                     if new_pos == *ctx.cpos && n <= 1 {
-                        self.reset_pending();
+                        ctx.vim_state.reset_pending();
                         return Action::HistoryNext;
                     }
                     ctx.cursor.set_curswant(Some(col));
@@ -810,7 +829,7 @@ impl Vim {
                     clamp_normal(ctx.buf, ctx.cpos);
                     return Action::Consumed;
                 }
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 if n <= 1 {
                     Action::HistoryNext
                 } else {
@@ -818,11 +837,11 @@ impl Vim {
                 }
             }
             'k' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 if ctx.buf.contains('\n') {
                     let (new_pos, col) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
                     if new_pos == *ctx.cpos && n <= 1 {
-                        self.reset_pending();
+                        ctx.vim_state.reset_pending();
                         return Action::HistoryPrev;
                     }
                     ctx.cursor.set_curswant(Some(col));
@@ -833,7 +852,7 @@ impl Vim {
                     clamp_normal(ctx.buf, ctx.cpos);
                     return Action::Consumed;
                 }
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 if n <= 1 {
                     Action::HistoryPrev
                 } else {
@@ -841,7 +860,7 @@ impl Vim {
                 }
             }
             'w' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
                 }
@@ -849,7 +868,7 @@ impl Vim {
                 Action::Consumed
             }
             'W' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
                 }
@@ -857,21 +876,21 @@ impl Vim {
                 Action::Consumed
             }
             'b' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
                 }
                 Action::Consumed
             }
             'B' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
                 }
                 Action::Consumed
             }
             'e' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::Word);
                 }
@@ -879,7 +898,7 @@ impl Vim {
                 Action::Consumed
             }
             'E' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
                 }
@@ -889,16 +908,16 @@ impl Vim {
             '0' => {
                 *ctx.cpos = line_start(ctx.buf, *ctx.cpos);
                 ctx.cursor.clear_curswant();
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             '^' | '_' => {
                 *ctx.cpos = first_non_blank(ctx.buf, *ctx.cpos);
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
             '$' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 // n$ moves down n-1 lines then to end.
                 for _ in 1..n {
                     *ctx.cpos = move_down(ctx.buf, *ctx.cpos);
@@ -907,8 +926,8 @@ impl Vim {
                 Action::Consumed
             }
             'G' => {
-                let had_count = self.count1.is_some();
-                let n = self.take_count();
+                let had_count = ctx.vim_state.count1.is_some();
+                let n = ctx.vim_state.take_count();
                 *ctx.cpos = if had_count {
                     goto_line(ctx.buf, n.saturating_sub(1))
                 } else {
@@ -920,7 +939,7 @@ impl Vim {
 
             // ── Match bracket ────────────────────────────────────────────
             '%' => {
-                self.reset_counts();
+                ctx.vim_state.reset_counts();
                 if let Some(p) = find_matching_bracket(ctx.buf, *ctx.cpos) {
                     *ctx.cpos = p;
                 }
@@ -928,7 +947,7 @@ impl Vim {
             }
 
             'J' => {
-                let count = self.take_count().max(2);
+                let count = ctx.vim_state.take_count().max(2);
                 let eol = line_end(ctx.buf, *ctx.cpos);
                 if eol < ctx.buf.len() {
                     ctx.save_undo();
@@ -954,7 +973,7 @@ impl Vim {
 
             // Unknown — swallow it.
             _ => {
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 Action::Consumed
             }
         }
@@ -964,8 +983,8 @@ impl Vim {
 
     fn handle_visual(&mut self, key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         // Handle sub-states.
-        if let SubState::WaitingVisualTextObj(inner) = self.sub {
-            self.sub = SubState::Ready;
+        if let SubState::WaitingVisualTextObj(inner) = ctx.vim_state.sub {
+            ctx.vim_state.sub = SubState::Ready;
             if let KeyCode::Char(c) = key.code {
                 if let Some((start, end)) = text_object(ctx.buf, *ctx.cpos, inner, c) {
                     ctx.vim_state.visual_anchor = start;
@@ -974,14 +993,14 @@ impl Vim {
             }
             return Action::Consumed;
         }
-        if let SubState::WaitingFind(kind) = self.sub {
+        if let SubState::WaitingFind(kind) = ctx.vim_state.sub {
             return self.handle_waiting_find(key, kind, ctx);
         }
-        if let SubState::WaitingG = self.sub {
+        if let SubState::WaitingG = ctx.vim_state.sub {
             return self.handle_waiting_g(key, ctx);
         }
-        if let SubState::WaitingZ = self.sub {
-            self.sub = SubState::Ready;
+        if let SubState::WaitingZ = ctx.vim_state.sub {
+            ctx.vim_state.sub = SubState::Ready;
             return if matches!(key.code, KeyCode::Char('z')) {
                 Action::CenterScroll
             } else {
@@ -996,9 +1015,9 @@ impl Vim {
 
         // Count digit accumulation.
         if let KeyCode::Char(c) = key.code {
-            if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) {
-                self.count1 =
-                    Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+            if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count1.is_some()) {
+                ctx.vim_state.count1 =
+                    Some(ctx.vim_state.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
                 return Action::Consumed;
             }
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
@@ -1130,8 +1149,8 @@ impl Vim {
                         *ctx.cpos = start;
                     }
                     *ctx.mode = VimMode::Insert;
-                    self.sub = SubState::Ready;
-                    self.reset_counts();
+                    ctx.vim_state.sub = SubState::Ready;
+                    ctx.vim_state.reset_counts();
                     return Action::Consumed;
                 }
                 self.exit_visual(ctx);
@@ -1253,21 +1272,21 @@ impl Vim {
 
             // ── Motions (move cursor, anchor stays) ────────────────────
             'h' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = move_left(ctx.buf, *ctx.cpos);
                 }
                 Action::Consumed
             }
             'l' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = move_right_normal(ctx.buf, *ctx.cpos);
                 }
                 Action::Consumed
             }
             'j' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     let col;
                     (*ctx.cpos, col) = move_down_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
@@ -1277,7 +1296,7 @@ impl Vim {
                 Action::Consumed
             }
             'k' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     let col;
                     (*ctx.cpos, col) = move_up_col(ctx.buf, *ctx.cpos, ctx.cursor.curswant());
@@ -1287,7 +1306,7 @@ impl Vim {
                 Action::Consumed
             }
             'w' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
                 }
@@ -1295,7 +1314,7 @@ impl Vim {
                 Action::Consumed
             }
             'W' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_forward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
                 }
@@ -1303,21 +1322,21 @@ impl Vim {
                 Action::Consumed
             }
             'b' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::Word);
                 }
                 Action::Consumed
             }
             'B' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_backward_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
                 }
                 Action::Consumed
             }
             'e' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::Word);
                 }
@@ -1325,7 +1344,7 @@ impl Vim {
                 Action::Consumed
             }
             'E' => {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 for _ in 0..n {
                     *ctx.cpos = word_end_pos(ctx.buf, *ctx.cpos, CharClass::WORD);
                 }
@@ -1345,8 +1364,8 @@ impl Vim {
                 Action::Consumed
             }
             'G' => {
-                let had_count = self.count1.is_some();
-                let n = self.take_count();
+                let had_count = ctx.vim_state.count1.is_some();
+                let n = ctx.vim_state.take_count();
                 *ctx.cpos = if had_count {
                     goto_line(ctx.buf, n.saturating_sub(1))
                 } else {
@@ -1356,51 +1375,51 @@ impl Vim {
                 Action::Consumed
             }
             '%' => {
-                self.reset_counts();
+                ctx.vim_state.reset_counts();
                 if let Some(p) = find_matching_bracket(ctx.buf, *ctx.cpos) {
                     *ctx.cpos = p;
                 }
                 Action::Consumed
             }
             'g' => {
-                self.sub = SubState::WaitingG;
+                ctx.vim_state.sub = SubState::WaitingG;
                 Action::Consumed
             }
             'f' => {
-                self.sub = SubState::WaitingFind(FindKind::Forward);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::Forward);
                 Action::Consumed
             }
             'F' => {
-                self.sub = SubState::WaitingFind(FindKind::Backward);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::Backward);
                 Action::Consumed
             }
             't' => {
-                self.sub = SubState::WaitingFind(FindKind::ForwardTill);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::ForwardTill);
                 Action::Consumed
             }
             'T' => {
-                self.sub = SubState::WaitingFind(FindKind::BackwardTill);
+                ctx.vim_state.sub = SubState::WaitingFind(FindKind::BackwardTill);
                 Action::Consumed
             }
             ';' => {
                 if let Some((kind, ch)) = ctx.vim_state.last_find {
-                    let n = self.take_count();
+                    let n = ctx.vim_state.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind, ch, n);
                 }
                 Action::Consumed
             }
             ',' => {
                 if let Some((kind, ch)) = ctx.vim_state.last_find {
-                    let n = self.take_count();
+                    let n = ctx.vim_state.take_count();
                     *ctx.cpos = repeat_find(ctx.buf, *ctx.cpos, kind.reversed(), ch, n);
                 }
                 Action::Consumed
             }
 
             // ── Count digits ───────────────────────────────────────────
-            c if c.is_ascii_digit() && (c != '0' || self.count1.is_some()) => {
-                self.count1 =
-                    Some(self.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+            c if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count1.is_some()) => {
+                ctx.vim_state.count1 =
+                    Some(ctx.vim_state.count1.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
                 Action::Consumed
             }
 
@@ -1412,11 +1431,11 @@ impl Vim {
 
             // ── Text objects (iw, aw, i", a( etc.) ────────────────────
             'i' => {
-                self.sub = SubState::WaitingVisualTextObj(true);
+                ctx.vim_state.sub = SubState::WaitingVisualTextObj(true);
                 Action::Consumed
             }
             'a' => {
-                self.sub = SubState::WaitingVisualTextObj(false);
+                ctx.vim_state.sub = SubState::WaitingVisualTextObj(false);
                 Action::Consumed
             }
 
@@ -1428,7 +1447,7 @@ impl Vim {
     // ── Sub-state handlers ──────────────────────────────────────────────
 
     fn handle_waiting_r(&mut self, key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
-        self.sub = SubState::Ready;
+        ctx.vim_state.sub = SubState::Ready;
         let replacement_char = match key.code {
             KeyCode::Char(c) => Some(c),
             KeyCode::Enter => Some('\n'),
@@ -1436,7 +1455,7 @@ impl Vim {
         };
         if let Some(c) = replacement_char {
             if !ctx.buf.is_empty() && *ctx.cpos < ctx.buf.len() {
-                let n = self.take_count();
+                let n = ctx.vim_state.take_count();
                 ctx.save_undo();
                 let mut pos = *ctx.cpos;
                 for _ in 0..n {
@@ -1453,7 +1472,7 @@ impl Vim {
                 clamp_normal(ctx.buf, ctx.cpos);
             }
         }
-        self.reset_pending();
+        ctx.vim_state.reset_pending();
         Action::Consumed
     }
 
@@ -1463,9 +1482,9 @@ impl Vim {
         kind: FindKind,
         ctx: &mut VimContext<'_>,
     ) -> Action {
-        self.sub = SubState::Ready;
+        ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char(ch) = key.code {
-            let n = self.take_count();
+            let n = ctx.vim_state.take_count();
             ctx.vim_state.last_find = Some((kind, ch));
             let mut pos = *ctx.cpos;
             for _ in 0..n {
@@ -1475,7 +1494,7 @@ impl Vim {
             }
             *ctx.cpos = pos;
         }
-        self.reset_pending();
+        ctx.vim_state.reset_pending();
         Action::Consumed
     }
 
@@ -1486,9 +1505,9 @@ impl Vim {
         kind: FindKind,
         ctx: &mut VimContext<'_>,
     ) -> Action {
-        self.sub = SubState::Ready;
+        ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char(ch) = key.code {
-            let n = self.effective_count();
+            let n = ctx.vim_state.effective_count();
             ctx.vim_state.last_find = Some((kind, ch));
             let origin = *ctx.cpos;
             // For operators, always find the actual char position (Forward/Backward),
@@ -1517,16 +1536,16 @@ impl Vim {
                 }
             }
         }
-        self.reset_pending();
+        ctx.vim_state.reset_pending();
         Action::Consumed
     }
 
     fn handle_waiting_g(&mut self, key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
-        self.sub = SubState::Ready;
+        ctx.vim_state.sub = SubState::Ready;
         let action = match key.code {
             KeyCode::Char('g') => {
                 // gg → start of buffer.
-                if let Some(n) = self.count1.take() {
+                if let Some(n) = ctx.vim_state.count1.take() {
                     *ctx.cpos = goto_line(ctx.buf, n.saturating_sub(1));
                 } else {
                     *ctx.cpos = 0;
@@ -1535,15 +1554,15 @@ impl Vim {
             }
             _ => Action::Consumed,
         };
-        self.count1 = None;
-        self.count2 = None;
+        ctx.vim_state.count1 = None;
+        ctx.vim_state.count2 = None;
         action
     }
 
     fn handle_waiting_op_g(&mut self, key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
-        self.sub = SubState::Ready;
+        ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char('g') = key.code {
-            let target = if let Some(n) = self.count1.take() {
+            let target = if let Some(n) = ctx.vim_state.count1.take() {
                 goto_line(ctx.buf, n.saturating_sub(1))
             } else {
                 0
@@ -1557,11 +1576,11 @@ impl Vim {
                 };
                 let ls = line_start(ctx.buf, s);
                 let le = line_end(ctx.buf, e);
-                self.reset_pending();
+                ctx.vim_state.reset_pending();
                 return self.apply_linewise_op(op, ctx, ls, le);
             }
         }
-        self.reset_pending();
+        ctx.vim_state.reset_pending();
         Action::Consumed
     }
 
@@ -1572,21 +1591,21 @@ impl Vim {
         inner: bool,
         ctx: &mut VimContext<'_>,
     ) -> Action {
-        self.sub = SubState::Ready;
+        ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
             if let Some((start, end)) = text_object(ctx.buf, *ctx.cpos, inner, c) {
-                let n = self.effective_count();
+                let n = ctx.vim_state.effective_count();
                 let _ = n;
                 return self.apply_charwise_op(op, ctx, start, end);
             }
         }
-        self.reset_pending();
+        ctx.vim_state.reset_pending();
         Action::Consumed
     }
 
     /// Operator pending + a motion key.
     fn execute_op_motion(&mut self, key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
-        let n = self.effective_count();
+        let n = ctx.vim_state.effective_count();
         let origin = *ctx.cpos;
 
         // Resolve motion target and whether the motion is linewise.
@@ -1691,23 +1710,23 @@ impl Vim {
             }
             KeyCode::Char('G') => (Some(ctx.buf.len()), true), // linewise
             KeyCode::Char('g') => {
-                self.sub = SubState::WaitingOpG(op);
+                ctx.vim_state.sub = SubState::WaitingOpG(op);
                 return Action::Consumed;
             }
             KeyCode::Char('f') => {
-                self.sub = SubState::WaitingOpFind(op, FindKind::Forward);
+                ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::Forward);
                 return Action::Consumed;
             }
             KeyCode::Char('F') => {
-                self.sub = SubState::WaitingOpFind(op, FindKind::Backward);
+                ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::Backward);
                 return Action::Consumed;
             }
             KeyCode::Char('t') => {
-                self.sub = SubState::WaitingOpFind(op, FindKind::ForwardTill);
+                ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::ForwardTill);
                 return Action::Consumed;
             }
             KeyCode::Char('T') => {
-                self.sub = SubState::WaitingOpFind(op, FindKind::BackwardTill);
+                ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::BackwardTill);
                 return Action::Consumed;
             }
             KeyCode::Home => (Some(line_start(ctx.buf, origin)), false),
@@ -1748,9 +1767,9 @@ impl Vim {
     }
 
     fn execute_linewise_op(&mut self, op: Op, ctx: &mut VimContext<'_>) -> Action {
-        let n = self.effective_count();
-        self.reset_counts();
-        self.sub = SubState::Ready;
+        let n = ctx.vim_state.effective_count();
+        ctx.vim_state.reset_counts();
+        ctx.vim_state.sub = SubState::Ready;
 
         let start = line_start(ctx.buf, *ctx.cpos);
         let mut end_pos = *ctx.cpos;
@@ -1786,7 +1805,7 @@ impl Vim {
                 ctx.buf.drain(start..end);
                 *ctx.cpos = start;
                 self.enter_insert_mode(ctx);
-                self.reset_counts();
+                ctx.vim_state.reset_counts();
                 return Action::Consumed;
             }
             Op::Yank => {
@@ -1866,18 +1885,18 @@ impl Vim {
 
     fn enter_insert_mode(&mut self, ctx: &mut VimContext<'_>) {
         *ctx.mode = VimMode::Insert;
-        self.sub = SubState::Ready;
+        ctx.vim_state.sub = SubState::Ready;
     }
 
     fn exit_visual(&mut self, ctx: &mut VimContext<'_>) {
         *ctx.mode = VimMode::Normal;
-        self.reset_pending();
+        ctx.vim_state.reset_pending();
     }
 
     fn enter_normal(&mut self, ctx: &mut VimContext<'_>) {
         *ctx.mode = VimMode::Normal;
-        self.sub = SubState::Ready;
-        self.reset_counts();
+        ctx.vim_state.sub = SubState::Ready;
+        ctx.vim_state.reset_counts();
         // Standard vim: cursor moves left one when leaving insert mode,
         // unless at the start of a line.
         let sol = line_start(ctx.buf, *ctx.cpos);
@@ -1885,33 +1904,6 @@ impl Vim {
             *ctx.cpos = prev_char_boundary(ctx.buf, *ctx.cpos);
         }
         clamp_normal(ctx.buf, ctx.cpos);
-    }
-
-    // ── Count helpers ───────────────────────────────────────────────────
-
-    fn take_count(&mut self) -> usize {
-        let n = self.count1.unwrap_or(1);
-        self.count1 = None;
-        self.count2 = None;
-        n
-    }
-
-    fn effective_count(&mut self) -> usize {
-        let c1 = self.count1.unwrap_or(1);
-        let c2 = self.count2.unwrap_or(1);
-        self.count1 = None;
-        self.count2 = None;
-        c1 * c2
-    }
-
-    fn reset_counts(&mut self) {
-        self.count1 = None;
-        self.count2 = None;
-    }
-
-    fn reset_pending(&mut self) {
-        self.sub = SubState::Ready;
-        self.reset_counts();
     }
 }
 
@@ -1996,10 +1988,8 @@ mod tests {
         }
 
         fn with_clipboard(text: &str, clipboard: Clipboard) -> Self {
-            let mut vim = Vim::new();
-            vim.sub = SubState::Ready;
             Self {
-                vim,
+                vim: Vim::new(),
                 buf: text.to_string(),
                 cpos: 0,
                 attachments: Vec::new(),
