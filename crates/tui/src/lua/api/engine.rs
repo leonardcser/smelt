@@ -1,9 +1,10 @@
-//! `smelt.engine` bindings — live engine reads (busy state, cost,
-//! tokens), turn-driver writes (submit, cancel, compact), the `ask`
-//! auxiliary request primitive, and the message-history snapshot.
-//! Mode get/set/cycle live under `smelt.mode`; reasoning effort
-//! lives under `smelt.reasoning`; model get/set/list live under
-//! `smelt.model`.
+//! `smelt.engine` bindings — live engine reads (busy state),
+//! turn-driver writes (submit, cancel, compact), the `ask` auxiliary
+//! request primitive, and the message-history snapshot. Mode
+//! get/set/cycle live under `smelt.mode`; reasoning effort lives
+//! under `smelt.reasoning`; model get/set/list live under
+//! `smelt.model`; per-session cost / context-token / context-window
+//! getters live under `smelt.session`.
 
 use super::app_read;
 use crate::lua::{messages_to_lua, LuaHandle, LuaShared};
@@ -14,18 +15,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let engine_tbl = lua.create_table()?;
 
     engine_tbl.set("is_busy", app_read!(lua, |app| app.agent.is_some()))?;
-    engine_tbl.set(
-        "cost",
-        app_read!(lua, |app| app.core.session.session_cost_usd),
-    )?;
-    engine_tbl.set(
-        "context_tokens",
-        app_read!(lua, |app| app.core.session.context_tokens),
-    )?;
-    engine_tbl.set(
-        "context_window",
-        app_read!(lua, |app| app.core.config.context_window),
-    )?;
 
     engine_tbl.set(
         "submit",
