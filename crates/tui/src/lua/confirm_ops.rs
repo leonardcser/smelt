@@ -22,8 +22,9 @@
 
 use mlua::prelude::*;
 
+use crate::app::cells::ConfirmResolved;
 use crate::app::dialogs::confirm;
-use crate::app::transcript_model::ConfirmChoice;
+use crate::app::transcript_model::{ApprovalScope, ConfirmChoice};
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
 pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -99,6 +100,13 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     );
                     app.send_permission_decision(request_id, true, None);
                     app.confirms.take(handle_id);
+                    app.cells.set_dyn(
+                        "confirm_resolved",
+                        std::rc::Rc::new(ConfirmResolved {
+                            handle_id,
+                            decision: "auto_allow".into(),
+                        }),
+                    );
                     true
                 } else {
                     false
@@ -125,6 +133,13 @@ pub fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         .get(choice_idx.saturating_sub(1))
                         .cloned()
                         .unwrap_or(ConfirmChoice::No);
+                    app.cells.set_dyn(
+                        "confirm_resolved",
+                        std::rc::Rc::new(ConfirmResolved {
+                            handle_id,
+                            decision: decision_label(&choice).into(),
+                        }),
+                    );
                     let request_id = entry.req.request_id;
                     let call_id = entry.req.call_id.clone();
                     let tool_name = entry.req.tool_name.clone();
@@ -177,6 +192,27 @@ impl RequestSnapshot {
         }
         t.set("options", opts)?;
         Ok(t)
+    }
+}
+
+/// Stable short label for the `confirm_resolved` cell payload. Plugins
+/// branch on this rather than reading the `ConfirmChoice` Rust enum.
+fn decision_label(choice: &ConfirmChoice) -> &'static str {
+    match choice {
+        ConfirmChoice::Yes => "yes",
+        ConfirmChoice::No => "no",
+        ConfirmChoice::Always(scope) => match scope {
+            ApprovalScope::Session => "always_session",
+            ApprovalScope::Workspace => "always_workspace",
+        },
+        ConfirmChoice::AlwaysPatterns(_, scope) => match scope {
+            ApprovalScope::Session => "always_pattern_session",
+            ApprovalScope::Workspace => "always_pattern_workspace",
+        },
+        ConfirmChoice::AlwaysDir(_, scope) => match scope {
+            ApprovalScope::Session => "always_dir_session",
+            ApprovalScope::Workspace => "always_dir_workspace",
+        },
     }
 }
 
