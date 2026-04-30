@@ -14,52 +14,46 @@ primary source of truth for what just landed; do not skip it:
 
 Then read:
 
-3. `refactor/REFACTOR.md` — find the next un-landed sub-phase under the
-   active phase. That sub-phase is your scope for this session.
-4. The active `refactor/P<n>.md` — see the latest decisions, deferrals,
-   open questions.
+3. `refactor/REFACTOR.md` — find the next un-landed sub-phase.
+4. The active `refactor/P<n>.md` — latest decisions / deferrals / open
+   questions.
 
-## Land one sub-phase
+## Land sub-phases
+
+A session lands **one or more** consecutive sub-phases. The sub-phase
+is still the natural unit — never split one across sessions or merge
+two into one commit. When a sub-phase finishes and the next is
+independent (no shared rewrites, no blocked decisions), keep going.
+
+Stop after a sub-phase lands when:
+
+- The next sub-phase needs a decision you don't have (defer it, log
+  the question in `P<n>.md`, look for independent work elsewhere; if
+  nothing's independent, exit).
+- The active phase closes (`P<n>` goes `Status: done`).
+- Two consecutive failed attempts to land — exit, human looks.
+
+If a sub-phase you started can't finish cleanly, split it in
+`REFACTOR.md` (`C.8` → `C.8a` / `C.8b`), land what's done, exit.
+
+For each sub-phase:
 
 - Plan briefly (2-3 sentences), then implement.
-- Intermediate commits can be red. The session must end green.
-  Encourage red-mid-session over scaffolding / shims / "kept for now".
-- Verify at session end: `cargo fmt && cargo clippy --workspace
+- Intermediate commits can be red. The sub-phase + its docs commit
+  must end green. Prefer red-mid-sub-phase over shims.
+- Verify after each: `cargo fmt && cargo clippy --workspace
   --all-targets -- -D warnings && cargo nextest run --workspace &&
   refactor/check.sh`.
-- Append one bullet to the active `P<n>.md` "Sub-phases landed":
-  `**<id>** (\`<sha>\`) — <one-line summary>.`
-  **One line.** No paragraphs, no nested bullets, no rephrasing the
-  commit body. The body lives in `git log`; this file is an index.
-  If you can't fit the summary on one line, you're duplicating the
-  commit message — trim.
-- If the sub-phase produced a non-obvious decision worth re-litigating
-  later, add one bullet to "Decisions made":
-  `**<title>** (\`<sha>\`) — <one line>.` Same one-line rule.
-  Reasoning lives in the commit message, not here.
+- Append one bullet to `P<n>.md` "Sub-phases landed":
+  `**<id>** (\`<sha>\`) — <one-line summary>.` **One line.** Body
+  lives in `git log`; this file is an index.
+- If a non-obvious decision landed, one bullet in "Decisions made":
+  `**<title>** (\`<sha>\`) — <one line>.` Same rule.
 - Mark the sub-phase landed in `REFACTOR.md`.
-- Update `INVENTORY.md` Status columns for files you touched.
-  **Notes column is forward-looking only** — what's still pending or
-  blocking, not what just landed. Don't paste commit-body prose, don't
-  enumerate per-sub-phase changes, don't accumulate "P2.a.X did Y / P2.a.Z
-  did W" history. The Status column carries the state; git log carries
-  the history; the Notes are a one-sentence pointer at most.
-- Commit with conventional commits (`feat(tui): …`, `refactor(ui): …`).
-
-## Stop
-
-Per `refactor/README.md` § Stopping rule:
-
-1. Sub-phase landed (tree green, docs synced, commit on HEAD) — exit.
-2. Real external blocker (missing credentials, environment broken,
-   user action genuinely required) — record in `P<n>.md` "Open
-   questions", exit.
-3. Two consecutive failed attempts to land — exit, human looks.
-
-**Never stop to ask the user.** If a decision is clear, pick the better
-option and log it. If a big decision ripples and no winner is clear,
-defer the dependent sub-phases, record the question in `P<n>.md`, and
-move on to independent work.
+- Update `INVENTORY.md` Status for touched files. Notes column is
+  forward-looking only — pending/blocking, not history.
+- Commit code as `feat(tui): …` / `refactor(ui): …`; docs sync as a
+  separate `docs(refactor): …` immediately after.
 
 ## Loop sentinels
 
@@ -68,28 +62,17 @@ only when its precondition is genuinely true.
 
 ### `refactor/.ralph-done` — plan complete
 
-Write this when every phase in `REFACTOR.md` is `Status: done`, no
-`P<n>.md` has open sub-phases, and no `P<n>.md` "Open questions"
-section has unresolved entries. Contents: a one-line summary
-(e.g. `P7 landed; full refactor green`).
+Every phase in `REFACTOR.md` is `Status: done`, no `P<n>.md` has open
+sub-phases, no "Open questions" section has unresolved entries.
+Contents: one-line summary (e.g. `P7 landed; full refactor green`).
 
 ### `refactor/.ralph-needs-input` — your turn
 
-Write this when **every un-landed sub-phase across all phases** is
-deferred on an open question recorded in some `P<n>.md`. That is:
-there is no independent work left for a fresh agent to attempt — every
-remaining path needs a user decision before it can move. Contents: a
-one-line summary pointing at the deciding questions (e.g.
-`P3.b naming + P5.b dispatcher wiring blocked on user`).
+Every un-landed sub-phase across all phases is deferred on an open
+question recorded in some `P<n>.md`. No independent work left for a
+fresh agent. Contents: one-line summary pointing at the deciding
+questions (e.g. `P3.b naming + P5.b dispatcher wiring blocked on user`).
 
-**Do not write either file** in any other situation. Partial
-completion, deferrals with independent work still available, "I think
-we're close", or "I tried and failed" all stay implicit — leave no
-sentinel and let the no-commit branch surface as `stuck`. Writing the
-wrong sentinel ends the loop prematurely.
-
-If the sub-phase is larger than fits one session, split it in
-`REFACTOR.md` (`C.8` → `C.8a`/`C.8b`), land `a`, exit.
-
-**Do not** start a new sub-phase. **Do not** keep going past a clean
-landing. The next iteration is fresh and ready.
+**Do not write either file** in any other situation. Partial completion,
+deferrals with independent work, "I think we're close", or "I tried and
+failed" all stay implicit — let the no-commit branch surface as `stuck`.
