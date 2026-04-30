@@ -23,7 +23,6 @@ pub mod sleep_inhibit;
 pub mod state;
 pub mod theme;
 pub mod utils;
-pub mod vim;
 pub mod window;
 pub mod workspace_permissions;
 

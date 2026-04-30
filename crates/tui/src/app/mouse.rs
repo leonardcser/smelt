@@ -304,7 +304,7 @@ impl App {
             if let Some(a) = saved_vim_visual_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    crate::vim::VimMode::Visual,
+                    ui::VimMode::Visual,
                     wrap.src_to_wrapped(a),
                 );
             }
@@ -345,7 +345,7 @@ impl App {
             if let Some(a) = new_w_vim_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    crate::vim::VimMode::Visual,
+                    ui::VimMode::Visual,
                     wrap.wrapped_to_src(a),
                 );
             }

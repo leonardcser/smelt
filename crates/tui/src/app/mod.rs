@@ -41,7 +41,7 @@ pub(crate) use crate::app::transcript_model::{
 pub(crate) use crate::app::working::{TurnOutcome, TurnPhase};
 use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
-use crate::{content, session, state, vim};
+use crate::{content, session, state};
 use engine::tools::tool_arg_summary;
 use engine::{permissions::Decision, EngineHandle, Permissions};
 use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
@@ -313,7 +313,7 @@ pub struct App {
     /// drag enters `Visual`, restored on mouse-up so a drag from Insert
     /// lands the user back in Insert rather than Normal. `None` outside
     /// an active prompt drag.
-    pub prompt_drag_return_vim_mode: Option<crate::vim::VimMode>,
+    pub prompt_drag_return_vim_mode: Option<ui::VimMode>,
     /// **Single global** vim mode — the one source of truth read by
     /// status bar, lua_bridge, and `smelt.vim.mode`. Vim dispatch
     /// (Window / PromptState) writes through `&mut` references threaded
@@ -463,7 +463,7 @@ enum InputOutcome {
 /// Mutable timer state shared across event handlers.
 struct Timers {
     last_esc: Option<Instant>,
-    esc_vim_mode: Option<vim::VimMode>,
+    esc_vim_mode: Option<ui::VimMode>,
     last_ctrlc: Option<Instant>,
     last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord. When set, the next key consumes the

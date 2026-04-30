@@ -78,11 +78,11 @@ impl StatusPosition {
     }
 }
 
-pub(crate) fn vim_mode_label(mode: Option<crate::vim::VimMode>) -> Option<&'static str> {
+pub(crate) fn vim_mode_label(mode: Option<ui::VimMode>) -> Option<&'static str> {
     match mode {
-        Some(crate::vim::VimMode::Insert) => Some("INSERT"),
-        Some(crate::vim::VimMode::Visual) => Some("VISUAL"),
-        Some(crate::vim::VimMode::VisualLine) => Some("VISUAL LINE"),
+        Some(ui::VimMode::Insert) => Some("INSERT"),
+        Some(ui::VimMode::Visual) => Some("VISUAL"),
+        Some(ui::VimMode::VisualLine) => Some("VISUAL LINE"),
         _ => None,
     }
 }

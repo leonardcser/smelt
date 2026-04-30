@@ -9,9 +9,9 @@ use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::CompleterSession;
 use crate::content;
 use crate::keymap::{self, KeyAction, KeyContext};
-use crate::vim::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
+use ui::VimMode;
 use vim_bridge::VimBridgeResult;
 
 pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
@@ -184,7 +184,7 @@ impl PromptState {
         if self.win.vim_enabled {
             self.win
                 .vim_state
-                .begin_visual(mode, crate::vim::VimMode::Visual, start);
+                .begin_visual(mode, VimMode::Visual, start);
         } else {
             self.win.selection_anchor = Some(start);
         }

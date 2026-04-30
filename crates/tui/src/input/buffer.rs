@@ -7,7 +7,7 @@
 
 use super::{PromptState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
 use crate::attachment::AttachmentId;
-use crate::vim::VimMode;
+use ui::VimMode;
 
 impl PromptState {
     /// Save undo state before an editing operation.

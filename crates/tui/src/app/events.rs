@@ -314,7 +314,7 @@ impl App {
         {
             let in_insert = match self.app_focus {
                 crate::app::AppFocus::Prompt => {
-                    !self.input.vim_enabled() || self.vim_mode == vim::VimMode::Insert
+                    !self.input.vim_enabled() || self.vim_mode == ui::VimMode::Insert
                 }
                 crate::app::AppFocus::Content => false,
             };
@@ -345,7 +345,7 @@ impl App {
                 ..
             })
         ) {
-            let in_normal = !self.input.vim_enabled() || self.vim_mode != vim::VimMode::Insert;
+            let in_normal = !self.input.vim_enabled() || self.vim_mode != ui::VimMode::Insert;
             if in_normal {
                 let double = t
                     .last_esc
@@ -361,9 +361,9 @@ impl App {
                             self.working.finish(TurnOutcome::Interrupted);
                         };
                         self.notify("compaction cancelled".into());
-                        if restore_mode == Some(vim::VimMode::Insert) {
+                        if restore_mode == Some(ui::VimMode::Insert) {
                             self.input
-                                .set_vim_mode(&mut self.vim_mode, vim::VimMode::Insert);
+                                .set_vim_mode(&mut self.vim_mode, ui::VimMode::Insert);
                         }
                         return EventOutcome::Noop;
                     }
@@ -371,7 +371,7 @@ impl App {
                     if self.user_turns().is_empty() {
                         return EventOutcome::Noop;
                     }
-                    let line = if restore_mode == Some(vim::VimMode::Insert) {
+                    let line = if restore_mode == Some(ui::VimMode::Insert) {
                         "/rewind insert"
                     } else {
                         "/rewind"
@@ -393,7 +393,7 @@ impl App {
             } else {
                 // Vim insert mode — start double-Esc timer, fall through so
                 // handle_event processes the Esc and switches vim to normal.
-                t.esc_vim_mode = Some(vim::VimMode::Insert);
+                t.esc_vim_mode = Some(ui::VimMode::Insert);
                 t.last_esc = Some(Instant::now());
             }
         } else {

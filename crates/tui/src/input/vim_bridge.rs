@@ -8,9 +8,9 @@
 //! `ui::Window`. Vim itself holds only in-flight key-sequence state.
 
 use super::{Action, History, PromptState};
-use crate::vim::{self, VimContext, VimMode};
 use crossterm::event::{Event, KeyEvent};
-use ui::Clipboard;
+use ui::vim::{self, VimContext};
+use ui::{Clipboard, VimMode};
 
 /// Outcome of the vim bridge for a single key event.
 pub(super) enum VimBridgeResult {
