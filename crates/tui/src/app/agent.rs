@@ -490,7 +490,6 @@ impl TuiApp {
             }
         }
         self.agents.retain(|a| a.agent_id != agent_id);
-        self.refresh_agent_counts();
         self.sync_agent_snapshots();
     }
 
@@ -512,8 +511,6 @@ impl TuiApp {
         }
         self.cancel_active_agents();
     }
-
-    pub(super) fn refresh_agent_counts(&mut self) {}
 
     // ── Agent tracking ────────────────────────────────────────────────
 
@@ -569,7 +566,6 @@ impl TuiApp {
                 cost_usd: 0.0,
             });
         }
-        self.refresh_agent_counts();
     }
 
     /// Drain stdout events for all tracked agents.
@@ -674,7 +670,6 @@ impl TuiApp {
             self.update_active_agent(&agent_id, slug.as_deref(), &tool_calls, status);
         }
 
-        self.refresh_agent_counts();
         self.sync_agent_snapshots();
     }
 

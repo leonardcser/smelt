@@ -18,7 +18,6 @@ impl TuiApp {
         let my_pid = std::process::id();
         engine::registry::kill_descendants(my_pid);
         self.agents.clear();
-        self.refresh_agent_counts();
     }
 
     pub(super) fn set_history(&mut self, messages: Vec<Message>) {

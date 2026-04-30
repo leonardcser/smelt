@@ -211,7 +211,6 @@ pub(crate) fn handle_event(
                         let pid = agent.pid;
                         engine::registry::kill_agent(pid);
                         app.agents.remove(idx);
-                        app.refresh_agent_counts();
                         app.sync_agent_snapshots();
                     }
                 } else {
@@ -251,7 +250,6 @@ pub(crate) fn handle_event(
                 app.drain_cells_pending();
                 app.flush_lua_callbacks();
             }
-            app.refresh_agent_counts();
             SessionControl::Continue
         }
         EngineEvent::RequestPermission {
