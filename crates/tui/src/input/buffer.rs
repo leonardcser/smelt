@@ -7,17 +7,15 @@
 
 use super::{PromptState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
 use crate::attachment::AttachmentId;
-use crate::vim::ViMode;
+use crate::vim::VimMode;
 
 impl PromptState {
     /// Save undo state before an editing operation.
     /// When vim is in insert mode, skip — the entire insert session is
     /// already covered by the undo entry saved on insert entry.
-    pub fn save_undo(&mut self) {
-        if let Some(ref vim) = self.win.vim {
-            if vim.mode() == ViMode::Insert {
-                return; // insert session groups all edits into one undo step
-            }
+    pub fn save_undo(&mut self, mode: VimMode) {
+        if self.win.vim.is_some() && mode == VimMode::Insert {
+            return; // insert session groups all edits into one undo step
         }
         self.win.edit_buf.history.save(ui::UndoEntry::snapshot(
             &self.win.edit_buf.buf,
@@ -26,21 +24,21 @@ impl PromptState {
         ));
     }
 
-    pub(super) fn insert_char(&mut self, c: char) {
+    pub(super) fn insert_char(&mut self, c: char, mode: VimMode) {
         self.from_paste = false;
-        if self.selection_range().is_some() {
-            self.save_undo();
-            self.delete_selection();
+        if self.selection_range(mode).is_some() {
+            self.save_undo(mode);
+            self.delete_selection(mode);
         }
         self.win.edit_buf.buf.insert(self.win.cpos, c);
         self.win.cpos += c.len_utf8();
         self.recompute_completer();
     }
 
-    pub(super) fn backspace(&mut self) {
-        if self.selection_range().is_some() {
-            self.save_undo();
-            self.delete_selection();
+    pub(super) fn backspace(&mut self, mode: VimMode) {
+        if self.selection_range(mode).is_some() {
+            self.save_undo(mode);
+            self.delete_selection(mode);
             self.recompute_completer();
             return;
         }

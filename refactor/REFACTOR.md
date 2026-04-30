@@ -482,14 +482,21 @@ detailed list.
 
 #### P1.d.5 — Vim state machine decomposes
 
-`crates/ui/src/vim/` and `window_cursor.rs` are deleted:
+End state: `crates/ui/src/vim/` and `window_cursor.rs` deleted.
+~3500 LOC of intertwined per-prompt state redistributes across
+App / Buffer / Window / Clipboard. Splits across sessions:
 
-- `VimMode` (`Normal/Insert/Visual/VisualLine`) lives on **App**
-  as a single global field. Lua: `smelt.vim.mode`.
-- Registers, dot-repeat, undo → **Buffer** (per-buffer edit
-  history).
-- Cursor / scroll / selection / Visual anchor → **Window**.
-- Kill ring → `Clipboard` subsystem (reached via `Host`).
+- **5a** — `VimMode` → App single global field; rename
+  `ViMode` → `VimMode`. `Vim` loses its `mode`; `VimContext`
+  threads `&mut VimMode`. Adds `smelt.vim.mode` Lua read.
+- **5b** — Kill ring → `Clipboard` subsystem (App-level
+  until Host lands in P2).
+- **5c** — Registers, dot-repeat, undo → **Buffer**. Pairs
+  with `edit_buffer.rs` merge (P1.a-tail).
+- **5d** — Cursor / scroll / selection / Visual anchor →
+  **Window**. Delete `crates/ui/src/vim/` + `window_cursor.rs`.
+  Vim becomes a per-Window keymap recipe (Rust; Lua recipes
+  are P3.b).
 
 #### P1.d.6 — Completer state machine decomposes
 

@@ -5,26 +5,21 @@
 use super::*;
 
 impl App {
-    /// Vim-mode label for the currently focused buffer Window. An
-    /// overlay-leaf Window with vim enabled (interactive preview
-    /// panes) reports its own mode; otherwise fall back to the active
-    /// split (transcript / prompt). Returns `None` when the focused
-    /// surface has no vim state — same as nvim's "no mode in widget
-    /// windows."
+    /// Vim-mode label for the currently focused buffer Window. Reads
+    /// the App-owned single-global `vim_mode` whenever the focused
+    /// surface has a Vim instance attached. Returns `None` for
+    /// surfaces without vim (nvim's "no mode in widget windows").
     pub(super) fn current_vim_mode_label(&self) -> Option<String> {
         if let Some(win) = self.ui.focused_window() {
-            if let Some(v) = win.vim.as_ref() {
-                return Some(format!("{:?}", v.mode()));
+            if win.vim.is_some() {
+                return Some(format!("{:?}", self.vim_mode));
             }
         }
-        match self.app_focus {
-            crate::app::AppFocus::Content => self
-                .transcript_window
-                .vim
-                .as_ref()
-                .map(|v| format!("{:?}", v.mode())),
-            crate::app::AppFocus::Prompt => self.input.vim_mode().map(|m| format!("{m:?}")),
-        }
+        let has_vim = match self.app_focus {
+            crate::app::AppFocus::Content => self.transcript_window.vim.is_some(),
+            crate::app::AppFocus::Prompt => self.input.vim_enabled(),
+        };
+        has_vim.then(|| format!("{:?}", self.vim_mode))
     }
 
     /// Fire `WinEvent::TextChanged` on `PROMPT_WIN` when the prompt

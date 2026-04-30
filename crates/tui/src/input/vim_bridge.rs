@@ -1,13 +1,13 @@
 //! Bridge between `PromptState` and the vim state machine.
 //!
-//! Vim owns its own mode/count state but operates on the input's live
-//! `buf`/`cpos`/`attachment_ids`. After Part B of the refactor, vim no longer
-//! keeps a private register or undo history either — it borrows the kill ring
-//! and the single `UndoHistory` owned by `PromptState` through `VimContext`,
-//! so no post-key sync is needed.
+//! Vim borrows the input's live `buf`/`cpos`/`attachment_ids` plus the
+//! kill ring and `UndoHistory` owned by `PromptState`, plus the
+//! **single global** `VimMode` owned by `App`. The mode reference is
+//! threaded in by the caller so vim and every other surface read one
+//! source of truth.
 
 use super::{Action, History, PromptState};
-use crate::vim::{self, VimContext};
+use crate::vim::{self, VimContext, VimMode};
 use crossterm::event::{Event, KeyEvent};
 
 /// Outcome of the vim bridge for a single key event.
@@ -25,6 +25,7 @@ impl PromptState {
         &mut self,
         ev: &Event,
         history: &mut Option<&mut History>,
+        mode: &mut VimMode,
     ) -> VimBridgeResult {
         if self.win.vim.is_none() {
             return VimBridgeResult::NotAKey;
@@ -50,6 +51,7 @@ impl PromptState {
                 kill_ring: &mut self.win.kill_ring,
                 history: &mut self.win.edit_buf.history,
                 clipboard: &mut clipboard,
+                mode,
             };
             vim.handle_key(key_ev, &mut ctx)
         };

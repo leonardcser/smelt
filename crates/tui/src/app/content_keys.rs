@@ -167,7 +167,9 @@ impl App {
                     ))
                 }
                 KeyAction::CopySelection => {
-                    if let Some((s, e)) = self.transcript_window.selection_range(&rows) {
+                    if let Some((s, e)) =
+                        self.transcript_window.selection_range(&rows, self.vim_mode)
+                    {
                         let s = ui::text::snap(&buf, s);
                         let e = ui::text::snap(&buf, e);
                         if s < e {
@@ -203,7 +205,7 @@ impl App {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
-            .scroll_by_lines(delta, &rows, viewport);
+            .scroll_by_lines(delta, &rows, viewport, &mut self.vim_mode);
         self.snap_transcript_cursor();
     }
 
@@ -214,7 +216,10 @@ impl App {
     fn handle_content_vim_key(&mut self, k: KeyEvent) -> bool {
         let rows = self.full_transcript_display_text(self.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
-        match self.transcript_window.handle_key(k, &rows, viewport) {
+        match self
+            .transcript_window
+            .handle_key(k, &rows, viewport, &mut self.vim_mode)
+        {
             None => false,
             Some(yanked) => {
                 if let Some(raw) = yanked {

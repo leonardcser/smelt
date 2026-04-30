@@ -33,6 +33,7 @@ pub(crate) struct PromptInput<'a> {
     pub queued: &'a [String],
     pub stash: &'a Option<crate::input::InputSnapshot>,
     pub input: &'a PromptState,
+    pub vim_mode: ui::VimMode,
     pub prediction: Option<&'a str>,
     pub width: u16,
     pub height: u16,
@@ -548,13 +549,15 @@ fn compute_input_area(
     let display_buf = spans_to_string(&spans);
     let char_kinds = build_char_kinds(&spans);
     let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
-    let display_selection = state.display_selection_range().map(|(start, end)| {
-        let raw_start_char = crate::input::char_pos(&state.buf, start);
-        let raw_end_char = crate::input::char_pos(&state.buf, end);
-        let ds = map_cursor(raw_start_char, &state.buf, &spans);
-        let de = map_cursor(raw_end_char, &state.buf, &spans);
-        (ds, de)
-    });
+    let display_selection = state
+        .display_selection_range(input.vim_mode)
+        .map(|(start, end)| {
+            let raw_start_char = crate::input::char_pos(&state.buf, start);
+            let raw_end_char = crate::input::char_pos(&state.buf, end);
+            let ds = map_cursor(raw_start_char, &state.buf, &spans);
+            let de = map_cursor(raw_end_char, &state.buf, &spans);
+            (ds, de)
+        });
     let (visual_lines, cursor_line, _, cursor_char_in_line) =
         wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
     // Slash commands and `!exec` are single-line by design. Multi-line
@@ -1031,7 +1034,7 @@ mod tests {
             queued: &[],
             stash: &None,
             input: &input_state,
-
+            vim_mode: ui::VimMode::Insert,
             prediction: None,
             width: 80,
             height: 10,

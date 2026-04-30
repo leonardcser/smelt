@@ -1,1 +1,1 @@
-pub use ui::vim::{Action, ViMode, Vim, VimContext};
+pub use ui::vim::{Action, Vim, VimContext, VimMode};
