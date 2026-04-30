@@ -709,15 +709,26 @@ impl TuiApp {
 
         // Skip shell escape for pasted content
         let is_from_paste = self.input.skip_shell_escape();
-        match super::commands::run_command(self, trimmed) {
+
+        // `:` is a vim-style alias for `/` — both dispatch through the
+        // same Lua command registry. Normalize once so the lookups
+        // below find `:reflect` / `:resume` / etc. the same way they
+        // find their `/` siblings.
+        let dispatch_input = if let Some(rest) = trimmed.strip_prefix(':') {
+            format!("/{rest}")
+        } else {
+            trimmed.to_string()
+        };
+
+        match super::commands::run_command(self, &dispatch_input) {
             CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }
-        if trimmed.starts_with('/') {
-            if let Some(cmd) = crate::custom_commands::resolve(trimmed) {
+        if dispatch_input.starts_with('/') {
+            if let Some(cmd) = crate::custom_commands::resolve(&dispatch_input) {
                 return InputOutcome::CustomCommand(Box::new(cmd));
             }
-            if crate::completer::Completer::is_command(trimmed) {
+            if crate::completer::Completer::is_command(&dispatch_input) {
                 return InputOutcome::Continue;
             }
         }
