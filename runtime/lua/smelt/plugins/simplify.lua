@@ -5,4 +5,7 @@
 
 smelt.cmd.register("simplify", function(arg)
   smelt.engine.submit_builtin_command("simplify", arg)
-end, { desc = "review changed code for reuse, quality, and efficiency" })
+end, {
+  desc = "review changed code for reuse, quality, and efficiency",
+  while_busy = false,
+})
