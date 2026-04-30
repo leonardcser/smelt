@@ -16,6 +16,7 @@ mod engine;
 mod fuzzy;
 mod history;
 mod keymap;
+mod mode;
 mod notebook;
 mod permissions;
 mod process;
@@ -68,6 +69,7 @@ impl LuaRuntime {
 
         transcript::register(lua, &smelt)?;
         engine::register(lua, &smelt, shared)?;
+        mode::register(lua, &smelt)?;
         session::register(lua, &smelt)?;
         process::register(lua, &smelt)?;
         shell::register(lua, &smelt)?;

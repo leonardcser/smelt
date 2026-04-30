@@ -1,7 +1,8 @@
-//! `smelt.engine` bindings — live engine reads (model, mode, busy
-//! state, cost, tokens), turn-driver writes (set_model, set_mode,
-//! set_reasoning_effort, submit, cancel, compact), the `ask` auxiliary
-//! request primitive, and the message-history snapshot.
+//! `smelt.engine` bindings — live engine reads (model, busy state,
+//! cost, tokens), turn-driver writes (set_model, set_reasoning_effort,
+//! submit, cancel, compact), the `ask` auxiliary request primitive,
+//! and the message-history snapshot. Mode get/set/cycle live under
+//! `smelt.mode`.
 
 use super::app_read;
 use crate::lua::{messages_to_lua, LuaHandle, LuaShared};
@@ -12,10 +13,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let engine_tbl = lua.create_table()?;
 
     engine_tbl.set("model", app_read!(lua, |app| app.core.config.model.clone()))?;
-    engine_tbl.set(
-        "mode",
-        app_read!(lua, |app| app.core.config.mode.as_str().to_string()),
-    )?;
     engine_tbl.set(
         "reasoning_effort",
         app_read!(lua, |app| app
@@ -65,16 +62,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 res?;
             }
             Ok(out)
-        })?,
-    )?;
-    engine_tbl.set(
-        "set_mode",
-        lua.create_function(|_, v: String| {
-            crate::lua::with_app(|app| match protocol::Mode::parse(&v) {
-                Some(mode) => app.set_mode(mode),
-                None => app.notify_error(format!("unknown mode: {v}")),
-            });
-            Ok(())
         })?,
     )?;
     engine_tbl.set(
