@@ -70,7 +70,6 @@ use std::collections::HashMap;
 pub struct Ui {
     bufs: HashMap<BufId, Buffer>,
     wins: HashMap<WinId, Window>,
-    current_win: Option<WinId>,
     next_buf_id: u64,
     next_win_id: u64,
     terminal_size: (u16, u16),
@@ -137,7 +136,6 @@ impl Ui {
         Self {
             bufs: HashMap::new(),
             wins: HashMap::new(),
-            current_win: None,
             next_buf_id: 1,
             // 0 is reserved for PROMPT_WIN, 1 for TRANSCRIPT_WIN.
             next_win_id: 2,
@@ -454,9 +452,6 @@ impl Ui {
         self.next_win_id += 1;
         let win = Window::new(id, buf, config);
         self.wins.insert(id, win);
-        if self.current_win.is_none() {
-            self.current_win = Some(id);
-        }
         Some(id)
     }
 
@@ -473,9 +468,6 @@ impl Ui {
         }
         let win = Window::new(id, buf, config);
         self.wins.insert(id, win);
-        if self.current_win.is_none() {
-            self.current_win = Some(id);
-        }
         true
     }
 
@@ -495,19 +487,12 @@ impl Ui {
                 for leaf in removed.layout.leaves_in_order() {
                     all_ids.extend(self.callbacks.clear_all(leaf));
                     self.wins.remove(&leaf);
-                    if self.current_win == Some(leaf) {
-                        self.current_win = self.wins.keys().next().copied();
-                    }
                 }
             }
             return all_ids;
         }
         self.wins.remove(&id);
-        let lua_ids = self.callbacks.clear_all(id);
-        if self.current_win == Some(id) {
-            self.current_win = self.wins.keys().next().copied();
-        }
-        lua_ids
+        self.callbacks.clear_all(id)
     }
 
     // ── Callbacks ────────────────────────────────────────────────────
@@ -605,16 +590,6 @@ impl Ui {
 
     pub fn win_list(&self) -> Vec<WinId> {
         self.wins.keys().copied().collect()
-    }
-
-    pub fn current_win(&self) -> Option<WinId> {
-        self.current_win
-    }
-
-    pub fn set_current_win(&mut self, id: WinId) {
-        if self.wins.contains_key(&id) {
-            self.current_win = Some(id);
-        }
     }
 
     pub fn set_terminal_size(&mut self, w: u16, h: u16) {
