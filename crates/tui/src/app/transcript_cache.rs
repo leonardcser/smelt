@@ -17,9 +17,8 @@
 use super::transcript_model::BlockArtifact;
 use crate::content::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
 use engine::tools::NotebookRenderData;
-use protocol::Message;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub const RENDER_CACHE_VERSION: u32 = 1;
 pub const LAYOUT_CACHE_VERSION: u32 = 6;
@@ -142,16 +141,6 @@ impl RenderCache {
 
     pub fn insert_tool_output(&mut self, call_id: String, cache: ToolOutputRenderCache) {
         self.tool_outputs.insert(call_id, cache);
-    }
-
-    pub fn retain_history(&mut self, history: &[Message]) {
-        let active: HashSet<&str> = history
-            .iter()
-            .filter_map(|msg| msg.tool_calls.as_ref())
-            .flat_map(|calls| calls.iter().map(|call| call.id.as_str()))
-            .collect();
-        self.tool_outputs
-            .retain(|call_id, _| active.contains(call_id.as_str()));
     }
 }
 

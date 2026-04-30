@@ -49,11 +49,6 @@ impl ViewportGeom {
         self.clamped_scroll()
     }
 
-    /// Number of content rows visible in the viewport.
-    pub fn visible_content_rows(&self) -> u16 {
-        self.total.min(self.viewport_rows)
-    }
-
     /// Screen row for a buffer line index, or `None` if offscreen.
     /// Lines are 0-indexed from the top of the flattened buffer; the
     /// returned row is 0-indexed from the top of the viewport.
