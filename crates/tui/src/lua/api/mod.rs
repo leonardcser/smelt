@@ -13,6 +13,7 @@ mod cmd;
 mod confirm;
 mod diff;
 mod engine;
+mod frontend;
 mod fuzzy;
 mod history;
 mod keymap;
@@ -77,6 +78,7 @@ impl LuaRuntime {
         agent::register(lua, &smelt)?;
         permissions::register(lua, &smelt)?;
         path::register(lua, &smelt)?;
+        frontend::register(lua, &smelt)?;
         fuzzy::register(lua, &smelt)?;
         history::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;

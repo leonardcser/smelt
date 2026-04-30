@@ -737,9 +737,9 @@ unit warrants it):
 - `tui::html` — html → markdown.
 - `tui::notebook` — Jupyter JSON ops.
 - `tui::grep` — ripgrep wrapper.
-- `tui::path` — normalize / canonical / relative.
+- `tui::path` — normalize / canonical / relative / expand_home. ✅ (`de7fb87`).
 - `tui::fuzzy` — fuzzy matching / scoring (folds `tui/fuzzy.rs` +
-  `tui/completer/score.rs`).
+  `tui/completer/score.rs`). ✅ (`b537d1a`).
 - `tui::permissions` — **all permission policy.** Absorbs every file
   in `engine/permissions/` (bash AST, rules, workspace check,
   RuntimeApprovals, 1617-line test suite) plus
@@ -805,13 +805,14 @@ Newly bound Lua surface:
   Long-lived child IPC; sub-agents and any other long-running child
   compose this.
 - `smelt.frontend` — `is_interactive()`, `kind()`. Tools branch on
-  this when they need the human-vs-headless distinction.
+  this when they need the human-vs-headless distinction. ✅ (`e38572d`).
 - `smelt.mode` — `get / set / cycle` over AgentMode (Plan/Apply/Yolo).
   Renamed from `smelt.agent.mode` to avoid collision with
-  `smelt.subprocess` (sub-agents).
+  `smelt.subprocess` (sub-agents). ✅ (`ad9eccc`).
+- `smelt.path` — wraps `tui::path`. ✅ (`de7fb87`).
 - `smelt.parse`, `smelt.fs`, `smelt.http`, `smelt.html`,
-  `smelt.notebook`, `smelt.path`, `smelt.os`, `smelt.fuzzy`,
-  `smelt.grep` — wrap their capability module.
+  `smelt.notebook`, `smelt.os`, `smelt.fuzzy`, `smelt.grep` — wrap
+  their capability module.
 
 End of P3: every Lua-callable Rust thing has a binding file with the
 same name. Lua plugins can compose Rust capabilities directly.

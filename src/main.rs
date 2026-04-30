@@ -480,7 +480,7 @@ async fn main() {
             multi_agent,
             cfg.settings.context_window,
         );
-        let core = tui::app::Core::new(app_config, engine_handle);
+        let core = tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Subagent);
         let sink = tui::app::HeadlessSink::new_subagent(color_mode);
         let mut headless = tui::app::HeadlessApp::new(core, sink);
 
@@ -534,7 +534,7 @@ async fn main() {
             multi_agent,
             cfg.settings.context_window,
         );
-        let core = tui::app::Core::new(app_config, engine_handle);
+        let core = tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Headless);
         let sink = tui::app::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = tui::app::HeadlessApp::new(core, sink);
         headless
