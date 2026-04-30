@@ -251,7 +251,7 @@ to invoke_ the feature.
 | `smelt.task.wait` / `task.resume`                       | `_bootstrap.lua` + `lua/task.rs`    | P2                                         | working        |
 | `smelt.tools.call` (call tool from tool)                | `_bootstrap.lua`                    | P5                                         | working        |
 | `smelt.engine.ask`                                      | `lua/api/state.rs`                  | P3.b → `lua/api/engine.rs`                 | working        |
-| `smelt.engine.model` / `models` / `set_model`           | `lua/api/state.rs`                  | P3.b                                       | working        |
+| `smelt.model.{get,set,list}`                            | `lua/api/model.rs`                  | P4.e (carved from `smelt.engine`)          | working        |
 | `smelt.engine.history`                                  | `lua/api/state.rs`                  | P3.b                                       | working        |
 | `smelt.engine.cancel`                                   | `lua/api/state.rs`                  | P3.b                                       | working        |
 | `smelt.reasoning.{get,set,cycle}`                       | `lua/api/reasoning.rs`              | P4.e (carved from `smelt.engine`)          | working        |
