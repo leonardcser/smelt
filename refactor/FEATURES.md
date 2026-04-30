@@ -269,9 +269,9 @@ to invoke_ the feature.
 | `smelt.buf.*` (create/lines/text/extmark)               | `lua/api/widgets.rs`                | P3.b → `lua/api/buf.rs` (extmarks!)        | working        |
 | `smelt.win.*`                                           | `lua/api/widgets.rs`                | P3.b → `lua/api/win.rs`                    | working        |
 | `smelt.statusline.register/set`                         | `lua/api/dispatch.rs`               | P4.c (cells-driven spec)                   | working        |
-| `smelt.cell.new/get/set/subscribe`                      | _missing today_                     | P3.c (added)                               | offline-pre-P3 |
-| `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/dispatch.rs`               | P3.c → `smelt.timer.set` (alias kept)      | working        |
-| `smelt.timer.set/every/cancel` namespace                | _missing today: only `smelt.defer` exists; no `every`/`cancel`_ | P3.c (full namespace + cancellable handles) | offline-pre-P3 |
+| `smelt.cell.new/get/set/subscribe`                      | `lua/api/dispatch.rs` + `app/cells.rs` | P2.a.4a (landed); a.4b adds userdata-handle ergonomics + `glob_subscribe` | working        |
+| `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/dispatch.rs`               | thin alias over `smelt.timer.set`          | working        |
+| `smelt.timer.set/every/cancel` namespace                | `lua/api/dispatch.rs` + `app/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |
 | `smelt.parse / fs / http / html / notebook / path / os` | _missing today_                     | P3.c                                       | offline-pre-P3 |
 
 ## Headless / non-TUI modes
