@@ -271,7 +271,10 @@ to invoke_ the feature.
 | `smelt.cell.new/get/set/subscribe`                      | `lua/api/dispatch.rs` + `app/cells.rs` | P2.a.4b (landed; `smelt.cell(name)` handle + `:glob_subscribe` shipped); a.4c migrates built-ins | working |
 | `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/dispatch.rs`               | thin alias over `smelt.timer.set`          | working        |
 | `smelt.timer.set/every/cancel` namespace                | `lua/api/dispatch.rs` + `app/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |
-| `smelt.parse / fs / http / html / notebook / path / os` | _missing today_                     | P3.c                                       | offline-pre-P3 |
+| `smelt.path` (`normalize / canonical / relative / expand / join / parent / basename / extension / is_absolute`) | `lua/api/path.rs` + `tui/path.rs` | P3.a + P3.c (landed `de7fb87`) | working |
+| `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.os` (`getenv / setenv / unsetenv / platform / arch / tempdir / home / cwd / set_cwd / pid`) | `lua/api/os.rs` | P3.c (landed this session) | working |
+| `smelt.parse / http / html / notebook / grep` | _missing today_                     | P3.c                                       | offline-pre-P3 |
 
 ## Headless / non-TUI modes
 
