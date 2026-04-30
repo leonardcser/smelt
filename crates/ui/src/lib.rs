@@ -56,7 +56,7 @@ pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{VimMode, VimWindowState};
 pub use window::{
-    CursorKind, DrawContext, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit,
+    CursorShape, DrawContext, MouseAction, MouseCtx, ScrollbarState, SplitConfig, ViewportHit,
     Window, WindowViewport,
 };
 
@@ -108,6 +108,14 @@ pub struct Ui {
     /// captured target's owning split disappears (`set_layout`) or
     /// owning overlay closes (`overlay_close`).
     capture: Option<HitTarget>,
+    /// Single global cursor shape for the focused window. The host
+    /// sets this each frame from the focused window's mode/state
+    /// (vim Insert → `Hardware`, vim Normal/Visual → `Block`,
+    /// transcript content cursor → `Block`, nothing focused →
+    /// `Hidden`). Read by paint paths into `DrawContext::cursor_shape`
+    /// (only the focused window honours it) and by `Ui::render` to
+    /// surface the hardware caret.
+    cursor_shape: CursorShape,
 }
 
 /// Reserved `WinId` for the main prompt input window. Stable id so Lua
@@ -138,6 +146,7 @@ impl Ui {
             focus_history: Vec::new(),
             focus: None,
             capture: None,
+            cursor_shape: CursorShape::Hidden,
         }
     }
 
@@ -764,6 +773,18 @@ impl Ui {
         self.capture = None;
     }
 
+    /// Read the current global cursor shape.
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.cursor_shape
+    }
+
+    /// Set the global cursor shape for the focused window. Hosts call
+    /// this each frame as the focused window's mode/state changes —
+    /// for unfocused frames, set to [`CursorShape::Hidden`].
+    pub fn set_cursor_shape(&mut self, shape: CursorShape) {
+        self.cursor_shape = shape;
+    }
+
     fn capture_target_alive(&self, target: HitTarget) -> bool {
         match target {
             HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
@@ -815,21 +836,24 @@ impl Ui {
                 buf.ensure_rendered_at(rect.width);
             }
         }
-        // Resolve the focused overlay leaf's hardware cursor (if any)
-        // so input panels / cmdline draw a visible caret. The
+        // Resolve the focused window's hardware cursor (if any) so
+        // input panels / cmdline / prompt draw a visible caret. The
         // compositor's focused-layer cursor path doesn't see overlay
-        // leaves; we route the cursor through `render_with`'s closure
-        // return. Painted splits feed in the same way — when the
-        // focused painted split has `cursor_kind = Hardware`, its
-        // (cursor_col, cursor_line) absolutely positions the caret.
-        // Block-cursor painted splits paint the cell in
-        // `Window::render` and contribute no hardware cursor.
-        // Overlay > painted-split > compositor-layer is the priority
-        // order; the compositor's focused-layer cursor path applies
-        // when the closure returns `None`.
-        let overlay_cursor = self.focused_overlay_cursor(&resolved);
-        let painted_split_cursor = self.focused_painted_split_cursor();
-        let cursor_override = overlay_cursor.or(painted_split_cursor);
+        // leaves or painted splits; we route the cursor through
+        // `render_with`'s closure return. The global `cursor_shape`
+        // gates this — only `Hardware` surfaces a caret. `Block`
+        // paints in-place via `Window::render`. Overlay > painted
+        // split priority order is preserved (overlay first, painted
+        // split as fallback); the compositor's focused-layer path
+        // applies when the closure returns `None`.
+        let cursor_override = if matches!(self.cursor_shape, CursorShape::Hardware) {
+            self.focused_overlay_cursor(&resolved)
+                .or_else(|| self.focused_painted_split_cursor())
+        } else {
+            None
+        };
+        let focus = self.focus;
+        let cursor_shape = self.cursor_shape;
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.terminal_size;
@@ -839,10 +863,30 @@ impl Ui {
             // overlays in the closure ran *after* every compositor
             // layer paint, so any overlap landed overlays-over-status).
             for (win_id, rect) in &painted_splits {
-                paint_split(grid, theme, *win_id, *rect, wins, bufs, term_size);
+                paint_split(
+                    grid,
+                    theme,
+                    *win_id,
+                    *rect,
+                    wins,
+                    bufs,
+                    term_size,
+                    focus,
+                    cursor_shape,
+                );
             }
             for (_id, rect, overlay) in &resolved {
-                paint_overlay(grid, theme, *rect, overlay, wins, bufs, term_size);
+                paint_overlay(
+                    grid,
+                    theme,
+                    *rect,
+                    overlay,
+                    wins,
+                    bufs,
+                    term_size,
+                    focus,
+                    cursor_shape,
+                );
             }
             cursor_override
         })
@@ -877,21 +921,18 @@ impl Ui {
     }
 
     /// Compute the absolute hardware cursor position for the focused
-    /// splits leaf. Returns `None` when focus isn't a splits leaf,
-    /// the focused window has no `cursor_kind`, the kind is `Block`
-    /// (paints in-place via `Window::render`), or its cursor coordinates
-    /// fall outside the resolved rect. `Window::cursor_line` /
-    /// `cursor_col` are viewport-relative and we add them to the rect's
-    /// origin.
+    /// splits leaf. Returns `None` when focus isn't a splits leaf or
+    /// its cursor coordinates fall outside the resolved rect. The
+    /// caller has already gated on `cursor_shape == Hardware` —
+    /// `Block` paints in-place via `Window::render`.
+    /// `Window::cursor_line` / `cursor_col` are viewport-relative and
+    /// we add them to the rect's origin.
     fn focused_painted_split_cursor(&self) -> Option<(u16, u16)> {
         let focus = self.focus?;
         if !self.splits.contains_leaf(focus) {
             return None;
         }
         let win = self.wins.get(&focus)?;
-        if !matches!(win.cursor_kind, Some(crate::window::CursorKind::Hardware)) {
-            return None;
-        }
         let rect = self.split_rect(focus)?;
         let abs_y = rect.top + win.cursor_line;
         let abs_x = rect.left + win.cursor_col;
@@ -1059,6 +1100,7 @@ impl Default for Ui {
 /// `Window::render`. Mirrors the leaf branch of `paint_layout_node` for
 /// split-shaped windows that paint outside the overlay layout system.
 /// Missing windows / buffers are silently skipped.
+#[allow(clippy::too_many_arguments)]
 fn paint_split(
     grid: &mut Grid,
     theme: &Theme,
@@ -1067,6 +1109,8 @@ fn paint_split(
     wins: &HashMap<WinId, Window>,
     bufs: &HashMap<BufId, Buffer>,
     term_size: (u16, u16),
+    focus: Option<WinId>,
+    cursor_shape: CursorShape,
 ) {
     let Some(win) = wins.get(&win_id) else {
         return;
@@ -1075,10 +1119,16 @@ fn paint_split(
         return;
     };
     let mut slice = grid.slice_mut(rect);
+    let focused = focus == Some(win_id);
     let ctx = DrawContext {
         terminal_width: term_size.0,
         terminal_height: term_size.1,
-        focused: false,
+        focused,
+        cursor_shape: if focused {
+            cursor_shape
+        } else {
+            CursorShape::Hidden
+        },
         theme: theme.clone(),
     };
     win.render(buf, &mut slice, &ctx);
@@ -1090,6 +1140,7 @@ fn paint_split(
 /// the grid and call `Window::render`. Missing windows / buffers are
 /// silently skipped — the paint pass is best-effort, not authoritative
 /// over registry state.
+#[allow(clippy::too_many_arguments)]
 fn paint_overlay(
     grid: &mut Grid,
     theme: &Theme,
@@ -1098,14 +1149,27 @@ fn paint_overlay(
     wins: &HashMap<WinId, Window>,
     bufs: &HashMap<BufId, Buffer>,
     term_size: (u16, u16),
+    focus: Option<WinId>,
+    cursor_shape: CursorShape,
 ) {
     // Overlays are opaque: clear the rect first so layers below
     // (statusline, prompt borders, transcript content) don't bleed
     // through gap rows or buffer lines that don't fill the leaf width.
     grid.clear(area);
-    paint_layout_node(grid, theme, &overlay.layout, area, wins, bufs, term_size);
+    paint_layout_node(
+        grid,
+        theme,
+        &overlay.layout,
+        area,
+        wins,
+        bufs,
+        term_size,
+        focus,
+        cursor_shape,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_layout_node(
     grid: &mut Grid,
     theme: &Theme,
@@ -1114,6 +1178,8 @@ fn paint_layout_node(
     wins: &HashMap<WinId, Window>,
     bufs: &HashMap<BufId, Buffer>,
     term_size: (u16, u16),
+    focus: Option<WinId>,
+    cursor_shape: CursorShape,
 ) {
     match node {
         LayoutTree::Leaf(win_id) => {
@@ -1124,10 +1190,16 @@ fn paint_layout_node(
                 return;
             };
             let mut slice = grid.slice_mut(area);
+            let focused = focus == Some(*win_id);
             let ctx = DrawContext {
                 terminal_width: term_size.0,
                 terminal_height: term_size.1,
-                focused: false,
+                focused,
+                cursor_shape: if focused {
+                    cursor_shape
+                } else {
+                    CursorShape::Hidden
+                },
                 theme: theme.clone(),
             };
             win.render(buf, &mut slice, &ctx);
@@ -1158,7 +1230,17 @@ fn paint_layout_node(
                 } else {
                     Rect::new(inner.top, inner.left + offset, size, inner.height)
                 };
-                paint_layout_node(grid, theme, child, child_area, wins, bufs, term_size);
+                paint_layout_node(
+                    grid,
+                    theme,
+                    child,
+                    child_area,
+                    wins,
+                    bufs,
+                    term_size,
+                    focus,
+                    cursor_shape,
+                );
                 offset += size;
                 if i + 1 < items.len() {
                     offset += chrome.gap;
@@ -1951,40 +2033,9 @@ mod tests {
         )]));
         ui.set_focus(win);
         let w = ui.win_mut(win).unwrap();
-        w.cursor_kind = Some(crate::window::CursorKind::Hardware);
         w.cursor_line = 1;
         w.cursor_col = 3;
         assert_eq!(ui.focused_painted_split_cursor(), Some((3, 1)));
-    }
-
-    #[test]
-    fn focused_painted_split_cursor_returns_none_for_block_cursor() {
-        let mut ui = make_ui();
-        ui.set_terminal_size(20, 4);
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
-        let win = ui
-            .win_open_split(
-                buf,
-                SplitConfig {
-                    region: "p".into(),
-                    gutters: Gutters::default(),
-                },
-            )
-            .unwrap();
-        ui.set_layout(LayoutTree::vbox(vec![(
-            Constraint::Fill,
-            LayoutTree::leaf(win),
-        )]));
-        ui.set_focus(win);
-        let w = ui.win_mut(win).unwrap();
-        w.cursor_kind = Some(crate::window::CursorKind::Block {
-            glyph: 'b',
-            style: grid::Style::default(),
-        });
-        w.cursor_line = 0;
-        w.cursor_col = 0;
-        // Block cursor paints in-place; no hardware caret to surface.
-        assert_eq!(ui.focused_painted_split_cursor(), None);
     }
 
     #[test]
@@ -2006,7 +2057,6 @@ mod tests {
             LayoutTree::leaf(win),
         )]));
         let w = ui.win_mut(win).unwrap();
-        w.cursor_kind = Some(crate::window::CursorKind::Hardware);
         w.cursor_line = 0;
         w.cursor_col = 0;
         // No focus call → focus stays None.

@@ -363,13 +363,7 @@ the rest.
 - **F.2** ✅ — `overlays: HashMap` → `Vec<(OverlayId, Overlay)>`.
 - **F.3** ✅ — `splits: LayoutTree` owned by `Ui`; `set_layout(tree)`.
 - **F.4** ✅ — `capture: Option<HitTarget>` for in-flight gestures.
-
-#### P1.f.5 — Global `cursor_shape: CursorShape`
-
-Today `cursor_kind` lives per-`Window`. Move the active shape onto
-`Ui::cursor_shape` as a single global, updated on focus change.
-Per-Window state degrades to "is the cursor visible from this window's
-viewport?" (already a render-time question).
+- **F.5** ✅ — `cursor_shape: CursorShape` global on `Ui`; `cursor_kind` retires from `Window`.
 
 #### P1.f.6 — `Ui::dispatch_event` consolidation
 

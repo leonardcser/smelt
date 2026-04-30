@@ -33,6 +33,13 @@ impl App {
 
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
 
+        // Reset the global cursor shape; downstream `sync_*_layer`
+        // calls and the overlay-focus default below will set it back
+        // to `Hardware` / `Block` if a focused surface owns the
+        // caret. `Hidden` is the right baseline for unfocused frames
+        // / cmdline-up / dialog-without-input cases.
+        self.ui.set_cursor_shape(ui::CursorShape::Hidden);
+
         // ── Layout ──
         let natural_prompt_height =
             self.measure_prompt_height(&self.input, width, queued, prediction);
@@ -72,6 +79,20 @@ impl App {
 
         self.sync_completer_overlay();
 
+        // Overlay-leaf focus surfaces a hardware caret by default —
+        // input panels (cmdline, dialog text inputs) need it, and
+        // text/list-shaped leaves are non-focusable so they never
+        // hit this branch. The transcript / prompt sync paths above
+        // run unconditionally, so check this only when neither one
+        // claimed the cursor.
+        if matches!(self.ui.cursor_shape(), ui::CursorShape::Hidden) {
+            if let Some(focus) = self.ui.focus() {
+                if self.ui.overlay_for_leaf(focus).is_some() {
+                    self.ui.set_cursor_shape(ui::CursorShape::Hardware);
+                }
+            }
+        }
+
         let mut stdout = std::io::stdout();
         let _ = self.ui.render(&mut stdout);
     }
@@ -91,15 +112,18 @@ impl App {
         }
     }
 
-    /// Cmdline steals the cursor (via its compositor layer);
-    /// terminal-unfocused suppresses; otherwise `app_focus` decides
-    /// prompt-vs-transcript ownership for this frame.
+    /// Cmdline / overlay focus steal the cursor (overlay path supplies
+    /// its own hardware caret); terminal-unfocused suppresses;
+    /// otherwise `app_focus` decides prompt-vs-transcript ownership
+    /// for this frame.
     fn compute_cursor_ownership(&self) -> (bool, bool) {
+        let overlay_owns_cursor = self.ui.focused_overlay().is_some();
         let cmdline_active = self.cmdline_win.is_some();
-        let has_prompt_cursor = !cmdline_active
+        let suppress = cmdline_active || overlay_owns_cursor;
+        let has_prompt_cursor = !suppress
             && self.term_focused
             && matches!(self.app_focus, crate::app::AppFocus::Prompt);
-        let has_transcript_cursor = !cmdline_active
+        let has_transcript_cursor = !suppress
             && self.term_focused
             && matches!(self.app_focus, crate::app::AppFocus::Content);
         (has_prompt_cursor, has_transcript_cursor)
@@ -108,9 +132,10 @@ impl App {
     /// Project the transcript into its display buffer, compute the
     /// soft cursor, and drive the painted-split `Ui::wins[TRANSCRIPT_WIN]`
     /// (cursor + viewport + scroll). Selection paints via extmarks in
-    /// the buffer's `NS_SELECTION` namespace; soft cursor surfaces as
-    /// `cursor_kind = Block { glyph, style }` so `Window::render`
-    /// paints the cell after extmark layering.
+    /// the buffer's `NS_SELECTION` namespace. When content owns focus
+    /// the soft cursor surfaces as `Ui::cursor_shape = Block { glyph,
+    /// style }` so `Window::render` paints the cell after extmark
+    /// layering.
     fn sync_transcript_layer(
         &mut self,
         term_w: u16,
@@ -182,12 +207,13 @@ impl App {
         // Drive the painted-split Window's cursor + scrollbar viewport
         // from the projection. The transcript shows a vim-style block
         // cursor over the glyph beneath when content owns focus —
-        // `cursor_kind = Block { glyph, style }` paints in-place after
-        // extmark layering. When content doesn't own the cursor (prompt
-        // focused / terminal unfocused / cmdline up), `soft_cursor` is
-        // `None` and `cursor_kind` collapses to `None` so no cursor
-        // renders.
-        let cursor_kind = tcursor.soft_cursor.as_ref().map(|c| {
+        // `Ui::cursor_shape = Block { glyph, style }` paints in-place
+        // after extmark layering on the focused window. When content
+        // doesn't own the cursor (prompt focused / terminal unfocused
+        // / cmdline up), `soft_cursor` is `None` and the global shape
+        // stays whatever the prompt path / overlay path set (or
+        // `Hidden`).
+        if let Some(c) = tcursor.soft_cursor.as_ref() {
             let theme = self.ui.theme();
             let (fg, bg) = if theme.is_light() {
                 (
@@ -200,22 +226,21 @@ impl App {
                     crossterm::style::Color::White,
                 )
             };
-            ui::CursorKind::Block {
+            self.ui.set_cursor_shape(ui::CursorShape::Block {
                 glyph: c.glyph,
                 style: ui::Style {
                     fg: Some(fg),
                     bg: Some(bg),
                     ..Default::default()
                 },
-            }
-        });
+            });
+        }
         let (cur_col, cur_line) = tcursor
             .soft_cursor
             .as_ref()
             .map(|c| (c.col, c.row))
             .unwrap_or((0, 0));
         if let Some(win) = self.ui.win_mut(ui::TRANSCRIPT_WIN) {
-            win.cursor_kind = cursor_kind;
             win.cursor_col = cur_col;
             win.cursor_line = cur_line;
             win.scroll_top = tdata.clamped_scroll;
@@ -303,19 +328,24 @@ impl App {
         self.prompt_viewport = prompt_viewport;
 
         // Drive the painted-split Window's cursor + scrollbar viewport
-        // from the prompt output. `cursor_kind = Hardware` flows through
-        // `Ui::render`'s focused-painted-split-cursor path; `Block`
-        // paints in-place via `Window::render`. When the prompt isn't
-        // focused (`has_prompt_cursor == false` collapses `cursor` to
-        // `None`), `cursor_kind` stays `None` so no cursor renders.
-        let cursor_kind = match (cursor, cursor_style) {
-            (Some(_), Some((style, glyph))) => Some(ui::CursorKind::Block { glyph, style }),
-            (Some(_), None) => Some(ui::CursorKind::Hardware),
-            (None, _) => None,
-        };
+        // from the prompt output. `Ui::cursor_shape = Hardware` flows
+        // through `Ui::render`'s focused-painted-split-cursor path;
+        // `Block` paints in-place via `Window::render`. When the
+        // prompt isn't focused (`has_prompt_cursor == false` collapses
+        // `cursor` to `None`), the global shape is left at whatever
+        // `render_normal` reset it to (`Hidden`).
+        match (cursor, cursor_style) {
+            (Some(_), Some((style, glyph))) => {
+                self.ui
+                    .set_cursor_shape(ui::CursorShape::Block { glyph, style });
+            }
+            (Some(_), None) => {
+                self.ui.set_cursor_shape(ui::CursorShape::Hardware);
+            }
+            (None, _) => {}
+        }
         let (cur_col, cur_line) = cursor.unwrap_or((0, 0));
         if let Some(win) = self.ui.win_mut(ui::PROMPT_WIN) {
-            win.cursor_kind = cursor_kind;
             win.cursor_col = cur_col;
             win.cursor_line = cur_line;
             win.viewport = prompt_viewport;
