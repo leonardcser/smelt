@@ -57,7 +57,7 @@ impl StatusItem {
 
 /// Buffer-agnostic cursor + scroll snapshot for the status bar.
 /// One record covers every focused window (prompt, transcript). Set
-/// once per tick by `App::tick_prompt` so the status bar stays in
+/// once per tick by `TuiApp::tick_prompt` so the status bar stays in
 /// sync with the actual focused window instead of a cached viewport
 /// field that only some code paths update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

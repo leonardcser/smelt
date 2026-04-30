@@ -31,7 +31,7 @@ pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Pa
 /// `Consumed` = Ui handled the event end-to-end (focused-window
 /// keymap fired, modal Esc dismissed, terminal resize applied,
 /// modal-gated mouse absorbed). `Ignored` = Ui did not consume; the
-/// host should route through its own paths (App-level chords,
+/// host should route through its own paths (TuiApp-level chords,
 /// prompt/transcript mouse routing, paste side effects, terminal
 /// focus tracking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1341,7 +1341,7 @@ mod tests {
 
     /// Open a Buffer-backed split Window at `win_id` and append it as
     /// a leaf to the splits tree — the test-only equivalent of what
-    /// `App::new` does at startup for the prompt / transcript / status
+    /// `TuiApp::new` does at startup for the prompt / transcript / status
     /// windows. Most focus / overlay tests just need a focusable target
     /// to exercise; this helper takes the boilerplate.
     fn make_split(ui: &mut Ui, win_id: WinId) {

@@ -1,7 +1,7 @@
 //! Simple read-only text dialog. One viewer Window inside a centered
 //! Overlay; Esc / q / Ctrl+C dismiss.
 
-use super::super::App;
+use super::super::TuiApp;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
@@ -10,7 +10,7 @@ use ui::{Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Over
 /// Open a centered modal overlay showing `body`. Esc dismisses via
 /// the `Ui` built-in; `q` and `Ctrl+C` dismiss via leaf-callbacks
 /// registered on the viewer window.
-pub fn open(app: &mut App, title: impl Into<String>, body: &str) {
+pub fn open(app: &mut TuiApp, title: impl Into<String>, body: &str) {
     let buf = app.ui.buf_create(BufCreateOpts::default());
     if let Some(b) = app.ui.buf_mut(buf) {
         let lines: Vec<String> = if body.is_empty() {

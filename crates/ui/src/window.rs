@@ -204,7 +204,7 @@ pub struct MouseCtx<'a> {
     /// click cadence can pass `1` and lose word/line click — that's
     /// fine for read-only views.
     pub click_count: u8,
-    /// App-owned single-global VimMode reference. Vim mouse paths
+    /// TuiApp-owned single-global VimMode reference. Vim mouse paths
     /// (begin Visual on click, exit Visual on mouse-up) write
     /// through this; non-vim windows ignore it.
     pub vim_mode: &'a mut VimMode,

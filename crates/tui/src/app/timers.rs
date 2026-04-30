@@ -5,7 +5,7 @@
 //! `LuaHandle` that owns the callback registry slot. Bindings call
 //! [`Timers::set`] / [`Timers::every`] / [`Timers::cancel`] through the
 //! TLS app pointer; the main loop drains due entries each iteration
-//! via `App::tick_timers`.
+//! via `TuiApp::tick_timers`.
 //!
 //! The drain pass walks entries with `retain_mut`: due one-shots are
 //! removed, due periodics are re-armed in place, and the LuaHandles for

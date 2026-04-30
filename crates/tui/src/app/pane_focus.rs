@@ -10,7 +10,7 @@ use std::time::Duration;
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
 
-impl App {
+impl TuiApp {
     pub(super) fn handle_pane_chord(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
         use crossterm::event::KeyModifiers as M;
         let Event::Key(k) = ev else { return None };

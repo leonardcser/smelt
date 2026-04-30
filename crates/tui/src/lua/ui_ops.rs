@@ -6,7 +6,7 @@
 //! submit / dismiss routing, selection tracking — lives in
 //! `runtime/lua/smelt/{dialog,picker}.lua`.
 
-use crate::app::App;
+use crate::app::TuiApp;
 use crate::format::BufFormat;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ui::buffer::BufCreateOpts;
@@ -62,7 +62,7 @@ pub struct DialogOpenResult {
 // - `{ kind = "options",  items = [{label}], selected? = <1-based index> }`
 // - `{ kind = "input",    placeholder? = "..." }`
 
-pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult, String> {
+pub fn open_dialog(app: &mut TuiApp, opts: mlua::Table) -> Result<DialogOpenResult, String> {
     let title: Option<String> = opts.get("title").ok();
     let panels_tbl: mlua::Table = opts
         .get("panels")
@@ -218,7 +218,7 @@ pub fn open_dialog(app: &mut App, opts: mlua::Table) -> Result<DialogOpenResult,
 /// `WinEvent::Submit { Selection { abs_row } }` so dialog.lua's
 /// `on_event(win, "submit", …)` handler resumes the parked task.
 fn open_dialog_via_overlay(
-    app: &mut App,
+    app: &mut TuiApp,
     title: Option<String>,
     panels: Vec<PanelSpec>,
     leaf_shapes: Vec<LeafShape>,
@@ -396,7 +396,7 @@ fn parse_overlay_placement(opts: &mlua::Table) -> OverlayPlacement {
 /// Enter fires `WinEvent::Submit` with the absolute selected row.
 /// Each binding is a small Rust callback that mutates the Window's
 /// cursor + scroll state directly.
-fn configure_list_leaf(app: &mut App, leaf: WinId, initial_cursor: u16) {
+fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: u16) {
     let line_count = app
         .ui
         .win(leaf)
@@ -507,7 +507,7 @@ fn configure_list_leaf(app: &mut App, leaf: WinId, initial_cursor: u16) {
 /// "logically empty" — first printable keystroke replaces line +
 /// extmark before inserting the typed char. Backspace is a no-op
 /// in placeholder mode.
-fn configure_input_leaf(app: &mut App, leaf: WinId) {
+fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
     if let Some(win) = app.ui.win_mut(leaf) {
         win.cursor_col = 0;
         win.cursor_line = 0;
@@ -693,7 +693,7 @@ fn configure_input_leaf(app: &mut App, leaf: WinId) {
 
 // ── Picker ───────────────────────────────────────────────────────────
 
-pub fn open_picker(app: &mut App, opts: mlua::Table) -> Result<WinId, String> {
+pub fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, String> {
     let items_tbl: mlua::Table = opts
         .get("items")
         .map_err(|e| format!("picker items: {e}"))?;
@@ -795,7 +795,7 @@ pub fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::PickerItem, S
 /// recipe detects this state via `highlights_at(0).is_empty()`
 /// and clears the line on first keystroke (`set_lines` drops
 /// well-known namespace marks on wholesale replacement).
-fn make_input_buffer(app: &mut App, placeholder: Option<&str>) -> BufId {
+fn make_input_buffer(app: &mut TuiApp, placeholder: Option<&str>) -> BufId {
     let id = app.ui.buf_create(BufCreateOpts::default());
     if let Some(buf) = app.ui.buf_mut(id) {
         match placeholder {
@@ -812,7 +812,7 @@ fn make_input_buffer(app: &mut App, placeholder: Option<&str>) -> BufId {
     id
 }
 
-fn make_options_buffer(app: &mut App, labels: &[String]) -> BufId {
+fn make_options_buffer(app: &mut TuiApp, labels: &[String]) -> BufId {
     let id = app.ui.buf_create(BufCreateOpts::default());
     if let Some(buf) = app.ui.buf_mut(id) {
         let lines: Vec<String> = if labels.is_empty() {
@@ -825,7 +825,7 @@ fn make_options_buffer(app: &mut App, labels: &[String]) -> BufId {
     id
 }
 
-fn make_content_buffer(app: &mut App, text: &str, format: Option<BufFormat>) -> BufId {
+fn make_content_buffer(app: &mut TuiApp, text: &str, format: Option<BufFormat>) -> BufId {
     let id = app.ui.buf_create(BufCreateOpts::default());
     if let Some(buf) = app.ui.buf_mut(id) {
         match format {

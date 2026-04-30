@@ -2,7 +2,7 @@
 //!
 //! The content-addressed block store, layout cache, and all mutable
 //! sidecar state (tool output, exec output, in-flight agents etc.)
-//! owned by `App`. Held inside `app::transcript::Transcript`, which
+//! owned by `TuiApp`. Held inside `app::transcript::Transcript`, which
 //! adds projection / streaming / paint orchestration on top.
 
 use crate::app::transcript_cache::ToolOutputRenderCache;
@@ -26,7 +26,7 @@ pub struct ActiveAgent {
 /// In-flight tool call — a thin handle to a streaming `Block::ToolCall`.
 /// The full state (status, output, user_message, elapsed) lives in
 /// `tool_states` keyed by `call_id`; rewrites go through
-/// `App::update_tool_state` which invalidates the layout cache.
+/// `TuiApp::update_tool_state` which invalidates the layout cache.
 pub struct ActiveTool {
     pub call_id: String,
     pub name: String,
@@ -125,7 +125,7 @@ pub enum Block {
     },
     /// Immutable handle to a committed tool call. The mutable result
     /// (status, elapsed, output, user_message) lives in `BlockHistory::tool_states`
-    /// keyed by `call_id`; look it up with `App::tool_state`.
+    /// keyed by `call_id`; look it up with `TuiApp::tool_state`.
     ToolCall {
         call_id: String,
         name: String,

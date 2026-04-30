@@ -30,7 +30,7 @@ pub(super) fn register(
 }
 
 fn register_vim(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    // smelt.vim.mode — read the App-owned single-global VimMode.
+    // smelt.vim.mode — read the TuiApp-owned single-global VimMode.
     // Returns "Normal" / "Insert" / "Visual" / "VisualLine".
     let vim_tbl = lua.create_table()?;
     vim_tbl.set("mode", app_read!(lua, |app| format!("{:?}", app.vim_mode)))?;

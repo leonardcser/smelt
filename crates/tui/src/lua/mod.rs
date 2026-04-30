@@ -9,7 +9,7 @@
 //!   store them in per-category registries that the app polls on the
 //!   tick.
 //! - **D3 event dispatch** — every "autocmd-shaped" event flows
-//!   through `Cells`. App publishers call `cells.set_dyn(name,
+//!   through `Cells`. TuiApp publishers call `cells.set_dyn(name,
 //!   payload)`; subscribers register via `smelt.au.on(name, fn)` (a
 //!   thin alias over `Cells::subscribe_kind`). One observer registry,
 //!   no parallel autocmd map.
@@ -291,7 +291,7 @@ pub(crate) fn register_callback_handle(
 /// the option is one. Used wherever a `win_set_keymap` / `win_clear_*`
 /// returns the callback that was just replaced or removed.
 pub(crate) fn drop_displaced_lua_handle(
-    app: &mut crate::app::App,
+    app: &mut crate::app::TuiApp,
     displaced: Option<ui::Callback>,
 ) {
     if let Some(ui::Callback::Lua(ui::LuaHandle(old))) = displaced {
@@ -338,16 +338,16 @@ pub(crate) struct LuaShared {
     pub(crate) task_inbox: Mutex<Vec<TaskEvent>>,
     /// Pending Lua keymap / event callback invocations. Recorded during
     /// `ui.dispatch_event` / `ui.fire_win_event` (where `&mut Ui` is held
-    /// and the Lua body therefore cannot call back into App state),
-    /// drained by App right after the ui call returns so each Lua body
-    /// runs with the TLS app pointer installed and sole access to App.
+    /// and the Lua body therefore cannot call back into TuiApp state),
+    /// drained by TuiApp right after the ui call returns so each Lua body
+    /// runs with the TLS app pointer installed and sole access to TuiApp.
     /// Without this deferral, a Lua callback that calls
     /// `smelt.ui.dialog.open` would collide with the ui borrow.
     pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
 }
 
 /// A callback invocation recorded by the ui dispatch path while
-/// `&mut Ui` is held. Drained by the host App between ui calls so each
+/// `&mut Ui` is held. Drained by the host TuiApp between ui calls so each
 /// Lua fn body runs with the TLS app pointer installed.
 pub struct PendingInvocation {
     pub handle: ui::LuaHandle,
@@ -615,7 +615,7 @@ impl LuaRuntime {
 
     /// Fire `smelt.confirm.open(handle_id)`. Called by the agent loop
     /// when an LLM tool call needs user approval — `agent.rs` registers
-    /// the request via `App::confirms.register` first, then this
+    /// the request via `TuiApp::confirms.register` first, then this
     /// method hands the handle to the Lua dialog runner.
     pub fn fire_confirm_open(&self, handle_id: u64) {
         let result: mlua::Result<()> = (|| {
@@ -634,7 +634,7 @@ impl LuaRuntime {
         // it (`install_test_notify`) capture errors emitted by the
         // runtime itself, not just user `smelt.notify_error(...)`
         // calls. Production sees the same routing — Lua dispatches
-        // through `with_app` to `App::notify_error`.
+        // through `with_app` to `TuiApp::notify_error`.
         if let Ok(smelt) = self.lua.globals().get::<mlua::Table>("smelt") {
             if let Ok(func) = smelt.get::<mlua::Function>("notify_error") {
                 let _ = func.call::<()>(msg);
@@ -969,8 +969,8 @@ mod tests {
     use super::*;
 
     /// Install a Lua-level `smelt.notify` / `smelt.notify_error` stub
-    /// that pushes into `_G.test_log` instead of routing through `App`
-    /// (no App exists in unit tests). Tests that observe handler
+    /// that pushes into `_G.test_log` instead of routing through `TuiApp`
+    /// (no TuiApp exists in unit tests). Tests that observe handler
     /// behaviour through these calls should call this once at the
     /// start, then read [`drain_notifications`] / [`drain_errors`].
     fn install_test_notify(rt: &LuaRuntime) {
@@ -1143,7 +1143,7 @@ mod tests {
     }
 
     // Theme bindings (`smelt.theme.set/get/accent/snapshot`) cross the
-    // `with_app` boundary — they read/write through `App.ui.theme()`.
+    // `with_app` boundary — they read/write through `TuiApp.ui.theme()`.
     // The Lua-side wiring is exercised by integration scenarios; here
     // the role-mapping and error logic is covered directly in
     // `lua::api::tests` against a local `ui::Theme`.

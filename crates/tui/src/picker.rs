@@ -18,7 +18,7 @@
 //! leaf via `close_overlay_leaf` (or `Ui::win_close`) cascades through
 //! `overlay_close` to remove the overlay.
 
-use crate::app::App;
+use crate::app::TuiApp;
 use crossterm::style::Color;
 use ui::buffer::{BufCreateOpts, SpanStyle};
 use ui::layout::Anchor;
@@ -78,7 +78,7 @@ pub enum PickerPlacement {
     ScreenBottom,
 }
 
-/// Per-leaf picker bookkeeping. Lives on `App::picker_state` keyed by
+/// Per-leaf picker bookkeeping. Lives on `TuiApp::picker_state` keyed by
 /// the leaf `WinId` so `set_items` / `set_selected` can resize the
 /// overlay's outer height constraint and reverse logical → visual
 /// indices without re-deriving placement on every call.
@@ -98,7 +98,7 @@ const DESC_GAP: usize = 2;
 /// `placement`. Returns the leaf `WinId` (caller stores it for
 /// subsequent `set_items` / `set_selected` calls).
 pub fn open(
-    app: &mut App,
+    app: &mut TuiApp,
     items: Vec<PickerItem>,
     selected: usize,
     placement: PickerPlacement,
@@ -158,7 +158,7 @@ pub fn open(
 /// Replace the picker's items in place. Resizes the overlay's outer
 /// height constraint when the count changes; preserves selection at
 /// `selected` (clamped). No-op when `leaf` isn't a known picker.
-pub fn set_items(app: &mut App, leaf: WinId, items: Vec<PickerItem>, selected: usize) {
+pub fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, selected: usize) {
     let Some(state) = app.picker_state.get(&leaf).copied() else {
         return;
     };
@@ -178,7 +178,7 @@ pub fn set_items(app: &mut App, leaf: WinId, items: Vec<PickerItem>, selected: u
 }
 
 /// Update the picker's logical selection. Clamps to `n - 1`.
-pub fn set_selected(app: &mut App, leaf: WinId, selected: usize) {
+pub fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
     let Some(state) = app.picker_state.get(&leaf).copied() else {
         return;
     };
@@ -194,7 +194,7 @@ pub fn set_selected(app: &mut App, leaf: WinId, selected: usize) {
 
 /// Remove the picker's bookkeeping when its leaf closes. The overlay
 /// itself is removed by `Ui::win_close → overlay_close` cascade.
-pub fn forget(app: &mut App, leaf: WinId) {
+pub fn forget(app: &mut TuiApp, leaf: WinId) {
     app.picker_state.remove(&leaf);
 }
 
@@ -254,7 +254,7 @@ fn max_label_chars(items: &[PickerItem]) -> usize {
 /// extmarks for per-item accent (prefix) and the dim description
 /// column. Reversed mode flips item order so logical 0 lands on the
 /// last visual row.
-fn write_buffer(app: &mut App, buf: BufId, items: &[PickerItem], reversed: bool) {
+fn write_buffer(app: &mut TuiApp, buf: BufId, items: &[PickerItem], reversed: bool) {
     let max_label = max_label_chars(items);
     let order: Vec<usize> = if reversed {
         (0..items.len()).rev().collect()

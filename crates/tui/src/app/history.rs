@@ -2,7 +2,7 @@ use super::*;
 
 use std::collections::HashMap;
 
-impl App {
+impl TuiApp {
     /// Redact secrets from user-submitted text before it lands on screen or
     /// in history. The `display` string is the rendered form of the submitted
     /// message; `content` is what gets sent to the engine. Both are scrubbed

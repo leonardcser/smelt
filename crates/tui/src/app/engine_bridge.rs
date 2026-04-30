@@ -4,7 +4,7 @@
 //! Today it's a thin delegate: `send` / `recv` / `try_recv` /
 //! `processes()` / `drain_spawned()`. P2.d folds the
 //! `EngineEvent` drain into this type so the call chain becomes
-//! `EngineBridge::handle_event(host, ev)` and the App-level
+//! `EngineBridge::handle_event(host, ev)` and the TuiApp-level
 //! `handle_engine_event` retires.
 
 use engine::{tools, EngineHandle};

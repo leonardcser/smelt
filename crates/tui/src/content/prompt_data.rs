@@ -12,7 +12,7 @@ use crossterm::style::Color;
 /// Namespace name for the prompt buffer's input-prediction (ghost text)
 /// extmark. `compute_prompt` reads-and-re-anchors this each frame so
 /// the dim suggestion follows the visible input row as chrome shifts;
-/// `App::{set,clear,take}_prompt_completer` mutate the storage from
+/// `TuiApp::{set,clear,take}_prompt_completer` mutate the storage from
 /// outside the render path.
 pub(crate) const COMPLETER_NS: &str = "completer";
 
@@ -169,7 +169,7 @@ pub(crate) fn compute_prompt(
     // Otherwise, park at `total_lines` (one past last) so the storage
     // survives without rendering — `Window::render` only walks rows
     // 0..line_count. Buffer mutation paths
-    // (`App::clear_prompt_completer` etc.) drop the storage entirely.
+    // (`TuiApp::clear_prompt_completer` etc.) drop the storage entirely.
     buf.clear_namespace(completer_ns, 0, usize::MAX);
     if let Some(text) = prediction {
         let row = if input.input.buf.is_empty() {

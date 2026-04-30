@@ -4,7 +4,7 @@ use super::*;
 use crossterm::event::{MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 
-impl App {
+impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::{Event, MouseButton};
@@ -13,7 +13,7 @@ impl App {
         // For wheel-on-overlay we surface a redraw so the pointer
         // hover updates; for modal absorb the redraw matters less but
         // is still cheap. Anything Ui doesn't claim (`Ignored`) keeps
-        // flowing through the App-side routing below.
+        // flowing through the TuiApp-side routing below.
         if matches!(
             self.ui.dispatch_event(Event::Mouse(me), &mut |_, _, _| {}),
             ui::DispatchOutcome::Consumed
@@ -48,7 +48,7 @@ impl App {
                 // `Window::mouse_up` self-guards bare clicks (no yank,
                 // no clear-on-empty) and handles its own anchor cleanup,
                 // so both branches just dispatch unconditionally.
-                // Scrollbar drag is an App-owned gesture and takes the
+                // Scrollbar drag is a `TuiApp`-owned gesture and takes the
                 // Up itself — the adapter call is skipped there.
                 if !matches!(self.ui.capture(), Some(ui::HitTarget::Scrollbar { .. })) {
                     self.dispatch_focused_mouse(me, 0);
@@ -191,7 +191,7 @@ impl App {
 
     /// Route a mouse event to the focused buffer surface's adapter.
     /// Both adapters wrap `Window::handle_mouse` with the per-surface
-    /// row/break/viewport plumbing, so all the App layer needs is the
+    /// row/break/viewport plumbing, so all the TuiApp layer needs is the
     /// focus dispatch.
     fn dispatch_focused_mouse(&mut self, me: MouseEvent, click_count: u8) {
         match self.app_focus {

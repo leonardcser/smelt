@@ -110,12 +110,13 @@ pub enum AgentTrackStatus {
     Error,
 }
 
-// ── App ──────────────────────────────────────────────────────────────────────
+// ── TuiApp ──────────────────────────────────────────────────────────────────────
 
-pub struct App {
-    /// Headless-safe subsystems aggregated into one struct. Today's
-    /// `App` is one frontend over this `Core`; `HeadlessApp` lands as
-    /// the second in a.12b. Subsystem access is `self.core.<field>.X`.
+pub struct TuiApp {
+    /// Headless-safe subsystems aggregated into one struct. `TuiApp`
+    /// is the compositor-bearing frontend; `HeadlessApp` is the
+    /// JSON / text sink frontend over the same `Core`. Subsystem
+    /// access is `self.core.<field>.X`.
     pub core: core::Core,
     /// Block history, tool states, layout cache — the committed transcript.
     pub(crate) transcript: crate::content::transcript::Transcript,
@@ -217,7 +218,7 @@ pub struct App {
     pub agent_snapshots: crate::app::SharedSnapshots,
     pub(crate) permissions: Arc<Permissions>,
     /// The active turn's state, or `None` when the app is idle.
-    /// Owned by `App` so reducer handlers (`apply_ops`) can mutate
+    /// Owned by `TuiApp` so reducer handlers (`apply_ops`) can mutate
     /// it directly rather than threading `&mut Option<TurnState>`
     /// through every call chain.
     pub(crate) agent: Option<TurnState>,
@@ -242,7 +243,7 @@ pub struct App {
     pending_turn_meta: Option<protocol::TurnMeta>,
     pending_agent_blocks: Vec<(String, protocol::AgentBlockData)>,
     startup_auth_error: Option<String>,
-    /// App-level focus (Prompt = editing buffer; History = navigating transcript).
+    /// TuiApp-level focus (Prompt = editing buffer; History = navigating transcript).
     pub app_focus: AppFocus,
     /// Readonly pane showing the transcript. Owns its `Buffer`
     /// (vim + kill ring + undo) and the viewport scroll / cursor
@@ -456,9 +457,9 @@ pub struct PendingTool {
     pub args: HashMap<String, serde_json::Value>,
 }
 
-// ── App impl ─────────────────────────────────────────────────────────────────
+// ── TuiApp impl ─────────────────────────────────────────────────────────────────
 
-impl App {
+impl TuiApp {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: String,
@@ -740,7 +741,7 @@ impl App {
     /// subscribe_kind / unsubscribe` composes cleanly with the TLS
     /// app pointer.
     ///
-    /// Snapshot the App-side fields that back diff-driven cells and
+    /// Snapshot the TuiApp-side fields that back diff-driven cells and
     /// publish through `Cells` whenever they differ from the last
     /// published value. Runs once per main-loop tick so a Lua
     /// subscriber on `vim_mode` / `confirms_pending` / `now` /
@@ -1027,10 +1028,10 @@ impl App {
             self.notify_error(message);
         }
 
-        // Plugins read live App state via `with_app` at registration
+        // Plugins read live TuiApp state via `with_app` at registration
         // time — e.g. `model.lua` declares `args = smelt.engine.models()`
         // for its arg picker. Install the TLS app pointer before any
-        // Lua runs at startup so those reads land on the real App.
+        // Lua runs at startup so those reads land on the real TuiApp.
         {
             let _guard = crate::lua::install_app_ptr(self);
             self.core.lua.load_plugins();
@@ -1088,7 +1089,7 @@ impl App {
                 break 'main;
             }
             // Install the TLS app pointer for the whole tick. Any Lua
-            // binding firing during this iteration can reach `&mut App`
+            // binding firing during this iteration can reach `&mut TuiApp`
             // via `crate::lua::with_app`. Guard drops at end of the
             // iteration scope and restores the previous slot (usually
             // None). The pointer is the Neovim-equivalent to Vim's

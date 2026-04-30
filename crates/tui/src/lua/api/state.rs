@@ -1,5 +1,5 @@
 //! Live engine + session reads. Each table here is a thin getter
-//! surface over `App` — calls go through `try_with_app` for reads and
+//! surface over `TuiApp` — calls go through `try_with_app` for reads and
 //! `with_app` for writes, never through a snapshot mirror.
 
 use super::app_read;
