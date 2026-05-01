@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 pub(crate) struct EditFileTool {
-    pub files: FileStateCache,
+    pub(crate) files: FileStateCache,
 }
 
 impl Tool for EditFileTool {

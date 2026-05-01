@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileState {
-    pub content: String,
-    pub mtime_ms: u64,
+pub(crate) struct FileState {
+    pub(crate) content: String,
+    pub(crate) mtime_ms: u64,
     // `Some` only for read-provenance entries. Writes leave this `None` so a
     // subsequent read_file doesn't dedup against pre-edit content.
-    pub read_range: Option<(usize, usize)>,
+    pub(crate) read_range: Option<(usize, usize)>,
 }
 
 const MAX_ENTRIES: usize = 100;
@@ -43,7 +43,7 @@ fn normalize_path(p: &str) -> String {
 }
 
 /// Read `path`'s mtime as milliseconds since the UNIX epoch.
-pub fn file_mtime_ms(path: &str) -> std::io::Result<u64> {
+pub(crate) fn file_mtime_ms(path: &str) -> std::io::Result<u64> {
     let meta = std::fs::metadata(path)?;
     let mtime = meta.modified()?;
     let ms = mtime
@@ -55,7 +55,7 @@ pub fn file_mtime_ms(path: &str) -> std::io::Result<u64> {
 
 /// Shared cache of recent file observations. Cheap to clone (Arc-backed).
 #[derive(Clone, Default)]
-pub struct FileStateCache(Arc<Mutex<Inner>>);
+pub(crate) struct FileStateCache(Arc<Mutex<Inner>>);
 
 #[derive(Default)]
 struct Inner {
@@ -70,12 +70,12 @@ struct Entry {
 }
 
 impl FileStateCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Return a copy of the cached state for `path`, if present.
-    pub fn get(&self, path: &str) -> Option<FileState> {
+    pub(crate) fn get(&self, path: &str) -> Option<FileState> {
         let key = normalize_path(path);
         self.0
             .lock()
@@ -85,7 +85,7 @@ impl FileStateCache {
             .map(|e| e.state.clone())
     }
 
-    pub fn has(&self, path: &str) -> bool {
+    pub(crate) fn has(&self, path: &str) -> bool {
         let key = normalize_path(path);
         self.0
             .lock()
@@ -94,7 +94,7 @@ impl FileStateCache {
     }
 
     /// Cache a just-read file. Looks up mtime itself; entry is dedup-eligible.
-    pub fn record_read(&self, path: &str, content: String, range: (usize, usize)) {
+    pub(crate) fn record_read(&self, path: &str, content: String, range: (usize, usize)) {
         let mtime_ms = file_mtime_ms(path).unwrap_or(0);
         self.set(
             path,
@@ -108,7 +108,7 @@ impl FileStateCache {
 
     /// Cache a just-written file. Not dedup-eligible — a follow-up read_file
     /// must actually re-read rather than hit this entry.
-    pub fn record_write(&self, path: &str, content: String) {
+    pub(crate) fn record_write(&self, path: &str, content: String) {
         let mtime_ms = file_mtime_ms(path).unwrap_or(0);
         self.set(
             path,
@@ -122,7 +122,7 @@ impl FileStateCache {
 
     /// Insert or replace an entry. Inserts exceeding the total byte cap are
     /// dropped; otherwise oldest entries are evicted until both caps hold.
-    pub fn set(&self, path: &str, state: FileState) {
+    pub(crate) fn set(&self, path: &str, state: FileState) {
         let new_bytes = state.content.len();
         if new_bytes > MAX_TOTAL_BYTES {
             return;
@@ -156,7 +156,7 @@ impl FileStateCache {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.0.lock().map(|m| m.entries.len()).unwrap_or(0)
     }
 }
@@ -164,7 +164,7 @@ impl FileStateCache {
 /// Error string when the cache has no prior observation or the file drifted
 /// since the last observation. `None` means safe to proceed. `noun` is
 /// `"file"` or `"notebook"`, used to phrase the message for the caller tool.
-pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option<String> {
+pub(crate) fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option<String> {
     let Some(cached) = cache.get(path) else {
         return Some(format!(
             "You must use read_file before editing. Read the {noun} first."

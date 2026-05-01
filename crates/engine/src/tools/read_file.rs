@@ -7,18 +7,18 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 /// Default line cap when `limit` is omitted by the caller.
-pub const DEFAULT_LINE_LIMIT: usize = 2000;
+const DEFAULT_LINE_LIMIT: usize = 2000;
 
 /// Returned instead of file content when the same file + range is re-read and
 /// the file is unchanged on disk. Keeps the earlier `read_file` tool_result in
 /// the prompt cache intact (append-only), saving cache_creation tokens.
-pub const FILE_UNCHANGED_STUB: &str =
+const FILE_UNCHANGED_STUB: &str =
     "File unchanged since last read. The content from the earlier read_file \
      tool_result in this conversation is still current — refer to that \
      instead of re-reading.";
 
 pub(crate) struct ReadFileTool {
-    pub files: FileStateCache,
+    pub(crate) files: FileStateCache,
 }
 
 impl Tool for ReadFileTool {

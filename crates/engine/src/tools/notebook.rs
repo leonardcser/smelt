@@ -10,7 +10,7 @@ use super::{
 };
 
 /// Check whether a file path looks like a Jupyter notebook.
-pub fn is_notebook(path: &str) -> bool {
+pub(crate) fn is_notebook(path: &str) -> bool {
     path.to_lowercase().ends_with(".ipynb")
 }
 
@@ -60,7 +60,7 @@ impl NotebookRenderData {
 }
 
 /// Render a notebook's cells as human-readable text with line numbers.
-pub fn read_notebook(path: &str, offset: usize, limit: usize) -> ToolResult {
+pub(crate) fn read_notebook(path: &str, offset: usize, limit: usize) -> ToolResult {
     let raw = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => return ToolResult::err(e.to_string()),
@@ -316,7 +316,7 @@ fn render_data_from_snapshots(
 // ---------------------------------------------------------------------------
 
 pub(crate) struct NotebookEditTool {
-    pub files: FileStateCache,
+    pub(crate) files: FileStateCache,
 }
 
 impl Tool for NotebookEditTool {
