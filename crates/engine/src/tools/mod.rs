@@ -147,6 +147,66 @@ pub(crate) struct ToolEntry {
     pub(crate) is_mcp: bool,
 }
 
+/// Resolves and executes tool calls during an agent turn. The engine
+/// never touches tool impls directly — every per-call decision (schema
+/// list, hook eval, dispatch, ruleset selection) routes through this
+/// trait. A future tui-side `ToolRuntime` walks a Lua-driven registry
+/// behind the same surface.
+///
+/// Lookup, hook evaluation, and dispatch all return `Option` so the
+/// engine can synthesise a "tool not found" result when the LLM emits
+/// a call for a tool the dispatcher doesn't know.
+pub(crate) trait ToolDispatcher: Send + Sync {
+    /// Tool definitions visible to the LLM under `(permissions, mode)`.
+    fn definitions(&self, permissions: &Permissions, mode: Mode) -> Vec<ToolDefinition>;
+
+    /// True when the named tool exists in this dispatcher.
+    fn contains(&self, name: &str) -> bool;
+
+    /// True when the named tool routes through the `mcp` permission
+    /// ruleset rather than the per-tool `tools` ruleset.
+    fn is_mcp(&self, name: &str) -> bool;
+
+    /// Per-call permission hooks. `None` means the tool is unknown.
+    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<PluginToolHooks>;
+
+    /// Dispatch a tool call. `None` means the tool is unknown; the
+    /// engine handles that case by emitting a synthetic error result.
+    fn dispatch<'a>(
+        &'a self,
+        name: &str,
+        args: HashMap<String, Value>,
+        ctx: &'a ToolContext,
+    ) -> Option<ToolFuture<'a>>;
+}
+
+impl ToolDispatcher for ToolRegistry {
+    fn definitions(&self, permissions: &Permissions, mode: Mode) -> Vec<ToolDefinition> {
+        ToolRegistry::definitions(self, permissions, mode)
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    fn is_mcp(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|e| e.is_mcp)
+    }
+
+    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<PluginToolHooks> {
+        self.get(name).map(|e| e.tool.evaluate_hooks(args))
+    }
+
+    fn dispatch<'a>(
+        &'a self,
+        name: &str,
+        args: HashMap<String, Value>,
+        ctx: &'a ToolContext,
+    ) -> Option<ToolFuture<'a>> {
+        self.get(name).map(|e| e.tool.execute(args, ctx))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ToolRegistry {
     tools: Vec<ToolEntry>,
