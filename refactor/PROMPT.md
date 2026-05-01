@@ -60,16 +60,17 @@ For each sub-phase:
 - Verify after each: `cargo fmt && cargo clippy --workspace
   --all-targets -- -D warnings && cargo nextest run --workspace &&
   refactor/check.sh`.
-- Append one bullet to `P<n>.md` "Sub-phases landed":
-  `**<id>** (\`<sha>\`) — <one-line summary>.` **One line.** Body
+- If a non-obvious decision landed, append one bullet to `P<n>.md`
+  "Decisions made": `**<title>** (\`<sha>\`) — <one line>.` Body
   lives in `git log`; this file is an index.
-- If a non-obvious decision landed, one bullet in "Decisions made":
-  `**<title>** (\`<sha>\`) — <one line>.` Same rule.
 - Mark the sub-phase landed in `REFACTOR.md`.
-- Update `INVENTORY.md` Status for touched files. Notes column is
-  forward-looking only — pending/blocking, not history.
-- Commit code as `feat(tui): …` / `refactor(ui): …`; docs sync as a
-  separate `docs(refactor): …` immediately after.
+- Update `INVENTORY.md` Status for touched files — but only at phase
+  boundaries, not per-commit. Notes column is forward-looking only.
+- Commit code and doc updates together — one commit per sub-phase or
+  batch of bundled sub-phases. The commit message carries the detail.
+  Only make a separate `docs(refactor): …` commit when the docs change
+  is large enough to stand alone (e.g. FEATURES.md refresh after
+  multiple features land together).
 
 ## Loop sentinels
 
