@@ -418,7 +418,7 @@ impl Provider {
     }
 
     /// Reset the sticky routing state. Call this at the start of each new turn.
-    pub fn reset_turn_state(&self) {
+    pub(crate) fn reset_turn_state(&self) {
         *self.turn_state.lock().unwrap() = None;
     }
 
@@ -1107,7 +1107,7 @@ fn messages_have_images(messages: &[Message]) -> bool {
     })
 }
 
-pub fn slugify(title: &str) -> String {
+pub(crate) fn slugify(title: &str) -> String {
     title
         .to_lowercase()
         .chars()
