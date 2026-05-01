@@ -1,4 +1,4 @@
-pub fn query_match_score(query: &str, query_words: &[&str], fields: &[String]) -> Option<u32> {
+pub(crate) fn query_match_score(query: &str, query_words: &[&str], fields: &[String]) -> Option<u32> {
     let field_words: Vec<Vec<&str>> = fields.iter().map(|field| split_words(field)).collect();
     let exact_primary = field_words
         .first()
@@ -41,13 +41,13 @@ pub fn query_match_score(query: &str, query_words: &[&str], fields: &[String]) -
     crate::fuzzy::fuzzy_score(&haystack, query).map(|score| score + 100)
 }
 
-pub fn split_words(text: &str) -> Vec<&str> {
+pub(crate) fn split_words(text: &str) -> Vec<&str> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect()
 }
 
-pub fn recency_bonus(recency_rank: usize) -> i64 {
+pub(crate) fn recency_bonus(recency_rank: usize) -> i64 {
     // History items are stored newest-first. Give recent entries a material
     // advantage without overpowering exact or whole-word matches.
     match recency_rank {

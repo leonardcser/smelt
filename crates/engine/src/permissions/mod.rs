@@ -20,7 +20,9 @@ mod tests;
 
 pub use approvals::RuntimeApprovals;
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
-pub use rules::{Decision, RuleSet, DEFAULT_BASH_ALLOW};
+pub use rules::Decision;
+pub(crate) use rules::DEFAULT_BASH_ALLOW;
+use rules::RuleSet;
 
 use crate::tools::str_arg;
 use bash::{has_output_redirection, is_cd_command};
@@ -60,7 +62,7 @@ impl Permissions {
     /// Create a clone with per-turn permission overrides layered on top.
     /// Override rules are prepended (checked first) to the existing rules
     /// for every mode.
-    pub fn with_overrides(&self, overrides: &protocol::PermissionOverrides) -> Self {
+    pub(crate) fn with_overrides(&self, overrides: &protocol::PermissionOverrides) -> Self {
         let mut cloned = self.clone();
         fn apply_to_mode(mode: &mut ModePerms, overrides: &protocol::PermissionOverrides) {
             if let Some(ref tools) = overrides.tools {
@@ -108,10 +110,6 @@ impl Permissions {
         self.workspace = path;
     }
 
-    pub fn restrict_to_workspace(&self) -> bool {
-        self.restrict_to_workspace
-    }
-
     pub fn set_restrict_to_workspace(&mut self, val: bool) {
         self.restrict_to_workspace = val;
     }
@@ -125,7 +123,7 @@ impl Permissions {
         }
     }
 
-    pub fn check_tool(&self, mode: Mode, tool_name: &str) -> Decision {
+    pub(crate) fn check_tool(&self, mode: Mode, tool_name: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let default = if mode == Mode::Yolo {
             Decision::Allow
@@ -135,7 +133,7 @@ impl Permissions {
         perms.tools.get(tool_name).cloned().unwrap_or(default)
     }
 
-    pub fn check_tool_pattern(&self, mode: Mode, tool_name: &str, pattern: &str) -> Decision {
+    pub(crate) fn check_tool_pattern(&self, mode: Mode, tool_name: &str, pattern: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let ruleset = match tool_name {
             "web_fetch" => &perms.web_fetch,
@@ -147,7 +145,7 @@ impl Permissions {
     /// Check permission for an MCP tool call. Matches the qualified tool name
     /// (e.g. `filesystem_read_file`) against glob patterns in the `mcp` ruleset.
     /// Defaults to Allow in yolo mode, Ask otherwise, if no pattern matches.
-    pub fn check_mcp(&self, mode: Mode, qualified_name: &str) -> Decision {
+    pub(crate) fn check_mcp(&self, mode: Mode, qualified_name: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let decision = check_ruleset(&perms.mcp, qualified_name);
         if decision == Decision::Ask && mode == Mode::Yolo {
@@ -157,7 +155,7 @@ impl Permissions {
         }
     }
 
-    pub fn check_bash(&self, mode: Mode, command: &str) -> Decision {
+    pub(crate) fn check_bash(&self, mode: Mode, command: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let command = command.trim();
         // Escalate output redirection only in Normal/Plan modes.
@@ -240,7 +238,7 @@ impl Permissions {
     /// Empty if `restrict_to_workspace` is off or no paths escape.
     /// Get the bash ruleset for the given mode (used by RuntimeApprovals
     /// to check per-subcommand config decisions).
-    pub fn bash_ruleset(&self, mode: Mode) -> &RuleSet {
+    pub(crate) fn bash_ruleset(&self, mode: Mode) -> &RuleSet {
         &self.mode_perms(mode).bash
     }
 
