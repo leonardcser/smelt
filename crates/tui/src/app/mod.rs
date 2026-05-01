@@ -477,10 +477,7 @@ impl TuiApp {
             if let Some(accent) = saved.accent_color {
                 ui.theme_mut().set_accent(accent);
             }
-            let input_display_buf = ui.buf_create(ui::buffer::BufCreateOpts {
-                modifiable: true,
-                buftype: ui::buffer::BufType::Prompt,
-            });
+            let input_display_buf = ui.buf_create(ui::buffer::BufCreateOpts { modifiable: true });
             // Transcript: a Buffer-backed Window painted via `Ui::render`
             // from the post-layer closure. No compositor `Component`
             // layer — `project_transcript_buffer` writes the projected
@@ -488,10 +485,8 @@ impl TuiApp {
             // split path consumes them via `Window::render`. Selection
             // bg lands as extmarks in a dedicated `selection`
             // namespace registered ahead so the painted layering wins.
-            let transcript_display_buf = ui.buf_create(ui::buffer::BufCreateOpts {
-                modifiable: true,
-                buftype: ui::buffer::BufType::Nofile,
-            });
+            let transcript_display_buf =
+                ui.buf_create(ui::buffer::BufCreateOpts { modifiable: true });
             if let Some(buf) = ui.buf_mut(transcript_display_buf) {
                 buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
             }
@@ -522,10 +517,7 @@ impl TuiApp {
             // No compositor `Component` layer — the buffer carries the
             // text + highlight extmarks `refresh_status_bar` writes
             // each frame.
-            let status_buf = ui.buf_create(ui::buffer::BufCreateOpts {
-                modifiable: true,
-                buftype: ui::buffer::BufType::Nofile,
-            });
+            let status_buf = ui.buf_create(ui::buffer::BufCreateOpts { modifiable: true });
             let status_win = ui
                 .win_open_split(
                     status_buf,
@@ -832,10 +824,9 @@ impl TuiApp {
         let gap = "  ";
         let line = format!("{indent}{label}{gap}{message}");
 
-        let buf = self.ui.buf_create(ui::buffer::BufCreateOpts {
-            modifiable: false,
-            ..Default::default()
-        });
+        let buf = self
+            .ui
+            .buf_create(ui::buffer::BufCreateOpts { modifiable: false });
 
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;

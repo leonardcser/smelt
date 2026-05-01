@@ -153,25 +153,13 @@ pub struct WrapResult {
     pub total_rows: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BufType {
-    Normal,
-    Nofile,
-    Prompt,
-    Scratch,
-}
-
 pub struct BufCreateOpts {
     pub modifiable: bool,
-    pub buftype: BufType,
 }
 
 impl Default for BufCreateOpts {
     fn default() -> Self {
-        Self {
-            modifiable: true,
-            buftype: BufType::Normal,
-        }
+        Self { modifiable: true }
     }
 }
 
@@ -339,7 +327,6 @@ pub struct Buffer {
     lines: Arc<Vec<String>>,
     extmarks: ExtmarkStore,
     modifiable: bool,
-    buftype: BufType,
     /// Bumped on lines mutation.
     changedtick: u64,
     /// Soft-wrap result cached by `(changedtick, width)`. Multiple
@@ -384,7 +371,6 @@ impl Buffer {
             lines: Arc::new(vec![String::new()]),
             extmarks,
             modifiable: opts.modifiable,
-            buftype: opts.buftype,
             changedtick: 0,
             wrap_cache: None,
             wrap_cache_key: None,
@@ -425,10 +411,6 @@ impl Buffer {
         }
         self.source = source;
         self.source_tick = self.source_tick.wrapping_add(1);
-    }
-
-    pub fn source(&self) -> &str {
-        &self.source
     }
 
     /// Re-run the parser if `(source, width)` differs from the last
@@ -520,10 +502,7 @@ impl Buffer {
         self.modifiable = modifiable;
     }
 
-    pub fn buftype(&self) -> &BufType {
-        &self.buftype
-    }
-
+    #[cfg(test)]
     pub fn changedtick(&self) -> u64 {
         self.changedtick
     }
@@ -933,13 +912,7 @@ mod tests {
         // `modifiable` guards user edits via windows, not framework
         // API calls. Dialog buffers are created with modifiable=false
         // but still need to be populated by `set_all_lines`.
-        let mut buf = Buffer::new(
-            BufId(1),
-            BufCreateOpts {
-                modifiable: false,
-                buftype: BufType::Nofile,
-            },
-        );
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts { modifiable: false });
         buf.set_all_lines(vec!["hello".into(), "world".into()]);
         assert_eq!(buf.line_count(), 2);
         assert_eq!(buf.get_line(0), Some("hello"));

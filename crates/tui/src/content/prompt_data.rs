@@ -1025,13 +1025,8 @@ mod tests {
                 session_cost_usd: 0.0,
             },
         };
-        let mut input_buf = Buffer::new(
-            ui::BufId(0),
-            ui::buffer::BufCreateOpts {
-                modifiable: true,
-                buftype: ui::buffer::BufType::Prompt,
-            },
-        );
+        let mut input_buf =
+            Buffer::new(ui::BufId(0), ui::buffer::BufCreateOpts { modifiable: true });
         let output = compute_prompt(&mut prompt_input, &mut input_buf, &test_theme());
         // Buffer carries chrome (top bar) + input area + bottom bar at least.
         assert!(input_buf.line_count() >= 3);

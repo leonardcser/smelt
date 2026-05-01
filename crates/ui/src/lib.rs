@@ -28,7 +28,7 @@ pub type AttachmentId = u64;
 /// and the event payload.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
-pub use buffer::{BufType, Buffer, BufferParser, Span, SpanStyle};
+pub use buffer::{Buffer, BufferParser, Span, SpanStyle};
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
     WinEvent,
