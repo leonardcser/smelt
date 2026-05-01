@@ -341,7 +341,7 @@ fn truncate_bytes_floor(text: &str, max_bytes: usize) -> String {
 
 /// Collect user and inter-agent messages as plain text, skipping anything
 /// that was itself produced by a prior compaction.
-pub fn collect_user_messages(messages: &[Message]) -> Vec<String> {
+fn collect_user_messages(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
         .filter_map(|m| {
@@ -363,7 +363,8 @@ pub fn collect_user_messages(messages: &[Message]) -> Vec<String> {
 /// True if `message` is a handoff summary produced by a prior compaction.
 /// Used on re-compaction so a prior summary doesn't get re-ingested as user
 /// input and nested under a new summary.
-pub fn is_summary_message(message: &Message) -> bool {
+#[cfg(test)]
+fn is_summary_message(message: &Message) -> bool {
     if !matches!(message.role, Role::User) {
         return false;
     }
@@ -381,7 +382,7 @@ fn is_summary_text(text: &str) -> bool {
 /// Assemble the replacement history: recent user-authored messages
 /// (token-budgeted, most recent kept) followed by the handoff summary as the
 /// final user message. Caller prepends the system prompt.
-pub fn build_compacted_history(
+fn build_compacted_history(
     user_messages: Vec<String>,
     summary_text: &str,
     injection: InitialContextInjection,
@@ -434,7 +435,7 @@ fn select_recent_user_messages(user_messages: Vec<String>, max_tokens: usize) ->
 
 /// Very rough token estimator: ~4 bytes per token. Only used to budget user-
 /// message carryover, so exactness against a real tokenizer isn't required.
-pub fn approx_token_count(text: &str) -> usize {
+fn approx_token_count(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
