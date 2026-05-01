@@ -150,8 +150,94 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    fs.set("file_state", build_file_state(lua)?)?;
+
     smelt.set("fs", fs)?;
     Ok(())
+}
+
+/// `smelt.fs.file_state` — shared mtime + content + read-range cache.
+/// Read by Lua `read_file` / `write_file` / `edit_file` / `notebook_edit`
+/// during their migration off the engine impls. Backed by the same
+/// `engine::tools::FileStateCache` engine-side tools see, parked on
+/// `Core.files`.
+fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+
+    t.set(
+        "has",
+        lua.create_function(|_, p: String| {
+            Ok(crate::lua::try_with_app(|app| app.core.files.has(&p)).unwrap_or(false))
+        })?,
+    )?;
+
+    t.set(
+        "get",
+        lua.create_function(|lua, p: String| {
+            let Some(state) = crate::lua::try_with_app(|app| app.core.files.get(&p)).flatten()
+            else {
+                return Ok(LuaNil);
+            };
+            let row = lua.create_table()?;
+            row.set("content", state.content)?;
+            row.set("mtime_ms", state.mtime_ms)?;
+            match state.read_range {
+                Some((offset, limit)) => {
+                    let range = lua.create_table()?;
+                    range.set("offset", offset as u64)?;
+                    range.set("limit", limit as u64)?;
+                    row.set("read_range", range)?;
+                }
+                None => row.set("read_range", LuaNil)?,
+            }
+            Ok(LuaValue::Table(row))
+        })?,
+    )?;
+
+    t.set(
+        "record_read",
+        lua.create_function(
+            |_, (p, content, offset, limit): (String, String, u64, u64)| {
+                crate::lua::try_with_app(|app| {
+                    app.core
+                        .files
+                        .record_read(&p, content, (offset as usize, limit as usize));
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    t.set(
+        "record_write",
+        lua.create_function(|_, (p, content): (String, String)| {
+            crate::lua::try_with_app(|app| {
+                app.core.files.record_write(&p, content);
+            });
+            Ok(())
+        })?,
+    )?;
+
+    t.set(
+        "staleness_error",
+        lua.create_function(|_, (p, noun): (String, Option<String>)| {
+            let noun = noun.unwrap_or_else(|| "file".into());
+            Ok(crate::lua::try_with_app(|app| {
+                engine::tools::staleness_error(&app.core.files, &p, &noun)
+            })
+            .flatten())
+        })?,
+    )?;
+
+    t.set(
+        "mtime_ms",
+        lua.create_function(|_, p: String| match engine::tools::file_mtime_ms(&p) {
+            Ok(ms) => Ok((Some(ms), None)),
+            Err(err) => Ok((None, Some(err.to_string()))),
+        })?,
+    )?;
+
+    Ok(t)
 }
 
 fn paths_to_strings(paths: Vec<PathBuf>) -> Vec<String> {

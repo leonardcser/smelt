@@ -1,7 +1,7 @@
 pub(crate) mod background;
 mod bash;
 mod edit_file;
-mod file_state;
+pub mod file_state;
 mod notebook;
 mod read_file;
 pub(crate) mod result_dedup;
@@ -11,9 +11,7 @@ mod web_fetch;
 mod web_shared;
 mod write_file;
 
-#[cfg(test)]
-pub(crate) use file_state::FileState;
-pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
+pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
 
 use crate::cancel::CancellationToken;
 use crate::provider::{FunctionSchema, Provider, ToolDefinition};
@@ -452,8 +450,8 @@ pub(crate) struct MultiAgentToolConfig {
 pub(crate) fn build_tools(
     _processes: ProcessRegistry,
     ma: Option<MultiAgentToolConfig>,
+    files: FileStateCache,
 ) -> ToolRegistry {
-    let files = FileStateCache::new();
     let mut r = ToolRegistry::new();
     r.register(Box::new(ReadFileTool {
         files: files.clone(),

@@ -8,6 +8,7 @@ use super::{
 };
 use crate::lua::LuaRuntime;
 use crate::session::Session;
+use engine::tools::FileStateCache;
 use engine::{EngineHandle, SkillLoader};
 use std::sync::Arc;
 
@@ -91,6 +92,12 @@ pub struct Core {
     /// section. Populated from `main.rs` after construction; `None`
     /// when no skills directory exists.
     pub skills: Option<Arc<SkillLoader>>,
+    /// Shared file-observation cache (mtime + content + read range).
+    /// `engine::start` was handed the same `Clone` of this cache so
+    /// the engine-side `read_file` / `write_file` / `edit_file` /
+    /// `edit_notebook` tools and Lua-side migrations both see one
+    /// view. Exposed to Lua via `smelt.fs.file_state.*`.
+    pub files: FileStateCache,
 }
 
 impl Core {
@@ -98,7 +105,12 @@ impl Core {
     /// fresh `EngineHandle`. Both `TuiApp::new` (TUI) and `HeadlessApp::new`
     /// (one-shot / subagent) call this — the only single source of
     /// truth for the eight subsystem fields' construction.
-    pub fn new(config: AppConfig, engine: EngineHandle, frontend: FrontendKind) -> Self {
+    pub fn new(
+        config: AppConfig,
+        engine: EngineHandle,
+        frontend: FrontendKind,
+        files: FileStateCache,
+    ) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -123,6 +135,7 @@ impl Core {
             engine: EngineBridge::new(engine),
             frontend,
             skills: None,
+            files,
         }
     }
 }

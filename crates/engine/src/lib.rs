@@ -317,9 +317,14 @@ impl EventInjector {
 
 /// Start the engine. Returns a handle for bidirectional communication.
 ///
+/// `files` is the shared file-state cache — read_file populates it, edit/write
+/// consult it for staleness checks. The caller passes its own clone so the
+/// frontend can expose the same cache to Lua tools while engine-side tools are
+/// migrating off the Rust impl.
+///
 /// MCP servers are connected asynchronously — this must be called from
 /// within a tokio runtime.
-pub fn start(config: EngineConfig) -> EngineHandle {
+pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -357,7 +362,7 @@ pub fn start(config: EngineConfig) -> EngineHandle {
         None
     };
 
-    let registry = tools::build_tools(processes.clone(), ma_config);
+    let registry = tools::build_tools(processes.clone(), ma_config, files);
 
     let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();

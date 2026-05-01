@@ -406,6 +406,7 @@ impl TuiApp {
         provider_type: String,
         permissions: Arc<Permissions>,
         engine: EngineHandle,
+        file_state: engine::tools::FileStateCache,
         settings: state::ResolvedSettings,
         multi_agent: bool,
         reasoning_effort: protocol::ReasoningEffort,
@@ -550,7 +551,7 @@ impl TuiApp {
         };
 
         Self {
-            core: core::Core::new(app_config, engine, FrontendKind::Tui),
+            core: core::Core::new(app_config, engine, FrontendKind::Tui, file_state),
             transcript: crate::content::transcript::Transcript::new(),
             parser: crate::content::stream_parser::StreamParser::new(),
             transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
