@@ -6,7 +6,9 @@
 //! lets plugin code do `local data, err = smelt.fs.read(p)` without
 //! `pcall`.
 
+use engine::tools::FlockGuard;
 use mlua::prelude::*;
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -152,8 +154,37 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set("file_state", build_file_state(lua)?)?;
 
+    fs.set(
+        "try_flock",
+        lua.create_function(|_, p: String| match engine::tools::try_flock(&p) {
+            Ok(guard) => Ok((Some(FlockHandle::new(guard)), None)),
+            Err(err) => Ok((None, Some(err))),
+        })?,
+    )?;
+
     smelt.set("fs", fs)?;
     Ok(())
+}
+
+/// Userdata wrapper for an exclusive advisory lock acquired via
+/// `engine::tools::try_flock`. Released on `:release()` or when garbage
+/// collected. Lua tools that mutate a file under a flock acquire one of
+/// these and let it drop when the write completes.
+struct FlockHandle(RefCell<Option<FlockGuard>>);
+
+impl FlockHandle {
+    fn new(guard: FlockGuard) -> Self {
+        Self(RefCell::new(Some(guard)))
+    }
+}
+
+impl LuaUserData for FlockHandle {
+    fn add_methods<M: LuaUserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("release", |_, this, ()| {
+            this.0.borrow_mut().take();
+            Ok(())
+        });
+    }
 }
 
 /// `smelt.fs.file_state` — shared mtime + content + read-range cache.

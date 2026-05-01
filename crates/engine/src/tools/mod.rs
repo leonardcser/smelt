@@ -9,7 +9,6 @@ mod spawn_agent;
 pub(crate) mod web_cache;
 mod web_fetch;
 mod web_shared;
-mod write_file;
 
 pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
 
@@ -51,7 +50,6 @@ pub use notebook::NotebookRenderData;
 pub(crate) use read_file::ReadFileTool;
 pub(crate) use spawn_agent::AgentMessageNotification;
 pub(crate) use web_fetch::WebFetchTool;
-pub(crate) use write_file::WriteFileTool;
 
 pub(crate) struct ToolResult {
     pub(crate) content: String,
@@ -292,7 +290,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
 }
 
 /// Convert an absolute path to a relative one if it's inside the cwd.
-pub(crate) fn display_path(path: &str) -> String {
+pub fn display_path(path: &str) -> String {
     if let Ok(cwd) = std::env::current_dir() {
         let prefix = cwd.to_string_lossy();
         if let Some(rest) = path.strip_prefix(prefix.as_ref()) {
@@ -364,7 +362,7 @@ pub(crate) fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> D
 /// locked by another process (EWOULDBLOCK) or on any other I/O error.
 /// The lock is released when the guard is dropped.
 #[cfg(unix)]
-pub(crate) fn try_flock(path: &str) -> Result<FlockGuard, String> {
+pub fn try_flock(path: &str) -> Result<FlockGuard, String> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -384,11 +382,11 @@ pub(crate) fn try_flock(path: &str) -> Result<FlockGuard, String> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn try_flock(_path: &str) -> Result<FlockGuard, String> {
+pub fn try_flock(_path: &str) -> Result<FlockGuard, String> {
     Ok(FlockGuard { _file: None })
 }
 
-pub(crate) struct FlockGuard {
+pub struct FlockGuard {
     #[cfg(unix)]
     _file: std::fs::File,
     #[cfg(not(unix))]
@@ -456,17 +454,12 @@ pub(crate) fn build_tools(
     r.register(Box::new(ReadFileTool {
         files: files.clone(),
     }));
-    r.register(Box::new(WriteFileTool {
-        files: files.clone(),
-    }));
     r.register(Box::new(EditFileTool {
         files: files.clone(),
     }));
     r.register(Box::new(BashTool));
     r.register(Box::new(WebFetchTool));
-    r.register(Box::new(NotebookEditTool {
-        files: files.clone(),
-    }));
+    r.register(Box::new(NotebookEditTool { files }));
 
     // Multi-agent tools (conditionally registered). `list_agents`,
     // `message_agent`, and `peek_agent` all live in

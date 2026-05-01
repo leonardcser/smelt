@@ -1013,6 +1013,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.web_search",
         include_str!("../../../../runtime/lua/smelt/tools/web_search.lua"),
     ),
+    (
+        "smelt.tools.write_file",
+        include_str!("../../../../runtime/lua/smelt/tools/write_file.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1049,6 +1053,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.peek_agent",
     "smelt.tools.message_agent",
     "smelt.tools.web_search",
+    "smelt.tools.write_file",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

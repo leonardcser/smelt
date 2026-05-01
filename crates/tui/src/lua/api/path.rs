@@ -73,6 +73,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|_, p: String| Ok(Path::new(&p).is_absolute()))?,
     )?;
 
+    // `smelt.path.display(p)` — the path the way smelt shows it in
+    // confirm dialogs and tool summaries: relative to cwd if inside,
+    // absolute otherwise. `"."` for cwd itself.
+    path_tbl.set(
+        "display",
+        lua.create_function(|_, p: String| Ok(engine::tools::display_path(&p)))?,
+    )?;
+
     // `smelt.path.config_dir()` — `~/.config/smelt` (or the
     // platform-specific equivalent). Resolved through the engine's
     // path helper so headless and tui agree on the lookup.

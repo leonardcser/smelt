@@ -248,7 +248,6 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/web_cache.rs`           | 51   | HTTP cache                     | moved-to-capability | P3.a  | pending | → `tui::http::cache`                                                             |
 | `tools/web_fetch.rs`           | 268  | Web fetch tool                 | moved-to-lua | P5.b  | pending | `tools/web_fetch.lua` over `tui::http`+`tui::html`              |
 | `tools/web_shared.rs`          | 436  | Shared HTTP helpers            | moved-to-capability | P3.a  | pending | → `tui::http` (fetch + redirects, the bulk of the module)                        |
-| `tools/write_file.rs`          | 190  | Write file tool                | moved-to-lua | P5.b  | pending | `tools/write_file.lua`                                          |
 
 ## `crates/protocol/src/`
 
@@ -307,6 +306,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/peek_agent.lua`            | 54  | Built-in `peek_agent` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.agent.{find_by_id,send_query,my_id}` (FFI over `engine::registry` + `engine::socket::send_query_blocking`). Gated on `smelt.engine.multi_agent()`. Same third-person framing the retired Rust `PeekAgentTool` prepended. |
 | `tools/message_agent.lua`         | 74  | Built-in `message_agent` tool         | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.agent.{find_by_id,send_message,my_id,my_slug}` (FFI over `engine::registry` + `engine::socket::send_message_blocking`). Gated on `smelt.engine.multi_agent()`. Reports `delivered` / `failed: ...` / `partial: ...` mirroring the retired Rust `MessageAgentTool`. |
 | `tools/web_search.lua`            | 87  | Built-in `web_search` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.http.{post,cache.{get,put},random_user_agent}` + `smelt.html.parse_ddg_results`. Mirrors the retired Rust `WebSearchTool`: 15-minute cache keyed `search:<query>`, rotated User-Agent against DuckDuckGo's HTML endpoint, top-20 results formatted as a numbered list. |
+| `tools/write_file.lua`            | 90  | Built-in `write_file` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.fs.{exists,mkdir_all,write,try_flock,file_state.{has,staleness_error,record_write}}` + `smelt.notebook.is_notebook_path` + `smelt.path.display`. Mirrors the retired `WriteFileTool`: rejects clobbering an unread file (`UNREAD_OVERWRITE_ERR`), surfaces stale-mtime preflight, locks the path before overwriting, refuses to write to `.ipynb` (deferred to `edit_notebook`). |
 
 **To be created (P4.a):**
 
@@ -315,9 +315,8 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 
 **To be created (P5.b) under `tools/`:**
 
-- `bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
-  `web_fetch.lua`, `web_search.lua`, `notebook_edit.lua`,
-  `spawn_agent.lua`, `message_agent.lua`, `peek_agent.lua`,
+- `bash.lua`, `read_file.lua`, `edit_file.lua`,
+  `web_fetch.lua`, `notebook_edit.lua`, `spawn_agent.lua`,
   `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
 
 ## `src/`

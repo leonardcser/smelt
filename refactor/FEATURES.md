@@ -74,7 +74,7 @@ to invoke_ the feature.
 | Tool                  | Source today                      | Restored by                                         | Status  |
 | --------------------- | --------------------------------- | --------------------------------------------------- | ------- |
 | `read_file`           | `engine/tools/read_file.rs`       | P5.b → `tools/read_file.lua`                        | working |
-| `write_file`          | `engine/tools/write_file.rs`      | P5.b                                                | working |
+| `write_file`          | `runtime/lua/smelt/tools/write_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + `smelt.notebook.is_notebook_path` | working |
 | `edit_file`           | `engine/tools/edit_file.rs`       | P5.b                                                | working |
 | `edit_notebook`       | `engine/tools/notebook.rs`        | P5.b                                                | working |
 | `bash`                | `engine/tools/bash.rs`            | P5.b                                                | working |
