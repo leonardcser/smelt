@@ -26,7 +26,7 @@ pub enum FrontendKind {
 
 impl FrontendKind {
     /// Stable lowercase name surfaced to Lua: `"tui" | "headless" | "subagent"`.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             FrontendKind::Tui => "tui",
             FrontendKind::Headless => "headless",
@@ -36,7 +36,7 @@ impl FrontendKind {
 
     /// True iff there's a human at the terminal able to answer prompts.
     /// Only `Tui` is interactive; both headless variants run unattended.
-    pub fn is_interactive(self) -> bool {
+    pub(crate) fn is_interactive(self) -> bool {
         matches!(self, FrontendKind::Tui)
     }
 }

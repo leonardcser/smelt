@@ -632,7 +632,7 @@ impl TuiApp {
 
     /// Rebuild prompt sections from current app state (mode, instructions, etc.)
     /// and return the assembled system prompt string.
-    pub fn rebuild_system_prompt(&mut self) -> String {
+    pub(crate) fn rebuild_system_prompt(&mut self) -> String {
         let cwd = std::path::Path::new(&self.cwd);
         self.prompt_sections = crate::prompt_sections::build_defaults(
             cwd,
@@ -649,7 +649,7 @@ impl TuiApp {
     /// drop one-shots, fire each callback after the borrow on `Timers`
     /// releases so a callback that re-enters `app.core.timers.set/every/cancel`
     /// composes cleanly with the TLS app pointer.
-    pub fn tick_timers(&mut self) {
+    pub(crate) fn tick_timers(&mut self) {
         let now = std::time::Instant::now();
         let due = self.core.timers.drain_due(now, &self.core.lua.lua);
         for func in due {
@@ -675,7 +675,7 @@ impl TuiApp {
     /// mutation point having to call `cells.set_dyn`. `now` and
     /// `spinner_frame` follow the same diff pattern so subscribers
     /// fire only on second-rollover / frame-rollover, not every tick.
-    pub fn publish_diff_cells(&mut self) {
+    pub(crate) fn publish_diff_cells(&mut self) {
         self.core
             .cells
             .publish_if_changed("vim_mode", format!("{:?}", self.vim_mode));
@@ -705,7 +705,7 @@ impl TuiApp {
     /// autocmd ergonomics). The cell value is converted to Lua via
     /// the per-`TypeId` projector registered on `Cells`; values with
     /// no registered projector surface as `nil`.
-    pub fn drain_cells_pending(&mut self) {
+    pub(crate) fn drain_cells_pending(&mut self) {
         if !self.cells().has_pending() {
             return;
         }
@@ -733,7 +733,7 @@ impl TuiApp {
         }
     }
 
-    pub fn settings_state(&self) -> state::ResolvedSettings {
+    pub(crate) fn settings_state(&self) -> state::ResolvedSettings {
         let mut s = self.core.config.settings.clone();
         s.vim = self.input.vim_enabled();
         s
@@ -797,16 +797,16 @@ impl TuiApp {
     /// Width available for transcript content. Reserves the rightmost
     /// column for the scrollbar track so the scrollbar never overpaints
     /// rendered content and mouse hit-testing has a stable target.
-    pub fn transcript_width(&self) -> usize {
+    pub(crate) fn transcript_width(&self) -> usize {
         let (w, _) = self.ui.terminal_size();
         (self.transcript_gutters.content_width(w) as usize).max(1)
     }
 
-    pub fn notify(&mut self, message: String) {
+    pub(crate) fn notify(&mut self, message: String) {
         self.open_notification(message, false);
     }
 
-    pub fn notify_error(&mut self, message: String) {
+    pub(crate) fn notify_error(&mut self, message: String) {
         self.open_notification(message, true);
     }
 
@@ -896,13 +896,13 @@ impl TuiApp {
         self.notification = Some(win);
     }
 
-    pub fn dismiss_notification(&mut self) {
+    pub(crate) fn dismiss_notification(&mut self) {
         if let Some(win) = self.notification.take() {
             self.close_overlay_leaf(win);
         }
     }
 
-    pub fn set_task_label(&mut self, label: String) {
+    pub(crate) fn set_task_label(&mut self, label: String) {
         self.task_label = if label.trim().is_empty() {
             None
         } else {

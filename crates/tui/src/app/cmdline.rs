@@ -21,13 +21,13 @@ const PREFIX: &str = ":";
 const PREFIX_LEN: u16 = 1;
 
 impl TuiApp {
-    pub fn cmdline_is_focused(&self) -> bool {
+    pub(crate) fn cmdline_is_focused(&self) -> bool {
         self.well_known
             .cmdline
             .is_some_and(|win| self.ui.focus() == Some(win))
     }
 
-    pub fn open_cmdline(&mut self) {
+    pub(crate) fn open_cmdline(&mut self) {
         if self.well_known.cmdline.is_some() {
             return;
         }
