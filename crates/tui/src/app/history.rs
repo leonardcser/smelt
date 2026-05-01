@@ -300,7 +300,7 @@ impl TuiApp {
                 Role::User => {
                     if let Some(ref content) = msg.content {
                         let text = content.text_content();
-                        let prefix_marker = engine::compact::SUMMARY_PREFIX.trim_end();
+                        let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
                         if let Some(rest) = text.strip_prefix(prefix_marker) {
                             let summary = rest.trim_start_matches('\n');
                             self.push_block(Block::Compacted {
