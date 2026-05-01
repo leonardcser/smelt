@@ -71,12 +71,12 @@ impl ScrollbarState {
     /// cell. Clamped to `[0, max_thumb_top()]`. Used by both the
     /// jump-scroll click and the in-flight drag tick so the thumb
     /// stays under the pointer.
-    pub fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
+    pub(crate) fn thumb_top_for_click(&self, rel_row: u16) -> u16 {
         let half = self.thumb_size() / 2;
         rel_row.saturating_sub(half).min(self.max_thumb_top())
     }
 
-    pub fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> u16 {
+    pub(crate) fn scroll_from_top_for_thumb(&self, thumb_top: u16) -> u16 {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
         if max_thumb == 0 || max_scroll == 0 {
@@ -88,7 +88,7 @@ impl ScrollbarState {
         from_top.min(u16::MAX as u32) as u16
     }
 
-    pub fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
+    pub(crate) fn contains(&self, rect: Rect, row: u16, col: u16) -> bool {
         col == self.col && row >= rect.top && row < rect.bottom()
     }
 
@@ -96,7 +96,7 @@ impl ScrollbarState {
     /// scroll offset. Mirror of `thumb_top_for_click`'s inverse,
     /// rounded toward the nearest thumb cell. Used by paint paths
     /// to figure out where the thumb's first cell renders.
-    pub fn thumb_top_for_scroll(&self, scroll_top: u16) -> u16 {
+    pub(crate) fn thumb_top_for_scroll(&self, scroll_top: u16) -> u16 {
         let max_thumb = self.max_thumb_top();
         let max_scroll = self.max_scroll();
         if max_thumb == 0 || max_scroll == 0 {
@@ -109,7 +109,7 @@ impl ScrollbarState {
     /// `true` if viewport-relative row `row` paints as the thumb
     /// (vs. the track) when scrolled to `scroll_top`. The thumb
     /// covers `[thumb_top, thumb_top + thumb_size)`.
-    pub fn is_thumb_at(&self, scroll_top: u16, row: u16) -> bool {
+    pub(crate) fn is_thumb_at(&self, scroll_top: u16, row: u16) -> bool {
         let thumb_top = self.thumb_top_for_scroll(scroll_top);
         let thumb_end = thumb_top + self.thumb_size();
         row >= thumb_top && row < thumb_end
