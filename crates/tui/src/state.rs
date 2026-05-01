@@ -71,19 +71,19 @@ pub struct ResolvedSettings {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
-    pub mode: String,
+    pub(crate) mode: String,
     // Legacy field — migrated into `settings.vim_mode` on load.
     #[serde(default)]
-    pub vim_enabled: bool,
+    pub(crate) vim_enabled: bool,
     #[serde(default)]
     pub selected_model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
     #[serde(default)]
-    pub accent_color: Option<u8>,
+    pub(crate) accent_color: Option<u8>,
     // Legacy field — migrated into `settings.show_thinking` on load.
     #[serde(default)]
-    pub show_thinking: Option<bool>,
+    pub(crate) show_thinking: Option<bool>,
     #[serde(default)]
     pub settings: PersistedSettings,
 }
@@ -122,11 +122,6 @@ impl State {
         s
     }
 
-    pub fn save(&self) {
-        let _lock = StateLock::acquire();
-        self.save_unlocked();
-    }
-
     fn save_unlocked(&self) {
         let path = state_path();
         if let Some(parent) = path.parent() {
@@ -137,7 +132,7 @@ impl State {
         }
     }
 
-    pub fn mode(&self) -> Mode {
+    pub(crate) fn mode(&self) -> Mode {
         Mode::parse(&self.mode).unwrap_or(Mode::Normal)
     }
 }
@@ -205,32 +200,26 @@ fn update_state(f: impl FnOnce(&mut State)) {
 
 // ── Read-modify-write helpers ─────────────────────────────────────────────
 
-pub fn set_mode(mode: Mode) {
+pub(crate) fn set_mode(mode: Mode) {
     update_state(|s| {
         s.mode = mode.as_str().to_string();
     });
 }
 
-pub fn set_selected_model(key: String) {
+pub(crate) fn set_selected_model(key: String) {
     update_state(|s| {
         s.selected_model = Some(key);
     });
 }
 
-pub fn set_reasoning_effort(effort: ReasoningEffort) {
+pub(crate) fn set_reasoning_effort(effort: ReasoningEffort) {
     update_state(|s| {
         s.reasoning_effort = effort;
     });
 }
 
-pub fn set_accent(value: u8) {
-    update_state(|s| {
-        s.accent_color = Some(value);
-    });
-}
-
 /// Persist all toggle settings from the resolved values.
-pub fn save_settings(resolved: &ResolvedSettings) {
+pub(crate) fn save_settings(resolved: &ResolvedSettings) {
     update_state(|s| {
         s.settings = PersistedSettings {
             vim_mode: Some(resolved.vim),

@@ -186,7 +186,7 @@ pub struct TuiApp {
     /// `set_selected` can resize the overlay's outer height
     /// constraint and translate logical → visual indices for reversed
     /// pickers.
-    pub picker_state: HashMap<ui::WinId, crate::picker::PickerState>,
+    pub(crate) picker_state: HashMap<ui::WinId, crate::picker::PickerState>,
     /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.

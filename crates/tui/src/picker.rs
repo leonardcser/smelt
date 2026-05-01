@@ -30,34 +30,34 @@ use ui::{
 /// any) prints in a column-aligned dim block to the right of the
 /// longest label across the whole item set.
 #[derive(Clone, Default, Debug)]
-pub struct PickerItem {
-    pub label: String,
-    pub description: Option<String>,
-    pub prefix: String,
+pub(crate) struct PickerItem {
+    pub(crate) label: String,
+    pub(crate) description: Option<String>,
+    pub(crate) prefix: String,
     /// Optional per-item accent color. When set, the prefix paints in
     /// this color regardless of selection.
-    pub accent: Option<Color>,
+    pub(crate) accent: Option<Color>,
 }
 
 impl PickerItem {
-    pub fn new(label: impl Into<String>) -> Self {
+    pub(crate) fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             ..Default::default()
         }
     }
 
-    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+    pub(crate) fn with_description(mut self, desc: impl Into<String>) -> Self {
         self.description = Some(desc.into());
         self
     }
 
-    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+    pub(crate) fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefix = prefix.into();
         self
     }
 
-    pub fn with_accent(mut self, color: Color) -> Self {
+    pub(crate) fn with_accent(mut self, color: Color) -> Self {
         self.accent = Some(color);
         self
     }
@@ -65,7 +65,7 @@ impl PickerItem {
 
 /// Where the picker overlay anchors on screen.
 #[derive(Clone, Copy, Debug)]
-pub enum PickerPlacement {
+pub(crate) enum PickerPlacement {
     /// Centered on screen — used by focusable selector overlays.
     ScreenCenter,
     /// Docked above the prompt window. Reversed: best match sits at
@@ -83,11 +83,11 @@ pub enum PickerPlacement {
 /// overlay's outer height constraint and reverse logical → visual
 /// indices without re-deriving placement on every call.
 #[derive(Clone, Copy, Debug)]
-pub struct PickerState {
-    pub overlay: OverlayId,
-    pub placement: PickerPlacement,
-    pub reversed: bool,
-    pub max_rows: u16,
+pub(crate) struct PickerState {
+    pub(crate) overlay: OverlayId,
+    pub(crate) placement: PickerPlacement,
+    pub(crate) reversed: bool,
+    pub(crate) max_rows: u16,
 }
 
 const INDENT: usize = 1;
@@ -97,7 +97,7 @@ const DESC_GAP: usize = 2;
 /// 0-based index into `items`; `reversed` is implicit from
 /// `placement`. Returns the leaf `WinId` (caller stores it for
 /// subsequent `set_items` / `set_selected` calls).
-pub fn open(
+pub(crate) fn open(
     app: &mut TuiApp,
     items: Vec<PickerItem>,
     selected: usize,
@@ -155,7 +155,7 @@ pub fn open(
 /// Replace the picker's items in place. Resizes the overlay's outer
 /// height constraint when the count changes; preserves selection at
 /// `selected` (clamped). No-op when `leaf` isn't a known picker.
-pub fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, selected: usize) {
+pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, selected: usize) {
     let Some(state) = app.picker_state.get(&leaf).copied() else {
         return;
     };
@@ -175,7 +175,7 @@ pub fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, selected
 }
 
 /// Update the picker's logical selection. Clamps to `n - 1`.
-pub fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
+pub(crate) fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
     let Some(state) = app.picker_state.get(&leaf).copied() else {
         return;
     };
@@ -191,7 +191,7 @@ pub fn set_selected(app: &mut TuiApp, leaf: WinId, selected: usize) {
 
 /// Remove the picker's bookkeeping when its leaf closes. The overlay
 /// itself is removed by `Ui::win_close → overlay_close` cascade.
-pub fn forget(app: &mut TuiApp, leaf: WinId) {
+pub(crate) fn forget(app: &mut TuiApp, leaf: WinId) {
     app.picker_state.remove(&leaf);
 }
 
