@@ -17,7 +17,7 @@ use protocol::{Message, Role};
 /// short error blurbs) aren't worth the indirection — the stub body itself
 /// would be comparable in length, and the savings wouldn't justify the
 /// cognitive cost on the model of interpreting the stub.
-pub const MIN_DEDUP_LEN: usize = 500;
+const MIN_DEDUP_LEN: usize = 500;
 
 /// Look up a prior tool_result in `history` whose content matches
 /// `new_content` and whose error flag matches `new_is_error`. Returns the
@@ -26,7 +26,7 @@ pub const MIN_DEDUP_LEN: usize = 500;
 /// We require `is_error` equality so that swapping an error for a success
 /// reference (or vice versa) never happens — the model would otherwise see
 /// a success-flagged message pointing to a failing earlier call.
-pub fn duplicate_of<'a>(
+pub(crate) fn duplicate_of<'a>(
     new_content: &str,
     new_is_error: bool,
     history: &'a [Message],
@@ -55,7 +55,7 @@ pub fn duplicate_of<'a>(
 }
 
 /// Render the replacement body for a deduplicated tool_result.
-pub fn dedup_stub(prior_call_id: &str) -> String {
+pub(crate) fn dedup_stub(prior_call_id: &str) -> String {
     format!(
         "Output identical to a prior tool_result (call {prior_call_id}). \
          Refer to that earlier result."

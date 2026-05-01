@@ -55,7 +55,7 @@ impl SkillLoader {
 
     /// Get skill content wrapped in tags for the LLM.
     /// Returns `Ok(content)` if found, `Err(message)` if not.
-    pub fn content(&self, name: &str) -> Result<String, String> {
+    pub(crate) fn content(&self, name: &str) -> Result<String, String> {
         match self.skills.get(name) {
             Some(entry) => Ok(entry.formatted.clone()),
             None => {
