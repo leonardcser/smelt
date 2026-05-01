@@ -792,7 +792,7 @@ impl TuiApp {
 
     /// True when the focused overlay pauses engine-event drain
     /// (Confirm / Question / Lua dialogs gating a pending tool call).
-    pub(super) fn focused_overlay_blocks_agent(&self) -> bool {
+    pub(crate) fn focused_overlay_blocks_agent(&self) -> bool {
         self.ui
             .focused_overlay()
             .and_then(|id| self.ui.overlay(id))

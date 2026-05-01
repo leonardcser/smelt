@@ -69,7 +69,7 @@ struct LastTurn {
 }
 
 #[derive(Default)]
-pub(super) struct WorkingState {
+pub(crate) struct WorkingState {
     live: Option<LiveTurn>,
     last: Option<LastTurn>,
 }
@@ -127,11 +127,11 @@ impl WorkingState {
     /// animation (spinner glyph rotating, elapsed clock ticking).
     /// `false` once a turn has completed — the archived result is
     /// static text.
-    pub(super) fn is_animating(&self) -> bool {
+    pub(crate) fn is_animating(&self) -> bool {
         self.live.is_some()
     }
 
-    pub(super) fn is_compacting(&self) -> bool {
+    pub(crate) fn is_compacting(&self) -> bool {
         matches!(
             self.live.as_ref().map(|l| l.phase),
             Some(TurnPhase::Compacting)
@@ -219,7 +219,7 @@ impl WorkingState {
     /// nothing is animating *or* the turn is paused by a blocking
     /// dialog. The status bar uses `None` to drop the spinner span
     /// entirely while paused — the label still renders.
-    pub(super) fn spinner_char(&self) -> Option<&'static str> {
+    pub(crate) fn spinner_char(&self) -> Option<&'static str> {
         let live = self.live.as_ref()?;
         if live.pause_started.is_some() {
             return None;

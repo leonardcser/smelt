@@ -193,7 +193,7 @@ pub struct TuiApp {
     /// Live-turn + last-turn state driving the status bar spinner and
     /// result line. `begin(TurnPhase::...)` / `finish(TurnOutcome::...)`
     /// are the write paths, mirrored from engine lifecycle events.
-    pub(in crate::app) working: working::WorkingState,
+    pub(crate) working: working::WorkingState,
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).
     pub(crate) transcript_gutters: crate::window::WindowGutters,

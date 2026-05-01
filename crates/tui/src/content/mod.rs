@@ -17,7 +17,6 @@ pub(crate) use selection::{truncate_str, try_at_ref, wrap_line};
 pub(crate) use status::StatusItem;
 
 pub(crate) use status::BarSpan;
-pub(crate) use status::{StatusPosition, StyleState};
 
 use crossterm::{style::Color, terminal};
 

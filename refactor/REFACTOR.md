@@ -852,12 +852,14 @@ Create the missing dirs and seed files:
   `transcript_buf.rs` / `transcript_present/` machinery — extmarks
   on the Buffer carry it now.
 
-### P4.c — Reactive statusline
+### P4.c — Reactive statusline ✅ landed
 
-`status.lua` registers a segment spec via `smelt.statusline.set({
-... })`. Segments bind to cells (`{ bind = "now", fmt = "%H:%M:%S" }`,
-`{ bind = "agent_mode" }`, ...). Escape hatch: `{ call = fn, deps =
-{ ... } }` runs Lua only when a dep cell changes.
+`runtime/lua/smelt/status.lua` registers a `core` source through
+`smelt.statusline.register`; the handler reads
+`smelt.statusline.snapshot()` and returns the segment list. Rust's
+`spans_to_buffer_line` keeps the responsive layout. Declarative
+`{ bind = ... }` / `{ call = fn, deps = {...} }` spec evaluator
+remains a future option.
 
 ### P4.d — Dialogs fully orchestrated in Lua
 

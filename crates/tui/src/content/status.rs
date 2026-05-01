@@ -55,29 +55,6 @@ impl StatusItem {
     }
 }
 
-/// Buffer-agnostic cursor + scroll snapshot for the status bar.
-/// One record covers every focused window (prompt, transcript). Set
-/// once per tick by `TuiApp::tick_prompt` so the status bar stays in
-/// sync with the actual focused window instead of a cached viewport
-/// field that only some code paths update.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StatusPosition {
-    /// 1-indexed logical line of the cursor.
-    pub(crate) line: u32,
-    /// 1-indexed display column of the cursor.
-    pub(crate) col: u32,
-    /// Percent of the buffer scrolled past the top of the viewport
-    /// (0 = top, 100 = bottom). Always clamped to `0..=100`.
-    pub(crate) scroll_pct: u8,
-}
-
-impl StatusPosition {
-    /// Format the way the status bar shows it: `<line>:<col> <pct>%`.
-    pub(crate) fn render(&self) -> String {
-        format!("{}:{} {}%", self.line, self.col, self.scroll_pct)
-    }
-}
-
 pub(crate) fn vim_mode_label(mode: Option<ui::VimMode>) -> Option<&'static str> {
     match mode {
         Some(ui::VimMode::Insert) => Some("INSERT"),

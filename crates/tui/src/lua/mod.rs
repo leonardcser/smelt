@@ -821,6 +821,10 @@ const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
         "smelt/dialogs/confirm.lua",
         include_str!("../../../../runtime/lua/smelt/dialogs/confirm.lua"),
     ),
+    (
+        "smelt/status.lua",
+        include_str!("../../../../runtime/lua/smelt/status.lua"),
+    ),
 ];
 
 /// Load all `BOOTSTRAP_CHUNKS` into the given Lua state. Called from
