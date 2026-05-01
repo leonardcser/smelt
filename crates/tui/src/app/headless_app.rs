@@ -21,8 +21,8 @@ use super::headless::{HeadlessSink, OutputFormat};
 
 pub struct HeadlessApp {
     pub core: Core,
-    pub sink: HeadlessSink,
-    pub next_turn_id: u64,
+    pub(crate) sink: HeadlessSink,
+    pub(crate) next_turn_id: u64,
 }
 
 impl HeadlessApp {

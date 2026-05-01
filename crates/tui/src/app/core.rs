@@ -60,7 +60,7 @@ pub struct Core {
     /// sink). Vim and emacs yank/paste sites borrow this directly so
     /// the prompt, the transcript, dialog inputs, and any future Lua
     /// tools share one kill ring backed by the same system clipboard.
-    pub clipboard: ui::Clipboard,
+    pub(crate) clipboard: ui::Clipboard,
     /// Scheduled Lua callbacks. `smelt.timer.set` /
     /// `smelt.timer.every` / `smelt.timer.cancel` (and the
     /// `smelt.defer` alias) all route here through `with_app`.
@@ -83,7 +83,7 @@ pub struct Core {
     /// running this core. Set at construction by the wrapping
     /// `TuiApp::new` / `HeadlessApp::new` call site; surfaced to Lua
     /// via `smelt.frontend.kind()` / `is_interactive()`.
-    pub frontend: FrontendKind,
+    pub(crate) frontend: FrontendKind,
 }
 
 impl Core {

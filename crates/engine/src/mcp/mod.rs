@@ -41,11 +41,11 @@ fn default_true() -> bool {
 /// A discovered MCP tool definition (before wrapping as a Tool trait object).
 #[derive(Debug, Clone)]
 pub(crate) struct McpToolDef {
-    pub server_name: String,
-    pub tool_name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-    pub timeout: Duration,
+    pub(crate) server_name: String,
+    pub(crate) tool_name: String,
+    pub(crate) description: String,
+    pub(crate) input_schema: serde_json::Value,
+    pub(crate) timeout: Duration,
 }
 
 impl McpToolDef {
