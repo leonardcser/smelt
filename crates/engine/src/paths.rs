@@ -43,7 +43,7 @@ pub fn state_dir() -> PathBuf {
         .join(APP_NAME)
 }
 
-pub fn cache_dir() -> PathBuf {
+pub(crate) fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home_dir().join(".cache"))
