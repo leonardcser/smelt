@@ -13,18 +13,16 @@ pub(crate) mod transcript;
 pub(crate) mod transcript_buf;
 
 pub(crate) use layout::HitRegion;
-pub use status::StatusItem;
-pub use transcript::{SnapshotCell, TranscriptSnapshot};
-
 pub(crate) use selection::{truncate_str, try_at_ref, wrap_line};
+pub(crate) use status::StatusItem;
 
 pub(crate) use status::BarSpan;
-pub use status::{StatusPosition, StyleState};
+pub(crate) use status::{StatusPosition, StyleState};
 
 use crossterm::{style::Color, terminal};
 
-pub use context::{LayoutContext, PaintContext};
-pub use display::DisplayBlock;
+pub(crate) use context::LayoutContext;
+pub(crate) use display::DisplayBlock;
 pub use highlight::warm_up_syntect;
 
 pub(crate) const SPINNER_FRAMES: &[&str] = &["✿", "❀", "✾", "❁"];
@@ -115,11 +113,11 @@ pub(super) fn reasoning_color(effort: protocol::ReasoningEffort, theme: &ui::The
     style.fg.or(style.bg).unwrap_or(Color::Reset)
 }
 
-pub fn term_width() -> usize {
+pub(crate) fn term_width() -> usize {
     terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
 }
 
-pub fn term_height() -> usize {
+pub(crate) fn term_height() -> usize {
     terminal::size().map(|(_, h)| h as usize).unwrap_or(24)
 }
 

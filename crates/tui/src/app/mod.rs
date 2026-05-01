@@ -153,7 +153,7 @@ pub struct TuiApp {
     /// Items returned by Lua-registered statusline sources. Appended
     /// after the Rust-side built-in spans each frame; priority /
     /// align_right on each item controls layout.
-    pub custom_status_items: Vec<content::status::StatusItem>,
+    pub(crate) custom_status_items: Vec<content::status::StatusItem>,
     /// Last error message reported per statusline source. Used to
     /// rate-limit notifications so a perpetually-broken source doesn't
     /// spam one toast per frame — only re-notify when the message
@@ -201,7 +201,7 @@ pub struct TuiApp {
     /// Last-computed viewport layout (status / transcript / prompt
     /// rows). Updated each frame in `render_normal`; read by mouse
     /// hit-testing and viewport-rows estimation.
-    pub layout: content::layout::LayoutState,
+    pub(crate) layout: content::layout::LayoutState,
     /// Human-readable name for this agent.
     pub agent_id: String,
     /// All tracked subagents (blocking and background).

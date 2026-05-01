@@ -11,7 +11,7 @@ use crossterm::style::Color;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DisplayBlock {
+pub(crate) struct DisplayBlock {
     pub lines: Vec<DisplayLine>,
     /// Terminal width this layout was computed at.
     pub layout_width: u16,
@@ -24,7 +24,7 @@ pub struct DisplayBlock {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DisplayLine {
+pub(crate) struct DisplayLine {
     pub spans: Vec<DisplaySpan>,
     /// Optional bg color for the left gutter column(s). When set,
     /// `paint_line` fills the gutter with this color instead of blank
@@ -56,7 +56,7 @@ pub struct DisplayLine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DisplaySpan {
+pub(crate) struct DisplaySpan {
     pub text: String,
     pub style: SpanStyle,
     #[serde(default)]
@@ -72,7 +72,7 @@ pub struct DisplaySpan {
 /// - `copy_as = Some(s)` substitutes `s` for each cell on copy;
 ///   `Some("")` drops the cell; `None` emits the underlying char.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SpanMeta {
+pub(crate) struct SpanMeta {
     pub selectable: bool,
     pub copy_as: Option<String>,
 }
@@ -87,7 +87,7 @@ impl Default for SpanMeta {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpanStyle {
+pub(crate) struct SpanStyle {
     pub fg: Option<ColorValue>,
     pub bg: Option<ColorValue>,
     pub bold: bool,
@@ -100,7 +100,7 @@ pub struct SpanStyle {
 /// Color value that may be theme-dependent (resolved at paint time) or
 /// fixed (raw RGB / named ANSI / 256-color palette index).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ColorValue {
+pub(crate) enum ColorValue {
     Rgb(u8, u8, u8),
     Ansi(u8),
     Named(NamedColor),
@@ -110,7 +110,7 @@ pub enum ColorValue {
 /// Theme-dependent semantic colors. Resolved by `to_buffer::resolve`
 /// against the active `ui::Theme` registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ColorRole {
+pub(crate) enum ColorRole {
     Accent,
     Slug,
     UserBg,
@@ -135,7 +135,7 @@ pub enum ColorRole {
 /// Mirror of crossterm's named colors. We can't store crossterm::Color
 /// directly because it isn't `Eq` and we want a stable serde shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NamedColor {
+pub(crate) enum NamedColor {
     Reset,
     Black,
     DarkGrey,

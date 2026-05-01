@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// One display cell in the snapshot, carrying the character and its
 /// copy/selection metadata from the span that produced it.
 #[derive(Clone, Debug)]
-pub struct SnapshotCell {
+pub(crate) struct SnapshotCell {
     pub ch: char,
     pub meta: super::display::SpanMeta,
 }
@@ -21,7 +21,7 @@ pub struct SnapshotCell {
 /// Cached, width-keyed projection of the full transcript into plain-text
 /// rows with block↔row mappings. Built lazily by `Transcript::snapshot()`
 /// and invalidated on any block mutation or width change.
-pub struct TranscriptSnapshot {
+pub(crate) struct TranscriptSnapshot {
     pub width: u16,
     pub show_thinking: bool,
     /// One entry per row in the full transcript (including gap rows).
@@ -193,7 +193,7 @@ impl TranscriptSnapshot {
     }
 }
 
-pub struct Transcript {
+pub(crate) struct Transcript {
     pub(crate) history: BlockHistory,
     cached_snapshot: Option<TranscriptSnapshot>,
 }
