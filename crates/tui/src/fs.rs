@@ -15,11 +15,6 @@ pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     std::fs::read_to_string(path)
 }
 
-/// Read the entire file as raw bytes.
-pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
-    std::fs::read(path)
-}
-
 /// Write `contents` to `path`, replacing existing contents.
 pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     std::fs::write(path, contents)

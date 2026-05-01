@@ -47,27 +47,22 @@ impl CellKind {
     }
 }
 
-/// One notebook cell, normalised into a plain `source` string. The
-/// raw JSON value stays available for tools that need fields beyond
-/// `kind / id / source / execution_count`.
+/// One notebook cell, normalised into a plain `source` string.
 #[derive(Debug, Clone)]
 pub struct Cell {
     pub kind: CellKind,
     pub id: Option<String>,
     pub source: String,
     pub execution_count: Option<i64>,
-    pub raw: Value,
 }
 
-/// Parsed notebook view. `metadata` and `format_*` mirror nbformat's
-/// top-level keys; `cells` walks `cells[]` in order.
+/// Parsed notebook view. `format_*` mirror nbformat's top-level keys;
+/// `cells` walks `cells[]` in order.
 #[derive(Debug, Clone)]
 pub struct Notebook {
     pub format: Option<i64>,
     pub format_minor: Option<i64>,
-    pub metadata: Value,
     pub cells: Vec<Cell>,
-    pub raw: Value,
 }
 
 /// Parse `.ipynb` JSON. Errors surface as `serde_json::Error`.
@@ -75,7 +70,6 @@ pub fn parse(json: &str) -> Result<Notebook, serde_json::Error> {
     let raw: Value = serde_json::from_str(json)?;
     let format = raw.get("nbformat").and_then(|v| v.as_i64());
     let format_minor = raw.get("nbformat_minor").and_then(|v| v.as_i64());
-    let metadata = raw.get("metadata").cloned().unwrap_or(Value::Null);
 
     let mut cells = Vec::new();
     if let Some(arr) = raw.get("cells").and_then(|v| v.as_array()) {
@@ -87,9 +81,7 @@ pub fn parse(json: &str) -> Result<Notebook, serde_json::Error> {
     Ok(Notebook {
         format,
         format_minor,
-        metadata,
         cells,
-        raw,
     })
 }
 
@@ -108,7 +100,6 @@ fn parse_cell(cell: &Value) -> Cell {
         id,
         source,
         execution_count,
-        raw: cell.clone(),
     }
 }
 
