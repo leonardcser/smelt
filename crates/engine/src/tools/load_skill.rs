@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(crate) struct LoadSkillTool {
-    pub loader: Arc<SkillLoader>,
+    pub(crate) loader: Arc<SkillLoader>,
 }
 
 impl Tool for LoadSkillTool {

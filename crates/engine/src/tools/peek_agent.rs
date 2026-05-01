@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 pub(crate) struct PeekAgentTool {
-    pub my_id: String,
+    pub(crate) my_id: String,
 }
 
 impl Tool for PeekAgentTool {

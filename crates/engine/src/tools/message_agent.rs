@@ -3,8 +3,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 pub(crate) struct MessageAgentTool {
-    pub my_id: String,
-    pub my_slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) my_id: String,
+    pub(crate) my_slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Tool for MessageAgentTool {
