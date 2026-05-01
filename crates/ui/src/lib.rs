@@ -248,8 +248,11 @@ impl Ui {
         }
     }
 
-    /// Read-only view of the splits tree.
-    pub fn splits(&self) -> &LayoutTree {
+    /// Read-only view of the splits tree. Test-only; production
+    /// consumers rebuild the tree from app state and write it back
+    /// via `set_layout`.
+    #[cfg(test)]
+    fn splits(&self) -> &LayoutTree {
         &self.splits
     }
 
@@ -257,7 +260,7 @@ impl Ui {
     /// returning the rect for each leaf. Walks the tree on every call
     /// — small trees in practice (3–4 leaves), so the cost is
     /// negligible.
-    pub fn resolve_splits(&self) -> HashMap<WinId, Rect> {
+    fn resolve_splits(&self) -> HashMap<WinId, Rect> {
         let (w, h) = self.terminal_size;
         let area = Rect::new(0, 0, w, h);
         layout::resolve_layout(&self.splits, area)
@@ -754,7 +757,7 @@ impl Ui {
     /// regardless of which leaf the user actually interacted with
     /// — necessary for mixed dialogs where multiple leaves are
     /// interactive (e.g. options + input).
-    pub fn overlay_root_for_leaf(&self, win: WinId) -> Option<WinId> {
+    fn overlay_root_for_leaf(&self, win: WinId) -> Option<WinId> {
         let id = self.overlay_for_leaf(win)?;
         let ov = self.overlay(id)?;
         ov.layout.leaves_in_order().first().copied()
