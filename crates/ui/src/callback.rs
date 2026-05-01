@@ -30,18 +30,21 @@ impl KeyBind {
         Self { code, mods }
     }
 
-    pub fn plain(code: KeyCode) -> Self {
+    #[cfg(test)]
+    pub(crate) fn plain(code: KeyCode) -> Self {
         Self {
             code,
             mods: KeyModifiers::NONE,
         }
     }
 
-    pub fn char(c: char) -> Self {
+    #[cfg(test)]
+    pub(crate) fn char(c: char) -> Self {
         Self::plain(KeyCode::Char(c))
     }
 
-    pub fn ctrl(c: char) -> Self {
+    #[cfg(test)]
+    pub(crate) fn ctrl(c: char) -> Self {
         Self {
             code: KeyCode::Char(c),
             mods: KeyModifiers::CONTROL,
