@@ -1,6 +1,6 @@
 use super::*;
 
-pub enum ExecEvent {
+pub(crate) enum ExecEvent {
     Output(String),
     Done(Option<i32>),
 }
@@ -11,7 +11,7 @@ pub enum ExecEvent {
 /// identically. `!` lines spawn a shell escape; everything else
 /// dispatches by name to a Lua-registered handler (or no-ops if
 /// nothing matches).
-pub fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
+pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     let line = line.trim();
     if let Some(rest) = line.strip_prefix('!') {
         if !app.input.skip_shell_escape() {

@@ -2,11 +2,11 @@ use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-pub fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     engine::config_dir()
 }
 
-pub fn state_dir() -> PathBuf {
+pub(crate) fn state_dir() -> PathBuf {
     engine::state_dir()
 }
 

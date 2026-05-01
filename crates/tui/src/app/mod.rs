@@ -336,7 +336,7 @@ enum EventOutcome {
     ),
 }
 
-pub enum CommandAction {
+pub(crate) enum CommandAction {
     Continue,
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
@@ -391,10 +391,10 @@ enum LoopAction {
     Done,
 }
 
-pub struct PendingTool {
-    pub call_id: String,
-    pub name: String,
-    pub args: HashMap<String, serde_json::Value>,
+pub(crate) struct PendingTool {
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) args: HashMap<String, serde_json::Value>,
 }
 
 // ── TuiApp impl ─────────────────────────────────────────────────────────────────
