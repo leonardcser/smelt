@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 pub(crate) struct StopAgentTool {
-    pub my_pid: u32,
+    pub(crate) my_pid: u32,
 }
 
 impl Tool for StopAgentTool {

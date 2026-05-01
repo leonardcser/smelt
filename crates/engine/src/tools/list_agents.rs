@@ -3,8 +3,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 pub(crate) struct ListAgentsTool {
-    pub scope: String,
-    pub my_pid: u32,
+    pub(crate) scope: String,
+    pub(crate) my_pid: u32,
 }
 
 impl Tool for ListAgentsTool {

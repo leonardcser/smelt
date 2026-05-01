@@ -8,23 +8,23 @@ const BLOCKING_TIMEOUT: Duration = Duration::from_secs(600);
 const CHILD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) struct SpawnAgentTool {
-    pub scope: String,
-    pub my_pid: u32,
-    pub depth: u8,
-    pub max_agents: u8,
-    pub api_base: String,
-    pub api_key_env: String,
-    pub model: String,
-    pub provider_type: String,
-    pub spawned_tx: Option<tokio::sync::mpsc::UnboundedSender<super::SpawnedChild>>,
-    pub agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
+    pub(crate) scope: String,
+    pub(crate) my_pid: u32,
+    pub(crate) depth: u8,
+    pub(crate) max_agents: u8,
+    pub(crate) api_base: String,
+    pub(crate) api_key_env: String,
+    pub(crate) model: String,
+    pub(crate) provider_type: String,
+    pub(crate) spawned_tx: Option<tokio::sync::mpsc::UnboundedSender<super::SpawnedChild>>,
+    pub(crate) agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
 }
 
 /// Notification sent when an agent message arrives on the socket.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentMessageNotification {
-    pub from_id: String,
-    pub message: String,
+    pub(crate) from_id: String,
+    pub(crate) message: String,
 }
 
 impl Tool for SpawnAgentTool {
