@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
-pub struct GrepTool;
+pub(crate) struct GrepTool;
 
 impl Tool for GrepTool {
     fn name(&self) -> &str {

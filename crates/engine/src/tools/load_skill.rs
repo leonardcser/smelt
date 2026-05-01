@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub struct LoadSkillTool {
+pub(crate) struct LoadSkillTool {
     pub loader: Arc<SkillLoader>,
 }
 

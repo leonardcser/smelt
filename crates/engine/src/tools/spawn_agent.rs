@@ -7,7 +7,7 @@ use tokio::sync::broadcast::error::RecvError;
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(600);
 const CHILD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
-pub struct SpawnAgentTool {
+pub(crate) struct SpawnAgentTool {
     pub scope: String,
     pub my_pid: u32,
     pub depth: u8,
@@ -22,7 +22,7 @@ pub struct SpawnAgentTool {
 
 /// Notification sent when an agent message arrives on the socket.
 #[derive(Clone, Debug)]
-pub struct AgentMessageNotification {
+pub(crate) struct AgentMessageNotification {
     pub from_id: String,
     pub message: String,
 }

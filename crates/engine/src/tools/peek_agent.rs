@@ -2,7 +2,7 @@ use super::{str_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub struct PeekAgentTool {
+pub(crate) struct PeekAgentTool {
     pub my_id: String,
 }
 

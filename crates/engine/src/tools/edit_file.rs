@@ -5,7 +5,7 @@ use super::{
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub struct EditFileTool {
+pub(crate) struct EditFileTool {
     pub files: FileStateCache,
 }
 
