@@ -199,7 +199,7 @@ pub fn prune_dead() {
 /// Check if `pid` is an ancestor of `root_pid` by walking parent_pid chains.
 /// Reads registry entries on each step. Returns true if the chain reaches
 /// `root_pid` within 10 hops.
-pub fn is_in_tree(pid: u32, root_pid: u32) -> bool {
+pub(crate) fn is_in_tree(pid: u32, root_pid: u32) -> bool {
     let mut current = pid;
     for _ in 0..10 {
         if current == root_pid {
