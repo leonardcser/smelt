@@ -73,6 +73,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|_, p: String| Ok(Path::new(&p).is_absolute()))?,
     )?;
 
+    // `smelt.path.config_dir()` — `~/.config/smelt` (or the
+    // platform-specific equivalent). Resolved through the engine's
+    // path helper so headless and tui agree on the lookup.
+    path_tbl.set(
+        "config_dir",
+        lua.create_function(|_, ()| Ok(to_string(crate::config::config_dir())))?,
+    )?;
+
+    // `smelt.path.commands_dir()` — `~/.config/smelt/commands`. Used
+    // by the custom-commands plugin to scan for user-defined `/foo`
+    // markdown templates at startup.
+    path_tbl.set(
+        "commands_dir",
+        lua.create_function(|_, ()| Ok(to_string(crate::config::config_dir().join("commands"))))?,
+    )?;
+
     smelt.set("path", path_tbl)?;
     Ok(())
 }

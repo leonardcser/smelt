@@ -66,6 +66,12 @@ pub(crate) struct RegisteredCommand {
     /// `while_busy = false` so the dispatcher rejects them with
     /// `cannot run /name while agent is working` instead of queueing.
     pub(crate) while_busy: bool,
+    /// Should this command queue as a regular message when invoked
+    /// while the agent is mid-turn? Defaults to `false`. User-defined
+    /// custom commands (which spawn their own turn) opt in so the
+    /// dispatcher silently defers them until the current turn ends
+    /// instead of erroring or running mid-turn.
+    pub(crate) queue_when_busy: bool,
     /// May this command be invoked as a startup argument
     /// (`smelt /name`)? Defaults to `false`; plugins that open a UI
     /// useful at launch (`/resume`, `/settings`) opt in.
@@ -623,6 +629,19 @@ impl LuaRuntime {
             .map(|c| !c.while_busy)
     }
 
+    /// True if the registered command opted into `queue_when_busy`,
+    /// meaning the dispatcher should defer it to after the current
+    /// turn instead of running it mid-turn or erroring. False for
+    /// unregistered commands or commands without the opt-in.
+    pub(crate) fn command_queues_when_busy(&self, name: &str) -> bool {
+        self.shared
+            .commands
+            .lock()
+            .ok()
+            .and_then(|m| m.get(name).map(|c| c.queue_when_busy))
+            .unwrap_or(false)
+    }
+
     /// Whether the registered command opted into `smelt /name` startup
     /// invocation. `Some(true/false)` if registered, `None` otherwise.
     pub(crate) fn command_startup_ok(&self, name: &str) -> Option<bool> {
@@ -916,6 +935,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/simplify.lua"),
     ),
     (
+        "smelt.plugins.custom_commands",
+        include_str!("../../../../runtime/lua/smelt/plugins/custom_commands.lua"),
+    ),
+    (
         "smelt.colorschemes.default",
         include_str!("../../../../runtime/lua/smelt/colorschemes/default.lua"),
     ),
@@ -946,6 +969,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.compact",
     "smelt.plugins.reflect",
     "smelt.plugins.simplify",
+    "smelt.plugins.custom_commands",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

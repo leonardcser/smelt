@@ -26,6 +26,7 @@ mod mode;
 mod model;
 mod notebook;
 mod os;
+mod parse;
 mod path;
 mod permissions;
 mod process;
@@ -87,6 +88,7 @@ impl LuaRuntime {
         shell::register(lua, &smelt)?;
         agent::register(lua, &smelt)?;
         permissions::register(lua, &smelt)?;
+        parse::register(lua, &smelt)?;
         path::register(lua, &smelt)?;
         fs::register(lua, &smelt)?;
         os::register(lua, &smelt)?;

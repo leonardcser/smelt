@@ -114,14 +114,13 @@ impl TuiApp {
         &mut self,
         cmd: crate::custom_commands::CustomCommand,
     ) -> TurnState {
-        // Ingress: custom command bodies may inline file contents via
-        // {file:...} substitutions, so scrub before the content lands in
-        // history or is dispatched to the engine.
-        let evaluated = crate::custom_commands::evaluate(&cmd.body);
+        // Body comes pre-rendered from Lua (frontmatter stripped, exec
+        // blocks evaluated, extra args appended). Apply redaction
+        // before history / engine dispatch.
         let evaluated = if self.core.config.settings.redact_secrets {
-            engine::redact::redact(&evaluated)
+            engine::redact::redact(&cmd.body)
         } else {
-            evaluated
+            cmd.body.clone()
         };
         let display = format!("/{}", cmd.name);
 

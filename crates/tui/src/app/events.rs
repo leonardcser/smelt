@@ -189,14 +189,9 @@ impl TuiApp {
                         // Empty submit with queued messages: pop and send the
                         // oldest one immediately.
                         let queued = self.queued_messages.remove(0);
-                        if let Some(cmd) = crate::custom_commands::resolve(queued.trim()) {
-                            let turn = self.begin_custom_command_turn(cmd);
-                            self.agent = Some(turn);
-                        } else {
-                            let outcome = self.process_input(&queued);
-                            let content = Content::text(queued.clone());
-                            self.apply_input_outcome(outcome, content, &queued);
-                        }
+                        let outcome = self.process_input(&queued);
+                        let content = Content::text(queued.clone());
+                        self.apply_input_outcome(outcome, content, &queued);
                     }
                 }
                 // Restore stash unless a dialog was opened (it will restore on close).
@@ -721,13 +716,10 @@ impl TuiApp {
             CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }
-        if dispatch_input.starts_with('/') {
-            if let Some(cmd) = crate::custom_commands::resolve(&dispatch_input) {
-                return InputOutcome::CustomCommand(Box::new(cmd));
-            }
-            if crate::completer::Completer::is_command(&dispatch_input) {
-                return InputOutcome::Continue;
-            }
+        if dispatch_input.starts_with('/')
+            && crate::completer::Completer::is_command(&dispatch_input)
+        {
+            return InputOutcome::Continue;
         }
         // Skip starting agent for shell escapes, but NOT for pasted content
         if trimmed.starts_with('!') && !is_from_paste {
