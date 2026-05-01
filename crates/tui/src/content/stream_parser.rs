@@ -512,7 +512,7 @@ impl StreamParser {
         self.finalize_active_tools_as(history, ToolStatus::Err);
     }
 
-    pub fn finalize_active_tools_as(&mut self, history: &mut BlockHistory, status: ToolStatus) {
+    fn finalize_active_tools_as(&mut self, history: &mut BlockHistory, status: ToolStatus) {
         self.finish_all_active_agents(history);
         let tools: Vec<ActiveTool> = self.active_tools.drain(..).collect();
         for tool in tools {
@@ -740,7 +740,7 @@ impl StreamParser {
         history.set_status(active.block_id, Status::Done);
     }
 
-    pub fn finish_all_active_agents(&mut self, history: &mut BlockHistory) {
+    fn finish_all_active_agents(&mut self, history: &mut BlockHistory) {
         let ids: Vec<String> = self
             .active_agents
             .iter()

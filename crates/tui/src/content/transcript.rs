@@ -54,7 +54,7 @@ impl TranscriptSnapshot {
     /// Extract copy text from a rectangular range of display cells,
     /// respecting `SpanMeta`. Non-selectable cells are skipped;
     /// `copy_as` substitutions are applied; rows are joined with `\n`.
-    pub fn copy_range(
+    fn copy_range(
         &self,
         start_row: usize,
         start_col: usize,

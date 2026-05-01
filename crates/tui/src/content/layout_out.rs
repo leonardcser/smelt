@@ -192,7 +192,7 @@ impl SpanCollector {
         self.cur_style.clone()
     }
 
-    pub(crate) fn apply_style(&mut self, style: SpanStyle) {
+    fn apply_style(&mut self, style: SpanStyle) {
         self.cur_style = style;
     }
 
