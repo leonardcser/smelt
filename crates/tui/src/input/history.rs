@@ -1,7 +1,7 @@
 use crate::config;
 use std::path::PathBuf;
 
-pub struct History {
+pub(crate) struct History {
     entries: Vec<String>,
     cursor: usize,
     draft: String,
