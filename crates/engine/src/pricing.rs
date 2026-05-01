@@ -81,7 +81,7 @@ static CATALOG: OnceLock<HashMap<(String, String), ModelPricing>> = OnceLock::ne
 
 /// Fetch pricing from models.dev in the background. Call once at startup.
 /// Safe to call multiple times — only the first call populates the catalog.
-pub fn spawn_catalog_fetch(client: reqwest::Client) {
+pub(crate) fn spawn_catalog_fetch(client: reqwest::Client) {
     if CATALOG.get().is_some() {
         return;
     }
