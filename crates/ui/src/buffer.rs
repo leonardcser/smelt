@@ -6,12 +6,13 @@
 //! text are all extmarks tagged by namespace — one storage shape,
 //! queried per-line at render time.
 //!
-//! The convenience methods `add_highlight`, `set_decoration`, and
-//! `set_virtual_text` create extmarks in well-known namespaces
-//! (`Buffer::NS_HIGHLIGHTS`, `NS_DECORATIONS`, `NS_VIRT_TEXT`). Code
-//! that wants nvim's full extmark ergonomics (custom namespace,
-//! `clear_namespace`, IDs) calls `create_namespace` + `set_extmark`
-//! directly.
+//! The convenience methods `add_highlight` and `set_decoration` create
+//! extmarks in well-known namespaces (`Buffer::NS_HIGHLIGHTS`,
+//! `NS_DECORATIONS`). Code that wants nvim's full extmark ergonomics
+//! (custom namespace, `clear_namespace`, IDs) calls `create_namespace`
+//! + `set_extmark` directly. Virt-text always goes through the latter
+//! shape (`ExtmarkOpts::virt_text`); production has no virt-text
+//! convenience method.
 
 use crate::BufId;
 use crossterm::style::Color;
@@ -295,8 +296,10 @@ impl Buffer {
     /// Default namespace name for line decorations created via
     /// `set_decoration`.
     pub const NS_DECORATIONS: &'static str = "buffer.decorations";
-    /// Default namespace name for virtual text created via
-    /// `set_virtual_text`.
+    /// Default namespace name for virtual text created via the
+    /// test-only `set_virtual_text` helper. Production virt-text is
+    /// stored under per-feature namespaces (`completer`, `GhostText`,
+    /// …) reached through `set_extmark` + `ExtmarkOpts::virt_text`.
     pub const NS_VIRT_TEXT: &'static str = "buffer.virt_text";
 
     pub fn new(id: BufId, _opts: BufCreateOpts) -> Self {
@@ -576,7 +579,8 @@ impl Buffer {
         &DEFAULT
     }
 
-    pub fn set_virtual_text(&mut self, line: usize, text: String, hl_group: Option<String>) {
+    #[cfg(test)]
+    pub(crate) fn set_virtual_text(&mut self, line: usize, text: String, hl_group: Option<String>) {
         // One virt_text per line in the convenience namespace.
         let ns = self.ns_virt_text;
         let to_remove: Vec<ExtmarkId> = self
@@ -591,7 +595,8 @@ impl Buffer {
         self.set_extmark(ns, line, 0, ExtmarkOpts::virt_text(text, hl_group));
     }
 
-    pub fn clear_virtual_text(&mut self, line: usize) {
+    #[cfg(test)]
+    pub(crate) fn clear_virtual_text(&mut self, line: usize) {
         let ns = self.ns_virt_text;
         let to_remove: Vec<ExtmarkId> = self
             .extmarks(ns)
@@ -610,7 +615,7 @@ impl Buffer {
     /// within a namespace, BTreeMap iteration is by extmark id —
     /// insertion order — so virt_texts from a single source paint in
     /// registration order. Mirrors the `highlights_at` precedent.
-    pub fn virtual_text_at(&self, line: usize) -> Vec<VirtualText> {
+    pub(crate) fn virtual_text_at(&self, line: usize) -> Vec<VirtualText> {
         let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
         ns_ids.sort_by_key(|n| n.0);
         let mut out = Vec::new();
