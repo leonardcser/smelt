@@ -97,6 +97,58 @@ pub(crate) fn size(path: impl AsRef<Path>) -> io::Result<u64> {
     Ok(std::fs::metadata(path)?.len())
 }
 
+/// One match emitted by [`glob`]: the file's modification time plus
+/// its display path. Callers sort or truncate as they like.
+pub(crate) struct GlobMatch {
+    pub mtime: std::time::SystemTime,
+    pub path: String,
+}
+
+/// Walk `search_dir` (or `.` when empty) honouring `.gitignore` and
+/// emit files whose path *relative to `search_dir`* matches `pattern`.
+/// Stops once `max` matches accumulate. Returns the matches unsorted —
+/// the caller decides ordering.
+pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<GlobMatch>, String> {
+    let matcher = match globset::Glob::new(pattern) {
+        Ok(g) => g.compile_matcher(),
+        Err(e) => return Err(format!("invalid glob pattern: {e}")),
+    };
+    let dir = if search_dir.is_empty() {
+        "."
+    } else {
+        search_dir
+    };
+    let walker = ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .git_ignore(true)
+        .build();
+
+    let mut out = Vec::new();
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let relative = path.strip_prefix(dir).unwrap_or(path);
+        if !matcher.is_match(relative) {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(mtime) = meta.modified() {
+                out.push(GlobMatch {
+                    mtime,
+                    path: path.display().to_string(),
+                });
+            }
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

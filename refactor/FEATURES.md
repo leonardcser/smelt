@@ -81,7 +81,7 @@ to invoke_ the feature.
 | `run_in_background` (bash flag, not a tool) | `plugins/background_commands.lua` (overrides bash registration) | P5.b → flag on `tools/bash.lua` | working |
 | `read_process_output` | `plugins/background_commands.lua` | P5.b                                                | working |
 | `stop_process`        | `plugins/background_commands.lua` | P5.b                                                | working |
-| `glob`                | `engine/tools/glob.rs`            | P5.b                                                | working |
+| `glob`                | `runtime/lua/smelt/tools/glob.lua` | P5.b — landed; composes `smelt.fs.glob`            | working |
 | `grep`                | `engine/tools/grep.rs`            | P5.b                                                | working |
 | `web_fetch`           | `engine/tools/web_fetch.rs`       | P5.b                                                | working |
 | `web_search`          | `engine/tools/web_search.rs`      | P5.b                                                | working |
@@ -276,7 +276,7 @@ to invoke_ the feature.
 | `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/dispatch.rs`               | thin alias over `smelt.timer.set`          | working        |
 | `smelt.timer.set/every/cancel` namespace                | `lua/api/dispatch.rs` + `app/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |
 | `smelt.path` (`normalize / canonical / relative / expand / join / parent / basename / extension / is_absolute`) | `lua/api/path.rs` + `tui/path.rs` | P3.a + P3.c (landed `de7fb87`) | working |
-| `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size / glob`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.os` (`getenv / setenv / unsetenv / platform / arch / tempdir / home / cwd / set_cwd / pid`) | `lua/api/os.rs` | P3.c (landed this session) | working |
 | `smelt.grep` (`run(pattern, path, opts)` over ripgrep — content / files_with_matches / count modes; case / multiline / context / glob / type / timeout) | `lua/api/grep.rs` + `tui/grep.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.http` (`get(url, opts)` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` | P3.a + P3.c (landed this session) | working |

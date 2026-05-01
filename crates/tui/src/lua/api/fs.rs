@@ -129,6 +129,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    fs.set(
+        "glob",
+        lua.create_function(|_, args: (String, Option<String>, Option<mlua::Table>)| {
+            let (pattern, path, opts) = args;
+            let dir = path.unwrap_or_default();
+            let max = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<u64>>("max").ok().flatten())
+                .map(|n| n as usize)
+                .unwrap_or(200);
+            match crate::fs::glob(&pattern, &dir, max) {
+                Ok(mut matches) => {
+                    matches.sort_by_key(|m| std::cmp::Reverse(m.mtime));
+                    let paths: Vec<String> = matches.into_iter().map(|m| m.path).collect();
+                    Ok((Some(paths), None))
+                }
+                Err(err) => Ok((None, Some(err))),
+            }
+        })?,
+    )?;
+
     smelt.set("fs", fs)?;
     Ok(())
 }

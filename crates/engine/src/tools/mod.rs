@@ -3,7 +3,6 @@ mod bash;
 mod edit_file;
 
 mod file_state;
-mod glob;
 mod grep;
 mod list_agents;
 mod load_skill;
@@ -57,7 +56,6 @@ pub(crate) use bash::BashTool;
 pub use bash::{check_interactive, check_shell_background_operator};
 pub(crate) use edit_file::EditFileTool;
 
-pub(crate) use glob::GlobTool;
 pub(crate) use grep::GrepTool;
 pub(crate) use notebook::NotebookEditTool;
 pub use notebook::NotebookRenderData;
@@ -544,7 +542,6 @@ pub(crate) fn build_tools(
         files: files.clone(),
     }));
     r.register(Box::new(BashTool));
-    r.register(Box::new(GlobTool));
     r.register(Box::new(GrepTool));
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(WebSearchTool));

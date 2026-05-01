@@ -981,6 +981,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.colorschemes.default",
         include_str!("../../../../runtime/lua/smelt/colorschemes/default.lua"),
     ),
+    (
+        "smelt.tools.glob",
+        include_str!("../../../../runtime/lua/smelt/tools/glob.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1009,6 +1013,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.reflect",
     "smelt.plugins.simplify",
     "smelt.plugins.custom_commands",
+    "smelt.tools.glob",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`
