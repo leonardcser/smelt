@@ -53,16 +53,16 @@ pub use provider::{Provider, ProviderKind};
 pub use skills::SkillLoader;
 
 /// Context for rendering the system prompt template.
-pub struct PromptContext<'a> {
-    pub cwd: &'a std::path::Path,
-    pub interactive: bool,
-    pub write_access: bool,
-    pub multi_agent: Option<&'a AgentPromptConfig>,
-    pub skills_section: Option<&'a str>,
-    pub extra_instructions: Option<&'a str>,
+struct PromptContext<'a> {
+    cwd: &'a std::path::Path,
+    interactive: bool,
+    write_access: bool,
+    multi_agent: Option<&'a AgentPromptConfig>,
+    skills_section: Option<&'a str>,
+    extra_instructions: Option<&'a str>,
 }
 
-pub fn build_system_prompt_full(
+pub(crate) fn build_system_prompt_full(
     mode: protocol::Mode,
     cwd: &std::path::Path,
     extra_instructions: Option<&str>,
@@ -223,7 +223,7 @@ impl EngineConfig {
     /// updates the active turn's provider but does not propagate back here,
     /// so a `/btw` arriving in the same turn will use the pre-switch primary.
     /// The next `SetModel` between turns re-syncs.
-    pub fn aux_or_primary(&self, task: AuxiliaryTask) -> RequestModelConfig {
+    pub(crate) fn aux_or_primary(&self, task: AuxiliaryTask) -> RequestModelConfig {
         let slot = match task {
             AuxiliaryTask::Title => &self.auxiliary.title,
             AuxiliaryTask::Prediction => &self.auxiliary.prediction,
