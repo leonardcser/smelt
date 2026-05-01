@@ -12,15 +12,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn toggle(self) -> Self {
-        match self {
-            Mode::Normal => Mode::Plan,
-            Mode::Plan => Mode::Apply,
-            Mode::Apply => Mode::Yolo,
-            Mode::Yolo => Mode::Normal,
-        }
-    }
-
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "normal" => Some(Mode::Normal),
