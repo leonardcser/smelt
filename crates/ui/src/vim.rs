@@ -191,10 +191,10 @@ pub struct VimWindowState {
     /// Byte position of the Visual-mode anchor (where the most recent
     /// `v`/`V` was pressed). Only meaningful while
     /// `mode ∈ {Visual, VisualLine}`; carries a stale value otherwise.
-    pub visual_anchor: usize,
+    pub(crate) visual_anchor: usize,
     /// Last `f`/`t`/`F`/`T` target, replayed by `;` (same direction) or
     /// `,` (reversed).
-    pub last_find: Option<(FindKind, char)>,
+    pub(crate) last_find: Option<(FindKind, char)>,
     /// In-flight sub-state for multi-key sequences (operator pending, find
     /// pending, text-object pending). Reset to `Ready` at command boundaries.
     pub(crate) sub: SubState,

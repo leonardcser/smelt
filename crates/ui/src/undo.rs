@@ -58,7 +58,7 @@ impl UndoHistory {
     }
 
     /// Pop the most recent redo, stashing `current` back onto the undo stack.
-    pub fn redo(&mut self, current: UndoEntry) -> Option<UndoEntry> {
+    pub(crate) fn redo(&mut self, current: UndoEntry) -> Option<UndoEntry> {
         let entry = self.redo.pop()?;
         self.undo.push(current);
         Some(entry)
