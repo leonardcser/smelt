@@ -165,21 +165,14 @@ impl ToolRegistry {
     }
 
     pub(crate) fn register_mcp(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(ToolEntry {
-            tool,
-            is_mcp: true,
-        });
+        self.tools.push(ToolEntry { tool, is_mcp: true });
     }
 
     pub(crate) fn get(&self, name: &str) -> Option<&ToolEntry> {
         self.tools.iter().find(|e| e.tool.name() == name)
     }
 
-    pub(crate) fn definitions(
-        &self,
-        permissions: &Permissions,
-        mode: Mode,
-    ) -> Vec<ToolDefinition> {
+    pub(crate) fn definitions(&self, permissions: &Permissions, mode: Mode) -> Vec<ToolDefinition> {
         self.tools
             .iter()
             .filter(|e| {
