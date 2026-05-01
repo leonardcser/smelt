@@ -133,11 +133,6 @@ pub(crate) trait Tool: Send + Sync {
         vec![]
     }
 
-    /// Whether this tool is an MCP tool (uses `mcp` permission ruleset).
-    fn is_mcp(&self) -> bool {
-        false
-    }
-
     /// Pre-flight validation run before showing the permission dialog.
     /// Return `Some(error)` to skip the dialog and fail the tool immediately.
     fn preflight(&self, _args: &HashMap<String, Value>) -> Option<String> {
@@ -145,9 +140,16 @@ pub(crate) trait Tool: Send + Sync {
     }
 }
 
+pub(crate) struct ToolEntry {
+    pub(crate) tool: Box<dyn Tool>,
+    /// MCP tools use the `mcp` permission ruleset rather than the per-tool
+    /// `tools` ruleset; tracked here so the trait stays dispatch-only.
+    pub(crate) is_mcp: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<ToolEntry>,
 }
 
 impl ToolRegistry {
@@ -156,14 +158,21 @@ impl ToolRegistry {
     }
 
     pub(crate) fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(tool);
+        self.tools.push(ToolEntry {
+            tool,
+            is_mcp: false,
+        });
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools
-            .iter()
-            .find(|t| t.name() == name)
-            .map(|t| t.as_ref())
+    pub(crate) fn register_mcp(&mut self, tool: Box<dyn Tool>) {
+        self.tools.push(ToolEntry {
+            tool,
+            is_mcp: true,
+        });
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&ToolEntry> {
+        self.tools.iter().find(|e| e.tool.name() == name)
     }
 
     pub(crate) fn definitions(
@@ -173,18 +182,18 @@ impl ToolRegistry {
     ) -> Vec<ToolDefinition> {
         self.tools
             .iter()
-            .filter(|t| {
-                if t.is_mcp() {
-                    permissions.check_mcp(mode, t.name()) != Decision::Deny
+            .filter(|e| {
+                if e.is_mcp {
+                    permissions.check_mcp(mode, e.tool.name()) != Decision::Deny
                 } else {
-                    permissions.check_tool(mode, t.name()) != Decision::Deny
+                    permissions.check_tool(mode, e.tool.name()) != Decision::Deny
                 }
             })
-            .map(|t| {
+            .map(|e| {
                 ToolDefinition::new(FunctionSchema {
-                    name: t.name().into(),
-                    description: t.description().into(),
-                    parameters: t.parameters(),
+                    name: e.tool.name().into(),
+                    description: e.tool.description().into(),
+                    parameters: e.tool.parameters(),
                 })
             })
             .collect()
