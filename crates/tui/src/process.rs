@@ -8,15 +8,18 @@
 //! that surface stays put. The future `tui::subprocess` module will
 //! cover bidirectional event-channel children (sub-agents, MCP).
 //!
-//! Streaming `spawn(cmd, args, opts) -> Handle` (group / kill / cancel
-//! on the handle) lands when the engine `tools/background.rs` registry
-//! folds in alongside `bash` / process-tool migrations to Lua in P5.b.
+//! `run_streaming` is the async counterpart used by the bash tool —
+//! drives the child via `tokio::process`, fires a per-line callback
+//! as stdout/stderr arrive, returns aggregated output. The Lua-side
+//! `bash` tool calls this through `smelt.process.run_streaming` and
+//! parks its coroutine on `smelt.task.wait`.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// Options accepted by [`run`]. Defaults: 30s timeout, inherit env,
 /// no stdin, capture stdout+stderr.
@@ -112,6 +115,116 @@ where
         }
     }
 }
+
+/// Result of [`run_streaming`]. Mirrors [`Output`] without the
+/// stdout/stderr split — streaming aggregates both into one buffer
+/// since per-line callbacks already saw them in arrival order.
+#[derive(Debug, Clone)]
+pub(crate) struct StreamOutput {
+    /// stdout + stderr lines joined by '\n' in arrival order.
+    pub(crate) content: String,
+    pub(crate) is_error: bool,
+    pub(crate) timed_out: bool,
+}
+
+/// Spawn `sh -c command` and stream stdout+stderr lines through
+/// `on_line` as they arrive. Returns aggregated output once the child
+/// exits or the timeout expires. The child is in its own process
+/// group so `kill_process_group` semantics are available to a future
+/// cancel path.
+pub(crate) async fn run_streaming(
+    command: &str,
+    timeout: Duration,
+    mut on_line: impl FnMut(String),
+) -> StreamOutput {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return StreamOutput {
+                content: e.to_string(),
+                is_error: true,
+                timed_out: false,
+            };
+        }
+    };
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+    let mut output = String::new();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+
+    loop {
+        if stdout_done && stderr_done {
+            break;
+        }
+        tokio::select! {
+            line = stdout_reader.next_line(), if !stdout_done => {
+                match line {
+                    Ok(Some(line)) => {
+                        on_line(line.clone());
+                        if !output.is_empty() { output.push('\n'); }
+                        output.push_str(&line);
+                    }
+                    _ => stdout_done = true,
+                }
+            }
+            line = stderr_reader.next_line(), if !stderr_done => {
+                match line {
+                    Ok(Some(line)) => {
+                        on_line(line.clone());
+                        if !output.is_empty() { output.push('\n'); }
+                        output.push_str(&line);
+                    }
+                    _ => stderr_done = true,
+                }
+            }
+            _ = &mut deadline => {
+                kill_process_group(&child);
+                return StreamOutput {
+                    content: format!("timed out after {:.0}s", timeout.as_secs_f64()),
+                    is_error: true,
+                    timed_out: true,
+                };
+            }
+        }
+    }
+
+    let status = child.wait().await;
+    let is_error = status.map(|s| !s.success()).unwrap_or(true);
+    StreamOutput {
+        content: output,
+        is_error,
+        timed_out: false,
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(child: &tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        unsafe {
+            // Negative pid → process group; SIGTERM.
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_child: &tokio::process::Child) {}
 
 #[cfg(test)]
 mod tests {

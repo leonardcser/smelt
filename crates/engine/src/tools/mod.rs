@@ -1,5 +1,4 @@
 pub(crate) mod background;
-mod bash;
 pub mod file_state;
 pub mod notebook;
 pub(crate) mod result_dedup;
@@ -10,12 +9,11 @@ pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
 
 use crate::cancel::CancellationToken;
 use crate::provider::{FunctionSchema, ToolDefinition};
-use protocol::{EngineEvent, ToolHooks};
+use protocol::ToolHooks;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Kill the entire process group spawned by a child.
@@ -36,8 +34,6 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 }
 
 pub use background::{ProcessInfo, ProcessRegistry};
-pub(crate) use bash::BashTool;
-pub use bash::{check_interactive, check_shell_background_operator};
 
 pub use notebook::NotebookRenderData;
 pub(crate) use spawn_agent::AgentMessageNotification;
@@ -79,8 +75,6 @@ impl ToolResult {
 /// gymnastics — this enables side calls like
 /// `smelt.tools.call("bash", args)` from Lua plugin tools.
 pub(crate) struct ToolContext {
-    pub(crate) event_tx: mpsc::UnboundedSender<EngineEvent>,
-    pub(crate) call_id: String,
     pub(crate) cancel: CancellationToken,
     pub(crate) session_dir: std::path::PathBuf,
 }
@@ -328,17 +322,6 @@ pub(crate) fn bool_arg(args: &HashMap<String, Value>, key: &str) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-const MAX_TIMEOUT_MS: u64 = 600_000;
-
-pub(crate) fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> Duration {
-    let ms = args
-        .get("timeout_ms")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(default_secs * 1000)
-        .min(MAX_TIMEOUT_MS);
-    Duration::from_millis(ms)
-}
-
 /// Acquire an exclusive, non-blocking advisory lock on the given file path.
 /// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
 /// locked by another process (EWOULDBLOCK) or on any other I/O error.
@@ -410,7 +393,6 @@ pub(crate) fn build_tools(
     files: FileStateCache,
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
-    r.register(Box::new(BashTool));
     let _ = files;
 
     // Multi-agent tools (conditionally registered). `list_agents`,

@@ -313,6 +313,16 @@ impl EventInjector {
             exit_code,
         });
     }
+
+    /// Stream a chunk of output for an in-flight tool call. Used by
+    /// the tui-side bash tool to emit `EngineEvent::ToolOutput` per
+    /// line as a child process runs, matching the streaming UX of
+    /// the legacy engine-side `BashTool`.
+    pub fn inject_tool_output(&self, call_id: String, chunk: String) {
+        let _ = self
+            .event_tx
+            .send(EngineEvent::ToolOutput { call_id, chunk });
+    }
 }
 
 /// Start the engine. Returns a handle for bidirectional communication.

@@ -1360,9 +1360,7 @@ impl<'a> Turn<'a> {
         let contexts: Vec<_> = plan
             .slots
             .iter()
-            .map(|s| ToolContext {
-                event_tx: self.event_tx.clone(),
-                call_id: s.tc.id.clone(),
+            .map(|_| ToolContext {
                 cancel: self.cancel.clone(),
                 session_dir: self.session_dir.clone(),
             })
@@ -1645,9 +1643,8 @@ impl<'a> Turn<'a> {
                     }
                     UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
                         if dispatcher.contains(&tool_name) {
+                            let _ = parent_call_id;
                             let ctx = ToolContext {
-                                event_tx: self.event_tx.clone(),
-                                call_id: parent_call_id,
                                 cancel: self.cancel.clone(),
                                 session_dir: self.session_dir.clone(),
                             };

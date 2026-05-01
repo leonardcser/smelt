@@ -353,6 +353,18 @@ pub(crate) struct LuaShared {
     /// Without this deferral, a Lua callback that calls
     /// `smelt.ui.dialog.open` would collide with the ui borrow.
     pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
+    /// Cross-thread JSON inbox mirroring `task_inbox`. tokio tasks
+    /// push `(external_id, json)` tuples; the main loop drains
+    /// them into `task_inbox` (as `ExternalResolvedJson`) before
+    /// pumping. Wrapped in `Arc<Mutex<...>>` so the
+    /// `LuaResumeSink` clone the tokio task holds is `Send`.
+    pub(crate) json_inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
+    /// Sender that wakes the main loop when a tokio task pushes a
+    /// JSON resume payload from outside the main thread. The
+    /// receiver lives on `TuiApp`; its `select!` arm flushes the
+    /// inbox and renders. Optional so `LuaShared::default()` stays
+    /// trivially constructable.
+    pub(crate) wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 /// A callback invocation recorded by the ui dispatch path while
@@ -379,6 +391,14 @@ pub(crate) enum TaskEvent {
         external_id: u64,
         value: mlua::RegistryKey,
     },
+    /// Cross-thread resume — pushed by tokio tasks (e.g. streaming
+    /// subprocess spawn) that need to resume a parked Lua coroutine
+    /// from outside the main thread. JSON is `Send`; the pump
+    /// converts it to an `mlua::Value` on the main thread.
+    ExternalResolvedJson {
+        external_id: u64,
+        value: serde_json::Value,
+    },
 }
 
 impl Default for LuaShared {
@@ -395,6 +415,44 @@ impl Default for LuaShared {
             tasks: Mutex::new(LuaTaskRuntime::new()),
             task_inbox: Mutex::new(Vec::new()),
             pending_invocations: Mutex::new(Vec::new()),
+            json_inbox: Arc::new(Mutex::new(Vec::new())),
+            wakeup_tx: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl LuaShared {
+    /// Build a `Send`-safe handle that lets a tokio task push a
+    /// JSON resume payload and wake the main loop. `Arc<LuaShared>`
+    /// itself is `!Send` (it owns `mlua::Thread`s inside `tasks`);
+    /// the resume sink is the narrowest cross-thread surface.
+    pub(crate) fn resume_sink(&self) -> LuaResumeSink {
+        LuaResumeSink {
+            inbox: Arc::clone(&self.json_inbox),
+            wakeup: self.wakeup_tx.get().cloned(),
+        }
+    }
+}
+
+/// Send-safe handle a tokio task uses to resume a parked Lua
+/// coroutine from outside the main thread. Stores into a
+/// `LuaShared.json_inbox` mirror; the main loop drains that into
+/// the runtime's `task_inbox` before pumping.
+#[derive(Clone)]
+pub(crate) struct LuaResumeSink {
+    inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
+    wakeup: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+}
+
+impl LuaResumeSink {
+    /// Push a JSON resume payload. Wakes the main loop so the
+    /// runtime pumps the inbox on the next iteration.
+    pub(crate) fn resolve_json(&self, external_id: u64, value: serde_json::Value) {
+        if let Ok(mut inbox) = self.inbox.lock() {
+            inbox.push((external_id, value));
+        }
+        if let Some(ref tx) = self.wakeup {
+            let _ = tx.send(());
         }
     }
 }
@@ -440,6 +498,14 @@ impl LuaRuntime {
         }
 
         rt
+    }
+
+    /// Borrow the shared state. Used to clone `Arc<LuaShared>` into
+    /// tokio tasks (e.g. streaming subprocess spawn) that need to
+    /// post `TaskEvent::ExternalResolvedJson` from outside the main
+    /// thread.
+    pub(crate) fn shared(&self) -> &Arc<LuaShared> {
+        &self.shared
     }
 
     /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
@@ -1037,6 +1103,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.exit_plan_mode",
         include_str!("../../../../runtime/lua/smelt/tools/exit_plan_mode.lua"),
     ),
+    (
+        "smelt.tools.bash",
+        include_str!("../../../../runtime/lua/smelt/tools/bash.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1078,6 +1148,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.read_file",
     "smelt.tools.notebook_edit",
     "smelt.tools.web_fetch",
+    "smelt.tools.bash",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

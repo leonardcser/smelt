@@ -103,6 +103,46 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             },
         )?,
     )?;
+    // smelt.process.run_streaming(task_id, call_id, command, timeout_ms)
+    //
+    // Spawns `sh -c command` on a tokio task, streams stdout+stderr
+    // via `EngineEvent::ToolOutput` as lines arrive, and on exit
+    // pushes `TaskEvent::ExternalResolvedJson` so a Lua coroutine
+    // parked on `smelt.task.wait(task_id)` resumes with
+    // `{ content, is_error, timed_out }`. The bash tool uses this —
+    // any other streaming subprocess tool composes it the same way.
+    process_tbl.set(
+        "run_streaming",
+        lua.create_function(
+            |_, (task_id, call_id, command, timeout_ms): (u64, String, String, u64)| {
+                let pair = crate::lua::try_with_app(|app| {
+                    (
+                        app.core.engine.injector(),
+                        app.core.lua.shared().resume_sink(),
+                    )
+                });
+                let Some((injector, sink)) = pair else {
+                    return Err(mlua::Error::external(
+                        "process.run_streaming: app unavailable",
+                    ));
+                };
+                let timeout = std::time::Duration::from_millis(timeout_ms);
+                tokio::spawn(async move {
+                    let on_line = |line: String| {
+                        injector.inject_tool_output(call_id.clone(), line);
+                    };
+                    let out = process::run_streaming(&command, timeout, on_line).await;
+                    let payload = serde_json::json!({
+                        "content": out.content,
+                        "is_error": out.is_error,
+                        "timed_out": out.timed_out,
+                    });
+                    sink.resolve_json(task_id, payload);
+                });
+                Ok(())
+            },
+        )?,
+    )?;
 
     smelt.set("process", process_tbl)?;
     Ok(())

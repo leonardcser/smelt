@@ -132,6 +132,12 @@ pub struct TuiApp {
     pub(crate) input: PromptState,
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
     exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Wakeup signal from cross-thread tokio tasks (streaming
+    /// subprocess spawn, future async work) that pushed a
+    /// `TaskEvent::ExternalResolvedJson` to the Lua inbox. Drains
+    /// the inbox and renders so a parked Lua coroutine resumes
+    /// promptly.
+    lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     pub(crate) queued_messages: Vec<String>,
     /// Agent messages waiting to trigger a turn.
     pending_agent_messages: Vec<protocol::Message>,
@@ -550,8 +556,11 @@ impl TuiApp {
             )
         };
 
+        let core = core::Core::new(app_config, engine, FrontendKind::Tui, file_state);
+        let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = core.lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
-            core: core::Core::new(app_config, engine, FrontendKind::Tui, file_state),
+            core,
             transcript: crate::content::transcript::Transcript::new(),
             parser: crate::content::stream_parser::StreamParser::new(),
             transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
@@ -560,6 +569,7 @@ impl TuiApp {
             input,
             exec_rx: None,
             exec_kill: None,
+            lua_wakeup_rx,
             queued_messages: Vec::new(),
             pending_agent_messages: Vec::new(),
             runtime_approvals,
@@ -1361,6 +1371,18 @@ impl TuiApp {
                     // Don't render here — deferred to the frame timer or
                     // top-of-loop render to batch rapid engine events into
                     // fewer frames and reduce flicker.
+                }
+
+                Some(_) = self.lua_wakeup_rx.recv() => {
+                    // Drain any backlog the cross-thread sender pushed
+                    // before this wake. flush_lua_callbacks pumps the
+                    // Lua task inbox so coroutines parked on
+                    // `smelt.task.wait(id)` resume; render reflects
+                    // any state they touched.
+                    while self.lua_wakeup_rx.try_recv().is_ok() {}
+                    self.flush_lua_callbacks();
+                    self.drive_lua_tasks();
+                    self.render_normal(self.agent.is_some());
                 }
 
                 Some(ev) = async {

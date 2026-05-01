@@ -106,7 +106,7 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
 
 /// Default bash patterns that are allowed without explicit approval.
 /// Used by both permissions checking and approval pattern suggestions.
-pub(crate) const DEFAULT_BASH_ALLOW: &[&str] = &[
+pub const DEFAULT_BASH_ALLOW: &[&str] = &[
     // Directory listing & file search
     "ls *",
     "find *",

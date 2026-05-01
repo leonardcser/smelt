@@ -1,66 +1,11 @@
 -- Built-in background_commands plugin.
 --
--- Owns the `bash run_in_background=true` story end-to-end in Lua:
---   * Overrides the core `bash` tool to add the `run_in_background` flag.
---     When false (the common case) it delegates back to the core tool via
---     `smelt.tools.call`, so streaming, permissions, and timeouts come
---     for free. When true it spawns through `smelt.process.spawn_bg`
---     and returns the process id.
---   * Registers the `read_process_output` and `stop_process` tools that
---     the LLM uses to interact with backgrounded jobs.
---   * Registers the `/ps` slash-command (formerly `smelt.plugins.ps`)
---     for managing those processes from the TUI.
---
--- Acts as the canonical example of "FFI = internal API": the plugin
--- mixes plugin-tool registration, core-tool side calls, the
--- `process.*` registry, and dialog UI without any C bridging.
-
--- ── bash override ─────────────────────────────────────────────────────
-
-local BG_PARAM_DESC =
-"Run the command in the background and return a process ID. Use read_process_output to check output and stop_process to kill it."
-
-smelt.tools.register({
-  name = "bash",
-  override = true,
-  description = "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). For long-running processes set run_in_background=true. Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
-  parameters = {
-    type = "object",
-    properties = {
-      command = { type = "string", description = "Shell command to execute" },
-      description = { type = "string", description = "Short (max 10 words) description of what this command does" },
-      timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 120000, max: 600000)" },
-      run_in_background = { type = "boolean", description = BG_PARAM_DESC },
-    },
-    required = { "command" },
-  },
-  execute = function(args, ctx)
-    local command = args.command or ""
-    if args.run_in_background then
-      local err = smelt.shell.check_interactive(command)
-      if err then
-        return { content = err, is_error = true }
-      end
-      err = smelt.shell.check_background_op(command)
-      if err then
-        return { content = err, is_error = true }
-      end
-      local ok, id_or_err = pcall(smelt.process.spawn_bg, command)
-      if not ok then
-        return { content = tostring(id_or_err), is_error = true }
-      end
-      return "background process started with id: " .. id_or_err
-    end
-
-    -- Foreground delegates to the core bash tool. `run_in_background`
-    -- is stripped so the core doesn't see an unknown arg.
-    local fwd = {}
-    for k, v in pairs(args) do
-      if k ~= "run_in_background" then fwd[k] = v end
-    end
-    return smelt.tools.call("bash", fwd, ctx.call_id)
-  end,
-})
+-- Registers the `read_process_output` and `stop_process` tools that
+-- the LLM uses to interact with backgrounded jobs, plus the `/ps`
+-- slash command for managing them from the TUI. The
+-- `run_in_background` flag itself lives on `tools/bash.lua` — both
+-- the foreground streaming branch and the `spawn_bg` branch are one
+-- registration there.
 
 -- ── read_process_output ───────────────────────────────────────────────
 
