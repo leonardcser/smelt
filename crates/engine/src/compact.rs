@@ -90,9 +90,9 @@ impl CompactPhase {
 /// an unwieldy positional argument list.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CompactOptions {
-    pub injection: InitialContextInjection,
-    pub phase: CompactPhase,
-    pub reason: CompactReason,
+    pub(crate) injection: InitialContextInjection,
+    pub(crate) phase: CompactPhase,
+    pub(crate) reason: CompactReason,
 }
 
 /// Run a compaction pass against `history` (which must NOT contain the
