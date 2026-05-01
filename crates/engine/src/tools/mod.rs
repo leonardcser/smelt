@@ -1,8 +1,7 @@
 pub(crate) mod background;
 mod bash;
 pub mod file_state;
-mod notebook;
-mod read_file;
+pub mod notebook;
 pub(crate) mod result_dedup;
 mod spawn_agent;
 pub(crate) mod web_cache;
@@ -45,7 +44,6 @@ pub use bash::{check_interactive, check_shell_background_operator};
 
 pub(crate) use notebook::NotebookEditTool;
 pub use notebook::NotebookRenderData;
-pub(crate) use read_file::ReadFileTool;
 pub(crate) use spawn_agent::AgentMessageNotification;
 pub(crate) use web_fetch::WebFetchTool;
 
@@ -336,10 +334,6 @@ pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
     out
 }
 
-pub(crate) fn int_arg(args: &HashMap<String, Value>, key: &str) -> usize {
-    args.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize
-}
-
 pub(crate) fn bool_arg(args: &HashMap<String, Value>, key: &str) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
@@ -449,9 +443,6 @@ pub(crate) fn build_tools(
     files: FileStateCache,
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
-    r.register(Box::new(ReadFileTool {
-        files: files.clone(),
-    }));
     r.register(Box::new(BashTool));
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(NotebookEditTool { files }));

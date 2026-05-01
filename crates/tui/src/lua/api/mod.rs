@@ -20,6 +20,7 @@ mod grep;
 mod history;
 mod html;
 mod http;
+mod image;
 mod keymap;
 mod metrics;
 mod mode;
@@ -100,6 +101,7 @@ impl LuaRuntime {
         history::register(lua, &smelt)?;
         html::register(lua, &smelt)?;
         http::register(lua, &smelt)?;
+        image::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
         buf::register(lua, &smelt, shared)?;
         win::register(lua, &smelt, shared)?;

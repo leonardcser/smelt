@@ -9,11 +9,6 @@ use super::{
     ToolResult,
 };
 
-/// Check whether a file path looks like a Jupyter notebook.
-pub(crate) fn is_notebook(path: &str) -> bool {
-    path.to_lowercase().ends_with(".ipynb")
-}
-
 #[derive(Debug, Clone)]
 struct NotebookCellSnapshot {
     index: usize,
@@ -56,6 +51,19 @@ impl NotebookRenderData {
             title.push_str(&format!(" id={id}"));
         }
         title
+    }
+}
+
+/// Render a notebook's cells as human-readable text with line numbers.
+/// Public wrapper for Lua tools that need the same line-numbered
+/// formatted-cell output the engine `read_file` tool produces for
+/// `.ipynb` paths.
+pub fn render_notebook_text(path: &str, offset: usize, limit: usize) -> Result<String, String> {
+    let r = read_notebook(path, offset, limit);
+    if r.is_error {
+        Err(r.content)
+    } else {
+        Ok(r.content)
     }
 }
 

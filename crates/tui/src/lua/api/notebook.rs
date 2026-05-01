@@ -57,6 +57,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    // `smelt.notebook.read(path, offset, limit)` returns the same
+    // line-numbered cell-by-cell text the engine `read_file` tool
+    // produces for `.ipynb` paths. Used by the Lua `read_file` tool
+    // when the caller hands it a notebook path.
+    notebook.set(
+        "read",
+        lua.create_function(|_, (path, offset, limit): (String, u64, u64)| {
+            match engine::tools::notebook::render_notebook_text(
+                &path,
+                offset as usize,
+                limit as usize,
+            ) {
+                Ok(s) => Ok((Some(s), None)),
+                Err(err) => Ok((None, Some(err))),
+            }
+        })?,
+    )?;
+
     smelt.set("notebook", notebook)?;
     Ok(())
 }

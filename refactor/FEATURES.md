@@ -73,7 +73,7 @@ to invoke_ the feature.
 
 | Tool                  | Source today                      | Restored by                                         | Status  |
 | --------------------- | --------------------------------- | --------------------------------------------------- | ------- |
-| `read_file`           | `engine/tools/read_file.rs`       | P5.b → `tools/read_file.lua`                        | working |
+| `read_file`           | `runtime/lua/smelt/tools/read_file.lua` | P5.b — landed; composes `smelt.image.*` + `smelt.notebook.read` + `smelt.fs.file_state.*` | working |
 | `write_file`          | `runtime/lua/smelt/tools/write_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + `smelt.notebook.is_notebook_path` | working |
 | `edit_file`           | `runtime/lua/smelt/tools/edit_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + Lua-side find/replace | working |
 | `edit_notebook`       | `engine/tools/notebook.rs`        | P5.b                                                | working |
