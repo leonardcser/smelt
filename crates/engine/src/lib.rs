@@ -29,7 +29,7 @@ const DEFAULT_COMPACT_THRESHOLD_PERCENT: u64 = 80;
 
 /// Environment variable that overrides the auto-compaction threshold.
 /// Accepts an integer percentage in `[10, 95]`.
-pub const COMPACT_THRESHOLD_ENV: &str = "SMELT_COMPACT_THRESHOLD_PERCENT";
+const COMPACT_THRESHOLD_ENV: &str = "SMELT_COMPACT_THRESHOLD_PERCENT";
 
 /// Auto-compaction trigger threshold as a percentage of the context window.
 ///
