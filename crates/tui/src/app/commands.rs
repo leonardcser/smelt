@@ -5,19 +5,13 @@ pub enum ExecEvent {
     Done(Option<i32>),
 }
 
-/// Stable command outcome exposed through `api::cmd::run`. Lua
-/// command bodies do their own side effects via `with_app`; the
-/// outcome only carries a shell-escape `Exec` channel pair when
-/// the line started with `!`.
-pub type CommandOutcome = CommandAction;
-
 /// Public command runner used by `crate::api::cmd::run`. Accepts raw
 /// command lines (`/quit`, `:q`, `/compact foo`, `! ls`, ...).
 /// Normalises a leading `:` to `/` so `/quit` and `:quit` dispatch
 /// identically. `!` lines spawn a shell escape; everything else
 /// dispatches by name to a Lua-registered handler (or no-ops if
 /// nothing matches).
-pub fn run_command(app: &mut TuiApp, line: &str) -> CommandOutcome {
+pub fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     let line = line.trim();
     if let Some(rest) = line.strip_prefix('!') {
         if !app.input.skip_shell_escape() {
