@@ -175,19 +175,6 @@ impl LayoutTree {
         self
     }
 
-    /// Set the separator drawn on the gap between siblings. When
-    /// `style != None` and the current `gap == 0`, raises gap to 1 so
-    /// the separator has a row to live on.
-    pub fn with_separator(mut self, style: SeparatorStyle) -> Self {
-        if let Some(c) = self.chrome_mut() {
-            c.separator = style;
-            if style != SeparatorStyle::None && c.gap == 0 {
-                c.gap = 1;
-            }
-        }
-        self
-    }
-
     /// Whether this tree contains `win` as one of its leaves
     /// (depth-first). Pure structural check — no rect math, no
     /// dependency on terminal size.
@@ -838,74 +825,6 @@ mod tests {
     fn separator_default_is_none() {
         let chrome = Chrome::default();
         assert_eq!(chrome.separator, SeparatorStyle::None);
-    }
-
-    #[test]
-    fn with_separator_sets_field() {
-        let tree = LayoutTree::vbox(vec![
-            (Constraint::Fill, LayoutTree::leaf(A)),
-            (Constraint::Fill, LayoutTree::leaf(B)),
-        ])
-        .with_gap(2)
-        .with_separator(SeparatorStyle::Solid);
-        let LayoutTree::Vbox { chrome, .. } = &tree else {
-            panic!("expected Vbox");
-        };
-        assert_eq!(chrome.separator, SeparatorStyle::Solid);
-        // Pre-existing gap is preserved when it's already non-zero.
-        assert_eq!(chrome.gap, 2);
-    }
-
-    #[test]
-    fn with_separator_inflates_zero_gap_to_one() {
-        let tree = LayoutTree::vbox(vec![
-            (Constraint::Fill, LayoutTree::leaf(A)),
-            (Constraint::Fill, LayoutTree::leaf(B)),
-        ])
-        .with_separator(SeparatorStyle::Dashed);
-        let LayoutTree::Vbox { chrome, .. } = &tree else {
-            panic!("expected Vbox");
-        };
-        assert_eq!(chrome.separator, SeparatorStyle::Dashed);
-        // Auto-inflated to host the separator row.
-        assert_eq!(chrome.gap, 1);
-    }
-
-    #[test]
-    fn with_separator_none_does_not_inflate_gap() {
-        let tree = LayoutTree::vbox(vec![
-            (Constraint::Fill, LayoutTree::leaf(A)),
-            (Constraint::Fill, LayoutTree::leaf(B)),
-        ])
-        .with_separator(SeparatorStyle::None);
-        let LayoutTree::Vbox { chrome, .. } = &tree else {
-            panic!("expected Vbox");
-        };
-        assert_eq!(chrome.gap, 0);
-    }
-
-    #[test]
-    fn separator_does_not_change_resolved_layout_or_natural_size() {
-        // Separator is a paint-time concept; layout math should be
-        // identical to a plain `with_gap(1)` with no separator.
-        let with_sep = LayoutTree::vbox(vec![
-            (Constraint::Fill, LayoutTree::leaf(A)),
-            (Constraint::Fill, LayoutTree::leaf(B)),
-        ])
-        .with_separator(SeparatorStyle::Solid);
-        let plain = LayoutTree::vbox(vec![
-            (Constraint::Fill, LayoutTree::leaf(A)),
-            (Constraint::Fill, LayoutTree::leaf(B)),
-        ])
-        .with_gap(1);
-        assert_eq!(
-            resolve_layout(&with_sep, Rect::new(0, 0, 80, 24)),
-            resolve_layout(&plain, Rect::new(0, 0, 80, 24)),
-        );
-        assert_eq!(
-            with_sep.natural_size((80, 24)),
-            plain.natural_size((80, 24)),
-        );
     }
 
     #[test]
