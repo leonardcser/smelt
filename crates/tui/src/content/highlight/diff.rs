@@ -28,19 +28,19 @@ struct DiffViewData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedInlineDiff {
-    pub max_display_lineno: usize,
-    pub lines: Vec<CachedDiffLine>,
+pub(crate) struct CachedInlineDiff {
+    pub(crate) max_display_lineno: usize,
+    pub(crate) lines: Vec<CachedDiffLine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedSpan {
-    pub text: String,
-    pub fg: (u8, u8, u8),
+pub(crate) struct CachedSpan {
+    pub(crate) text: String,
+    pub(crate) fg: (u8, u8, u8),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CachedDiffLine {
+pub(crate) enum CachedDiffLine {
     Context {
         lineno: usize,
         text: String,

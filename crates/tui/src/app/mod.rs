@@ -2,7 +2,7 @@ mod agent;
 pub(crate) mod app_config;
 pub(crate) mod cells;
 mod cmdline;
-pub mod commands;
+pub(crate) mod commands;
 pub(crate) mod confirms;
 mod content_keys;
 pub(crate) mod core;
@@ -236,7 +236,7 @@ pub struct TuiApp {
     pending_agent_blocks: Vec<(String, protocol::AgentBlockData)>,
     startup_auth_error: Option<String>,
     /// TuiApp-level focus (Prompt = editing buffer; History = navigating transcript).
-    pub app_focus: AppFocus,
+    pub(crate) app_focus: AppFocus,
     /// Readonly pane showing the transcript. Owns its `Buffer`
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
@@ -278,26 +278,26 @@ pub struct TuiApp {
 /// transient cmdline overlay leaf. Buffers are reached through
 /// `Ui::win_buf_mut(WinId)` — there's exactly one `Buffer` per
 /// well-known `Window`.
-pub struct WellKnown {
+pub(crate) struct WellKnown {
     /// Prompt input window. Stable id `ui::PROMPT_WIN`. Its buffer
     /// is rewritten each frame by `compute_prompt` (chrome rows +
     /// visible input slice + bottom bar + completer extmark).
-    pub prompt: ui::WinId,
+    pub(crate) prompt: ui::WinId,
     /// Transcript window. Stable id `ui::TRANSCRIPT_WIN`. Its
     /// buffer is rewritten each frame by
     /// `project_transcript_buffer`; selection bg lands as extmarks
     /// in the `NS_SELECTION` namespace.
-    pub transcript: ui::WinId,
+    pub(crate) transcript: ui::WinId,
     /// Statusline window. Dynamically allocated at startup. Its
     /// buffer carries one line; `refresh_status_bar` rewrites it
     /// each frame.
-    pub statusline: ui::WinId,
+    pub(crate) statusline: ui::WinId,
     /// Leaf `WinId` of the open `:` cmdline overlay, if visible.
     /// `cmdline_handle_key` mutates the leaf's buffer + cursor
     /// directly through `&mut self`. Closing the leaf via
     /// `close_overlay_leaf` cascades through `overlay_close` to
     /// remove the overlay.
-    pub cmdline: Option<ui::WinId>,
+    pub(crate) cmdline: Option<ui::WinId>,
 }
 
 /// Which pane currently holds focus (nvim-style window split).
@@ -307,7 +307,7 @@ pub struct WellKnown {
 /// * `Content` — the transcript pane owns focus; motions target it and
 ///   the prompt is frozen until focus returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppFocus {
+pub(crate) enum AppFocus {
     Prompt,
     Content,
 }

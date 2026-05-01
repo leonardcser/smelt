@@ -242,7 +242,7 @@ pub(crate) struct BashHighlighter<'a> {
 }
 
 impl<'a> BashHighlighter<'a> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let syntax = SYNTAX_SET
             .find_syntax_by_extension("sh")
             .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
@@ -253,14 +253,14 @@ impl<'a> BashHighlighter<'a> {
     }
 
     /// Advance the highlighter state without emitting output.
-    pub fn advance(&mut self, line: &str) {
+    pub(crate) fn advance(&mut self, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let _ = self.h.highlight_line(&line_with_nl, &SYNTAX_SET);
     }
 
     /// Print a single line with syntax highlighting.
     /// Does not emit a newline — the caller controls line breaks.
-    pub fn print_line(&mut self, out: &mut SpanCollector, line: &str) {
+    pub(crate) fn print_line(&mut self, out: &mut SpanCollector, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let regions = self
             .h
