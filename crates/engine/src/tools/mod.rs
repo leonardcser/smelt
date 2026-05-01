@@ -25,9 +25,8 @@ pub(crate) use file_state::FileState;
 pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
 
 use crate::cancel::CancellationToken;
-use crate::permissions::{Decision, Permissions};
 use crate::provider::{FunctionSchema, Provider, ToolDefinition};
-use protocol::{EngineEvent, Mode, PluginToolHooks};
+use protocol::{EngineEvent, PluginToolHooks};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -156,9 +155,15 @@ pub(crate) struct ToolEntry {
 /// Lookup, hook evaluation, and dispatch all return `Option` so the
 /// engine can synthesise a "tool not found" result when the LLM emits
 /// a call for a tool the dispatcher doesn't know.
+///
+/// The trait carries no permission policy — engine applies its rules
+/// over the unfiltered tool list returned by `definitions`, using
+/// `is_mcp` to pick the right ruleset. When permissions move to Lua
+/// hooks (P5.c) the engine-side filter retires.
 pub(crate) trait ToolDispatcher: Send + Sync {
-    /// Tool definitions visible to the LLM under `(permissions, mode)`.
-    fn definitions(&self, permissions: &Permissions, mode: Mode) -> Vec<ToolDefinition>;
+    /// All tool definitions registered with this dispatcher. The engine
+    /// applies permission filtering externally.
+    fn definitions(&self) -> Vec<ToolDefinition>;
 
     /// True when the named tool exists in this dispatcher.
     fn contains(&self, name: &str) -> bool;
@@ -181,8 +186,17 @@ pub(crate) trait ToolDispatcher: Send + Sync {
 }
 
 impl ToolDispatcher for ToolRegistry {
-    fn definitions(&self, permissions: &Permissions, mode: Mode) -> Vec<ToolDefinition> {
-        ToolRegistry::definitions(self, permissions, mode)
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .iter()
+            .map(|e| {
+                ToolDefinition::new(FunctionSchema {
+                    name: e.tool.name().into(),
+                    description: e.tool.description().into(),
+                    parameters: e.tool.parameters(),
+                })
+            })
+            .collect()
     }
 
     fn contains(&self, name: &str) -> bool {
@@ -230,26 +244,6 @@ impl ToolRegistry {
 
     pub(crate) fn get(&self, name: &str) -> Option<&ToolEntry> {
         self.tools.iter().find(|e| e.tool.name() == name)
-    }
-
-    pub(crate) fn definitions(&self, permissions: &Permissions, mode: Mode) -> Vec<ToolDefinition> {
-        self.tools
-            .iter()
-            .filter(|e| {
-                if e.is_mcp {
-                    permissions.check_mcp(mode, e.tool.name()) != Decision::Deny
-                } else {
-                    permissions.check_tool(mode, e.tool.name()) != Decision::Deny
-                }
-            })
-            .map(|e| {
-                ToolDefinition::new(FunctionSchema {
-                    name: e.tool.name().into(),
-                    description: e.tool.description().into(),
-                    parameters: e.tool.parameters(),
-                })
-            })
-            .collect()
     }
 }
 
