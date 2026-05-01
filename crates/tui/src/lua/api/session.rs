@@ -13,7 +13,6 @@ fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResult<mlua::Tab
             protocol::Role::User => "user",
             protocol::Role::Assistant => "assistant",
             protocol::Role::Tool => "tool",
-            protocol::Role::Agent => "agent",
         };
         entry.set("role", role)?;
         if let Some(ref c) = msg.content {

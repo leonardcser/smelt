@@ -89,30 +89,6 @@ pub struct Args {
     color: ColorMode,
     #[arg(short, long, help = "Show tool output in headless mode")]
     verbose: bool,
-    #[arg(long, help = "Run as a subagent (persistent headless with IPC)")]
-    subagent: bool,
-    #[arg(long, help = "Enable multi-agent mode (registry, socket, agent tools)")]
-    multi_agent: bool,
-    #[arg(long, help = "Disable multi-agent even if config enables it")]
-    no_multi_agent: bool,
-    #[arg(long, value_name = "PID", help = "Parent agent PID (for subagents)")]
-    parent_pid: Option<u32>,
-    #[arg(long, value_name = "N", help = "Agent depth in the spawn tree")]
-    depth: Option<u8>,
-    #[arg(
-        long,
-        value_name = "N",
-        default_value = "1",
-        help = "Maximum agent spawn depth"
-    )]
-    max_agent_depth: u8,
-    #[arg(
-        long,
-        value_name = "N",
-        default_value = "8",
-        help = "Maximum concurrent agents per session"
-    )]
-    max_agents: u8,
     #[arg(short, long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
     resume: Option<String>,
     #[arg(
@@ -174,7 +150,6 @@ async fn main() {
         model,
         model_config,
         settings,
-        multi_agent,
         mode_override,
         mode_cycle,
         reasoning_effort,
@@ -206,18 +181,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    if args.subagent {
-        if args.message.is_none() {
-            eprintln!("error: --subagent requires a message argument");
-            std::process::exit(1);
-        }
-        if args.parent_pid.is_none() || args.depth.is_none() {
-            eprintln!("error: --subagent requires --parent-pid and --depth");
-            std::process::exit(1);
-        }
-    }
-
-    if (args.headless || args.subagent) && startup_auth_error.is_some() {
+    if args.headless && startup_auth_error.is_some() {
         eprintln!(
             "error: {}",
             startup_auth_error.as_deref().unwrap_or_default()
@@ -292,10 +256,6 @@ async fn main() {
             if let Some(id) = session_id {
                 tui::session::print_resume_hint(&id);
             }
-            // Kill child agents on shutdown.
-            if multi_agent {
-                engine::registry::cleanup_self(std::process::id());
-            }
             std::process::exit(0);
         });
     }
@@ -335,14 +295,6 @@ async fn main() {
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();
 
-    // Pick the interactive root agent ID once and share it across
-    // engine tools + registry registration to avoid identity drift.
-    let planned_agent_id = if multi_agent && !args.subagent {
-        Some(engine::registry::next_agent_id())
-    } else {
-        None
-    };
-
     // Create shared runtime approvals and load workspace rules.
     let runtime_approvals = {
         let cwd_str = cwd.to_string_lossy();
@@ -366,48 +318,27 @@ async fn main() {
     let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
-    // Shared file-state cache: engine-side read/write/edit/notebook tools
-    // populate it for staleness checks; the same cache is parked on `Core`
-    // so Lua tools migrating off the Rust impls see the same observations.
-    let file_state = engine::tools::FileStateCache::new();
-
-    let engine_handle = engine::start(
-        engine::EngineConfig {
-            api: engine::ApiConfig {
-                base: api_base,
-                key: api_key,
-                key_env: api_key_env.clone(),
-                provider_type,
-                model_config: (&model_config).into(),
-            },
-            model: model.clone(),
-            auxiliary,
-            instructions,
-            system_prompt_override,
-            cwd: cwd.clone(),
-            permissions: permissions.clone(),
-            runtime_approvals: runtime_approvals.clone(),
-            multi_agent: if multi_agent {
-                Some(engine::MultiAgentConfig {
-                    depth: args.depth.unwrap_or(0),
-                    max_depth: args.max_agent_depth,
-                    max_agents: args.max_agents,
-                    parent_pid: args.parent_pid,
-                })
-            } else {
-                None
-            },
-            interactive: !args.headless && !args.subagent,
-            mcp_servers: cfg.mcp.clone(),
-            skills: Some(skill_loader),
-            auto_compact: settings.auto_compact,
-            context_window: cfg.settings.context_window,
-            redact_secrets: settings.redact_secrets,
+    let engine_handle = engine::start(engine::EngineConfig {
+        api: engine::ApiConfig {
+            base: api_base,
+            key: api_key,
+            key_env: api_key_env.clone(),
+            provider_type,
+            model_config: (&model_config).into(),
         },
-        file_state.clone(),
-    );
-    let engine_injector = engine_handle.injector();
-
+        model: model.clone(),
+        auxiliary,
+        instructions,
+        system_prompt_override,
+        cwd: cwd.clone(),
+        permissions: permissions.clone(),
+        runtime_approvals: runtime_approvals.clone(),
+        mcp_servers: cfg.mcp.clone(),
+        skills: Some(skill_loader),
+        auto_compact: settings.auto_compact,
+        context_window: cfg.settings.context_window,
+        redact_secrets: settings.redact_secrets,
+    });
     // Fetch context window in background (only needed for interactive TUI display).
     // If the user set it in config, skip the fetch entirely.
     let ctx_rx = if !args.headless && cfg.settings.context_window.is_none() {
@@ -445,87 +376,7 @@ async fn main() {
         ColorMode::Never => tui::app::ColorMode::Never,
     };
 
-    if args.subagent {
-        let parent_pid = args.parent_pid.unwrap();
-        let depth = args.depth.unwrap();
-        let my_pid = std::process::id();
-
-        // Request SIGTERM when parent dies (Linux only).
-        #[cfg(target_os = "linux")]
-        unsafe {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            // Check if parent already died between our fork and prctl.
-            if !engine::registry::is_pid_alive(parent_pid) {
-                std::process::exit(1);
-            }
-        }
-
-        // Start socket listener.
-        let (socket_path, socket_rx) =
-            engine::socket::start_listener(my_pid).expect("failed to start agent socket");
-
-        // Detect scope for registry.
-        let scope = engine::paths::git_root(&cwd)
-            .unwrap_or_else(|| cwd.clone())
-            .to_string_lossy()
-            .into_owned();
-
-        let app_config = build_headless_config(
-            model,
-            initial_api_base,
-            api_key_env,
-            initial_provider_type,
-            available_models,
-            (&model_config).into(),
-            args.model.is_some(),
-            args.api_base.is_some(),
-            args.api_key_env.is_some(),
-            mode_override,
-            mode_cycle,
-            reasoning_effort,
-            reasoning_cycle,
-            settings,
-            multi_agent,
-            cfg.settings.context_window,
-        );
-        let mut core = tui::app::Core::new(
-            app_config,
-            engine_handle,
-            tui::app::FrontendKind::Subagent,
-            file_state.clone(),
-        );
-        core.skills = Some(tui_skill_loader.clone());
-        let sink = tui::app::HeadlessSink::new_subagent(color_mode);
-        let mut headless = tui::app::HeadlessApp::new(core, sink);
-
-        // Register in the agent registry (update the pre-registered entry).
-        let branch = engine::paths::git_branch(&cwd);
-        let agent_id = engine::registry::read_entry(my_pid)
-            .ok()
-            .map(|e| e.agent_id)
-            .unwrap_or_else(|| format!("agent-{my_pid}"));
-        engine::registry::register(&engine::registry::RegistryEntry {
-            agent_id,
-            pid: my_pid,
-            parent_pid: Some(parent_pid),
-            git_root: Some(scope.clone()),
-            git_branch: branch,
-            cwd: cwd.to_string_lossy().into_owned(),
-            status: engine::registry::AgentStatus::Idle,
-            task_slug: None,
-            session_id: headless.core.session.id.clone(),
-            socket_path: socket_path.to_string_lossy().into_owned(),
-            depth,
-            started_at: timestamp_now(),
-        })
-        .expect("failed to register agent");
-
-        headless
-            .run_subagent(args.message.unwrap(), parent_pid, socket_rx)
-            .await;
-
-        engine::registry::cleanup_self(my_pid);
-    } else if args.headless {
+    if args.headless {
         let output_format = match args.format {
             OutputFormat::Text => tui::app::OutputFormat::Text,
             OutputFormat::Json => tui::app::OutputFormat::Json,
@@ -545,15 +396,10 @@ async fn main() {
             reasoning_effort,
             reasoning_cycle,
             settings,
-            multi_agent,
             cfg.settings.context_window,
         );
-        let mut core = tui::app::Core::new(
-            app_config,
-            engine_handle,
-            tui::app::FrontendKind::Headless,
-            file_state.clone(),
-        );
+        let mut core =
+            tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Headless);
         core.skills = Some(tui_skill_loader.clone());
         let sink = tui::app::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = tui::app::HeadlessApp::new(core, sink);
@@ -569,9 +415,7 @@ async fn main() {
             initial_provider_type,
             Arc::clone(&permissions),
             engine_handle,
-            file_state.clone(),
             settings,
-            multi_agent,
             reasoning_effort,
             reasoning_cycle,
             mode_cycle,
@@ -614,65 +458,16 @@ async fn main() {
         // (e.g. polkit, PAM) or libraries doesn't corrupt the TUI display.
         redirect_stderr();
 
-        // Interactive mode: register if multi-agent is enabled.
-        if multi_agent {
-            let my_pid = std::process::id();
-            let scope = engine::paths::git_root(&cwd)
-                .unwrap_or_else(|| cwd.clone())
-                .to_string_lossy()
-                .into_owned();
-            let branch = engine::paths::git_branch(&cwd);
-
-            let (socket_path, socket_rx) =
-                engine::socket::start_listener(my_pid).expect("failed to start agent socket");
-
-            // Bridge socket messages to the engine + child permission channel.
-            let (child_perm_tx, child_perm_rx) = tokio::sync::mpsc::unbounded_channel();
-            spawn_socket_bridge(socket_rx, engine_injector.clone(), child_perm_tx);
-            app.set_child_permission_rx(child_perm_rx);
-
-            let my_agent_id = planned_agent_id
-                .clone()
-                .unwrap_or_else(engine::registry::next_agent_id);
-            app.agent_id = my_agent_id.clone();
-            if let Err(e) = engine::registry::register(&engine::registry::RegistryEntry {
-                agent_id: my_agent_id,
-                pid: my_pid,
-                parent_pid: None,
-                git_root: Some(scope),
-                git_branch: branch,
-                cwd: cwd.to_string_lossy().into_owned(),
-                status: engine::registry::AgentStatus::Idle,
-                task_slug: None,
-                session_id: app.core.session.id.clone(),
-                socket_path: socket_path.to_string_lossy().into_owned(),
-                depth: 0,
-                started_at: timestamp_now(),
-            }) {
-                eprintln!("warning: failed to register in agent registry: {e}");
-            }
-
-            // Prune dead entries on startup.
-            engine::registry::prune_dead();
-
-            // Watch for child agent deaths.
-            spawn_child_watcher(my_pid, engine_injector.clone());
-        }
-
         println!();
         app.run(ctx_rx, args.message).await;
         if !app.core.session.messages.is_empty() {
             tui::session::print_resume_hint(&app.core.session.id);
         }
-
-        if multi_agent {
-            engine::registry::cleanup_self(std::process::id());
-        }
     }
     tui::perf::print_summary();
 }
 
-/// Assemble the `AppConfig` for a headless / subagent frontend from
+/// Assemble the `AppConfig` for a headless frontend from
 /// resolved CLI + config inputs. No saved-state seeding (predictable
 /// behaviour from the CLI invocation) — the TUI path layers
 /// `state::State::load()` on top of its own fields inside `TuiApp::new`.
@@ -692,7 +487,6 @@ fn build_headless_config(
     reasoning_effort: protocol::ReasoningEffort,
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
     settings: tui::state::ResolvedSettings,
-    multi_agent: bool,
     context_window: Option<u32>,
 ) -> tui::app::AppConfig {
     let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
@@ -715,7 +509,6 @@ fn build_headless_config(
         reasoning_effort,
         reasoning_cycle,
         settings,
-        multi_agent,
         context_window,
     }
 }
@@ -744,60 +537,4 @@ fn redirect_stderr() {
             // description, so it stays open.
         }
     }
-}
-
-fn spawn_socket_bridge(
-    mut socket_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
-    injector: engine::EventInjector,
-    child_perm_tx: tokio::sync::mpsc::UnboundedSender<engine::socket::IncomingMessage>,
-) {
-    tokio::spawn(async move {
-        while let Some(msg) = socket_rx.recv().await {
-            match msg {
-                engine::socket::IncomingMessage::Message {
-                    from_id,
-                    from_slug,
-                    message,
-                } => {
-                    injector.inject_agent_message(from_id, from_slug, message);
-                }
-                engine::socket::IncomingMessage::Query { reply_tx, .. } => {
-                    let _ = reply_tx.send(
-                        "agent is in interactive mode and cannot serve queries at this time".into(),
-                    );
-                }
-                perm @ engine::socket::IncomingMessage::PermissionCheck { .. } => {
-                    let _ = child_perm_tx.send(perm);
-                }
-            }
-        }
-    });
-}
-
-fn spawn_child_watcher(parent_pid: u32, injector: engine::EventInjector) {
-    tokio::spawn(async move {
-        let mut known: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            let children = engine::registry::children_of(parent_pid);
-            let current: std::collections::HashSet<u32> = children.iter().map(|c| c.pid).collect();
-
-            for (pid, agent_id) in &known {
-                if !current.contains(pid) {
-                    injector.inject_agent_exited(agent_id.clone(), None);
-                }
-            }
-
-            known = children.into_iter().map(|c| (c.pid, c.agent_id)).collect();
-        }
-    });
-}
-
-fn timestamp_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
 }

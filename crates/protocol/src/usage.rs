@@ -43,25 +43,6 @@ pub struct TurnMeta {
     /// Per-tool-call elapsed times, keyed by call_id.
     #[serde(default)]
     pub tool_elapsed: HashMap<String, u64>,
-    /// Subagent block data, keyed by spawn_agent call_id.
-    #[serde(default)]
-    pub agent_blocks: HashMap<String, AgentBlockData>,
-}
-
-/// Persisted subagent block state for session resume.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentBlockData {
-    pub slug: Option<String>,
-    pub tool_calls: Vec<AgentToolData>,
-}
-
-/// A single tool call from a subagent's execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentToolData {
-    pub tool_name: String,
-    pub summary: String,
-    pub elapsed_ms: Option<u64>,
-    pub is_error: bool,
 }
 
 /// Model-parameter overrides applied to a single turn.

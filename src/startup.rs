@@ -31,7 +31,6 @@ pub struct ResolvedStartup {
     pub model: String,
     pub model_config: tui::config::ModelConfig,
     pub settings: tui::state::ResolvedSettings,
-    pub multi_agent: bool,
     pub mode_override: Option<AgentMode>,
     pub mode_cycle: Vec<AgentMode>,
     pub reasoning_effort: ReasoningEffort,
@@ -83,7 +82,7 @@ fn resolve_model_reference(
 
 /// Load config (honouring `--config` + `--set`), fetch dynamic model lists,
 /// resolve the active model, auxiliary routing, API keys, and all pure
-/// defaults merges (mode, reasoning, settings, multi-agent).
+/// defaults merges (mode, reasoning, settings).
 pub async fn resolve(args: &Args) -> ResolvedStartup {
     let mut cfg = match args.config {
         Some(ref path) => {
@@ -323,15 +322,6 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         }
     };
 
-    // Multi-agent: CLI flags override config.
-    let multi_agent = if args.no_multi_agent {
-        false
-    } else if args.multi_agent || args.subagent {
-        true
-    } else {
-        cfg.settings.multi_agent.unwrap_or(false)
-    };
-
     let mode_override = args
         .mode
         .as_deref()
@@ -377,8 +367,8 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
     }
 
     let mut settings = app_state.settings.resolve(&cfg.settings);
-    // Force auto_compact on for subagent/headless mode.
-    if args.subagent || args.headless {
+    // Force auto_compact on for headless mode.
+    if args.headless {
         settings.auto_compact = true;
     }
 
@@ -393,7 +383,6 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         model,
         model_config,
         settings,
-        multi_agent,
         mode_override,
         mode_cycle,
         reasoning_effort,

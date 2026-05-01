@@ -4,7 +4,7 @@
 //! Two responsibilities:
 //!
 //! 1. The `EngineBridge` struct delegates `send` / `recv` /
-//!    `try_recv` / `processes` / `drain_spawned` onto the
+//!    `try_recv` / `processes` onto the
 //!    underlying `EngineHandle`.
 //! 2. Free functions `handle_event` and `handle_idle_event`
 //!    translate `EngineEvent`s into TuiApp mutations. The
@@ -15,7 +15,7 @@
 use crate::app::transcript_model::{Block, ToolOutput, ToolStatus};
 use crate::app::working::{TurnOutcome, TurnPhase};
 use crate::app::{ConfirmRequest, PendingTool, SessionControl, TuiApp};
-use engine::{tools, EngineHandle};
+use engine::EngineHandle;
 use protocol::{EngineEvent, UiCommand};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -41,34 +41,11 @@ impl EngineBridge {
         self.handle.try_recv()
     }
 
-    pub(crate) fn drain_spawned(&mut self) -> Vec<tools::SpawnedChild> {
-        self.handle.drain_spawned()
-    }
-
     /// Cloneable injector for cross-thread tasks that need to push
     /// events into the engine's event stream (e.g. streaming bash
     /// emitting `EngineEvent::ToolOutput` per line).
     pub(crate) fn injector(&self) -> engine::EventInjector {
         self.handle.injector()
-    }
-
-    /// Snapshot of subagent spawn settings — `(depth, max_depth, max_agents)`.
-    /// `None` when multi-agent is disabled. Surfaced to Lua via
-    /// `smelt.agent.subagent_meta()`.
-    pub(crate) fn subagent_meta(&self) -> Option<(u8, u8, u8)> {
-        self.handle.subagent_meta()
-    }
-
-    /// Spawn a subagent process. Returns the new agent's id on success,
-    /// or an error string on failure. Surfaced to Lua via
-    /// `smelt.agent.spawn(prompt, blocking, session_dir)`.
-    pub(crate) fn spawn_subagent(
-        &self,
-        prompt: String,
-        blocking: bool,
-        session_dir: &std::path::Path,
-    ) -> Result<String, String> {
-        self.handle.spawn_subagent(prompt, blocking, session_dir)
     }
 }
 
@@ -116,8 +93,7 @@ pub(crate) fn handle_event(
             });
             // Auxiliary requests (title, compaction, btw, predict)
             // are excluded so a `tokens_used` subscriber sees only
-            // the user-visible context flow. Sub-agent token usage
-            // routes through `agent.context_tokens` separately and
+            // the user-visible context flow.
             // doesn't touch this cell.
             if !background {
                 app.core
@@ -168,14 +144,12 @@ pub(crate) fn handle_event(
         } => {
             app.flush_streaming_thinking();
             app.flush_streaming_text();
-            if tool_name != "spawn_agent" {
-                app.start_tool(
-                    call_id.clone(),
-                    tool_name.clone(),
-                    summary.clone(),
-                    args.clone(),
-                );
-            }
+            app.start_tool(
+                call_id.clone(),
+                tool_name.clone(),
+                summary.clone(),
+                args.clone(),
+            );
             app.core.cells.set_dyn(
                 "tool_start",
                 std::rc::Rc::new(crate::app::cells::ToolStart {
@@ -201,42 +175,7 @@ pub(crate) fn handle_event(
             let mut finished_is_error = false;
             if let Some(idx) = pending.iter().position(|p| p.call_id == call_id) {
                 let removed = pending.remove(idx);
-                if removed.name == "spawn_agent" {
-                    let agent_id = result
-                        .content
-                        .strip_prefix("agent ")
-                        .and_then(|s| s.split_whitespace().next())
-                        .unwrap_or("")
-                        .to_string();
-                    app.finish_active_agent(&agent_id);
-                    if let Some(idx) = app
-                        .agents
-                        .iter()
-                        .position(|a| a.agent_id == agent_id && a.blocking)
-                    {
-                        let agent = &app.agents[idx];
-                        app.pending_agent_blocks.push((
-                            agent.agent_id.clone(),
-                            protocol::AgentBlockData {
-                                slug: agent.slug.clone(),
-                                tool_calls: agent
-                                    .tool_calls
-                                    .iter()
-                                    .map(|tc| protocol::AgentToolData {
-                                        tool_name: tc.tool_name.clone(),
-                                        summary: tc.summary.clone(),
-                                        elapsed_ms: tc.elapsed.map(|d| d.as_millis() as u64),
-                                        is_error: matches!(tc.status, ToolStatus::Err),
-                                    })
-                                    .collect(),
-                            },
-                        ));
-                        let pid = agent.pid;
-                        engine::registry::kill_agent(pid);
-                        app.agents.remove(idx);
-                        app.sync_agent_snapshots();
-                    }
-                } else {
+                {
                     finished_tool_name = Some(removed.name.clone());
                     finished_is_error = result.is_error;
                     let status = if result.is_error {
@@ -355,7 +294,6 @@ pub(crate) fn handle_event(
                 avg_tps: None,
                 interrupted: false,
                 tool_elapsed: std::collections::HashMap::new(),
-                agent_blocks: std::collections::HashMap::new(),
             });
             app.core
                 .cells
@@ -377,40 +315,6 @@ pub(crate) fn handle_event(
             SessionControl::Done
         }
         EngineEvent::Shutdown { .. } => SessionControl::Done,
-        EngineEvent::AgentExited {
-            agent_id,
-            exit_code,
-        } => {
-            app.handle_agent_exited(&agent_id, exit_code);
-            SessionControl::Continue
-        }
-        EngineEvent::AgentMessage {
-            from_id,
-            from_slug,
-            message,
-        } => {
-            // Suppress AgentMessage rendering for blocking agents — their
-            // result flows through the spawn_agent tool output instead.
-            let is_blocking = app
-                .agents
-                .iter()
-                .any(|a| a.agent_id == from_id && a.blocking);
-            if !is_blocking {
-                app.push_block(Block::AgentMessage {
-                    from_id: from_id.clone(),
-                    from_slug: from_slug.clone(),
-                    content: message.clone(),
-                });
-            }
-            // Forward to engine so it enters the conversation history
-            // (deferred until current tool batch completes).
-            app.core.engine.send(protocol::UiCommand::AgentMessage {
-                from_id,
-                from_slug,
-                message,
-            });
-            SessionControl::Continue
-        }
         EngineEvent::ToolDispatch {
             request_id,
             call_id,
@@ -450,7 +354,7 @@ pub(crate) fn handle_event(
         }
     }
 }
-/// Handle engine events that arrive when no agent turn is active.
+/// Handle engine events that arrive when no turn is active.
 pub(crate) fn handle_idle_event(app: &mut TuiApp, ev: EngineEvent) {
     match ev {
         // Ignore stale Messages snapshots from cancelled/completed turns.
@@ -493,33 +397,6 @@ pub(crate) fn handle_idle_event(app: &mut TuiApp, ev: EngineEvent) {
         EngineEvent::TurnError { message } => {
             app.working.finish(TurnOutcome::Done);
             app.notify_error(message);
-        }
-        EngineEvent::AgentExited {
-            agent_id,
-            exit_code,
-        } => {
-            app.handle_agent_exited(&agent_id, exit_code);
-        }
-        EngineEvent::AgentMessage {
-            from_id,
-            from_slug,
-            message,
-        } => {
-            let is_blocking = app
-                .agents
-                .iter()
-                .any(|a| a.agent_id == from_id && a.blocking);
-            if !is_blocking {
-                app.push_block(Block::AgentMessage {
-                    from_id: from_id.clone(),
-                    from_slug: from_slug.clone(),
-                    content: message.clone(),
-                });
-                // Queue as an Agent role message to trigger a turn without
-                // rendering a duplicate User block.
-                app.pending_agent_messages
-                    .push(protocol::Message::agent(&from_id, &from_slug, &message));
-            }
         }
         _ => {}
     }

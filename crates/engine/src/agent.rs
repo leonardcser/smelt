@@ -74,38 +74,6 @@ pub(crate) async fn engine_task(
                         } else {
                             &config.permissions
                         };
-                        let agent_config = if let Some(ref ma) = config.multi_agent {
-                            let scope = config.cwd.to_string_lossy();
-                            let my_pid = std::process::id();
-                            let my_entry = crate::registry::read_entry(my_pid).ok();
-                            let agent_id = my_entry
-                                .as_ref()
-                                .map(|e| e.agent_id.clone())
-                                .unwrap_or_default();
-                            let parent_id = ma.parent_pid.and_then(|ppid| {
-                                crate::registry::read_entry(ppid)
-                                    .ok()
-                                    .map(|e| e.agent_id)
-                            });
-                            let siblings = if ma.depth > 0 {
-                                let entries = crate::registry::discover(&scope);
-                                entries
-                                    .iter()
-                                    .filter(|e| e.pid != my_pid && e.parent_pid == ma.parent_pid)
-                                    .map(|e| e.agent_id.clone())
-                                    .collect()
-                            } else {
-                                vec![]
-                            };
-                            Some(crate::AgentPromptConfig {
-                                agent_id,
-                                depth: ma.depth,
-                                parent_id,
-                                siblings,
-                            })
-                        } else {
-                            None
-                        };
                         let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
                         let system_prompt = tui_system_prompt
                             .or_else(|| config.system_prompt_override.clone())
@@ -114,9 +82,7 @@ pub(crate) async fn engine_task(
                                     mode,
                                     &config.cwd,
                                     config.instructions.as_deref(),
-                                    agent_config.as_ref(),
                                     skill_section,
-                                    config.interactive,
                                 )
                             });
                         let mut turn = Turn {
@@ -135,7 +101,6 @@ pub(crate) async fn engine_task(
                             turn_id,
                             model,
                             system_prompt,
-                            agent_config,
                             plugin_tools,
                             started_at: Instant::now(),
                             tps_samples: Vec::new(),
@@ -580,7 +545,6 @@ struct Turn<'a> {
     turn_id: u64,
     model: String,
     system_prompt: String,
-    agent_config: Option<crate::AgentPromptConfig>,
     plugin_tools: Vec<protocol::ToolDef>,
     started_at: Instant,
     tps_samples: Vec<f64>,
@@ -632,7 +596,7 @@ impl<'a> Turn<'a> {
     /// from outside the model — is scrubbed at this boundary. Model-generated
     /// messages (assistant, system) are passed through untouched.
     fn push_message(&mut self, mut msg: Message) {
-        if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool | Role::Agent) {
+        if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool) {
             crate::redact::redact_message(&mut msg);
         }
         self.messages.push(msg);
@@ -651,9 +615,7 @@ impl<'a> Turn<'a> {
                     self.mode,
                     &self.config.cwd,
                     self.config.instructions.as_deref(),
-                    self.agent_config.as_ref(),
                     skill_section,
-                    self.config.interactive,
                 )
             });
         self.system_prompt = new;
@@ -665,11 +627,6 @@ impl<'a> Turn<'a> {
     }
 
     fn emit_messages_snapshot(&self) {
-        // Only subagents consume Messages snapshots. Interactive mode ignores
-        // them, so skip the expensive clone of the entire conversation history.
-        if self.config.interactive {
-            return;
-        }
         let mut messages = self.messages.clone();
         if messages
             .first()
@@ -790,7 +747,6 @@ impl<'a> Turn<'a> {
             avg_tps,
             interrupted,
             tool_elapsed: self.tool_elapsed.clone(),
-            agent_blocks: std::collections::HashMap::new(),
         }
     }
 
@@ -917,19 +873,6 @@ impl<'a> Turn<'a> {
             }
             UiCommand::Cancel => {
                 self.cancel.cancel();
-                true
-            }
-            UiCommand::AgentMessage {
-                from_id,
-                from_slug,
-                message,
-            } => {
-                // Don't re-emit EngineEvent::AgentMessage here — the TUI
-                // already rendered the block when the socket bridge first
-                // delivered the event. Just inject into conversation history
-                // so the LLM sees it on the next API call.
-                self.push_message(Message::agent(&from_id, &from_slug, &message));
-                self.emit_messages_snapshot();
                 true
             }
             other => self.handle_background_cmd(other),
@@ -1651,8 +1594,7 @@ impl<'a> Turn<'a> {
                             });
                         }
                     }
-                    UiCommand::AgentMessage { .. }
-                    | UiCommand::Steer { .. }
+                    UiCommand::Steer { .. }
                     | UiCommand::Unsteer { .. }
                     | UiCommand::SetAgentMode { .. }
                     | UiCommand::SetReasoningEffort { .. }
@@ -1842,9 +1784,9 @@ impl<'a> Turn<'a> {
 
     /// Call the LLM, monitoring cmd_rx for Cancel during the request.
     /// Returns (response, had_injected_messages). The bool is true when
-    /// Steer or AgentMessage commands arrived during the LLM call and were
-    /// injected into conversation history — the caller should continue the
-    /// loop instead of ending the turn.
+    /// Commands arrived during the LLM call and were injected into
+    /// conversation history — the caller should continue the loop instead of
+    /// ending the turn.
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
@@ -1921,8 +1863,7 @@ impl<'a> Turn<'a> {
                             pending_model = Some((model, api_base, api_key, provider_type));
                         }
                         UiCommand::Steer { .. }
-                        | UiCommand::Unsteer { .. }
-                        | UiCommand::AgentMessage { .. } => deferred_turn_cmds.push(cmd),
+                        | UiCommand::Unsteer { .. } => deferred_turn_cmds.push(cmd),
                         other => {
                             self.handle_background_cmd(other);
                         }
@@ -1939,7 +1880,7 @@ impl<'a> Turn<'a> {
         }
         let had_injected = deferred_turn_cmds
             .iter()
-            .any(|c| matches!(c, UiCommand::Steer { .. } | UiCommand::AgentMessage { .. }));
+            .any(|c| matches!(c, UiCommand::Steer { .. }));
         for cmd in deferred_turn_cmds {
             self.handle_turn_cmd(cmd);
         }

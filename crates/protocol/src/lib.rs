@@ -19,7 +19,4 @@ pub use event::{
 };
 pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
 pub use mode::{AgentMode, ReasoningEffort};
-pub use usage::{
-    AgentBlockData, AgentToolData, ModelConfigOverrides, PermissionOverrides, RuleSetOverride,
-    TokenUsage, TurnMeta,
-};
+pub use usage::{ModelConfigOverrides, PermissionOverrides, RuleSetOverride, TokenUsage, TurnMeta};

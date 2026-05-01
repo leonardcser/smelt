@@ -18,9 +18,6 @@ pub(super) fn build_body(
         .iter()
         .map(|m| {
             let mut v = serde_json::to_value(m).unwrap();
-            if m.role == Role::Agent {
-                super::fixup_agent_message(m, &mut v);
-            }
             if let Some(obj) = v.as_object_mut() {
                 obj.remove("is_error");
                 if m.role == Role::Tool {

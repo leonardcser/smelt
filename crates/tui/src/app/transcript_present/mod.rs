@@ -6,9 +6,7 @@
 //! `LayoutKey`. Render paints the resulting `DisplayBlock`; it has no
 //! further knowledge of `Block` variants.
 
-use super::transcript_model::{
-    AgentBlockStatus, Block, ToolOutput, ToolState, ToolStatus, ViewState,
-};
+use super::transcript_model::{Block, ToolOutput, ToolState, ToolStatus, ViewState};
 use crate::content::display::{
     ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
 };
@@ -22,12 +20,10 @@ use crate::utils::format_duration;
 use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
 
-mod agent;
 mod markdown;
 mod tool_previews;
 mod tools;
 
-use agent::render_agent_block;
 #[cfg(test)]
 use markdown::is_horizontal_rule;
 pub(crate) use markdown::render_markdown_inner;
@@ -262,14 +258,9 @@ pub(crate) fn gap_between(above: &Element, below: &Element) -> u16 {
         (_, Element::Block(Block::Thinking { .. })) => 1,
         (Element::Block(Block::Thinking { .. }), _) => 1,
         (Element::Block(Block::ToolCall { .. }), Element::Block(Block::Text { .. })) => 1,
-        (Element::Block(Block::Hint { .. }), _) => 1,
-        (_, Element::Block(Block::Hint { .. })) => 1,
         (_, Element::Block(Block::Compacted { .. })) => 1,
         (Element::Block(Block::Compacted { .. }), _) => 1,
-        (_, Element::Block(Block::AgentMessage { .. })) => 1,
-        (Element::Block(Block::AgentMessage { .. }), _) => 1,
-        (_, Element::Block(Block::Agent { .. })) => 1,
-        (Element::Block(Block::Agent { .. }), _) => 1,
+
         // Text→Text: 1 gap (paragraph spacing), except when the previous
         // text block ends with a markdown heading — headings do not get a
         // trailing blank line.
@@ -298,11 +289,8 @@ pub(super) fn render_block(
         Block::Text { .. } => crate::perf::begin("render:text"),
         Block::CodeLine { .. } => crate::perf::begin("render:code_line"),
         Block::ToolCall { .. } => crate::perf::begin("render:tool_call"),
-        Block::Hint { .. } => crate::perf::begin("render:hint"),
         Block::Compacted { .. } => crate::perf::begin("render:compacted"),
         Block::Exec { .. } => crate::perf::begin("render:exec"),
-        Block::AgentMessage { .. } => crate::perf::begin("render:agent_msg"),
-        Block::Agent { .. } => crate::perf::begin("render:agent"),
     };
     match block {
         Block::User { text, image_labels } => {
@@ -396,13 +384,6 @@ pub(super) fn render_block(
                 width,
             )
         }
-        Block::Hint { content } => {
-            out.push_dim_italic();
-            out.print(content);
-            out.pop_style();
-            out.newline();
-            1
-        }
         Block::Compacted { summary } => {
             let label = " compacted ";
             let label_len = label.len();
@@ -438,45 +419,6 @@ pub(super) fn render_block(
             }
             rows
         }
-        Block::AgentMessage {
-            from_id,
-            from_slug: _,
-            content,
-        } => {
-            let header = format!("➜ {from_id}");
-            out.push_style(SpanStyle {
-                fg: Some(ColorValue::Role(ColorRole::Agent)),
-                bold: true,
-                ..Default::default()
-            });
-            out.print(&header);
-            out.pop_style();
-            out.newline();
-            let bctx = crate::content::BoxContext {
-                left: "\u{2502} ",
-                right: "",
-                color: ColorValue::Role(ColorRole::Agent),
-                inner_w: width.saturating_sub(3),
-            };
-            1 + render_markdown_inner(out, content, width, bctx.left, true, Some(&bctx))
-        }
-        Block::Agent {
-            agent_id,
-            slug,
-            blocking,
-            tool_calls,
-            status,
-            elapsed,
-        } => render_agent_block(
-            out,
-            agent_id,
-            slug.as_deref(),
-            *blocking,
-            tool_calls,
-            *status,
-            *elapsed,
-            width,
-        ),
     }
 }
 /// Print user message text with accent highlighting for valid `@path` refs,

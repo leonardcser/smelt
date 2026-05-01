@@ -48,7 +48,7 @@ to invoke_ the feature.
 | Per-turn message snapshot (`Messages` event for transcript sync) | `protocol/event.rs::Messages` + `app/transcript_model.rs` | P2.d | working |
 | Plugin tool hook flow (`needs_confirm` / `preflight` / `approval_patterns`) | `protocol/event.rs::ToolHooksRequest` + `lua/tasks.rs` PluginToolEnv | P5.b (Lua hook fn returns "allow"/"needs_confirm"/"deny") | working |
 | Tool call lifecycle states (`ToolStarted` / `ToolOutput` / `ToolFinished` / `ToolStatus::Denied`) | `protocol/event.rs` + `app/transcript_present/tools.rs` | P4.b (Lua presentation) | working |
-| Per-turn telemetry (`TurnMeta`, `agent_blocks`, `AgentToolData`) | `protocol/usage.rs` + `session.rs` | P2.a (Session). `AgentBlockData` deleted in P5.c — sub-agent output becomes ordinary tool blocks. | working |
+| Per-turn telemetry (`TurnMeta`) | `protocol/usage.rs` + `session.rs` | P2.a (Session). `AgentBlockData` deleted in P5.c. | working |
 | Cost tracking                                                 | `app/working.rs` + `session.rs` cost fields               | P2.a (Session)                | working |
 | Token usage display                                           | `protocol/usage.rs` + status bar                          | P2.c (`tokens_used` cell)     | working |
 | Tokens/sec readout                                            | `show_tps` setting + status bar                           | P4.c                          | working |
@@ -61,11 +61,7 @@ to invoke_ the feature.
 | Prompt history (↑/↓)                                          | `input/history.rs`                                        | P2                            | working |
 | Reverse history search (Ctrl+R, `/history`)                   | `plugins/history_search.lua`                              | P4.e                          | working |
 | Input stash (Ctrl+S)                                          | `input/mod.rs`                                            | P1/P4                         | working |
-| Multi-agent: spawn                                            | `runtime/lua/smelt/tools/spawn_agent.lua`                 | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` with no engine-aware agent surface | working |
-| Multi-agent: stop                                             | `runtime/lua/smelt/tools/stop_agent.lua`                  | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
-| Multi-agent: message                                          | `runtime/lua/smelt/tools/message_agent.lua`               | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
-| Multi-agent: peek                                             | `runtime/lua/smelt/tools/peek_agent.lua`                  | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
-| Multi-agent: list                                             | `runtime/lua/smelt/tools/list_agents.lua`                 | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
+
 | MCP servers                                                   | `engine/mcp/`                                             | n/a (kept)                    | working |
 | Skills loader                                                 | `engine/skills.rs` + `runtime/lua/smelt/tools/load_skill.lua` | P5.b — `load_skill` Lua-side; loader stays on `Core.skills` for FFI | working |
 
@@ -86,11 +82,7 @@ to invoke_ the feature.
 | `web_fetch`           | `runtime/lua/smelt/tools/web_fetch.lua` | P5.b — landed; composes `smelt.http.{get,cache,random_user_agent}` + `smelt.html.{title,links,to_text,to_markdown}` + `smelt.image.data_url_from_bytes` + `smelt.engine.ask` (`AuxiliaryTask::Btw`) | working |
 | `web_search`          | `runtime/lua/smelt/tools/web_search.lua` | P5.b — landed; composes `smelt.http.{post,cache,random_user_agent}` + `smelt.html.parse_ddg_results` | working |
 | `ask_user_question`   | `runtime/lua/smelt/tools/ask_user_question.lua` | P5.b — landed                | working |
-| `spawn_agent`         | `runtime/lua/smelt/tools/spawn_agent.lua` | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
-| `list_agents`         | `runtime/lua/smelt/tools/list_agents.lua` | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
-| `message_agent`       | `runtime/lua/smelt/tools/message_agent.lua` | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
-| `peek_agent`          | `runtime/lua/smelt/tools/peek_agent.lua`    | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
-| `stop_agent`          | `runtime/lua/smelt/tools/stop_agent.lua` | Transitional P5.b path; target is optional plugin logic over `smelt.subprocess` | working |
+
 | `load_skill`          | `runtime/lua/smelt/tools/load_skill.lua` | P5.b — landed; composes `smelt.skills.content` over `Core.skills` | working |
 | `exit_plan_mode`      | `runtime/lua/smelt/tools/exit_plan_mode.lua` | P5.b — landed; module `register/unregister` swapped in/out by `plugins/plan_mode.lua` on Plan mode entry/exit | working |
 
@@ -121,7 +113,7 @@ to invoke_ the feature.
 | `/history`                                        | `plugins/history_search.lua`      | P4.e                             | working |
 | `/yank-block` (opt-in)                            | `plugins/yank_block.lua`          | P4                               | working |
 | `/reflect`                                        | `runtime/lua/smelt/plugins/reflect.lua`                              | P4.e | working — fully Lua: body inlined; submits via `smelt.engine.submit_command` |
-| `/simplify`                                       | `runtime/lua/smelt/plugins/simplify.lua`                             | P4.e | working — fully Lua: multi-agent + solo bodies inlined; branches on `smelt.engine.multi_agent()` |
+| `/simplify`                                       | `runtime/lua/smelt/plugins/simplify.lua`                             | P4.e | working — fully Lua: body inlined; submits via `smelt.engine.submit_command` |
 | Custom commands (`~/.config/smelt/commands/*.md`) | `runtime/lua/smelt/plugins/custom_commands.lua` | P4.e            | working — fully Lua: scans dir at startup, parses YAML frontmatter via `smelt.parse.frontmatter`, evaluates exec blocks via `smelt.process.run`, submits via `smelt.engine.submit_command(name, body, overrides)` |
 | `! <shell>` (shell escape)                        | `app/cmdline.rs`                  | P4 (cmdline widget)              | working |
 
@@ -210,7 +202,7 @@ to invoke_ the feature.
 | `restrict_to_workspace` setting                       | settings + permissions            | P5                          | working |
 | `redact_secrets` setting                              | settings + `engine/redact.rs`     | n/a                         | working |
 | `auto_compact` setting                                | settings + compact loop           | P2                          | working |
-| `multi_agent` setting                                 | settings + plugin enablement / startup wiring | P5.c cleanup still pending; target is optional plugin enablement, not engine-side multi-agent plumbing | partial |
+| `multi_agent` setting                                 | settings + plugin enablement / startup wiring | Removed in P5.c; target is optional plugin enablement, not engine-side multi-agent plumbing | deleted |
 | `context_window` override                             | settings                          | n/a                         | working |
 | Custom statusline items (`smelt.statusline.register`) | `lua/api/statusline.rs` + `runtime/lua/smelt/status.lua`           | P4.c                        | working — the shipped `core` composer plus user-registered sources both flow through the same `smelt.statusline.register(name, fn)` path; Rust runs the responsive layout. |
 | Vim mode opt-in                                       | settings + `plugins/toggles.lua`  | P4                          | working |
@@ -294,10 +286,8 @@ to invoke_ the feature.
 | Text output (final on stdout, tools on stderr)  | `app/headless.rs`                      | P2                     | working |
 | JSON output (`--format json` JSONL events)      | `app/headless.rs`                      | P2                     | working |
 | Verbose tool output (`-v`)                      | `src/main.rs`                          | n/a                    | working |
-| Subagent mode (`--subagent`, → `--agent <id>` in target) | `src/main.rs` + `engine/socket.rs`     | Transitional; target is optional plugin wiring over `tui::subprocess::socket` with the flag rename in P5.e | working |
-| Parent PID tracking (`--parent-pid`)            | `src/main.rs`                          | n/a                    | working |
-| Subagent depth (`--depth`, `--max-agent-depth`) | `src/main.rs` + `engine/registry.rs`   | n/a                    | working |
-| Concurrent agent cap (`--max-agents`)           | `engine/registry.rs`                   | n/a                    | working |
+| Subagent mode (`--subagent`) | `src/main.rs` + `engine/socket.rs`     | Removed in P5.c | deleted |
+
 | Color control (`--color`)                       | `src/main.rs`                          | n/a                    | working |
 | Log level (`--log-level`)                       | `src/main.rs` + `engine/log.rs`        | n/a                    | working |
 | Bench mode (`--bench`)                          | `src/main.rs` + `metrics.rs`           | P7                     | working |
@@ -310,7 +300,7 @@ to invoke_ the feature.
 | Behavior                | `--mode`, `--mode-cycle`, `--reasoning-effort`, `--reasoning-cycle`, `--no-tool-calling`, `--system-prompt`, `--no-system-prompt`, `--set` | `src/main.rs`                             | n/a         | working |
 | Sampling                | `--temperature`, `--top-p`, `--top-k`                                                                                                      | `src/main.rs`                             | n/a         | working |
 | Sessions                | `-r/--resume [SESSION_ID]`                                                                                                                 | `src/main.rs`                             | n/a         | working |
-| Multi-Agent             | `--multi-agent`/`--no-multi-agent`, `--max-agent-depth`, `--max-agents`                                                                    | `src/main.rs`                             | Transitional CLI surface; target depends on optional plugin/startup wiring rather than core engine ownership | working |
+| Multi-Agent             | `--multi-agent`/`--no-multi-agent`, `--max-agent-depth`, `--max-agents`                                                                    | `src/main.rs`                             | Removed in P5.c | deleted |
 | Runtime                 | `--headless`, `--format`, `-v`, `--color`, `--log-level`, `--bench`                                                                        | `src/main.rs`                             | n/a         | working |
 | Subcommands             | `smelt auth`                                                                                                                               | `src/main.rs`                             | n/a         | working |
 | Config: providers       | `name`, `type`, `api_base`, `api_key_env`, `models`                                                                                        | `engine/config_file.rs`                   | n/a         | working |

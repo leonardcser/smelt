@@ -106,13 +106,6 @@ pub(super) fn build_body(
                     }
                 }
             }
-            Role::Agent => {
-                input.push(serde_json::json!({
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": m.agent_api_text()}],
-                }));
-            }
             Role::Tool => {
                 let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
                 let trimmed = trim_tool_output(output, MAX_TOOL_OUTPUT_LINES);

@@ -100,8 +100,8 @@ impl TuiApp {
     }
 
     /// Resolve an open Confirm dialog with the user's choice. Heavy
-    /// cancel (flush events, kill blocking subagents, drop the active
-    /// turn) when the resolution asks the turn to cancel.
+    /// cancel (flush events, drop the active turn) when the resolution
+    /// asks the turn to cancel.
     pub(crate) fn handle_confirm_resolve(
         &mut self,
         choice: ConfirmChoice,

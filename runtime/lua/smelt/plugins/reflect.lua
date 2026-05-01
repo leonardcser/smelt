@@ -14,7 +14,6 @@ abstraction. This is your chance to course-correct before the debt compounds.
 ## Rules
 
 - **Do NOT edit any files.** Only read code and report back.
-- **Do NOT launch subagents.** Do all the analysis yourself.
 
 ## What to do
 

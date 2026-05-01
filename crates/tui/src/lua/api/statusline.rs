@@ -85,9 +85,6 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     if let Some(c) = fg_of("SmeltAccent") {
         theme.set("accent_fg", c)?;
     }
-    if let Some(c) = fg_of("SmeltAgent") {
-        theme.set("agent_fg", c)?;
-    }
     if let Some(c) = fg_of("Comment") {
         theme.set("muted_fg", c)?;
     }
@@ -198,7 +195,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     let blocked = app.focused_overlay_blocks_agent();
     t.set("permission_pending", app.pending_dialog && !blocked)?;
     t.set("running_procs", app.core.processes.running_count() as i64)?;
-    t.set("running_agents", app.agents.len() as i64)?;
+    t.set("running_agents", 0i64)?;
     if let Some(label) = &app.task_label {
         t.set("task_label", label.as_str())?;
     }

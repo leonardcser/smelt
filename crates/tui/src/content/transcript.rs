@@ -333,21 +333,6 @@ impl Transcript {
                     content: t.to_string(),
                 }
             }
-            Block::AgentMessage {
-                from_id,
-                from_slug,
-                content,
-            } => {
-                let t = content.trim();
-                if t.is_empty() {
-                    return;
-                }
-                Block::AgentMessage {
-                    from_id,
-                    from_slug,
-                    content: t.to_string(),
-                }
-            }
             Block::Thinking { content } => {
                 let t = content.trim();
                 if t.is_empty() {

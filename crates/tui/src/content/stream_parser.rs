@@ -11,8 +11,8 @@
 
 use super::is_table_separator;
 use crate::app::transcript_model::{
-    ActiveAgent, ActiveText, ActiveThinking, ActiveTool, AgentBlockStatus, Block, BlockHistory,
-    BlockId, Status, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
+    ActiveText, ActiveThinking, ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput,
+    ToolOutputRef, ToolState, ToolStatus,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -22,7 +22,6 @@ pub(crate) struct StreamParser {
     active_text: Option<ActiveText>,
     stream_exec_id: Option<BlockId>,
     active_tools: Vec<ActiveTool>,
-    active_agents: Vec<ActiveAgent>,
 }
 
 impl StreamParser {
@@ -32,7 +31,6 @@ impl StreamParser {
             active_text: None,
             stream_exec_id: None,
             active_tools: Vec::new(),
-            active_agents: Vec::new(),
         }
     }
 
@@ -40,7 +38,6 @@ impl StreamParser {
         self.active_thinking = None;
         self.active_text = None;
         self.active_tools.clear();
-        self.active_agents.clear();
         self.stream_exec_id = None;
     }
 
@@ -60,9 +57,8 @@ impl StreamParser {
         self.active_thinking.as_ref()
     }
 
-    pub(crate) fn clear_tools_and_agents(&mut self) {
+    pub(crate) fn clear_tools(&mut self) {
         self.active_tools.clear();
-        self.active_agents.clear();
     }
 
     // ── Streaming thinking ──────────────────────────────────────────
@@ -518,7 +514,6 @@ impl StreamParser {
     }
 
     fn finalize_active_tools_as(&mut self, history: &mut BlockHistory, status: ToolStatus) {
-        self.finish_all_active_agents(history);
         let tools: Vec<ActiveTool> = self.active_tools.drain(..).collect();
         for tool in tools {
             let elapsed = if status == ToolStatus::Denied {
@@ -599,192 +594,5 @@ impl StreamParser {
             );
         }
         history.set_status(id, Status::Done);
-    }
-
-    // ── Agent lifecycle ─────────────────────────────────────────────
-
-    pub(crate) fn start_active_agent(&mut self, history: &mut BlockHistory, agent_id: String) {
-        let start_time = Instant::now();
-        let block = Block::Agent {
-            agent_id: agent_id.clone(),
-            slug: None,
-            blocking: true,
-            tool_calls: Vec::new(),
-            status: AgentBlockStatus::Running,
-            elapsed: Some(Duration::from_secs(0)),
-        };
-        let block_id = history.push(block);
-        history.set_status(block_id, Status::Streaming);
-        self.active_agents.push(ActiveAgent {
-            agent_id,
-            block_id,
-            start_time,
-            final_elapsed: None,
-        });
-    }
-
-    pub(crate) fn update_active_agent(
-        &mut self,
-        history: &mut BlockHistory,
-        agent_id: &str,
-        slug: Option<&str>,
-        tool_calls: &[crate::app::AgentToolEntry],
-        status: AgentBlockStatus,
-    ) {
-        let (block_id, elapsed) = {
-            let Some(active) = self
-                .active_agents
-                .iter_mut()
-                .find(|a| a.agent_id == agent_id)
-            else {
-                return;
-            };
-            if status != AgentBlockStatus::Running && active.final_elapsed.is_none() {
-                active.final_elapsed = Some(active.start_time.elapsed());
-            }
-            let elapsed = active
-                .final_elapsed
-                .unwrap_or_else(|| active.start_time.elapsed());
-            (active.block_id, elapsed)
-        };
-        history.rewrite(
-            block_id,
-            Block::Agent {
-                agent_id: agent_id.to_string(),
-                slug: slug.map(str::to_string),
-                blocking: true,
-                tool_calls: tool_calls.to_vec(),
-                status,
-                elapsed: Some(elapsed),
-            },
-        );
-    }
-
-    pub(crate) fn cancel_active_agents(&mut self, history: &mut BlockHistory) {
-        type AgentCancel = (
-            BlockId,
-            String,
-            Duration,
-            Vec<crate::app::AgentToolEntry>,
-            Option<String>,
-        );
-        let updates: Vec<AgentCancel> = self
-            .active_agents
-            .iter_mut()
-            .map(|a| {
-                if a.final_elapsed.is_none() {
-                    a.final_elapsed = Some(a.start_time.elapsed());
-                }
-                let elapsed = a.final_elapsed.unwrap_or_else(|| a.start_time.elapsed());
-                let (slug, tool_calls) = match history.blocks.get(&a.block_id) {
-                    Some(Block::Agent {
-                        slug, tool_calls, ..
-                    }) => (slug.clone(), tool_calls.clone()),
-                    _ => (None, Vec::new()),
-                };
-                (a.block_id, a.agent_id.clone(), elapsed, tool_calls, slug)
-            })
-            .collect();
-        for (block_id, agent_id, elapsed, tool_calls, slug) in updates {
-            history.rewrite(
-                block_id,
-                Block::Agent {
-                    agent_id,
-                    slug,
-                    blocking: true,
-                    tool_calls,
-                    status: AgentBlockStatus::Error,
-                    elapsed: Some(elapsed),
-                },
-            );
-        }
-    }
-
-    pub(crate) fn finish_active_agent(&mut self, history: &mut BlockHistory, agent_id: &str) {
-        let Some(idx) = self
-            .active_agents
-            .iter()
-            .position(|a| a.agent_id == agent_id)
-        else {
-            return;
-        };
-        let mut active = self.active_agents.remove(idx);
-        if active.final_elapsed.is_none() {
-            active.final_elapsed = Some(active.start_time.elapsed());
-        }
-        let elapsed = active
-            .final_elapsed
-            .unwrap_or_else(|| active.start_time.elapsed());
-        let (slug, tool_calls, status) = match history.blocks.get(&active.block_id) {
-            Some(Block::Agent {
-                slug,
-                tool_calls,
-                status,
-                ..
-            }) => {
-                let next = if *status == AgentBlockStatus::Running {
-                    AgentBlockStatus::Done
-                } else {
-                    *status
-                };
-                (slug.clone(), tool_calls.clone(), next)
-            }
-            _ => (None, Vec::new(), AgentBlockStatus::Done),
-        };
-        history.rewrite(
-            active.block_id,
-            Block::Agent {
-                agent_id: active.agent_id,
-                slug,
-                blocking: true,
-                tool_calls,
-                status,
-                elapsed: Some(elapsed),
-            },
-        );
-        history.set_status(active.block_id, Status::Done);
-    }
-
-    fn finish_all_active_agents(&mut self, history: &mut BlockHistory) {
-        let ids: Vec<String> = self
-            .active_agents
-            .iter()
-            .map(|a| a.agent_id.clone())
-            .collect();
-        for id in ids {
-            self.finish_active_agent(history, &id);
-        }
-    }
-
-    pub(crate) fn tick_active_agents(&mut self, history: &mut BlockHistory) {
-        let ticks: Vec<(BlockId, Duration)> = self
-            .active_agents
-            .iter()
-            .filter(|a| a.final_elapsed.is_none())
-            .map(|a| (a.block_id, a.start_time.elapsed()))
-            .collect();
-        for (block_id, elapsed) in ticks {
-            let Some(Block::Agent {
-                agent_id,
-                slug,
-                tool_calls,
-                status,
-                ..
-            }) = history.blocks.get(&block_id).cloned()
-            else {
-                continue;
-            };
-            history.rewrite(
-                block_id,
-                Block::Agent {
-                    agent_id,
-                    slug,
-                    blocking: true,
-                    tool_calls,
-                    status,
-                    elapsed: Some(elapsed),
-                },
-            );
-        }
     }
 }

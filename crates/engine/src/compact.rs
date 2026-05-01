@@ -273,7 +273,6 @@ fn stringify_conversation(messages: &[Message]) -> String {
             Role::User => ("User", message_text(m)),
             Role::Assistant => ("Assistant", assistant_text(m)),
             Role::Tool => ("ToolResult", message_text(m)),
-            Role::Agent => ("Agent", m.agent_api_text()),
         };
 
         let text = text.trim();
@@ -339,7 +338,7 @@ fn truncate_bytes_floor(text: &str, max_bytes: usize) -> String {
     out
 }
 
-/// Collect user and inter-agent messages as plain text, skipping anything
+/// Collect user messages as plain text, skipping anything
 /// that was itself produced by a prior compaction.
 fn collect_user_messages(messages: &[Message]) -> Vec<String> {
     messages
@@ -347,7 +346,7 @@ fn collect_user_messages(messages: &[Message]) -> Vec<String> {
         .filter_map(|m| {
             let text = match m.role {
                 Role::User => m.content.as_ref()?.as_text().to_string(),
-                Role::Agent => m.agent_api_text(),
+
                 _ => return None,
             };
             let trimmed = text.trim();

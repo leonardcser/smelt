@@ -6,7 +6,7 @@
 //! Long-lived background processes go through the engine
 //! `ProcessRegistry` (`smelt.process.{list,kill,read_output,spawn_bg}`);
 //! that surface stays put. The future `tui::subprocess` module will
-//! cover bidirectional event-channel children (sub-agents, MCP).
+//! cover bidirectional event-channel children (MCP, etc.).
 //!
 //! `run_streaming` is the async counterpart used by the bash tool —
 //! drives the child via `tokio::process`, fires a per-line callback

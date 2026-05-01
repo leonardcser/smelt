@@ -59,10 +59,6 @@ impl CodexTokens {
     pub(crate) fn delete() {
         cred_store().delete();
     }
-
-    pub(crate) fn to_env_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
-    }
 }
 
 // ── JWT helpers ────────────────────────────────────────────────────────────

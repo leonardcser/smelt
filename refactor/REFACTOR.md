@@ -487,7 +487,7 @@ bridges, then the aggregate.
   compose cleanly because `drain_due` releases `&mut Timers` before
   the function calls happen.
 - **a.6** ✅ — `AppConfig` (provider triple, mode + reasoning cycles,
-  settings, multi-agent toggle, model overrides, context window).
+  settings, model overrides, context window).
   16 fields bundle off `App` into `app::app_config::AppConfig`; call
   sites read through `self.config.*`. Keymap / theme path bindings
   ride later phases (P3.b / P5.d).
@@ -550,11 +550,11 @@ bridges, then the aggregate.
     encapsulation + main.rs branch flip) and the `App` → `TuiApp`
     rename (~300+ callsites) are each natural single-session units:
     - **a.12b1** ✅ — carve `HeadlessApp { core, sink: HeadlessSink }`
-      over today's `App::run_headless` / `App::run_subagent` surface;
+      over today's `App::run_headless` surface;
       add `Core::new(config, engine)` so both frontends share the
       headless-safe construction path; main.rs branches on
-      `args.headless || args.subagent` *before* `App::new`,
-      constructing `HeadlessApp` directly for those paths.
+      `args.headless` *before* `App::new`,
+      constructing `HeadlessApp` directly for that path.
     - **a.12b2** ✅ — rename `App` → `TuiApp` throughout the codebase.
 
 Aggregate:
@@ -576,7 +576,7 @@ struct HeadlessApp { core: Core, sink: HeadlessSink }
 ```
 
 The TUI `main` builds `TuiApp` and runs its event loop. A
-`smelt --headless` (or sub-agent worker) builds `HeadlessApp` and
+`smelt --headless` builds `HeadlessApp` and
 runs the same loop, sans terminal events and sans `Ui` rendering.
 
 ### P2.b — `Host` + `UiHost` impls + supporting types
@@ -731,9 +731,9 @@ unit warrants it):
 - `tui::process` — short-lived shell commands. ✅ `run` shipped
   (this session); streaming `spawn -> Handle` rides P5.b.
 - `tui::subprocess` — long-lived child with bidirectional event
-  channel (`spawn`, `send`, `on_event`, `wait`, `kill`). Used by
-  sub-agents, MCP servers, long-running background commands. Wire
-  format is opaque (stdio / socket); JSON framing is a convention
+  channel (`spawn`, `send`, `on_event`, `wait`, `kill`). Future
+  primitive for MCP servers, long-running background commands, etc.
+  Wire format is opaque (stdio / socket); JSON framing is a convention
   the consumer enforces.
 - `tui::fs` — read / write / edit / glob / lock. ✅ shell (`5de3054`).
 - `tui::http` — fetch / cache / redirects. ✅ shell (this session).
@@ -764,8 +764,8 @@ capability they serve:
   redirects, the bulk of `tui::http`).
 - `engine/tools/result_dedup.rs` (169 LOC) → `tui::tools::dedup`
   (helper).
-- `engine/socket.rs` (345 LOC) + `engine/registry.rs` (262 LOC) →
-  `tui::subprocess::{socket, registry}` (sub-agent IPC layer).
+- `engine/socket.rs` (345 LOC) + `engine/registry.rs` (262 LOC) —
+  deleted in P5.c; future `tui::subprocess` may absorb the patterns.
 
 After this, `engine/tools/` retains only `ToolSchema` +
 `ToolDispatcher` + `ToolResult` + ctx — engine's tool surface is
@@ -805,13 +805,12 @@ Newly bound Lua surface:
   via `set_rules`), `outside_workspace_paths`, `is_approved`,
   `approve`, `load_workspace`, `save_workspace`, `set_rules`.
 - `smelt.subprocess` — `spawn`, `send`, `on_event`, `wait`, `kill`.
-  Long-lived child IPC; sub-agents and any other long-running child
-  compose this.
+  Long-lived child IPC; future primitive for any long-running child.
 - `smelt.frontend` — `is_interactive()`, `kind()`. Tools branch on
   this when they need the human-vs-headless distinction. ✅ (`e38572d`).
 - `smelt.mode` — `get / set / cycle` over AgentMode (Plan/Apply/Yolo).
   Renamed from `smelt.agent.mode` to avoid collision with
-  `smelt.subprocess` (sub-agents). ✅ (`ad9eccc`).
+  future `smelt.subprocess`. ✅ (`ad9eccc`).
 - `smelt.path` — wraps `tui::path`. ✅ (`de7fb87`).
 - `smelt.parse`, `smelt.fs`, `smelt.http`, `smelt.html`,
   `smelt.notebook`, `smelt.os`, `smelt.fuzzy`, `smelt.grep` — wrap
@@ -932,29 +931,10 @@ Land in `runtime/lua/smelt/tools/`:
 plugins over the same primitives; they do not need to be built into the core
 tool set.
 
-**Agent tools are optional subprocess tools.** When a multi-agent plugin is
-enabled, it composes `tui::subprocess` and a thin Lua-side registry — no
-engine knowledge. The transcript renders these calls as ordinary tool calls
-(no special widget). Concretely:
-
-- `spawn_agent.lua` calls
-  `smelt.subprocess.spawn("smelt", { "--agent", id, … })`,
-  registers `on_event` to fire `agent:<id>:event` cell, stores the
-  handle in a Lua table keyed by `id`, returns the handle id as
-  the tool result.
-- `message_agent.lua` looks up the handle, sends a JSON message
-  through `subprocess.send`, yields the coroutine until the next
-  reply arrives via the cell, returns the reply text.
-- `stop_agent.lua` calls `subprocess.kill` on the handle.
-- `peek_agent.lua` reads the latest cell value.
-- `list_agents.lua` enumerates the Lua-side registry table.
-
-A removable `runtime/lua/smelt/plugins/multi_agent.lua` carries the
-shared state (the `id → handle` table, the `agent:<id>:status`
-cells) so the tools don't duplicate it. Plugin authors who want
-fancier agent UI (live token streaming, dedicated transcript
-panel) build it on top of `agent:<id>:event` subscriptions and
-custom Buffer attaches.
+**Future: optional subprocess tools.** A future multi-agent plugin (if
+enabled) would compose `tui::subprocess` and a thin Lua-side registry —
+no engine knowledge. The transcript would render these calls as ordinary
+tool calls (no special widget).
 
 Each tool:
 
@@ -1052,17 +1032,14 @@ process-management UX live in a separate plugin/tool surface over
   - `protocol::Role::Agent` and `protocol::AgentBlockData`.
   - The 5 dedicated agent tool files
     (`spawn_agent.rs` / `stop_agent.rs` / `message_agent.rs` /
-    `peek_agent.rs` / `list_agents.rs`) follow P5.b to Lua. The
-    agent-management Lua tools compose `tui::subprocess` only —
-    engine never sees them. (`load_skill.rs` is unrelated to
-    multi-agent and follows P5.b on its own track.)
+    `peek_agent.rs` / `list_agents.rs`) deleted in P5.c.
   - `agent.rs`'s multi-agent loop branch (~400 LOC of the 2129)
-    deletes; `agent.rs` becomes single-agent only.
+    deleted in P5.c; `agent.rs` is single-agent only.
 
-  After this, engine has _no opinion on sub-agents whatsoever_.
-  Spawning one is `tui::subprocess.spawn("smelt", …)` from a Lua
-  tool; the parent's LLM sees "tool call, tool result" like any
-  other tool.
+  After this, engine has _no opinion on agents whatsoever_.
+  Any future multi-agent plugin would spawn children via
+  `tui::subprocess.spawn("smelt", …)` from a Lua tool; the parent's
+  LLM sees "tool call, tool result" like any other tool.
 - `crates/tui/src/workspace_permissions.rs` is folded into
   `tui::permissions::store` in P3.a. P5.b's `bash.lua` and
   `edit_file.lua` call `tui::permissions.*` for parsing, rule

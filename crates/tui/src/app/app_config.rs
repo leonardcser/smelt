@@ -27,6 +27,5 @@ pub struct AppConfig {
     pub reasoning_cycle: Vec<ReasoningEffort>,
 
     pub settings: state::ResolvedSettings,
-    pub multi_agent: bool,
     pub context_window: Option<u32>,
 }

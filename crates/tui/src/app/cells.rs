@@ -469,9 +469,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         mlua::Value::Table(t)
     });
     // `TurnMeta` projector: surface the per-turn metadata as a flat
-    // Lua table. `tool_elapsed` flattens to `{ [call_id] = ms }`;
-    // `agent_blocks` is omitted today (un-migrated payload shape will
-    // land alongside the agent-tools migration in P5).
+    // Lua table. `tool_elapsed` flattens to `{ [call_id] = ms }`.
     cells.register_lua_projector::<TurnMeta, _>(|m, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
@@ -1033,7 +1031,6 @@ mod tests {
                 avg_tps: Some(33.5),
                 interrupted: false,
                 tool_elapsed,
-                agent_blocks: std::collections::HashMap::new(),
             }),
         );
         cells.set_dyn(

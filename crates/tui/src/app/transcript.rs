@@ -1,10 +1,8 @@
 //! Transcript ownership on `TuiApp` — block history, streaming state
-//! (thinking / text / tools / agents / exec), projection to a
+//! (thinking / text / tools / exec), projection to a
 //! ui::Buffer, and the transcript-cursor glyph cache.
 
-use super::transcript_model::{
-    AgentBlockStatus, Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
-};
+use super::transcript_model::{Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState};
 use super::*;
 use crate::app::transcript_cache::{PersistedLayoutCache, RenderCache};
 use crate::app::transcript_present as blocks;
@@ -41,37 +39,6 @@ pub(crate) struct TranscriptCursor {
 }
 
 impl TuiApp {
-    pub(crate) fn start_active_agent(&mut self, agent_id: String) {
-        self.parser
-            .start_active_agent(&mut self.transcript.history, agent_id);
-    }
-
-    pub(crate) fn update_active_agent(
-        &mut self,
-        agent_id: &str,
-        slug: Option<&str>,
-        tool_calls: &[crate::app::AgentToolEntry],
-        status: AgentBlockStatus,
-    ) {
-        self.parser.update_active_agent(
-            &mut self.transcript.history,
-            agent_id,
-            slug,
-            tool_calls,
-            status,
-        );
-    }
-
-    pub(crate) fn cancel_active_agents(&mut self) {
-        self.parser
-            .cancel_active_agents(&mut self.transcript.history);
-    }
-
-    pub(crate) fn finish_active_agent(&mut self, agent_id: &str) {
-        self.parser
-            .finish_active_agent(&mut self.transcript.history, agent_id);
-    }
-
     pub(crate) fn begin_turn(&mut self) {
         self.parser.begin_turn();
     }
@@ -279,7 +246,7 @@ impl TuiApp {
         // expose `Block::raw_text`) so yanking a rendered markdown block
         // returns `**bold**`, `` `code` ``, fenced blocks, tables etc.
         // verbatim. Fall back to cell-walking for structured blocks
-        // (tool / agent / confirm) whose "raw" form isn't a single
+        // (tool / confirm) whose "raw" form isn't a single
         // string.
         let block_id = {
             let snap = self.transcript.snapshot(tw, show_thinking);
@@ -499,7 +466,7 @@ impl TuiApp {
 
     pub(crate) fn truncate_to(&mut self, block_idx: usize) {
         self.transcript.truncate_to(block_idx);
-        self.parser.clear_tools_and_agents();
+        self.parser.clear_tools();
     }
 
     /// Update spinner animation state. Call before rendering. Returns
@@ -516,7 +483,6 @@ impl TuiApp {
                 changed = true;
             }
         }
-        self.parser.tick_active_agents(&mut self.transcript.history);
         changed
     }
 

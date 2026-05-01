@@ -75,8 +75,6 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
             is_error,
-            agent_from_id: None,
-            agent_from_slug: None,
         }
     }
 

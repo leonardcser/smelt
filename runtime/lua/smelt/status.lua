@@ -131,7 +131,7 @@ local function compose()
     })
   end
 
-  -- Background-procs / sub-agent counters.
+  -- Background-proc counters.
   local procs = snap.running_procs or 0
   if procs > 0 then
     table.insert(items, {

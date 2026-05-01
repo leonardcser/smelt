@@ -1,4 +1,4 @@
-//! Headless / subagent log output. Bare-minimum style — assistant
+//! Headless log output. Bare-minimum style — assistant
 //! text flows undecorated; only tool lifecycle gets markers. Thinking
 //! is dim+italic. Colors match the TUI theme. Respects NO_COLOR,
 //! TERM=dumb, non-TTY stderr, and the `--color` CLI flag.
@@ -28,9 +28,8 @@ pub enum ColorMode {
 
 /// Output writer for `HeadlessApp`. Carries the format / verbosity
 /// flags chosen at startup; every event emission and log helper hangs
-/// off `&self`. The subagent variant always emits JSON for every
-/// event with `verbose = true`; the headless variant honours the
-/// CLI's `--format` and `-v` flags.
+/// off `&self`. The headless variant honours the CLI's `--format` and
+/// `-v` flags.
 pub struct HeadlessSink {
     pub(super) format: OutputFormat,
     pub(super) verbose: bool,
@@ -43,13 +42,6 @@ impl HeadlessSink {
     pub fn new(format: OutputFormat, color: ColorMode, verbose: bool) -> Self {
         init_color_mode(color);
         Self { format, verbose }
-    }
-
-    /// Build a sink for `smelt --subagent`: always JSON, always
-    /// verbose. Subagents forward every engine event to the parent
-    /// over stdout as a JSON line.
-    pub fn new_subagent(color: ColorMode) -> Self {
-        Self::new(OutputFormat::Json, color, true)
     }
 
     /// Write a single `EngineEvent` as a JSON line to stdout.
@@ -168,8 +160,8 @@ fn stderr_supports_color() -> bool {
         if std::env::var("TERM").as_deref() == Ok("dumb") {
             return false;
         }
-        // Subagents have stderr piped to a log file, but the parent
-        // TUI renders the ANSI sequences — so honor FORCE_COLOR.
+        // Headless processes may have stderr piped to a log file, but
+        // the parent TUI renders the ANSI sequences — so honor FORCE_COLOR.
         if std::env::var_os("FORCE_COLOR").is_some() {
             return true;
         }

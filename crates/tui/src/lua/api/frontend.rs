@@ -1,6 +1,6 @@
 //! `smelt.frontend` bindings — read which frontend wraps the running
 //! `Core` so tools can branch between the human-facing TUI and the
-//! headless / subagent paths.
+//! headless paths.
 //!
 //! Today only `TuiApp` installs the TLS app pointer, so reads from
 //! Lua always see `Tui`. When `HeadlessApp` gains a Lua driver
