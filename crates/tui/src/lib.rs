@@ -2,7 +2,6 @@ pub mod alloc;
 pub(crate) mod api;
 pub mod app;
 pub mod attachment;
-pub(crate) mod builtin_commands;
 pub(crate) mod completer;
 pub mod config;
 pub mod content;

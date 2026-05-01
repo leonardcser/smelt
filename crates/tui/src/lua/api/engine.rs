@@ -1,7 +1,7 @@
 //! `smelt.engine` bindings — turn-driver writes (cancel, compact),
-//! the `ask` auxiliary request primitive, and the
-//! `submit_builtin_command` entry point used by the built-in
-//! `/reflect` and `/simplify` plugins. Mode get/set/cycle live under
+//! the `ask` auxiliary request primitive, and `submit_command` for
+//! Lua-rendered slash-command turns (`/reflect`, `/simplify`,
+//! user-defined custom commands). Mode get/set/cycle live under
 //! `smelt.mode`; reasoning effort lives under `smelt.reasoning`;
 //! model get/set/list live under `smelt.model`; per-session cost /
 //! context-token / context-window / messages snapshot live under
@@ -29,31 +29,35 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         })?,
     )?;
 
-    // smelt.engine.submit_builtin_command(name, arg?) — start a
-    // custom-command turn from a built-in prompt template (rendered
-    // with the current `multi_agent` context, frontmatter overrides
-    // applied). Used by Lua plugins for `/reflect` and `/simplify`.
+    // smelt.engine.multi_agent() -> bool. Read-only view of the
+    // process-wide multi-agent config flag (set once at startup from
+    // CLI / config). Lua plugins branch on this when their template
+    // body differs between solo and multi-agent runs.
     engine_tbl.set(
-        "submit_builtin_command",
-        lua.create_function(|_, (name, arg): (String, Option<String>)| {
+        "multi_agent",
+        lua.create_function(|_, ()| {
+            Ok(crate::lua::try_with_app(|app| app.core.config.multi_agent).unwrap_or(false))
+        })?,
+    )?;
+
+    // smelt.engine.submit_command(name, body) — start a turn from a
+    // Lua-rendered slash-command template. `name` is the bare command
+    // (e.g. `"reflect"`) and shows in the transcript as `/name`;
+    // `body` is the fully resolved prompt the LLM sees. No-op when
+    // an agent turn is already running.
+    engine_tbl.set(
+        "submit_command",
+        lua.create_function(|_, (name, body): (String, String)| {
             crate::lua::with_app(|app| {
-                let mut input = format!("/{name}");
-                if let Some(a) = arg.as_deref() {
-                    let trimmed = a.trim();
-                    if !trimmed.is_empty() {
-                        input.push(' ');
-                        input.push_str(trimmed);
-                    }
-                }
-                let multi = app.core.config.multi_agent;
-                let Some(cmd) = crate::builtin_commands::resolve(&input, multi) else {
-                    app.notify_error(format!("unknown builtin command: /{name}"));
-                    return;
-                };
                 if app.agent.is_some() {
                     app.notify_error(format!("cannot run /{name} while agent is working"));
                     return;
                 }
+                let cmd = crate::custom_commands::CustomCommand {
+                    name,
+                    body,
+                    overrides: Default::default(),
+                };
                 let turn = app.begin_custom_command_turn(cmd);
                 app.agent = Some(turn);
             });
