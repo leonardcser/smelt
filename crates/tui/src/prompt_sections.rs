@@ -5,14 +5,14 @@ use protocol::Mode;
 /// The TUI builds these from app state and sends the assembled result to the
 /// engine. Lua plugins can add, remove, or replace sections by name.
 #[derive(Clone, Default)]
-pub struct PromptSections {
+pub(crate) struct PromptSections {
     sections: Vec<(String, String)>,
 }
 
 impl PromptSections {
     /// Insert or replace a section. If a section with this name exists,
     /// it is replaced in-place. Otherwise it is appended at the end.
-    pub fn set(&mut self, name: &str, content: String) {
+    pub(crate) fn set(&mut self, name: &str, content: String) {
         if let Some(entry) = self.sections.iter_mut().find(|(n, _)| n == name) {
             entry.1 = content;
         } else {
@@ -21,12 +21,12 @@ impl PromptSections {
     }
 
     /// Remove a section by name. No-op if the section doesn't exist.
-    pub fn remove(&mut self, name: &str) {
+    pub(crate) fn remove(&mut self, name: &str) {
         self.sections.retain(|(n, _)| n != name);
     }
 
     /// Concatenate all non-empty sections with double newlines.
-    pub fn assemble(&self) -> String {
+    pub(crate) fn assemble(&self) -> String {
         let mut out = String::new();
         for (_, content) in &self.sections {
             let trimmed = content.trim();
@@ -39,10 +39,6 @@ impl PromptSections {
             out.push_str(trimmed);
         }
         out
-    }
-
-    pub fn has(&self, name: &str) -> bool {
-        self.sections.iter().any(|(n, _)| n == name)
     }
 }
 
