@@ -14,27 +14,27 @@ use crossterm::style::Color;
 /// `ui::grid::Style` at paint time via `style_to_grid` below.
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct StyleState {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub crossedout: bool,
-    pub underline: bool,
+    pub(crate) fg: Option<Color>,
+    pub(crate) bg: Option<Color>,
+    pub(crate) bold: bool,
+    pub(crate) dim: bool,
+    pub(crate) italic: bool,
+    pub(crate) crossedout: bool,
+    pub(crate) underline: bool,
 }
 
 /// A structured status item that Lua (or internal code) provides.
 /// Rust owns width fitting, priority dropping, and truncation.
 #[derive(Clone, Debug)]
 pub(crate) struct StatusItem {
-    pub text: String,
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub bold: bool,
-    pub priority: u8,
-    pub align_right: bool,
-    pub truncatable: bool,
-    pub group: bool,
+    pub(crate) text: String,
+    pub(crate) fg: Option<Color>,
+    pub(crate) bg: Option<Color>,
+    pub(crate) bold: bool,
+    pub(crate) priority: u8,
+    pub(crate) align_right: bool,
+    pub(crate) truncatable: bool,
+    pub(crate) group: bool,
 }
 
 impl StatusItem {
@@ -63,17 +63,17 @@ impl StatusItem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StatusPosition {
     /// 1-indexed logical line of the cursor.
-    pub line: u32,
+    pub(crate) line: u32,
     /// 1-indexed display column of the cursor.
-    pub col: u32,
+    pub(crate) col: u32,
     /// Percent of the buffer scrolled past the top of the viewport
     /// (0 = top, 100 = bottom). Always clamped to `0..=100`.
-    pub scroll_pct: u8,
+    pub(crate) scroll_pct: u8,
 }
 
 impl StatusPosition {
     /// Format the way the status bar shows it: `<line>:<col> <pct>%`.
-    pub fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         format!("{}:{} {}%", self.line, self.col, self.scroll_pct)
     }
 }
@@ -127,9 +127,9 @@ const STATUS_SEP_LEN: usize = 3;
 /// gets exactly one span.
 #[derive(Clone, Debug)]
 pub(crate) struct StatusSpanOut {
-    pub col_start: u16,
-    pub col_end: u16,
-    pub style: ui::grid::Style,
+    pub(crate) col_start: u16,
+    pub(crate) col_end: u16,
+    pub(crate) style: ui::grid::Style,
 }
 
 /// Materialised status line: a flat string padded to terminal width
@@ -139,8 +139,8 @@ pub(crate) struct StatusSpanOut {
 /// one cell of right-edge gap.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StatusLine {
-    pub text: String,
-    pub spans: Vec<StatusSpanOut>,
+    pub(crate) text: String,
+    pub(crate) spans: Vec<StatusSpanOut>,
 }
 
 pub(crate) fn spans_to_buffer_line(

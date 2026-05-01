@@ -26,7 +26,7 @@ pub(crate) struct StreamParser {
 }
 
 impl StreamParser {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             active_thinking: None,
             active_text: None,
@@ -36,7 +36,7 @@ impl StreamParser {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.active_thinking = None;
         self.active_text = None;
         self.active_tools.clear();
@@ -44,30 +44,30 @@ impl StreamParser {
         self.stream_exec_id = None;
     }
 
-    pub fn begin_turn(&mut self) {
+    pub(crate) fn begin_turn(&mut self) {
         self.active_tools.clear();
     }
 
-    pub fn has_active_exec(&self) -> bool {
+    pub(crate) fn has_active_exec(&self) -> bool {
         self.stream_exec_id.is_some()
     }
 
-    pub fn has_active_thinking(&self) -> bool {
+    pub(crate) fn has_active_thinking(&self) -> bool {
         self.active_thinking.is_some()
     }
 
-    pub fn active_thinking(&self) -> Option<&ActiveThinking> {
+    pub(crate) fn active_thinking(&self) -> Option<&ActiveThinking> {
         self.active_thinking.as_ref()
     }
 
-    pub fn clear_tools_and_agents(&mut self) {
+    pub(crate) fn clear_tools_and_agents(&mut self) {
         self.active_tools.clear();
         self.active_agents.clear();
     }
 
     // ── Streaming thinking ──────────────────────────────────────────
 
-    pub fn append_streaming_thinking(&mut self, history: &mut BlockHistory, delta: &str) {
+    pub(crate) fn append_streaming_thinking(&mut self, history: &mut BlockHistory, delta: &str) {
         let at = self.active_thinking.get_or_insert_with(|| ActiveThinking {
             current_line: String::new(),
             paragraph: String::new(),
@@ -106,7 +106,7 @@ impl StreamParser {
         }
     }
 
-    pub fn flush_streaming_thinking(&mut self, history: &mut BlockHistory) {
+    pub(crate) fn flush_streaming_thinking(&mut self, history: &mut BlockHistory) {
         if let Some(mut at) = self.active_thinking.take() {
             if !at.current_line.is_empty() {
                 if !at.paragraph.is_empty() {
@@ -135,7 +135,7 @@ impl StreamParser {
 
     // ── Streaming text ──────────────────────────────────────────────
 
-    pub fn append_streaming_text(&mut self, history: &mut BlockHistory, delta: &str) {
+    pub(crate) fn append_streaming_text(&mut self, history: &mut BlockHistory, delta: &str) {
         if self.active_thinking.is_some() {
             self.flush_streaming_thinking(history);
         }
@@ -324,7 +324,7 @@ impl StreamParser {
         }
     }
 
-    pub fn flush_streaming_text(&mut self, history: &mut BlockHistory) {
+    pub(crate) fn flush_streaming_text(&mut self, history: &mut BlockHistory) {
         self.flush_streaming_thinking(history);
         if let Some(mut at) = self.active_text.take() {
             if at.in_code_block.is_some() {
@@ -366,7 +366,7 @@ impl StreamParser {
 
     // ── Tool lifecycle ──────────────────────────────────────────────
 
-    pub fn start_tool(
+    pub(crate) fn start_tool(
         &mut self,
         history: &mut BlockHistory,
         call_id: String,
@@ -418,7 +418,7 @@ impl StreamParser {
             })
     }
 
-    pub fn append_active_output(&mut self, history: &mut BlockHistory, call_id: &str, chunk: &str) {
+    pub(crate) fn append_active_output(&mut self, history: &mut BlockHistory, call_id: &str, chunk: &str) {
         let Some(cid) = self.resolve_active_call_id(history, call_id) else {
             return;
         };
@@ -441,7 +441,7 @@ impl StreamParser {
         });
     }
 
-    pub fn set_active_status(
+    pub(crate) fn set_active_status(
         &mut self,
         history: &mut BlockHistory,
         call_id: &str,
@@ -462,7 +462,7 @@ impl StreamParser {
         Self::update_tool_state(history, &cid, |state| state.status = status);
     }
 
-    pub fn set_active_user_message(
+    pub(crate) fn set_active_user_message(
         &mut self,
         history: &mut BlockHistory,
         call_id: &str,
@@ -474,7 +474,7 @@ impl StreamParser {
         Self::update_tool_state(history, &cid, |state| state.user_message = Some(msg));
     }
 
-    pub fn finish_tool(
+    pub(crate) fn finish_tool(
         &mut self,
         history: &mut BlockHistory,
         call_id: &str,
@@ -508,7 +508,7 @@ impl StreamParser {
         }
     }
 
-    pub fn finalize_active_tools(&mut self, history: &mut BlockHistory) {
+    pub(crate) fn finalize_active_tools(&mut self, history: &mut BlockHistory) {
         self.finalize_active_tools_as(history, ToolStatus::Err);
     }
 
@@ -546,7 +546,7 @@ impl StreamParser {
 
     // ── Exec lifecycle ──────────────────────────────────────────────
 
-    pub fn start_exec(&mut self, history: &mut BlockHistory, command: String) {
+    pub(crate) fn start_exec(&mut self, history: &mut BlockHistory, command: String) {
         let id = history.push(Block::Exec {
             command,
             output: String::new(),
@@ -555,7 +555,7 @@ impl StreamParser {
         self.stream_exec_id = Some(id);
     }
 
-    pub fn append_exec_output(&mut self, history: &mut BlockHistory, chunk: &str) {
+    pub(crate) fn append_exec_output(&mut self, history: &mut BlockHistory, chunk: &str) {
         let Some(id) = self.stream_exec_id else {
             return;
         };
@@ -576,9 +576,9 @@ impl StreamParser {
         );
     }
 
-    pub fn finish_exec(&mut self, _exit_code: Option<i32>) {}
+    pub(crate) fn finish_exec(&mut self, _exit_code: Option<i32>) {}
 
-    pub fn finalize_exec(&mut self, history: &mut BlockHistory) {
+    pub(crate) fn finalize_exec(&mut self, history: &mut BlockHistory) {
         let Some(id) = self.stream_exec_id.take() else {
             return;
         };
@@ -598,7 +598,7 @@ impl StreamParser {
 
     // ── Agent lifecycle ─────────────────────────────────────────────
 
-    pub fn start_active_agent(&mut self, history: &mut BlockHistory, agent_id: String) {
+    pub(crate) fn start_active_agent(&mut self, history: &mut BlockHistory, agent_id: String) {
         let start_time = Instant::now();
         let block = Block::Agent {
             agent_id: agent_id.clone(),
@@ -618,7 +618,7 @@ impl StreamParser {
         });
     }
 
-    pub fn update_active_agent(
+    pub(crate) fn update_active_agent(
         &mut self,
         history: &mut BlockHistory,
         agent_id: &str,
@@ -655,7 +655,7 @@ impl StreamParser {
         );
     }
 
-    pub fn cancel_active_agents(&mut self, history: &mut BlockHistory) {
+    pub(crate) fn cancel_active_agents(&mut self, history: &mut BlockHistory) {
         type AgentCancel = (
             BlockId,
             String,
@@ -695,7 +695,7 @@ impl StreamParser {
         }
     }
 
-    pub fn finish_active_agent(&mut self, history: &mut BlockHistory, agent_id: &str) {
+    pub(crate) fn finish_active_agent(&mut self, history: &mut BlockHistory, agent_id: &str) {
         let Some(idx) = self
             .active_agents
             .iter()
@@ -751,7 +751,7 @@ impl StreamParser {
         }
     }
 
-    pub fn tick_active_agents(&mut self, history: &mut BlockHistory) {
+    pub(crate) fn tick_active_agents(&mut self, history: &mut BlockHistory) {
         let ticks: Vec<(BlockId, Duration)> = self
             .active_agents
             .iter()

@@ -2,19 +2,19 @@ pub(crate) use ui::Rect;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LayoutState {
-    pub transcript: Rect,
-    pub prompt: Rect,
-    pub status: Rect,
+    pub(crate) transcript: Rect,
+    pub(crate) prompt: Rect,
+    pub(crate) status: Rect,
 }
 
 #[derive(Debug)]
 pub(crate) struct LayoutInput {
-    pub term_height: u16,
+    pub(crate) term_height: u16,
     /// Natural height claimed by the prompt area, including the row
     /// reserved for the status line. The tree splits this between a
     /// prompt leaf (`prompt_height - 1` rows) and a status leaf
     /// (1 row) sharing an inner vbox.
-    pub prompt_height: u16,
+    pub(crate) prompt_height: u16,
 }
 
 /// Build the splits tree for the main TUI layout. Outer vbox:
@@ -56,7 +56,7 @@ impl LayoutState {
     /// the splits tree via `Ui::set_layout`. Missing leaves fall back
     /// to `Rect::default` (zero-sized) — practically only happens
     /// before the first frame.
-    pub fn from_ui(ui: &ui::Ui, status_win: ui::WinId) -> Self {
+    pub(crate) fn from_ui(ui: &ui::Ui, status_win: ui::WinId) -> Self {
         Self {
             transcript: ui.split_rect(ui::TRANSCRIPT_WIN).unwrap_or_default(),
             prompt: ui.split_rect(ui::PROMPT_WIN).unwrap_or_default(),
@@ -64,11 +64,11 @@ impl LayoutState {
         }
     }
 
-    pub fn viewport_rows(&self) -> u16 {
+    pub(crate) fn viewport_rows(&self) -> u16 {
         self.transcript.height
     }
 
-    pub fn hit_test(&self, row: u16, col: u16) -> HitRegion {
+    pub(crate) fn hit_test(&self, row: u16, col: u16) -> HitRegion {
         if self.status.height > 0 && self.status.contains(row, col) {
             return HitRegion::Status;
         }

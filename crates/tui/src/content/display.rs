@@ -12,55 +12,55 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct DisplayBlock {
-    pub lines: Vec<DisplayLine>,
+    pub(crate) lines: Vec<DisplayLine>,
     /// Terminal width this layout was computed at.
-    pub layout_width: u16,
+    pub(crate) layout_width: u16,
     /// True iff layout broke at least one logical line into multiple
     /// visual rows. When false, the layout is replayable at any width
     /// >= `max_line_width`. When true it is pinned to `layout_width`.
-    pub was_wrapped: bool,
+    pub(crate) was_wrapped: bool,
     /// Longest visible line in the layout (display columns).
-    pub max_line_width: u16,
+    pub(crate) max_line_width: u16,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct DisplayLine {
-    pub spans: Vec<DisplaySpan>,
+    pub(crate) spans: Vec<DisplaySpan>,
     /// Optional bg color for the left gutter column(s). When set,
     /// `paint_line` fills the gutter with this color instead of blank
     /// spaces. Used by User blocks whose background bleeds into the
     /// gutter while content stays in content-rect coords.
     #[serde(default)]
-    pub gutter_bg: Option<ColorValue>,
+    pub(crate) gutter_bg: Option<ColorValue>,
     /// Optional bg color that extends from end-of-spans to
     /// `term_width - right_margin` at paint time. Used by diff and code
     /// rows to fill the row with a background color.
     #[serde(default)]
-    pub fill_bg: Option<ColorValue>,
+    pub(crate) fill_bg: Option<ColorValue>,
     /// Width (in display columns) reserved on the right side when
     /// `fill_bg` extends the line. The fill stops `right_margin` columns
     /// short of the terminal edge.
     #[serde(default)]
-    pub fill_right_margin: u16,
+    pub(crate) fill_right_margin: u16,
     /// True when this visual row is a continuation of the previous row's
     /// logical line (soft-wrapped). `copy_range` suppresses `\n` before
     /// soft-wrapped rows so copied text matches the source.
     #[serde(default)]
-    pub soft_wrapped: bool,
+    pub(crate) soft_wrapped: bool,
     /// Raw source line this display row was rendered from. Set by
     /// `render_markdown_inner` on the first segment of each source line.
     /// Soft-wrap continuations leave this `None`. `copy_range` emits
     /// this instead of display text for fully-selected rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_text: Option<String>,
+    pub(crate) source_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DisplaySpan {
-    pub text: String,
-    pub style: SpanStyle,
+    pub(crate) text: String,
+    pub(crate) style: SpanStyle,
     #[serde(default)]
-    pub meta: SpanMeta,
+    pub(crate) meta: SpanMeta,
 }
 
 /// Per-span selection + copy semantics. Carried alongside `SpanStyle`
@@ -73,8 +73,8 @@ pub(crate) struct DisplaySpan {
 ///   `Some("")` drops the cell; `None` emits the underlying char.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SpanMeta {
-    pub selectable: bool,
-    pub copy_as: Option<String>,
+    pub(crate) selectable: bool,
+    pub(crate) copy_as: Option<String>,
 }
 
 impl Default for SpanMeta {
@@ -88,13 +88,13 @@ impl Default for SpanMeta {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SpanStyle {
-    pub fg: Option<ColorValue>,
-    pub bg: Option<ColorValue>,
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub crossedout: bool,
+    pub(crate) fg: Option<ColorValue>,
+    pub(crate) bg: Option<ColorValue>,
+    pub(crate) bold: bool,
+    pub(crate) dim: bool,
+    pub(crate) italic: bool,
+    pub(crate) underline: bool,
+    pub(crate) crossedout: bool,
 }
 
 /// Color value that may be theme-dependent (resolved at paint time) or
@@ -156,11 +156,11 @@ pub(crate) enum NamedColor {
 }
 
 impl DisplayBlock {
-    pub fn rows(&self) -> u16 {
+    pub(crate) fn rows(&self) -> u16 {
         self.lines.len() as u16
     }
 
-    pub fn is_valid_at(&self, new_width: u16) -> bool {
+    pub(crate) fn is_valid_at(&self, new_width: u16) -> bool {
         if self.was_wrapped {
             new_width == self.layout_width
         } else {

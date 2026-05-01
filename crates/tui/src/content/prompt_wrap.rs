@@ -20,14 +20,14 @@ use crate::content::selection::{
 use crate::input::{PromptState, ATTACHMENT_MARKER};
 
 pub(crate) struct PromptWrap {
-    pub rows: Vec<String>,
-    pub joined: String,
+    pub(crate) rows: Vec<String>,
+    pub(crate) joined: String,
     /// Byte positions in `joined` where the join `\n` is a soft-wrap
     /// insert (no `\n` in the display string at this point).
-    pub soft_breaks: Vec<usize>,
+    pub(crate) soft_breaks: Vec<usize>,
     /// Byte positions in `joined` where the join `\n` corresponds to a
     /// real source `\n` (a hard line break).
-    pub hard_breaks: Vec<usize>,
+    pub(crate) hard_breaks: Vec<usize>,
 
     src_len: usize,
     /// `src_to_wrapped[byte]` — wrapped joined byte for each source
@@ -40,7 +40,7 @@ pub(crate) struct PromptWrap {
 }
 
 impl PromptWrap {
-    pub fn build(state: &PromptState, usable: usize) -> Self {
+    pub(crate) fn build(state: &PromptState, usable: usize) -> Self {
         let src_buf = &state.win.edit_buf.buf;
         let spans = build_display_spans(src_buf, &state.win.edit_buf.attachment_ids, &state.store);
         let display_buf = spans_to_string(&spans);
@@ -133,12 +133,12 @@ impl PromptWrap {
         }
     }
 
-    pub fn src_to_wrapped(&self, src_byte: usize) -> usize {
+    pub(crate) fn src_to_wrapped(&self, src_byte: usize) -> usize {
         let i = src_byte.min(self.src_len);
         self.src_to_wrapped_byte[i]
     }
 
-    pub fn wrapped_to_src(&self, w_byte: usize) -> usize {
+    pub(crate) fn wrapped_to_src(&self, w_byte: usize) -> usize {
         let i = w_byte.min(self.joined.len());
         self.wrapped_to_src_byte[i]
     }
