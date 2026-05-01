@@ -890,8 +890,8 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/predict.lua"),
     ),
     (
-        "smelt.plugins.ask_user_question",
-        include_str!("../../../../runtime/lua/smelt/plugins/ask_user_question.lua"),
+        "smelt.tools.ask_user_question",
+        include_str!("../../../../runtime/lua/smelt/tools/ask_user_question.lua"),
     ),
     (
         "smelt.plugins.export",
@@ -1007,7 +1007,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
 /// init.lua). These are former Rust built-ins migrated to Lua. Required
 /// after the embedded searcher is set up, before user init.lua runs.
 const AUTOLOAD_MODULES: &[&str] = &[
-    "smelt.plugins.ask_user_question",
+    "smelt.tools.ask_user_question",
     "smelt.plugins.btw",
     "smelt.plugins.export",
     "smelt.dialogs.rewind",

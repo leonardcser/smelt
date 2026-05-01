@@ -274,7 +274,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `widgets/picker.lua`              | 68  | Generic picker helper                 | moved        | P4.a  | landed  | Bootstrap chunk; `smelt.ui.picker.open` recipe.                    |
 | `widgets/prompt_picker.lua`       | 164 | Prompt-docked picker                  | moved        | P4.a  | landed  | Bootstrap chunk; `smelt.prompt.open_picker`. Stays separate from `widgets/picker.lua` per P4.a decision (different focus / filtering shapes). |
 | `dialogs/agents.lua`              | 248 | `/agents` dialog                      | moved        | P4.a/P4.d | landed  | Module path `smelt.dialogs.agents`; orchestrates via `smelt.ui.dialog`.                                          |
-| `plugins/ask_user_question.lua`   | 119 | ask_user_question tool                | moved        | P5.b  | pending | → `tools/ask_user_question.lua`                                    |
+| `tools/ask_user_question.lua`     | 119 | Built-in `ask_user_question` tool     | moved        | P5.b  | landed  | Already-Lua tool relocated from `plugins/`; lives under `tools/` so the directory matches the migration target. Embedded module path is `smelt.tools.ask_user_question`. |
 | `plugins/background_commands.lua` | 224 | Bash run-in-background tools + `/ps`  | restructured | P5.b  | pending | Tool registrations → `tools/`; `/ps` → `commands.lua` or stays     |
 | `plugins/btw.lua`                 | 58  | `/btw` side-question                  | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
 | `plugins/color.lua`               | 30  | `/color` slug accent                  | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
@@ -317,8 +317,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 - `bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
   `web_fetch.lua`, `web_search.lua`, `notebook_edit.lua`,
   `spawn_agent.lua`, `message_agent.lua`, `peek_agent.lua`,
-  `ask_user_question.lua` (moved from
-  plugins), `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
+  `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
 
 ## `src/`
 
