@@ -47,7 +47,7 @@ pub fn compact_threshold_percent() -> u64 {
 
 pub use config::ModelConfig;
 pub use mcp::McpServerConfig;
-pub use paths::{cache_dir, config_dir, home_dir, state_dir};
+pub use paths::{config_dir, home_dir, state_dir};
 pub use permissions::Permissions;
 pub use provider::{Provider, ProviderKind};
 pub use skills::SkillLoader;

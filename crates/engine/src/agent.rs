@@ -24,7 +24,7 @@ fn next_request_id() -> u64 {
 }
 
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
-pub async fn engine_task(
+pub(crate) async fn engine_task(
     mut config: EngineConfig,
     mut registry: ToolRegistry,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
@@ -2040,7 +2040,7 @@ fn send_usage(
 }
 
 /// Calculate cost from token usage and emit a `TokenUsage` event.
-pub fn emit_usage(
+pub(crate) fn emit_usage(
     tx: &mpsc::UnboundedSender<EngineEvent>,
     api: &crate::ApiConfig,
     model: &str,

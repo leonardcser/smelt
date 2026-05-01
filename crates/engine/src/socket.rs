@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WireMessage {
+enum WireMessage {
     Message {
         from_id: String,
         from_slug: String,
@@ -284,7 +284,7 @@ pub async fn send_message(
 }
 
 /// Send a query to a target agent and wait for the answer.
-pub async fn send_query(
+pub(crate) async fn send_query(
     socket_path: &Path,
     from_id: &str,
     question: &str,
@@ -337,7 +337,7 @@ pub async fn send_permission_check(
 }
 
 /// Clean up the socket file for this PID.
-pub fn cleanup_socket(pid: u32) {
+pub(crate) fn cleanup_socket(pid: u32) {
     let path = crate::paths::state_dir()
         .join("sockets")
         .join(format!("{pid}.sock"));
