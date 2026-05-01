@@ -64,15 +64,6 @@ pub struct SpanMeta {
     pub copy_as: Option<String>,
 }
 
-impl SpanMeta {
-    pub fn selectable() -> Self {
-        Self {
-            selectable: true,
-            copy_as: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LineDecoration {
     pub gutter_bg: Option<Color>,
@@ -144,24 +135,8 @@ pub struct VirtualText {
     pub hl_group: Option<String>,
 }
 
-/// Cached soft-wrap result for one `(buffer, width)` pair. One entry
-/// per source line, each carrying the wrapped visual rows for that
-/// line.
-#[derive(Clone, Debug)]
-pub struct WrapResult {
-    pub rows_per_line: Vec<Vec<String>>,
-    pub total_rows: usize,
-}
-
-pub struct BufCreateOpts {
-    pub modifiable: bool,
-}
-
-impl Default for BufCreateOpts {
-    fn default() -> Self {
-        Self { modifiable: true }
-    }
-}
+#[derive(Default)]
+pub struct BufCreateOpts {}
 
 // ─── Extmark model ─────────────────────────────────────────────────
 
@@ -326,14 +301,8 @@ pub struct Buffer {
     /// copies when the Arc is actually shared.
     lines: Arc<Vec<String>>,
     extmarks: ExtmarkStore,
-    modifiable: bool,
     /// Bumped on lines mutation.
     changedtick: u64,
-    /// Soft-wrap result cached by `(changedtick, width)`. Multiple
-    /// Windows on the same Buffer at the same width share one
-    /// computation.
-    wrap_cache: Option<WrapResult>,
-    wrap_cache_key: Option<(u64, u16)>,
     /// Well-known namespace ids — interned at construction so the
     /// convenience methods (`add_highlight`, `set_decoration`, …)
     /// don't pay a hashmap lookup per call.
@@ -361,7 +330,7 @@ impl Buffer {
     /// `set_virtual_text`.
     pub const NS_VIRT_TEXT: &'static str = "buffer.virt_text";
 
-    pub fn new(id: BufId, opts: BufCreateOpts) -> Self {
+    pub fn new(id: BufId, _opts: BufCreateOpts) -> Self {
         let mut extmarks = ExtmarkStore::default();
         let ns_highlights = extmarks.create_namespace(Self::NS_HIGHLIGHTS);
         let ns_decorations = extmarks.create_namespace(Self::NS_DECORATIONS);
@@ -370,10 +339,7 @@ impl Buffer {
             id,
             lines: Arc::new(vec![String::new()]),
             extmarks,
-            modifiable: opts.modifiable,
             changedtick: 0,
-            wrap_cache: None,
-            wrap_cache_key: None,
             ns_highlights,
             ns_decorations,
             ns_virt_text,
@@ -494,40 +460,9 @@ impl Buffer {
         &self.lines
     }
 
-    pub fn is_modifiable(&self) -> bool {
-        self.modifiable
-    }
-
-    pub fn set_modifiable(&mut self, modifiable: bool) {
-        self.modifiable = modifiable;
-    }
-
     #[cfg(test)]
     pub fn changedtick(&self) -> u64 {
         self.changedtick
-    }
-
-    /// Soft-wrap every source line to `width` columns; cached by
-    /// `(changedtick, width)` so repeated calls (or multiple Windows
-    /// on the same Buffer at the same width) share one computation.
-    /// The cache is invalidated automatically when lines change.
-    pub fn wrap_at(&mut self, width: u16) -> &WrapResult {
-        let key = (self.changedtick, width);
-        if self.wrap_cache_key != Some(key) {
-            let mut rows_per_line = Vec::with_capacity(self.lines.len());
-            let mut total_rows = 0usize;
-            for line in self.lines.iter() {
-                let wrapped = crate::text::wrap_line(line, width as usize);
-                total_rows += wrapped.len();
-                rows_per_line.push(wrapped);
-            }
-            self.wrap_cache = Some(WrapResult {
-                rows_per_line,
-                total_rows,
-            });
-            self.wrap_cache_key = Some(key);
-        }
-        self.wrap_cache.as_ref().expect("cache populated above")
     }
 
     // ── Extmark API (the primary surface) ──────────────────────────
@@ -908,17 +843,6 @@ mod tests {
     }
 
     #[test]
-    fn nonmodifiable_buffer_still_accepts_api_writes() {
-        // `modifiable` guards user edits via windows, not framework
-        // API calls. Dialog buffers are created with modifiable=false
-        // but still need to be populated by `set_all_lines`.
-        let mut buf = Buffer::new(BufId(1), BufCreateOpts { modifiable: false });
-        buf.set_all_lines(vec!["hello".into(), "world".into()]);
-        assert_eq!(buf.line_count(), 2);
-        assert_eq!(buf.get_line(0), Some("hello"));
-    }
-
-    #[test]
     fn changedtick_increments() {
         let mut buf = make_buf();
         let t0 = buf.changedtick();
@@ -1083,32 +1007,6 @@ mod tests {
         buf.clear_namespace(ns_a, 0, usize::MAX);
         assert_eq!(buf.extmarks(ns_a).len(), 0);
         assert_eq!(buf.extmarks(ns_b).len(), 1);
-    }
-
-    #[test]
-    fn wrap_at_caches_by_changedtick_and_width() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["one two three four".into()]);
-        let r = buf.wrap_at(8).clone();
-        assert_eq!(r.total_rows, r.rows_per_line[0].len());
-        // Same width / unchanged buffer → cache reused (`total_rows`
-        // is equal because the cache hit returns the same shape).
-        let r2 = buf.wrap_at(8).clone();
-        assert_eq!(r.total_rows, r2.total_rows);
-        assert_eq!(r.rows_per_line, r2.rows_per_line);
-        // Different width → recompute.
-        let wide = buf.wrap_at(40).clone();
-        assert_eq!(wide.total_rows, 1);
-        assert_eq!(wide.rows_per_line[0], vec!["one two three four"]);
-    }
-
-    #[test]
-    fn wrap_at_invalidated_by_line_change() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["foo".into()]);
-        assert_eq!(buf.wrap_at(40).rows_per_line[0], vec!["foo"]);
-        buf.set_all_lines(vec!["bar baz".into()]);
-        assert_eq!(buf.wrap_at(40).rows_per_line[0], vec!["bar baz"]);
     }
 
     #[test]
