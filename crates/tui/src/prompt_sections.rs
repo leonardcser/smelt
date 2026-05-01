@@ -48,7 +48,7 @@ impl PromptSections {
 
 // ── Default section content ─────────────────────────────────────────────────
 
-pub fn base_section(cwd: &std::path::Path) -> String {
+fn base_section(cwd: &std::path::Path) -> String {
     format!(
         "You are an expert coding agent running in the user's terminal. You help with \
          software engineering tasks: reading code, finding bugs, explaining patterns, and \
@@ -92,7 +92,7 @@ pub fn base_section(cwd: &std::path::Path) -> String {
     )
 }
 
-pub fn interactive_behavior() -> &'static str {
+fn interactive_behavior() -> &'static str {
     "# Behavior\n\
      You and the user are collaborators — you bring your full intellectual weight, ask sharp \
      questions, and surface options they might not have considered.\n\
@@ -109,7 +109,7 @@ pub fn interactive_behavior() -> &'static str {
      - Output is rendered as markdown in a monospace terminal."
 }
 
-pub fn autonomous_behavior() -> &'static str {
+fn autonomous_behavior() -> &'static str {
     "# Behavior\n\
      You are running autonomously without a human in the loop.\n\
      - Make your best judgment and proceed without asking questions.\n\
@@ -118,7 +118,7 @@ pub fn autonomous_behavior() -> &'static str {
      - Do not narrate or explain your changes. Just make them."
 }
 
-pub fn write_access() -> &'static str {
+fn write_access() -> &'static str {
     "# Write access\n\
      You have write access. Use edit_file to modify existing files and write_file only to create \
      new files.\n\
@@ -126,7 +126,7 @@ pub fn write_access() -> &'static str {
 }
 
 /// Build the multi-agent section from the engine's agent prompt config.
-pub fn multi_agent_section(config: &engine::AgentPromptConfig) -> String {
+fn multi_agent_section(config: &engine::AgentPromptConfig) -> String {
     let mut s = format!(
         "# Multi-agent\n\
          \n\

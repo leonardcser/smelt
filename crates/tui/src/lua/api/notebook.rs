@@ -4,9 +4,9 @@
 //!   Buffer the caller owns (UiHost-only). Reuses
 //!   `ConfirmPreview::from_tool` so the picker/confirm/dialog paths
 //!   all render notebook ops the same way.
-//! - `parse / source_to_string / cell_index_by_id / is_notebook_path`
-//!   are Host-tier read shapes over `tui::notebook` for plugins that
-//!   want to introspect a notebook's structure.
+//! - `parse / is_notebook_path` are Host-tier read shapes over
+//!   `tui::notebook` for plugins that want to introspect a
+//!   notebook's structure.
 
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
 use crate::notebook;

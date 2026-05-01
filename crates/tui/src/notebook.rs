@@ -114,7 +114,7 @@ fn parse_cell(cell: &Value) -> Cell {
 
 /// Jupyter stores `source` as either a single string or an array of
 /// strings. Concatenate and return the canonical text.
-pub fn source_to_string(source: Option<&Value>) -> String {
+fn source_to_string(source: Option<&Value>) -> String {
     match source {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(arr)) => arr
@@ -127,7 +127,8 @@ pub fn source_to_string(source: Option<&Value>) -> String {
 }
 
 /// Find the index of a cell by id. `None` when no match.
-pub fn cell_index_by_id(nb: &Notebook, id: &str) -> Option<usize> {
+#[cfg(test)]
+fn cell_index_by_id(nb: &Notebook, id: &str) -> Option<usize> {
     nb.cells.iter().position(|c| c.id.as_deref() == Some(id))
 }
 
