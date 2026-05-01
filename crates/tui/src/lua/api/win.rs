@@ -1,5 +1,6 @@
 //! `smelt.win` bindings — focus state, keymap / event registration,
-//! buf resolution, overlay leaf close. UiHost-only.
+//! buf resolution, window creation/configuration, overlay leaf close.
+//! UiHost-only.
 
 use super::app_read;
 use crate::lua::{parse_keybind, parse_win_event, LuaShared};
@@ -34,6 +35,65 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua.create_function(|_, id: u64| {
             crate::lua::with_app(|app| {
                 app.close_overlay_leaf(ui::WinId(id));
+            });
+            Ok(())
+        })?,
+    )?;
+    win_tbl.set(
+        "open",
+        lua.create_function(|_, (buf_id, opts): (u64, Option<mlua::Table>)| {
+            let win = crate::lua::with_app(|app| {
+                let region = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<String>("region").ok())
+                    .unwrap_or_else(|| "lua_overlay".to_string());
+                let win = app.ui.win_open_split(
+                    ui::BufId(buf_id),
+                    ui::SplitConfig {
+                        region,
+                        gutters: Default::default(),
+                    },
+                );
+                if let Some(win_id) = win {
+                    if let Some(w) = app.ui.win_mut(win_id) {
+                        if let Some(opts) = opts.as_ref() {
+                            if let Ok(focusable) = opts.get::<bool>("focusable") {
+                                w.focusable = focusable;
+                            }
+                            if let Ok(cursor_line_highlight) =
+                                opts.get::<bool>("cursor_line_highlight")
+                            {
+                                w.cursor_line_highlight = cursor_line_highlight;
+                            }
+                            if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
+                                w.set_vim_enabled(vim_enabled);
+                            }
+                        }
+                    }
+                }
+                win.map(|w| w.0)
+            });
+            Ok(win)
+        })?,
+    )?;
+    win_tbl.set(
+        "configure_list",
+        lua.create_function(|_, (win_id, initial_cursor): (u64, Option<u64>)| {
+            crate::lua::with_app(|app| {
+                crate::lua::ui_ops::configure_list_leaf(
+                    app,
+                    ui::WinId(win_id),
+                    initial_cursor.unwrap_or(0).min(u16::MAX as u64) as u16,
+                );
+            });
+            Ok(())
+        })?,
+    )?;
+    win_tbl.set(
+        "configure_input",
+        lua.create_function(|_, win_id: u64| {
+            crate::lua::with_app(|app| {
+                crate::lua::ui_ops::configure_input_leaf(app, ui::WinId(win_id));
             });
             Ok(())
         })?,

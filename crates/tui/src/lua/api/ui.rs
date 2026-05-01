@@ -1,6 +1,6 @@
 //! `smelt.ui.*` overlay primitives — ghost text on the prompt,
 //! shared spinner glyph + cadence, picker overlay (set_items /
-//! set_selected / _open), dialog overlay (_open). UiHost-only.
+//! set_selected / _open), and generic overlay composition. UiHost-only.
 
 use mlua::prelude::*;
 
@@ -8,7 +8,7 @@ pub(super) fn register(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     register_ghost_text(lua, smelt_ui)?;
     register_spinner(lua, smelt_ui)?;
     register_picker(lua, smelt_ui)?;
-    register_dialog(lua, smelt_ui)?;
+    register_overlay(lua, smelt_ui)?;
     Ok(())
 }
 
@@ -92,28 +92,17 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
     Ok(())
 }
 
-fn register_dialog(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
-    let dialog_tbl = lua.create_table()?;
-
-    // smelt.ui.dialog._open(opts) → (win_id, leaves).
-    // `leaves` is a sequence parallel to `opts.panels`, holding the
-    // leaf WinId opened for each panel. `dialog.lua`'s `make_handle`
-    // pairs each spec with its leaf so panel handles can drive
-    // focus + per-panel queries (e.g. input `:text()`) through the
-    // standard `smelt.win.*` / `smelt.buf.*` surface.
-    dialog_tbl.set(
-        "_open",
-        lua.create_function(|lua, opts: mlua::Table| -> LuaResult<(u64, mlua::Table)> {
-            let result = crate::lua::with_app(|app| crate::lua::ui_ops::open_dialog(app, opts))
-                .map_err(|e| LuaError::RuntimeError(format!("dialog.open: {e}")))?;
-            let leaves = lua.create_table()?;
-            for (i, win) in result.leaves.iter().enumerate() {
-                leaves.set(i + 1, win.0)?;
-            }
-            Ok((result.root.0, leaves))
+fn register_overlay(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
+    let overlay_tbl = lua.create_table()?;
+    overlay_tbl.set(
+        "open",
+        lua.create_function(|_, opts: mlua::Table| -> LuaResult<u64> {
+            let id = crate::lua::with_app(|app| crate::lua::ui_ops::open_overlay(app, opts))
+                .map_err(|e| LuaError::RuntimeError(format!("overlay.open: {e}")))?;
+            Ok(id)
         })?,
     )?;
 
-    smelt_ui.set("dialog", dialog_tbl)?;
+    smelt_ui.set("overlay", overlay_tbl)?;
     Ok(())
 }
