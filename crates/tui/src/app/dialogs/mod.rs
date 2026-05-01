@@ -1,5 +1,0 @@
-//! Rust-authored dialogs. `confirm` is the security-critical
-//! permission dialog; the Lua-driven dialogs open from
-//! `crate::lua::ui_ops`.
-
-pub(crate) mod confirm;

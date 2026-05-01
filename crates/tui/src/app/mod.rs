@@ -6,7 +6,6 @@ pub(crate) mod commands;
 pub(crate) mod confirms;
 mod content_keys;
 pub(crate) mod core;
-pub(crate) mod dialogs;
 pub(crate) mod engine_bridge;
 mod events;
 mod headless;
