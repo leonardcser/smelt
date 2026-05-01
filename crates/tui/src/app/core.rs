@@ -73,7 +73,7 @@ pub struct Core {
     pub(crate) cells: Cells,
     /// Lua runtime — loads `~/.config/smelt/init.lua`, dispatches
     /// user-registered commands / keymaps / autocmds.
-    pub lua: LuaRuntime,
+    pub(crate) lua: LuaRuntime,
     /// Channel surface to the LLM `engine` task (`send` / `recv` /
     /// `try_recv`) plus the shared process / spawned-agent registries
     /// the agent loop drains. P2.d will fold the engine-event drain

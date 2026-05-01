@@ -24,21 +24,21 @@
 //!   notification on the next tick.
 
 mod api;
-pub mod app_ref;
+pub(crate) mod app_ref;
 mod task;
 mod tasks;
-pub mod ui_ops;
+pub(crate) mod ui_ops;
 
-pub use app_ref::{
-    install_app_ptr, try_with_app, try_with_ui_host, with_app, with_ui_host, AppPtrGuard,
+pub(crate) use app_ref::{
+    install_app_ptr, try_with_app, try_with_host, try_with_ui_host, with_app, with_host,
+    with_ui_host,
 };
-pub(crate) use app_ref::{try_with_host, with_host};
 
-pub use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
-pub use tasks::PluginToolEnv;
+pub(crate) use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
+pub(crate) use tasks::PluginToolEnv;
 
 /// Outcome of invoking a plugin tool handler.
-pub enum ToolExecResult {
+pub(crate) enum ToolExecResult {
     /// Handler returned without yielding — caller forwards this
     /// content to the engine immediately.
     Immediate { content: String, is_error: bool },
@@ -352,10 +352,10 @@ pub(crate) struct LuaShared {
 /// A callback invocation recorded by the ui dispatch path while
 /// `&mut Ui` is held. Drained by the host TuiApp between ui calls so each
 /// Lua fn body runs with the TLS app pointer installed.
-pub struct PendingInvocation {
-    pub handle: ui::LuaHandle,
-    pub win: ui::WinId,
-    pub payload: ui::Payload,
+pub(crate) struct PendingInvocation {
+    pub(crate) handle: ui::LuaHandle,
+    pub(crate) win: ui::WinId,
+    pub(crate) payload: ui::Payload,
 }
 
 /// Events that drive the Lua task runtime. After the D3 dialog + D2b
@@ -364,7 +364,7 @@ pub struct PendingInvocation {
 /// directly via `smelt.win.set_keymap` / `on_event` and resolve
 /// themselves via `smelt.task.resume`, so the only remaining
 /// event is the externally-allocated resume itself.
-pub enum TaskEvent {
+pub(crate) enum TaskEvent {
     /// `smelt.task.resume(id, value)` posts this to route the
     /// resume through the Lua pump. The pump looks up the parked task
     /// by `id` and resumes it with the stored value on the next
@@ -394,9 +394,9 @@ impl Default for LuaShared {
 }
 
 /// User-scoped Lua state + any recorded startup error.
-pub struct LuaRuntime {
-    pub lua: Lua,
-    pub load_error: Option<String>,
+pub(crate) struct LuaRuntime {
+    pub(crate) lua: Lua,
+    pub(crate) load_error: Option<String>,
     shared: Arc<LuaShared>,
 }
 

@@ -46,7 +46,7 @@ enum TaskWait {
 }
 
 /// What to do when a task's top-level function returns.
-pub enum TaskCompletion {
+pub(crate) enum TaskCompletion {
     /// `smelt.spawn(fn)` kickoff — return value is discarded, errors
     /// surface as notifications.
     FireAndForget,
@@ -65,7 +65,7 @@ struct LuaTask {
 /// One output per drive tick. The app loop consumes these and maps
 /// them onto Rust-side side effects (deliver a tool result, notify an
 /// error).
-pub enum TaskDriveOutput {
+pub(crate) enum TaskDriveOutput {
     /// Tool-execute task returned.
     ToolComplete {
         request_id: u64,
@@ -80,13 +80,13 @@ pub enum TaskDriveOutput {
 
 /// Single-threaded task runtime. All methods must be called on the
 /// thread that owns the `mlua::Lua`.
-pub struct LuaTaskRuntime {
+pub(crate) struct LuaTaskRuntime {
     tasks: Vec<LuaTask>,
     next_task_id: AtomicU64,
 }
 
 impl LuaTaskRuntime {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             tasks: Vec::new(),
             next_task_id: AtomicU64::new(1),
@@ -98,7 +98,7 @@ impl LuaTaskRuntime {
     /// handler on first resume. Pass `LuaMultiValue::new()` for
     /// zero-arg kickoffs (`smelt.spawn(fn)`); `(args, ctx)` for tool
     /// execute.
-    pub fn spawn(
+    pub(crate) fn spawn(
         &mut self,
         lua: &Lua,
         func: mlua::Function,
@@ -118,7 +118,7 @@ impl LuaTaskRuntime {
 
     /// Satisfy a `TaskWait::External(id)` wait with the given result
     /// value. Returns `true` if a matching task was found.
-    pub fn resolve_external(&mut self, external_id: u64, value: LuaValue) -> bool {
+    pub(crate) fn resolve_external(&mut self, external_id: u64, value: LuaValue) -> bool {
         for task in &mut self.tasks {
             if matches!(&task.wait, TaskWait::External(id) if *id == external_id) {
                 let mut mv = LuaMultiValue::new();
@@ -133,7 +133,7 @@ impl LuaTaskRuntime {
     /// Drive all ready tasks once. Each ready task is resumed; if it
     /// yields, it's parked on a new wait; if it returns, its
     /// completion is reported.
-    pub fn drive(&mut self, lua: &Lua, now: Instant) -> Vec<TaskDriveOutput> {
+    pub(crate) fn drive(&mut self, lua: &Lua, now: Instant) -> Vec<TaskDriveOutput> {
         let mut outputs = Vec::new();
         let mut i = 0;
         while i < self.tasks.len() {
