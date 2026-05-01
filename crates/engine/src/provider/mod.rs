@@ -921,23 +921,6 @@ impl Provider {
             .await
     }
 
-    pub(crate) async fn extract_web_content(
-        &self,
-        content: &str,
-        prompt: &str,
-        model: &str,
-    ) -> Result<(String, TokenUsage), ProviderError> {
-        let messages = vec![
-            Message::system(
-                "Answer the user's question based solely on the provided web page content. Be concise and direct.".to_string(),
-            ),
-            Message::user(Content::text(format!(
-                "<content>\n{content}\n</content>\n\n{prompt}"
-            ))),
-        ];
-        self.complete_simple(&messages, model, None).await
-    }
-
     pub(crate) async fn complete_title(
         &self,
         last_user_message: &str,

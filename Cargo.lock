@@ -2899,6 +2899,8 @@ dependencies = [
  "flate2",
  "futures-core",
  "glob",
+ "globset",
+ "ignore",
  "libc",
  "mlua",
  "protocol",

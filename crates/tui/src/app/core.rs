@@ -8,7 +8,9 @@ use super::{
 };
 use crate::lua::LuaRuntime;
 use crate::session::Session;
-use engine::EngineHandle;
+use engine::tools::FileStateCache;
+use engine::{EngineHandle, SkillLoader};
+use std::sync::Arc;
 
 /// Which frontend wraps this `Core`. Read by `smelt.frontend.kind()` /
 /// `is_interactive()` so tools can branch between human-facing and
@@ -84,6 +86,18 @@ pub struct Core {
     /// `TuiApp::new` / `HeadlessApp::new` call site; surfaced to Lua
     /// via `smelt.frontend.kind()` / `is_interactive()`.
     pub(crate) frontend: FrontendKind,
+    /// Loaded skills (`SKILL.md` frontmatter + body). Read by the
+    /// Lua `smelt.skills.{content,list}` bindings; engine consumes
+    /// the same loader through its own config field for the prompt
+    /// section. Populated from `main.rs` after construction; `None`
+    /// when no skills directory exists.
+    pub skills: Option<Arc<SkillLoader>>,
+    /// Shared file-observation cache (mtime + content + read range).
+    /// `engine::start` was handed the same `Clone` of this cache so
+    /// the engine-side `read_file` / `write_file` / `edit_file` /
+    /// `edit_notebook` tools and Lua-side migrations both see one
+    /// view. Exposed to Lua via `smelt.fs.file_state.*`.
+    pub files: FileStateCache,
 }
 
 impl Core {
@@ -91,7 +105,12 @@ impl Core {
     /// fresh `EngineHandle`. Both `TuiApp::new` (TUI) and `HeadlessApp::new`
     /// (one-shot / subagent) call this — the only single source of
     /// truth for the eight subsystem fields' construction.
-    pub fn new(config: AppConfig, engine: EngineHandle, frontend: FrontendKind) -> Self {
+    pub fn new(
+        config: AppConfig,
+        engine: EngineHandle,
+        frontend: FrontendKind,
+        files: FileStateCache,
+    ) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -115,6 +134,8 @@ impl Core {
             lua: LuaRuntime::new(),
             engine: EngineBridge::new(engine),
             frontend,
+            skills: None,
+            files,
         }
     }
 }

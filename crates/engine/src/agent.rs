@@ -10,7 +10,6 @@ use protocol::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -33,7 +32,6 @@ pub(crate) async fn engine_task(
 ) {
     let client = reqwest::Client::new();
     crate::pricing::spawn_catalog_fetch(client.clone());
-    let file_locks = tools::FileLocks::default();
 
     // Connect MCP servers and register their tools.
     let _mcp_manager = if !config.mcp_servers.is_empty() {
@@ -60,7 +58,7 @@ pub(crate) async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, plugin_tools } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir: _, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, plugin_tools } => {
 
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -139,11 +137,9 @@ pub(crate) async fn engine_task(
                             system_prompt,
                             agent_config,
                             plugin_tools,
-                            session_dir,
                             started_at: Instant::now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
-                            file_locks: &file_locks,
                             context_window,
                             compacted_this_turn: false,
                         };
@@ -578,7 +574,6 @@ struct Turn<'a> {
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
-    file_locks: &'a tools::FileLocks,
     messages: Vec<Message>,
     mode: AgentMode,
     reasoning_effort: ReasoningEffort,
@@ -587,7 +582,6 @@ struct Turn<'a> {
     system_prompt: String,
     agent_config: Option<crate::AgentPromptConfig>,
     plugin_tools: Vec<protocol::ToolDef>,
-    session_dir: PathBuf,
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
@@ -1360,20 +1354,7 @@ impl<'a> Turn<'a> {
         type TaggedFut<'x> =
             std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ToolResult)> + Send + 'x>>;
 
-        let contexts: Vec<_> = plan
-            .slots
-            .iter()
-            .map(|s| ToolContext {
-                event_tx: self.event_tx.clone(),
-                call_id: s.tc.id.clone(),
-                cancel: self.cancel.clone(),
-                provider: self.provider.clone(),
-                model: self.model.clone(),
-                session_dir: self.session_dir.clone(),
-                file_locks: self.file_locks.clone(),
-                api: self.config.api.clone(),
-            })
-            .collect();
+        let contexts: Vec<_> = plan.slots.iter().map(|_| ToolContext).collect();
 
         let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
@@ -1652,16 +1633,8 @@ impl<'a> Turn<'a> {
                     }
                     UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
                         if dispatcher.contains(&tool_name) {
-                            let ctx = ToolContext {
-                                event_tx: self.event_tx.clone(),
-                                call_id: parent_call_id,
-                                cancel: self.cancel.clone(),
-                                provider: self.provider.clone(),
-                                model: self.model.clone(),
-                                session_dir: self.session_dir.clone(),
-                                file_locks: self.file_locks.clone(),
-                                api: self.config.api.clone(),
-                            };
+                            let _ = parent_call_id;
+                            let ctx = ToolContext;
                             side_futs.push(Box::pin(async move {
                                 let r = dispatcher
                                     .dispatch(&tool_name, args, &ctx)
@@ -2066,24 +2039,6 @@ fn send_usage(
         cost_usd: if cost > 0.0 { Some(cost) } else { None },
         background,
     });
-}
-
-/// Calculate cost from token usage and emit a `TokenUsage` event.
-pub(crate) fn emit_usage(
-    tx: &mpsc::UnboundedSender<EngineEvent>,
-    api: &crate::ApiConfig,
-    model: &str,
-    usage: protocol::TokenUsage,
-) {
-    send_usage(
-        tx,
-        &api.provider_type,
-        &api.model_config,
-        model,
-        usage,
-        None,
-        false,
-    );
 }
 
 /// Emit a background `TokenUsage` event (compaction, title, btw, predict).

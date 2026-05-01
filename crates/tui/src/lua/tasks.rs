@@ -93,8 +93,25 @@ impl LuaRuntime {
         self.resolve_external(request_id, mlua::Value::Table(table));
     }
 
-    /// Drain the task-runtime inbox and apply each event.
+    /// Drain the task-runtime inbox and apply each event. First
+    /// folds the cross-thread `json_inbox` into the main inbox so
+    /// resume payloads pushed by tokio tasks (streaming subprocess,
+    /// future async work) get applied in order.
     pub(crate) fn pump_task_events(&self) {
+        // Cross-thread JSON inbox first.
+        let json_pending: Vec<(u64, serde_json::Value)> = {
+            let Ok(mut inbox) = self.shared.json_inbox.lock() else {
+                return;
+            };
+            std::mem::take(&mut *inbox)
+        };
+        if !json_pending.is_empty() {
+            if let Ok(mut main) = self.shared.task_inbox.lock() {
+                for (external_id, value) in json_pending {
+                    main.push(TaskEvent::ExternalResolvedJson { external_id, value });
+                }
+            }
+        }
         let events: Vec<TaskEvent> = {
             let Ok(mut inbox) = self.shared.task_inbox.lock() else {
                 return;
@@ -105,6 +122,10 @@ impl LuaRuntime {
             match ev {
                 TaskEvent::ExternalResolved { external_id, value } => {
                     let v = self.lua.registry_value(&value).unwrap_or(mlua::Value::Nil);
+                    self.resolve_external(external_id, v);
+                }
+                TaskEvent::ExternalResolvedJson { external_id, value } => {
+                    let v = super::json_to_lua(&self.lua, &value).unwrap_or(mlua::Value::Nil);
                     self.resolve_external(external_id, v);
                 }
             }

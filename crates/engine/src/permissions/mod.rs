@@ -22,7 +22,7 @@ pub use approvals::RuntimeApprovals;
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use rules::Decision;
 use rules::RuleSet;
-pub(crate) use rules::DEFAULT_BASH_ALLOW;
+pub use rules::DEFAULT_BASH_ALLOW;
 
 use crate::tools::str_arg;
 use bash::{has_output_redirection, is_cd_command};

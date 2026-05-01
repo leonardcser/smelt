@@ -20,6 +20,7 @@ mod grep;
 mod history;
 mod html;
 mod http;
+mod image;
 mod keymap;
 mod metrics;
 mod mode;
@@ -35,6 +36,7 @@ mod reasoning;
 mod session;
 mod settings;
 mod shell;
+mod skills;
 mod spawn;
 mod statusline;
 mod syntax;
@@ -86,6 +88,7 @@ impl LuaRuntime {
         session::register(lua, &smelt)?;
         process::register(lua, &smelt)?;
         shell::register(lua, &smelt)?;
+        skills::register(lua, &smelt)?;
         agent::register(lua, &smelt)?;
         permissions::register(lua, &smelt)?;
         parse::register(lua, &smelt)?;
@@ -98,6 +101,7 @@ impl LuaRuntime {
         history::register(lua, &smelt)?;
         html::register(lua, &smelt)?;
         http::register(lua, &smelt)?;
+        image::register(lua, &smelt)?;
         theme::register(lua, &smelt)?;
         buf::register(lua, &smelt, shared)?;
         win::register(lua, &smelt, shared)?;
@@ -422,6 +426,41 @@ fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
         mlua::Value::Table(t) => lua_table_to_json(lua, t),
         _ => serde_json::Value::Null,
     }
+}
+
+/// Convert a `serde_json::Value` into a Lua value. Objects become
+/// tables keyed by string; arrays become 1-indexed sequences. Used by
+/// FFI bindings that surface JSON-shaped metadata back to Lua.
+pub(super) fn json_to_lua_value(lua: &Lua, value: &serde_json::Value) -> LuaResult<mlua::Value> {
+    use serde_json::Value as J;
+    Ok(match value {
+        J::Null => mlua::Value::Nil,
+        J::Bool(b) => mlua::Value::Boolean(*b),
+        J::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                mlua::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                mlua::Value::Number(f)
+            } else {
+                mlua::Value::Nil
+            }
+        }
+        J::String(s) => mlua::Value::String(lua.create_string(s)?),
+        J::Array(arr) => {
+            let t = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                t.set(i + 1, json_to_lua_value(lua, v)?)?;
+            }
+            mlua::Value::Table(t)
+        }
+        J::Object(obj) => {
+            let t = lua.create_table()?;
+            for (k, v) in obj {
+                t.set(k.as_str(), json_to_lua_value(lua, v)?)?;
+            }
+            mlua::Value::Table(t)
+        }
+    })
 }
 
 /// Treat a Lua table as a `{ string => json }` arg map, the shape every

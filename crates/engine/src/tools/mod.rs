@@ -1,38 +1,17 @@
 pub(crate) mod background;
-mod bash;
-mod edit_file;
-
-mod file_state;
-mod glob;
-mod grep;
-mod list_agents;
-mod load_skill;
-mod message_agent;
-mod notebook;
-mod peek_agent;
-mod read_file;
+pub mod file_state;
+pub mod notebook;
 pub(crate) mod result_dedup;
-mod spawn_agent;
-mod stop_agent;
 pub(crate) mod web_cache;
-mod web_fetch;
-mod web_search;
-mod web_shared;
-mod write_file;
 
-#[cfg(test)]
-pub(crate) use file_state::FileState;
-pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
+pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
 
-use crate::cancel::CancellationToken;
-use crate::provider::{FunctionSchema, Provider, ToolDefinition};
-use protocol::{EngineEvent, ToolHooks};
+use crate::provider::{FunctionSchema, ToolDefinition};
+use protocol::ToolHooks;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Kill the entire process group spawned by a child.
@@ -53,19 +32,15 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 }
 
 pub use background::{ProcessInfo, ProcessRegistry};
-pub(crate) use bash::BashTool;
-pub use bash::{check_interactive, check_shell_background_operator};
-pub(crate) use edit_file::EditFileTool;
 
-pub(crate) use glob::GlobTool;
-pub(crate) use grep::GrepTool;
-pub(crate) use notebook::NotebookEditTool;
 pub use notebook::NotebookRenderData;
-pub(crate) use read_file::ReadFileTool;
-pub(crate) use spawn_agent::AgentMessageNotification;
-pub(crate) use web_fetch::WebFetchTool;
-pub(crate) use web_search::WebSearchTool;
-pub(crate) use write_file::WriteFileTool;
+
+/// Notification sent when an agent message arrives on the socket.
+#[derive(Clone, Debug)]
+pub struct AgentMessageNotification {
+    pub from_id: String,
+    pub message: String,
+}
 
 pub(crate) struct ToolResult {
     pub(crate) content: String,
@@ -97,23 +72,11 @@ impl ToolResult {
     }
 }
 
-/// Context provided to tools during execution, giving them access to
-/// engine facilities (event streaming, cancellation, and the LLM provider
-/// for tools that need secondary LLM calls).
-///
-/// All fields are owned (Arc-backed where shared) so a fresh context can be
-/// constructed per call without lifetime gymnastics — this enables side calls
-/// like `smelt.tools.call("bash", args)` from Lua plugin tools.
-pub(crate) struct ToolContext {
-    pub(crate) event_tx: mpsc::UnboundedSender<EngineEvent>,
-    pub(crate) call_id: String,
-    pub(crate) cancel: CancellationToken,
-    pub(crate) provider: Provider,
-    pub(crate) model: String,
-    pub(crate) session_dir: std::path::PathBuf,
-    pub(crate) file_locks: FileLocks,
-    pub(crate) api: crate::ApiConfig,
-}
+/// Context provided to tools during execution. All Tool impls left in
+/// engine (MCP adapters) ignore it — kept as a placeholder so the
+/// trait signature can grow back if a future engine-side tool needs
+/// cancel propagation or other engine facilities.
+pub(crate) struct ToolContext;
 
 pub(crate) type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
 
@@ -231,13 +194,6 @@ impl ToolRegistry {
         Self::default()
     }
 
-    pub(crate) fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(ToolEntry {
-            tool,
-            is_mcp: false,
-        });
-    }
-
     pub(crate) fn register_mcp(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(ToolEntry { tool, is_mcp: true });
     }
@@ -306,7 +262,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
 }
 
 /// Convert an absolute path to a relative one if it's inside the cwd.
-pub(crate) fn display_path(path: &str) -> String {
+pub fn display_path(path: &str) -> String {
     if let Ok(cwd) = std::env::current_dir() {
         let prefix = cwd.to_string_lossy();
         if let Some(rest) = path.strip_prefix(prefix.as_ref()) {
@@ -354,94 +310,12 @@ pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
     out
 }
 
-pub(crate) fn int_arg(args: &HashMap<String, Value>, key: &str) -> usize {
-    args.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize
-}
-
-pub(crate) fn bool_arg(args: &HashMap<String, Value>, key: &str) -> bool {
-    args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
-}
-
-const MAX_TIMEOUT_MS: u64 = 600_000;
-
-pub(crate) fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> Duration {
-    let ms = args
-        .get("timeout_ms")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(default_secs * 1000)
-        .min(MAX_TIMEOUT_MS);
-    Duration::from_millis(ms)
-}
-
-pub(crate) fn run_command_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> ToolResult {
-    // Drain stdout/stderr in background threads to avoid pipe buffer deadlocks.
-    // If the child produces more output than the OS pipe buffer (~64KB on macOS),
-    // it will block on write and never exit unless we actively read.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let stdout_handle = std::thread::spawn(move || {
-        stdout.map(|mut r| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut r, &mut buf).ok();
-            buf
-        })
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        stderr.map(|mut r| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut r, &mut buf).ok();
-            buf
-        })
-    });
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout_bytes = stdout_handle.join().ok().flatten().unwrap_or_default();
-                let stderr_bytes = stderr_handle.join().ok().flatten().unwrap_or_default();
-                let mut result = String::from_utf8_lossy(&stdout_bytes).into_owned();
-                let stderr_str = String::from_utf8_lossy(&stderr_bytes);
-                if !stderr_str.is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(&stderr_str);
-                }
-                return ToolResult {
-                    content: result,
-                    is_error: !status.success(),
-                    metadata: None,
-                };
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return ToolResult::err(format!(
-                        "timed out after {:.0}s",
-                        timeout.as_secs_f64()
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                return ToolResult::err(e.to_string());
-            }
-        }
-    }
-}
-
 /// Acquire an exclusive, non-blocking advisory lock on the given file path.
 /// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
 /// locked by another process (EWOULDBLOCK) or on any other I/O error.
 /// The lock is released when the guard is dropped.
 #[cfg(unix)]
-pub(crate) fn try_flock(path: &str) -> Result<FlockGuard, String> {
+pub fn try_flock(path: &str) -> Result<FlockGuard, String> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -461,38 +335,15 @@ pub(crate) fn try_flock(path: &str) -> Result<FlockGuard, String> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn try_flock(_path: &str) -> Result<FlockGuard, String> {
+pub fn try_flock(_path: &str) -> Result<FlockGuard, String> {
     Ok(FlockGuard { _file: None })
 }
 
-pub(crate) struct FlockGuard {
+pub struct FlockGuard {
     #[cfg(unix)]
     _file: std::fs::File,
     #[cfg(not(unix))]
     _file: Option<()>,
-}
-
-/// Per-path locks that serialize concurrent file-mutating operations.
-/// Concurrent tool calls (edit_file, write_file, edit_notebook) targeting
-/// the same file will execute sequentially, while different files remain
-/// parallel. Entries are pruned when no one else holds a reference.
-#[derive(Clone, Default)]
-pub(crate) struct FileLocks(Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>);
-
-impl FileLocks {
-    pub(crate) async fn lock(&self, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let mutex = {
-            let mut map = self.0.lock().unwrap();
-            // Prune idle entries (strong_count == 1 means only the map holds it).
-            if map.len() > 32 {
-                map.retain(|_, v| Arc::strong_count(v) > 1);
-            }
-            map.entry(path.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        mutex.lock_owned().await
-    }
 }
 
 /// A handle to a spawned child process, carrying the piped stdout.
@@ -506,87 +357,36 @@ pub struct SpawnedChild {
     pub blocking: bool,
 }
 
-/// Configuration for multi-agent tool registration.
-pub(crate) struct MultiAgentToolConfig {
-    pub(crate) scope: String,
-    pub(crate) pid: u32,
-    pub(crate) agent_id: String,
-    pub(crate) depth: u8,
-    pub(crate) max_depth: u8,
-    pub(crate) max_agents: u8,
-    /// Shared mutable slug — updated by title generation, read by message_agent.
-    pub(crate) slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// API config for spawned subagents.
-    pub(crate) api_base: String,
-    pub(crate) api_key_env: String,
-    pub(crate) model: String,
-    pub(crate) provider_type: String,
+/// Subagent spawn configuration. Stashed on `EngineHandle` and read
+/// back by `EngineHandle::spawn_subagent` (called from the Lua-side
+/// `spawn_agent` tool). Cloned at startup so the engine task and the
+/// frontend each hold an independent view.
+#[derive(Clone)]
+pub struct SubagentConfig {
+    pub scope: String,
+    pub pid: u32,
+    pub depth: u8,
+    pub max_depth: u8,
+    pub max_agents: u8,
+    pub api_base: String,
+    pub api_key_env: String,
+    pub model: String,
+    pub provider_type: String,
     /// Broadcast channel for agent message notifications (used by blocking spawn).
-    pub(crate) agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
+    pub agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
     /// Channel for sending spawned child handles (stdout pipes) to the parent.
-    pub(crate) spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
+    pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
 }
 
-pub(crate) fn build_tools(
-    _processes: ProcessRegistry,
-    ma: Option<MultiAgentToolConfig>,
-    skills: Option<std::sync::Arc<crate::skills::SkillLoader>>,
-) -> ToolRegistry {
-    let files = FileStateCache::new();
-    let mut r = ToolRegistry::new();
-    r.register(Box::new(ReadFileTool {
-        files: files.clone(),
-    }));
-    r.register(Box::new(WriteFileTool {
-        files: files.clone(),
-    }));
-    r.register(Box::new(EditFileTool {
-        files: files.clone(),
-    }));
-    r.register(Box::new(BashTool));
-    r.register(Box::new(GlobTool));
-    r.register(Box::new(GrepTool));
-    r.register(Box::new(WebFetchTool));
-    r.register(Box::new(WebSearchTool));
-    r.register(Box::new(NotebookEditTool {
-        files: files.clone(),
-    }));
+pub(crate) fn build_tools(_processes: ProcessRegistry, files: FileStateCache) -> ToolRegistry {
+    let r = ToolRegistry::new();
+    let _ = files;
 
-    // Skill loader tool (conditionally registered).
-    if let Some(loader) = skills {
-        r.register(Box::new(load_skill::LoadSkillTool { loader }));
-    }
-
-    // Multi-agent tools (conditionally registered).
-    if let Some(ma) = ma {
-        r.register(Box::new(list_agents::ListAgentsTool {
-            scope: ma.scope.clone(),
-            my_pid: ma.pid,
-        }));
-        r.register(Box::new(message_agent::MessageAgentTool {
-            my_id: ma.agent_id.clone(),
-            my_slug: ma.slug,
-        }));
-        r.register(Box::new(peek_agent::PeekAgentTool {
-            my_id: ma.agent_id.clone(),
-        }));
-        if ma.depth < ma.max_depth {
-            r.register(Box::new(spawn_agent::SpawnAgentTool {
-                scope: ma.scope.clone(),
-                my_pid: ma.pid,
-                depth: ma.depth,
-                max_agents: ma.max_agents,
-                api_base: ma.api_base.clone(),
-                api_key_env: ma.api_key_env.clone(),
-                model: ma.model.clone(),
-                provider_type: ma.provider_type.clone(),
-                spawned_tx: ma.spawned_tx.clone(),
-                agent_msg_tx: ma.agent_msg_tx.clone(),
-            }));
-        }
-        // stop_agent: any agent can stop its children.
-        r.register(Box::new(stop_agent::StopAgentTool { my_pid: ma.pid }));
-    }
+    // Multi-agent tools — `spawn_agent`, `list_agents`, `stop_agent`,
+    // `message_agent`, `peek_agent` — all live in
+    // `runtime/lua/smelt/tools/*.lua` (gated by `smelt.engine.multi_agent()`).
+    // `spawn_agent` composes `smelt.agent.spawn` over
+    // `EngineHandle::spawn_subagent`.
 
     r
 }

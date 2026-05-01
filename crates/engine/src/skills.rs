@@ -55,7 +55,7 @@ impl SkillLoader {
 
     /// Get skill content wrapped in tags for the LLM.
     /// Returns `Ok(content)` if found, `Err(message)` if not.
-    pub(crate) fn content(&self, name: &str) -> Result<String, String> {
+    pub fn content(&self, name: &str) -> Result<String, String> {
         match self.skills.get(name) {
             Some(entry) => Ok(entry.formatted.clone()),
             None => {
@@ -71,6 +71,14 @@ impl SkillLoader {
                 ))
             }
         }
+    }
+
+    /// List loaded skill names alphabetically. Used by the Lua
+    /// `smelt.skills.list()` binding for plugins that want to enumerate.
+    pub fn names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.skills.keys().cloned().collect();
+        out.sort();
+        out
     }
 
     /// Pre-built system prompt section listing available skills.

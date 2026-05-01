@@ -363,41 +363,49 @@ async fn main() {
         Arc::new(engine::SkillLoader::load(&extra_paths))
     };
     let tui_skill_section = skill_loader.prompt_section().map(String::from);
+    let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
-    let engine_handle = engine::start(engine::EngineConfig {
-        api: engine::ApiConfig {
-            base: api_base,
-            key: api_key,
-            key_env: api_key_env.clone(),
-            provider_type,
-            model_config: (&model_config).into(),
+    // Shared file-state cache: engine-side read/write/edit/notebook tools
+    // populate it for staleness checks; the same cache is parked on `Core`
+    // so Lua tools migrating off the Rust impls see the same observations.
+    let file_state = engine::tools::FileStateCache::new();
+
+    let engine_handle = engine::start(
+        engine::EngineConfig {
+            api: engine::ApiConfig {
+                base: api_base,
+                key: api_key,
+                key_env: api_key_env.clone(),
+                provider_type,
+                model_config: (&model_config).into(),
+            },
+            model: model.clone(),
+            auxiliary,
+            instructions,
+            system_prompt_override,
+            cwd: cwd.clone(),
+            permissions: permissions.clone(),
+            runtime_approvals: runtime_approvals.clone(),
+            multi_agent: if multi_agent {
+                Some(engine::MultiAgentConfig {
+                    depth: args.depth.unwrap_or(0),
+                    max_depth: args.max_agent_depth,
+                    max_agents: args.max_agents,
+                    parent_pid: args.parent_pid,
+                })
+            } else {
+                None
+            },
+            interactive: !args.headless && !args.subagent,
+            mcp_servers: cfg.mcp.clone(),
+            skills: Some(skill_loader),
+            auto_compact: settings.auto_compact,
+            context_window: cfg.settings.context_window,
+            redact_secrets: settings.redact_secrets,
         },
-        model: model.clone(),
-        auxiliary,
-        instructions,
-        system_prompt_override,
-        cwd: cwd.clone(),
-        permissions: permissions.clone(),
-        runtime_approvals: runtime_approvals.clone(),
-        multi_agent: if multi_agent {
-            Some(engine::MultiAgentConfig {
-                depth: args.depth.unwrap_or(0),
-                max_depth: args.max_agent_depth,
-                max_agents: args.max_agents,
-                parent_pid: args.parent_pid,
-                agent_id: planned_agent_id.clone(),
-            })
-        } else {
-            None
-        },
-        interactive: !args.headless && !args.subagent,
-        mcp_servers: cfg.mcp.clone(),
-        skills: Some(skill_loader),
-        auto_compact: settings.auto_compact,
-        context_window: cfg.settings.context_window,
-        redact_secrets: settings.redact_secrets,
-    });
+        file_state.clone(),
+    );
     let engine_injector = engine_handle.injector();
 
     // Fetch context window in background (only needed for interactive TUI display).
@@ -480,7 +488,13 @@ async fn main() {
             multi_agent,
             cfg.settings.context_window,
         );
-        let core = tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Subagent);
+        let mut core = tui::app::Core::new(
+            app_config,
+            engine_handle,
+            tui::app::FrontendKind::Subagent,
+            file_state.clone(),
+        );
+        core.skills = Some(tui_skill_loader.clone());
         let sink = tui::app::HeadlessSink::new_subagent(color_mode);
         let mut headless = tui::app::HeadlessApp::new(core, sink);
 
@@ -534,7 +548,13 @@ async fn main() {
             multi_agent,
             cfg.settings.context_window,
         );
-        let core = tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Headless);
+        let mut core = tui::app::Core::new(
+            app_config,
+            engine_handle,
+            tui::app::FrontendKind::Headless,
+            file_state.clone(),
+        );
+        core.skills = Some(tui_skill_loader.clone());
         let sink = tui::app::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = tui::app::HeadlessApp::new(core, sink);
         headless
@@ -549,6 +569,7 @@ async fn main() {
             initial_provider_type,
             Arc::clone(&permissions),
             engine_handle,
+            file_state.clone(),
             settings,
             multi_agent,
             reasoning_effort,
@@ -562,6 +583,7 @@ async fn main() {
             startup_auth_error.take(),
         );
         app.core.config.model_config = (&model_config).into();
+        app.core.skills = Some(tui_skill_loader.clone());
         app.extra_instructions = tui_instructions;
         app.skill_section = tui_skill_section;
         if let Some(accent) = cfg_accent {

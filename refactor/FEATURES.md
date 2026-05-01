@@ -61,38 +61,38 @@ to invoke_ the feature.
 | Prompt history (↑/↓)                                          | `input/history.rs`                                        | P2                            | working |
 | Reverse history search (Ctrl+R, `/history`)                   | `plugins/history_search.lua`                              | P4.e                          | working |
 | Input stash (Ctrl+S)                                          | `input/mod.rs`                                            | P1/P4                         | working |
-| Multi-agent: spawn                                            | `engine/tools/spawn_agent.rs`                             | P5.b                          | working |
-| Multi-agent: stop                                             | `engine/tools/stop_agent.rs`                              | P5.b                          | working |
-| Multi-agent: message                                          | `engine/tools/message_agent.rs`                           | P5.b                          | working |
-| Multi-agent: peek                                             | `engine/tools/peek_agent.rs`                              | P5.b                          | working |
-| Multi-agent: list                                             | `engine/tools/list_agents.rs`                             | P5.b                          | working |
+| Multi-agent: spawn                                            | `runtime/lua/smelt/tools/spawn_agent.lua`                 | P5.b — landed; composes `smelt.agent.spawn` + `smelt.agent.wait_for_message` over `EngineHandle::spawn_subagent` + the engine's `AgentMessageNotification` broadcast | working |
+| Multi-agent: stop                                             | `runtime/lua/smelt/tools/stop_agent.lua`                  | P5.b — landed; composes `smelt.agent.{find_by_id,is_in_tree,kill}` | working |
+| Multi-agent: message                                          | `runtime/lua/smelt/tools/message_agent.lua`               | P5.b — landed; composes `smelt.agent.send_message` | working |
+| Multi-agent: peek                                             | `runtime/lua/smelt/tools/peek_agent.lua`                  | P5.b — landed; composes `smelt.agent.send_query` | working |
+| Multi-agent: list                                             | `runtime/lua/smelt/tools/list_agents.lua`                 | P5.b — landed; composes `smelt.agent.discover()` | working |
 | MCP servers                                                   | `engine/mcp/`                                             | n/a (kept)                    | working |
-| Skills loader                                                 | `engine/skills.rs` + `tools/load_skill.rs`                | P5.b                          | working |
+| Skills loader                                                 | `engine/skills.rs` + `runtime/lua/smelt/tools/load_skill.lua` | P5.b — `load_skill` Lua-side; loader stays on `Core.skills` for FFI | working |
 
 ## Tools (built-in)
 
 | Tool                  | Source today                      | Restored by                                         | Status  |
 | --------------------- | --------------------------------- | --------------------------------------------------- | ------- |
-| `read_file`           | `engine/tools/read_file.rs`       | P5.b → `tools/read_file.lua`                        | working |
-| `write_file`          | `engine/tools/write_file.rs`      | P5.b                                                | working |
-| `edit_file`           | `engine/tools/edit_file.rs`       | P5.b                                                | working |
-| `edit_notebook`       | `engine/tools/notebook.rs`        | P5.b                                                | working |
-| `bash`                | `engine/tools/bash.rs`            | P5.b                                                | working |
+| `read_file`           | `runtime/lua/smelt/tools/read_file.lua` | P5.b — landed; composes `smelt.image.*` + `smelt.notebook.read` + `smelt.fs.file_state.*` | working |
+| `write_file`          | `runtime/lua/smelt/tools/write_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + `smelt.notebook.is_notebook_path` | working |
+| `edit_file`           | `runtime/lua/smelt/tools/edit_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + Lua-side find/replace | working |
+| `edit_notebook`       | `runtime/lua/smelt/tools/notebook_edit.lua` | P5.b — landed; thin Lua wrapper over `smelt.notebook.apply_edit` (intricate JSON cell munging stays Rust) | working |
+| `bash`                | `runtime/lua/smelt/tools/bash.lua` | P5.b — landed; composes `smelt.process.run_streaming` + `smelt.shell.*` | working |
 | `run_in_background` (bash flag, not a tool) | `plugins/background_commands.lua` (overrides bash registration) | P5.b → flag on `tools/bash.lua` | working |
 | `read_process_output` | `plugins/background_commands.lua` | P5.b                                                | working |
 | `stop_process`        | `plugins/background_commands.lua` | P5.b                                                | working |
-| `glob`                | `engine/tools/glob.rs`            | P5.b                                                | working |
-| `grep`                | `engine/tools/grep.rs`            | P5.b                                                | working |
-| `web_fetch`           | `engine/tools/web_fetch.rs`       | P5.b                                                | working |
-| `web_search`          | `engine/tools/web_search.rs`      | P5.b                                                | working |
+| `glob`                | `runtime/lua/smelt/tools/glob.lua` | P5.b — landed; composes `smelt.fs.glob`            | working |
+| `grep`                | `runtime/lua/smelt/tools/grep.lua` | P5.b — landed; composes `smelt.grep.run` + `smelt.process.run` fallback | working |
+| `web_fetch`           | `runtime/lua/smelt/tools/web_fetch.lua` | P5.b — landed; composes `smelt.http.{get,cache,random_user_agent}` + `smelt.html.{title,links,to_text,to_markdown}` + `smelt.image.data_url_from_bytes` + `smelt.engine.ask` (`AuxiliaryTask::Btw`) | working |
+| `web_search`          | `runtime/lua/smelt/tools/web_search.lua` | P5.b — landed; composes `smelt.http.{post,cache,random_user_agent}` + `smelt.html.parse_ddg_results` | working |
 | `ask_user_question`   | `plugins/ask_user_question.lua`   | P5.b → `tools/ask_user_question.lua`                | working |
-| `spawn_agent`         | `engine/tools/spawn_agent.rs`     | P5.b                                                | working |
-| `list_agents`         | `engine/tools/list_agents.rs`     | P5.b                                                | working |
-| `message_agent`       | `engine/tools/message_agent.rs`   | P5.b                                                | working |
-| `peek_agent`          | `engine/tools/peek_agent.rs`      | P5.b                                                | working |
-| `stop_agent`          | `engine/tools/stop_agent.rs`      | P5.b                                                | working |
-| `load_skill`          | `engine/tools/load_skill.rs`      | P5.b                                                | working |
-| `exit_plan_mode`      | `plugins/plan_mode.lua`           | P5.b → `tools/exit_plan_mode.lua`                   | working |
+| `spawn_agent`         | `runtime/lua/smelt/tools/spawn_agent.lua` | P5.b — landed; composes `smelt.agent.{spawn,wait_for_message,subagent_meta,list}` over `EngineHandle::spawn_subagent` + the `AgentMessageNotification` broadcast | working |
+| `list_agents`         | `runtime/lua/smelt/tools/list_agents.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
+| `message_agent`       | `runtime/lua/smelt/tools/message_agent.lua` | P5.b — landed; composes `smelt.agent.send_message` over `engine::socket::send_message_blocking` | working |
+| `peek_agent`          | `runtime/lua/smelt/tools/peek_agent.lua`    | P5.b — landed; composes `smelt.agent.send_query` over `engine::socket::send_query_blocking` | working |
+| `stop_agent`          | `runtime/lua/smelt/tools/stop_agent.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
+| `load_skill`          | `runtime/lua/smelt/tools/load_skill.lua` | P5.b — landed; composes `smelt.skills.content` over `Core.skills` | working |
+| `exit_plan_mode`      | `runtime/lua/smelt/tools/exit_plan_mode.lua` | P5.b — landed; module `register/unregister` swapped in/out by `plugins/plan_mode.lua` on Plan mode entry/exit | working |
 
 ## Slash commands
 
@@ -276,11 +276,11 @@ to invoke_ the feature.
 | `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/dispatch.rs`               | thin alias over `smelt.timer.set`          | working        |
 | `smelt.timer.set/every/cancel` namespace                | `lua/api/dispatch.rs` + `app/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |
 | `smelt.path` (`normalize / canonical / relative / expand / join / parent / basename / extension / is_absolute`) | `lua/api/path.rs` + `tui/path.rs` | P3.a + P3.c (landed `de7fb87`) | working |
-| `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size / glob`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.os` (`getenv / setenv / unsetenv / platform / arch / tempdir / home / cwd / set_cwd / pid`) | `lua/api/os.rs` | P3.c (landed this session) | working |
 | `smelt.grep` (`run(pattern, path, opts)` over ripgrep — content / files_with_matches / count modes; case / multiline / context / glob / type / timeout) | `lua/api/grep.rs` + `tui/grep.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.http` (`get(url, opts)` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.html` (`title / links / to_text` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.http` (`get / post / random_user_agent / cache.{get,put}` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` + `tui/http/cache.rs` | P3.a + P3.c + P5.b (POST + UA rotator + cache) | working |
+| `smelt.html` (`title / links / to_text / to_markdown / parse_ddg_results` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c + P5.b (DDG parser + `to_markdown`) | working |
 | `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `tui::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.notebook.parse` (Jupyter `.ipynb` parse over `tui::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.parse.frontmatter` (YAML frontmatter splitter)   | `lua/api/parse.rs`                  | P3.c/P4.e (custom-commands plugin)         | working        |

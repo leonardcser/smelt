@@ -22,6 +22,36 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
         })?,
     )?;
+    http_tbl.set(
+        "post",
+        lua.create_function(
+            |lua, (url, body, opts): (String, Option<mlua::String>, Option<mlua::Table>)| {
+                let parsed = parse_options(opts.as_ref())?;
+                let body_bytes = body.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+                match http::post(&url, body_bytes, &parsed) {
+                    Ok(resp) => Ok((Some(response_to_lua(lua, &resp)?), None)),
+                    Err(err) => Ok((None, Some(err.to_string()))),
+                }
+            },
+        )?,
+    )?;
+    http_tbl.set(
+        "random_user_agent",
+        lua.create_function(|_, ()| Ok(http::random_user_agent()))?,
+    )?;
+    let cache_tbl = lua.create_table()?;
+    cache_tbl.set(
+        "get",
+        lua.create_function(|_, key: String| Ok(http::cache::get(&key)))?,
+    )?;
+    cache_tbl.set(
+        "put",
+        lua.create_function(|_, (key, value): (String, String)| {
+            http::cache::put(&key, &value);
+            Ok(())
+        })?,
+    )?;
+    http_tbl.set("cache", cache_tbl)?;
 
     smelt.set("http", http_tbl)?;
     Ok(())
@@ -53,7 +83,10 @@ fn response_to_lua(lua: &Lua, resp: &http::Response) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     t.set("status", resp.status)?;
     t.set("final_url", resp.final_url.clone())?;
-    t.set("body", resp.text())?;
+    // Lua strings are byte-safe; pass raw bytes so binary responses
+    // (e.g. images) survive the boundary intact. Text consumers can
+    // still treat the value as a string.
+    t.set("body", lua.create_string(&resp.body)?)?;
     let h = lua.create_table()?;
     for (k, v) in &resp.headers {
         h.set(k.clone(), v.clone())?;
