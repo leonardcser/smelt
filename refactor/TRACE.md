@@ -33,12 +33,15 @@ Document the resolution and update the canonical doc.
 
 1. `main.rs` parses argv, picks `TuiApp` (no `-p`, no `--agent`).
 2. Builds `Core` (config, session, confirms, clipboard, timers, cells,
-   lua, tools, engine_bridge), then `TuiApp { core, well_known, ui }`.
+   lua, engine_bridge, skills/files/processes), then
+   `TuiApp { core, well_known, ui }`.
 3. `LuaRuntime::load_runtime()` — embedded `runtime/lua/smelt/*.lua`
-   autoloads run first: `transcript.lua`, `diff.lua`, `status.lua`,
-   `modes.lua`, `widgets/*.lua`, `dialogs/*.lua`,
+   autoloads run first: bootstrap/ui modules such as `dialog.lua`,
+   `status.lua`, `modes.lua`, `widgets/*.lua`, `dialogs/*.lua`,
    `colorschemes/default.lua`, `tools/*.lua`, `plugins/*.lua`. Each
    registers its surface (cells, callbacks, tools, commands).
+   `transcript.lua` / `diff.lua` are target-state P4.b modules, not
+   embedded runtime files today.
 4. `~/.config/smelt/init.lua` runs after autoloads — user config and
    plugin overrides. Example:
 
@@ -79,9 +82,9 @@ Document the resolution and update the canonical doc.
    end)
    ```
 
-5. `Core::start()` materializes the engine config from what `init.lua`
-   populated, opens an `EngineHandle` (single channel pair), and the
-   event loop enters its `select!`.
+5. Startup materializes the engine config from CLI + saved state +
+   `init.lua`, opens an `EngineHandle`, and the event loop enters its
+   `select!`.
 
 6. Well-known windows open via Lua autoloads: a transcript Window on
    buffer `transcript:1`, a prompt Window on buffer `prompt:1`, a
