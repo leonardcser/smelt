@@ -3,7 +3,6 @@ mod bash;
 mod edit_file;
 
 mod file_state;
-mod grep;
 mod list_agents;
 mod load_skill;
 mod message_agent;
@@ -56,7 +55,6 @@ pub(crate) use bash::BashTool;
 pub use bash::{check_interactive, check_shell_background_operator};
 pub(crate) use edit_file::EditFileTool;
 
-pub(crate) use grep::GrepTool;
 pub(crate) use notebook::NotebookEditTool;
 pub use notebook::NotebookRenderData;
 pub(crate) use read_file::ReadFileTool;
@@ -371,69 +369,6 @@ pub(crate) fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> D
     Duration::from_millis(ms)
 }
 
-pub(crate) fn run_command_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> ToolResult {
-    // Drain stdout/stderr in background threads to avoid pipe buffer deadlocks.
-    // If the child produces more output than the OS pipe buffer (~64KB on macOS),
-    // it will block on write and never exit unless we actively read.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let stdout_handle = std::thread::spawn(move || {
-        stdout.map(|mut r| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut r, &mut buf).ok();
-            buf
-        })
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        stderr.map(|mut r| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut r, &mut buf).ok();
-            buf
-        })
-    });
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout_bytes = stdout_handle.join().ok().flatten().unwrap_or_default();
-                let stderr_bytes = stderr_handle.join().ok().flatten().unwrap_or_default();
-                let mut result = String::from_utf8_lossy(&stdout_bytes).into_owned();
-                let stderr_str = String::from_utf8_lossy(&stderr_bytes);
-                if !stderr_str.is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(&stderr_str);
-                }
-                return ToolResult {
-                    content: result,
-                    is_error: !status.success(),
-                    metadata: None,
-                };
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return ToolResult::err(format!(
-                        "timed out after {:.0}s",
-                        timeout.as_secs_f64()
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                return ToolResult::err(e.to_string());
-            }
-        }
-    }
-}
-
 /// Acquire an exclusive, non-blocking advisory lock on the given file path.
 /// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
 /// locked by another process (EWOULDBLOCK) or on any other I/O error.
@@ -542,7 +477,6 @@ pub(crate) fn build_tools(
         files: files.clone(),
     }));
     r.register(Box::new(BashTool));
-    r.register(Box::new(GrepTool));
     r.register(Box::new(WebFetchTool));
     r.register(Box::new(WebSearchTool));
     r.register(Box::new(NotebookEditTool {

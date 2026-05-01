@@ -238,7 +238,6 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/bash.rs`                | 355  | Bash tool                      | moved-to-lua | P5.b  | pending | `tools/bash.lua` composes `tui::process`                        |
 | `tools/edit_file.rs`           | 233  | Edit tool                      | moved-to-lua | P5.b  | pending | `tools/edit_file.lua` composes `tui::fs`                        |
 | `tools/file_state.rs`          | 340  | File metadata tracking         | moved-to-capability | P3.a  | pending | → `tui::fs::file_state` (mtime tracking for edit_file race detection)            |
-| `tools/grep.rs`                | 262  | Grep tool                      | moved-to-lua | P5.b  | pending | `tools/grep.lua` over `tui::grep`                               |
 | `tools/list_agents.rs`         | 90   | List agents tool               | moved-to-lua | P5.b  | pending | `tools/list_agents.lua`                                         |
 | `tools/load_skill.rs`          | 53   | Load skill tool                | moved-to-lua | P5.b  | pending | `tools/load_skill.lua`                                          |
 | `tools/message_agent.rs`       | 98   | Message agent tool             | moved-to-lua | P5.b  | pending | `tools/message_agent.lua`                                       |
@@ -305,6 +304,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `status.lua`                      | 170 | Bottom-row statusline composer        | added        | P4.c  | landed  | Bootstrap chunk; registers a `core` source via `smelt.statusline.register` whose handler walks `smelt.statusline.snapshot()` and emits the full segment list (slug pill, vim mode, agent mode, throbber sub-spans, permission/proc/agent indicators, right-aligned position). The Rust `app/status_bar.rs` collapses to a buffer-write shell. |
 | `modes.lua`                       | 32  | Lua-side cycle for mode + reasoning   | added        | P4.f  | landed  | Bootstrap chunk; overrides `smelt.{mode,reasoning}.cycle` over new `cycle_list()` bindings. Rust `cycle_within` / `toggle_mode` / `cycle_reasoning` retire. |
 | `tools/glob.lua`                  | 53  | Built-in `glob` tool                  | added        | P5.b  | landed  | First core-tool migration off engine. `override = true` plugin tool composes `smelt.fs.glob` (globset + ignore::WalkBuilder) and inherits the `needs_confirm` shape from the retired Rust `GlobTool`. |
+| `tools/grep.lua`                  | 175 | Built-in `grep` tool                  | added        | P5.b  | landed  | `override = true` plugin tool over `smelt.grep.run` (ripgrep) with a `smelt.process.run("grep", ...)` fallback. Lua-side `offset` / `head_limit` slicing + stdout+stderr concatenation match the retired Rust `GrepTool`. Schema preserves the `-i` / `-n` / `-A` / `-B` / `-C` / `context` / `multiline` / `output_mode` knobs verbatim. |
 
 **To be created (P4.a):**
 
@@ -314,7 +314,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 **To be created (P5.b) under `tools/`:**
 
 - `bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
-  `grep.lua`, `web_fetch.lua`, `web_search.lua`, `notebook_edit.lua`,
+  `web_fetch.lua`, `web_search.lua`, `notebook_edit.lua`,
   `spawn_agent.lua`, `stop_agent.lua`, `message_agent.lua`, `peek_agent.lua`,
   `list_agents.lua`, `load_skill.lua`, `ask_user_question.lua` (moved from
   plugins), `exit_plan_mode.lua` (extracted from `plan_mode.lua`)

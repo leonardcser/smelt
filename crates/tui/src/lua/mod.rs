@@ -985,6 +985,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.glob",
         include_str!("../../../../runtime/lua/smelt/tools/glob.lua"),
     ),
+    (
+        "smelt.tools.grep",
+        include_str!("../../../../runtime/lua/smelt/tools/grep.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1014,6 +1018,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.simplify",
     "smelt.plugins.custom_commands",
     "smelt.tools.glob",
+    "smelt.tools.grep",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

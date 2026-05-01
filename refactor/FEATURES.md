@@ -82,7 +82,7 @@ to invoke_ the feature.
 | `read_process_output` | `plugins/background_commands.lua` | P5.b                                                | working |
 | `stop_process`        | `plugins/background_commands.lua` | P5.b                                                | working |
 | `glob`                | `runtime/lua/smelt/tools/glob.lua` | P5.b — landed; composes `smelt.fs.glob`            | working |
-| `grep`                | `engine/tools/grep.rs`            | P5.b                                                | working |
+| `grep`                | `runtime/lua/smelt/tools/grep.lua` | P5.b — landed; composes `smelt.grep.run` + `smelt.process.run` fallback | working |
 | `web_fetch`           | `engine/tools/web_fetch.rs`       | P5.b                                                | working |
 | `web_search`          | `engine/tools/web_search.rs`      | P5.b                                                | working |
 | `ask_user_question`   | `plugins/ask_user_question.lua`   | P5.b → `tools/ask_user_question.lua`                | working |
