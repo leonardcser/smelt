@@ -408,7 +408,7 @@ impl LuaRuntime {
     /// (available models, settings, history) so plugins that read those
     /// at registration time (e.g. `/model` declaring `args = model_keys`)
     /// see real data.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let lua = Lua::new();
         // `Arc<LuaShared>` is single-threaded in practice (all Lua
         // callbacks fire on the TUI thread). The task runtime holds
@@ -439,7 +439,7 @@ impl LuaRuntime {
     /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
     /// *after* pushing startup snapshots so plugins see populated
     /// `smelt.engine.models()` etc.
-    pub fn load_plugins(&mut self) {
+    pub(crate) fn load_plugins(&mut self) {
         if self.load_error.is_some() {
             return;
         }
@@ -468,7 +468,7 @@ impl LuaRuntime {
     /// Invoke a registered command by name. Returns `true` when the
     /// command exists and was dispatched (regardless of whether the
     /// handler succeeded); `false` when the name isn't bound.
-    pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
+    pub(crate) fn run_command(&self, name: &str, arg: Option<String>) -> bool {
         let func = {
             let Ok(map) = self.shared.commands.lock() else {
                 return false;
@@ -495,7 +495,7 @@ impl LuaRuntime {
     /// is the vim mode name (e.g. "Normal", "Insert", "Visual") or `None`
     /// when vim mode is disabled. A handler registered with mode `""` matches
     /// any mode; `"n"` matches Normal, `"i"` Insert, `"v"` Visual.
-    pub fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> bool {
+    pub(crate) fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> bool {
         let func = {
             let Ok(map) = self.shared.keymaps.lock() else {
                 return false;
@@ -523,12 +523,6 @@ impl LuaRuntime {
         true
     }
 
-    /// Access the underlying Lua state so callers can build result
-    /// tables (e.g. for `resolve_dialog`).
-    pub fn lua(&self) -> &Lua {
-        &self.lua
-    }
-
     /// Call every registered statusline source and return the combined
     /// item list (appended to Rust-side built-ins at the status-bar
     /// layer). Each source returns either a single item table or a list
@@ -538,7 +532,7 @@ impl LuaRuntime {
     /// for every source, ordered as registered. The caller dedupes
     /// against its own per-source error history so a perpetually-broken
     /// source doesn't spam one toast per frame.
-    pub fn tick_statusline(
+    pub(crate) fn tick_statusline(
         &self,
     ) -> (
         Vec<crate::content::StatusItem>,
@@ -582,7 +576,7 @@ impl LuaRuntime {
     /// when an LLM tool call needs user approval — `agent.rs` registers
     /// the request via `TuiApp::confirms.register` first, then this
     /// method hands the handle to the Lua dialog runner.
-    pub fn fire_confirm_open(&self, handle_id: u64) {
+    pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
         let result: mlua::Result<()> = (|| {
             let smelt: mlua::Table = self.lua.globals().get("smelt")?;
             let confirm: mlua::Table = smelt.get("confirm")?;
@@ -608,7 +602,7 @@ impl LuaRuntime {
     }
 
     /// Whether a command with `name` is registered via Lua.
-    pub fn has_command(&self, name: &str) -> bool {
+    pub(crate) fn has_command(&self, name: &str) -> bool {
         self.shared
             .commands
             .lock()
@@ -620,7 +614,7 @@ impl LuaRuntime {
     /// while the agent is mid-turn (`while_busy = false`).
     /// `Some(false)` if it's registered and allowed. `None` if no
     /// command by that name is registered.
-    pub fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
+    pub(crate) fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
         self.shared
             .commands
             .lock()
@@ -631,7 +625,7 @@ impl LuaRuntime {
 
     /// Whether the registered command opted into `smelt /name` startup
     /// invocation. `Some(true/false)` if registered, `None` otherwise.
-    pub fn command_startup_ok(&self, name: &str) -> Option<bool> {
+    pub(crate) fn command_startup_ok(&self, name: &str) -> Option<bool> {
         self.shared
             .commands
             .lock()
@@ -641,7 +635,7 @@ impl LuaRuntime {
     }
 
     /// Names of all Lua-registered commands (for completion).
-    pub fn command_names(&self) -> Vec<String> {
+    pub(crate) fn command_names(&self) -> Vec<String> {
         self.shared
             .commands
             .lock()
@@ -671,7 +665,7 @@ impl LuaRuntime {
     /// declared an `args` list via `smelt.cmd.register("name", fn, {args = {...}})`.
     /// Drives the secondary `CommandArg` picker that opens after
     /// `/name <space>`.
-    pub fn list_command_args(&self) -> Vec<(String, Vec<String>)> {
+    pub(crate) fn list_command_args(&self) -> Vec<(String, Vec<String>)> {
         let mut items: Vec<(String, Vec<String>)> = self
             .shared
             .commands
