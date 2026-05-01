@@ -1,3 +1,4 @@
+use super::working::TurnOutcome;
 use super::*;
 
 use crate::keymap::{self, KeyAction};

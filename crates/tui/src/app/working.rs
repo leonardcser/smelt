@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 /// `since` and the phase; `Retrying` additionally carries a delay and
 /// attempt counter for the countdown display.
 #[derive(Clone, Copy, PartialEq)]
-pub enum TurnPhase {
+pub(super) enum TurnPhase {
     Working,
     Compacting,
     Retrying { delay: Duration, attempt: u32 },
@@ -26,33 +26,33 @@ pub enum TurnPhase {
 
 /// Outcome of a completed turn.
 #[derive(Clone, Copy, PartialEq)]
-pub enum TurnOutcome {
+pub(super) enum TurnOutcome {
     Done,
     Interrupted,
 }
 
 /// A turn that is currently running.
-pub struct LiveTurn {
-    pub phase: TurnPhase,
+struct LiveTurn {
+    phase: TurnPhase,
     /// Anchor for elapsed math. Shifted forward by the pause duration
     /// on resume, so `since.elapsed()` is the correct paused-aware
     /// elapsed whenever `pause_started` is `None`.
-    pub since: Instant,
+    since: Instant,
     /// Absolute time at which a `Retrying` phase ends. `None` for
     /// other phases.
-    pub retry_deadline: Option<Instant>,
-    pub tps_samples: Vec<f64>,
-    pub last_spinner_frame: usize,
+    retry_deadline: Option<Instant>,
+    tps_samples: Vec<f64>,
+    last_spinner_frame: usize,
     /// Some(t) while paused (blocking dialog up). Timer + spinner
     /// freeze; `since` gets shifted forward by `t.elapsed()` on resume.
-    pub pause_started: Option<Instant>,
+    pause_started: Option<Instant>,
 }
 
 impl LiveTurn {
     /// Elapsed time the user sees: frozen at the moment of pause while
     /// `pause_started` is set, otherwise just `since.elapsed()` (which
     /// is paused-aware because resume shifts `since` forward).
-    pub fn effective_elapsed(&self) -> Duration {
+    fn effective_elapsed(&self) -> Duration {
         match self.pause_started {
             Some(t) => t.duration_since(self.since),
             None => self.since.elapsed(),
@@ -62,26 +62,26 @@ impl LiveTurn {
 
 /// Archived metadata from the last completed turn. Shown in the
 /// status bar until the next `begin()`.
-pub struct LastTurn {
-    pub outcome: TurnOutcome,
-    pub elapsed: Duration,
-    pub avg_tps: Option<f64>,
+struct LastTurn {
+    outcome: TurnOutcome,
+    elapsed: Duration,
+    avg_tps: Option<f64>,
 }
 
 #[derive(Default)]
-pub struct WorkingState {
+pub(super) struct WorkingState {
     live: Option<LiveTurn>,
     last: Option<LastTurn>,
 }
 
 impl WorkingState {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::default()
     }
 
     /// Start a new live turn, or update the phase of the currently-
     /// running one (keeps `since` and accumulated `tps_samples`).
-    pub fn begin(&mut self, phase: TurnPhase) {
+    pub(super) fn begin(&mut self, phase: TurnPhase) {
         let retry_deadline = match phase {
             TurnPhase::Retrying { delay, .. } => Some(Instant::now() + delay),
             _ => None,
@@ -106,7 +106,7 @@ impl WorkingState {
     }
 
     /// Archive the live turn's metadata as `last` and clear live.
-    pub fn finish(&mut self, outcome: TurnOutcome) {
+    pub(super) fn finish(&mut self, outcome: TurnOutcome) {
         let (elapsed, avg_tps) = match self.live.take() {
             Some(live) => (live.effective_elapsed(), avg(&live.tps_samples)),
             None => (Duration::ZERO, None),
@@ -118,7 +118,7 @@ impl WorkingState {
         });
     }
 
-    pub fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.live = None;
         self.last = None;
     }
@@ -127,18 +127,18 @@ impl WorkingState {
     /// animation (spinner glyph rotating, elapsed clock ticking).
     /// `false` once a turn has completed — the archived result is
     /// static text.
-    pub fn is_animating(&self) -> bool {
+    pub(super) fn is_animating(&self) -> bool {
         self.live.is_some()
     }
 
-    pub fn is_compacting(&self) -> bool {
+    pub(super) fn is_compacting(&self) -> bool {
         matches!(
             self.live.as_ref().map(|l| l.phase),
             Some(TurnPhase::Compacting)
         )
     }
 
-    pub fn record_tokens_per_sec(&mut self, tps: f64) {
+    pub(super) fn record_tokens_per_sec(&mut self, tps: f64) {
         if let Some(live) = self.live.as_mut() {
             live.tps_samples.push(tps);
         }
@@ -147,7 +147,7 @@ impl WorkingState {
     /// Elapsed time for the display — `since` for a live turn,
     /// archived `elapsed` otherwise. Live elapsed excludes time
     /// during which a blocking dialog paused the turn.
-    pub fn elapsed(&self) -> Option<Duration> {
+    pub(super) fn elapsed(&self) -> Option<Duration> {
         if let Some(live) = self.live.as_ref() {
             Some(live.effective_elapsed())
         } else {
@@ -159,7 +159,7 @@ impl WorkingState {
     /// `effective_elapsed` and the spinner freeze. On resume, `since`
     /// is shifted forward by the pause duration so subsequent reads of
     /// `since.elapsed()` are still correct. Idempotent.
-    pub fn set_paused(&mut self, paused: bool) {
+    pub(super) fn set_paused(&mut self, paused: bool) {
         let Some(live) = self.live.as_mut() else {
             return;
         };
@@ -173,17 +173,17 @@ impl WorkingState {
         }
     }
 
-    pub fn last_spinner_frame(&self) -> Option<usize> {
+    pub(super) fn last_spinner_frame(&self) -> Option<usize> {
         self.live.as_ref().map(|l| l.last_spinner_frame)
     }
 
-    pub fn set_last_spinner_frame(&mut self, frame: usize) {
+    pub(super) fn set_last_spinner_frame(&mut self, frame: usize) {
         if let Some(live) = self.live.as_mut() {
             live.last_spinner_frame = frame;
         }
     }
 
-    pub fn turn_meta(&self) -> Option<TurnMeta> {
+    pub(super) fn turn_meta(&self) -> Option<TurnMeta> {
         if let Some(live) = self.live.as_ref() {
             return Some(TurnMeta {
                 elapsed_ms: live.effective_elapsed().as_millis() as u64,
@@ -202,7 +202,7 @@ impl WorkingState {
         })
     }
 
-    pub fn restore_from_turn_meta(&mut self, meta: &TurnMeta) {
+    pub(super) fn restore_from_turn_meta(&mut self, meta: &TurnMeta) {
         self.live = None;
         self.last = Some(LastTurn {
             outcome: if meta.interrupted {
@@ -219,7 +219,7 @@ impl WorkingState {
     /// nothing is animating *or* the turn is paused by a blocking
     /// dialog. The status bar uses `None` to drop the spinner span
     /// entirely while paused — the label still renders.
-    pub fn spinner_char(&self) -> Option<&'static str> {
+    pub(super) fn spinner_char(&self) -> Option<&'static str> {
         let live = self.live.as_ref()?;
         if live.pause_started.is_some() {
             return None;
