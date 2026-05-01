@@ -1,316 +1,55 @@
-//! Lua → ui translators for `smelt.ui.dialog.open` and
-//! `smelt.ui.picker.open`. These parse the plugin-supplied `opts`
-//! tables into the typed `PanelSpec` / `PickerItem` shapes that the
-//! `ui` crate consumes, open the overlay, and hand the new `WinId`
-//! back to the parked Lua task. Everything else — keymap callbacks,
-//! submit / dismiss routing, selection tracking — lives in
-//! `runtime/lua/smelt/{dialog,picker}.lua`.
+//! Generic Lua → ui helpers that are still easier to keep on the
+//! Rust side: overlay placement parsing, picker construction, and a
+//! few reusable window recipes (`list` / `input`).
 
 use crate::app::TuiApp;
-use crate::format::BufFormat;
 use crossterm::event::{KeyCode, KeyModifiers};
-use ui::buffer::BufCreateOpts;
 use ui::layout::Anchor;
 use ui::{
-    Border, BufId, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, PanelHeight,
-    PanelSpec, Payload, SplitConfig, WinEvent, WinId,
+    Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, Payload, WinEvent,
+    WinId,
 };
 
-/// What shape an overlay leaf takes when the dialog is content-only.
-/// Drives whether cursor highlighting + a built-in navigation keymap
-/// are wired up after the leaf's Window is created.
-#[derive(Clone)]
-enum LeafShape {
-    /// Read-only viewer: no cursor highlight, no built-in keymap.
-    /// Lua-side callers can still register their own keymaps via
-    /// `smelt.win.set_keymap`.
-    Content,
-    /// Cursor-driven list: cursor row highlighted, built-in
-    /// j/k/Up/Down/Home/End/PgUp/PgDn navigation, Enter fires
-    /// `WinEvent::Submit` with `Payload::Selection { index = abs_row }`.
-    /// `initial_cursor` is the 0-based row the cursor lands on when
-    /// the leaf opens.
-    List { initial_cursor: u16 },
-    /// Single-line text input: printable-char fallback inserts at
-    /// cursor; Backspace deletes previous char; Left/Right/Home/End
-    /// move cursor; Enter fires `WinEvent::Submit` with
-    /// `Payload::Text { content }`. The buffer carries a dim
-    /// placeholder line until the user types; on first keystroke
-    /// the placeholder line + extmark clear and real text takes over.
-    Input,
+/// Where the dialog's overlay anchors. Parsed from `opts.placement` on
+/// the Lua side: absent or `"center"` → `ScreenCenter`; `"dock_bottom"`
+/// → `DockBottom` reading `placement_height` (default 60).
+#[derive(Clone, Copy)]
+enum OverlayPlacement {
+    ScreenCenter,
+    DockBottom { height_pct: u16 },
 }
 
-/// Result of `open_dialog`. The Lua binding turns this into a
-/// `(win_id, leaves)` multi-return: `root` is the WinId of the first
-/// declared leaf (used as the dialog's identity for event/keymap
-/// registration), and `leaves` is parallel-indexed to `opts.panels`
-/// so `dialog.lua` can wire each panel handle to its leaf for focus +
-/// per-panel queries (e.g. input `:text()`).
-pub(crate) struct DialogOpenResult {
-    pub(crate) root: WinId,
-    pub(crate) leaves: Vec<WinId>,
-}
-
-// ── Dialog ───────────────────────────────────────────────────────────
-//
-// Supported panel kinds from `opts.panels[]`:
-// - `{ kind = "content", buf = <id> }`                       — existing buffer (plain or formatter-backed)
-// - `{ kind = "content", text = "..." }`                     — soft-wrapped plain text
-// - `{ kind = "content", text = "...", mode = "markdown" }`  — formatter-rendered text
-//                                                              (also accepts "bash", "file", "diff")
-// - `{ kind = "markdown", text = "..." }`                    — sugar for the line above with mode = "markdown"
-// - `{ kind = "options",  items = [{label}], selected? = <1-based index> }`
-// - `{ kind = "input",    placeholder? = "..." }`
-
-pub(crate) fn open_dialog(app: &mut TuiApp, opts: mlua::Table) -> Result<DialogOpenResult, String> {
+pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
     let title: Option<String> = opts.get("title").ok();
-    let panels_tbl: mlua::Table = opts
-        .get("panels")
-        .map_err(|e| format!("dialog panels: {e}"))?;
-
-    let mut panel_specs: Vec<PanelSpec> = Vec::new();
-    let mut leaf_shapes: Vec<LeafShape> = Vec::new();
-    for pair in panels_tbl.sequence_values::<mlua::Table>() {
-        let panel = pair.map_err(|e| format!("dialog panel entry: {e}"))?;
-        let kind: String = panel.get("kind").map_err(|e| format!("panel.kind: {e}"))?;
-        let height = parse_panel_height(&panel)?;
-        let initial_focus: bool = panel.get("focus").unwrap_or(false);
-        match kind.as_str() {
-            "list" => {
-                // `kind = "list"` — caller-supplied buffer rendered as
-                // a focusable Buffer-backed Window with cursor-driven
-                // selection.
-                let id: u64 = panel
-                    .get("buf")
-                    .map_err(|e| format!("list.buf is required: {e}"))?;
-                let buf = BufId(id);
-                let spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fill))
-                    .focusable(true)
-                    .with_initial_focus(initial_focus);
-                panel_specs.push(spec);
-                leaf_shapes.push(LeafShape::List { initial_cursor: 0 });
-            }
-            "content" => {
-                let buf = if let Ok(id) = panel.get::<u64>("buf") {
-                    BufId(id)
-                } else {
-                    let text: String = panel.get("text").unwrap_or_default();
-                    // Inline text panels default to the plain formatter
-                    // so help dialogs / help-style content wrap at the
-                    // current panel width instead of being clipped.
-                    // Callers who want raw unwrapped lines can supply a
-                    // pre-built buffer via `buf = ...`.
-                    let format = parse_panel_mode(&panel)?.or(Some(BufFormat::Plain));
-                    make_content_buffer(app, &text, format)
-                };
-                let focusable: bool = panel.get("focusable").unwrap_or(false);
-                let interactive: bool = panel.get("interactive").unwrap_or(false);
-                // `interactive` upgrades the panel to a transcript-style
-                // window: click + double/triple click + drag select all
-                // ride on the same `ui::Window` primitive as the
-                // transcript pane. Implies focusable.
-                let mut spec = if interactive {
-                    PanelSpec::interactive_content(buf, height.unwrap_or(PanelHeight::Fit))
-                } else {
-                    PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
-                };
-                spec = spec
-                    .focusable(focusable || interactive)
-                    .with_initial_focus(initial_focus);
-                if panel.get::<bool>("collapse_when_empty").unwrap_or(false) {
-                    spec.collapse_when_empty = true;
-                }
-                panel_specs.push(spec);
-                leaf_shapes.push(LeafShape::Content);
-            }
-            "markdown" => {
-                let text: String = panel.get("text").unwrap_or_default();
-                let buf = make_content_buffer(app, &text, Some(BufFormat::Markdown));
-                panel_specs.push(
-                    PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
-                        .with_initial_focus(initial_focus),
-                );
-                leaf_shapes.push(LeafShape::Content);
-            }
-            "options" => {
-                let items_tbl: mlua::Table = panel
-                    .get("items")
-                    .map_err(|e| format!("options.items: {e}"))?;
-                let mut labels: Vec<String> = Vec::new();
-                for it_pair in items_tbl.sequence_values::<mlua::Table>() {
-                    let it = it_pair.map_err(|e| format!("option item: {e}"))?;
-                    let label: String = it.get("label").unwrap_or_default();
-                    labels.push(label);
-                }
-                let initial_cursor: u16 = panel
-                    .get::<i64>("selected")
-                    .ok()
-                    .filter(|s| *s >= 1)
-                    .map(|s| (s - 1) as u16)
-                    .unwrap_or(0);
-
-                let buf = make_options_buffer(app, &labels);
-                let spec = PanelSpec::content(buf, height.unwrap_or(PanelHeight::Fit))
-                    .focusable(true)
-                    .with_initial_focus(initial_focus);
-                panel_specs.push(spec);
-                leaf_shapes.push(LeafShape::List { initial_cursor });
-            }
-            "input" => {
-                // Buffer-backed editable single-line leaf. The
-                // placeholder lives as initial line text + a dim
-                // highlight extmark covering it; the input recipe
-                // clears both on first keystroke.
-                let placeholder: Option<String> = panel.get("placeholder").ok();
-                let buf = make_input_buffer(app, placeholder.as_deref());
-                let spec = PanelSpec::content(buf, PanelHeight::Fixed(1))
-                    .focusable(true)
-                    .with_initial_focus(initial_focus);
-                panel_specs.push(spec);
-                leaf_shapes.push(LeafShape::Input);
-            }
-            other => return Err(format!("unknown panel kind: {other}")),
-        }
-    }
-
-    if panel_specs.is_empty() {
-        return Err("dialog must have at least one panel".into());
-    }
-
-    // `blocks_agent` gates engine-event drain + queues new user
-    // input while focus is inside the overlay. Only dialogs that gate
-    // a pending agent decision (permission prompts,
-    // `ask_user_question`, `exit_plan_mode`) opt in — passive viewers
-    // (`/help`, `/btw`, `/ps`) leave engine responses flowing.
-    let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
+    let items_tbl: mlua::Table = opts
+        .get("items")
+        .map_err(|e| format!("overlay items: {e}"))?;
     let placement = parse_overlay_placement(&opts);
-    open_dialog_via_overlay(
-        app,
-        title,
-        panel_specs,
-        leaf_shapes,
-        blocks_agent,
-        placement,
-    )
-}
+    let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
+    let modal: bool = opts.get("modal").unwrap_or(true);
+    let z: u16 = opts.get("z").unwrap_or(50);
 
-/// Open a centered modal Overlay carrying one Window per buffer panel.
-/// The first focusable leaf (or the first leaf if none focusable) is
-/// returned to Lua as the dialog's primary `WinId` — `dialog.lua`
-/// registers `on_event("dismiss"|"submit"|"text_changed"|"tick")` and
-/// keymap callbacks against that id.
-///
-/// Modal-Esc dismissal is built in (the `Ui` fires `WinEvent::Dismiss`
-/// on every leaf before closing). The Lua side's `on_event("dismiss",
-/// …)` handler calls `smelt.win.close(win_id)`, which routes through
-/// `Ui::win_close → Ui::overlay_close` and clears every leaf's
-/// callbacks atomically.
-///
-/// Heights:  `Fixed(n)` → `Constraint::Length(n)`; `Fit` and `Fill` →
-/// `Constraint::Fill` (every panel shares the inner space). Per-panel
-/// natural-size resolution lands when the leaf gains a content-rows
-/// hint (P1.d).
-///
-/// `leaf_shapes` is parallel to `panels` and decides the per-leaf
-/// post-creation wiring: `LeafShape::List` leaves get
-/// `cursor_line_highlight = true` plus a built-in navigation keymap
-/// (j/k/Up/Down/Home/End/PgUp/PgDn) and an Enter binding that fires
-/// `WinEvent::Submit { Selection { abs_row } }` so dialog.lua's
-/// `on_event(win, "submit", …)` handler resumes the parked task.
-fn open_dialog_via_overlay(
-    app: &mut TuiApp,
-    title: Option<String>,
-    panels: Vec<PanelSpec>,
-    leaf_shapes: Vec<LeafShape>,
-    blocks_agent: bool,
-    placement: OverlayPlacement,
-) -> Result<DialogOpenResult, String> {
-    let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::with_capacity(panels.len());
-    let mut leaf_wins: Vec<WinId> = Vec::with_capacity(panels.len());
-    let mut focus_target: Option<WinId> = None;
-    // Leaves needing post-overlay configuration.
-    let mut list_leaves: Vec<(WinId, u16)> = Vec::new();
-    let mut input_leaves: Vec<WinId> = Vec::new();
-    let mut interactive_leaves: Vec<WinId> = Vec::new();
-
-    for (spec, shape) in panels.into_iter().zip(leaf_shapes) {
-        let buf = spec.buf;
-        let win = app
-            .ui
-            .win_open_split(
-                buf,
-                SplitConfig {
-                    region: "dialog_overlay".into(),
-                    gutters: Default::default(),
-                },
-            )
-            .ok_or_else(|| "failed to allocate dialog window".to_string())?;
-        // `collapse_when_empty`: zero-height the leaf when the
-        // backing buffer is "empty" (a single blank line counts as
-        // empty — `Buffer::set_all_lines(vec![])` normalises to that
-        // shape). Mirrors the legacy panel-collapse rule so dialogs
-        // ride a hidden summary / preview row without the gap or
-        // separator polluting the layout.
-        let buffer_empty = app
-            .ui
-            .buf(buf)
-            .map(|b| {
-                let n = b.line_count();
-                n == 0 || (n == 1 && b.lines()[0].is_empty())
-            })
-            .unwrap_or(false);
-        let constraint = if spec.collapse_when_empty && buffer_empty {
+    let mut leaf_items: Vec<(Constraint, LayoutTree)> = Vec::new();
+    for pair in items_tbl.sequence_values::<mlua::Table>() {
+        let item = pair.map_err(|e| format!("overlay item: {e}"))?;
+        let win = WinId(
+            item.get::<u64>("win")
+                .map_err(|e| format!("overlay item.win: {e}"))?,
+        );
+        if app.ui.win(win).is_none() {
+            return Err(format!("overlay item references missing window {}", win.0));
+        }
+        let collapse_when_empty: bool = item.get("collapse_when_empty").unwrap_or(false);
+        let constraint = if collapse_when_empty && window_buffer_empty(app, win) {
             Constraint::Length(0)
         } else {
-            match spec.height {
-                PanelHeight::Fixed(n) => Constraint::Length(n),
-                PanelHeight::Fit | PanelHeight::Fill => Constraint::Fill,
-            }
+            parse_height_constraint(&item)?
         };
         leaf_items.push((constraint, LayoutTree::leaf(win)));
-        leaf_wins.push(win);
-        if spec.interactive {
-            interactive_leaves.push(win);
-        }
-        match &shape {
-            LeafShape::List { initial_cursor } => {
-                list_leaves.push((win, *initial_cursor));
-                // Default initial focus to the first interactive
-                // leaf when the dialog has no explicit
-                // `focus = true`. Lists / inputs are interactive;
-                // content viewers above/below are typically just
-                // headers.
-                if focus_target.is_none() && !spec.focus_initial {
-                    focus_target = Some(win);
-                }
-            }
-            LeafShape::Input => {
-                input_leaves.push(win);
-                if focus_target.is_none() && !spec.focus_initial {
-                    focus_target = Some(win);
-                }
-            }
-            LeafShape::Content => {}
-        }
-        if spec.focus_initial && focus_target.is_none() {
-            focus_target = Some(win);
-        }
     }
-
-    if leaf_wins.is_empty() {
-        return Err("dialog must have at least one panel".into());
+    if leaf_items.is_empty() {
+        return Err("overlay must have at least one item".into());
     }
-
-    // The "root" leaf is always the first declared leaf — that's
-    // the WinId returned to dialog.lua as the dialog's identity.
-    // `Ui::fire_win_event` redirects WinEvents fired on any leaf
-    // up to this root, so dialog.lua's single registration hears
-    // events from every interactive leaf in mixed dialogs. Focus
-    // is independent: it lands on `focus_target` (the first
-    // explicitly-focused leaf, falling back to the first list/
-    // input leaf, falling back to the root).
-    let root = leaf_wins[0];
-    let initial_focus = focus_target.unwrap_or(root);
 
     let inner = LayoutTree::vbox(leaf_items);
     let (anchor, layout) = match placement {
@@ -324,10 +63,6 @@ fn open_dialog_via_overlay(
             (Anchor::ScreenCenter, layout)
         }
         OverlayPlacement::DockBottom { height_pct } => {
-            // Full-width across the terminal; height % drives the
-            // outer vbox so `Anchor::ScreenBottom` reads the layout's
-            // natural size and pins to the bottom edge with one row
-            // reserved above for the status bar.
             let layout = LayoutTree::vbox(vec![(
                 Constraint::Percentage(height_pct),
                 LayoutTree::hbox(vec![(Constraint::Percentage(100), inner)]),
@@ -338,49 +73,20 @@ fn open_dialog_via_overlay(
         }
     };
 
-    app.ui.overlay_open(
+    let id = app.ui.overlay_open(
         Overlay::new(layout, anchor)
-            .modal(true)
+            .with_z(z)
+            .modal(modal)
             .blocks_agent(blocks_agent),
     );
-    app.ui.set_focus(initial_focus);
-
-    for (leaf, initial_cursor) in list_leaves {
-        configure_list_leaf(app, leaf, initial_cursor);
-    }
-    for leaf in input_leaves {
-        configure_input_leaf(app, leaf);
-    }
-    // Mirror the transcript's selection model on interactive buffer
-    // panels — vim Visual gives inclusive selection so dragging
-    // "hello" yanks all five chars, not "hell".
-    let vim_enabled = app.input.vim_enabled();
-    for leaf in interactive_leaves {
-        if let Some(win) = app.ui.win_mut(leaf) {
-            win.set_vim_enabled(vim_enabled);
-        }
-    }
-
-    Ok(DialogOpenResult {
-        root,
-        leaves: leaf_wins,
-    })
+    Ok(id.0 as u64)
 }
 
-/// Where the dialog's overlay anchors. Parsed from `opts.placement` on
-/// the Lua side: absent or `"center"` → `ScreenCenter`; `"dock_bottom"`
-/// → `DockBottom` reading `placement_height` (default 60).
-#[derive(Clone, Copy)]
-enum OverlayPlacement {
-    ScreenCenter,
-    DockBottom { height_pct: u16 },
-}
-
-/// Top-level `placement` option on `smelt.ui.dialog._open`. Defaults to
-/// centered. `"dock_bottom"` docks full-width at the terminal bottom
-/// (1 row reserved above for the status bar); an optional
-/// `placement_height = <pct>` controls the dialog height as a fraction
-/// of available height.
+/// Top-level `placement` option on generic overlay-open requests.
+/// Defaults to centered. `"dock_bottom"` docks full-width at the
+/// terminal bottom (1 row reserved above for the status bar); an
+/// optional `placement_height = <pct>` controls the overlay height as
+/// a fraction of available height.
 fn parse_overlay_placement(opts: &mlua::Table) -> OverlayPlacement {
     match opts.get::<String>("placement").ok().as_deref() {
         Some("dock_bottom") => {
@@ -396,7 +102,7 @@ fn parse_overlay_placement(opts: &mlua::Table) -> OverlayPlacement {
 /// Enter fires `WinEvent::Submit` with the absolute selected row.
 /// Each binding is a small Rust callback that mutates the Window's
 /// cursor + scroll state directly.
-fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: u16) {
+pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: u16) {
     let line_count = app
         .ui
         .win(leaf)
@@ -507,7 +213,7 @@ fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor: u16) {
 /// "logically empty" — first printable keystroke replaces line +
 /// extmark before inserting the typed char. Backspace is a no-op
 /// in placeholder mode.
-fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
+pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
     if let Some(win) = app.ui.win_mut(leaf) {
         win.cursor_col = 0;
         win.cursor_line = 0;
@@ -732,24 +438,6 @@ pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, 
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/// Parse a per-panel `height` option. `"fit"` → Fit (auto-shrink),
-/// `"fill"` → Fill (stretch + scroll), integer → Fixed rows. Absent →
-/// Ok(None) so the caller can pick a kind-appropriate default.
-fn parse_panel_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String> {
-    match panel.get::<mlua::Value>("height").ok() {
-        None | Some(mlua::Value::Nil) => Ok(None),
-        Some(mlua::Value::String(s)) => match s.to_str().map_err(|e| e.to_string())?.as_ref() {
-            "fit" => Ok(Some(PanelHeight::Fit)),
-            "fill" => Ok(Some(PanelHeight::Fill)),
-            other => Err(format!("panel.height: unknown value '{other}'")),
-        },
-        Some(mlua::Value::Integer(n)) if n > 0 => Ok(Some(PanelHeight::Fixed(n as u16))),
-        Some(other) => Err(format!(
-            "panel.height: expected 'fit' | 'fill' | int, got {other:?}"
-        )),
-    }
-}
-
 pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::PickerItem, String> {
     match v {
         mlua::Value::String(s) => Ok(crate::picker::PickerItem::new(
@@ -778,84 +466,29 @@ pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::Picker
     }
 }
 
-/// Build a buffer for a `content` / `markdown` panel. `format = None`
-/// produces a plain buffer with raw lines (no wrapping, no
-/// formatter) — matches the pre-formatter behaviour. `format =
-/// Some(mode)` installs the matching formatter and seeds its source
-/// with `text`; the dialog drives re-rendering at the panel's
-/// content width, so the baked-at-open width=80 trap of the old
-/// markdown path is gone.
-/// Build a Buffer holding one row per `kind = "options"` item label,
-/// plain-text. The Buffer-backed list leaf takes over selection
-/// rendering via `cursor_line_highlight`, so the buffer needs no
-/// styling — just the labels.
-/// Build a single-line Buffer for an input panel. When
-/// `placeholder` is `Some`, seed line 0 with the placeholder
-/// text and a dim highlight extmark covering it; the input
-/// recipe detects this state via `highlights_at(0).is_empty()`
-/// and clears the line on first keystroke (`set_lines` drops
-/// well-known namespace marks on wholesale replacement).
-fn make_input_buffer(app: &mut TuiApp, placeholder: Option<&str>) -> BufId {
-    let id = app.ui.buf_create(BufCreateOpts::default());
-    if let Some(buf) = app.ui.buf_mut(id) {
-        match placeholder {
-            Some(text) if !text.is_empty() => {
-                buf.set_all_lines(vec![text.to_string()]);
-                let len = text.chars().count() as u16;
-                buf.add_highlight(0, 0, len, ui::buffer::SpanStyle::dim());
-            }
-            _ => {
-                buf.set_all_lines(vec![String::new()]);
-            }
-        }
+fn parse_height_constraint(item: &mlua::Table) -> Result<Constraint, String> {
+    match item.get::<mlua::Value>("height").ok() {
+        None | Some(mlua::Value::Nil) => Ok(Constraint::Fill),
+        Some(mlua::Value::String(s)) => match s.to_str().map_err(|e| e.to_string())?.as_ref() {
+            "fit" | "fill" => Ok(Constraint::Fill),
+            other => Err(format!("overlay item.height: unknown value '{other}'")),
+        },
+        Some(mlua::Value::Integer(n)) if n > 0 => Ok(Constraint::Length(n as u16)),
+        Some(other) => Err(format!(
+            "overlay item.height: expected 'fit' | 'fill' | int, got {other:?}"
+        )),
     }
-    id
 }
 
-fn make_options_buffer(app: &mut TuiApp, labels: &[String]) -> BufId {
-    let id = app.ui.buf_create(BufCreateOpts::default());
-    if let Some(buf) = app.ui.buf_mut(id) {
-        let lines: Vec<String> = if labels.is_empty() {
-            vec![String::new()]
-        } else {
-            labels.to_vec()
-        };
-        buf.set_all_lines(lines);
-    }
-    id
-}
-
-fn make_content_buffer(app: &mut TuiApp, text: &str, format: Option<BufFormat>) -> BufId {
-    let id = app.ui.buf_create(BufCreateOpts::default());
-    if let Some(buf) = app.ui.buf_mut(id) {
-        match format {
-            Some(fmt) => {
-                buf.set_parser(fmt.into_parser());
-                buf.set_source(text.to_string());
-            }
-            None => {
-                let lines: Vec<String> = if text.is_empty() {
-                    vec![String::new()]
-                } else {
-                    text.lines().map(|s| s.to_string()).collect()
-                };
-                buf.set_all_lines(lines);
-            }
-        }
-    }
-    id
-}
-
-/// Parse an optional `mode = "..."` field off a panel table. Returns
-/// `Ok(None)` when absent, `Ok(Some(fmt))` when a valid mode is
-/// specified, and `Err(msg)` on unknown modes or missing payload
-/// fields (e.g. `mode = "file"` without `path`).
-fn parse_panel_mode(panel: &mlua::Table) -> Result<Option<BufFormat>, String> {
-    match panel
-        .get::<Option<String>>("mode")
-        .map_err(|e| e.to_string())?
-    {
-        Some(mode) => BufFormat::from_lua_spec(&mode, panel).map(Some),
-        None => Ok(None),
-    }
+fn window_buffer_empty(app: &TuiApp, win: WinId) -> bool {
+    let Some(buf_id) = app.ui.win(win).map(|w| w.buf) else {
+        return false;
+    };
+    app.ui
+        .buf(buf_id)
+        .map(|b| {
+            let n = b.line_count();
+            n == 0 || (n == 1 && b.lines()[0].is_empty())
+        })
+        .unwrap_or(false)
 }

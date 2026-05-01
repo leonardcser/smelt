@@ -2,14 +2,16 @@
 -- typed panel-handle factory `smelt.ui.dialog.open_handle(opts)` used
 -- by built-ins (confirm) that drive the dialog lifecycle directly.
 --
--- Rust exposes the low-level
--- `smelt.ui.dialog._open(opts) -> (win_id, leaves)`. `leaves` is a
--- 1-based sequence parallel to `opts.panels`, holding the leaf WinId
--- opened for each panel. Everything else — handle construction,
--- result building, custom keymaps, `on_select` / `on_change` /
--- `on_tick`, submit/dismiss routing — lives here.
+-- Dialogs are built from generic primitives: buffers, windows, and
+-- one overlay composition call. Rust still supplies a few reusable
+-- window recipes (`configure_list`, `configure_input`) and the generic
+-- overlay opener; dialog structure itself lives here.
 
 local M = {}
+
+-- Claim the namespace so we can attach open_handle / open without
+-- Rust knowing the word "dialog".
+smelt.ui.dialog = smelt.ui.dialog or {}
 
 -- Single panel-handle factory: identity fields + `:focus()`. Buffer
 -- panels expose `.buf` so callers can mutate / re-render without
@@ -68,9 +70,134 @@ function smelt.ui.dialog.open_handle(opts)
   if type(opts) ~= "table" then
     error("smelt.ui.dialog.open_handle: expected table of options", 2)
   end
-  local win_id, leaves = smelt.ui.dialog._open(opts)
+  local win_id, leaves = M._open(opts)
   if type(win_id) ~= "number" then return nil end
   return make_handle(win_id, opts, leaves)
+end
+
+local function split_lines(text)
+  if text == "" then return { "" } end
+  local out = {}
+  for line in tostring(text):gmatch("([^\n]*)\n?") do
+    if line == "" and #out > 0 and out[#out] == "" then break end
+    table.insert(out, line)
+  end
+  if #out == 0 then out = { "" } end
+  return out
+end
+
+local function make_input_buffer(placeholder)
+  local buf = smelt.buf.create()
+  if placeholder and placeholder ~= "" then
+    smelt.buf.set_lines(buf, { placeholder })
+    smelt.buf.add_dim(buf, 1, 0, #placeholder)
+  else
+    smelt.buf.set_lines(buf, { "" })
+  end
+  return buf
+end
+
+local function make_options_buffer(items)
+  local lines = {}
+  for _, item in ipairs(items or {}) do
+    table.insert(lines, item.label or "")
+  end
+  if #lines == 0 then lines = { "" } end
+  local buf = smelt.buf.create()
+  smelt.buf.set_lines(buf, lines)
+  return buf
+end
+
+local function make_content_buffer(spec)
+  local mode = spec.mode
+  if spec.kind == "markdown" and not mode then
+    mode = "markdown"
+  end
+  local buf = mode and smelt.buf.create({ mode = mode }) or smelt.buf.create()
+  local text = spec.text or ""
+  if mode then
+    smelt.buf.set_source(buf, text)
+  else
+    smelt.buf.set_lines(buf, split_lines(text))
+  end
+  return buf
+end
+
+function M._open(opts)
+  local panels = opts.panels or {}
+  if #panels == 0 then
+    error("smelt.ui.dialog.open: panels must be non-empty", 2)
+  end
+
+  local leaves = {}
+  local overlay_items = {}
+  local root = nil
+  local initial_focus = nil
+
+  for i, spec in ipairs(panels) do
+    local kind = spec.kind
+    local buf = spec.buf
+    if not buf then
+      if kind == "content" or kind == "markdown" then
+        buf = make_content_buffer(spec)
+      elseif kind == "options" then
+        buf = make_options_buffer(spec.items or {})
+      elseif kind == "input" then
+        buf = make_input_buffer(spec.placeholder)
+      elseif kind == "list" then
+        error("smelt.ui.dialog.open: list panel requires buf", 2)
+      else
+        error("smelt.ui.dialog.open: unknown panel kind `" .. tostring(kind) .. "`", 2)
+      end
+    end
+
+    local focusable = (kind == "list") or (kind == "options") or (kind == "input")
+    if spec.focusable ~= nil then focusable = spec.focusable end
+    if spec.interactive then focusable = true end
+
+    local leaf = smelt.win.open(buf, {
+      region = "dialog_overlay",
+      focusable = focusable,
+      vim_enabled = spec.interactive or false,
+    })
+    if not leaf then
+      error("smelt.ui.dialog.open: failed to create window", 2)
+    end
+
+    if kind == "list" then
+      smelt.win.configure_list(leaf, 0)
+    elseif kind == "options" then
+      local selected = tonumber(spec.selected or 1) or 1
+      if selected < 1 then selected = 1 end
+      smelt.win.configure_list(leaf, selected - 1)
+    elseif kind == "input" then
+      smelt.win.configure_input(leaf)
+    end
+
+    leaves[i] = leaf
+    overlay_items[i] = {
+      win = leaf,
+      height = spec.height,
+      collapse_when_empty = spec.collapse_when_empty or false,
+    }
+    if not root then root = leaf end
+    if spec.focus and not initial_focus then
+      initial_focus = leaf
+    elseif not initial_focus and (kind == "list" or kind == "options" or kind == "input") then
+      initial_focus = leaf
+    end
+  end
+
+  smelt.ui.overlay.open({
+    title = opts.title,
+    placement = opts.placement,
+    placement_height = opts.placement_height,
+    blocks_agent = opts.blocks_agent,
+    modal = true,
+    items = overlay_items,
+  })
+  smelt.win.set_focus(initial_focus or root)
+  return root, leaves
 end
 
 -- Collect input text for every input panel in `opts.panels`. Used by
@@ -142,9 +269,9 @@ function smelt.ui.dialog.open(opts)
     end
   end
 
-  -- Open the float synchronously. `leaves` is parallel-indexed to
+  -- Open the dialog synchronously. `leaves` is parallel-indexed to
   -- `opts.panels`.
-  local win_id, leaves = smelt.ui.dialog._open(opts)
+  local win_id, leaves = M._open(opts)
   if type(win_id) ~= "number" then
     return { action = "dismiss", inputs = {} }
   end
