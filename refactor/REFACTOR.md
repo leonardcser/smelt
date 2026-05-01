@@ -59,8 +59,9 @@ P3  rust capabilities + lua api    ── tui::parse/process/fs/http/...
         │                              /permissions, one file per smelt.*
         │                              namespace
         ▼
-P4  lua takes the ux               ── transcript.lua, diff.lua, status.lua,
-        │                              widgets/, dialogs/, colorschemes/
+P4  lua takes the ux ✅            ── status.lua, dialogs/, modes.lua,
+        │                              widgets/, colorschemes/ (P4.b deferred
+        │                              to transcript-pipeline keystone)
         ▼
 P5  tools to lua                   ── 15 Rust tool impls to Lua, mode
         │                              gating becomes a Lua hook concern;
@@ -824,33 +825,23 @@ of `tui` into `runtime/lua/smelt/`. Rust shrinks to capability
 provision and pixel pushing. Order within the phase is by leverage —
 the highest-touched UI surfaces first.
 
-### P4.a — `runtime/lua/smelt/` layout
+### P4.a — `runtime/lua/smelt/` layout ✅ landed
 
-Create the missing dirs and seed files:
+`widgets/picker.lua` + `prompt_picker.lua`, full `dialogs/` set,
+`colorschemes/default.lua`, top-level `status.lua` / `modes.lua` /
+`cmd.lua` / `dialog.lua` / `_bootstrap.lua` all shipped. The remaining
+widget seed files (`input` / `options` / `list` / `cmdline` /
+`statusline` / `notification`) materialize alongside their Rust-shell
+rebuilds. `transcript.lua` / `diff.lua` ride P4.b.
 
-- `widgets/` — `input.lua`, `options.lua`, `list.lua`, `picker.lua`,
-  `cmdline.lua`, `statusline.lua`, `notification.lua`. Each is a
-  keymap recipe + helpers for opening the corresponding Window.
-- `dialogs/` — `confirm.lua`, `permissions.lua`, `agents.lua`,
-  `rewind.lua`, `resume.lua`. Move from `plugins/`.
-- `colorschemes/` — at least one default theme via `smelt.theme.set`
-  / `smelt.theme.link` calls.
-- Top-level: `transcript.lua`, `diff.lua`, `status.lua`, `modes.lua`.
-  Slash-commands stay one-file-per-command in `plugins/`; `cmd.lua`
-  is the framework helper they call.
+### P4.b — Transcript and diff parsers in Lua ⏸ deferred
 
-### P4.b — Transcript and diff parsers in Lua
-
-- `transcript.lua` calls `buf.attach { parser = "markdown",
-  on_block = fn }`. Lua walks the result and writes extmarks via
-  `smelt.buf.set_extmark`.
-- `diff.lua` calls `buf.attach { parser = "diff", on_block = fn }`.
-  Same shape.
-- Rust `tui::parse` does the fast pure parse; Lua handles
-  presentation policy.
-- Drop the Rust-side `crates/tui/src/content/highlight/*` and
-  `transcript_buf.rs` / `transcript_present/` machinery — extmarks
-  on the Buffer carry it now.
+Deferred to the transcript-pipeline keystone (same multi-session work
+P1.a-tail names). Reopens when `Buffer::attach(spec)` lands. Final
+shape: `transcript.lua` / `diff.lua` call `buf.attach` with markdown /
+diff parsers; `on_block` writes extmarks via `smelt.buf.set_extmark`;
+Rust `tui::parse` is the fast pure parse; `content/highlight/*` +
+`transcript_buf.rs` + `transcript_present/` retire (extmarks carry it).
 
 ### P4.c — Reactive statusline ✅ landed
 
