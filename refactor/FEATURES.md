@@ -254,7 +254,8 @@ to invoke_ the feature.
 | `smelt.model.{get,set,list}`                            | `lua/api/model.rs`                  | P4.e (carved from `smelt.engine`)          | working        |
 | `smelt.session.messages`                                | `lua/api/session.rs`                | P4.e (carved from `smelt.engine.history`)  | working        |
 | `smelt.engine.cancel`                                   | `lua/api/state.rs`                  | P3.b                                       | working        |
-| `smelt.reasoning.{get,set,cycle}`                       | `lua/api/reasoning.rs`              | P4.e (carved from `smelt.engine`)          | working        |
+| `smelt.reasoning.{get,set,cycle,cycle_list}`            | `lua/api/reasoning.rs` + `runtime/lua/smelt/modes.lua` | P4.e (carved from `smelt.engine`); P4.f (`cycle_list` + Lua-side cycle) | working        |
+| `smelt.mode.{get,set,cycle,cycle_list}`                 | `lua/api/mode.rs` + `runtime/lua/smelt/modes.lua`      | P3.c + P4.f (`cycle_list` + Lua-side cycle)                              | working        |
 | `smelt.ui.dialog.open` / `open_handle`                  | `dialog.lua` + `lua/api/widgets.rs` | P3.b → `lua/api/ui.rs`                     | working        |
 | `smelt.ui.picker`                                       | `picker.lua` + `lua/api/widgets.rs` | P3.b                                       | working        |
 | `smelt.ui.ghost_text`                                   | `lua/api/widgets.rs`                | P3.b                                       | working        |
@@ -282,7 +283,7 @@ to invoke_ the feature.
 | `smelt.html` (`title / links / to_text` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `tui::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.notebook.parse` (Jupyter `.ipynb` parse over `tui::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.parse` | _missing today_                     | P3.c                                       | offline-pre-P3 |
+| `smelt.parse.frontmatter` (YAML frontmatter splitter)   | `lua/api/parse.rs`                  | P3.c/P4.e (custom-commands plugin)         | working        |
 
 ## Headless / non-TUI modes
 
