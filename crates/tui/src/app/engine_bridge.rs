@@ -45,10 +45,6 @@ impl EngineBridge {
         self.handle.drain_spawned()
     }
 
-    pub(crate) fn processes(&self) -> &tools::ProcessRegistry {
-        &self.handle.processes
-    }
-
     /// Cloneable injector for cross-thread tasks that need to push
     /// events into the engine's event stream (e.g. streaming bash
     /// emitting `EngineEvent::ToolOutput` per line).

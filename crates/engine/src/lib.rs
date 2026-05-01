@@ -240,7 +240,6 @@ pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent>,
-    pub processes: tools::ProcessRegistry,
     runtime_approvals: Arc<std::sync::RwLock<permissions::RuntimeApprovals>>,
     agent_msg_tx: Option<tokio::sync::broadcast::Sender<tools::AgentMessageNotification>>,
     spawned_rx: Option<mpsc::UnboundedReceiver<tools::SpawnedChild>>,
@@ -496,8 +495,6 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-    let processes = tools::ProcessRegistry::new();
-
     // Broadcast channel for agent message notifications (blocking spawn_agent).
     // Only created for interactive agents (depth == 0) that can spawn children.
     let agent_msg_tx = if config.multi_agent.as_ref().is_some_and(|ma| ma.depth == 0) {
@@ -528,7 +525,7 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
         }
     });
 
-    let registry = tools::build_tools(processes.clone(), files);
+    let registry = tools::build_tools(files);
 
     let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();
@@ -539,7 +536,6 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
         cmd_tx,
         event_tx: event_tx_clone,
         event_rx,
-        processes,
         runtime_approvals,
         agent_msg_tx,
         spawned_rx: if has_multi_agent {

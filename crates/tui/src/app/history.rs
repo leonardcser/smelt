@@ -128,7 +128,7 @@ impl TuiApp {
         self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
         self.input.store.clear();
-        self.core.engine.processes().clear();
+        self.core.processes.clear();
         self.reset_subagents_for_new_session();
         self.core.session = session::Session::new();
         self.pending_title = false;
@@ -214,7 +214,7 @@ impl TuiApp {
         self.input.clear();
         self.input.store.clear();
         self.pending_title = false;
-        self.core.engine.processes().clear();
+        self.core.processes.clear();
         self.compact_epoch += 1;
         self.sync_session_snapshot();
         self.core

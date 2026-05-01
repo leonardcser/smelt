@@ -378,7 +378,7 @@ pub struct SubagentConfig {
     pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
 }
 
-pub(crate) fn build_tools(_processes: ProcessRegistry, files: FileStateCache) -> ToolRegistry {
+pub(crate) fn build_tools(files: FileStateCache) -> ToolRegistry {
     let r = ToolRegistry::new();
     let _ = files;
 
