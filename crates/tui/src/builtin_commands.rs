@@ -28,7 +28,7 @@ const COMMANDS: &[BuiltinCommand] = &[
 /// Resolve a builtin command by name, appending any extra arguments.
 /// Builtin command bodies are minijinja templates; `multi_agent` controls
 /// whether sections gated on multi-agent mode are included.
-pub fn resolve(input: &str, multi_agent: bool) -> Option<CustomCommand> {
+pub(crate) fn resolve(input: &str, multi_agent: bool) -> Option<CustomCommand> {
     let after_slash = input.strip_prefix('/')?;
     let name = after_slash.split_whitespace().next()?;
     let extra = after_slash[name.len()..].trim();

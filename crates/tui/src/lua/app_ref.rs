@@ -57,7 +57,7 @@ impl Drop for AppPtrGuard {
 /// Borrow the installed `&mut TuiApp` for the duration of `f`. Panics if
 /// called outside a [`install_app_ptr`] scope — a Lua binding hit from
 /// a context we forgot to wire.
-pub fn with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> R {
+pub(crate) fn with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> R {
     let ptr = APP
         .with(|cell| cell.get())
         .expect("with_app called outside Lua entry");
@@ -73,7 +73,7 @@ pub fn with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> R {
 /// Variant that returns `None` if the pointer is unset instead of
 /// panicking. Useful from bindings that might be called from a
 /// benchmark / test harness without a `TuiApp`.
-pub fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
+pub(crate) fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
     let ptr = APP.with(|cell| cell.get())?;
     // SAFETY: same contract as `with_app`.
     Some(unsafe { f(ptr.as_ptr().as_mut().expect("app ptr must be non-null")) })
@@ -105,12 +105,12 @@ pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn crate::app::Host) -> R) -
 /// `HeadlessApp` install into the TLS slot, this dispatcher will
 /// surface a runtime error from headless contexts (today every
 /// installed frontend impls `UiHost`).
-pub fn with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> R {
+pub(crate) fn with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> R {
     with_app(|app| f(app))
 }
 
 /// `try_` variant of `with_ui_host` that returns `None` instead of
 /// panicking when no frontend is installed.
-pub fn try_with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> Option<R> {
+pub(crate) fn try_with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> Option<R> {
     try_with_app(|app| f(app))
 }

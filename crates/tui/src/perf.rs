@@ -20,7 +20,7 @@ fn value_samples() -> &'static Mutex<HashMap<&'static str, Vec<u64>>> {
 /// Record a raw numeric sample under `label`. Used for things that
 /// aren't durations — byte counts, cache sizes, etc. Printed in the
 /// summary alongside the duration table.
-pub fn record_value(label: &'static str, value: u64) {
+pub(crate) fn record_value(label: &'static str, value: u64) {
     if !enabled() {
         return;
     }
@@ -29,7 +29,7 @@ pub fn record_value(label: &'static str, value: u64) {
     }
 }
 
-pub fn enabled() -> bool {
+fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
@@ -41,7 +41,7 @@ pub fn enable() {
 /// Returns an RAII guard that records a self-time sample for `label` when
 /// dropped. Also records allocation count and bytes delta if the counting
 /// allocator is enabled. Cheap no-op if bench mode is off.
-pub fn begin(label: &'static str) -> Option<Guard> {
+pub(crate) fn begin(label: &'static str) -> Option<Guard> {
     if !enabled() {
         return None;
     }
@@ -52,7 +52,7 @@ pub fn begin(label: &'static str) -> Option<Guard> {
     })
 }
 
-pub struct Guard {
+pub(crate) struct Guard {
     label: &'static str,
     start: Instant,
     allocs_start: (u64, u64),
