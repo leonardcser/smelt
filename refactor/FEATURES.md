@@ -100,8 +100,8 @@ to invoke_ the feature.
 | ------------------------------------------------- | --------------------------------- | -------------------------------- | ------- |
 | `/clear`, `/new`                                  | `runtime/lua/smelt/plugins/session.lua` | P4.e                       | working — Lua command (`04f6419`); calls `smelt.session.reset()` |
 | `/quit`, `/exit`, `:q`, `:qa`, `:wq`, `:wqa`      | `runtime/lua/smelt/plugins/quit.lua` | P4.e                          | working — Lua command (`7c028d8`); flips `pending_quit` via `smelt.quit()` |
-| `/rewind`                                         | `plugins/rewind.lua`              | P4.d → `dialogs/rewind.lua`      | working |
-| `/resume`                                         | `plugins/resume.lua`              | P4.d → `dialogs/resume.lua`      | working |
+| `/rewind`                                         | `dialogs/rewind.lua`              | P4.d                             | working |
+| `/resume`                                         | `dialogs/resume.lua`              | P4.d                             | working |
 | `/compact [instructions]`                         | `runtime/lua/smelt/plugins/compact.lua` | P4.e                       | working — Lua command (`abe9ed0`); wraps `smelt.engine.compact` |
 | `/fork`, `/branch`                                | `runtime/lua/smelt/plugins/session.lua` | P4.e                       | working — Lua command (`04f6419`); calls `smelt.session.fork()` |
 | `/model [provider/model]`                         | `plugins/model.lua`               | P4.e                             | working |
@@ -113,9 +113,9 @@ to invoke_ the feature.
 | `/export`                                         | `plugins/export.lua`              | P4.e                             | working |
 | `/vim`                                            | `plugins/toggles.lua`             | P4.e                             | working |
 | `/thinking`                                       | `plugins/toggles.lua`             | P4.e                             | working |
-| `/permissions`                                    | `plugins/permissions.lua`         | P4.d → `dialogs/permissions.lua` | working |
+| `/permissions`                                    | `dialogs/permissions.lua`         | P4.d                             | working |
 | `/ps`                                             | `plugins/background_commands.lua` | P4.e                             | working |
-| `/agents`                                         | `plugins/agents.lua`              | P4.d → `dialogs/agents.lua`      | working |
+| `/agents`                                         | `dialogs/agents.lua`              | P4.d                             | working |
 | `/btw <q>`                                        | `plugins/btw.lua`                 | P4.e                             | working — Overlay (P1.c C.6) |
 | `/help`                                           | `plugins/help.lua`                | P4.e                             | working — Overlay (P1.c C.6) |
 | `/history`                                        | `plugins/history_search.lua`      | P4.e                             | working |
@@ -129,12 +129,12 @@ to invoke_ the feature.
 
 | Dialog                                             | Source today                                                    | Restored by                     | Status  |
 | -------------------------------------------------- | --------------------------------------------------------------- | ------------------------------- | ------- |
-| Confirm dialog (tool approval, Tab to add message) | `app/dialogs/confirm.rs` + `lua/confirm_ops.rs` + `confirm.lua` | P4.d → `dialogs/confirm.lua`    | working |
-| Diff preview pane in confirm                       | `app/dialogs/confirm_preview.rs` + `lua/render_ops.rs`          | P4.b (`diff.lua` extmarks)      | working |
-| Permissions picker                                 | `plugins/permissions.lua`                                       | P4.d                            | working |
-| Agents picker (list + detail)                      | `plugins/agents.lua`                                            | P4.d                            | working |
-| Rewind picker                                      | `plugins/rewind.lua`                                            | P4.d                            | working |
-| Resume picker (workspace toggle)                   | `plugins/resume.lua`                                            | P4.d                            | working |
+| Confirm dialog (tool approval, Tab to add message) | `dialogs/confirm.lua` + `lua/api/confirm.rs` (Rust primitives)  | P4.d → `dialogs/confirm.lua`    | working |
+| Diff preview pane in confirm                       | `dialogs/confirm.lua` + `smelt.diff.render` over `tui::content::highlight::diff` | P4.b (`diff.lua` extmarks) | working |
+| Permissions picker                                 | `dialogs/permissions.lua`                                       | P4.d                            | working |
+| Agents picker (list + detail)                      | `dialogs/agents.lua`                                            | P4.d                            | working |
+| Rewind picker                                      | `dialogs/rewind.lua`                                            | P4.d                            | working |
+| Resume picker (workspace toggle)                   | `dialogs/resume.lua`                                            | P4.d                            | working |
 | Model picker                                       | `plugins/model.lua`                                             | P4.d/e                          | working |
 | Theme picker (live preview)                        | `plugins/theme.lua`                                             | P4.d                            | working |
 | Color picker                                       | `plugins/color.lua`                                             | P4.d/e                          | working |
@@ -220,9 +220,9 @@ to invoke_ the feature.
 | Feature                                             | Source today                                                       | Restored by | Status  |
 | --------------------------------------------------- | ------------------------------------------------------------------ | ----------- | ------- |
 | Auto-save every turn                                | `persist.rs` + `session.rs`                                        | P2.a        | working |
-| Resume (`-r` / `/resume`)                           | `persist.rs` + `plugins/resume.lua`                                | P2.a + P4.d | working |
+| Resume (`-r` / `/resume`)                           | `persist.rs` + `dialogs/resume.lua`                                | P2.a + P4.d | working |
 | Session branching / fork (`/fork`)                  | `plugins/session.lua` + `app/history.rs::fork_session` | P2.a + P4.e | working |
-| Rewind to turn (`/rewind`, Esc Esc)                 | `app/history.rs` + `plugins/rewind.lua`                            | P2.a + P4.d | working |
+| Rewind to turn (`/rewind`, Esc Esc)                 | `app/history.rs` + `dialogs/rewind.lua`                            | P2.a + P4.d | working |
 | Conversation export (markdown → clip/file)          | `plugins/export.lua`                                               | P4.e        | working |
 | Message queuing (queue while running, pop on Enter) | `app/events.rs` + `app/working.rs`                                 | P2          | working |
 | Per-workspace permissions                           | `engine/permissions/workspace.rs` + `tui/workspace_permissions.rs` | P5.c        | working |
