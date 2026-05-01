@@ -10,7 +10,6 @@ use protocol::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -59,7 +58,7 @@ pub(crate) async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, plugin_tools } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir: _, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, plugin_tools } => {
 
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -138,7 +137,6 @@ pub(crate) async fn engine_task(
                             system_prompt,
                             agent_config,
                             plugin_tools,
-                            session_dir,
                             started_at: Instant::now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
@@ -584,7 +582,6 @@ struct Turn<'a> {
     system_prompt: String,
     agent_config: Option<crate::AgentPromptConfig>,
     plugin_tools: Vec<protocol::ToolDef>,
-    session_dir: PathBuf,
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
@@ -1357,14 +1354,7 @@ impl<'a> Turn<'a> {
         type TaggedFut<'x> =
             std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ToolResult)> + Send + 'x>>;
 
-        let contexts: Vec<_> = plan
-            .slots
-            .iter()
-            .map(|_| ToolContext {
-                cancel: self.cancel.clone(),
-                session_dir: self.session_dir.clone(),
-            })
-            .collect();
+        let contexts: Vec<_> = plan.slots.iter().map(|_| ToolContext).collect();
 
         let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
@@ -1644,10 +1634,7 @@ impl<'a> Turn<'a> {
                     UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
                         if dispatcher.contains(&tool_name) {
                             let _ = parent_call_id;
-                            let ctx = ToolContext {
-                                cancel: self.cancel.clone(),
-                                session_dir: self.session_dir.clone(),
-                            };
+                            let ctx = ToolContext;
                             side_futs.push(Box::pin(async move {
                                 let r = dispatcher
                                     .dispatch(&tool_name, args, &ctx)

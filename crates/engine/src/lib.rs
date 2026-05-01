@@ -244,6 +244,10 @@ pub struct EngineHandle {
     runtime_approvals: Arc<std::sync::RwLock<permissions::RuntimeApprovals>>,
     agent_msg_tx: Option<tokio::sync::broadcast::Sender<tools::AgentMessageNotification>>,
     spawned_rx: Option<mpsc::UnboundedReceiver<tools::SpawnedChild>>,
+    /// Stashed subagent spawn config. `None` when multi-agent is disabled
+    /// or this process has reached `max_depth`. Read back by
+    /// `spawn_subagent` (called from the Lua-side `spawn_agent` tool).
+    subagent_config: Option<tools::SubagentConfig>,
 }
 
 impl EngineHandle {
@@ -275,6 +279,149 @@ impl EngineHandle {
         children
     }
 
+    /// Snapshot of subagent spawn settings — `(depth, max_depth, max_agents)`.
+    /// `None` when multi-agent is disabled. The Lua `spawn_agent` tool calls
+    /// this to expose the multi-agent shape (and the "are we allowed to
+    /// spawn at this depth?" check) without taking the heavier
+    /// `SubagentConfig` route.
+    pub fn subagent_meta(&self) -> Option<(u8, u8, u8)> {
+        self.subagent_config
+            .as_ref()
+            .map(|c| (c.depth, c.max_depth, c.max_agents))
+    }
+
+    /// Spawn a subagent process. Wraps the same `std::process::Command`
+    /// dance the retired `SpawnAgentTool` performed: registers a fresh
+    /// `agent_id`, points the child's stderr at
+    /// `<session_dir>/agent_logs/<pid>.log`, posts the captured stdout
+    /// to the spawned-child channel for the frontend to consume, and
+    /// returns the new agent's id.
+    ///
+    /// `blocking` is informational — the child runs the same way
+    /// regardless. The frontend reads it back from `SpawnedChild` to
+    /// decide whether to render a live overlay or a one-line static
+    /// block.
+    ///
+    /// Returns `Err` if multi-agent is disabled, the depth budget is
+    /// exhausted, the child count is at the `max_agents` cap, or the
+    /// spawn itself fails.
+    pub fn spawn_subagent(
+        &self,
+        prompt: String,
+        blocking: bool,
+        session_dir: &std::path::Path,
+    ) -> Result<String, String> {
+        let cfg = self
+            .subagent_config
+            .as_ref()
+            .ok_or_else(|| "multi-agent disabled".to_string())?;
+
+        if cfg.depth >= cfg.max_depth {
+            return Err(format!(
+                "cannot spawn: max depth reached ({})",
+                cfg.max_depth
+            ));
+        }
+
+        let current = registry::children_of(cfg.pid).len();
+        if current >= cfg.max_agents as usize {
+            return Err(format!(
+                "cannot spawn: already at max agents ({}) for this session",
+                cfg.max_agents
+            ));
+        }
+
+        let exe = std::env::current_exe().map_err(|e| format!("cannot find binary: {e}"))?;
+        let child_depth = cfg.depth + 1;
+
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args([
+            "--subagent",
+            "--multi-agent",
+            "--parent-pid",
+            &cfg.pid.to_string(),
+            "--depth",
+            &child_depth.to_string(),
+            "--max-agents",
+            &cfg.max_agents.to_string(),
+            "--api-base",
+            &cfg.api_base,
+            "--api-key-env",
+            &cfg.api_key_env,
+            "--type",
+            &cfg.provider_type,
+            "-m",
+            &cfg.model,
+        ]);
+        cmd.arg(&prompt);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.env("FORCE_COLOR", "1");
+
+        if cfg.provider_type == ProviderKind::Codex.as_config_str() {
+            if let Some(tokens) = provider::codex::CodexTokens::load() {
+                cmd.env(provider::codex::CODEX_TOKENS_ENV, tokens.to_env_json());
+            }
+        }
+
+        let agent_id = registry::next_agent_id();
+
+        cmd.stdout(std::process::Stdio::piped());
+        let log_dir = session_dir.join("agent_logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        match std::fs::File::create(log_dir.join(format!("{agent_id}.log"))) {
+            Ok(f) => {
+                cmd.stderr(f);
+            }
+            Err(_) => {
+                cmd.stderr(std::process::Stdio::null());
+            }
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn subagent: {e}"))?;
+        let pid = child.id();
+
+        let _ = std::fs::rename(
+            log_dir.join(format!("{agent_id}.log")),
+            log_dir.join(format!("{pid}.log")),
+        );
+
+        let _ = registry::register(&registry::RegistryEntry {
+            agent_id: agent_id.clone(),
+            pid,
+            parent_pid: Some(cfg.pid),
+            git_root: Some(cfg.scope.clone()),
+            git_branch: None,
+            cwd: cfg.scope.clone(),
+            status: registry::AgentStatus::Working,
+            task_slug: None,
+            session_id: String::new(),
+            socket_path: String::new(),
+            depth: child_depth,
+            started_at: String::new(),
+        });
+
+        if let Some(ref tx) = cfg.spawned_tx {
+            if let Some(stdout) = child.stdout.take() {
+                let _ = tx.send(tools::SpawnedChild {
+                    agent_id: agent_id.clone(),
+                    pid,
+                    stdout,
+                    prompt: prompt.clone(),
+                    blocking,
+                });
+            }
+        }
+
+        // Drop the child handle. Rust's Child::drop closes pipes but
+        // does NOT kill the process — the subagent continues running
+        // independently.
+        drop(child);
+
+        Ok(agent_id)
+    }
+
     /// Create a cloneable injector for external tasks (socket bridge, watchers)
     /// that need to inject events into the engine's event stream.
     pub fn injector(&self) -> EventInjector {
@@ -293,6 +440,17 @@ pub struct EventInjector {
 }
 
 impl EventInjector {
+    /// Subscribe to the agent-message broadcast channel. `None` when
+    /// multi-agent is disabled or this process can't spawn children
+    /// (e.g. is itself a subagent at non-zero depth). The Lua
+    /// `spawn_agent` tool calls this through `smelt.agent.wait_for_message`
+    /// for blocking spawn semantics.
+    pub fn subscribe_agent_msg(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<tools::AgentMessageNotification>> {
+        self.agent_msg_tx.as_ref().map(|tx| tx.subscribe())
+    }
+
     pub fn inject_agent_message(&self, from_id: String, from_slug: String, message: String) {
         if let Some(ref tx) = self.agent_msg_tx {
             let _ = tx.send(tools::AgentMessageNotification {
@@ -352,10 +510,10 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
     // Channel for spawned child stdout handles (used for streaming).
     let (spawned_tx, spawned_rx) = mpsc::unbounded_channel();
 
-    let ma_config = if let Some(ref ma) = config.multi_agent {
+    let subagent_config = config.multi_agent.as_ref().map(|ma| {
         let scope = config.cwd.to_string_lossy().into_owned();
         let my_pid = std::process::id();
-        Some(tools::MultiAgentToolConfig {
+        tools::SubagentConfig {
             scope,
             pid: my_pid,
             depth: ma.depth,
@@ -367,12 +525,10 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
             provider_type: config.api.provider_type.clone(),
             agent_msg_tx: agent_msg_tx.clone(),
             spawned_tx: Some(spawned_tx),
-        })
-    } else {
-        None
-    };
+        }
+    });
 
-    let registry = tools::build_tools(processes.clone(), ma_config, files);
+    let registry = tools::build_tools(processes.clone(), files);
 
     let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();
@@ -391,5 +547,6 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
         } else {
             None
         },
+        subagent_config,
     }
 }

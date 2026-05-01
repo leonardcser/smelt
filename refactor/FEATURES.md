@@ -61,7 +61,7 @@ to invoke_ the feature.
 | Prompt history (↑/↓)                                          | `input/history.rs`                                        | P2                            | working |
 | Reverse history search (Ctrl+R, `/history`)                   | `plugins/history_search.lua`                              | P4.e                          | working |
 | Input stash (Ctrl+S)                                          | `input/mod.rs`                                            | P1/P4                         | working |
-| Multi-agent: spawn                                            | `engine/tools/spawn_agent.rs`                             | P5.b                          | working |
+| Multi-agent: spawn                                            | `runtime/lua/smelt/tools/spawn_agent.lua`                 | P5.b — landed; composes `smelt.agent.spawn` + `smelt.agent.wait_for_message` over `EngineHandle::spawn_subagent` + the engine's `AgentMessageNotification` broadcast | working |
 | Multi-agent: stop                                             | `runtime/lua/smelt/tools/stop_agent.lua`                  | P5.b — landed; composes `smelt.agent.{find_by_id,is_in_tree,kill}` | working |
 | Multi-agent: message                                          | `runtime/lua/smelt/tools/message_agent.lua`               | P5.b — landed; composes `smelt.agent.send_message` | working |
 | Multi-agent: peek                                             | `runtime/lua/smelt/tools/peek_agent.lua`                  | P5.b — landed; composes `smelt.agent.send_query` | working |
@@ -86,7 +86,7 @@ to invoke_ the feature.
 | `web_fetch`           | `runtime/lua/smelt/tools/web_fetch.lua` | P5.b — landed; composes `smelt.http.{get,cache,random_user_agent}` + `smelt.html.{title,links,to_text,to_markdown}` + `smelt.image.data_url_from_bytes` + `smelt.engine.ask` (`AuxiliaryTask::Btw`) | working |
 | `web_search`          | `runtime/lua/smelt/tools/web_search.lua` | P5.b — landed; composes `smelt.http.{post,cache,random_user_agent}` + `smelt.html.parse_ddg_results` | working |
 | `ask_user_question`   | `plugins/ask_user_question.lua`   | P5.b → `tools/ask_user_question.lua`                | working |
-| `spawn_agent`         | `engine/tools/spawn_agent.rs`     | P5.b                                                | working |
+| `spawn_agent`         | `runtime/lua/smelt/tools/spawn_agent.lua` | P5.b — landed; composes `smelt.agent.{spawn,wait_for_message,subagent_meta,list}` over `EngineHandle::spawn_subagent` + the `AgentMessageNotification` broadcast | working |
 | `list_agents`         | `runtime/lua/smelt/tools/list_agents.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
 | `message_agent`       | `runtime/lua/smelt/tools/message_agent.lua` | P5.b — landed; composes `smelt.agent.send_message` over `engine::socket::send_message_blocking` | working |
 | `peek_agent`          | `runtime/lua/smelt/tools/peek_agent.lua`    | P5.b — landed; composes `smelt.agent.send_query` over `engine::socket::send_query_blocking` | working |

@@ -230,6 +230,130 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     agent_tbl.set(
+        "subagent_meta",
+        lua.create_function(|lua, ()| {
+            let meta = crate::lua::try_with_app(|app| app.core.engine.subagent_meta()).flatten();
+            let Some((depth, max_depth, max_agents)) = meta else {
+                return Ok(LuaNil);
+            };
+            let row = lua.create_table()?;
+            row.set("depth", depth)?;
+            row.set("max_depth", max_depth)?;
+            row.set("max_agents", max_agents)?;
+            Ok(LuaValue::Table(row))
+        })?,
+    )?;
+    agent_tbl.set(
+        "spawn",
+        lua.create_function(
+            |lua, (prompt, blocking, session_dir): (String, Option<bool>, String)| {
+                let blocking = blocking.unwrap_or(false);
+                let result = crate::lua::try_with_app(|app| {
+                    app.core.engine.spawn_subagent(
+                        prompt,
+                        blocking,
+                        std::path::Path::new(&session_dir),
+                    )
+                });
+                let Some(result) = result else {
+                    return Err(mlua::Error::external("agent.spawn: app unavailable"));
+                };
+                match result {
+                    Ok(agent_id) => Ok((LuaValue::String(lua.create_string(&agent_id)?), LuaNil)),
+                    Err(err) => Ok((LuaNil, LuaValue::String(lua.create_string(&err)?))),
+                }
+            },
+        )?,
+    )?;
+    // smelt.agent.wait_for_message(task_id, agent_id, my_pid, timeout_ms)
+    //
+    // Spawns a tokio task that subscribes to the engine's
+    // `AgentMessageNotification` broadcast and resolves `task_id`
+    // through the Lua `LuaResumeSink` when one of three things
+    // happens: a matching message arrives (`{ message }`), the named
+    // child exits without sending a result (`{ error: "... exited
+    // without sending a result" }`), or the timeout elapses
+    // (`{ error: "... timed out after ..s" }`). Mirrors the
+    // `select!` body of the retired Rust `SpawnAgentTool`'s
+    // `wait_for_agent`.
+    agent_tbl.set(
+        "wait_for_message",
+        lua.create_function(
+            |_, (task_id, agent_id, my_pid, timeout_ms): (u64, String, u32, u64)| {
+                let pair = crate::lua::try_with_app(|app| {
+                    (
+                        app.core.engine.injector().subscribe_agent_msg(),
+                        app.core.lua.shared().resume_sink(),
+                    )
+                });
+                let Some((rx_opt, sink)) = pair else {
+                    return Err(mlua::Error::external(
+                        "agent.wait_for_message: app unavailable",
+                    ));
+                };
+                let Some(mut rx) = rx_opt else {
+                    sink.resolve_json(
+                        task_id,
+                        serde_json::json!({
+                            "error": "multi-agent disabled",
+                        }),
+                    );
+                    return Ok(());
+                };
+                let timeout = std::time::Duration::from_millis(timeout_ms);
+                tokio::spawn(async move {
+                    use tokio::sync::broadcast::error::RecvError;
+                    let deadline = tokio::time::Instant::now() + timeout;
+                    let mut child_check =
+                        tokio::time::interval(std::time::Duration::from_secs(5));
+                    child_check.tick().await; // consume immediate tick
+                    loop {
+                        tokio::select! {
+                            result = rx.recv() => {
+                                match result {
+                                    Ok(notif) if notif.from_id == agent_id => {
+                                        sink.resolve_json(task_id, serde_json::json!({
+                                            "message": notif.message,
+                                        }));
+                                        return;
+                                    }
+                                    Ok(_) => continue,
+                                    Err(RecvError::Lagged(_)) => continue,
+                                    Err(RecvError::Closed) => {
+                                        sink.resolve_json(task_id, serde_json::json!({
+                                            "error": format!("agent {agent_id}: message channel closed"),
+                                        }));
+                                        return;
+                                    }
+                                }
+                            }
+                            _ = tokio::time::sleep_until(deadline) => {
+                                sink.resolve_json(task_id, serde_json::json!({
+                                    "error": format!("agent {agent_id}: timed out after {}s", timeout.as_secs()),
+                                }));
+                                return;
+                            }
+                            _ = child_check.tick() => {
+                                let alive = engine::registry::children_of(my_pid)
+                                    .iter()
+                                    .any(|e| e.agent_id == agent_id
+                                        && engine::registry::is_pid_alive(e.pid));
+                                if !alive {
+                                    sink.resolve_json(task_id, serde_json::json!({
+                                        "error": format!("agent {agent_id} exited without sending a result"),
+                                    }));
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    agent_tbl.set(
         "peek",
         lua.create_function(|lua, (pid, max_lines): (u32, Option<usize>)| {
             let my_pid = std::process::id();

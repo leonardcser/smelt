@@ -55,6 +55,25 @@ impl EngineBridge {
     pub(crate) fn injector(&self) -> engine::EventInjector {
         self.handle.injector()
     }
+
+    /// Snapshot of subagent spawn settings — `(depth, max_depth, max_agents)`.
+    /// `None` when multi-agent is disabled. Surfaced to Lua via
+    /// `smelt.agent.subagent_meta()`.
+    pub(crate) fn subagent_meta(&self) -> Option<(u8, u8, u8)> {
+        self.handle.subagent_meta()
+    }
+
+    /// Spawn a subagent process. Returns the new agent's id on success,
+    /// or an error string on failure. Surfaced to Lua via
+    /// `smelt.agent.spawn(prompt, blocking, session_dir)`.
+    pub(crate) fn spawn_subagent(
+        &self,
+        prompt: String,
+        blocking: bool,
+        session_dir: &std::path::Path,
+    ) -> Result<String, String> {
+        self.handle.spawn_subagent(prompt, blocking, session_dir)
+    }
 }
 
 pub(crate) fn handle_event(

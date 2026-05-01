@@ -1107,6 +1107,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.bash",
         include_str!("../../../../runtime/lua/smelt/tools/bash.lua"),
     ),
+    (
+        "smelt.tools.spawn_agent",
+        include_str!("../../../../runtime/lua/smelt/tools/spawn_agent.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1149,6 +1153,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.notebook_edit",
     "smelt.tools.web_fetch",
     "smelt.tools.bash",
+    "smelt.tools.spawn_agent",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

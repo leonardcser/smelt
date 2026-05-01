@@ -2,12 +2,10 @@ pub(crate) mod background;
 pub mod file_state;
 pub mod notebook;
 pub(crate) mod result_dedup;
-mod spawn_agent;
 pub(crate) mod web_cache;
 
 pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
 
-use crate::cancel::CancellationToken;
 use crate::provider::{FunctionSchema, ToolDefinition};
 use protocol::ToolHooks;
 use serde_json::Value;
@@ -36,7 +34,13 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 pub use background::{ProcessInfo, ProcessRegistry};
 
 pub use notebook::NotebookRenderData;
-pub(crate) use spawn_agent::AgentMessageNotification;
+
+/// Notification sent when an agent message arrives on the socket.
+#[derive(Clone, Debug)]
+pub struct AgentMessageNotification {
+    pub from_id: String,
+    pub message: String,
+}
 
 pub(crate) struct ToolResult {
     pub(crate) content: String,
@@ -68,16 +72,11 @@ impl ToolResult {
     }
 }
 
-/// Context provided to tools during execution, giving them access to
-/// engine facilities (event streaming, cancellation, and the session
-/// directory). All fields are owned (Arc-backed where shared) so a
-/// fresh context can be constructed per call without lifetime
-/// gymnastics — this enables side calls like
-/// `smelt.tools.call("bash", args)` from Lua plugin tools.
-pub(crate) struct ToolContext {
-    pub(crate) cancel: CancellationToken,
-    pub(crate) session_dir: std::path::PathBuf,
-}
+/// Context provided to tools during execution. All Tool impls left in
+/// engine (MCP adapters) ignore it — kept as a placeholder so the
+/// trait signature can grow back if a future engine-side tool needs
+/// cancel propagation or other engine facilities.
+pub(crate) struct ToolContext;
 
 pub(crate) type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
 
@@ -193,13 +192,6 @@ pub(crate) struct ToolRegistry {
 impl ToolRegistry {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    pub(crate) fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(ToolEntry {
-            tool,
-            is_mcp: false,
-        });
     }
 
     pub(crate) fn register_mcp(&mut self, tool: Box<dyn Tool>) {
@@ -318,10 +310,6 @@ pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
     out
 }
 
-pub(crate) fn bool_arg(args: &HashMap<String, Value>, key: &str) -> bool {
-    args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
-}
-
 /// Acquire an exclusive, non-blocking advisory lock on the given file path.
 /// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
 /// locked by another process (EWOULDBLOCK) or on any other I/O error.
@@ -369,52 +357,36 @@ pub struct SpawnedChild {
     pub blocking: bool,
 }
 
-/// Configuration for multi-agent tool registration.
-pub(crate) struct MultiAgentToolConfig {
-    pub(crate) scope: String,
-    pub(crate) pid: u32,
-    pub(crate) depth: u8,
-    pub(crate) max_depth: u8,
-    pub(crate) max_agents: u8,
-    /// API config for spawned subagents.
-    pub(crate) api_base: String,
-    pub(crate) api_key_env: String,
-    pub(crate) model: String,
-    pub(crate) provider_type: String,
+/// Subagent spawn configuration. Stashed on `EngineHandle` and read
+/// back by `EngineHandle::spawn_subagent` (called from the Lua-side
+/// `spawn_agent` tool). Cloned at startup so the engine task and the
+/// frontend each hold an independent view.
+#[derive(Clone)]
+pub struct SubagentConfig {
+    pub scope: String,
+    pub pid: u32,
+    pub depth: u8,
+    pub max_depth: u8,
+    pub max_agents: u8,
+    pub api_base: String,
+    pub api_key_env: String,
+    pub model: String,
+    pub provider_type: String,
     /// Broadcast channel for agent message notifications (used by blocking spawn).
-    pub(crate) agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
+    pub agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
     /// Channel for sending spawned child handles (stdout pipes) to the parent.
-    pub(crate) spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
+    pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
 }
 
-pub(crate) fn build_tools(
-    _processes: ProcessRegistry,
-    ma: Option<MultiAgentToolConfig>,
-    files: FileStateCache,
-) -> ToolRegistry {
-    let mut r = ToolRegistry::new();
+pub(crate) fn build_tools(_processes: ProcessRegistry, files: FileStateCache) -> ToolRegistry {
+    let r = ToolRegistry::new();
     let _ = files;
 
-    // Multi-agent tools (conditionally registered). `list_agents`,
-    // `message_agent`, and `peek_agent` all live in
+    // Multi-agent tools — `spawn_agent`, `list_agents`, `stop_agent`,
+    // `message_agent`, `peek_agent` — all live in
     // `runtime/lua/smelt/tools/*.lua` (gated by `smelt.engine.multi_agent()`).
-    if let Some(ma) = ma {
-        if ma.depth < ma.max_depth {
-            r.register(Box::new(spawn_agent::SpawnAgentTool {
-                scope: ma.scope.clone(),
-                my_pid: ma.pid,
-                depth: ma.depth,
-                max_agents: ma.max_agents,
-                api_base: ma.api_base.clone(),
-                api_key_env: ma.api_key_env.clone(),
-                model: ma.model.clone(),
-                provider_type: ma.provider_type.clone(),
-                spawned_tx: ma.spawned_tx.clone(),
-                agent_msg_tx: ma.agent_msg_tx.clone(),
-            }));
-        }
-        // `stop_agent` lives in `runtime/lua/smelt/tools/stop_agent.lua`.
-    }
+    // `spawn_agent` composes `smelt.agent.spawn` over
+    // `EngineHandle::spawn_subagent`.
 
     r
 }
