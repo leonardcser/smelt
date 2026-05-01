@@ -238,7 +238,6 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `socket.rs`                    | 345  | Inter-agent IPC sockets        | moved-to-capability | P3.a/P5.c | pending | → `tui::subprocess::socket` (wire layer for sub-smelt subprocess type)         |
 | `tools/background.rs`          | 228  | Background process registry    | moved-to-capability | P3.a  | pending | → `tui::process` (registry + spawn/group/kill); Lua bash tool registers with it |
 | `tools/bash.rs`                | 355  | Bash tool                      | moved-to-lua | P5.b  | pending | `tools/bash.lua` composes `tui::process`                        |
-| `tools/edit_file.rs`           | 233  | Edit tool                      | moved-to-lua | P5.b  | pending | `tools/edit_file.lua` composes `tui::fs`                        |
 | `tools/file_state.rs`          | 340  | File metadata tracking         | moved-to-capability | P3.a  | pending | → `tui::fs::file_state` (mtime tracking for edit_file race detection)            |
 | `tools/mod.rs`                 | 614  | Tool trait + ToolDispatcher trait + ToolResult + ctx  | restructured | P5.a  | partial | Dead methods (`interactive_only` / `modes` / `decide_override`) and the `interactive: bool` arg on `definitions` retired in `9c356d8`. `is_mcp` lifted off the trait into a `ToolEntry { tool, is_mcp }` flag set via `register` / `register_mcp` (`030aecd`). `needs_confirm` / `preflight` / `approval_patterns` collapsed into `evaluate_hooks` (`a26a42e`). `pub(crate) trait ToolDispatcher` (definitions / contains / is_mcp / evaluate_hooks / dispatch) impl'd for `ToolRegistry` (this session) — engine routes every per-call decision through it; `ToolSlot::tool` field retired. Visibility lift to `pub` + `engine::start` injection point ride the next P5.a sub-phase. `MultiAgentToolConfig.{agent_id,slug}` retired alongside the message_agent / peek_agent migrations; the message-agent / peek-agent registrations went with them. |
 | `tools/notebook.rs`            | 677  | Notebook tool                  | moved-to-lua | P5.b  | pending | `tools/notebook_edit.lua` over `tui::notebook`                  |
@@ -307,6 +306,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/message_agent.lua`         | 74  | Built-in `message_agent` tool         | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.agent.{find_by_id,send_message,my_id,my_slug}` (FFI over `engine::registry` + `engine::socket::send_message_blocking`). Gated on `smelt.engine.multi_agent()`. Reports `delivered` / `failed: ...` / `partial: ...` mirroring the retired Rust `MessageAgentTool`. |
 | `tools/web_search.lua`            | 87  | Built-in `web_search` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.http.{post,cache.{get,put},random_user_agent}` + `smelt.html.parse_ddg_results`. Mirrors the retired Rust `WebSearchTool`: 15-minute cache keyed `search:<query>`, rotated User-Agent against DuckDuckGo's HTML endpoint, top-20 results formatted as a numbered list. |
 | `tools/write_file.lua`            | 90  | Built-in `write_file` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.fs.{exists,mkdir_all,write,try_flock,file_state.{has,staleness_error,record_write}}` + `smelt.notebook.is_notebook_path` + `smelt.path.display`. Mirrors the retired `WriteFileTool`: rejects clobbering an unread file (`UNREAD_OVERWRITE_ERR`), surfaces stale-mtime preflight, locks the path before overwriting, refuses to write to `.ipynb` (deferred to `edit_notebook`). |
+| `tools/edit_file.lua`             | 153 | Built-in `edit_file` tool             | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.fs.{read,write,try_flock,file_state.{staleness_error,record_write}}` + `smelt.notebook.is_notebook_path` + `smelt.path.display`. Lua-side `find/replace_first/replace_all` over `string.find(..., true)` reproduces the byte-exact replacement of the retired `EditFileTool`: rejects when `old == new`, when `old_string` is missing, when ambiguous without `replace_all = true`. |
 
 **To be created (P4.a):**
 
@@ -315,9 +315,8 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 
 **To be created (P5.b) under `tools/`:**
 
-- `bash.lua`, `read_file.lua`, `edit_file.lua`,
-  `web_fetch.lua`, `notebook_edit.lua`, `spawn_agent.lua`,
-  `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
+- `bash.lua`, `read_file.lua`, `web_fetch.lua`, `notebook_edit.lua`,
+  `spawn_agent.lua`, `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
 
 ## `src/`
 

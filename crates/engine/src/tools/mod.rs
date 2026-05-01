@@ -1,6 +1,5 @@
 pub(crate) mod background;
 mod bash;
-mod edit_file;
 pub mod file_state;
 mod notebook;
 mod read_file;
@@ -43,7 +42,6 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 pub use background::{ProcessInfo, ProcessRegistry};
 pub(crate) use bash::BashTool;
 pub use bash::{check_interactive, check_shell_background_operator};
-pub(crate) use edit_file::EditFileTool;
 
 pub(crate) use notebook::NotebookEditTool;
 pub use notebook::NotebookRenderData;
@@ -452,9 +450,6 @@ pub(crate) fn build_tools(
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Box::new(ReadFileTool {
-        files: files.clone(),
-    }));
-    r.register(Box::new(EditFileTool {
         files: files.clone(),
     }));
     r.register(Box::new(BashTool));

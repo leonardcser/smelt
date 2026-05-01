@@ -75,7 +75,7 @@ to invoke_ the feature.
 | --------------------- | --------------------------------- | --------------------------------------------------- | ------- |
 | `read_file`           | `engine/tools/read_file.rs`       | P5.b → `tools/read_file.lua`                        | working |
 | `write_file`          | `runtime/lua/smelt/tools/write_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + `smelt.notebook.is_notebook_path` | working |
-| `edit_file`           | `engine/tools/edit_file.rs`       | P5.b                                                | working |
+| `edit_file`           | `runtime/lua/smelt/tools/edit_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + Lua-side find/replace | working |
 | `edit_notebook`       | `engine/tools/notebook.rs`        | P5.b                                                | working |
 | `bash`                | `engine/tools/bash.rs`            | P5.b                                                | working |
 | `run_in_background` (bash flag, not a tool) | `plugins/background_commands.lua` (overrides bash registration) | P5.b → flag on `tools/bash.lua` | working |
