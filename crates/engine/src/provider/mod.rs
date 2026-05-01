@@ -9,7 +9,7 @@ mod sse;
 
 use crate::cancel::CancellationToken;
 use crate::log;
-pub use protocol::TokenUsage;
+pub(crate) use protocol::TokenUsage;
 use protocol::{Content, Message, ReasoningEffort, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 // ── Tool definitions ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ToolDefinition {
+pub(crate) struct ToolDefinition {
     #[serde(rename = "type")]
     def_type: AlwaysFunctionDef,
     pub function: FunctionSchema,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct FunctionSchema {
+pub(crate) struct FunctionSchema {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
@@ -41,7 +41,7 @@ impl Serialize for AlwaysFunctionDef {
 }
 
 impl ToolDefinition {
-    pub fn new(function: FunctionSchema) -> Self {
+    pub(crate) fn new(function: FunctionSchema) -> Self {
         Self {
             def_type: AlwaysFunctionDef,
             function,
@@ -105,12 +105,12 @@ pub(crate) fn collect_indexed_tool_calls(
 }
 
 /// A streaming delta from the LLM.
-pub enum StreamDelta<'a> {
+pub(crate) enum StreamDelta<'a> {
     Text(&'a str),
     Thinking(&'a str),
 }
 
-pub struct LLMResponse {
+pub(crate) struct LLMResponse {
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
@@ -121,7 +121,7 @@ pub struct LLMResponse {
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
+pub(crate) enum ProviderError {
     #[error("cancelled")]
     Cancelled,
     #[error("{}", format_rate_limit(resets_at))]
@@ -338,13 +338,13 @@ impl ProviderKind {
 /// Providers that don't support structured outputs ignore it; the model still
 /// usually emits valid JSON thanks to the prompt, but without enforcement.
 #[derive(Clone)]
-pub struct ResponseFormat {
+pub(crate) struct ResponseFormat {
     pub name: String,
     pub schema: serde_json::Value,
 }
 
 /// Execution-time options for a `Provider::chat()` call.
-pub struct ChatOptions<'a> {
+pub(crate) struct ChatOptions<'a> {
     pub cancel: &'a CancellationToken,
     pub on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
     pub on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
@@ -352,7 +352,7 @@ pub struct ChatOptions<'a> {
 }
 
 impl<'a> ChatOptions<'a> {
-    pub fn new(cancel: &'a CancellationToken) -> Self {
+    pub(crate) fn new(cancel: &'a CancellationToken) -> Self {
         Self {
             cancel,
             on_retry: None,
@@ -422,16 +422,16 @@ impl Provider {
         *self.turn_state.lock().unwrap() = None;
     }
 
-    pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
+    pub(crate) fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
         self
     }
 
-    pub fn tool_calling(&self) -> bool {
+    pub(crate) fn tool_calling(&self) -> bool {
         self.model_config.tool_calling()
     }
 
-    pub fn apply_model_overrides(&mut self, overrides: &protocol::ModelConfigOverrides) {
+    pub(crate) fn apply_model_overrides(&mut self, overrides: &protocol::ModelConfigOverrides) {
         if let Some(v) = overrides.temperature {
             self.model_config.temperature = Some(v);
         }
@@ -451,7 +451,7 @@ impl Provider {
 
     // ── Main chat method ────────────────────────────────────────────────
 
-    pub async fn chat(
+    pub(crate) async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
@@ -899,7 +899,7 @@ impl Provider {
         }
     }
 
-    pub async fn complete_predict(
+    pub(crate) async fn complete_predict(
         &self,
         messages: &[protocol::Message],
         model: &str,
@@ -921,7 +921,7 @@ impl Provider {
             .await
     }
 
-    pub async fn extract_web_content(
+    pub(crate) async fn extract_web_content(
         &self,
         content: &str,
         prompt: &str,
@@ -938,7 +938,7 @@ impl Provider {
         self.complete_simple(&messages, model, None).await
     }
 
-    pub async fn complete_title(
+    pub(crate) async fn complete_title(
         &self,
         last_user_message: &str,
         assistant_tail: &str,
