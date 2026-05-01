@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 /// Output mode for `rg`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
+pub(crate) enum Mode {
     /// Default — print matching lines.
     #[default]
     Content,
@@ -27,32 +27,32 @@ pub enum Mode {
 
 /// Options accepted by [`run`]. Defaults match `rg`'s defaults.
 #[derive(Debug, Clone, Default)]
-pub struct Options {
-    pub mode: Mode,
-    pub case_insensitive: bool,
-    pub multiline: bool,
-    pub line_numbers: bool,
-    pub before_context: u32,
-    pub after_context: u32,
-    pub context: u32,
-    pub glob: Option<String>,
-    pub file_type: Option<String>,
-    pub timeout: Option<Duration>,
+pub(crate) struct Options {
+    pub(crate) mode: Mode,
+    pub(crate) case_insensitive: bool,
+    pub(crate) multiline: bool,
+    pub(crate) line_numbers: bool,
+    pub(crate) before_context: u32,
+    pub(crate) after_context: u32,
+    pub(crate) context: u32,
+    pub(crate) glob: Option<String>,
+    pub(crate) file_type: Option<String>,
+    pub(crate) timeout: Option<Duration>,
 }
 
 /// Output from a single `rg` invocation. Callers slice / paginate the
 /// stdout themselves; this module returns it verbatim.
 #[derive(Debug, Clone)]
-pub struct Output {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-    pub timed_out: bool,
+pub(crate) struct Output {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: i32,
+    pub(crate) timed_out: bool,
 }
 
 /// Run `rg <pattern> <path>` with the given options. `path` defaults
 /// to `.` when empty.
-pub fn run(pattern: &str, path: impl AsRef<Path>, opts: &Options) -> io::Result<Output> {
+pub(crate) fn run(pattern: &str, path: impl AsRef<Path>, opts: &Options) -> io::Result<Output> {
     let path: PathBuf = {
         let p = path.as_ref();
         if p.as_os_str().is_empty() {
