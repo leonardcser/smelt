@@ -31,30 +31,16 @@ pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
 pub(crate) use host::Host;
 
-/// Snapshot of a tracked agent's state, published by the main loop
-/// and consumed by the agents dialog.
-#[derive(Clone)]
-pub(crate) struct AgentSnapshot {
-    pub(crate) agent_id: String,
-    pub(crate) prompt: Arc<String>,
-    pub(crate) tool_calls: Vec<AgentToolEntry>,
-    pub(crate) context_tokens: Option<u32>,
-    pub(crate) cost_usd: f64,
-}
-
-/// Shared, live-updating list of agent snapshots.
-pub(crate) type SharedSnapshots = Arc<Mutex<Vec<AgentSnapshot>>>;
-
 pub(crate) use crate::app::transcript_model::{
-    AgentBlockStatus, ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest,
-    PermissionEntry, ToolOutput, ToolState, ToolStatus, ViewState,
+    ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest, PermissionEntry, ToolOutput,
+    ToolState, ToolStatus, ViewState,
 };
 use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
 use crate::{content, session, state};
 use engine::tools::tool_arg_summary;
 use engine::{permissions::Decision, EngineHandle, Permissions};
-use protocol::{AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, UiCommand};
+use protocol::{AgentMode, Content, Message, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
     cursor,
@@ -71,43 +57,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-// ── Tracked agent state ──────────────────────────────────────────────────────
-
-/// A single tool call recorded from a subagent's event stream.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AgentToolEntry {
-    pub(crate) call_id: String,
-    pub(crate) tool_name: String,
-    pub(crate) summary: String,
-    pub(crate) status: ToolStatus,
-    pub(crate) elapsed: Option<Duration>,
-}
-
-/// State for a spawned subagent (blocking or background).
-pub(crate) struct TrackedAgent {
-    pub(crate) agent_id: String,
-    pub(crate) pid: u32,
-    pub(crate) prompt: Arc<String>,
-    pub(crate) slug: Option<String>,
-    pub(crate) event_rx: tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
-    /// Completed tool calls (for /agents dialog and blocking block rendering).
-    pub(crate) tool_calls: Vec<AgentToolEntry>,
-    pub(crate) status: AgentTrackStatus,
-    /// Whether the parent LLM is waiting for this agent (blocking spawn).
-    pub(crate) blocking: bool,
-    /// Latest prompt-token count reported for this subagent.
-    pub(crate) context_tokens: Option<u32>,
-    /// Accumulated cost in USD from this subagent's TokenUsage events.
-    pub(crate) cost_usd: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentTrackStatus {
-    Working,
-    Idle,
-    Error,
-}
 
 // ── TuiApp ──────────────────────────────────────────────────────────────────────
 
@@ -139,8 +88,6 @@ pub struct TuiApp {
     /// promptly.
     lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     pub(crate) queued_messages: Vec<String>,
-    /// Agent messages waiting to trigger a turn.
-    pending_agent_messages: Vec<protocol::Message>,
     /// Runtime approvals shared with the engine. The engine checks these
     /// during `decide()` to auto-approve tools without sending
     /// `RequestPermission`. The TUI writes to them when the user approves.
@@ -207,12 +154,7 @@ pub struct TuiApp {
     /// rows). Updated each frame in `render_normal`; read by mouse
     /// hit-testing and viewport-rows estimation.
     pub(crate) layout: content::layout::LayoutState,
-    /// Human-readable name for this agent.
-    pub agent_id: String,
-    /// All tracked subagents (blocking and background).
-    pub(crate) agents: Vec<TrackedAgent>,
-    /// Shared agent snapshots for live dialog updates.
-    pub(crate) agent_snapshots: crate::app::SharedSnapshots,
+
     pub(crate) permissions: Arc<Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `TuiApp` so reducer handlers (`apply_ops`) can mutate
@@ -223,11 +165,6 @@ pub struct TuiApp {
     predict_generation: u64,
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     persister: crate::persist::Persister,
-    /// Receiver for child agent permission requests (fed by socket bridge).
-    child_permission_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
-    /// Reply channels for pending child permission requests, keyed by synthetic request_id.
-    child_permission_replies:
-        HashMap<u64, tokio::sync::oneshot::Sender<engine::socket::PermissionReply>>,
     pending_title: bool,
     last_width: u16,
     last_height: u16,
@@ -238,7 +175,6 @@ pub struct TuiApp {
     pending_compact_epoch: u64,
     /// TurnMeta from the engine, consumed by `finish_turn`.
     pending_turn_meta: Option<protocol::TurnMeta>,
-    pending_agent_blocks: Vec<(String, protocol::AgentBlockData)>,
     startup_auth_error: Option<String>,
     /// TuiApp-level focus (Prompt = editing buffer; History = navigating transcript).
     pub(crate) app_focus: AppFocus,
@@ -268,8 +204,6 @@ pub struct TuiApp {
     pub extra_instructions: Option<String>,
     /// Pre-rendered skills prompt section. Set during app initialization.
     pub skill_section: Option<String>,
-    /// Multi-agent prompt config (agent identity, parent, siblings).
-    pub(crate) agent_prompt_config: Option<engine::AgentPromptConfig>,
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
@@ -372,11 +306,6 @@ struct Timers {
 /// How long after the last keypress before we show a deferred permission dialog.
 const CONFIRM_DEFER_MS: u64 = 1500;
 
-/// Counter for synthetic request IDs assigned to child permission requests.
-/// Uses a high starting offset to avoid colliding with engine-generated IDs.
-static NEXT_CHILD_REQUEST_ID: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1_000_000_000);
-
 /// A permission dialog deferred because the user was actively typing.
 enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
@@ -412,9 +341,7 @@ impl TuiApp {
         provider_type: String,
         permissions: Arc<Permissions>,
         engine: EngineHandle,
-        file_state: engine::tools::FileStateCache,
         settings: state::ResolvedSettings,
-        multi_agent: bool,
         reasoning_effort: protocol::ReasoningEffort,
         reasoning_cycle: Vec<protocol::ReasoningEffort>,
         mode_cycle: Vec<protocol::AgentMode>,
@@ -471,7 +398,6 @@ impl TuiApp {
             reasoning_effort,
             reasoning_cycle,
             settings,
-            multi_agent,
             context_window: None,
         };
 
@@ -558,7 +484,7 @@ impl TuiApp {
             )
         };
 
-        let core = core::Core::new(app_config, engine, FrontendKind::Tui, file_state);
+        let core = core::Core::new(app_config, engine, FrontendKind::Tui);
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = core.lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
@@ -573,7 +499,6 @@ impl TuiApp {
             exec_kill: None,
             lua_wakeup_rx,
             queued_messages: Vec::new(),
-            pending_agent_messages: Vec::new(),
             runtime_approvals,
             cwd,
             shared_session,
@@ -594,19 +519,12 @@ impl TuiApp {
             // The first frame's `render_normal` overwrites this via
             // `LayoutState::from_ui` after publishing the splits tree.
             layout: content::layout::LayoutState::default(),
-            agent_id: String::new(),
-            agents: Vec::new(),
-            agent_snapshots: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+
             permissions,
             agent: None,
             predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
-            child_permission_rx: {
-                let (_, rx) = tokio::sync::mpsc::unbounded_channel();
-                rx
-            },
-            child_permission_replies: HashMap::new(),
             pending_title: false,
             last_width: terminal::size().map(|(w, _)| w).unwrap_or(80),
             last_height: terminal::size().map(|(_, h)| h).unwrap_or(24),
@@ -614,7 +532,7 @@ impl TuiApp {
             compact_epoch: 0,
             pending_compact_epoch: 0,
             pending_turn_meta: None,
-            pending_agent_blocks: Vec::new(),
+
             startup_auth_error,
             app_focus: AppFocus::Prompt,
             transcript_window: {
@@ -634,7 +552,6 @@ impl TuiApp {
             vim_mode: ui::VimMode::Insert,
             extra_instructions: None,
             skill_section: None,
-            agent_prompt_config: None,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
@@ -649,7 +566,6 @@ impl TuiApp {
             cwd,
             self.core.config.mode,
             true, // TUI is always interactive
-            self.agent_prompt_config.as_ref(),
             self.skill_section.as_deref(),
             self.extra_instructions.as_deref(),
         );
@@ -923,14 +839,6 @@ impl TuiApp {
 
     // ── Unified event loop ───────────────────────────────────────────────
 
-    /// Set the receiver for child agent permission requests (from socket bridge).
-    pub fn set_child_permission_rx(
-        &mut self,
-        rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
-    ) {
-        self.child_permission_rx = rx;
-    }
-
     pub async fn run(
         &mut self,
         mut ctx_rx: Option<tokio::sync::oneshot::Receiver<Option<u32>>>,
@@ -1072,8 +980,7 @@ impl TuiApp {
             self.drain_cells_pending();
             self.flush_lua_callbacks();
             // Fire `WinEvent::Tick` on every window with a registered
-            // Tick callback — e.g. Agents pulls a fresh subagent
-            // snapshot here each frame.
+            // Tick callback.
             {
                 let lua = &self.core.lua;
                 let mut lua_invoke =
@@ -1150,60 +1057,6 @@ impl TuiApp {
                 }
             }
 
-            // ── Auto-start from pending agent messages ─────────────────
-            if self.agent.is_none() && !self.pending_agent_messages.is_empty() {
-                let msgs = std::mem::take(&mut self.pending_agent_messages);
-                self.session().messages.extend(msgs);
-                let turn = self.begin_agent_message_turn();
-                self.agent = Some(turn);
-            }
-
-            // ── Drain spawned children → track agents ─────────────────────
-            self.drain_spawned_children();
-
-            // ── Drain subagent events ────────────────────────────────────
-            self.drain_agent_events();
-
-            // ── Drain child permission requests ──────────────────────────
-            while let Ok(msg) = self.child_permission_rx.try_recv() {
-                let engine::socket::IncomingMessage::PermissionCheck {
-                    tool_name,
-                    args,
-                    confirm_message,
-                    approval_patterns,
-                    summary,
-                    reply_tx,
-                    ..
-                } = msg
-                else {
-                    continue;
-                };
-
-                let request_id =
-                    NEXT_CHILD_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.child_permission_replies.insert(request_id, reply_tx);
-
-                let ctrl = SessionControl::NeedsConfirm(Box::new(ConfirmRequest {
-                    call_id: format!("child-perm-{request_id}"),
-                    tool_name,
-                    desc: confirm_message,
-                    args,
-                    approval_patterns,
-                    outside_dir: None,
-                    summary,
-                    request_id,
-                }));
-                let taken = self.agent.take();
-                let pending_ref: &[crate::app::PendingTool] =
-                    taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                let action =
-                    self.dispatch_control(ctrl, pending_ref, &mut pending_dialogs, t.last_keypress);
-                self.agent = taken;
-                if matches!(action, LoopAction::Done) {
-                    self.discard_turn(false);
-                }
-            }
-
             // ── Process pending permission dialogs ──────────────────────
             // If agent was cancelled while dialogs were pending, discard them.
             if self.agent.is_none() && !pending_dialogs.is_empty() {
@@ -1263,11 +1116,7 @@ impl TuiApp {
             let has_animation = self.ui.focused_overlay().is_some()
                 || self.has_active_exec()
                 || self.working.is_animating()
-                || yank_flash_active
-                || self
-                    .agents
-                    .iter()
-                    .any(|a| a.status == AgentTrackStatus::Working);
+                || yank_flash_active;
 
             // ── Wait for next event ──────────────────────────────────────
             tokio::select! {

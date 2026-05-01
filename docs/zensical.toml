@@ -24,7 +24,6 @@ nav = [
   ]},
   { "Advanced" = [
     { "Headless" = "advanced/headless.md" },
-    { "Multi-Agent" = "advanced/multi-agent.md" },
   ]},
 ]
 

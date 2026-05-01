@@ -6,21 +6,12 @@ pub(crate) mod web_cache;
 pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
 
 use crate::provider::{FunctionSchema, ToolDefinition};
+pub use notebook::NotebookRenderData;
 use protocol::ToolHooks;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::mpsc;
-
-pub use notebook::NotebookRenderData;
-
-/// Notification sent when an agent message arrives on the socket.
-#[derive(Clone, Debug)]
-pub struct AgentMessageNotification {
-    pub from_id: String,
-    pub message: String,
-}
 
 pub(crate) struct ToolResult {
     pub(crate) content: String,
@@ -89,7 +80,7 @@ pub(crate) struct ToolEntry {
     pub(crate) is_mcp: bool,
 }
 
-/// Resolves and executes tool calls during an agent turn. The engine
+/// Resolves and executes tool calls during a turn. The engine
 /// never touches tool impls directly — every per-call decision (schema
 /// list, hook eval, dispatch, ruleset selection) routes through this
 /// trait. A future tui-side `ToolRuntime` walks a Lua-driven registry
@@ -211,32 +202,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
                 .unwrap_or(0);
             format!("{} question{}", count, if count == 1 { "" } else { "s" })
         }
-        "spawn_agent" => {
-            let prompt = str_arg(args, "prompt");
-            prompt.lines().next().unwrap_or("").trim().to_string()
-        }
-        "message_agent" => {
-            let targets: Vec<String> = args
-                .get("targets")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let msg = str_arg(args, "message");
-            let first_line = msg.lines().next().unwrap_or("").trim().to_string();
-            format!("{} {first_line}", targets.join(", "))
-        }
-        "stop_agent" => str_arg(args, "target"),
         "load_skill" => str_arg(args, "name"),
-        "list_agents" => String::new(),
-        "peek_agent" => {
-            let target = str_arg(args, "target");
-            let question = str_arg(args, "question");
-            format!("{target} {question}")
-        }
         _ => String::new(),
     }
 }
@@ -326,47 +292,6 @@ pub struct FlockGuard {
     _file: Option<()>,
 }
 
-/// A handle to a spawned child process, carrying the piped stdout.
-pub struct SpawnedChild {
-    pub agent_id: String,
-    pub pid: u32,
-    pub stdout: std::process::ChildStdout,
-    /// The prompt given to the subagent (displayed as the initial user message).
-    pub prompt: String,
-    /// Whether the parent is waiting for this agent to finish (blocking spawn).
-    pub blocking: bool,
-}
-
-/// Subagent spawn configuration. Stashed on `EngineHandle` and read
-/// back by `EngineHandle::spawn_subagent` (called from the Lua-side
-/// `spawn_agent` tool). Cloned at startup so the engine task and the
-/// frontend each hold an independent view.
-#[derive(Clone)]
-pub struct SubagentConfig {
-    pub scope: String,
-    pub pid: u32,
-    pub depth: u8,
-    pub max_depth: u8,
-    pub max_agents: u8,
-    pub api_base: String,
-    pub api_key_env: String,
-    pub model: String,
-    pub provider_type: String,
-    /// Broadcast channel for agent message notifications (used by blocking spawn).
-    pub agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
-    /// Channel for sending spawned child handles (stdout pipes) to the parent.
-    pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
-}
-
-pub(crate) fn build_tools(files: FileStateCache) -> ToolRegistry {
-    let r = ToolRegistry::new();
-    let _ = files;
-
-    // Multi-agent tools — `spawn_agent`, `list_agents`, `stop_agent`,
-    // `message_agent`, `peek_agent` — all live in
-    // `runtime/lua/smelt/tools/*.lua` (gated by `smelt.engine.multi_agent()`).
-    // `spawn_agent` composes `smelt.agent.spawn` over
-    // `EngineHandle::spawn_subagent`.
-
-    r
+pub(crate) fn build_tools() -> ToolRegistry {
+    ToolRegistry::new()
 }

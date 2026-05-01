@@ -29,17 +29,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         })?,
     )?;
 
-    // smelt.engine.multi_agent() -> bool. Read-only view of the
-    // process-wide multi-agent config flag (set once at startup from
-    // CLI / config). Lua plugins branch on this when their template
-    // body differs between solo and multi-agent runs.
-    engine_tbl.set(
-        "multi_agent",
-        lua.create_function(|_, ()| {
-            Ok(crate::lua::try_with_app(|app| app.core.config.multi_agent).unwrap_or(false))
-        })?,
-    )?;
-
     // smelt.engine.submit_command(name, body, overrides?) — start a
     // turn from a Lua-rendered slash-command template. `name` is the
     // bare command (e.g. `"reflect"`) and shows in the transcript as

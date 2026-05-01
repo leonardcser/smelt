@@ -199,7 +199,6 @@ pub(crate) fn build_tool_output_render_cache(
                 diff,
             }))
         }
-        // Preserve successful spawn_agent output lines exactly as returned.
         // No extra IR is needed here.
         _ => {
             let _ = content;

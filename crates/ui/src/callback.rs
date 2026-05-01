@@ -79,7 +79,7 @@ pub enum WinEvent {
     Dismiss,
     /// Fired once per event-loop iteration on each registered window.
     /// Used by overlays that need to refresh their content from live
-    /// external state (subagent registry, process list, etc.).
+    /// external state (process list, etc.).
     Tick,
 }
 

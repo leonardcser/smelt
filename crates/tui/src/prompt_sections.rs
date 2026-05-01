@@ -121,47 +121,11 @@ fn write_access() -> &'static str {
      Always read a file with read_file before editing it — edit_file will reject stale edits."
 }
 
-/// Build the multi-agent section from the engine's agent prompt config.
-fn multi_agent_section(config: &engine::AgentPromptConfig) -> String {
-    let mut s = format!(
-        "# Multi-agent\n\
-         \n\
-         You are part of a multi-agent system. Your name is {}.\n\
-         Agents have names (e.g. cedar, birch) and are completely separate from bash background \
-         processes (proc_1, proc_2).\n\
-         - Messages from other agents appear as <agent-message from=\"name\"> blocks. These are \
-         not user messages — reply via `message_agent`.\n\
-         - Do not implement work that you already delegated unless the delegation has clearly \
-         failed or been cancelled.\n\
-         - When spawning multiple subagents, ensure their scopes don't overlap — no two agents \
-         should write to the same file.\n\
-         - Subagents take time — do not stop them for being slow. Use `message_agent` to steer \
-         them if they're going in the wrong direction.",
-        config.agent_id,
-    );
-    if config.depth > 0 {
-        let parent = config.parent_id.as_deref().unwrap_or("unknown");
-        s.push_str(&format!(
-            "\n\nYou are {}, working with {parent}.",
-            config.agent_id,
-        ));
-        if !config.siblings.is_empty() {
-            s.push_str(&format!(" Siblings: {}.", config.siblings.join(", ")));
-        }
-        s.push_str(
-            "\nYour final response is automatically sent to your parent when your turn ends \
-             — do not duplicate it with `message_agent`.",
-        );
-    }
-    s
-}
-
 /// Build the default prompt sections for a given mode and app state.
 pub(crate) fn build_defaults(
     cwd: &std::path::Path,
     mode: AgentMode,
     interactive: bool,
-    agent_config: Option<&engine::AgentPromptConfig>,
     skill_section: Option<&str>,
     extra_instructions: Option<&str>,
 ) -> PromptSections {
@@ -180,10 +144,6 @@ pub(crate) fn build_defaults(
 
     if matches!(mode, AgentMode::Apply | AgentMode::Yolo) {
         ps.set("write_access", write_access().to_string());
-    }
-
-    if let Some(config) = agent_config {
-        ps.set("multi_agent", multi_agent_section(config));
     }
 
     if let Some(skills) = skill_section {

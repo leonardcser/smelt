@@ -33,7 +33,7 @@ Every change lands closer to all three, never farther from any.
    plugin. **A feature living in Rust that could live in Lua is a bug.**
    Built-in Lua still needs a boundary: generic capabilities live in Rust,
    default product UX can live in built-in Lua, and optional workflows
-   (multi-agent orchestration, background-process management, etc.) should be
+   (background-process management, etc.) should be
    removable plugins over those primitives rather than baked into the core
    engine or default tool semantics.
 
@@ -52,7 +52,7 @@ protocol  ←  engine  ←──┐
 | Crate                    | Role                                                                    |
 | ------------------------ | ----------------------------------------------------------------------- |
 | `protocol`               | Wire types, pure data, serde-serializable. Stable contract, no behavior |
-| `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept** — sub-agents, if enabled, are just child processes spawned by optional Lua plugins through `tui::subprocess`. Engine emits `RequestPermission` events when the dispatcher signals `needs_confirm`, but holds no rules, modes, or approvals. **Zero UI imports** |
+| `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept**. Engine emits `RequestPermission` events when the dispatcher signals `needs_confirm`, but holds no rules, modes, or approvals. **Zero UI imports** |
 | `ui`                     | Generic terminal UI primitives. Buffer, Window, LayoutTree, Overlay, Theme, Grid/diff. Could ship standalone at the data/rendering layer — no smelt knowledge |
 | `tui`                    | Smelt's binary. `Core` + `TuiApp` / `HeadlessApp` frontends, subsystems, Lua bridge, engine-event bridge/reducer, Rust capabilities (parse/process/subprocess/fs/http/html/notebook/grep/path/fuzzy/permissions) |
 | `runtime/lua/smelt/`     | The whole UX. Widgets, dialogs, commands, statusline, transcript/diff presentation, themes, tools |
@@ -370,8 +370,7 @@ Each layer is independent and composes:
    - `VimMode` — `Normal / Insert / Visual / VisualLine`. On App.
    - `AgentMode` — `Normal / Plan / Apply / Yolo`. Permission-gating policy.
      Lives in protocol. Lua: `smelt.mode` (renamed from
-     `smelt.agent.mode` to avoid collision with `smelt.subprocess`,
-     which is what sub-agents use now).
+     `smelt.agent.mode` to avoid collision with future `smelt.subprocess`).
 2. **Window keymap recipe** decides what keys do. Editor recipes bind
    `i/a/o/dd`; viewer recipes bind only `j/k/v/y`. Recipes are pure Lua,
    defined in `runtime/lua/smelt/widgets/`.
@@ -467,9 +466,8 @@ subscriptions, Lua runtime, session state, confirms, clipboard.
 statusline / cmdline) and a `ui::Ui`. `HeadlessApp` adds a
 `HeadlessSink` that emits JSON / text instead of pixels.
 
-This split lets `smelt -p "..."` (one-shot CLI) and multi-agent worker
-processes use the same Core/EngineBridge/Tools as the TUI without
-loading `ui::Ui`.
+This split lets `smelt -p "..."` (one-shot CLI) use the same
+Core/EngineBridge/Tools as the TUI without loading `ui::Ui`.
 
 **One binary, two entry points.** A single `smelt` binary; `main`
 inspects argv:
@@ -477,7 +475,7 @@ inspects argv:
 ```
 smelt                       → TuiApp (interactive terminal)
 smelt -p "..."              → HeadlessApp + JSON/text sink
-smelt --agent <id> [...]    → HeadlessApp + socket sink (sub-agent worker)
+
 ```
 
 There is no `smelt-worker` second binary, no `EngineConfig.interactive`
@@ -650,7 +648,7 @@ No trait impls, no callbacks, no UI types crossing the boundary. **No
 engine-side state leaks** — today's `processes`, `permissions`, and
 `runtime_approvals` fields on `EngineHandle` go away in P5 when their
 owners move into `tui::*`. The same channel-only shape powers headless
-and sub-agent frontends without cherry-picking engine internals.
+frontends without cherry-picking engine internals.
 
 The engine/event bridge drains `event_rx` and updates buffers, cells,
 and session state. Lua/UI actions send `UiCommand`s back across the
@@ -827,8 +825,7 @@ tool-specific. Any Lua plugin composes from them. A statusline source
 reads git state via `tui::fs`. A custom command shells out via
 `tui::process`. A theme finds files via `tui::fs::glob`. A picker
 ranks candidates via `tui::fuzzy`. The `bash` tool checks command
-shape via `tui::permissions.parse_bash`. The `spawn_agent` tool
-manages a child smelt process via `tui::subprocess`. Tools are just
+shape via `tui::permissions.parse_bash`. Tools are just
 one consumer.
 
 `tui::process` (foreground process spawning, used by short-lived
@@ -953,14 +950,12 @@ the `eprintln!`s before committing.
 - Selection = fg-accent on the cursor row. No bg fill, no cursor glyph, no
   layout shift.
 
-## Multi-agent — an optional plugin pattern, not an engine concept
+## Future multi-agent — an optional plugin pattern, not an engine concept
 
 Engine has no notion of "agents." There is no `Role::Agent`, no
 `AgentBlockData`, no `AgentMessage` event, no `EngineConfig.multi_agent`,
-no agent registry inside engine. From engine's perspective every
-sub-agent is _just another tool call from the parent's LLM_:
-`spawn_agent`, `message_agent`, `stop_agent`, etc. are Lua tools
-from an optional plugin composing one generic capability —
+no agent registry inside engine. Any future multi-agent feature would be
+implemented as optional Lua plugins composing one generic capability —
 `tui::subprocess`.
 
 ```rust
@@ -977,12 +972,12 @@ impl Handle {
 }
 ```
 
-The child can be anything — a sub-smelt process, a long-running bash
-command, an MCP server. The parent receives structured events through
-`on_event` and decides what to do with them. This generalizes past
-agents into a single primitive.
+The child can be anything — a long-running bash command, an MCP server.
+The parent receives structured events through `on_event` and decides
+what to do with them. This generalizes past agents into a single
+primitive.
 
-An optional multi-agent plugin under this model:
+A future optional multi-agent plugin under this model would:
 
 - `spawn_agent.lua` calls `tui::subprocess.spawn("smelt", {"--agent", id})`,
   registers an `on_event` handler that fires a Lua-side cell (e.g.
@@ -992,13 +987,13 @@ An optional multi-agent plugin under this model:
   tool result.
 - `peek_agent.lua` reads the latest event payload from the cell.
 
-The transcript renders these tool calls _the same way it renders any
+The transcript would render these tool calls _the same way it renders any
 other tool call_ — no special widget. A plugin that wants fancy agent
 UI (live token streaming, dedicated panel, etc.) builds it on top of
 the cell + a custom Buffer attach. That's a plugin author's choice,
 not a built-in.
 
-**Bidirectional async: solved by the event channel.** A sub-agent
+**Bidirectional async: solved by the event channel.** A child process
 finishing a task while the parent is mid-turn fires events into the
 parent via `on_event`. Those events update Lua-side cells; subscribers
 react. The parent's LLM sees the updates next turn (or is woken

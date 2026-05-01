@@ -32,15 +32,9 @@ Normal/Plan/Apply or **Allow** in Yolo.
 | `exit_plan_mode`      | —      | Ask   | —     | —     |
 | `read_process_output` | Ask    | Ask   | Ask   | Allow |
 | `stop_process`        | Ask    | Ask   | Ask   | Allow |
-| `spawn_agent`\*       | Allow  | Allow | Allow | Allow |
-| `list_agents`\*       | Allow  | Allow | Allow | Allow |
-| `message_agent`\*     | Allow  | Allow | Allow | Allow |
-| `peek_agent`\*        | Allow  | Allow | Allow | Allow |
 | `load_skill`          | Ask    | Ask   | Ask   | Allow |
-| `stop_agent`\*        | Allow  | Allow | Allow | Allow |
 
-\*Only registered when `--multi-agent` is enabled. — = not available in that
-mode.
+— = not available in that mode.
 
 ## Default Bash Patterns
 

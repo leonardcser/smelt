@@ -59,7 +59,6 @@ expression: out.events
         }
       ],
       "meta": {
-        "agent_blocks": {},
         "avg_tps": "[avg_tps]",
         "elapsed_ms": "[elapsed_ms]",
         "interrupted": false,

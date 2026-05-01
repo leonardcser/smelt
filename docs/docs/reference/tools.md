@@ -115,35 +115,6 @@ Loads a skill by name to give the agent specialized instructions and knowledge.
 See [Skills](configuration.md#skills) in the configuration reference for how to
 create and organize skills.
 
-## Multi-Agent
-
-These tools are only available when `--multi-agent` is enabled.
-
-### `spawn_agent`
-
-Spawns a new subagent to work on a task. Give it a well-scoped task with all the
-context it needs. Set `wait` to `true` to block until the agent finishes.
-Subagents persist and build context — reuse them via `message_agent`.
-
-### `list_agents`
-
-Lists agents in the current workspace with their name, status, and task slug.
-Shows both owned subagents and discovered peers.
-
-### `message_agent`
-
-Sends a message to one or more agents by name. Use to steer subagents, provide
-information, or coordinate work.
-
-### `peek_agent`
-
-Inspects another agent's context without interrupting it. Useful for checking
-what a subagent knows or is working on.
-
-### `stop_agent`
-
-Terminates a subagent and all its children.
-
 ## Mode-Specific
 
 ### `exit_plan_mode`

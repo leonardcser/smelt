@@ -3,7 +3,6 @@
 //! cross-cutting top-level bindings (notify, clipboard, confirm)
 //! and shared helpers (color / theme / json conversion).
 
-mod agent;
 mod au;
 mod bash;
 mod buf;
@@ -89,7 +88,6 @@ impl LuaRuntime {
         process::register(lua, &smelt)?;
         shell::register(lua, &smelt)?;
         skills::register(lua, &smelt)?;
-        agent::register(lua, &smelt)?;
         permissions::register(lua, &smelt)?;
         parse::register(lua, &smelt)?;
         path::register(lua, &smelt)?;
@@ -303,7 +301,6 @@ fn role_to_group(role: &str) -> Option<&'static str> {
         "tool_pending" => "SmeltToolPending",
         "reason_off" => "SmeltReasonOff",
         "muted" => "Comment",
-        "agent" => "SmeltAgent",
         _ => return None,
     })
 }
@@ -359,7 +356,6 @@ pub(super) fn theme_snapshot_pairs(
         "tool_pending",
         "reason_off",
         "muted",
-        "agent",
     ]
     .into_iter()
     .map(|role| {
@@ -503,7 +499,6 @@ mod tests {
             "tool_pending",
             "reason_off",
             "muted",
-            "agent",
         ] {
             assert!(
                 theme_role_get(&t, role).is_some(),
@@ -560,7 +555,6 @@ mod tests {
             "slug",
             "tool_pending",
             "user_bg",
-            "agent",
         ] {
             assert!(
                 names.contains(&expected),

@@ -1,7 +1,7 @@
 //! Transcript domain model.
 //!
 //! The content-addressed block store, layout cache, and all mutable
-//! sidecar state (tool output, exec output, in-flight agents etc.)
+//! sidecar state (tool output, exec output, etc.)
 //! owned by `TuiApp`. Held inside `app::transcript::Transcript`, which
 //! adds projection / streaming / paint orchestration on top.
 
@@ -10,18 +10,6 @@ use crate::app::transcript_present::{gap_between, layout_block, Element};
 use crate::content::{DisplayBlock, LayoutContext};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
-
-/// In-flight blocking agent — a thin handle to a streaming `Block::Agent`.
-/// The full state (slug, tool_calls, status, elapsed) lives in the block
-/// itself and is refreshed via `rewrite` as engine events arrive.
-pub(crate) struct ActiveAgent {
-    pub(crate) agent_id: String,
-    pub(crate) block_id: BlockId,
-    pub(crate) start_time: Instant,
-    /// Frozen elapsed time once the agent finishes; while `None`, live
-    /// elapsed ticks are rewritten into the block on each spinner frame.
-    pub(crate) final_elapsed: Option<Duration>,
-}
 
 /// In-flight tool call — a thin handle to a streaming `Block::ToolCall`.
 /// The full state (status, output, user_message, elapsed) lives in
@@ -38,7 +26,7 @@ impl ActiveTool {
     pub(crate) fn elapsed(&self) -> Option<Duration> {
         if matches!(
             self.name.as_str(),
-            "bash" | "web_fetch" | "read_process_output" | "stop_process" | "peek_agent"
+            "bash" | "web_fetch" | "read_process_output" | "stop_process"
         ) {
             Some(self.start_time.elapsed())
         } else {
@@ -132,29 +120,12 @@ pub(crate) enum Block {
         summary: String,
         args: HashMap<String, serde_json::Value>,
     },
-    Hint {
-        content: String,
-    },
     Exec {
         command: String,
         output: String,
     },
     Compacted {
         summary: String,
-    },
-    AgentMessage {
-        from_id: String,
-        from_slug: String,
-        content: String,
-    },
-    /// Inline agent block — shows a spawned subagent's progress.
-    Agent {
-        agent_id: String,
-        slug: Option<String>,
-        blocking: bool,
-        tool_calls: Vec<super::AgentToolEntry>,
-        status: AgentBlockStatus,
-        elapsed: Option<Duration>,
     },
 }
 
@@ -185,29 +156,19 @@ impl Block {
     /// `|` tables, `---` rules, etc. — instead of walking display cells
     /// (which strips inline markup).
     ///
-    /// Returns `None` for structured blocks (tool calls, agent headers,
+    /// Returns `None` for structured blocks (tool calls,
     /// confirm dialogs) that don't have a single "markdown source"; the
     /// caller falls back to cell-walking for those.
     pub(crate) fn raw_text(&self) -> Option<String> {
         match self {
             Block::User { text, .. } => Some(text.clone()),
-            Block::Text { content }
-            | Block::Thinking { content }
-            | Block::Hint { content }
-            | Block::AgentMessage { content, .. } => Some(content.clone()),
+            Block::Text { content } | Block::Thinking { content } => Some(content.clone()),
             Block::Compacted { summary } => Some(summary.clone()),
             Block::CodeLine { content, .. } => Some(content.clone()),
             Block::Exec { command, output } => Some(format!("$ {command}\n{output}")),
-            Block::ToolCall { .. } | Block::Agent { .. } => None,
+            Block::ToolCall { .. } => None,
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub(crate) enum AgentBlockStatus {
-    Running,
-    Done,
-    Error,
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize)]
@@ -902,23 +863,13 @@ mod tests {
 
     #[test]
     fn raw_text_is_none_for_structured_blocks() {
-        // Tool / confirm / agent blocks don't have a single markdown
-        // source — yank falls back to cell-walking for them.
+        // Tool blocks don't have a single markdown source — yank falls back
+        // to cell-walking for them.
         assert!(Block::ToolCall {
             call_id: "c1".into(),
             name: "bash".into(),
             summary: "ls".into(),
             args: HashMap::new(),
-        }
-        .raw_text()
-        .is_none());
-        assert!(Block::Agent {
-            agent_id: "a1".into(),
-            slug: None,
-            blocking: false,
-            tool_calls: Vec::new(),
-            status: AgentBlockStatus::Running,
-            elapsed: None,
         }
         .raw_text()
         .is_none());

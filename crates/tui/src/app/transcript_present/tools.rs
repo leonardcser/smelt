@@ -24,7 +24,7 @@ pub(super) fn render_tool(
     };
     let time = if matches!(
         name,
-        "bash" | "web_fetch" | "read_process_output" | "stop_process" | "peek_agent"
+        "bash" | "web_fetch" | "read_process_output" | "stop_process"
     ) && status != ToolStatus::Confirm
     {
         elapsed
@@ -161,56 +161,10 @@ fn print_tool_line(
     }
 
     let truncated = truncate_str(summary, ly.max_summary);
-    if matches!(name, "message_agent" | "stop_agent" | "peek_agent") {
-        print_agent_summary(out, &truncated);
-    } else {
-        out.print(&truncated);
-    }
+    out.print(&truncated);
     print_dim_non_selectable(out, &time_str, &timeout_str);
     out.newline();
     1
-}
-
-/// Print an agent tool summary: color leading agent name tokens, print the
-/// rest as plain text. Agent names are single words (no spaces) optionally
-/// separated by ", ". The first token that contains a space or follows a
-/// non-comma separator marks the start of the plain-text portion.
-fn print_agent_summary(out: &mut SpanCollector, summary: &str) {
-    // Find where agent names end: consume "word(, word)*" prefix.
-    let mut end = 0;
-    let mut rest = summary;
-    loop {
-        let trimmed = rest.trim_start();
-        let skipped = rest.len() - trimmed.len();
-        let word_end = trimmed.find([' ', ',']).unwrap_or(trimmed.len());
-        if word_end == 0 {
-            break;
-        }
-        end += skipped + word_end;
-        rest = &trimmed[word_end..];
-        // If followed by ", " consume the separator and continue.
-        if rest.starts_with(", ") {
-            end += 2;
-            rest = &rest[2..];
-        } else {
-            break;
-        }
-    }
-    if end > 0 {
-        let names = &summary[..end];
-        for (i, name) in names.split(", ").enumerate() {
-            if i > 0 {
-                out.print(", ");
-            }
-            out.push_fg(ColorValue::Role(ColorRole::Agent));
-            out.print(name.trim());
-            out.pop_style();
-        }
-    }
-    let tail = &summary[end..];
-    if !tail.is_empty() {
-        out.print(tail);
-    }
 }
 
 pub(super) fn print_tool_output(
@@ -259,16 +213,7 @@ pub(super) fn print_tool_output(
         "bash" | "read_process_output" | "stop_process" => {
             render_wrapped_output(out, content, is_error, width)
         }
-        "peek_agent" if !is_error => render_wrapped_output(out, content, false, width),
-        "list_agents" | "message_agent" | "stop_agent" | "spawn_agent" if !is_error => {
-            let mut rows = 0u16;
-            for line in content.lines() {
-                print_dim(out, &format!("  {line}"));
-                out.newline();
-                rows += 1;
-            }
-            rows.max(1)
-        }
+
         _ => render_default_output(out, content, is_error, width),
     }
 }

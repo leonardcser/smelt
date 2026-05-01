@@ -436,7 +436,7 @@ fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
     write_meta(session_dir, meta);
 }
 
-/// Build the search blob for a session: user, assistant, and inter-agent
+/// Build the search blob for a session: user and assistant
 /// message text, separated by newlines. Reasoning, tool output, and system
 /// messages are excluded.
 fn build_search_blob(messages: &[Message]) -> String {
@@ -444,7 +444,7 @@ fn build_search_blob(messages: &[Message]) -> String {
     let mut out = String::new();
     for msg in messages {
         match msg.role {
-            Role::User | Role::Assistant | Role::Agent => {
+            Role::User | Role::Assistant => {
                 if let Some(ref c) = msg.content {
                     let text = c.text_content();
                     if !text.is_empty() {

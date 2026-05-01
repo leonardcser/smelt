@@ -218,19 +218,6 @@ pub enum EngineEvent {
     /// Engine is shutting down.
     Shutdown { reason: Option<String> },
 
-    /// A subagent exited (expected or unexpected).
-    AgentExited {
-        agent_id: String,
-        exit_code: Option<i32>,
-    },
-
-    /// An inter-agent message arrived via the socket.
-    AgentMessage {
-        from_id: String,
-        from_slug: String,
-        message: String,
-    },
-
     /// Engine needs the TUI to execute a plugin-defined tool.
     ToolDispatch {
         request_id: u64,
@@ -401,11 +388,4 @@ pub enum UiCommand {
 
     /// Cancel the current turn.
     Cancel,
-
-    /// Inject an inter-agent message as a steer message.
-    AgentMessage {
-        from_id: String,
-        from_slug: String,
-        message: String,
-    },
 }

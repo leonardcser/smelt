@@ -988,10 +988,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/dialogs/resume.lua"),
     ),
     (
-        "smelt.dialogs.agents",
-        include_str!("../../../../runtime/lua/smelt/dialogs/agents.lua"),
-    ),
-    (
         "smelt.plugins.theme",
         include_str!("../../../../runtime/lua/smelt/plugins/theme.lua"),
     ),
@@ -1060,22 +1056,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/tools/load_skill.lua"),
     ),
     (
-        "smelt.tools.list_agents",
-        include_str!("../../../../runtime/lua/smelt/tools/list_agents.lua"),
-    ),
-    (
-        "smelt.tools.stop_agent",
-        include_str!("../../../../runtime/lua/smelt/tools/stop_agent.lua"),
-    ),
-    (
-        "smelt.tools.peek_agent",
-        include_str!("../../../../runtime/lua/smelt/tools/peek_agent.lua"),
-    ),
-    (
-        "smelt.tools.message_agent",
-        include_str!("../../../../runtime/lua/smelt/tools/message_agent.lua"),
-    ),
-    (
         "smelt.tools.web_search",
         include_str!("../../../../runtime/lua/smelt/tools/web_search.lua"),
     ),
@@ -1107,10 +1087,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.bash",
         include_str!("../../../../runtime/lua/smelt/tools/bash.lua"),
     ),
-    (
-        "smelt.tools.spawn_agent",
-        include_str!("../../../../runtime/lua/smelt/tools/spawn_agent.lua"),
-    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1125,7 +1101,6 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.help",
     "smelt.dialogs.permissions",
     "smelt.dialogs.resume",
-    "smelt.dialogs.agents",
     "smelt.plugins.theme",
     "smelt.plugins.color",
     "smelt.plugins.model",
@@ -1142,10 +1117,6 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.glob",
     "smelt.tools.grep",
     "smelt.tools.load_skill",
-    "smelt.tools.list_agents",
-    "smelt.tools.stop_agent",
-    "smelt.tools.peek_agent",
-    "smelt.tools.message_agent",
     "smelt.tools.web_search",
     "smelt.tools.write_file",
     "smelt.tools.edit_file",
@@ -1153,7 +1124,6 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.notebook_edit",
     "smelt.tools.web_fetch",
     "smelt.tools.bash",
-    "smelt.tools.spawn_agent",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

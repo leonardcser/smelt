@@ -394,15 +394,6 @@ pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, ser
 }
 
 /// Rewrite an Agent-role message as a user message for API serialization.
-pub(crate) fn fixup_agent_message(m: &Message, v: &mut serde_json::Value) {
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert("role".into(), serde_json::json!("user"));
-        obj.remove("agent_from_id");
-        obj.remove("agent_from_slug");
-        obj.insert("content".into(), serde_json::json!(m.agent_api_text()));
-    }
-}
-
 impl Provider {
     pub fn new(api_base: String, api_key: String, provider_type: &str, client: Client) -> Self {
         let api_base = api_base.trim_end_matches('/').to_string();

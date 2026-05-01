@@ -1297,8 +1297,8 @@ impl Ui {
 
     /// Fire `WinEvent::Tick` on every window that has a registered
     /// Tick callback. Used by the app event loop to drive per-frame
-    /// refresh of dialogs with live external state (subagent list,
-    /// process registry, …).
+    /// refresh of dialogs with live external state (process registry,
+    /// …).
     pub fn dispatch_tick(&mut self, lua_invoke: &mut LuaInvoke) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Tick);
         for win in wins {

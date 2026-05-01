@@ -9,7 +9,6 @@ use super::{
 use crate::lua::LuaRuntime;
 use crate::process::ProcessRegistry;
 use crate::session::Session;
-use engine::tools::FileStateCache;
 use engine::{EngineHandle, SkillLoader};
 use std::sync::Arc;
 
@@ -22,18 +21,14 @@ pub enum FrontendKind {
     Tui,
     /// One-shot CLI — `smelt -p "..."` / `--headless`. No Ui, no human input.
     Headless,
-    /// Persistent worker spawned by a parent smelt — `--agent <id>`. JSON
-    /// over a Unix socket. No Ui, no human input.
-    Subagent,
 }
 
 impl FrontendKind {
-    /// Stable lowercase name surfaced to Lua: `"tui" | "headless" | "subagent"`.
+    /// Stable lowercase name surfaced to Lua: `"tui" | "headless"`.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             FrontendKind::Tui => "tui",
             FrontendKind::Headless => "headless",
-            FrontendKind::Subagent => "subagent",
         }
     }
 
@@ -48,7 +43,7 @@ pub struct Core {
     /// Connection + behaviour configuration: model / api_base /
     /// api_key_env / provider_type / available_models / model_config /
     /// cli_*overrides / mode / mode_cycle / reasoning_effort /
-    /// reasoning_cycle / settings / multi_agent / context_window.
+    /// reasoning_cycle / settings / context_window.
     /// Populated by `TuiApp::new` from CLI args + saved state, then
     /// mutated by user actions (Shift+Tab cycles `mode`, `/model`
     /// rewrites `model`, etc.).
@@ -82,7 +77,7 @@ pub struct Core {
     /// the agent loop drains. P2.d will fold the engine-event drain
     /// into this type.
     pub(crate) engine: EngineBridge,
-    /// Which frontend (TUI / headless one-shot / subagent worker) is
+    /// Which frontend (TUI / headless one-shot) is
     /// running this core. Set at construction by the wrapping
     /// `TuiApp::new` / `HeadlessApp::new` call site; surfaced to Lua
     /// via `smelt.frontend.kind()` / `is_interactive()`.
@@ -94,11 +89,8 @@ pub struct Core {
     /// when no skills directory exists.
     pub skills: Option<Arc<SkillLoader>>,
     /// Shared file-observation cache (mtime + content + read range).
-    /// `engine::start` was handed the same `Clone` of this cache so
-    /// the engine-side `read_file` / `write_file` / `edit_file` /
-    /// `edit_notebook` tools and Lua-side migrations both see one
-    /// view. Exposed to Lua via `smelt.fs.file_state.*`.
-    pub files: FileStateCache,
+    /// Exposed to Lua via `smelt.fs.file_state.*`.
+    pub files: engine::tools::FileStateCache,
     /// Background-process registry. Owned by the frontend; engine
     /// has no consumer of this since the bash tool's
     /// `run_in_background` flag migrated to Lua. Surfaced to Lua via
@@ -110,14 +102,9 @@ pub struct Core {
 impl Core {
     /// Build the headless-safe core from a populated `AppConfig` and a
     /// fresh `EngineHandle`. Both `TuiApp::new` (TUI) and `HeadlessApp::new`
-    /// (one-shot / subagent) call this — the only single source of
+    /// (one-shot) call this — the only single source of
     /// truth for the eight subsystem fields' construction.
-    pub fn new(
-        config: AppConfig,
-        engine: EngineHandle,
-        frontend: FrontendKind,
-        files: FileStateCache,
-    ) -> Self {
+    pub fn new(config: AppConfig, engine: EngineHandle, frontend: FrontendKind) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -142,7 +129,7 @@ impl Core {
             engine: EngineBridge::new(engine),
             frontend,
             skills: None,
-            files,
+            files: engine::tools::FileStateCache::new(),
             processes: ProcessRegistry::new(),
         }
     }

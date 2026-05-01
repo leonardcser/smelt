@@ -194,7 +194,7 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
   package "Rust capabilities  (generic, Lua-callable — FFI for intricate logic)" as BIND #FFE9B5 {
     class "tui::parse"        as TPARSE     <<markdown / diff / syntax>>
     class "tui::process"      as TPROC      <<short-lived spawn /\ngroup / streaming / kill>>
-    class "tui::subprocess"   as TSUB       <<long-lived child:\nspawn · send · on_event ·\nwait · kill — used by\nsub-agent / mcp / bg cmd>>
+    class "tui::subprocess"   as TSUB       <<long-lived child:\nspawn · send · on_event ·\nwait · kill — future primitive\nfor mcp / bg cmd / etc.>>
     class "tui::fs"           as TFS        <<read / write / edit (mtime-checked) / glob / lock>>
     class "tui::http"         as THTTP      <<fetch / cache / redirects>>
     class "tui::html"         as THTML      <<html → markdown>>
@@ -517,9 +517,9 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
     class CancellationToken
     class CompactOptions
     ' No multi-agent registry, no
-    ' inter-agent socket here — sub-agents
-    ' are child processes spawned by Lua
-    ' tools through tui::subprocess.
+    ' inter-agent socket here.
+    ' Any future multi-agent feature is
+    ' a Lua plugin through tui::subprocess.
   }
 }
 
@@ -536,8 +536,7 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
     enum Role {
       System / User / Assistant
       / Tool
-      ' No `Agent` role — sub-agent
-      ' replies are tool results.
+      ' No `Agent` role.
     }
     class ToolCall
     class ToolOutcome
@@ -556,8 +555,7 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
       CompactionComplete / TitleGenerated
       Shutdown
       ToolDispatch / ToolHooksRequest
-      ' No AgentMessage / AgentExited /
-      ' Spawned — sub-agents are tool calls.
+      ' No AgentMessage / AgentExited / Spawned.
       …
     }
   }
@@ -570,9 +568,9 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
       Compact / GenerateTitle / Btw
       ToolResult / ToolHooksResponse
       Cancel
-      ' No AgentMessage — parent talks to
-      ' sub-agents through subprocess IPC,
-      ' not through engine UiCommands.
+      ' No AgentMessage — any future parent/child
+      ' IPC goes through tui::subprocess, not
+      ' through engine UiCommands.
       …
     }
   }
@@ -591,8 +589,7 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
     class ToolDef
     class ToolHooks
     enum AuxiliaryTask
-    ' No AgentBlockData — sub-agent replies
-    ' are tool outcomes.
+    ' No AgentBlockData.
   }
 }
 
@@ -674,7 +671,7 @@ LTOOLS   -[#aa6,dashed]-> THTML           : html → markdown
 LTOOLS   -[#aa6,dashed]-> TNB             : Jupyter ops
 LTOOLS   -[#aa6,dashed]-> TGREP           : ripgrep
 LTOOLS   -[#aa6,dashed]-> TPERM           : bash AST parse\n(intricate logic\nbehind FFI)
-LTOOLS   -[#aa6,dashed]-> TSUB            : spawn_agent /\nmessage_agent /\nany child process
+LTOOLS   -[#aa6,dashed]-> TSUB            : any child process
 LPLG     -[#aa6,dashed]-> BIND            : any plugin can\ncompose Rust capabilities
 
 ' =====================================================================

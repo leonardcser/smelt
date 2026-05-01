@@ -128,7 +128,7 @@ mod tests {
             &[
                 "use the gh cli search for issue in the llama.cpp repo",
                 "don't cat into a file, just tell me here",
-                "create a full stack application fully with bun and typscript for recepies. work with subagents",
+                "create a full stack application fully with bun and typscript for recepies.",
                 "add them with default allow",
                 "full",
             ],
@@ -138,7 +138,8 @@ mod tests {
         let word_pos = labels
             .iter()
             .position(|label| {
-                label == "create a full stack application fully with bun and typscript for recepies. work with subagents"
+                label
+                    == "create a full stack application fully with bun and typscript for recepies."
             })
             .unwrap();
         let fuzzy_pos = labels

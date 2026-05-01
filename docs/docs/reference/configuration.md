@@ -117,7 +117,7 @@ All toggleable at runtime via `/settings`.
 | Key                     | Default | Description                                                                              |
 | ----------------------- | ------- | ---------------------------------------------------------------------------------------- |
 | `vim_mode`              | `false` | Vi keybindings                                                                           |
-| `auto_compact`          | `false` | Auto-summarize when context usage crosses the threshold (always on in headless/subagent) |
+| `auto_compact`          | `false` | Auto-summarize when context usage crosses the threshold (always on in headless) |
 | `show_tps`              | `true`  | Tokens/sec in status bar                                                                 |
 | `show_tokens`           | `true`  | Context token count in status bar                                                        |
 | `show_cost`             | `true`  | Session cost in status bar                                                               |
@@ -126,7 +126,6 @@ All toggleable at runtime via `/settings`.
 | `show_thinking`         | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                       |
 | `restrict_to_workspace` | `true`  | Downgrade Allow → Ask outside workspace                                                  |
 | `redact_secrets`        | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM        |
-| `multi_agent`           | `false` | Enable multi-agent mode                                                                  |
 | `context_window`        | auto    | Override context window size (tokens); auto-detected from API                            |
 
 ## Theme
@@ -333,7 +332,6 @@ settings:
   show_thinking: true
   restrict_to_workspace: true
   redact_secrets: true
-  multi_agent: false
 
 theme:
   accent: lavender

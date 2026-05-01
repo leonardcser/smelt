@@ -28,7 +28,6 @@ fn resolve(c: ColorValue, theme: &Theme) -> Color {
                 ColorRole::ToolPending => "SmeltToolPending",
                 ColorRole::ReasonOff => "SmeltReasonOff",
                 ColorRole::Muted => "Comment",
-                ColorRole::Agent => "SmeltAgent",
                 ColorRole::Success => "SmeltSuccess",
                 ColorRole::ErrorMsg => "ErrorMsg",
                 ColorRole::Apply => "SmeltModeApply",

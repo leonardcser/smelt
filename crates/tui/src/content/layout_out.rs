@@ -271,11 +271,4 @@ impl SpanCollector {
         s.crossedout = true;
         self.push_style(s);
     }
-
-    pub(crate) fn push_dim_italic(&mut self) {
-        let mut s = self.snapshot_style();
-        s.dim = true;
-        s.italic = true;
-        self.push_style(s);
-    }
 }

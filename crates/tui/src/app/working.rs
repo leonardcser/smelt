@@ -190,7 +190,6 @@ impl WorkingState {
                 avg_tps: avg(&live.tps_samples),
                 interrupted: false,
                 tool_elapsed: std::collections::HashMap::new(),
-                agent_blocks: std::collections::HashMap::new(),
             });
         }
         self.last.as_ref().map(|last| TurnMeta {
@@ -198,7 +197,6 @@ impl WorkingState {
             avg_tps: last.avg_tps,
             interrupted: matches!(last.outcome, TurnOutcome::Interrupted),
             tool_elapsed: std::collections::HashMap::new(),
-            agent_blocks: std::collections::HashMap::new(),
         })
     }
 

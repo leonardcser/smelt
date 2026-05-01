@@ -2,24 +2,18 @@ use super::working::{TurnOutcome, TurnPhase};
 use super::*;
 
 impl TuiApp {
-    /// Send a permission decision — either to a child agent (via socket reply)
-    /// or to the local engine. This is the single routing point for all
-    /// permission verdicts.
+    /// Send a permission decision to the local engine.
     pub(crate) fn send_permission_decision(
         &mut self,
         request_id: u64,
         approved: bool,
         message: Option<String>,
     ) {
-        if let Some(reply_tx) = self.child_permission_replies.remove(&request_id) {
-            let _ = reply_tx.send(engine::socket::PermissionReply { approved, message });
-        } else {
-            self.core.engine.send(UiCommand::PermissionDecision {
-                request_id,
-                approved,
-                message,
-            });
-        }
+        self.core.engine.send(UiCommand::PermissionDecision {
+            request_id,
+            approved,
+            message,
+        });
     }
 
     // ── Agent lifecycle ──────────────────────────────────────────────────
@@ -45,16 +39,6 @@ impl TuiApp {
         self.dispatch_turn(content)
     }
 
-    /// Start a turn triggered by agent messages already in history.
-    /// No user message block is shown — the agent messages are already
-    /// rendered as AgentMessage blocks.
-    pub(super) fn begin_agent_message_turn(&mut self) -> TurnState {
-        self.clear_prompt_completer();
-        self.begin_turn();
-        self.sync_session_snapshot();
-        self.dispatch_turn(Content::text(""))
-    }
-
     /// Mark the engine busy, allocate a turn id, and send `StartTurn` with the
     /// current app state. Callers own any history/session prep before this.
     fn dispatch_turn(&mut self, content: Content) -> TurnState {
@@ -72,7 +56,6 @@ impl TuiApp {
         {
             self.working.begin(TurnPhase::Working);
         };
-        engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Working);
 
         self.core
             .cells
@@ -308,7 +291,6 @@ impl TuiApp {
         self.sleep_inhibit.release();
         if cancelled {
             self.core.engine.send(UiCommand::Cancel);
-            self.kill_blocking_agents();
         }
         self.core.cells.set_dyn(
             "turn_end",
@@ -356,10 +338,7 @@ impl TuiApp {
             .pending_turn_meta
             .take()
             .or_else(|| self.working.turn_meta());
-        if let Some(mut meta) = meta {
-            for (agent_id, data) in self.pending_agent_blocks.drain(..) {
-                meta.agent_blocks.insert(agent_id, data);
-            }
+        if let Some(meta) = meta {
             self.core
                 .session
                 .turn_metas
@@ -368,7 +347,6 @@ impl TuiApp {
         self.snapshot_tokens();
         self.save_session();
         self.maybe_auto_compact();
-        engine::registry::update_status(std::process::id(), engine::registry::AgentStatus::Idle);
     }
 
     /// Execute a plugin-defined tool by calling the Lua handler registered for
@@ -422,9 +400,6 @@ impl TuiApp {
         self.set_task_label(slug.clone());
         self.pending_title = false;
         self.save_session();
-
-        // Update registry with new task slug.
-        engine::registry::update_slug(std::process::id(), &slug);
     }
 
     pub(super) fn handle_input_prediction(&mut self, text: String) {
@@ -477,213 +452,6 @@ impl TuiApp {
                 None
             }
         }
-    }
-
-    pub(super) fn handle_agent_exited(&mut self, agent_id: &str, exit_code: Option<i32>) {
-        if let Some(c) = exit_code {
-            if c != 0 {
-                self.push_block(Block::Hint {
-                    content: format!("{agent_id} exited with code {c}."),
-                });
-            }
-        }
-        self.agents.retain(|a| a.agent_id != agent_id);
-        self.sync_agent_snapshots();
-    }
-
-    /// Kill all blocking (wait=true) agents and commit their blocks.
-    fn kill_blocking_agents(&mut self) {
-        let blocking_pids: Vec<u32> = self
-            .agents
-            .iter()
-            .filter(|a| a.blocking && a.status == super::AgentTrackStatus::Working)
-            .map(|a| a.pid)
-            .collect();
-        for pid in blocking_pids {
-            engine::registry::kill_agent(pid);
-        }
-        for agent in &mut self.agents {
-            if agent.blocking && agent.status == super::AgentTrackStatus::Working {
-                agent.status = super::AgentTrackStatus::Error;
-            }
-        }
-        self.cancel_active_agents();
-    }
-
-    // ── Agent tracking ────────────────────────────────────────────────
-
-    /// Drain newly spawned child handles and create TrackedAgent entries.
-    pub(super) fn drain_spawned_children(&mut self) {
-        let children = self.core.engine.drain_spawned();
-        for child in children {
-            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-
-            // Spawn a reader task that deserializes JSON events from stdout.
-            let stdout = child.stdout;
-            tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let async_stdout =
-                    tokio::process::ChildStdout::from_std(stdout).expect("async stdout");
-                let reader = BufReader::new(async_stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Ok(ev) = serde_json::from_str::<protocol::EngineEvent>(&line) {
-                        if event_tx.send(ev).is_err() {
-                            break;
-                        }
-                    }
-                }
-            });
-
-            if child.blocking {
-                // Blocking agents render as a live overlay (like active tools).
-                self.start_active_agent(child.agent_id.clone());
-            } else {
-                // Non-blocking agents get a one-line static block.
-                self.push_block(Block::Agent {
-                    agent_id: child.agent_id.clone(),
-                    slug: None,
-                    blocking: false,
-                    tool_calls: Vec::new(),
-                    status: AgentBlockStatus::Running,
-                    elapsed: None,
-                });
-            }
-
-            self.agents.push(super::TrackedAgent {
-                agent_id: child.agent_id,
-                pid: child.pid,
-                prompt: std::sync::Arc::new(child.prompt),
-                slug: None,
-                event_rx,
-                tool_calls: Vec::new(),
-                status: super::AgentTrackStatus::Working,
-                blocking: child.blocking,
-                context_tokens: None,
-                cost_usd: 0.0,
-            });
-        }
-    }
-
-    /// Drain stdout events for all tracked agents.
-    pub(super) fn drain_agent_events(&mut self) {
-        let mut changed = false;
-        let mut session_cost_delta = 0.0;
-
-        for agent in &mut self.agents {
-            while let Ok(ev) = agent.event_rx.try_recv() {
-                changed = true;
-                match ev {
-                    EngineEvent::ToolStarted {
-                        call_id,
-                        tool_name,
-                        summary,
-                        ..
-                    } => {
-                        agent.status = super::AgentTrackStatus::Working;
-                        agent.tool_calls.push(super::AgentToolEntry {
-                            call_id,
-                            tool_name,
-                            summary,
-                            status: ToolStatus::Pending,
-                            elapsed: None,
-                        });
-                    }
-                    EngineEvent::ToolFinished {
-                        call_id,
-                        result,
-                        elapsed_ms,
-                    } => {
-                        if let Some(entry) =
-                            agent.tool_calls.iter_mut().find(|t| t.call_id == call_id)
-                        {
-                            entry.status = if result.is_error {
-                                ToolStatus::Err
-                            } else {
-                                ToolStatus::Ok
-                            };
-                            entry.elapsed = elapsed_ms.map(Duration::from_millis);
-                        }
-                    }
-                    EngineEvent::TitleGenerated { slug, .. } => {
-                        agent.slug = Some(slug);
-                    }
-                    EngineEvent::TurnComplete { .. } => {
-                        agent.status = super::AgentTrackStatus::Idle;
-                    }
-                    EngineEvent::TokenUsage {
-                        cost_usd,
-                        usage,
-                        background,
-                        ..
-                    } => {
-                        let cost = cost_usd.unwrap_or(0.0);
-                        agent.cost_usd += cost;
-                        session_cost_delta += cost;
-                        if !background {
-                            if let Some(tokens) = usage.prompt_tokens {
-                                if tokens > 0 {
-                                    agent.context_tokens = Some(tokens);
-                                }
-                            }
-                        }
-                    }
-                    EngineEvent::TurnError { .. } => {
-                        agent.status = super::AgentTrackStatus::Error;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if session_cost_delta > 0.0 {
-            self.core.session.session_cost_usd += session_cost_delta;
-        }
-
-        if !changed {
-            return;
-        }
-
-        // Update active blocking agent overlays on screen.
-        let agent_updates: Vec<_> = self
-            .agents
-            .iter()
-            .filter(|a| a.blocking)
-            .map(|a| {
-                let status = match a.status {
-                    super::AgentTrackStatus::Working => AgentBlockStatus::Running,
-                    super::AgentTrackStatus::Idle => AgentBlockStatus::Done,
-                    super::AgentTrackStatus::Error => AgentBlockStatus::Error,
-                };
-                (
-                    a.agent_id.clone(),
-                    a.slug.clone(),
-                    a.tool_calls.clone(),
-                    status,
-                )
-            })
-            .collect();
-        for (agent_id, slug, tool_calls, status) in agent_updates {
-            self.update_active_agent(&agent_id, slug.as_deref(), &tool_calls, status);
-        }
-
-        self.sync_agent_snapshots();
-    }
-
-    /// Update the shared snapshots so the /agents dialog sees live data.
-    pub(super) fn sync_agent_snapshots(&self) {
-        let snaps: Vec<crate::app::AgentSnapshot> = self
-            .agents
-            .iter()
-            .map(|a| crate::app::AgentSnapshot {
-                agent_id: a.agent_id.clone(),
-                prompt: a.prompt.clone(),
-                tool_calls: a.tool_calls.clone(),
-                context_tokens: a.context_tokens,
-                cost_usd: a.cost_usd,
-            })
-            .collect();
-        *self.agent_snapshots.lock().unwrap() = snaps;
     }
 
     pub(super) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
@@ -895,10 +663,7 @@ impl TuiApp {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
                 }
 
-                // Check runtime auto-approvals. For local engine requests this
-                // is normally handled by the engine itself, but child agent
-                // permission requests arrive via socket and bypass the engine's
-                // decision flow, so we check here too.
+                // Check runtime auto-approvals.
                 let auto_approved = {
                     let rt = self.runtime_approvals.read().unwrap();
                     rt.is_auto_approved(

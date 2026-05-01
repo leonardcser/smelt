@@ -200,18 +200,6 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: AgentMode) -> ModePerms {
             .or_insert(Decision::Allow);
     }
 
-    // Multi-agent tools: always allowed in all modes (they're coordination
-    // primitives, not filesystem operations).
-    for name in [
-        "spawn_agent",
-        "stop_agent",
-        "list_agents",
-        "message_agent",
-        "peek_agent",
-    ] {
-        tools.entry(name.to_string()).or_insert(Decision::Allow);
-    }
-
     let mut bash_allow = compile_patterns(&raw.bash.allow);
     if bash_allow.is_empty() {
         if mode == AgentMode::Yolo {

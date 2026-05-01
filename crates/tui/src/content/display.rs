@@ -119,7 +119,6 @@ pub(crate) enum ColorRole {
     ToolPending,
     ReasonOff,
     Muted,
-    Agent,
     Success,
     ErrorMsg,
     Apply,

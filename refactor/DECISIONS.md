@@ -52,30 +52,27 @@ Then ten architectural decisions landed across REFACTOR / ARCHITECTURE
    → `tui::process / tui::fs / tui::http / tui::tools::dedup`.
    `engine/tools/` shrinks to `ToolSchema + ToolDispatcher +
    ToolResult`. The Unclear row is closed.
-7. **One binary, two entry points.** `smelt`, `smelt -p`, and
-   `smelt --agent <id>` all dispatch in `main` to either `TuiApp` or
-   `HeadlessApp`. No second binary. No `EngineConfig.interactive`
-   flag — Lua tools call `smelt.frontend.is_interactive()`. Protocol
-   rename pass shifted from P5.d to P5.e.
+7. **One binary, two entry points.** `smelt` and `smelt -p`
+   dispatch in `main` to either `TuiApp` or `HeadlessApp`. No second
+   binary. No `EngineConfig.interactive` flag — Lua tools call
+   `smelt.frontend.is_interactive()`. Protocol rename pass shifted
+   from P5.d to P5.e.
 8. **`EngineHandle` is channels-only.** Drop `processes`,
    `permissions`, `runtime_approvals` public fields.
    `EngineHandle = cmd_tx + event_rx`, nothing more.
 9. **Multi-agent → plugin pattern (Option B).** Engine drops the
-   multi-agent concept entirely. Sub-agents are child processes
-   spawned by optional Lua plugins/tools (`spawn_agent.lua` etc.) through a new
+   multi-agent concept entirely. Any future multi-agent feature would
+   be implemented as optional Lua plugins through a future
    `tui::subprocess` capability (spawn / send / on_event / wait /
-   kill). Sub-agent replies are tool results; transcript renders them
-   as ordinary tool calls (no special widget). Removed:
-   `protocol::Role::Agent`, `protocol::AgentBlockData`,
+   kill). Removed: `protocol::Role::Agent`, `protocol::AgentBlockData`,
    `EngineEvent::{AgentMessage, AgentExited, Spawned}`,
    `UiCommand::AgentMessage`, `EngineConfig.multi_agent`,
    `engine::tools::AgentMessageNotification`, `engine/registry.rs`,
-   `engine/socket.rs` (relocated to `tui::subprocess::{registry,
-   socket}`), `Session.agents/snapshots`,
+   `engine/socket.rs`, `Session.agents/snapshots`,
    `transcript_present/agent.rs`. Multi-agent loop branch in
-   `engine/agent.rs` (~400 LOC) deletes; `agent.rs` becomes
-   single-agent only. `smelt.agent.mode` Lua API renamed to
-   `smelt.mode` to avoid collision with `smelt.subprocess`.
+   `engine/agent.rs` (~400 LOC) deleted; `agent.rs` is single-agent
+   only. `smelt.agent.mode` Lua API renamed to `smelt.mode` to avoid
+   collision with future `smelt.subprocess`.
 10. **Drift-prevention check script (manual, not pre-commit).**
     `refactor/check.sh` runs invariants over the synced docs (P\<n\>
     headers exist, INVENTORY paths exist, puml validates, etc.).

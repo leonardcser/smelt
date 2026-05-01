@@ -1,7 +1,7 @@
 //! Secret redaction for chat content.
 //!
 //! The policy is **redact-at-ingress**: data entering the conversation from
-//! outside the model (user input, tool results, inter-agent messages) is
+//! outside the model (user input, tool results) is
 //! scrubbed once at the boundary, before it lands in history. Model-generated
 //! content (assistant text, reasoning, tool-call arguments) is never touched.
 //! This is the only layer preventing secrets from leaving the machine toward

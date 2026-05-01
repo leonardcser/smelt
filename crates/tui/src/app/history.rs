@@ -15,12 +15,6 @@ impl TuiApp {
         }
     }
 
-    fn reset_subagents_for_new_session(&mut self) {
-        let my_pid = std::process::id();
-        engine::registry::kill_descendants(my_pid);
-        self.agents.clear();
-    }
-
     pub(super) fn set_history(&mut self, messages: Vec<Message>) {
         self.core.session.messages = messages;
         self.sync_session_snapshot();
@@ -112,7 +106,6 @@ impl TuiApp {
         self.core.engine.send(UiCommand::Cancel);
         let old_id = self.core.session.id.clone();
         self.core.session.messages.clear();
-        self.pending_agent_blocks.clear();
         self.reset_session_permissions();
         self.queued_messages.clear();
         self.task_label = None;
@@ -129,7 +122,6 @@ impl TuiApp {
         self.input.clear();
         self.input.store.clear();
         self.core.processes.clear();
-        self.reset_subagents_for_new_session();
         self.core.session = session::Session::new();
         self.pending_title = false;
         self.compact_epoch += 1;
@@ -157,8 +149,6 @@ impl TuiApp {
 
     pub fn load_session(&mut self, loaded: session::Session) {
         let old_id = self.core.session.id.clone();
-        // Resume starts a fresh session view: stop/clear existing subagents tabs.
-        self.reset_subagents_for_new_session();
         self.flush_persist();
 
         // Restore per-session settings through the canonical helpers so
@@ -254,7 +244,6 @@ impl TuiApp {
 
         let mut tool_outputs: HashMap<String, ToolOutput> = HashMap::new();
         let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
-        let mut agent_blocks: HashMap<String, protocol::AgentBlockData> = HashMap::new();
         let render_cache = session::load_render_cache(&self.core.session);
         for msg in &self.core.session.messages {
             if matches!(msg.role, Role::Tool) {
@@ -284,15 +273,7 @@ impl TuiApp {
 
         for (_, meta) in &self.core.session.turn_metas {
             tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
-            agent_blocks.extend(
-                meta.agent_blocks
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone())),
-            );
         }
-        // Track blocking agent IDs so we can suppress their AgentMessage blocks.
-        let mut blocking_agent_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
 
         let messages = self.core.session.messages.clone();
         for msg in &messages {
@@ -349,66 +330,6 @@ impl TuiApp {
                                 out
                             });
 
-                            if tc.function.name == "spawn_agent" {
-                                let meta = output.as_ref().and_then(|o| o.metadata.as_ref());
-                                let result_text =
-                                    output.as_ref().map(|o| o.content.as_str()).unwrap_or("");
-                                let agent_id = meta
-                                    .and_then(|m| m["agent_id"].as_str())
-                                    .or_else(|| {
-                                        result_text
-                                            .strip_prefix("agent ")
-                                            .and_then(|s| s.split_whitespace().next())
-                                    })
-                                    .unwrap_or("?")
-                                    .to_string();
-                                let is_blocking = meta
-                                    .and_then(|m| m["blocking"].as_bool())
-                                    .unwrap_or_else(|| result_text.contains("finished:"));
-                                let is_error = output.as_ref().is_some_and(|o| o.is_error);
-                                let block_status = if is_error {
-                                    AgentBlockStatus::Error
-                                } else {
-                                    AgentBlockStatus::Done
-                                };
-                                let elapsed = tool_elapsed
-                                    .get(&tc.id)
-                                    .map(|ms| Duration::from_millis(*ms));
-                                // Restore slug and tool calls from persisted agent block data.
-                                let block_data = agent_blocks.get(&agent_id);
-                                let slug = block_data.and_then(|d| d.slug.clone());
-                                let tool_calls = block_data
-                                    .map(|d| {
-                                        d.tool_calls
-                                            .iter()
-                                            .map(|t| crate::app::AgentToolEntry {
-                                                call_id: String::new(),
-                                                tool_name: t.tool_name.clone(),
-                                                summary: t.summary.clone(),
-                                                elapsed: t.elapsed_ms.map(Duration::from_millis),
-                                                status: if t.is_error {
-                                                    ToolStatus::Err
-                                                } else {
-                                                    ToolStatus::Ok
-                                                },
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                if is_blocking {
-                                    blocking_agent_ids.insert(agent_id.clone());
-                                }
-                                self.push_block(Block::Agent {
-                                    agent_id,
-                                    slug,
-                                    blocking: is_blocking,
-                                    tool_calls,
-                                    status: block_status,
-                                    elapsed,
-                                });
-                                continue;
-                            }
-
                             let summary = tool_arg_summary(&tc.function.name, &args);
                             let status = if let Some(ref out) = output {
                                 if out.content.contains("denied this tool call")
@@ -445,20 +366,6 @@ impl TuiApp {
                 }
                 Role::Tool => {}
                 Role::System => {}
-                Role::Agent => {
-                    let from_id = msg.agent_from_id.clone().unwrap_or_default();
-                    // Suppress AgentMessage for blocking agents — their result
-                    // is already shown in the spawn_agent block.
-                    if !blocking_agent_ids.contains(&from_id) {
-                        if let Some(ref content) = msg.content {
-                            self.push_block(Block::AgentMessage {
-                                from_id,
-                                from_slug: msg.agent_from_slug.clone().unwrap_or_default(),
-                                content: content.text_content(),
-                            });
-                        }
-                    }
-                }
             }
         }
 
