@@ -32,7 +32,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 
 | File                  | LOC  | Purpose                                       | Fate         | Phase     | Status  | Notes                                                                                               |
 | --------------------- | ---- | --------------------------------------------- | ------------ | --------- | ------- | --------------------------------------------------------------------------------------------------- |
-| `buffer.rs`           | 1334 | Lines, namespaced extmarks, virtual text | restructured | P1.a    | partial | `attach(spec)` parser-hook system + `BufferFormatter` deletion deferred to P1.a-tail (gated on transcript-pipeline migration). |
+| `buffer.rs`           | 1201 | Lines, namespaced extmarks, virtual text | restructured | P1.a    | partial | `attach(spec)` parser-hook system + `BufferFormatter` deletion deferred to P1.a-tail (gated on transcript-pipeline migration). |
 | `callback.rs`         | 321  | Window callbacks + WinEvent routing           | kept         | P2        | pending | Drain pipeline for Lua callbacks; pattern preserved. |
 | `clipboard.rs`        | 81   | Clipboard subsystem (kill ring + sink)        | restructured | P1.d.5b   | partial | App-level subsystem; every text I/O routes through `app.clipboard.{read,write}`. |
 | `compositor.rs`       | 175  | Double-buffered renderer (grid + diff flush)  | restructured | P1.f      | partial | Renderer-only (`render_with` + grid diff). Final fold into `Ui` facade is P1.f. |

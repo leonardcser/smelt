@@ -172,7 +172,7 @@ mod tests {
     }
 
     fn make_buf() -> Buffer {
-        Buffer::new(BufId(99), BufCreateOpts { modifiable: true })
+        Buffer::new(BufId(99), BufCreateOpts::default())
     }
 
     #[test]

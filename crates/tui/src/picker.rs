@@ -112,7 +112,7 @@ pub fn open(
     };
     let reversed = matches!(placement, PickerPlacement::PromptDocked { .. });
 
-    let buf = app.ui.buf_create(BufCreateOpts { modifiable: false });
+    let buf = app.ui.buf_create(BufCreateOpts::default());
     write_buffer(app, buf, &items, reversed);
 
     let leaf = app.ui.win_open_split(
