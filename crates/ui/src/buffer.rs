@@ -10,9 +10,9 @@
 //! extmarks in well-known namespaces (`Buffer::NS_HIGHLIGHTS`,
 //! `NS_DECORATIONS`). Code that wants nvim's full extmark ergonomics
 //! (custom namespace, `clear_namespace`, IDs) calls `create_namespace`
-//! + `set_extmark` directly. Virt-text always goes through the latter
-//! shape (`ExtmarkOpts::virt_text`); production has no virt-text
-//! convenience method.
+//! plus `set_extmark` directly. Virt-text always goes through the
+//! latter shape (`ExtmarkOpts::virt_text`); production has no
+//! virt-text convenience method.
 
 use crate::BufId;
 use crossterm::style::Color;
