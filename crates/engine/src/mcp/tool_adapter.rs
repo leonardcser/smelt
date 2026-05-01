@@ -42,10 +42,6 @@ impl Tool for McpTool {
         ))
     }
 
-    fn is_mcp(&self) -> bool {
-        true
-    }
-
     fn execute<'a>(
         &'a self,
         args: HashMap<String, Value>,

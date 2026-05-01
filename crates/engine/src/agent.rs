@@ -39,7 +39,7 @@ pub(crate) async fn engine_task(
         let mgr = crate::mcp::McpManager::start(&config.mcp_servers).await;
         let tool_defs = mgr.tool_defs().await;
         for def in tool_defs {
-            registry.register(Box::new(crate::mcp::McpTool::new(
+            registry.register_mcp(Box::new(crate::mcp::McpTool::new(
                 def,
                 std::sync::Arc::clone(&mgr),
             )));
@@ -1216,8 +1216,8 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let tool = match self.registry.get(&tc.function.name) {
-                Some(t) => t,
+            let entry = match self.registry.get(&tc.function.name) {
+                Some(e) => e,
                 None => {
                     self.push_tool_result(
                         &tc.id,
@@ -1228,10 +1228,11 @@ impl<'a> Turn<'a> {
                     continue;
                 }
             };
+            let tool = entry.tool.as_ref();
 
             let mut decision =
                 self.permissions
-                    .decide(self.mode, &tc.function.name, &args, tool.is_mcp());
+                    .decide(self.mode, &tc.function.name, &args, entry.is_mcp);
 
             // Runtime approvals (session + workspace) can turn Ask → Allow.
             if decision == Decision::Ask {
@@ -1620,7 +1621,8 @@ impl<'a> Turn<'a> {
                         }
                     }
                     UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
-                        if let Some(tool) = self.registry.get(&tool_name) {
+                        if let Some(entry) = self.registry.get(&tool_name) {
+                            let tool = entry.tool.as_ref();
                             let ctx = ToolContext {
                                 event_tx: self.event_tx.clone(),
                                 call_id: parent_call_id,
