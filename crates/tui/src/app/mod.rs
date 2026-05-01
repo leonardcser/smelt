@@ -139,10 +139,10 @@ pub struct TuiApp {
     /// Runtime approvals shared with the engine. The engine checks these
     /// during `decide()` to auto-approve tools without sending
     /// `RequestPermission`. The TUI writes to them when the user approves.
-    pub runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
+    pub(crate) runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
-    pub shared_session: Arc<Mutex<Option<Session>>>,
+    pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
     /// Short task label (slug) shown on the status bar after the throbber.
     pub(crate) task_label: Option<String>,
     /// A permission dialog is waiting for the user to stop typing.
