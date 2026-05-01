@@ -31,11 +31,7 @@ impl Tool for BashTool {
         })
     }
 
-    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        Some(str_arg(args, "command"))
-    }
-
-    fn approval_patterns(&self, args: &HashMap<String, Value>) -> Vec<String> {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
         let cmd = str_arg(args, "command");
         // split_shell_commands already extracts embedded commands from $(...),
         // backticks, and (...) subshells, so all binaries are surfaced.
@@ -52,7 +48,11 @@ impl Tool for BashTool {
                 }
             }
         }
-        patterns
+        protocol::PluginToolHooks {
+            needs_confirm: Some(cmd),
+            approval_patterns: patterns,
+            preflight_error: None,
+        }
     }
 
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
@@ -214,7 +214,7 @@ mod tests {
         let tool = BashTool;
         let mut args = HashMap::new();
         args.insert("command".into(), Value::String(cmd.into()));
-        tool.approval_patterns(&args)
+        tool.evaluate_hooks(&args).approval_patterns
     }
 
     #[test]

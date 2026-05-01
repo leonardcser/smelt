@@ -29,9 +29,11 @@ impl Tool for WebSearchTool {
         })
     }
 
-    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        let query = str_arg(args, "query");
-        Some(query.to_string())
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
+        protocol::PluginToolHooks {
+            needs_confirm: Some(str_arg(args, "query")),
+            ..Default::default()
+        }
     }
 
     fn execute<'a>(

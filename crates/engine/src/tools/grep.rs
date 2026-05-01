@@ -87,8 +87,14 @@ impl Tool for GrepTool {
         })
     }
 
-    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        super::confirm_with_optional_path(str_arg(args, "pattern"), &str_arg(args, "path"))
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
+        protocol::PluginToolHooks {
+            needs_confirm: super::confirm_with_optional_path(
+                str_arg(args, "pattern"),
+                &str_arg(args, "path"),
+            ),
+            ..Default::default()
+        }
     }
 
     fn execute<'a>(

@@ -35,11 +35,14 @@ impl Tool for McpTool {
         self.def.input_schema.clone()
     }
 
-    fn needs_confirm(&self, _args: &HashMap<String, Value>) -> Option<String> {
-        Some(format!(
-            "MCP {}_{}",
-            self.def.server_name, self.def.tool_name
-        ))
+    fn evaluate_hooks(&self, _args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
+        protocol::PluginToolHooks {
+            needs_confirm: Some(format!(
+                "MCP {}_{}",
+                self.def.server_name, self.def.tool_name
+            )),
+            ..Default::default()
+        }
     }
 
     fn execute<'a>(

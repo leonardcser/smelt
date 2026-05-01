@@ -1229,6 +1229,13 @@ impl<'a> Turn<'a> {
                 }
             };
             let tool = entry.tool.as_ref();
+            let hooks = tool.evaluate_hooks(&args);
+
+            // Pre-flight validation: catch errors before prompting (e.g. stale file hash).
+            if let Some(err) = hooks.preflight_error {
+                self.push_tool_result(&tc.id, &err, true, None);
+                continue;
+            }
 
             let mut decision =
                 self.permissions
@@ -1237,19 +1244,14 @@ impl<'a> Turn<'a> {
             // Runtime approvals (session + workspace) can turn Ask → Allow.
             if decision == Decision::Ask {
                 let rt = self.runtime_approvals.read().unwrap();
-                let desc = tool
-                    .needs_confirm(&args)
+                let desc = hooks
+                    .needs_confirm
+                    .clone()
                     .unwrap_or_else(|| tc.function.name.clone());
                 if rt.is_auto_approved(self.permissions, self.mode, &tc.function.name, &args, &desc)
                 {
                     decision = Decision::Allow;
                 }
-            }
-
-            // Pre-flight validation: catch errors before prompting (e.g. stale file hash).
-            if let Some(err) = tool.preflight(&args) {
-                self.push_tool_result(&tc.id, &err, true, None);
-                continue;
             }
 
             let idx = plan.slots.len();
@@ -1274,10 +1276,9 @@ impl<'a> Turn<'a> {
                     );
                 }
                 Decision::Ask => {
-                    let desc = tool
-                        .needs_confirm(&args)
+                    let desc = hooks
+                        .needs_confirm
                         .unwrap_or_else(|| tc.function.name.clone());
-                    let approval_patterns = tool.approval_patterns(&args);
                     let cmd_summary = if tc.function.name == "bash" {
                         let d = tools::str_arg(&args, "description");
                         (!d.is_empty()).then_some(d)
@@ -1291,7 +1292,7 @@ impl<'a> Turn<'a> {
                         tool_name: tc.function.name.clone(),
                         args: args.clone(),
                         confirm_message: desc,
-                        approval_patterns,
+                        approval_patterns: hooks.approval_patterns,
                         summary: cmd_summary,
                     });
                     plan.slots.push(ToolSlot {
