@@ -55,8 +55,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 /// One Lua-registered `/command` entry. Lives in `LuaShared.commands`
-/// so completers (`list_commands`, `list_command_args`, `is_lua_command`)
-/// read the same map the dispatcher does — no parallel snapshot.
+/// so completers (`list_commands`, `is_lua_command`) read the same
+/// map the dispatcher does — no parallel snapshot.
 pub(crate) struct RegisteredCommand {
     pub(crate) handle: LuaHandle,
     pub(crate) description: Option<String>,
@@ -76,20 +76,13 @@ pub(crate) struct RegisteredCommand {
 /// Sorted by name. Used by the `/` completer. Reads live via
 /// `try_with_app`; returns empty when no app pointer is installed
 /// (e.g. early startup).
-pub fn list_commands() -> Vec<(String, Option<String>)> {
+pub(crate) fn list_commands() -> Vec<(String, Option<String>)> {
     try_with_app(|app| app.core.lua.list_commands_with_desc()).unwrap_or_default()
-}
-
-/// Return every Lua-registered command that declared an `args` list,
-/// as `("/cmd", args)` pairs. Used by `PromptState::command_arg_sources`
-/// to drive the secondary arg picker that opens after `/cmd <space>`.
-pub fn list_command_args() -> Vec<(String, Vec<String>)> {
-    try_with_app(|app| app.core.lua.list_command_args()).unwrap_or_default()
 }
 
 /// True if `input` (e.g. `/pick-test` or `/pick-test arg`) matches a
 /// Lua-registered command name.
-pub fn is_lua_command(input: &str) -> bool {
+pub(crate) fn is_lua_command(input: &str) -> bool {
     let name = input
         .strip_prefix('/')
         .and_then(|s| s.split_whitespace().next())
@@ -104,7 +97,7 @@ pub fn is_lua_command(input: &str) -> bool {
 /// (`<C-g>`, `<S-Tab>`, `<M-x>`, printable `j`, etc). Unrecognized
 /// chords return `None` so the dispatcher falls through to the normal
 /// handlers. This is the lookup key for `smelt.keymap.set(_, chord, fn)`.
-pub fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
+pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     use crossterm::event::{KeyCode, KeyModifiers as M};
     let mods = key.modifiers;
     let has_ctrl = mods.contains(M::CONTROL);
@@ -750,7 +743,7 @@ fn statusline_item_from(
 }
 
 /// Convert a `serde_json::Value` to a `mlua::Value`.
-pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
+pub(crate) fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
     match v {
         serde_json::Value::Null => Ok(mlua::Value::Nil),
         serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
