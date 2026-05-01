@@ -835,8 +835,9 @@ Create the missing dirs and seed files:
   `rewind.lua`, `resume.lua`. Move from `plugins/`.
 - `colorschemes/` — at least one default theme via `smelt.theme.set`
   / `smelt.theme.link` calls.
-- Top-level: `transcript.lua`, `diff.lua`, `status.lua`, `modes.lua`,
-  `commands.lua`. Move from `plugins/` where applicable.
+- Top-level: `transcript.lua`, `diff.lua`, `status.lua`, `modes.lua`.
+  Slash-commands stay one-file-per-command in `plugins/`; `cmd.lua`
+  is the framework helper they call.
 
 ### P4.b — Transcript and diff parsers in Lua
 
@@ -869,10 +870,9 @@ no tab-strip widget in the framework.
 
 ### P4.e — Slash commands fully Lua
 
-`runtime/lua/smelt/commands.lua` registers every builtin via
-`smelt.cmd.register`. Engine/`tui` no longer has a `RUST_COMMANDS`
-table. The Rust `App::handle_command(line)` becomes
-`lua.run_command(line) -> CommandOutcome` and acts on it.
+Each builtin lives one-file-per-command under `runtime/lua/smelt/plugins/`
+(or `dialogs/` when it opens a dialog) and self-registers via
+`smelt.cmd.register`. Engine/`tui` no longer has a `RUST_COMMANDS` table.
 
 ### P4.f — Modes registry in Lua
 

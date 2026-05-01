@@ -275,7 +275,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | File                              | LOC | Purpose                               | Fate         | Phase | Status  | Notes                                                              |
 | --------------------------------- | --- | ------------------------------------- | ------------ | ----- | ------- | ------------------------------------------------------------------ |
 | `_bootstrap.lua`                  | 71  | Yield primitives, fuzzy ranking       | kept         | none  | pending | Autoload                                                           |
-| `cmd.lua`                         | 82  | Command framework wrappers            | kept         | P4.e  | pending | Possibly merges into `commands.lua`; decide while coding           |
+| `cmd.lua`                         | 82  | Command framework wrappers            | kept         | none  | pending | Stays as the top-level framework helper that plugin-defined commands call (sibling to `dialog.lua`). The `commands.lua` umbrella idea retires. |
 | `dialogs/confirm.lua`             | 136 | Confirm dialog renderer               | moved        | P4.a  | partial | Relocated under `dialogs/` (`73056a5`); behavior orchestration migration to overlay primitives stays P4.d. C.9b: reads reason via panel handle's `:text()`; tracks `selected_idx` via `selection_changed`; tracks `typed_reason` via `text_changed`. |
 | `dialog.lua`                      | 269 | Dialog handle factory + framework     | kept         | P4.a  | pending | Primary dialog abstraction. C.9b: panel handles capture leaf WinId from `named_inputs`; `kind = "input"` panels expose `:text()`; `:focus()` routes to `smelt.win.set_focus` for input panels. |
 | `widgets/picker.lua`              | 68  | Generic picker helper                 | moved        | P4.a  | landed  | Bootstrap chunk; `smelt.ui.picker.open` recipe.                    |
@@ -283,26 +283,26 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `dialogs/agents.lua`              | 248 | `/agents` dialog                      | moved        | P4.a  | partial | Relocated (`73056a5`); module path now `smelt.dialogs.agents`. Behavior orchestration to overlay primitives stays P4.d.                                            |
 | `plugins/ask_user_question.lua`   | 119 | ask_user_question tool                | moved        | P5.b  | pending | → `tools/ask_user_question.lua`                                    |
 | `plugins/background_commands.lua` | 224 | Bash run-in-background tools + `/ps`  | restructured | P5.b  | pending | Tool registrations → `tools/`; `/ps` → `commands.lua` or stays     |
-| `plugins/btw.lua`                 | 58  | `/btw` side-question                  | moved        | P4.e  | pending | → `commands.lua` (or stays as plugin)                              |
-| `plugins/color.lua`               | 30  | `/color` slug accent                  | moved        | P4.e  | pending | → `commands.lua`                                                   |
-| `plugins/export.lua`              | 159 | `/export` markdown                    | moved        | P4.e  | pending | → `commands.lua`                                                   |
-| `plugins/help.lua`                | 47  | `/help` keybinding viewer             | moved        | P4.e  | pending | → `commands.lua`                                                   |
-| `plugins/history_search.lua`      | 50  | Ctrl+R history search                 | moved        | P4.e  | pending | → `commands.lua`                                                   |
-| `plugins/model.lua`               | 37  | `/model` picker                       | moved        | P4.e  | pending | → `commands.lua`                                                   |
+| `plugins/btw.lua`                 | 58  | `/btw` side-question                  | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
+| `plugins/color.lua`               | 30  | `/color` slug accent                  | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
+| `plugins/export.lua`              | 159 | `/export` markdown                    | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
+| `plugins/help.lua`                | 47  | `/help` keybinding viewer             | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
+| `plugins/history_search.lua`      | 50  | Ctrl+R history search                 | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
+| `plugins/model.lua`               | 37  | `/model` picker                       | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
 | `dialogs/permissions.lua`         | 97  | `/permissions` dialog                 | moved        | P4.a  | partial | Relocated (`73056a5`); module path now `smelt.dialogs.permissions`. Behavior orchestration stays P4.d.                                       |
-| `plugins/plan_mode.lua`           | 181 | Plan mode hooks + exit_plan_mode tool | restructured | P5.b  | pending | Tool → `tools/`; mode hook stays in `modes.lua` or `plugins/`      |
+| `plugins/plan_mode.lua`           | 181 | Plan mode hooks + exit_plan_mode tool | restructured | P5.b  | pending | Tool → `tools/exit_plan_mode.lua`; mode hook stays in `plugins/plan_mode.lua` (mode-specific behavior, not registry) |
 | `plugins/compact.lua`             | 5   | `/compact [instructions]`             | added        | P4.e  | landed | Migrated `cmd_compact` (`abe9ed0`); wraps `smelt.engine.compact`. Declares `while_busy = false` (`68f8317`).         |
 | `plugins/reflect.lua`             | 9   | `/reflect [focus]`                    | added        | P4.e  | landed | Migrated builtin (`4420015`); wraps `smelt.engine.submit_builtin_command("reflect", arg)`.                          |
 | `plugins/simplify.lua`            | 9   | `/simplify [focus]`                   | added        | P4.e  | landed | Migrated builtin (`4420015`); wraps `smelt.engine.submit_builtin_command("simplify", arg)`. Multi-agent template branches via the binding's `multi_agent` context. |
-| `plugins/predict.lua`             | 71  | Input prediction                      | kept         | P4    | pending | Stays as plugin (Lua-only feature)                                 |
+| `plugins/predict.lua`             | 71  | Input prediction                      | kept         | none  | pending | Stays in `plugins/` — adding a `hooks/` dir for one file is bookkeeping without payoff. |
 | `plugins/quit.lua`                | 13  | `/exit`, `/quit`, `/q`, `/qa`, `/wq`, `/wqa` | added | P4.e | landed | Migrated `cmd_quit` (`7c028d8`); calls top-level `smelt.quit()` which flips `pending_quit`. |
 | `dialogs/resume.lua`              | 172 | `/resume` session picker              | moved        | P4.a  | partial | Relocated (`73056a5`); module path now `smelt.dialogs.resume`. Behavior orchestration stays P4.d.                                            |
 | `dialogs/rewind.lua`              | 57  | `/rewind` turn picker                 | moved        | P4.a  | partial | Relocated (`73056a5`); module path now `smelt.dialogs.rewind`. Behavior orchestration stays P4.d.                                            |
 | `plugins/session.lua`             | 16  | `/clear`, `/new`, `/fork`, `/branch`  | added        | P4.e   | landed | Migrated `cmd_clear` / `cmd_fork` (`04f6419`); composes `smelt.session.{fork,reset}`.                                            |
-| `plugins/settings.lua`            | 38  | `/settings` toggles                   | moved        | P4.e  | pending | → `commands.lua`                                                   |
+| `plugins/settings.lua`            | 38  | `/settings` toggles                   | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
 | `plugins/stats.lua`               | 26  | `/stats`, `/cost` dialog commands     | added        | P4.d/e | landed | Migrated `cmd_stats` / `cmd_cost` (`11bd6c6`) — first builtins to leave `RUST_COMMANDS`. Composes `smelt.ui.dialog.open` over `smelt.metrics.*`. |
-| `plugins/theme.lua`               | 32  | `/theme` accent picker                | moved        | P4    | pending | → `colorschemes/<n>.lua` + `commands.lua` thin wrapper             |
-| `plugins/toggles.lua`             | 13  | `/vim`, `/thinking` toggles           | moved        | P4.e  | pending | → `commands.lua`                                                   |
+| `plugins/theme.lua`               | 32  | `/theme` accent picker                | kept         | P4    | pending | Stays one-file-per-command in `plugins/`; plugin-authored colorschemes still ride `colorschemes/<name>.lua`. |
+| `plugins/toggles.lua`             | 13  | `/vim`, `/thinking` toggles           | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
 | `plugins/yank_block.lua`          | 12  | Optional `/yank-block`                | kept         | P4    | pending | Stays as opt-in plugin                                             |
 | `colorschemes/default.lua`        | 9   | Default colorscheme (ember accent)    | added        | P4.a  | landed  | Seed (`9bb2f11`); `require`-able as `smelt.colorschemes.default`. Pattern target for plugin-authored schemes. |
 
@@ -352,12 +352,4 @@ shipped as a namespace seeded with the workspace JSON store; the engine
 permission policy (`bash` / `rules` / `workspace` / `approvals` + the
 1617-line test suite) lands here in P5.c when engine becomes policy-free.
 
-## Unclear — needs explicit decision
-
-| File / question                                                                           | Phase needed by | Decision needed                                                                                                                                           |
-| ----------------------------------------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `runtime/lua/smelt/cmd.lua`                                                               | P4.e            | Merge into `commands.lua`, or keep as the framework helper that `commands.lua` calls?                                                                     |
-| `plugins/{btw, color, export, help, history_search, model, settings, theme, toggles}.lua` | P4.e            | All move to `commands.lua` (one master file), or stay as one-file-per-command in `plugins/` with `commands.lua` as registration index?                    |
-| `plugins/predict.lua`                                                                     | P4              | Stay in `plugins/` (it's a hook, not a command/dialog/tool), or move under a new `hooks/` dir?                                                            |
-| `plugins/plan_mode.lua`                                                                   | P4/P5           | Split: tool → `tools/exit_plan_mode.lua`, hook → `modes.lua` or `plugins/`. Confirm split shape.                                                          |
 
