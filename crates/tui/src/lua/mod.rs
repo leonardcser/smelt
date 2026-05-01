@@ -266,10 +266,10 @@ pub(crate) struct LuaHandle {
 /// round-trips through `EvaluatePluginToolHooks` per call before
 /// dispatching the tool — same Allow / Deny / Ask flow core tools use.
 pub(crate) struct PluginToolHandles {
-    pub execute: LuaHandle,
-    pub needs_confirm: Option<LuaHandle>,
-    pub approval_patterns: Option<LuaHandle>,
-    pub preflight: Option<LuaHandle>,
+    pub(crate) execute: LuaHandle,
+    pub(crate) needs_confirm: Option<LuaHandle>,
+    pub(crate) approval_patterns: Option<LuaHandle>,
+    pub(crate) preflight: Option<LuaHandle>,
 }
 
 /// Stash a Lua callable in `shared.callbacks` under a fresh u64 id.

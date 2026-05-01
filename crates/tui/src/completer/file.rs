@@ -4,7 +4,7 @@ use std::process::Command;
 use super::{Completer, CompleterKind, CompletionItem};
 
 impl Completer {
-    pub fn files(anchor: usize) -> Self {
+    pub(crate) fn files(anchor: usize) -> Self {
         let all_items: Vec<CompletionItem> = git_files()
             .into_iter()
             .map(|f| CompletionItem {

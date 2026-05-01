@@ -26,9 +26,9 @@ const PASTE_LINE_THRESHOLD: usize = 12;
 /// Owns its attachment data so it survives store clears across sessions.
 #[derive(Clone, Debug)]
 pub(crate) struct InputSnapshot {
-    pub buf: String,
-    pub cpos: usize,
-    pub attachments: Vec<Attachment>,
+    pub(crate) buf: String,
+    pub(crate) cpos: usize,
+    pub(crate) attachments: Vec<Attachment>,
     from_paste: bool,
 }
 
@@ -39,14 +39,14 @@ pub(crate) struct InputSnapshot {
 /// history, attachments). `Deref<Target = EditBuffer>` gives direct
 /// access to `input.buf`, `input.attachment_ids`, etc.
 pub(crate) struct PromptState {
-    pub win: ui::Window,
-    pub store: AttachmentStore,
+    pub(crate) win: ui::Window,
+    pub(crate) store: AttachmentStore,
     pub(crate) completer: Option<CompleterSession>,
     /// Picker leaf WinIds from closed completer sessions, waiting for
     /// the next frame to drain and `win_close`. `PromptState` doesn't
     /// hold a `&mut ui::Ui`, so closing has to happen out-of-band.
-    pub pending_picker_close: Vec<ui::WinId>,
-    pub stash: Option<InputSnapshot>,
+    pub(crate) pending_picker_close: Vec<ui::WinId>,
+    pub(crate) stash: Option<InputSnapshot>,
     /// Tracks whether the current buffer content originated from a paste.
     /// Cleared on any manual character input.
     pub(super) from_paste: bool,
@@ -54,7 +54,7 @@ pub(crate) struct PromptState {
     pending_ctrl_x: bool,
     /// Completable arguments for commands like `/model`, `/theme`, `/color`.
     /// Each entry is `("/cmd", vec!["arg1", "arg2", ...])`.
-    pub command_arg_sources: Vec<(String, Vec<String>)>,
+    pub(crate) command_arg_sources: Vec<(String, Vec<String>)>,
 }
 
 impl std::ops::Deref for PromptState {
@@ -85,7 +85,7 @@ impl Default for PromptState {
 }
 
 impl PromptState {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut win = ui::Window::new(
             ui::PROMPT_WIN,
             ui::BufId(0),
@@ -111,7 +111,7 @@ impl PromptState {
     /// Works for both vim visual modes and shift+key selection. `mode` is
     /// the TuiApp-owned single-global VimMode (only consulted when vim is
     /// enabled on this prompt).
-    pub fn selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
+    pub(crate) fn selection_range(&self, mode: VimMode) -> Option<(usize, usize)> {
         // Vim visual mode takes priority.
         if self.win.vim_enabled {
             if let Some(range) = ui::vim::visual_range(
@@ -132,7 +132,7 @@ impl PromptState {
     /// `y`, …) get the brief post-yank highlight, matching nvim's
     /// `vim.highlight.on_yank`. Editing logic must keep using
     /// `selection_range` so the flash never affects mutations.
-    pub fn display_selection_range(
+    pub(crate) fn display_selection_range(
         &self,
         mode: VimMode,
         clipboard: &ui::Clipboard,
@@ -150,14 +150,14 @@ impl PromptState {
     }
 
     /// Clear any active selection (non-vim). Called on non-shift movement or editing.
-    pub fn clear_selection(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         self.win.selection_anchor = None;
     }
 
     /// End the active completer session, queueing its picker overlay
     /// leaf for close on the next frame. Replaces bare `self.completer
     /// = None` so the associated `ui::WinId` doesn't leak.
-    pub fn close_completer(&mut self) {
+    pub(crate) fn close_completer(&mut self) {
         if let Some(session) = self.completer.take() {
             if let Some(win) = session.picker_win {
                 self.pending_picker_close.push(win);
@@ -191,24 +191,24 @@ impl PromptState {
         Some(deleted)
     }
 
-    pub fn vim_enabled(&self) -> bool {
+    pub(crate) fn vim_enabled(&self) -> bool {
         self.win.vim_enabled
     }
 
     /// Returns true if the current content originated from a paste and should
     /// not be treated as a shell escape command (starting with '!').
-    pub fn skip_shell_escape(&self) -> bool {
+    pub(crate) fn skip_shell_escape(&self) -> bool {
         self.from_paste
     }
 
-    pub fn set_vim_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
         self.win.set_vim_enabled(enabled);
     }
 
     /// Restore vim to a specific mode (used after double-Esc cancel).
     /// Writes through `mode_ref` (the TuiApp-owned single global) and
     /// resets the in-flight key sequence on the prompt's Vim instance.
-    pub fn set_vim_mode(&mut self, mode_ref: &mut VimMode, new: VimMode) {
+    pub(crate) fn set_vim_mode(&mut self, mode_ref: &mut VimMode, new: VimMode) {
         if self.win.vim_enabled {
             self.win.vim_state.set_mode(mode_ref, new);
         }
@@ -231,7 +231,7 @@ impl PromptState {
         clipboard.kill_ring.record_clipboard_write(text);
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.win.edit_buf.buf.clear();
         self.win.cpos = 0;
         self.win.edit_buf.attachment_ids.clear();
@@ -246,7 +246,7 @@ impl PromptState {
     /// paste state, drop the completer so it re-derives. Prefer the
     /// `crate::api::buf::replace` wrapper at call sites — it reads as
     /// intent rather than a method on the receiver.
-    pub fn replace_text(&mut self, text: String, cursor: Option<usize>, mode: VimMode) {
+    pub(crate) fn replace_text(&mut self, text: String, cursor: Option<usize>, mode: VimMode) {
         self.save_undo(mode);
         let cpos = cursor.unwrap_or(text.len()).min(text.len());
         self.win.edit_buf.buf = text;
@@ -288,7 +288,7 @@ impl PromptState {
     }
 
     /// Restore stash into the buffer (called after submit/command completes).
-    pub fn restore_stash(&mut self) {
+    pub(crate) fn restore_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
             self.win.edit_buf.buf = snap.buf;
             self.win.cpos = snap.cpos;
@@ -304,7 +304,7 @@ impl PromptState {
     /// Restore input from a rewind. The text has pastes expanded and image
     /// labels inline as `[label]`. Replace each `[label]` with an attachment
     /// marker so images become editable attachments again.
-    pub fn restore_from_rewind(&mut self, mut text: String, images: Vec<(String, String)>) {
+    pub(crate) fn restore_from_rewind(&mut self, mut text: String, images: Vec<(String, String)>) {
         let mut ids = Vec::new();
         for (label, data_url) in images {
             let display = format!("[{label}]");
@@ -319,7 +319,7 @@ impl PromptState {
         self.win.edit_buf.attachment_ids = ids;
     }
 
-    pub fn cursor_char(&self) -> usize {
+    pub(crate) fn cursor_char(&self) -> usize {
         char_pos(&self.win.edit_buf.buf, self.win.cpos)
     }
 
@@ -332,7 +332,7 @@ impl PromptState {
     /// spending tokens on duplicate content. The back-reference is omitted
     /// for images entirely — their content is carried via `Content::Parts`,
     /// not inline text, so repeating the (empty) image expansion is a no-op.
-    pub fn expanded_text(&self) -> String {
+    pub(crate) fn expanded_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
         let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
@@ -354,7 +354,7 @@ impl PromptState {
     }
 
     /// Text for the user message block: pastes expanded, images shown as `[label]`.
-    pub fn message_display_text(&self) -> String {
+    pub(crate) fn message_display_text(&self) -> String {
         let mut result = String::new();
         let mut att_idx = 0;
         for c in self.win.edit_buf.buf.chars() {
@@ -378,7 +378,7 @@ impl PromptState {
     }
 
     /// Attach an image at the current cursor position.
-    pub fn insert_image(&mut self, label: String, data_url: String) {
+    pub(crate) fn insert_image(&mut self, label: String, data_url: String) {
         let id = self.store.insert_image(label, data_url);
         self.insert_attachment_id(id);
     }
@@ -388,7 +388,7 @@ impl PromptState {
     /// Images referenced multiple times in the buffer are emitted only once
     /// in `Content::Parts` — the payload is a base64 data URL (large), and
     /// the model gets nothing extra from seeing it twice.
-    pub fn build_content(&self) -> Content {
+    pub(crate) fn build_content(&self) -> Content {
         let text = self.expanded_text();
         let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
         let images: Vec<(String, String)> = self
@@ -890,7 +890,7 @@ impl PromptState {
     /// Priority ladder: completer → vim → paste → resize → keymap → insert.
     /// `mode` is the TuiApp-owned single-global VimMode; the bridge writes
     /// through it during vim dispatch and other paths read it.
-    pub fn handle_event(
+    pub(crate) fn handle_event(
         &mut self,
         ev: Event,
         mut history: Option<&mut History>,
