@@ -10,10 +10,10 @@
 //! `RuntimeApprovals`, and two helpers consumed by tool implementations
 //! (`split_shell_commands`, `DEFAULT_BASH_ALLOW`).
 
-pub mod approvals;
-pub mod bash;
-pub mod rules;
-pub mod workspace;
+pub(crate) mod approvals;
+pub(crate) mod bash;
+pub(crate) mod rules;
+pub(crate) mod workspace;
 
 #[cfg(test)]
 mod tests;
