@@ -92,7 +92,7 @@ to invoke_ the feature.
 | `peek_agent`          | `runtime/lua/smelt/tools/peek_agent.lua`    | P5.b — landed; composes `smelt.agent.send_query` over `engine::socket::send_query_blocking` | working |
 | `stop_agent`          | `runtime/lua/smelt/tools/stop_agent.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
 | `load_skill`          | `runtime/lua/smelt/tools/load_skill.lua` | P5.b — landed; composes `smelt.skills.content` over `Core.skills` | working |
-| `exit_plan_mode`      | `plugins/plan_mode.lua`           | P5.b → `tools/exit_plan_mode.lua`                   | working |
+| `exit_plan_mode`      | `runtime/lua/smelt/tools/exit_plan_mode.lua` | P5.b — landed; module `register/unregister` swapped in/out by `plugins/plan_mode.lua` on Plan mode entry/exit | working |
 
 ## Slash commands
 

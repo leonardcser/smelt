@@ -277,7 +277,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `plugins/history_search.lua`      | 50  | Ctrl+R history search                 | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
 | `plugins/model.lua`               | 37  | `/model` picker                       | kept         | none  | pending | Stays one-file-per-command in `plugins/`.                          |
 | `dialogs/permissions.lua`         | 97  | `/permissions` dialog                 | moved        | P4.a/P4.d | landed  | Module path `smelt.dialogs.permissions`; orchestrates via `smelt.ui.dialog`.                                  |
-| `plugins/plan_mode.lua`           | 181 | Plan mode hooks + exit_plan_mode tool | restructured | P5.b  | pending | Tool → `tools/exit_plan_mode.lua`; mode hook stays in `plugins/plan_mode.lua` (mode-specific behavior, not registry) |
+| `plugins/plan_mode.lua`           | 68  | Plan-mode hook driver                 | kept         | P5.b  | landed  | Mode-hook surface only: swaps the plan-mode prompt section + the `exit_plan_mode` tool in / out as the agent enters / leaves Plan mode. Tool body lives in `smelt.tools.exit_plan_mode`. |
 | `plugins/compact.lua`             | 5   | `/compact [instructions]`             | added        | P4.e  | landed | Migrated `cmd_compact` (`abe9ed0`); wraps `smelt.engine.compact`. Declares `while_busy = false` (`68f8317`).         |
 | `plugins/reflect.lua`             | 56  | `/reflect [focus]`                    | added        | P4.e  | landed | Self-contained: prompt body inlined as a Lua string; submits via `smelt.engine.submit_command("reflect", body)`.   |
 | `plugins/simplify.lua`            | 159 | `/simplify [focus]`                   | added        | P4.e  | landed | Self-contained: prompt bodies (multi-agent + solo) inlined as Lua strings; branches on `smelt.engine.multi_agent()`; submits via `smelt.engine.submit_command("simplify", body)`. |
@@ -308,6 +308,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/read_file.lua`             | 130 | Built-in `read_file` tool             | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.image.{is_image_file,read_as_data_url}` (image data-URL short-circuit) + `smelt.notebook.{is_notebook_path,read}` (line-numbered notebook formatting via the new public `engine::tools::notebook::render_notebook_text` wrapper) + `smelt.fs.{read,file_state.{get,record_read,mtime_ms}}`. Pure-Lua `effective_range` / `dedup_stub` / `format_text_window` reproduce the retired `ReadFileTool` semantics: `FILE_UNCHANGED_STUB` on exact-range repeat against unchanged mtime, default `(1, 2000)` window, 2000-byte per-line truncation, `"%4d\t%s"` line numbering. |
 | `tools/notebook_edit.lua`         | 87  | Built-in `edit_notebook` tool         | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.fs.{exists,try_flock,file_state.staleness_error}` + `smelt.path.display` + a thin call into the new `smelt.notebook.apply_edit(args)` FFI (over `engine::tools::notebook::apply_edit`). The intricate JSON cell-munging stays Rust; Lua owns schema, hook, flock acquisition, and metadata pass-through (the dialog-preview payload comes back as a Lua table set on the tool result's `metadata`). Side-effect of the migration: `ToolContext.file_locks` + `engine::tools::FileLocks` retire (no remaining tool needs intra-process per-path serialization on top of `try_flock`). |
 | `tools/web_fetch.lua`             | 248 | Built-in `web_fetch` tool             | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.http.{get,cache.{get,put},random_user_agent}` + `smelt.html.{title,links,to_text,to_markdown}` + `smelt.image.data_url_from_bytes` + `smelt.engine.ask` (parked on `smelt.task.alloc/wait` until `EngineAskResponse` fires). Mirrors the retired Rust `WebFetchTool`: domain-pattern approval suggestion, cf-mitigated 403 retry with `User-Agent: smelt`, cross-domain redirect rejection, image content-type → base64 data URL, 2000-line / 50KB output truncation, 15-minute cache keyed `fetch:<url>:<format>`. LLM extraction routes through `AuxiliaryTask::Btw` (was the primary model unconditionally before). |
+| `tools/exit_plan_mode.lua`        | 127 | Built-in `exit_plan_mode` tool        | added        | P5.b  | landed  | Module exposing `register / unregister` so `plugins/plan_mode.lua` can swap the tool in and out as the agent enters / leaves Plan mode. Tool body — schema, plan-name generator (adjective/noun/verb tuple), `save_plan` writer under `<session>/plans/<name>.md`, confirm dialog with auto-apply / approve / deny — relocated verbatim from `plan_mode.lua`. |
 
 **To be created (P4.a):**
 
@@ -316,8 +317,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 
 **To be created (P5.b) under `tools/`:**
 
-- `bash.lua`, `spawn_agent.lua`,
-  `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
+- `bash.lua`, `spawn_agent.lua`
 
 ## `src/`
 

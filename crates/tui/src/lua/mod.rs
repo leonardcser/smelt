@@ -1033,6 +1033,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.web_fetch",
         include_str!("../../../../runtime/lua/smelt/tools/web_fetch.lua"),
     ),
+    (
+        "smelt.tools.exit_plan_mode",
+        include_str!("../../../../runtime/lua/smelt/tools/exit_plan_mode.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
