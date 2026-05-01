@@ -38,7 +38,7 @@ impl Tool for WriteFileTool {
         })
     }
 
-    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::ToolHooks {
         let path = str_arg(args, "file_path");
         let preflight_error = if !Path::new(&path).exists() {
             None
@@ -47,7 +47,7 @@ impl Tool for WriteFileTool {
         } else {
             staleness_error(&self.files, &path, "file")
         };
-        protocol::PluginToolHooks {
+        protocol::ToolHooks {
             needs_confirm: Some(display_path(&path)),
             approval_patterns: Vec::new(),
             preflight_error,

@@ -1,4 +1,4 @@
-use protocol::Mode;
+use protocol::AgentMode;
 
 /// Ordered collection of named system prompt sections.
 ///
@@ -159,7 +159,7 @@ fn multi_agent_section(config: &engine::AgentPromptConfig) -> String {
 /// Build the default prompt sections for a given mode and app state.
 pub(crate) fn build_defaults(
     cwd: &std::path::Path,
-    mode: Mode,
+    mode: AgentMode,
     interactive: bool,
     agent_config: Option<&engine::AgentPromptConfig>,
     skill_section: Option<&str>,
@@ -178,7 +178,7 @@ pub(crate) fn build_defaults(
         },
     );
 
-    if matches!(mode, Mode::Apply | Mode::Yolo) {
+    if matches!(mode, AgentMode::Apply | AgentMode::Yolo) {
         ps.set("write_access", write_access().to_string());
     }
 

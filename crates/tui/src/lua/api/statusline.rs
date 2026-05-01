@@ -180,14 +180,14 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     }
     t.set("vim", vim_tbl)?;
 
-    // Mode (Plan/Apply/Yolo/Normal) — icon + name; the Lua composer
+    // AgentMode (Plan/Apply/Yolo/Normal) — icon + name; the Lua composer
     // reads `theme.{plan,apply,yolo,muted}_fg` to colorize.
     let mode_tbl = lua.create_table()?;
     let (icon, name) = match app.core.config.mode {
-        protocol::Mode::Plan => ("◇ ", "plan"),
-        protocol::Mode::Apply => ("→ ", "apply"),
-        protocol::Mode::Yolo => ("⚡", "yolo"),
-        protocol::Mode::Normal => ("○ ", "normal"),
+        protocol::AgentMode::Plan => ("◇ ", "plan"),
+        protocol::AgentMode::Apply => ("→ ", "apply"),
+        protocol::AgentMode::Yolo => ("⚡", "yolo"),
+        protocol::AgentMode::Normal => ("○ ", "normal"),
     };
     mode_tbl.set("icon", icon)?;
     mode_tbl.set("name", name)?;

@@ -54,7 +54,7 @@ use crate::session::Session;
 use crate::{content, session, state};
 use engine::tools::tool_arg_summary;
 use engine::{permissions::Decision, EngineHandle, Permissions};
-use protocol::{Content, EngineEvent, Message, Mode, ReasoningEffort, Role, UiCommand};
+use protocol::{AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
     cursor,
@@ -410,7 +410,7 @@ impl TuiApp {
         multi_agent: bool,
         reasoning_effort: protocol::ReasoningEffort,
         reasoning_cycle: Vec<protocol::ReasoningEffort>,
-        mode_cycle: Vec<protocol::Mode>,
+        mode_cycle: Vec<protocol::AgentMode>,
         shared_session: Arc<Mutex<Option<Session>>>,
         available_models: Vec<crate::config::ResolvedModel>,
         cli_model_override: bool,

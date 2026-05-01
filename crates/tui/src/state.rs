@@ -1,5 +1,5 @@
 use crate::config;
-use protocol::{Mode, ReasoningEffort};
+use protocol::{AgentMode, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -132,8 +132,8 @@ impl State {
         }
     }
 
-    pub(crate) fn mode(&self) -> Mode {
-        Mode::parse(&self.mode).unwrap_or(Mode::Normal)
+    pub(crate) fn mode(&self) -> AgentMode {
+        AgentMode::parse(&self.mode).unwrap_or(AgentMode::Normal)
     }
 }
 
@@ -200,7 +200,7 @@ fn update_state(f: impl FnOnce(&mut State)) {
 
 // ── Read-modify-write helpers ─────────────────────────────────────────────
 
-pub(crate) fn set_mode(mode: Mode) {
+pub(crate) fn set_mode(mode: AgentMode) {
     update_state(|s| {
         s.mode = mode.as_str().to_string();
     });
@@ -307,7 +307,7 @@ mod tests {
             let mode_thread = std::thread::spawn(move || {
                 b1.wait();
                 update_state(|state| {
-                    state.mode = Mode::Apply.as_str().to_string();
+                    state.mode = AgentMode::Apply.as_str().to_string();
                     std::thread::sleep(Duration::from_millis(50));
                 });
             });
@@ -322,7 +322,7 @@ mod tests {
             settings_thread.join().unwrap();
 
             let state = State::load();
-            assert_eq!(state.mode(), Mode::Apply);
+            assert_eq!(state.mode(), AgentMode::Apply);
             assert_eq!(state.settings.vim_mode, Some(true));
         });
     }

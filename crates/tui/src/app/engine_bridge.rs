@@ -389,7 +389,7 @@ pub(crate) fn handle_event(
             });
             SessionControl::Continue
         }
-        EngineEvent::ExecutePluginTool {
+        EngineEvent::ToolDispatch {
             request_id,
             call_id,
             tool_name,
@@ -401,7 +401,7 @@ pub(crate) fn handle_event(
             app.handle_plugin_tool(request_id, call_id, tool_name, args);
             SessionControl::Continue
         }
-        EngineEvent::EvaluatePluginToolHooks {
+        EngineEvent::ToolHooksRequest {
             request_id,
             tool_name,
             args,
@@ -412,7 +412,7 @@ pub(crate) fn handle_event(
             drop(_guard);
             app.core
                 .engine
-                .send(protocol::UiCommand::PluginToolHooksResult { request_id, hooks });
+                .send(protocol::UiCommand::ToolHooksResponse { request_id, hooks });
             SessionControl::Continue
         }
         EngineEvent::CoreToolResult {

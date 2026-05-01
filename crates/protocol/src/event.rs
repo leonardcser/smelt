@@ -2,7 +2,7 @@
 
 use crate::content::Content;
 use crate::message::{Message, ToolOutcome};
-use crate::mode::{Mode, ReasoningEffort};
+use crate::mode::{AgentMode, ReasoningEffort};
 use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMeta};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -42,13 +42,13 @@ pub enum ToolExecutionMode {
 /// A tool defined by a Lua plugin. Sent from TUI to engine so the engine
 /// can include it in LLM tool definitions and proxy execution back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginToolDef {
+pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
     /// When set, the tool is only available in these modes.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub modes: Option<Vec<Mode>>,
+    pub modes: Option<Vec<AgentMode>>,
     #[serde(default)]
     pub execution_mode: ToolExecutionMode,
     /// When `true`, this plugin tool replaces the core Rust tool of the
@@ -59,21 +59,21 @@ pub struct PluginToolDef {
     #[serde(default)]
     pub override_core: bool,
     /// Hook signals declared by the plugin. Each `true` flag tells the
-    /// engine to round-trip through `EvaluatePluginToolHooks` before
+    /// engine to round-trip through `ToolHooksRequest` before
     /// dispatching the tool — to ask the user for permission, run a
     /// preflight check, etc. When all flags are false the engine
     /// dispatches the tool directly (today's behavior, no permission
     /// gate). Plugin tools that touch security-sensitive surfaces
     /// (bash, file mutation) MUST opt in.
     #[serde(default)]
-    pub hooks: PluginToolHookFlags,
+    pub hooks: ToolHookFlags,
 }
 
 /// Which permission hooks a plugin tool has registered. Sent with
-/// `PluginToolDef` so the engine knows whether to ask the TUI to
+/// `ToolDef` so the engine knows whether to ask the TUI to
 /// evaluate them per-call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PluginToolHookFlags {
+pub struct ToolHookFlags {
     #[serde(default)]
     pub needs_confirm: bool,
     #[serde(default)]
@@ -82,9 +82,9 @@ pub struct PluginToolHookFlags {
     pub preflight: bool,
 }
 
-impl PluginToolHookFlags {
+impl ToolHookFlags {
     /// True when at least one hook is registered — i.e. the engine must
-    /// round-trip through `EvaluatePluginToolHooks` before dispatch.
+    /// round-trip through `ToolHooksRequest` before dispatch.
     pub fn any(&self) -> bool {
         self.needs_confirm || self.approval_patterns || self.preflight
     }
@@ -92,9 +92,9 @@ impl PluginToolHookFlags {
 
 /// Result of evaluating a plugin tool's permission hooks for a specific
 /// invocation. Returned by the TUI in response to
-/// `EngineEvent::EvaluatePluginToolHooks`.
+/// `EngineEvent::ToolHooksRequest`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PluginToolHooks {
+pub struct ToolHooks {
     /// Confirm dialog message; `None` falls back to the tool name.
     #[serde(default)]
     pub needs_confirm: Option<String>,
@@ -232,7 +232,7 @@ pub enum EngineEvent {
     },
 
     /// Engine needs the TUI to execute a plugin-defined tool.
-    ExecutePluginTool {
+    ToolDispatch {
         request_id: u64,
         call_id: String,
         tool_name: String,
@@ -242,14 +242,14 @@ pub enum EngineEvent {
     /// Engine asks the TUI to evaluate a plugin tool's permission
     /// hooks (`needs_confirm`, `approval_patterns`, `preflight`) for a
     /// specific invocation. The TUI replies with
-    /// `UiCommand::PluginToolHooksResult`, after which the engine
+    /// `UiCommand::ToolHooksResponse`, after which the engine
     /// resumes the standard Allow / Deny / Ask flow.
-    EvaluatePluginToolHooks {
+    ToolHooksRequest {
         request_id: u64,
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
-        mode: Mode,
+        mode: AgentMode,
     },
 
     /// Result of a core-tool side call requested by a Lua plugin via
@@ -272,7 +272,7 @@ pub enum UiCommand {
     StartTurn {
         turn_id: u64,
         content: Content,
-        mode: Mode,
+        mode: AgentMode,
         model: String,
         reasoning_effort: ReasoningEffort,
         history: Vec<Message>,
@@ -297,9 +297,9 @@ pub enum UiCommand {
         system_prompt: Option<String>,
         /// Plugin-defined tools registered by Lua plugins. The engine
         /// includes these in the LLM tool definitions and proxies execution
-        /// back to the TUI via `ExecutePluginTool`.
+        /// back to the TUI via `ToolDispatch`.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
-        plugin_tools: Vec<PluginToolDef>,
+        plugin_tools: Vec<ToolDef>,
     },
 
     /// Inject a message mid-turn (steering / type-ahead).
@@ -316,14 +316,14 @@ pub enum UiCommand {
     },
 
     /// Change the active mode while the engine is running.
-    SetMode {
-        mode: Mode,
+    SetAgentMode {
+        mode: AgentMode,
         /// Updated system prompt for the new mode (if managed by TUI).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         system_prompt: Option<String>,
         /// Updated plugin tools for the new mode.
         #[serde(skip_serializing_if = "Option::is_none", default)]
-        plugin_tools: Option<Vec<PluginToolDef>>,
+        plugin_tools: Option<Vec<ToolDef>>,
     },
 
     /// Change reasoning effort while the engine is running.
@@ -375,8 +375,8 @@ pub enum UiCommand {
         task: AuxiliaryTask,
     },
 
-    /// Result of a plugin tool execution (response to `ExecutePluginTool`).
-    PluginToolResult {
+    /// Result of a plugin tool execution (response to `ToolDispatch`).
+    ToolResult {
         request_id: u64,
         call_id: String,
         content: String,
@@ -384,11 +384,8 @@ pub enum UiCommand {
     },
 
     /// Result of evaluating a plugin tool's permission hooks (response
-    /// to `EngineEvent::EvaluatePluginToolHooks`).
-    PluginToolHooksResult {
-        request_id: u64,
-        hooks: PluginToolHooks,
-    },
+    /// to `EngineEvent::ToolHooksRequest`).
+    ToolHooksResponse { request_id: u64, hooks: ToolHooks },
 
     /// Side-call from a Lua plugin to a core (or another plugin) tool.
     /// The engine runs the named tool and replies with

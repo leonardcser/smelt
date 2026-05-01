@@ -49,7 +49,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             meta.set("execution_mode", mode_str)?;
         }
         // Hook flag bits — let `plugin_tool_defs` build
-        // `PluginToolHookFlags` without reaching back into the
+        // `ToolHookFlags` without reaching back into the
         // handles map.
         meta.set("hook_needs_confirm", needs_confirm_handle.is_some())?;
         meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
@@ -95,7 +95,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let content: String = result.get("content").unwrap_or_default();
                 let is_error: bool = result.get("is_error").unwrap_or(false);
                 crate::lua::with_host(|host| {
-                    host.engine().send(protocol::UiCommand::PluginToolResult {
+                    host.engine().send(protocol::UiCommand::ToolResult {
                         request_id,
                         call_id,
                         content,

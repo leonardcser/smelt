@@ -32,8 +32,8 @@ impl Tool for GlobTool {
         })
     }
 
-    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
-        protocol::PluginToolHooks {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::ToolHooks {
+        protocol::ToolHooks {
             needs_confirm: confirm_with_optional_path(
                 str_arg(args, "pattern"),
                 &str_arg(args, "path"),

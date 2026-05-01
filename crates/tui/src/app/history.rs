@@ -163,7 +163,7 @@ impl TuiApp {
 
         // Restore per-session settings through the canonical helpers so
         // state.json + engine + screen all stay in sync with `self`.
-        if let Some(mode) = loaded.mode.as_deref().and_then(Mode::parse) {
+        if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
             self.set_mode(mode);
         }
         if let Some(effort) = loaded.reasoning_effort {

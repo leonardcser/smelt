@@ -31,7 +31,7 @@ impl Tool for BashTool {
         })
     }
 
-    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::ToolHooks {
         let cmd = str_arg(args, "command");
         // split_shell_commands already extracts embedded commands from $(...),
         // backticks, and (...) subshells, so all binaries are surfaced.
@@ -48,7 +48,7 @@ impl Tool for BashTool {
                 }
             }
         }
-        protocol::PluginToolHooks {
+        protocol::ToolHooks {
             needs_confirm: Some(cmd),
             approval_patterns: patterns,
             preflight_error: None,

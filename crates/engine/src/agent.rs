@@ -5,7 +5,8 @@ use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError
 use crate::tools::{self, ToolContext, ToolDispatcher, ToolRegistry, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
 use protocol::{
-    Content, EngineEvent, Message, Mode, ReasoningEffort, Role, ToolOutcome, TurnMeta, UiCommand,
+    AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,
+    UiCommand,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -547,7 +548,7 @@ struct ToolExecutionPlan<'a> {
     /// (tool_call, args, start)
     sequential_plugins: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
     /// Plugin tools whose permission hooks are being evaluated by the
-    /// TUI. Resolved by `UiCommand::PluginToolHooksResult`, after which
+    /// TUI. Resolved by `UiCommand::ToolHooksResponse`, after which
     /// the call transitions into `pending_plugins` (Allow), into
     /// `pending_plugin_perms` (Ask), or into a synthetic deny result.
     pending_plugin_hooks: Vec<(u64, PendingPluginCall<'a>)>,
@@ -579,13 +580,13 @@ struct Turn<'a> {
     cancel: crate::cancel::CancellationToken,
     file_locks: &'a tools::FileLocks,
     messages: Vec<Message>,
-    mode: Mode,
+    mode: AgentMode,
     reasoning_effort: ReasoningEffort,
     turn_id: u64,
     model: String,
     system_prompt: String,
     agent_config: Option<crate::AgentPromptConfig>,
-    plugin_tools: Vec<protocol::PluginToolDef>,
+    plugin_tools: Vec<protocol::ToolDef>,
     session_dir: PathBuf,
     started_at: Instant,
     tps_samples: Vec<f64>,
@@ -612,11 +613,11 @@ impl<'a> Turn<'a> {
     fn resolve_decision(
         permissions: &Permissions,
         runtime_approvals: &Arc<RwLock<RuntimeApprovals>>,
-        mode: Mode,
+        mode: AgentMode,
         name: &str,
         args: &HashMap<String, Value>,
         is_mcp: bool,
-        hooks: &protocol::PluginToolHooks,
+        hooks: &protocol::ToolHooks,
     ) -> Decision {
         let mut decision = permissions.decide(mode, name, args, is_mcp);
         if decision == Decision::Ask {
@@ -886,7 +887,7 @@ impl<'a> Turn<'a> {
                 self.emit_messages_snapshot();
                 true
             }
-            UiCommand::SetMode {
+            UiCommand::SetAgentMode {
                 mode,
                 system_prompt,
                 plugin_tools,
@@ -964,7 +965,7 @@ impl<'a> Turn<'a> {
             first = false;
 
             // Ensure the system prompt reflects the current mode — a mid-turn
-            // mode change (via SetMode) updates self.mode but the prompt may
+            // mode change (via SetAgentMode) updates self.mode but the prompt may
             // still describe the old mode.
             self.regenerate_system_prompt();
 
@@ -1227,7 +1228,7 @@ impl<'a> Turn<'a> {
                 if pt.hooks.any() {
                     // Round-trip through the TUI for permission hooks.
                     let request_id = next_request_id();
-                    self.emit(EngineEvent::EvaluatePluginToolHooks {
+                    self.emit(EngineEvent::ToolHooksRequest {
                         request_id,
                         call_id: tc.id.clone(),
                         tool_name: tc.function.name.clone(),
@@ -1247,7 +1248,7 @@ impl<'a> Turn<'a> {
                     plan.sequential_plugins.push((tc, args.clone(), tool_start));
                 } else {
                     let request_id = next_request_id();
-                    self.emit(EngineEvent::ExecutePluginTool {
+                    self.emit(EngineEvent::ToolDispatch {
                         request_id,
                         call_id: tc.id.clone(),
                         tool_name: tc.function.name.clone(),
@@ -1478,7 +1479,7 @@ impl<'a> Turn<'a> {
                                     ));
                                 } else {
                                     let rid = next_request_id();
-                                    let _ = self.event_tx.send(EngineEvent::ExecutePluginTool {
+                                    let _ = self.event_tx.send(EngineEvent::ToolDispatch {
                                         request_id: rid,
                                         call_id: pending.tc.id.clone(),
                                         tool_name: pending.tc.function.name.clone(),
@@ -1515,7 +1516,7 @@ impl<'a> Turn<'a> {
                             }
                         }
                     }
-                    UiCommand::PluginToolHooksResult { request_id, hooks } => {
+                    UiCommand::ToolHooksResponse { request_id, hooks } => {
                         if let Some(pos) = plan
                             .pending_plugin_hooks
                             .iter()
@@ -1565,7 +1566,7 @@ impl<'a> Turn<'a> {
                                             let rid = next_request_id();
                                             let _ = self
                                                 .event_tx
-                                                .send(EngineEvent::ExecutePluginTool {
+                                                .send(EngineEvent::ToolDispatch {
                                                     request_id: rid,
                                                     call_id: pending.tc.id.clone(),
                                                     tool_name: pending.tc.function.name.clone(),
@@ -1628,7 +1629,7 @@ impl<'a> Turn<'a> {
                             }
                         }
                     }
-                    UiCommand::PluginToolResult { request_id, call_id, content, is_error } => {
+                    UiCommand::ToolResult { request_id, call_id, content, is_error } => {
                         if let Some(pos) = plan
                             .pending_plugins
                             .iter()
@@ -1680,7 +1681,7 @@ impl<'a> Turn<'a> {
                     UiCommand::AgentMessage { .. }
                     | UiCommand::Steer { .. }
                     | UiCommand::Unsteer { .. }
-                    | UiCommand::SetMode { .. }
+                    | UiCommand::SetAgentMode { .. }
                     | UiCommand::SetReasoningEffort { .. }
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
                     _ => {}
@@ -1769,7 +1770,7 @@ impl<'a> Turn<'a> {
                 ("cancelled".to_string(), true)
             } else {
                 let request_id = next_request_id();
-                let _ = self.event_tx.send(EngineEvent::ExecutePluginTool {
+                let _ = self.event_tx.send(EngineEvent::ToolDispatch {
                     request_id,
                     call_id: tc.id.clone(),
                     tool_name: tc.function.name.clone(),
@@ -1937,7 +1938,7 @@ impl<'a> Turn<'a> {
                             self.cancel.cancel();
                             cancel_received = true;
                         }
-                        UiCommand::SetMode { mode, system_prompt, plugin_tools } => {
+                        UiCommand::SetAgentMode { mode, system_prompt, plugin_tools } => {
                             self.mode = mode;
                             if let Some(p) = system_prompt { self.system_prompt = p; }
                             if let Some(t) = plugin_tools { self.plugin_tools = t; }
@@ -1972,18 +1973,18 @@ impl<'a> Turn<'a> {
         (result.map(|r| (r, had_injected)), pt, pr)
     }
 
-    /// Wait for a PluginToolResult matching the given request_id.
+    /// Wait for a ToolResult matching the given request_id.
     /// Applies mid-wait mode/model/reasoning changes.
     async fn wait_for_plugin_result(&mut self, request_id: u64) -> Option<(String, bool)> {
         loop {
             match self.cmd_rx.recv().await {
-                Some(UiCommand::PluginToolResult {
+                Some(UiCommand::ToolResult {
                     request_id: id,
                     content,
                     is_error,
                     ..
                 }) if id == request_id => return Some((content, is_error)),
-                Some(UiCommand::SetMode {
+                Some(UiCommand::SetAgentMode {
                     mode,
                     system_prompt,
                     plugin_tools,

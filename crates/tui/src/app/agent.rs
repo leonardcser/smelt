@@ -400,14 +400,12 @@ impl TuiApp {
             },
         ) {
             crate::lua::ToolExecResult::Immediate { content, is_error } => {
-                self.core
-                    .engine
-                    .send(protocol::UiCommand::PluginToolResult {
-                        request_id,
-                        call_id,
-                        content,
-                        is_error,
-                    });
+                self.core.engine.send(protocol::UiCommand::ToolResult {
+                    request_id,
+                    call_id,
+                    content,
+                    is_error,
+                });
             }
             crate::lua::ToolExecResult::Pending => {
                 // Result will be delivered via drive_tasks.

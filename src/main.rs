@@ -664,15 +664,15 @@ fn build_headless_config(
     cli_model_override: bool,
     cli_api_base_override: bool,
     cli_api_key_env_override: bool,
-    mode_override: Option<protocol::Mode>,
-    mode_cycle: Vec<protocol::Mode>,
+    mode_override: Option<protocol::AgentMode>,
+    mode_cycle: Vec<protocol::AgentMode>,
     reasoning_effort: protocol::ReasoningEffort,
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
     settings: tui::state::ResolvedSettings,
     multi_agent: bool,
     context_window: Option<u32>,
 ) -> tui::app::AppConfig {
-    let mode = mode_override.unwrap_or(protocol::Mode::Normal);
+    let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
     let mut mode_cycle = mode_cycle;
     if !mode_cycle.contains(&mode) {
         mode_cycle.push(mode);

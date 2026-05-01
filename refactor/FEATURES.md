@@ -46,7 +46,7 @@ to invoke_ the feature.
 | Auto-retry on transient errors (`Retrying`) | `engine/agent.rs` → `EngineEvent::Retrying` + `app/working.rs` spinner | P2.d (EngineBridge fires) | working |
 | Auxiliary model routing (title, prediction, btw, compaction) | `engine/agent.rs` + `protocol/usage.rs::AuxiliaryTask` + auxiliary-model config | P2 (kept), P4 (predict/btw plugins) | working |
 | Per-turn message snapshot (`Messages` event for transcript sync) | `protocol/event.rs::Messages` + `app/transcript_model.rs` | P2.d | working |
-| Plugin tool hook flow (`needs_confirm` / `preflight` / `approval_patterns`) | `protocol/event.rs::EvaluatePluginToolHooks` + `lua/tasks.rs` PluginToolEnv | P5.b (Lua hook fn returns "allow"/"needs_confirm"/"deny") | working |
+| Plugin tool hook flow (`needs_confirm` / `preflight` / `approval_patterns`) | `protocol/event.rs::ToolHooksRequest` + `lua/tasks.rs` PluginToolEnv | P5.b (Lua hook fn returns "allow"/"needs_confirm"/"deny") | working |
 | Tool call lifecycle states (`ToolStarted` / `ToolOutput` / `ToolFinished` / `ToolStatus::Denied`) | `protocol/event.rs` + `app/transcript_present/tools.rs` | P4.b (Lua presentation) | working |
 | Per-turn telemetry (`TurnMeta`, `agent_blocks`, `AgentToolData`) | `protocol/usage.rs` + `session.rs` | P2.a (Session). `AgentBlockData` deleted in P5.c — sub-agent output becomes ordinary tool blocks. | working |
 | Cost tracking                                                 | `app/working.rs` + `session.rs` cost fields               | P2.a (Session)                | working |
