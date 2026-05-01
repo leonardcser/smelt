@@ -52,23 +52,45 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // smelt.confirm._back_tab(handle_id) → bool. Toggles the app
-    // mode; returns true when the new mode auto-allows this request
-    // (caller closes the dialog) and false otherwise (dialog stays
-    // open so the user can pick manually).
+    // smelt.confirm._back_tab(handle_id) → bool. Cycles the app
+    // mode (via the Lua-side `smelt.mode.cycle`); returns true when
+    // the new mode auto-allows this request (caller closes the
+    // dialog) and false otherwise (dialog stays open so the user
+    // can pick manually).
+    //
+    // The `with_app` borrow has to be released before reaching back
+    // into Lua to fire the cycle (`smelt.mode.set` re-enters `with_app`
+    // through its binding), so the body is split into three steps:
+    // gather the request payload, run the cycle, then re-enter
+    // `with_app` to inspect the new mode's decision and resolve.
     confirm_tbl.set(
         "_back_tab",
-        lua.create_function(|_, handle_id: u64| {
+        lua.create_function(|lua, handle_id: u64| {
+            let request: Option<(
+                u64,
+                String,
+                String,
+                std::collections::HashMap<String, serde_json::Value>,
+            )> = crate::lua::with_app(|app| {
+                app.core.confirms.get(handle_id).map(|entry| {
+                    (
+                        entry.req.request_id,
+                        entry.req.call_id.clone(),
+                        entry.req.tool_name.clone(),
+                        entry.req.args.clone(),
+                    )
+                })
+            });
+            let Some((request_id, call_id, tool_name, args)) = request else {
+                return Ok(false);
+            };
+
+            let smelt: mlua::Table = lua.globals().get("smelt")?;
+            let mode_tbl: mlua::Table = smelt.get("mode")?;
+            let cycle: mlua::Function = mode_tbl.get("cycle")?;
+            cycle.call::<()>(())?;
+
             let auto_allowed = crate::lua::with_app(|app| {
-                let entry = match app.core.confirms.get(handle_id) {
-                    Some(e) => e,
-                    None => return false,
-                };
-                let request_id = entry.req.request_id;
-                let call_id = entry.req.call_id.clone();
-                let tool_name = entry.req.tool_name.clone();
-                let args = entry.req.args.clone();
-                app.toggle_mode();
                 if app
                     .permissions
                     .decide(app.core.config.mode, &tool_name, &args, false)

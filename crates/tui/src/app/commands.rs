@@ -280,24 +280,6 @@ impl TuiApp {
         });
     }
 
-    pub(crate) fn toggle_mode(&mut self) {
-        let next = self
-            .core
-            .config
-            .mode
-            .cycle_within(&self.core.config.mode_cycle);
-        self.set_mode(next);
-    }
-
-    pub(crate) fn cycle_reasoning(&mut self) {
-        let next = self
-            .core
-            .config
-            .reasoning_effort
-            .cycle_within(&self.core.config.reasoning_cycle);
-        self.set_reasoning_effort(next);
-    }
-
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.core.config.reasoning_effort = effort;
         state::set_reasoning_effort(effort);

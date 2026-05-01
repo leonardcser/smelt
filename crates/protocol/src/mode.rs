@@ -31,20 +31,6 @@ impl Mode {
         }
     }
 
-    /// Cycle to the next mode within the given allowed list.
-    pub fn cycle_within(self, allowed: &[Self]) -> Self {
-        let list = if allowed.is_empty() {
-            Self::ALL
-        } else {
-            allowed
-        };
-        let pos = list.iter().position(|&m| m == self);
-        match pos {
-            Some(i) => list[(i + 1) % list.len()],
-            None => list[0],
-        }
-    }
-
     /// Parse a list of mode labels, skipping unknown ones.
     pub fn parse_list(items: &[String]) -> Vec<Self> {
         items.iter().filter_map(|s| Self::parse(s)).collect()
@@ -75,18 +61,6 @@ impl ReasoningEffort {
             "high" => Some(Self::High),
             "max" => Some(Self::Max),
             _ => None,
-        }
-    }
-
-    /// Cycle to the next effort level within the given allowed list.
-    pub fn cycle_within(self, allowed: &[Self]) -> Self {
-        if allowed.is_empty() {
-            return self;
-        }
-        let pos = allowed.iter().position(|&e| e == self);
-        match pos {
-            Some(i) => allowed[(i + 1) % allowed.len()],
-            None => allowed[0],
         }
     }
 

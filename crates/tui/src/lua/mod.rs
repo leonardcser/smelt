@@ -594,6 +594,37 @@ impl LuaRuntime {
         }
     }
 
+    /// Fire `smelt.mode.cycle()`. Used by the BackTab keymap and
+    /// the confirm dialog's mode-cycle button. The Lua side
+    /// (`runtime/lua/smelt/modes.lua`) reads the configured cycle
+    /// list, picks the next entry, and calls `smelt.mode.set` —
+    /// which routes back into Rust through `TuiApp::set_mode`.
+    pub(crate) fn cycle_mode(&self) {
+        let result: mlua::Result<()> = (|| {
+            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
+            let mode: mlua::Table = smelt.get("mode")?;
+            let cycle: mlua::Function = mode.get("cycle")?;
+            cycle.call::<()>(())
+        })();
+        if let Err(e) = result {
+            self.record_error(format!("smelt.mode.cycle: {e}"));
+        }
+    }
+
+    /// Fire `smelt.reasoning.cycle()`. Mirrors `cycle_mode` for the
+    /// Ctrl+T keymap.
+    pub(crate) fn cycle_reasoning(&self) {
+        let result: mlua::Result<()> = (|| {
+            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
+            let reasoning: mlua::Table = smelt.get("reasoning")?;
+            let cycle: mlua::Function = reasoning.get("cycle")?;
+            cycle.call::<()>(())
+        })();
+        if let Err(e) = result {
+            self.record_error(format!("smelt.reasoning.cycle: {e}"));
+        }
+    }
+
     pub(crate) fn record_error(&self, msg: String) {
         // Route through `smelt.notify_error` so tests that override
         // it (`install_test_notify`) capture errors emitted by the
@@ -824,6 +855,10 @@ const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
     (
         "smelt/status.lua",
         include_str!("../../../../runtime/lua/smelt/status.lua"),
+    ),
+    (
+        "smelt/modes.lua",
+        include_str!("../../../../runtime/lua/smelt/modes.lua"),
     ),
 ];
 

@@ -304,11 +304,12 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `plugins/yank_block.lua`          | 12  | Optional `/yank-block`                | kept         | P4    | pending | Stays as opt-in plugin                                             |
 | `colorschemes/default.lua`        | 9   | Default colorscheme (ember accent)    | added        | P4.a  | landed  | Seed (`9bb2f11`); `require`-able as `smelt.colorschemes.default`. Pattern target for plugin-authored schemes. |
 | `status.lua`                      | 170 | Bottom-row statusline composer        | added        | P4.c  | landed  | Bootstrap chunk; registers a `core` source via `smelt.statusline.register` whose handler walks `smelt.statusline.snapshot()` and emits the full segment list (slug pill, vim mode, agent mode, throbber sub-spans, permission/proc/agent indicators, right-aligned position). The Rust `app/status_bar.rs` collapses to a buffer-write shell. |
+| `modes.lua`                       | 32  | Lua-side cycle for mode + reasoning   | added        | P4.f  | landed  | Bootstrap chunk; overrides `smelt.{mode,reasoning}.cycle` over new `cycle_list()` bindings. Rust `cycle_within` / `toggle_mode` / `cycle_reasoning` retire. |
 
 **To be created (P4.a):**
 
 - `widgets/{input,options,list,cmdline,statusline,notification}.lua`
-- `transcript.lua`, `diff.lua`, `modes.lua`, `commands.lua`
+- `transcript.lua`, `diff.lua`, `commands.lua`
 
 **To be created (P5.b) under `tools/`:**
 

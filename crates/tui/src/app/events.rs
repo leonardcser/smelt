@@ -41,11 +41,11 @@ impl TuiApp {
                     .key_context(self.agent.is_some(), false, self.vim_mode);
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
-                        self.toggle_mode();
+                        self.core.lua.cycle_mode();
                         return false;
                     }
                     Some(KeyAction::CycleReasoning) => {
-                        self.cycle_reasoning();
+                        self.core.lua.cycle_reasoning();
                         return false;
                     }
                     Some(KeyAction::Redraw) => {
@@ -557,11 +557,11 @@ impl TuiApp {
                 }
             }
             Action::ToggleMode => {
-                self.toggle_mode();
+                self.core.lua.cycle_mode();
             }
             Action::Redraw => {}
             Action::CycleReasoning => {
-                self.cycle_reasoning();
+                self.core.lua.cycle_reasoning();
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
@@ -585,11 +585,11 @@ impl TuiApp {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
             Action::SubmitEmpty => EventOutcome::Noop,
             Action::ToggleMode => {
-                self.toggle_mode();
+                self.core.lua.cycle_mode();
                 EventOutcome::Redraw
             }
             Action::CycleReasoning => {
-                self.cycle_reasoning();
+                self.core.lua.cycle_reasoning();
                 EventOutcome::Redraw
             }
             Action::EditInEditor => {

@@ -876,11 +876,11 @@ Each builtin lives one-file-per-command under `runtime/lua/smelt/plugins/`
 (or `dialogs/` when it opens a dialog) and self-registers via
 `smelt.cmd.register`. Engine/`tui` no longer has a `RUST_COMMANDS` table.
 
-### P4.f — Modes registry in Lua
+### P4.f — Modes registry in Lua ✅ landed (cycle scope)
 
-`modes.lua` exposes `smelt.modes` — register a mode (name, display,
-keymap-overlay). Existing `mode_cycle` and `reasoning_cycle` flows
-become Lua functions firing the right autocmds via `smelt.au.fire`.
+`modes.lua` (bootstrap chunk) owns `smelt.{mode,reasoning}.cycle`
+over new `cycle_list()` bindings; Rust `cycle_within` /
+`toggle_mode` / `cycle_reasoning` retire. See `P4.md`.
 
 **Tests (L3a):** as each widget reaches its final shape (transcript, diff,
 status, dialogs, picker), add `#[cfg(test)] mod tests` blocks rendering into
