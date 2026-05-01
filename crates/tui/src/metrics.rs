@@ -330,7 +330,7 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
 const KV_GAP: usize = 2;
 
 /// Compute the label column width for a set of lines (max label length + gap).
-pub fn label_col_width(lines: &[StatsLine]) -> usize {
+fn label_col_width(lines: &[StatsLine]) -> usize {
     lines
         .iter()
         .filter_map(|l| match l {
@@ -342,7 +342,7 @@ pub fn label_col_width(lines: &[StatsLine]) -> usize {
         + KV_GAP
 }
 
-pub fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
+fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
     match line {
         StatsLine::Kv { label, value } => {
             let col = label_col.max(label.len() + KV_GAP);
@@ -358,7 +358,7 @@ pub fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
 /// Flatten one `StatsLine` to a plain string. Used by the `/stats` and
 /// `/cost` Lua plugins which render through `smelt.ui.dialog.open` and
 /// need a textual representation rather than the structured variants.
-pub fn stats_line_to_text(line: &StatsLine, label_col: usize) -> String {
+fn stats_line_to_text(line: &StatsLine, label_col: usize) -> String {
     match line {
         StatsLine::Kv { label, value } => {
             let pad = label_col.saturating_sub(label.len());
