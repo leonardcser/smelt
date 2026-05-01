@@ -3,7 +3,7 @@
 -- Opens a 2-option dialog: copy the conversation as markdown to the
 -- clipboard, or write it to a timestamped file in the cwd. Pure Lua
 -- composition over primitives (session metadata, session.messages(),
--- smelt.clipboard, io.open) — the host has no export-specific Rust.
+-- smelt.clipboard.write, io.open) — the host has no export-specific Rust.
 
 local function format_timestamp(ms)
   if ms == nil or ms <= 0 then
@@ -141,7 +141,7 @@ smelt.cmd.register("export", function()
 
     local markdown = format_markdown()
     if result.option_index == 1 then
-      smelt.clipboard(markdown)
+      smelt.clipboard.write(markdown)
       smelt.notify("conversation copied to clipboard")
     elseif result.option_index == 2 then
       local path = default_export_path()
