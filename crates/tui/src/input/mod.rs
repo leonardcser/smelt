@@ -415,7 +415,7 @@ impl PromptState {
     }
 
     /// Build a `KeyContext` snapshot for keymap lookups.
-    pub fn key_context(
+    pub(crate) fn key_context(
         &self,
         agent_running: bool,
         ghost_text_visible: bool,

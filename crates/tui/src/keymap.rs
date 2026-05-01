@@ -13,7 +13,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// The dispatch loop matches on these to perform side effects. Ordering here
 /// doesn't matter — priority comes from the binding list order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyAction {
+pub(crate) enum KeyAction {
     // TuiApp control
     Quit,
     CancelAgent,
@@ -82,12 +82,12 @@ pub enum KeyAction {
 // ── Context ──────────────────────────────────────────────────────────────────
 
 /// Snapshot of app state used for condition matching.
-pub struct KeyContext {
-    pub buf_empty: bool,
-    pub vim_non_insert: bool,
-    pub vim_enabled: bool,
-    pub agent_running: bool,
-    pub ghost_text_visible: bool,
+pub(crate) struct KeyContext {
+    pub(crate) buf_empty: bool,
+    pub(crate) vim_non_insert: bool,
+    pub(crate) vim_enabled: bool,
+    pub(crate) agent_running: bool,
+    pub(crate) ghost_text_visible: bool,
 }
 
 // ── Conditions ───────────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ impl Cond {
 
 /// Builder for binding conditions.
 #[derive(Clone, Copy, Debug)]
-pub struct When {
+pub(crate) struct When {
     buf_empty: Cond,
     vim_non_insert: Cond,
     vim_enabled: Cond,
@@ -478,7 +478,7 @@ static BINDINGS: &[Binding] = &[
 
 /// Look up the first matching action for the given key event and context.
 /// Returns `None` if no binding matches (caller should try vim / char insert).
-pub fn lookup(code: KeyCode, modifiers: KeyModifiers, ctx: &KeyContext) -> Option<KeyAction> {
+pub(crate) fn lookup(code: KeyCode, modifiers: KeyModifiers, ctx: &KeyContext) -> Option<KeyAction> {
     for b in BINDINGS {
         if b.code != code {
             continue;
@@ -512,7 +512,7 @@ pub fn lookup(code: KeyCode, modifiers: KeyModifiers, ctx: &KeyContext) -> Optio
 // ── Help dialog ──────────────────────────────────────────────────────────────
 
 /// Help dialog content sections sourced by the Lua keymap-help binding.
-pub mod hints {
+pub(crate) mod hints {
     // ── Help dialog content ─────────────────────────────────────────
 
     const HELP_PREFIXES: &[(&str, &str)] = &[
@@ -563,7 +563,7 @@ pub mod hints {
     ];
 
     /// Build the help sections for the current mode.
-    pub fn help_sections(
+    pub(crate) fn help_sections(
         vim_enabled: bool,
     ) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
         let mut sections = vec![
