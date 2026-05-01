@@ -2,7 +2,7 @@ use super::{str_arg, Tool, ToolContext, ToolFuture, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub struct MessageAgentTool {
+pub(crate) struct MessageAgentTool {
     pub my_id: String,
     pub my_slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 
 const UNREAD_OVERWRITE_ERR: &str = "File already exists. Use edit_file to modify existing files, or read_file then write_file to replace.";
 
-pub struct WriteFileTool {
+pub(crate) struct WriteFileTool {
     pub files: FileStateCache,
 }
 

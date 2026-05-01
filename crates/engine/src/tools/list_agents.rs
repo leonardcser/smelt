@@ -2,7 +2,7 @@ use super::{Tool, ToolContext, ToolFuture, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub struct ListAgentsTool {
+pub(crate) struct ListAgentsTool {
     pub scope: String,
     pub my_pid: u32,
 }

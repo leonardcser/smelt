@@ -17,7 +17,7 @@ pub const FILE_UNCHANGED_STUB: &str =
      tool_result in this conversation is still current — refer to that \
      instead of re-reading.";
 
-pub struct ReadFileTool {
+pub(crate) struct ReadFileTool {
     pub files: FileStateCache,
 }
 

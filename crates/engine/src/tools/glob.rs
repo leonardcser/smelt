@@ -4,7 +4,7 @@ use ignore::WalkBuilder;
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub struct GlobTool;
+pub(crate) struct GlobTool;
 
 impl Tool for GlobTool {
     fn name(&self) -> &str {

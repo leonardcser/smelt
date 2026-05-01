@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
-pub struct WebSearchTool;
+pub(crate) struct WebSearchTool;
 
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {

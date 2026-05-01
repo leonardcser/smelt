@@ -8,7 +8,7 @@ fn is_default_allowed_pattern(pattern: &str) -> bool {
     crate::permissions::DEFAULT_BASH_ALLOW.contains(&pattern)
 }
 
-pub struct BashTool;
+pub(crate) struct BashTool;
 
 impl Tool for BashTool {
     fn name(&self) -> &str {

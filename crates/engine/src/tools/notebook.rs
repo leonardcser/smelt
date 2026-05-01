@@ -315,7 +315,7 @@ fn render_data_from_snapshots(
 // Editing
 // ---------------------------------------------------------------------------
 
-pub struct NotebookEditTool {
+pub(crate) struct NotebookEditTool {
     pub files: FileStateCache,
 }
 

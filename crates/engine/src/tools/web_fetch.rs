@@ -21,7 +21,7 @@ const IMAGE_TYPES: &[&str] = &[
     "image/tiff",
 ];
 
-pub struct WebFetchTool;
+pub(crate) struct WebFetchTool;
 
 impl Tool for WebFetchTool {
     fn name(&self) -> &str {
