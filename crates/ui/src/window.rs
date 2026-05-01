@@ -399,7 +399,7 @@ impl Window {
     /// across display rows selects as one unit); must be sorted
     /// ascending. Cursor lands at the last char of the selection so
     /// the visual-range render covers the whole word.
-    pub fn select_big_word_at_transparent(
+    fn select_big_word_at_transparent(
         &mut self,
         cpos: usize,
         transparent: &[usize],
@@ -422,7 +422,7 @@ impl Window {
     /// (every `\n`), which would collapse selection to a single
     /// wrapped row for soft-wrapped content. Returns the byte range of
     /// the selected source line.
-    pub fn select_line_at(
+    fn select_line_at(
         &mut self,
         cpos: usize,
         hard_breaks: &[usize],
@@ -925,7 +925,7 @@ impl Window {
         self.follow_tail = self.scroll_top >= max_scroll;
     }
 
-    pub fn jump_to_line_col(
+    fn jump_to_line_col(
         &mut self,
         rows: &[String],
         line_idx: usize,

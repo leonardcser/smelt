@@ -778,16 +778,19 @@ impl Ui {
     /// focusable leaves only. Returns `false` outside a modal —
     /// cross-source (split + overlay-leaf) z-order is gated on the
     /// unified Ui facade.
-    pub fn focus_next(&mut self) -> bool {
+    #[cfg(test)]
+    fn focus_next(&mut self) -> bool {
         self.focus_step(1)
     }
 
     /// Move focus to the previous focusable window. See `focus_next`
     /// for cycling and modal-awareness rules.
-    pub fn focus_prev(&mut self) -> bool {
+    #[cfg(test)]
+    fn focus_prev(&mut self) -> bool {
         self.focus_step(-1)
     }
 
+    #[cfg(test)]
     fn focus_step(&mut self, dir: i32) -> bool {
         let Some(modal_id) = self.active_modal() else {
             return false;
@@ -830,16 +833,15 @@ impl Ui {
 
     /// Latch a gesture target. Call on mouse-down once the host has
     /// decided which target should own the in-flight gesture (e.g.
-    /// scrollbar hit). [`Self::clear_capture`] releases it on
-    /// mouse-up; [`Self::set_layout`] / [`Self::overlay_close`]
-    /// auto-release if the target's owning split or overlay
-    /// disappears.
-    pub fn set_capture(&mut self, target: HitTarget) {
+    /// scrollbar hit). `clear_capture` releases it on mouse-up;
+    /// `set_layout` / `overlay_close` auto-release if the target's
+    /// owning split or overlay disappears.
+    fn set_capture(&mut self, target: HitTarget) {
         self.capture = Some(target);
     }
 
     /// Release the in-flight gesture target. Idempotent.
-    pub fn clear_capture(&mut self) {
+    fn clear_capture(&mut self) {
         self.capture = None;
         self.drag_autoscroll_since = None;
     }
