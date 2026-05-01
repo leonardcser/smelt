@@ -372,7 +372,7 @@ pub fn start(config: EngineConfig) -> EngineHandle {
         None
     };
 
-    let registry = tools::build_tools(processes.clone(), ma_config, config.skills.clone());
+    let registry = tools::build_tools(processes.clone(), ma_config);
 
     let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();

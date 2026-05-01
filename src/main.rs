@@ -363,6 +363,7 @@ async fn main() {
         Arc::new(engine::SkillLoader::load(&extra_paths))
     };
     let tui_skill_section = skill_loader.prompt_section().map(String::from);
+    let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
     let engine_handle = engine::start(engine::EngineConfig {
@@ -480,7 +481,9 @@ async fn main() {
             multi_agent,
             cfg.settings.context_window,
         );
-        let core = tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Subagent);
+        let mut core =
+            tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Subagent);
+        core.skills = Some(tui_skill_loader.clone());
         let sink = tui::app::HeadlessSink::new_subagent(color_mode);
         let mut headless = tui::app::HeadlessApp::new(core, sink);
 
@@ -534,7 +537,9 @@ async fn main() {
             multi_agent,
             cfg.settings.context_window,
         );
-        let core = tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Headless);
+        let mut core =
+            tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Headless);
+        core.skills = Some(tui_skill_loader.clone());
         let sink = tui::app::HeadlessSink::new(output_format, color_mode, args.verbose);
         let mut headless = tui::app::HeadlessApp::new(core, sink);
         headless
@@ -562,6 +567,7 @@ async fn main() {
             startup_auth_error.take(),
         );
         app.core.config.model_config = (&model_config).into();
+        app.core.skills = Some(tui_skill_loader.clone());
         app.extra_instructions = tui_instructions;
         app.skill_section = tui_skill_section;
         if let Some(accent) = cfg_accent {

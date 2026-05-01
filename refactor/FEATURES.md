@@ -67,7 +67,7 @@ to invoke_ the feature.
 | Multi-agent: peek                                             | `engine/tools/peek_agent.rs`                              | P5.b                          | working |
 | Multi-agent: list                                             | `engine/tools/list_agents.rs`                             | P5.b                          | working |
 | MCP servers                                                   | `engine/mcp/`                                             | n/a (kept)                    | working |
-| Skills loader                                                 | `engine/skills.rs` + `tools/load_skill.rs`                | P5.b                          | working |
+| Skills loader                                                 | `engine/skills.rs` + `runtime/lua/smelt/tools/load_skill.lua` | P5.b — `load_skill` Lua-side; loader stays on `Core.skills` for FFI | working |
 
 ## Tools (built-in)
 
@@ -91,7 +91,7 @@ to invoke_ the feature.
 | `message_agent`       | `engine/tools/message_agent.rs`   | P5.b                                                | working |
 | `peek_agent`          | `engine/tools/peek_agent.rs`      | P5.b                                                | working |
 | `stop_agent`          | `engine/tools/stop_agent.rs`      | P5.b                                                | working |
-| `load_skill`          | `engine/tools/load_skill.rs`      | P5.b                                                | working |
+| `load_skill`          | `runtime/lua/smelt/tools/load_skill.lua` | P5.b — landed; composes `smelt.skills.content` over `Core.skills` | working |
 | `exit_plan_mode`      | `plugins/plan_mode.lua`           | P5.b → `tools/exit_plan_mode.lua`                   | working |
 
 ## Slash commands

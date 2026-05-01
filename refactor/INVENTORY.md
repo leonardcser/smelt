@@ -164,6 +164,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `lua/api/session.rs`                      | 180  | `smelt.session.{title,cwd,cost,context_tokens,context_window,id,dir,turns,messages,rewind_to,list,load,delete,created_at_ms,fork,reset}` | added | P3.b | landed | Current-session metadata + persisted-session enumeration / load / delete; `cost` / `context_tokens` / `context_window` / `messages` carved from `smelt.engine` (P4.e). |
 | `lua/api/settings.rs`                     | 42   | `smelt.settings.{snapshot,toggle}` user preferences          | added               | P3.b      | landed  | Mirrors `app.settings_state()` for the `/settings` picker.                                                                    |
 | `lua/api/shell.rs`                        | 45   | `smelt.shell.{split,split_with_ops,check_interactive,check_background_op}` | added | P3.b      | landed  | Pure parsing helpers reused from the core bash tool; consumed by Lua wrappers (background_commands).                          |
+| `lua/api/skills.rs`                       | 53   | `smelt.skills.{content,list}` over `Core.skills` (engine `SkillLoader` clone) | added               | P5.b      | landed  | Backs `runtime/lua/smelt/tools/load_skill.lua`; reads via `try_with_app` like every Host-tier binding.                       |
 | `lua/api/spawn.rs`                        | 26   | `smelt.spawn` — fire-and-forget Lua coroutine                | added               | P3.b      | landed  | Routes through `LuaShared.tasks`.                                                                                            |
 | `lua/api/statusline.rs`                   | 245  | `smelt.statusline.{register,unregister,snapshot}` core composer surface | added | P3.b/P4.c | landed | `register/unregister` write to `LuaShared.statusline_sources`. `snapshot()` (added P4.c) projects the full `TuiApp` state the bottom-row composer consumes (working, throbber, vim, mode, indicators, position, theme colors) into one Lua table per refresh — `runtime/lua/smelt/status.lua` reads it and returns the segment list. |
 | `lua/api/syntax.rs`                       | 31   | `smelt.syntax.render(buf, { content, path })` syntect render | added               | P3.b      | landed  | Reuses `print_syntax_file` + `to_buffer::render_into_buffer`.                                                                 |
@@ -232,14 +233,13 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `provider/sse.rs`              | 48   | SSE parsing                    | kept         | none  | pending |                                                                 |
 | `redact.rs`                    | 922  | Content redaction              | kept         | none  | pending | Privacy/logging                                                 |
 | `registry.rs`                  | 262  | Multi-agent on-disk registry (`RegistryEntry`, agent PIDs/sockets) | moved-to-capability | P5.c  | pending | → `tui::subprocess::registry` (the agent-tracking JSON file Lua tools maintain) |
-| `skills.rs`                    | 213  | Skill loader                   | kept         | P5    | pending | `load_skill` tool wraps this                                    |
+| `skills.rs`                    | 219  | Skill loader                   | kept         | P5    | partial | `pub fn content` + `pub fn names` exposed to tui via `Core.skills` so the Lua `load_skill` tool composes `smelt.skills.content`. `prompt_section()` still feeds engine's system prompt via config. |
 | `socket.rs`                    | 345  | Inter-agent IPC sockets        | moved-to-capability | P3.a/P5.c | pending | → `tui::subprocess::socket` (wire layer for sub-smelt subprocess type)         |
 | `tools/background.rs`          | 228  | Background process registry    | moved-to-capability | P3.a  | pending | → `tui::process` (registry + spawn/group/kill); Lua bash tool registers with it |
 | `tools/bash.rs`                | 355  | Bash tool                      | moved-to-lua | P5.b  | pending | `tools/bash.lua` composes `tui::process`                        |
 | `tools/edit_file.rs`           | 233  | Edit tool                      | moved-to-lua | P5.b  | pending | `tools/edit_file.lua` composes `tui::fs`                        |
 | `tools/file_state.rs`          | 340  | File metadata tracking         | moved-to-capability | P3.a  | pending | → `tui::fs::file_state` (mtime tracking for edit_file race detection)            |
 | `tools/list_agents.rs`         | 90   | List agents tool               | moved-to-lua | P5.b  | pending | `tools/list_agents.lua`                                         |
-| `tools/load_skill.rs`          | 53   | Load skill tool                | moved-to-lua | P5.b  | pending | `tools/load_skill.lua`                                          |
 | `tools/message_agent.rs`       | 98   | Message agent tool             | moved-to-lua | P5.b  | pending | `tools/message_agent.lua`                                       |
 | `tools/mod.rs`                 | 614  | Tool trait + ToolDispatcher trait + ToolResult + ctx  | restructured | P5.a  | partial | Dead methods (`interactive_only` / `modes` / `decide_override`) and the `interactive: bool` arg on `definitions` retired in `9c356d8`. `is_mcp` lifted off the trait into a `ToolEntry { tool, is_mcp }` flag set via `register` / `register_mcp` (`030aecd`). `needs_confirm` / `preflight` / `approval_patterns` collapsed into `evaluate_hooks` (`a26a42e`). `pub(crate) trait ToolDispatcher` (definitions / contains / is_mcp / evaluate_hooks / dispatch) impl'd for `ToolRegistry` (this session) — engine routes every per-call decision through it; `ToolSlot::tool` field retired. Visibility lift to `pub` + `engine::start` injection point ride the next P5.a sub-phase. |
 | `tools/notebook.rs`            | 677  | Notebook tool                  | moved-to-lua | P5.b  | pending | `tools/notebook_edit.lua` over `tui::notebook`                  |
@@ -305,6 +305,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `modes.lua`                       | 32  | Lua-side cycle for mode + reasoning   | added        | P4.f  | landed  | Bootstrap chunk; overrides `smelt.{mode,reasoning}.cycle` over new `cycle_list()` bindings. Rust `cycle_within` / `toggle_mode` / `cycle_reasoning` retire. |
 | `tools/glob.lua`                  | 53  | Built-in `glob` tool                  | added        | P5.b  | landed  | First core-tool migration off engine. `override = true` plugin tool composes `smelt.fs.glob` (globset + ignore::WalkBuilder) and inherits the `needs_confirm` shape from the retired Rust `GlobTool`. |
 | `tools/grep.lua`                  | 175 | Built-in `grep` tool                  | added        | P5.b  | landed  | `override = true` plugin tool over `smelt.grep.run` (ripgrep) with a `smelt.process.run("grep", ...)` fallback. Lua-side `offset` / `head_limit` slicing + stdout+stderr concatenation match the retired Rust `GrepTool`. Schema preserves the `-i` / `-n` / `-A` / `-B` / `-C` / `context` / `multiline` / `output_mode` knobs verbatim. |
+| `tools/load_skill.lua`            | 33  | Built-in `load_skill` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.skills.content` (FFI into the shared `engine::SkillLoader` parked on `Core.skills`). Engine still consumes `prompt_section()` for the system prompt; the `LoadSkillTool` Rust impl retires alongside. |
 
 **To be created (P4.a):**
 
@@ -316,7 +317,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 - `bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
   `web_fetch.lua`, `web_search.lua`, `notebook_edit.lua`,
   `spawn_agent.lua`, `stop_agent.lua`, `message_agent.lua`, `peek_agent.lua`,
-  `list_agents.lua`, `load_skill.lua`, `ask_user_question.lua` (moved from
+  `list_agents.lua`, `ask_user_question.lua` (moved from
   plugins), `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
 
 ## `src/`

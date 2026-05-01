@@ -35,6 +35,7 @@ mod reasoning;
 mod session;
 mod settings;
 mod shell;
+mod skills;
 mod spawn;
 mod statusline;
 mod syntax;
@@ -86,6 +87,7 @@ impl LuaRuntime {
         session::register(lua, &smelt)?;
         process::register(lua, &smelt)?;
         shell::register(lua, &smelt)?;
+        skills::register(lua, &smelt)?;
         agent::register(lua, &smelt)?;
         permissions::register(lua, &smelt)?;
         parse::register(lua, &smelt)?;

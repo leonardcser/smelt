@@ -1,10 +1,8 @@
 pub(crate) mod background;
 mod bash;
 mod edit_file;
-
 mod file_state;
 mod list_agents;
-mod load_skill;
 mod message_agent;
 mod notebook;
 mod peek_agent;
@@ -463,7 +461,6 @@ pub(crate) struct MultiAgentToolConfig {
 pub(crate) fn build_tools(
     _processes: ProcessRegistry,
     ma: Option<MultiAgentToolConfig>,
-    skills: Option<std::sync::Arc<crate::skills::SkillLoader>>,
 ) -> ToolRegistry {
     let files = FileStateCache::new();
     let mut r = ToolRegistry::new();
@@ -482,11 +479,6 @@ pub(crate) fn build_tools(
     r.register(Box::new(NotebookEditTool {
         files: files.clone(),
     }));
-
-    // Skill loader tool (conditionally registered).
-    if let Some(loader) = skills {
-        r.register(Box::new(load_skill::LoadSkillTool { loader }));
-    }
 
     // Multi-agent tools (conditionally registered).
     if let Some(ma) = ma {
