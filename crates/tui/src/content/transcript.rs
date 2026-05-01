@@ -51,34 +51,6 @@ pub struct TranscriptSnapshot {
 }
 
 impl TranscriptSnapshot {
-    /// Viewport-slice the snapshot into visible rows, matching
-    /// `paint_viewport`'s top-anchoring and skip logic.
-    pub fn viewport_rows(&self, viewport_rows: u16, scroll_top: u16) -> Vec<String> {
-        if viewport_rows == 0 {
-            return Vec::new();
-        }
-        let total = self.rows.len().min(u16::MAX as usize) as u16;
-        let geom = super::viewport::ViewportGeom::new(total, viewport_rows, scroll_top);
-        let skip = geom.skip_from_top() as usize;
-
-        let mut out = Vec::with_capacity(viewport_rows as usize);
-        for row in self.rows.iter().skip(skip) {
-            if out.len() >= viewport_rows as usize {
-                break;
-            }
-            out.push(row.clone());
-        }
-        while out.len() < viewport_rows as usize {
-            out.push(String::new());
-        }
-        out
-    }
-
-    /// Total rows in the snapshot.
-    pub fn total_rows(&self) -> u16 {
-        self.rows.len().min(u16::MAX as usize) as u16
-    }
-
     /// Extract copy text from a rectangular range of display cells,
     /// respecting `SpanMeta`. Non-selectable cells are skipped;
     /// `copy_as` substitutions are applied; rows are joined with `\n`.

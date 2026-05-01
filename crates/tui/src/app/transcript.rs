@@ -546,9 +546,7 @@ impl TuiApp {
 
         let total_rows = buf.line_count() as u16;
 
-        let geom =
-            crate::content::viewport::ViewportGeom::new(total_rows, viewport_rows, scroll_top);
-        let clamped_scroll = geom.clamped_scroll();
+        let clamped_scroll = scroll_top.min(total_rows.saturating_sub(viewport_rows));
 
         let layer_w = gutters.layer_width(width as u16);
         let scrollbar_col = match gutters.scrollbar {
