@@ -5,7 +5,7 @@ static UA_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Return a glob pattern that matches all URLs on the same domain.
 /// e.g. "https://docs.rs/foo/bar" -> "https://docs.rs/*"
-pub fn domain_pattern(url: &str) -> Option<String> {
+pub(crate) fn domain_pattern(url: &str) -> Option<String> {
     let parsed = Url::parse(url).ok()?;
     let scheme = parsed.scheme();
     let host = parsed.host_str()?;
@@ -35,7 +35,7 @@ const USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OPR/116.0.0.0",
 ];
 
-pub fn next_user_agent() -> &'static str {
+pub(crate) fn next_user_agent() -> &'static str {
     // 80% round-robin, 20% random
     let idx = UA_COUNTER.fetch_add(1, Ordering::Relaxed);
     if idx.is_multiple_of(5) {
@@ -52,14 +52,14 @@ const SKIP_ELEMENTS: &[&str] = &[
 ];
 
 /// Parse HTML once and extract all content (title, links, body) in a single pass.
-pub struct ParsedHtml {
-    pub title: Option<String>,
-    pub links: Vec<String>,
+pub(crate) struct ParsedHtml {
+    pub(crate) title: Option<String>,
+    pub(crate) links: Vec<String>,
     doc: scraper::Html,
 }
 
 impl ParsedHtml {
-    pub fn parse(html: &str, base_url: Option<&url::Url>) -> Self {
+    pub(crate) fn parse(html: &str, base_url: Option<&url::Url>) -> Self {
         use scraper::{Html, Selector};
         use std::collections::HashSet;
 
@@ -110,7 +110,7 @@ impl ParsedHtml {
     }
 
     /// Convert to markdown, stripping non-content elements in a single pass.
-    pub fn to_markdown(&self) -> String {
+    pub(crate) fn to_markdown(&self) -> String {
         use scraper::Selector;
 
         let body_sel = Selector::parse("body").unwrap();
@@ -126,7 +126,7 @@ impl ParsedHtml {
     }
 
     /// Extract text content, stripping all tags.
-    pub fn to_text(&self) -> String {
+    pub(crate) fn to_text(&self) -> String {
         use scraper::Selector;
 
         let skip = Selector::parse("script, style, noscript, iframe, object, embed, svg").unwrap();
@@ -414,7 +414,7 @@ fn collapse_blank_lines(s: &str) -> String {
 }
 
 /// Truncate output to max lines/bytes, appending a note if truncated.
-pub fn truncate_output(text: &str, max_lines: usize, max_bytes: usize) -> String {
+pub(crate) fn truncate_output(text: &str, max_lines: usize, max_bytes: usize) -> String {
     let mut lines: Vec<&str> = text.lines().collect();
     let mut truncated = false;
 

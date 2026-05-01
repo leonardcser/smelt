@@ -22,7 +22,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-pub fn get(key: &str) -> Option<String> {
+pub(crate) fn get(key: &str) -> Option<String> {
     let path = key_path(key);
     let contents = std::fs::read_to_string(&path).ok()?;
     let (first_line, rest) = contents.split_once('\n')?;
@@ -34,11 +34,11 @@ pub fn get(key: &str) -> Option<String> {
     Some(rest.to_string())
 }
 
-pub fn put(key: &str, value: &str) {
+pub(crate) fn put(key: &str, value: &str) {
     put_with_ttl(key, value, DEFAULT_TTL);
 }
 
-pub fn put_with_ttl(key: &str, value: &str, ttl: Duration) {
+pub(crate) fn put_with_ttl(key: &str, value: &str, ttl: Duration) {
     let dir = cache_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = key_path(key);

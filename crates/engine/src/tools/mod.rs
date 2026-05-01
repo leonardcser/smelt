@@ -69,14 +69,14 @@ pub(crate) use web_search::WebSearchTool;
 pub(crate) use write_file::WriteFileTool;
 
 pub(crate) struct ToolResult {
-    pub content: String,
-    pub is_error: bool,
+    pub(crate) content: String,
+    pub(crate) is_error: bool,
     /// Structured metadata passed through to ToolOutcome for machine-readable data.
-    pub metadata: Option<serde_json::Value>,
+    pub(crate) metadata: Option<serde_json::Value>,
 }
 
 impl ToolResult {
-    pub fn ok(content: impl Into<String>) -> Self {
+    pub(crate) fn ok(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
             is_error: false,
@@ -84,7 +84,7 @@ impl ToolResult {
         }
     }
 
-    pub fn err(content: impl Into<String>) -> Self {
+    pub(crate) fn err(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
             is_error: true,
@@ -92,7 +92,7 @@ impl ToolResult {
         }
     }
 
-    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+    pub(crate) fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
