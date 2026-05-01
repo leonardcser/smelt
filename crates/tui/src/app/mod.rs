@@ -133,7 +133,7 @@ pub struct TuiApp {
     pub(crate) input: PromptState,
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
     exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
-    pub queued_messages: Vec<String>,
+    pub(crate) queued_messages: Vec<String>,
     /// Agent messages waiting to trigger a turn.
     pending_agent_messages: Vec<protocol::Message>,
     /// Runtime approvals shared with the engine. The engine checks these
@@ -144,9 +144,9 @@ pub struct TuiApp {
     pub(crate) cwd: String,
     pub shared_session: Arc<Mutex<Option<Session>>>,
     /// Short task label (slug) shown on the status bar after the throbber.
-    pub task_label: Option<String>,
+    pub(crate) task_label: Option<String>,
     /// A permission dialog is waiting for the user to stop typing.
-    pub pending_dialog: bool,
+    pub(crate) pending_dialog: bool,
     /// Set by reducer handlers (e.g. `DomainOp::RunCommand` dispatching
     /// `/quit`) to request the main loop break out on its next check.
     pub(crate) pending_quit: bool,
@@ -163,18 +163,18 @@ pub struct TuiApp {
     /// visible. Dismissed on any key (see `handle_overlay_keys`).
     /// `None` when no toast. Closing the leaf via `close_overlay_leaf`
     /// cascades through `overlay_close` to remove the overlay.
-    pub notification: Option<ui::WinId>,
+    pub(crate) notification: Option<ui::WinId>,
     /// Persistent `:` history across open/close cycles. Most-recent
     /// at the back; submit appends (dedup'd against the previous
     /// entry).
-    pub cmdline_history: Vec<String>,
+    pub(crate) cmdline_history: Vec<String>,
     /// Index into `cmdline_history` while the user is browsing with
     /// Up/Down. `None` when not browsing.
-    pub cmdline_history_browse: Option<usize>,
+    pub(crate) cmdline_history_browse: Option<usize>,
     /// Snapshot of the cmdline payload at the moment the user started
     /// history browsing. Restored when Down past the most-recent
     /// entry returns to "live" input.
-    pub cmdline_history_stash: String,
+    pub(crate) cmdline_history_stash: String,
     /// Shared completer instance for `:` command completion. Lazily
     /// constructed on first Tab press (it queries Lua command names),
     /// dropped on cmdline close or any text mutation that invalidates
@@ -190,7 +190,7 @@ pub struct TuiApp {
     /// Terminal focus (FocusGained / FocusLost). Cursor is suppressed
     /// when the terminal isn't focused, so input from other apps
     /// doesn't draw a stale cursor in our window.
-    pub term_focused: bool,
+    pub(crate) term_focused: bool,
     /// Live-turn + last-turn state driving the status bar spinner and
     /// result line. `begin(TurnPhase::...)` / `finish(TurnOutcome::...)`
     /// are the write paths, mirrored from engine lifecycle events.
@@ -240,31 +240,31 @@ pub struct TuiApp {
     /// Readonly pane showing the transcript. Owns its `Buffer`
     /// (vim + kill ring + undo) and the viewport scroll / cursor
     /// position.
-    pub transcript_window: ui::Window,
+    pub(crate) transcript_window: ui::Window,
     /// Last prompt-buffer text we dispatched a `TextChanged` event for.
     /// After each event, if `input.buf` differs from this, we fire
     /// `WinEvent::TextChanged` on `PROMPT_WIN` so Lua subscribers
     /// (`smelt.win.on_event(prompt, "text_changed", …)`) get called.
-    pub last_prompt_text: String,
+    pub(crate) last_prompt_text: String,
     /// Prompt vim mode at the start of a mouse-drag. Set on mouse-down
     /// inside the prompt viewport (only when vim is enabled) before the
     /// drag enters `Visual`, restored on mouse-up so a drag from Insert
     /// lands the user back in Insert rather than Normal. `None` outside
     /// an active prompt drag.
-    pub prompt_drag_return_vim_mode: Option<ui::VimMode>,
+    pub(crate) prompt_drag_return_vim_mode: Option<ui::VimMode>,
     /// **Single global** vim mode — the one source of truth read by
     /// status bar, lua_bridge, and `smelt.vim.mode`. Vim dispatch
     /// (Window / PromptState) writes through `&mut` references threaded
     /// via `VimContext.mode` and `MouseCtx.vim_mode`. Defaults to
     /// `Insert`, matching the historical default.
-    pub vim_mode: ui::VimMode,
+    pub(crate) vim_mode: ui::VimMode,
     /// Extra instructions from AGENTS.md / config, injected into the system
     /// prompt as a section. Set during app initialization.
     pub extra_instructions: Option<String>,
     /// Pre-rendered skills prompt section. Set during app initialization.
     pub skill_section: Option<String>,
     /// Multi-agent prompt config (agent identity, parent, siblings).
-    pub agent_prompt_config: Option<engine::AgentPromptConfig>,
+    pub(crate) agent_prompt_config: Option<engine::AgentPromptConfig>,
     /// Prompt sections built from app state. Rebuilt on mode changes.
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
