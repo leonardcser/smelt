@@ -266,7 +266,7 @@ pub struct TuiApp {
     /// Multi-agent prompt config (agent identity, parent, siblings).
     pub agent_prompt_config: Option<engine::AgentPromptConfig>,
     /// Prompt sections built from app state. Rebuilt on mode changes.
-    pub prompt_sections: crate::prompt_sections::PromptSections,
+    pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
     /// `WinId`s of the well-known split-tree surfaces. The matching
     /// `Buffer`s are reached via `Ui::win_buf_mut`.
