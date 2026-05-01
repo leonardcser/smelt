@@ -1001,6 +1001,14 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.stop_agent",
         include_str!("../../../../runtime/lua/smelt/tools/stop_agent.lua"),
     ),
+    (
+        "smelt.tools.peek_agent",
+        include_str!("../../../../runtime/lua/smelt/tools/peek_agent.lua"),
+    ),
+    (
+        "smelt.tools.message_agent",
+        include_str!("../../../../runtime/lua/smelt/tools/message_agent.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1034,6 +1042,8 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.load_skill",
     "smelt.tools.list_agents",
     "smelt.tools.stop_agent",
+    "smelt.tools.peek_agent",
+    "smelt.tools.message_agent",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

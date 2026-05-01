@@ -150,9 +150,6 @@ pub struct MultiAgentConfig {
     pub max_depth: u8,
     pub max_agents: u8,
     pub parent_pid: Option<u32>,
-    /// Optional preselected agent ID for interactive root agents.
-    /// When provided, engine tools use this exact identity.
-    pub agent_id: Option<String>,
 }
 
 /// API connection and model configuration, grouped for clarity.
@@ -343,24 +340,12 @@ pub fn start(config: EngineConfig) -> EngineHandle {
     let ma_config = if let Some(ref ma) = config.multi_agent {
         let scope = config.cwd.to_string_lossy().into_owned();
         let my_pid = std::process::id();
-        // Subagents: read the pre-registered agent_id from the registry.
-        // Interactive sessions: generate a unique ID.
-        let agent_id = if ma.depth > 0 {
-            registry::read_entry(my_pid)
-                .ok()
-                .map(|e| e.agent_id)
-                .unwrap_or_else(registry::next_agent_id)
-        } else {
-            ma.agent_id.clone().unwrap_or_else(registry::next_agent_id)
-        };
         Some(tools::MultiAgentToolConfig {
             scope,
             pid: my_pid,
-            agent_id,
             depth: ma.depth,
             max_depth: ma.max_depth,
             max_agents: ma.max_agents,
-            slug: std::sync::Arc::new(std::sync::Mutex::new(None)),
             api_base: config.api.base.clone(),
             api_key_env: config.api.key_env.clone(),
             model: config.api.model_config.name.clone().unwrap_or_default(),

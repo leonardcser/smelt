@@ -86,8 +86,59 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             row.set("git_branch", e.git_branch.unwrap_or_default())?;
             row.set("depth", e.depth)?;
             row.set("started_at", e.started_at)?;
+            row.set("socket_path", e.socket_path)?;
             Ok(LuaValue::Table(row))
         })?,
+    )?;
+    agent_tbl.set(
+        "my_id",
+        lua.create_function(|_, ()| {
+            let pid = std::process::id();
+            Ok(engine::registry::read_entry(pid)
+                .map(|e| e.agent_id)
+                .unwrap_or_default())
+        })?,
+    )?;
+    agent_tbl.set(
+        "my_slug",
+        lua.create_function(|_, ()| {
+            let pid = std::process::id();
+            Ok(engine::registry::read_entry(pid)
+                .ok()
+                .and_then(|e| e.task_slug)
+                .unwrap_or_default())
+        })?,
+    )?;
+    agent_tbl.set(
+        "send_message",
+        lua.create_function(
+            |lua, (socket_path, from_id, from_slug, message): (String, String, String, String)| {
+                match engine::socket::send_message_blocking(
+                    std::path::Path::new(&socket_path),
+                    &from_id,
+                    &from_slug,
+                    &message,
+                ) {
+                    Ok(()) => Ok((true, LuaNil)),
+                    Err(e) => Ok((false, LuaValue::String(lua.create_string(&e)?))),
+                }
+            },
+        )?,
+    )?;
+    agent_tbl.set(
+        "send_query",
+        lua.create_function(
+            |lua, (socket_path, from_id, question): (String, String, String)| {
+                match engine::socket::send_query_blocking(
+                    std::path::Path::new(&socket_path),
+                    &from_id,
+                    &question,
+                ) {
+                    Ok(answer) => Ok((LuaValue::String(lua.create_string(&answer)?), LuaNil)),
+                    Err(e) => Ok((LuaNil, LuaValue::String(lua.create_string(&e)?))),
+                }
+            },
+        )?,
     )?;
     agent_tbl.set(
         "is_in_tree",

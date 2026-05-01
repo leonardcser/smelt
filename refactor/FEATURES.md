@@ -63,8 +63,8 @@ to invoke_ the feature.
 | Input stash (Ctrl+S)                                          | `input/mod.rs`                                            | P1/P4                         | working |
 | Multi-agent: spawn                                            | `engine/tools/spawn_agent.rs`                             | P5.b                          | working |
 | Multi-agent: stop                                             | `runtime/lua/smelt/tools/stop_agent.lua`                  | P5.b — landed; composes `smelt.agent.{find_by_id,is_in_tree,kill}` | working |
-| Multi-agent: message                                          | `engine/tools/message_agent.rs`                           | P5.b                          | working |
-| Multi-agent: peek                                             | `engine/tools/peek_agent.rs`                              | P5.b                          | working |
+| Multi-agent: message                                          | `runtime/lua/smelt/tools/message_agent.lua`               | P5.b — landed; composes `smelt.agent.send_message` | working |
+| Multi-agent: peek                                             | `runtime/lua/smelt/tools/peek_agent.lua`                  | P5.b — landed; composes `smelt.agent.send_query` | working |
 | Multi-agent: list                                             | `runtime/lua/smelt/tools/list_agents.lua`                 | P5.b — landed; composes `smelt.agent.discover()` | working |
 | MCP servers                                                   | `engine/mcp/`                                             | n/a (kept)                    | working |
 | Skills loader                                                 | `engine/skills.rs` + `runtime/lua/smelt/tools/load_skill.lua` | P5.b — `load_skill` Lua-side; loader stays on `Core.skills` for FFI | working |
@@ -88,8 +88,8 @@ to invoke_ the feature.
 | `ask_user_question`   | `plugins/ask_user_question.lua`   | P5.b → `tools/ask_user_question.lua`                | working |
 | `spawn_agent`         | `engine/tools/spawn_agent.rs`     | P5.b                                                | working |
 | `list_agents`         | `runtime/lua/smelt/tools/list_agents.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
-| `message_agent`       | `engine/tools/message_agent.rs`   | P5.b                                                | working |
-| `peek_agent`          | `engine/tools/peek_agent.rs`      | P5.b                                                | working |
+| `message_agent`       | `runtime/lua/smelt/tools/message_agent.lua` | P5.b — landed; composes `smelt.agent.send_message` over `engine::socket::send_message_blocking` | working |
+| `peek_agent`          | `runtime/lua/smelt/tools/peek_agent.lua`    | P5.b — landed; composes `smelt.agent.send_query` over `engine::socket::send_query_blocking` | working |
 | `stop_agent`          | `runtime/lua/smelt/tools/stop_agent.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
 | `load_skill`          | `runtime/lua/smelt/tools/load_skill.lua` | P5.b — landed; composes `smelt.skills.content` over `Core.skills` | working |
 | `exit_plan_mode`      | `plugins/plan_mode.lua`           | P5.b → `tools/exit_plan_mode.lua`                   | working |

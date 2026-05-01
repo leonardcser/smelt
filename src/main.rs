@@ -387,7 +387,6 @@ async fn main() {
                 max_depth: args.max_agent_depth,
                 max_agents: args.max_agents,
                 parent_pid: args.parent_pid,
-                agent_id: planned_agent_id.clone(),
             })
         } else {
             None

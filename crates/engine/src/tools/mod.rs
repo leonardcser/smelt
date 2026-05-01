@@ -2,9 +2,7 @@ pub(crate) mod background;
 mod bash;
 mod edit_file;
 mod file_state;
-mod message_agent;
 mod notebook;
-mod peek_agent;
 mod read_file;
 pub(crate) mod result_dedup;
 mod spawn_agent;
@@ -439,12 +437,9 @@ pub struct SpawnedChild {
 pub(crate) struct MultiAgentToolConfig {
     pub(crate) scope: String,
     pub(crate) pid: u32,
-    pub(crate) agent_id: String,
     pub(crate) depth: u8,
     pub(crate) max_depth: u8,
     pub(crate) max_agents: u8,
-    /// Shared mutable slug — updated by title generation, read by message_agent.
-    pub(crate) slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// API config for spawned subagents.
     pub(crate) api_base: String,
     pub(crate) api_key_env: String,
@@ -478,17 +473,10 @@ pub(crate) fn build_tools(
         files: files.clone(),
     }));
 
-    // Multi-agent tools (conditionally registered). `list_agents` lives
-    // in `runtime/lua/smelt/tools/list_agents.lua` now (gated by
-    // `smelt.engine.multi_agent()`).
+    // Multi-agent tools (conditionally registered). `list_agents`,
+    // `message_agent`, and `peek_agent` all live in
+    // `runtime/lua/smelt/tools/*.lua` (gated by `smelt.engine.multi_agent()`).
     if let Some(ma) = ma {
-        r.register(Box::new(message_agent::MessageAgentTool {
-            my_id: ma.agent_id.clone(),
-            my_slug: ma.slug,
-        }));
-        r.register(Box::new(peek_agent::PeekAgentTool {
-            my_id: ma.agent_id.clone(),
-        }));
         if ma.depth < ma.max_depth {
             r.register(Box::new(spawn_agent::SpawnAgentTool {
                 scope: ma.scope.clone(),

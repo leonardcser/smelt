@@ -284,7 +284,7 @@ pub async fn send_message(
 }
 
 /// Send a query to a target agent and wait for the answer.
-pub(crate) async fn send_query(
+pub async fn send_query(
     socket_path: &Path,
     from_id: &str,
     question: &str,
@@ -334,6 +334,36 @@ pub async fn send_permission_check(
         }
         _ => Err("unexpected response type".into()),
     }
+}
+
+/// Blocking wrapper around [`send_message`] for sync callers running
+/// inside a multi-threaded tokio runtime.
+pub fn send_message_blocking(
+    socket_path: &Path,
+    from_id: &str,
+    from_slug: &str,
+    message: &str,
+) -> Result<(), String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(send_message(
+            socket_path,
+            from_id,
+            from_slug,
+            message,
+        ))
+    })
+}
+
+/// Blocking wrapper around [`send_query`] for sync callers running
+/// inside a multi-threaded tokio runtime.
+pub fn send_query_blocking(
+    socket_path: &Path,
+    from_id: &str,
+    question: &str,
+) -> Result<String, String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(send_query(socket_path, from_id, question))
+    })
 }
 
 /// Clean up the socket file for this PID.
