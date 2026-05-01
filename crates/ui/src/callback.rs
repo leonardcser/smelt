@@ -119,7 +119,7 @@ pub struct LuaHandle(pub u64);
 /// Rust-side callback closure. Boxed `FnMut` with full mutable
 /// access to `Ui` via the ctx, plus the shared `actions` buffer
 /// for app-level effects.
-pub type RustCallback = Box<dyn FnMut(&mut CallbackCtx<'_>) -> CallbackResult>;
+pub(crate) type RustCallback = Box<dyn FnMut(&mut CallbackCtx<'_>) -> CallbackResult>;
 
 /// A callback is either a Rust closure or a Lua handle. Both share
 /// the same (WinId, KeyBind/WinEvent) registry and dispatch path.

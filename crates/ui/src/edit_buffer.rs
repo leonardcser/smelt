@@ -41,7 +41,7 @@ impl EditBuffer {
     }
 
     /// A new empty readonly buffer (undo disabled).
-    pub fn readonly() -> Self {
+    pub(crate) fn readonly() -> Self {
         Self {
             buf: String::new(),
             attachment_ids: Vec::new(),
@@ -56,7 +56,8 @@ impl EditBuffer {
     /// break (exclusive) and the next hard break (exclusive), or the
     /// buffer start/end. The returned range does not include the
     /// trailing `\n`.
-    pub fn line_range_at(&self, pos: usize, hard_breaks: &[usize]) -> Option<(usize, usize)> {
+    #[cfg(test)]
+    fn line_range_at(&self, pos: usize, hard_breaks: &[usize]) -> Option<(usize, usize)> {
         line_range_at(&self.buf, pos, hard_breaks)
     }
 }
@@ -150,8 +151,17 @@ where
     Some((start, end))
 }
 
-/// Standalone version of [`EditBuffer::line_range_at`].
-pub fn line_range_at(buf: &str, pos: usize, hard_breaks: &[usize]) -> Option<(usize, usize)> {
+/// Source-line range at `pos`. `hard_breaks` lists byte positions of
+/// `\n` characters that are "real" line breaks (i.e. not soft-wrap
+/// continuations). Returns the span bounded by the previous hard
+/// break (exclusive) and the next hard break (exclusive), or the
+/// buffer start/end. The returned range does not include the
+/// trailing `\n`.
+pub(crate) fn line_range_at(
+    buf: &str,
+    pos: usize,
+    hard_breaks: &[usize],
+) -> Option<(usize, usize)> {
     if buf.is_empty() {
         return None;
     }
