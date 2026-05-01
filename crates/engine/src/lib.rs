@@ -62,16 +62,6 @@ pub struct PromptContext<'a> {
     pub extra_instructions: Option<&'a str>,
 }
 
-/// Assemble the system prompt from the base template, mode overlay, cwd, and
-/// optional extra instructions (e.g. from AGENTS.md files).
-pub fn build_system_prompt(
-    mode: protocol::Mode,
-    cwd: &std::path::Path,
-    extra_instructions: Option<&str>,
-) -> String {
-    build_system_prompt_full(mode, cwd, extra_instructions, None, None, true)
-}
-
 pub fn build_system_prompt_full(
     mode: protocol::Mode,
     cwd: &std::path::Path,
@@ -92,7 +82,7 @@ pub fn build_system_prompt_full(
 }
 
 /// Render the system prompt template with the given context.
-pub fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
+fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
     let template_src = include_str!("prompts/system.txt");
     let env = minijinja::Environment::new();
     let template = env
@@ -291,13 +281,6 @@ impl EngineHandle {
             agent_id,
             exit_code,
         });
-    }
-
-    /// Notify blocking `spawn_agent` calls that an agent message arrived.
-    pub fn notify_agent_message(&self, notif: tools::AgentMessageNotification) {
-        if let Some(ref tx) = self.agent_msg_tx {
-            let _ = tx.send(notif);
-        }
     }
 
     /// Drain spawned child handles (stdout pipes for subagent streaming).

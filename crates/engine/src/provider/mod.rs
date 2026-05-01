@@ -60,7 +60,7 @@ pub(crate) struct ParsedResponse {
 }
 
 impl ParsedResponse {
-    pub fn into_response(self, tokens_per_sec: Option<f64>) -> LLMResponse {
+    pub(crate) fn into_response(self, tokens_per_sec: Option<f64>) -> LLMResponse {
         LLMResponse {
             content: self.content,
             reasoning_content: self.reasoning,
@@ -359,11 +359,6 @@ impl<'a> ChatOptions<'a> {
             on_delta: None,
             response_format: None,
         }
-    }
-
-    pub fn with_response_format(mut self, fmt: ResponseFormat) -> Self {
-        self.response_format = Some(fmt);
-        self
     }
 }
 

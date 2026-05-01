@@ -104,7 +104,7 @@ fn client_id() -> String {
 /// Extract the Copilot API base URL from the `proxy-ep=` claim in a Copilot
 /// token. Token format:
 /// `tid=...;exp=...;proxy-ep=proxy.individual.githubcopilot.com;...`
-pub fn base_url_from_token(token: &str) -> Option<String> {
+fn base_url_from_token(token: &str) -> Option<String> {
     let proxy_host = token
         .split(';')
         .find_map(|kv| kv.strip_prefix("proxy-ep="))?;
