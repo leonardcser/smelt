@@ -93,7 +93,12 @@ impl RuntimeApprovals {
     /// description against patterns.
     ///
     /// Returns `true` if the tool call should be auto-approved.
-    pub(crate) fn is_approved(&self, tool_name: &str, desc: &str, config_bash: Option<&RuleSet>) -> bool {
+    pub(crate) fn is_approved(
+        &self,
+        tool_name: &str,
+        desc: &str,
+        config_bash: Option<&RuleSet>,
+    ) -> bool {
         let session = self.session_tools.get(tool_name);
         let workspace = self.workspace_tools.get(tool_name);
 

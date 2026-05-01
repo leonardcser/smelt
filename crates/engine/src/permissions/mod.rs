@@ -21,8 +21,8 @@ mod tests;
 pub use approvals::RuntimeApprovals;
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use rules::Decision;
-pub(crate) use rules::DEFAULT_BASH_ALLOW;
 use rules::RuleSet;
+pub(crate) use rules::DEFAULT_BASH_ALLOW;
 
 use crate::tools::str_arg;
 use bash::{has_output_redirection, is_cd_command};
@@ -133,7 +133,12 @@ impl Permissions {
         perms.tools.get(tool_name).cloned().unwrap_or(default)
     }
 
-    pub(crate) fn check_tool_pattern(&self, mode: Mode, tool_name: &str, pattern: &str) -> Decision {
+    pub(crate) fn check_tool_pattern(
+        &self,
+        mode: Mode,
+        tool_name: &str,
+        pattern: &str,
+    ) -> Decision {
         let perms = self.mode_perms(mode);
         let ruleset = match tool_name {
             "web_fetch" => &perms.web_fetch,
