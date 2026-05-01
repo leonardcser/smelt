@@ -260,19 +260,6 @@ impl<'a> GridSlice<'a> {
     pub fn clear(&mut self) {
         self.grid.clear(self.area);
     }
-
-    pub fn sub_slice(&mut self, area: Rect) -> GridSlice<'_> {
-        let abs = Rect::new(
-            self.area.top + area.top.min(self.area.height),
-            self.area.left + area.left.min(self.area.width),
-            area.width.min(self.area.width.saturating_sub(area.left)),
-            area.height.min(self.area.height.saturating_sub(area.top)),
-        );
-        GridSlice {
-            grid: self.grid,
-            area: abs,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -368,17 +355,6 @@ mod tests {
         slice.put_str(0, 0, "hello world", Style::default());
         assert_eq!(grid.cell(2, 0).symbol, 'l');
         assert_eq!(grid.cell(3, 0).symbol, ' ');
-    }
-
-    #[test]
-    fn sub_slice_offsets_compound() {
-        let mut grid = Grid::new(20, 10);
-        let mut slice = grid.slice_mut(Rect::new(2, 3, 10, 6));
-        {
-            let mut sub = slice.sub_slice(Rect::new(1, 1, 4, 3));
-            sub.set(0, 0, 'X', Style::default());
-        }
-        assert_eq!(grid.cell(4, 3).symbol, 'X');
     }
 
     #[test]

@@ -50,40 +50,6 @@ impl EditBuffer {
         }
     }
 
-    /// Find word boundaries around the given byte offset inside `buf`.
-    /// A word is a contiguous run of alphanumeric characters plus `_`.
-    /// Returns `(start, end)` byte offsets, or `None` if the position
-    /// is in whitespace / out of bounds.
-    pub fn word_range_at(&self, pos: usize) -> Option<(usize, usize)> {
-        word_range_at(&self.buf, pos)
-    }
-
-    /// Like `word_range_at` but treats byte positions listed in
-    /// `transparent` as if they were word characters during the walk.
-    /// Used to cross soft-wrap `\n` boundaries so a word split by a
-    /// display wrap still selects as one unit. `transparent` must be
-    /// sorted ascending. Leading/trailing transparent bytes are
-    /// trimmed from the returned range.
-    pub fn word_range_at_transparent(
-        &self,
-        pos: usize,
-        transparent: &[usize],
-    ) -> Option<(usize, usize)> {
-        word_range_at_transparent(&self.buf, pos, transparent)
-    }
-
-    /// Vim "WORD" (capital W) variant of [`Self::word_range_at_transparent`]:
-    /// a token is any contiguous run of non-whitespace characters,
-    /// punctuation included. Used by the transcript double-click
-    /// selector so e.g. `foo.bar(baz)` selects as one unit.
-    pub fn big_word_range_at_transparent(
-        &self,
-        pos: usize,
-        transparent: &[usize],
-    ) -> Option<(usize, usize)> {
-        big_word_range_at_transparent(&self.buf, pos, transparent)
-    }
-
     /// Source-line range at `pos`. `hard_breaks` lists byte positions of
     /// `\n` characters that are "real" line breaks (i.e. not soft-wrap
     /// continuations). Returns the span bounded by the previous hard
@@ -95,17 +61,14 @@ impl EditBuffer {
     }
 }
 
-/// Standalone version of [`EditBuffer::word_range_at`] that operates on
-/// any `&str`. Window's mouse helpers use this against
-/// `rows.join("\n")` so they don't need `self.edit_buf.buf` to match —
-/// the prompt's `edit_buf.buf` is the source buffer (≠ wrapped display
-/// rows), so a `self`-bound method couldn't be reused there.
-pub fn word_range_at(buf: &str, pos: usize) -> Option<(usize, usize)> {
-    word_range_at_transparent(buf, pos, &[])
-}
-
-/// Like [`word_range_at`] but treats byte positions listed in
-/// `transparent` as if they were word characters during the walk.
+/// Find word boundaries around the given byte offset inside `buf`.
+/// A word is a contiguous run of alphanumeric characters plus `_`.
+/// `transparent` lists byte positions that are treated as if they
+/// were word characters during the walk — used to cross soft-wrap
+/// `\n` boundaries so a word split by a display wrap still selects
+/// as one unit. `transparent` must be sorted ascending.
+/// Leading/trailing transparent bytes are trimmed from the returned
+/// range. Returns `None` if `pos` is in whitespace / out of bounds.
 pub fn word_range_at_transparent(
     buf: &str,
     pos: usize,
@@ -237,19 +200,21 @@ mod tests {
 
     #[test]
     fn word_range_at_plain() {
-        let b = buf("hello world");
-        assert_eq!(b.word_range_at(0), Some((0, 5)));
-        assert_eq!(b.word_range_at(4), Some((0, 5)));
-        assert_eq!(b.word_range_at(6), Some((6, 11)));
-        assert_eq!(b.word_range_at(5), None); // on the space
+        let s = "hello world";
+        assert_eq!(word_range_at_transparent(s, 0, &[]), Some((0, 5)));
+        assert_eq!(word_range_at_transparent(s, 4, &[]), Some((0, 5)));
+        assert_eq!(word_range_at_transparent(s, 6, &[]), Some((6, 11)));
+        assert_eq!(word_range_at_transparent(s, 5, &[]), None); // on the space
     }
 
     #[test]
     fn word_range_at_treats_newline_as_non_word() {
         // Baseline: walk stops at '\n', so clicking on "world" only
         // selects "world", not "hello\nworld".
-        let b = buf("hello\nworld");
-        assert_eq!(b.word_range_at(6), Some((6, 11)));
+        assert_eq!(
+            word_range_at_transparent("hello\nworld", 6, &[]),
+            Some((6, 11))
+        );
     }
 
     #[test]
@@ -257,12 +222,12 @@ mod tests {
         // "verylong" was soft-wrapped as "very\nlong". The \n at byte 4
         // is a soft-wrap — treat as transparent → whole "verylong"
         // selects regardless of which side was clicked.
-        let b = buf("very\nlong");
+        let s = "very\nlong";
         let transparent = [4usize];
-        assert_eq!(b.word_range_at_transparent(0, &transparent), Some((0, 9)));
-        assert_eq!(b.word_range_at_transparent(5, &transparent), Some((0, 9)));
+        assert_eq!(word_range_at_transparent(s, 0, &transparent), Some((0, 9)));
+        assert_eq!(word_range_at_transparent(s, 5, &transparent), Some((0, 9)));
         // Click on the transparent \n itself → still selects the word.
-        assert_eq!(b.word_range_at_transparent(4, &transparent), Some((0, 9)));
+        assert_eq!(word_range_at_transparent(s, 4, &transparent), Some((0, 9)));
     }
 
     #[test]
@@ -271,15 +236,14 @@ mod tests {
         // on "end" should return [0, 3) — the trailing transparent \n
         // is trimmed because nothing word-like followed it in the
         // extended walk (the hard \n stops forward walk before "rest").
-        let b = buf("end\n\nrest");
+        let s = "end\n\nrest";
         let transparent = [3usize]; // first \n is soft
-        assert_eq!(b.word_range_at_transparent(0, &transparent), Some((0, 3)));
+        assert_eq!(word_range_at_transparent(s, 0, &transparent), Some((0, 3)));
     }
 
     #[test]
     fn word_range_at_transparent_returns_none_on_punctuation() {
-        let b = buf("a, b");
-        assert_eq!(b.word_range_at_transparent(1, &[]), None);
+        assert_eq!(word_range_at_transparent("a, b", 1, &[]), None);
     }
 
     #[test]

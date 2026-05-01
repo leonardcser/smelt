@@ -149,27 +149,6 @@ pub struct Extmark {
     pub end_row: usize,
     pub end_col: usize,
     pub payload: ExtmarkPayload,
-    /// How `Buffer::yank_text_for_range` should treat the bytes this
-    /// extmark covers when yanking. `None` = use literal source text.
-    /// `Empty` = elide (drop) the bytes — used for hidden-thinking
-    /// blocks that render as content but shouldn't appear in copies.
-    /// `Static(s)` = substitute the bytes with `s` — used for
-    /// attachment sigils that render as a glyph but yank as the
-    /// expanded path.
-    pub yank: Option<YankSubst>,
-}
-
-/// How an extmark's covered bytes should be substituted when yanking
-/// (`Buffer::yank_text_for_range`). Mirrors the per-cell `copy_as`
-/// behaviour at the extmark level: one substitution per intersecting
-/// extmark, not per-cell.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum YankSubst {
-    /// Drop the covered bytes entirely.
-    Empty,
-    /// Replace the covered bytes with `s` (verbatim, no per-cell
-    /// repetition).
-    Static(String),
 }
 
 /// Payload carried by an extmark. Each variant maps onto one of the
@@ -195,7 +174,6 @@ pub struct ExtmarkOpts {
     pub end_row: Option<usize>,
     pub end_col: Option<usize>,
     pub payload: ExtmarkPayload,
-    pub yank: Option<YankSubst>,
 }
 
 impl ExtmarkOpts {
@@ -204,7 +182,6 @@ impl ExtmarkOpts {
             end_row: None,
             end_col: Some(end_col),
             payload: ExtmarkPayload::Highlight { style, meta },
-            yank: None,
         }
     }
 
@@ -213,7 +190,6 @@ impl ExtmarkOpts {
             end_row: None,
             end_col: None,
             payload: ExtmarkPayload::Decoration(dec),
-            yank: None,
         }
     }
 
@@ -222,14 +198,7 @@ impl ExtmarkOpts {
             end_row: None,
             end_col: None,
             payload: ExtmarkPayload::VirtText { text, hl_group },
-            yank: None,
         }
-    }
-
-    /// Builder: attach a yank substitution to this extmark.
-    pub fn with_yank(mut self, yank: YankSubst) -> Self {
-        self.yank = Some(yank);
-        self
     }
 }
 
@@ -487,144 +456,8 @@ impl Buffer {
             end_row: opts.end_row.unwrap_or(line),
             end_col: opts.end_col.unwrap_or(col),
             payload: opts.payload,
-            yank: opts.yank,
         };
         self.extmarks.set_extmark(ns, mark)
-    }
-
-    /// Yank the text covered by `[start..end)` (inclusive of
-    /// `start`, exclusive of `end`) honouring extmark-level
-    /// `YankSubst`s. Walks every extmark in every namespace; for each
-    /// extmark whose range intersects the yank range and whose `yank`
-    /// is set, the corresponding bytes are replaced (`Static(s)`) or
-    /// elided (`Empty`). Bytes not covered by any yank-bearing extmark
-    /// emit literal source text. Cross-line ranges join with `\n`.
-    ///
-    /// Returns `None` when the range is empty or out of bounds. The
-    /// helper is pure — no buffer state is touched.
-    pub fn yank_text_for_range(
-        &self,
-        start_row: usize,
-        start_col: usize,
-        end_row: usize,
-        end_col: usize,
-    ) -> Option<String> {
-        if self.lines.is_empty() {
-            return None;
-        }
-        if start_row > end_row || (start_row == end_row && start_col >= end_col) {
-            return None;
-        }
-        let last_row = self.lines.len() - 1;
-        if start_row > last_row {
-            return None;
-        }
-        let end_row = end_row.min(last_row);
-
-        // Gather every yank-bearing extmark that intersects the range.
-        // Sort by (start_row, start_col, end_row, end_col) so the
-        // walker emits substitutions in source order.
-        let mut yanks: Vec<&Extmark> = Vec::new();
-        for state in self.extmarks.namespaces.values() {
-            for mark in state.extmarks.values() {
-                if mark.yank.is_none() {
-                    continue;
-                }
-                let m_end_row = mark.end_row.max(mark.start_row);
-                let m_end_col = if mark.end_row >= mark.start_row {
-                    mark.end_col
-                } else {
-                    mark.start_col
-                };
-                let starts_before_end = (mark.start_row, mark.start_col) < (end_row, end_col);
-                let ends_after_start = (m_end_row, m_end_col) > (start_row, start_col);
-                if starts_before_end && ends_after_start {
-                    yanks.push(mark);
-                }
-            }
-        }
-        yanks.sort_by_key(|m| (m.start_row, m.start_col, m.end_row, m.end_col));
-
-        let mut out = String::new();
-        let mut cur_row = start_row;
-        let mut cur_col = start_col;
-
-        // Helper: emit literal text from `(cur_row, cur_col)` up to
-        // `(stop_row, stop_col)` (exclusive) and advance the cursor.
-        let emit_literal =
-            |out: &mut String, cur_row: &mut usize, cur_col: &mut usize, stop_row, stop_col| {
-                while *cur_row < stop_row {
-                    let line = &self.lines[*cur_row];
-                    let bytes = line.as_bytes();
-                    let from = (*cur_col).min(bytes.len());
-                    out.push_str(&line[from..]);
-                    out.push('\n');
-                    *cur_row += 1;
-                    *cur_col = 0;
-                }
-                if *cur_row == stop_row && *cur_col < stop_col {
-                    let line = &self.lines[*cur_row];
-                    let bytes = line.as_bytes();
-                    let from = (*cur_col).min(bytes.len());
-                    let to = stop_col.min(bytes.len());
-                    if to > from {
-                        out.push_str(&line[from..to]);
-                    }
-                    *cur_col = stop_col;
-                }
-            };
-
-        for mark in yanks {
-            // Clip the extmark to the yank range.
-            let m_end_row = mark.end_row.max(mark.start_row);
-            let m_end_col = if mark.end_row >= mark.start_row {
-                mark.end_col
-            } else {
-                mark.start_col
-            };
-            let m_start = (mark.start_row.max(start_row), {
-                if mark.start_row < start_row {
-                    start_col
-                } else if mark.start_row == start_row {
-                    mark.start_col.max(start_col)
-                } else {
-                    mark.start_col
-                }
-            });
-            let m_end = (m_end_row.min(end_row), {
-                if m_end_row > end_row {
-                    end_col
-                } else if m_end_row == end_row {
-                    m_end_col.min(end_col)
-                } else {
-                    m_end_col
-                }
-            });
-            if (m_start) >= (m_end) {
-                continue;
-            }
-            // Skip if this extmark starts before our cursor (already
-            // emitted by an earlier mark, since we sorted source-order).
-            if m_start < (cur_row, cur_col) {
-                continue;
-            }
-            // Emit any literal text leading up to this mark.
-            emit_literal(&mut out, &mut cur_row, &mut cur_col, m_start.0, m_start.1);
-            // Apply the substitution.
-            match mark.yank.as_ref().expect("filtered above") {
-                YankSubst::Empty => {
-                    // drop
-                }
-                YankSubst::Static(s) => {
-                    out.push_str(s);
-                }
-            }
-            cur_row = m_end.0;
-            cur_col = m_end.1;
-        }
-
-        emit_literal(&mut out, &mut cur_row, &mut cur_col, end_row, end_col);
-        Some(out)
     }
 
     /// Clear every extmark in `ns` whose anchor lies within
@@ -1007,114 +840,6 @@ mod tests {
         buf.clear_namespace(ns_a, 0, usize::MAX);
         assert_eq!(buf.extmarks(ns_a).len(), 0);
         assert_eq!(buf.extmarks(ns_b).len(), 1);
-    }
-
-    #[test]
-    fn yank_text_returns_literal_when_no_substitutions() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["hello world".into()]);
-        assert_eq!(
-            buf.yank_text_for_range(0, 0, 0, 5).unwrap(),
-            "hello".to_string()
-        );
-        assert_eq!(
-            buf.yank_text_for_range(0, 6, 0, 11).unwrap(),
-            "world".to_string()
-        );
-    }
-
-    #[test]
-    fn yank_text_joins_multiple_lines_with_newline() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["alpha".into(), "beta".into(), "gamma".into()]);
-        assert_eq!(
-            buf.yank_text_for_range(0, 2, 2, 3).unwrap(),
-            "pha\nbeta\ngam".to_string()
-        );
-    }
-
-    #[test]
-    fn yank_text_static_substitutes_extmark_range() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["see @file for details".into()]);
-        let ns = buf.create_namespace("attachments");
-        // `@file` (cols 4..9) yanks as the expanded path.
-        buf.set_extmark(
-            ns,
-            0,
-            4,
-            ExtmarkOpts {
-                end_row: Some(0),
-                end_col: Some(9),
-                payload: ExtmarkPayload::Highlight {
-                    style: SpanStyle::default(),
-                    meta: SpanMeta::default(),
-                },
-                yank: Some(YankSubst::Static("/home/me/file.txt".into())),
-            },
-        );
-        let yanked = buf.yank_text_for_range(0, 0, 0, 21).unwrap();
-        assert_eq!(yanked, "see /home/me/file.txt for details");
-    }
-
-    #[test]
-    fn yank_text_empty_elides_extmark_range() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["before<hidden>after".into()]);
-        let ns = buf.create_namespace("hide");
-        // `<hidden>` (cols 6..14) drops out of yanks.
-        buf.set_extmark(
-            ns,
-            0,
-            6,
-            ExtmarkOpts {
-                end_row: Some(0),
-                end_col: Some(14),
-                payload: ExtmarkPayload::Highlight {
-                    style: SpanStyle::default(),
-                    meta: SpanMeta::default(),
-                },
-                yank: Some(YankSubst::Empty),
-            },
-        );
-        assert_eq!(
-            buf.yank_text_for_range(0, 0, 0, 19).unwrap(),
-            "beforeafter".to_string()
-        );
-    }
-
-    #[test]
-    fn yank_text_clips_extmark_to_range() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["see @attachment here".into()]);
-        let ns = buf.create_namespace("attachments");
-        buf.set_extmark(
-            ns,
-            0,
-            4,
-            ExtmarkOpts {
-                end_row: Some(0),
-                end_col: Some(15),
-                payload: ExtmarkPayload::Highlight {
-                    style: SpanStyle::default(),
-                    meta: SpanMeta::default(),
-                },
-                yank: Some(YankSubst::Static("/p".into())),
-            },
-        );
-        // Yank stops mid-extmark — the substitution still fires once
-        // (it's an extmark-level operation, not per-cell).
-        let yanked = buf.yank_text_for_range(0, 4, 0, 10).unwrap();
-        assert_eq!(yanked, "/p");
-    }
-
-    #[test]
-    fn yank_text_returns_none_for_empty_or_oob_range() {
-        let mut buf = make_buf();
-        buf.set_all_lines(vec!["one".into()]);
-        assert!(buf.yank_text_for_range(0, 0, 0, 0).is_none());
-        assert!(buf.yank_text_for_range(0, 5, 0, 3).is_none());
-        assert!(buf.yank_text_for_range(99, 0, 99, 1).is_none());
     }
 
     /// Drives [`Buffer::ensure_rendered_at`] with a stub parser so
