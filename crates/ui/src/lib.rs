@@ -403,7 +403,7 @@ impl Ui {
     /// Iterate overlays in stacking order (lowest `z` first; ties
     /// broken by insertion order — the live vec already carries
     /// insertion order, and `sort_by_key` is stable).
-    pub fn overlays_in_z_order(&self) -> Vec<(OverlayId, &Overlay)> {
+    fn overlays_in_z_order(&self) -> Vec<(OverlayId, &Overlay)> {
         let mut entries: Vec<(OverlayId, &Overlay)> =
             self.overlays.iter().map(|(id, o)| (*id, o)).collect();
         entries.sort_by_key(|(_, o)| o.z);
@@ -479,7 +479,7 @@ impl Ui {
     /// receive hits — lower-z overlays are blocked even if their
     /// rect contains the point. `cursor` is forwarded to
     /// [`Self::resolve_overlays`] for `Anchor::Cursor` resolution.
-    pub fn overlay_hit_test(
+    fn overlay_hit_test(
         &self,
         row: u16,
         col: u16,
@@ -518,7 +518,7 @@ impl Ui {
     /// `cursor`, or whose `Anchor::Win` target is absent from the
     /// splits tree, are skipped silently. The caller (compositor
     /// integration in C.5+) feeds the cursor it knows from focus.
-    pub fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
+    fn resolve_overlays(&self, cursor: Option<(u16, u16)>) -> Vec<(OverlayId, Rect, &Overlay)> {
         let (term_w, term_h) = self.terminal_size;
         let split_rects = self.resolve_splits();
         let ctx = overlay::AnchorContext {
