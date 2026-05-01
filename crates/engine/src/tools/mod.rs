@@ -8,7 +8,6 @@ mod peek_agent;
 mod read_file;
 pub(crate) mod result_dedup;
 mod spawn_agent;
-mod stop_agent;
 pub(crate) mod web_cache;
 mod web_fetch;
 mod web_search;
@@ -504,8 +503,7 @@ pub(crate) fn build_tools(
                 agent_msg_tx: ma.agent_msg_tx.clone(),
             }));
         }
-        // stop_agent: any agent can stop its children.
-        r.register(Box::new(stop_agent::StopAgentTool { my_pid: ma.pid }));
+        // `stop_agent` lives in `runtime/lua/smelt/tools/stop_agent.lua`.
     }
 
     r

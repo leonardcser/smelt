@@ -62,7 +62,7 @@ to invoke_ the feature.
 | Reverse history search (Ctrl+R, `/history`)                   | `plugins/history_search.lua`                              | P4.e                          | working |
 | Input stash (Ctrl+S)                                          | `input/mod.rs`                                            | P1/P4                         | working |
 | Multi-agent: spawn                                            | `engine/tools/spawn_agent.rs`                             | P5.b                          | working |
-| Multi-agent: stop                                             | `engine/tools/stop_agent.rs`                              | P5.b                          | working |
+| Multi-agent: stop                                             | `runtime/lua/smelt/tools/stop_agent.lua`                  | P5.b — landed; composes `smelt.agent.{find_by_id,is_in_tree,kill}` | working |
 | Multi-agent: message                                          | `engine/tools/message_agent.rs`                           | P5.b                          | working |
 | Multi-agent: peek                                             | `engine/tools/peek_agent.rs`                              | P5.b                          | working |
 | Multi-agent: list                                             | `runtime/lua/smelt/tools/list_agents.lua`                 | P5.b — landed; composes `smelt.agent.discover()` | working |
@@ -90,7 +90,7 @@ to invoke_ the feature.
 | `list_agents`         | `runtime/lua/smelt/tools/list_agents.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
 | `message_agent`       | `engine/tools/message_agent.rs`   | P5.b                                                | working |
 | `peek_agent`          | `engine/tools/peek_agent.rs`      | P5.b                                                | working |
-| `stop_agent`          | `engine/tools/stop_agent.rs`      | P5.b                                                | working |
+| `stop_agent`          | `runtime/lua/smelt/tools/stop_agent.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
 | `load_skill`          | `runtime/lua/smelt/tools/load_skill.lua` | P5.b — landed; composes `smelt.skills.content` over `Core.skills` | working |
 | `exit_plan_mode`      | `plugins/plan_mode.lua`           | P5.b → `tools/exit_plan_mode.lua`                   | working |
 

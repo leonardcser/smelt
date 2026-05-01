@@ -60,6 +60,42 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
     agent_tbl.set(
+        "find_by_id",
+        lua.create_function(|lua, agent_id: String| {
+            let Some(e) = engine::registry::find_by_id(&agent_id) else {
+                return Ok(LuaNil);
+            };
+            let row = lua.create_table()?;
+            row.set("pid", e.pid)?;
+            match e.parent_pid {
+                Some(p) => row.set("parent_pid", p)?,
+                None => row.set("parent_pid", LuaNil)?,
+            }
+            row.set("agent_id", e.agent_id)?;
+            row.set("session_id", e.session_id)?;
+            row.set("cwd", e.cwd)?;
+            row.set(
+                "status",
+                match e.status {
+                    engine::registry::AgentStatus::Working => "working",
+                    engine::registry::AgentStatus::Idle => "idle",
+                },
+            )?;
+            row.set("task_slug", e.task_slug.unwrap_or_default())?;
+            row.set("git_root", e.git_root.unwrap_or_default())?;
+            row.set("git_branch", e.git_branch.unwrap_or_default())?;
+            row.set("depth", e.depth)?;
+            row.set("started_at", e.started_at)?;
+            Ok(LuaValue::Table(row))
+        })?,
+    )?;
+    agent_tbl.set(
+        "is_in_tree",
+        lua.create_function(|_, (pid, root_pid): (u32, u32)| {
+            Ok(engine::registry::is_in_tree(pid, root_pid))
+        })?,
+    )?;
+    agent_tbl.set(
         "list",
         lua.create_function(|lua, ()| {
             let my_pid = std::process::id();

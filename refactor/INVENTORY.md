@@ -246,7 +246,6 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/read_file.rs`           | 320  | Read file tool                 | moved-to-lua | P5.b  | pending | `tools/read_file.lua`                                           |
 | `tools/result_dedup.rs`        | 169  | Streaming result dedup         | moved-to-capability | P3.a  | pending | → `tui::tools::dedup` helper (or Lua-only if usage is small)                     |
 | `tools/spawn_agent.rs`         | 232  | Spawn agent tool               | moved-to-lua | P5.b  | pending | `tools/spawn_agent.lua`                                         |
-| `tools/stop_agent.rs`          | 52   | Stop agent tool                | moved-to-lua | P5.b  | pending | `tools/stop_agent.lua`                                          |
 | `tools/web_cache.rs`           | 51   | HTTP cache                     | moved-to-capability | P3.a  | pending | → `tui::http::cache`                                                             |
 | `tools/web_fetch.rs`           | 268  | Web fetch tool                 | moved-to-lua | P5.b  | pending | `tools/web_fetch.lua` over `tui::http`+`tui::html`              |
 | `tools/web_search.rs`          | 194  | Web search tool                | moved-to-lua | P5.b  | pending | `tools/web_search.lua`                                          |
@@ -306,6 +305,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/grep.lua`                  | 175 | Built-in `grep` tool                  | added        | P5.b  | landed  | `override = true` plugin tool over `smelt.grep.run` (ripgrep) with a `smelt.process.run("grep", ...)` fallback. Lua-side `offset` / `head_limit` slicing + stdout+stderr concatenation match the retired Rust `GrepTool`. Schema preserves the `-i` / `-n` / `-A` / `-B` / `-C` / `context` / `multiline` / `output_mode` knobs verbatim. |
 | `tools/load_skill.lua`            | 33  | Built-in `load_skill` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.skills.content` (FFI into the shared `engine::SkillLoader` parked on `Core.skills`). Engine still consumes `prompt_section()` for the system prompt; the `LoadSkillTool` Rust impl retires alongside. |
 | `tools/list_agents.lua`           | 76  | Built-in `list_agents` tool           | added        | P5.b  | landed  | `override = true` plugin tool over `smelt.agent.discover()` + `smelt.agent.my_pid()`; gated on `smelt.engine.multi_agent()` so single-agent runs don't see it. Reproduces the workspace-scope discovery + owned/peer split + aligned columns the retired Rust `ListAgentsTool` produced. |
+| `tools/stop_agent.lua`            | 41  | Built-in `stop_agent` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.agent.{find_by_id,is_in_tree,kill,my_pid}` (FFI over `engine::registry::*`). Gated on `smelt.engine.multi_agent()`; same owner-only check the retired Rust `StopAgentTool` enforced. |
 
 **To be created (P4.a):**
 
@@ -316,7 +316,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 
 - `bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
   `web_fetch.lua`, `web_search.lua`, `notebook_edit.lua`,
-  `spawn_agent.lua`, `stop_agent.lua`, `message_agent.lua`, `peek_agent.lua`,
+  `spawn_agent.lua`, `message_agent.lua`, `peek_agent.lua`,
   `ask_user_question.lua` (moved from
   plugins), `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
 
