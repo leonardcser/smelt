@@ -11,12 +11,10 @@ pub(crate) mod stream_parser;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript;
 pub(crate) mod transcript_buf;
-pub(crate) mod viewport;
 
 pub(crate) use layout::HitRegion;
 pub use status::StatusItem;
 pub use transcript::{SnapshotCell, TranscriptSnapshot};
-pub use viewport::ViewportGeom;
 
 pub(crate) use selection::{truncate_str, try_at_ref, wrap_line};
 
