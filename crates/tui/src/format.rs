@@ -51,7 +51,7 @@ impl BufFormat {
     /// that need an extra payload (`file` → `path`, `diff` → `old +
     /// path`) are constructed via [`BufFormat::from_lua_spec`] which
     /// also reads those fields from the opts table.
-    pub fn parse_simple(mode: &str) -> Option<Self> {
+    fn parse_simple(mode: &str) -> Option<Self> {
         match mode {
             "plain" => Some(Self::Plain),
             "markdown" | "md" => Some(Self::Markdown),
