@@ -1,23 +1,22 @@
 pub mod buffer;
 pub mod callback;
-pub mod clipboard;
-pub mod compositor;
-pub mod dialog;
-pub mod edit_buffer;
-pub mod event;
-pub mod flush;
+pub(crate) mod clipboard;
+pub(crate) mod compositor;
+pub(crate) mod dialog;
+pub(crate) mod edit_buffer;
+pub(crate) mod event;
+pub(crate) mod flush;
 pub mod grid;
-pub mod kill_ring;
+pub(crate) mod kill_ring;
 pub mod layout;
-pub mod motions;
-pub mod overlay;
-pub mod style;
+pub(crate) mod motions;
+pub(crate) mod overlay;
 pub mod text;
-pub mod text_objects;
+pub(crate) mod text_objects;
 pub mod theme;
-pub mod undo;
+pub(crate) mod undo;
 pub mod vim;
-pub mod window;
+pub(crate) mod window;
 
 mod id;
 
@@ -29,28 +28,23 @@ pub type AttachmentId = u64;
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
 pub use buffer::{Buffer, BufferParser, Span, SpanStyle};
-pub use callback::{
-    Callback, CallbackCtx, CallbackResult, Callbacks, KeyBind, LuaHandle, Payload, RustCallback,
-    WinEvent,
-};
+use callback::Callbacks;
+pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
 pub use clipboard::{Clipboard, NullSink, Sink};
-pub use compositor::Compositor;
+use compositor::Compositor;
 pub use dialog::{PanelHeight, PanelSpec};
 pub use edit_buffer::EditBuffer;
-pub use event::{Event, FocusTarget, Status};
-pub use flush::flush_diff;
+pub use event::{Event, Status};
 pub use grid::{Cell, Grid, GridSlice, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
-pub use kill_ring::KillRing;
 pub use layout::{Anchor, Border, Constraint, Corner, Gutters, LayoutTree, Rect, SeparatorStyle};
-pub use motions::FindKind;
-pub use overlay::{HitTarget, Overlay, OverlayHitTarget, OverlayId};
-pub use style::{HlAttrs, HlGroup};
+use overlay::OverlayHitTarget;
+pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::{VimMode, VimWindowState};
 pub use window::{
-    CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, ViewportHit, Window,
+    CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,
     WindowViewport,
 };
 

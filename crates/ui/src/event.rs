@@ -11,8 +11,6 @@
 //! signals an in-flight gesture grab the host folds into
 //! `Ui::set_capture`.
 
-use crate::id::WinId;
-
 /// Terminal event in `ui`'s vocabulary. Variants carry crossterm
 /// payloads — the conversion is a thin re-wrap, so no information
 /// is lost. Consuming code matches on `ui::Event` and pulls the
@@ -61,15 +59,6 @@ pub enum Status {
     Ignored,
 }
 
-/// Semantic keyboard-focus target. Currently single-variant —
-/// `FocusTarget::Window(WinId)` — but exists as its own type so
-/// consumers don't have to choose between "focused window id" and
-/// "hit-tested geometric target" using a bare `WinId`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusTarget {
-    Window(WinId),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,11 +86,5 @@ mod tests {
             Event::from(Ce::Paste("hi".into())),
             Event::Paste("hi".into())
         );
-    }
-
-    #[test]
-    fn focus_target_carries_win_id() {
-        let target = FocusTarget::Window(WinId(7));
-        assert_eq!(target, FocusTarget::Window(WinId(7)));
     }
 }

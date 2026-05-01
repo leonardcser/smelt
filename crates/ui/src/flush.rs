@@ -5,7 +5,7 @@ use crossterm::style::{
 use crossterm::{cursor, QueueableCommand};
 use std::io::Write;
 
-pub fn flush_diff<'a, W: Write>(
+pub(crate) fn flush_diff<'a, W: Write>(
     w: &mut W,
     updates: impl Iterator<Item = CellUpdate<'a>>,
 ) -> std::io::Result<()> {
