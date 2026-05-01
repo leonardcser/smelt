@@ -5,34 +5,34 @@ use crate::config::config_dir;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-pub struct RuleOverride {
-    pub allow: Vec<String>,
-    pub ask: Vec<String>,
-    pub deny: Vec<String>,
+pub(crate) struct RuleOverride {
+    pub(crate) allow: Vec<String>,
+    pub(crate) ask: Vec<String>,
+    pub(crate) deny: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-pub struct CommandOverrides {
-    pub description: Option<String>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub top_k: Option<u32>,
-    pub min_p: Option<f64>,
-    pub repeat_penalty: Option<f64>,
-    pub reasoning_effort: Option<String>,
-    pub tools: Option<RuleOverride>,
-    pub bash: Option<RuleOverride>,
-    pub web_fetch: Option<RuleOverride>,
+pub(crate) struct CommandOverrides {
+    pub(crate) description: Option<String>,
+    pub(crate) provider: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) temperature: Option<f64>,
+    pub(crate) top_p: Option<f64>,
+    pub(crate) top_k: Option<u32>,
+    pub(crate) min_p: Option<f64>,
+    pub(crate) repeat_penalty: Option<f64>,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) tools: Option<RuleOverride>,
+    pub(crate) bash: Option<RuleOverride>,
+    pub(crate) web_fetch: Option<RuleOverride>,
 }
 
 #[derive(Debug, Clone)]
-pub struct CustomCommand {
-    pub name: String,
-    pub body: String,
-    pub overrides: CommandOverrides,
+pub(crate) struct CustomCommand {
+    pub(crate) name: String,
+    pub(crate) body: String,
+    pub(crate) overrides: CommandOverrides,
 }
 
 fn commands_dir() -> std::path::PathBuf {
@@ -40,7 +40,7 @@ fn commands_dir() -> std::path::PathBuf {
 }
 
 /// List all custom commands: (name, description) pairs.
-pub fn list() -> Vec<(String, String)> {
+pub(crate) fn list() -> Vec<(String, String)> {
     let dir = commands_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -88,7 +88,7 @@ pub fn list() -> Vec<(String, String)> {
 /// `None` for missing files; built-in command bodies (`/reflect`, `/simplify`)
 /// resolve through `crate::builtin_commands::resolve` directly, called from
 /// the `submit_builtin_command` Lua binding.
-pub fn resolve(input: &str) -> Option<CustomCommand> {
+pub(crate) fn resolve(input: &str) -> Option<CustomCommand> {
     let after_slash = input.strip_prefix('/')?;
     let name = after_slash.split_whitespace().next()?;
     if name.is_empty() || name.contains('/') || name.contains('.') {
@@ -108,7 +108,7 @@ pub fn resolve(input: &str) -> Option<CustomCommand> {
 /// command file, ignoring any trailing arguments. Built-ins (`/reflect`,
 /// `/simplify`) are Lua-registered slash commands and are detected by the
 /// completer through `crate::lua::is_lua_command`.
-pub fn is_custom_command(input: &str) -> bool {
+pub(crate) fn is_custom_command(input: &str) -> bool {
     let name = input
         .strip_prefix('/')
         .and_then(|s| s.split_whitespace().next())
@@ -129,7 +129,7 @@ fn parse_command(path: &Path, name: &str) -> Option<CustomCommand> {
     })
 }
 
-pub fn parse_frontmatter(content: &str) -> (CommandOverrides, &str) {
+pub(crate) fn parse_frontmatter(content: &str) -> (CommandOverrides, &str) {
     if !content.starts_with("---") {
         return (CommandOverrides::default(), content);
     }
@@ -153,7 +153,7 @@ pub fn parse_frontmatter(content: &str) -> (CommandOverrides, &str) {
 /// - Fenced code blocks starting with `` ```! `` are executed and replaced
 ///   with a regular code block containing the output.
 /// - Inline `` !`command` `` is executed and replaced with the output.
-pub fn evaluate(body: &str) -> String {
+pub(crate) fn evaluate(body: &str) -> String {
     let mut result = String::with_capacity(body.len());
     let mut lines = body.lines().peekable();
 

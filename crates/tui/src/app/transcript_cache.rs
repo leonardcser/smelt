@@ -20,8 +20,8 @@ use engine::tools::NotebookRenderData;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const RENDER_CACHE_VERSION: u32 = 1;
-pub const LAYOUT_CACHE_VERSION: u32 = 6;
+pub(crate) const RENDER_CACHE_VERSION: u32 = 1;
+pub(crate) const LAYOUT_CACHE_VERSION: u32 = 6;
 
 /// Content-addressed on-disk snapshot of `BlockHistory::artifacts` for
 /// one session. Keyed by block content hash (not `BlockId`, which is

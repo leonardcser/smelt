@@ -41,7 +41,7 @@ pub struct InputSnapshot {
 pub struct PromptState {
     pub win: ui::Window,
     pub store: AttachmentStore,
-    pub completer: Option<CompleterSession>,
+    pub(crate) completer: Option<CompleterSession>,
     /// Picker leaf WinIds from closed completer sessions, waiting for
     /// the next frame to drain and `win_close`. `PromptState` doesn't
     /// hold a `&mut ui::Ui`, so closing has to happen out-of-band.
@@ -170,7 +170,7 @@ impl PromptState {
     /// `CompleterSession` must go through this — bare `self.completer
     /// = Some(...)` orphans the old `ui::WinId` and leaves a stale
     /// picker painted above the prompt.
-    pub fn set_completer(&mut self, comp: crate::completer::Completer) {
+    pub(crate) fn set_completer(&mut self, comp: crate::completer::Completer) {
         self.close_completer();
         self.completer = Some(CompleterSession::new(comp));
     }

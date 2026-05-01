@@ -161,7 +161,7 @@ fn multi_agent_section(config: &engine::AgentPromptConfig) -> String {
 }
 
 /// Build the default prompt sections for a given mode and app state.
-pub fn build_defaults(
+pub(crate) fn build_defaults(
     cwd: &std::path::Path,
     mode: Mode,
     interactive: bool,

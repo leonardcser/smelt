@@ -1,39 +1,39 @@
 use crate::fuzzy::score::{query_match_score, split_words};
 
-pub mod command;
-pub mod file;
-pub mod history;
+pub(crate) mod command;
+pub(crate) mod file;
+pub(crate) mod history;
 
 #[derive(Clone, Default)]
-pub struct CompletionItem {
-    pub label: String,
-    pub description: Option<String>,
+pub(crate) struct CompletionItem {
+    pub(crate) label: String,
+    pub(crate) description: Option<String>,
     /// Optional ANSI color. When set, the row's pill + label + description
     /// are all painted in this color.
-    pub ansi_color: Option<u8>,
+    pub(crate) ansi_color: Option<u8>,
     /// Extra terms to match against when filtering — label and this
     /// field are both scanned. Lets a plugin match on hidden fields
     /// (provider + key for the model picker) without displaying them.
-    pub search_terms: Option<String>,
+    pub(crate) search_terms: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum CompleterKind {
+pub(crate) enum CompleterKind {
     File,
     Command,
     CommandArg,
 }
 
-pub struct Completer {
+pub(crate) struct Completer {
     /// Byte offset in the buffer where the trigger char starts.
-    pub anchor: usize,
-    pub kind: CompleterKind,
+    pub(crate) anchor: usize,
+    pub(crate) kind: CompleterKind,
     /// Current query (text after trigger).
-    pub query: String,
+    pub(crate) query: String,
     /// Filtered results.
-    pub results: Vec<CompletionItem>,
+    pub(crate) results: Vec<CompletionItem>,
     /// Selected index in results.
-    pub selected: usize,
+    pub(crate) selected: usize,
     /// Full item list (cached on activation).
     pub(super) all_items: Vec<CompletionItem>,
     /// Stable identity of the selected item across filter updates.
@@ -42,22 +42,22 @@ pub struct Completer {
 
 impl Completer {
     /// Replace the item list and re-filter, preserving the current selection.
-    pub fn refresh_items(&mut self, items: Vec<CompletionItem>) {
+    pub(crate) fn refresh_items(&mut self, items: Vec<CompletionItem>) {
         self.all_items = items;
         self.filter_inner(true);
     }
 
-    pub fn all_items(&self) -> &[CompletionItem] {
+    pub(crate) fn all_items(&self) -> &[CompletionItem] {
         &self.all_items
     }
 
     /// Returns the selected item, if any.
-    pub fn selected_item(&self) -> Option<&CompletionItem> {
+    pub(crate) fn selected_item(&self) -> Option<&CompletionItem> {
         self.results.get(self.selected)
     }
 
     /// Maximum rows to display for the inline completer popup.
-    pub fn max_visible_rows(&self) -> usize {
+    pub(crate) fn max_visible_rows(&self) -> usize {
         5
     }
 
@@ -96,7 +96,7 @@ impl Completer {
         fields
     }
 
-    pub fn update_query(&mut self, query: String) {
+    pub(crate) fn update_query(&mut self, query: String) {
         self.query = query;
         self.selected = 0;
         self.selected_key = None;
@@ -137,7 +137,7 @@ impl Completer {
         }
     }
 
-    pub fn move_up(&mut self) {
+    pub(crate) fn move_up(&mut self) {
         if !self.results.is_empty() {
             self.selected = if self.selected == 0 {
                 self.results.len() - 1
@@ -148,14 +148,14 @@ impl Completer {
         }
     }
 
-    pub fn move_down(&mut self) {
+    pub(crate) fn move_down(&mut self) {
         if !self.results.is_empty() {
             self.selected = (self.selected + 1) % self.results.len();
             self.remember_selected_key();
         }
     }
 
-    pub fn accept(&self) -> Option<&str> {
+    pub(crate) fn accept(&self) -> Option<&str> {
         self.results.get(self.selected).map(|i| i.label.as_str())
     }
 }
@@ -163,13 +163,13 @@ impl Completer {
 /// Couples a `Completer` model with its picker-overlay leaf WinId.
 /// One owner, one lifecycle: created when a completer opens, destroyed
 /// when it closes.
-pub struct CompleterSession {
-    pub completer: Completer,
-    pub picker_win: Option<ui::WinId>,
+pub(crate) struct CompleterSession {
+    pub(crate) completer: Completer,
+    pub(crate) picker_win: Option<ui::WinId>,
 }
 
 impl CompleterSession {
-    pub fn new(completer: Completer) -> Self {
+    pub(crate) fn new(completer: Completer) -> Self {
         Self {
             completer,
             picker_win: None,

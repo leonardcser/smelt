@@ -272,7 +272,7 @@ pub enum ViewState {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
-pub enum Status {
+pub(crate) enum Status {
     /// Block content is still being produced (active stream, running
     /// tool). The layout cache should expect invalidation on every
     /// chunk; the renderer may apply a "live" style.

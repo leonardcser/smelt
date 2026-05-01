@@ -46,9 +46,9 @@ enum LeafShape {
 /// registration), and `leaves` is parallel-indexed to `opts.panels`
 /// so `dialog.lua` can wire each panel handle to its leaf for focus +
 /// per-panel queries (e.g. input `:text()`).
-pub struct DialogOpenResult {
-    pub root: WinId,
-    pub leaves: Vec<WinId>,
+pub(crate) struct DialogOpenResult {
+    pub(crate) root: WinId,
+    pub(crate) leaves: Vec<WinId>,
 }
 
 // ── Dialog ───────────────────────────────────────────────────────────
@@ -693,7 +693,7 @@ fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
 
 // ── Picker ───────────────────────────────────────────────────────────
 
-pub fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, String> {
+pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, String> {
     let items_tbl: mlua::Table = opts
         .get("items")
         .map_err(|e| format!("picker items: {e}"))?;
