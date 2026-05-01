@@ -198,7 +198,12 @@ impl LuaRuntime {
     /// borrow). The host drains this queue right after the ui call
     /// returns and invokes each callback with the TLS app pointer
     /// installed, giving Lua bindings sole access to TuiApp state.
-    pub(crate) fn queue_invocation(&self, handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload) {
+    pub(crate) fn queue_invocation(
+        &self,
+        handle: ui::LuaHandle,
+        win: ui::WinId,
+        payload: &ui::Payload,
+    ) {
         if let Ok(mut q) = self.shared.pending_invocations.lock() {
             q.push(crate::lua::PendingInvocation {
                 handle,
