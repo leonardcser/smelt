@@ -424,6 +424,7 @@ impl TuiApp {
         cli_api_base_override: bool,
         cli_api_key_env_override: bool,
         startup_auth_error: Option<String>,
+        runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
@@ -450,9 +451,10 @@ impl TuiApp {
             .ok()
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_default();
-        // Runtime approvals are shared with the engine via Arc<RwLock>.
-        // Load workspace rules from disk into them at startup.
-        let runtime_approvals = engine.runtime_approvals();
+        // Runtime approvals are shared with the engine via Arc<RwLock>;
+        // the caller owns the original Arc and passes a clone here so the
+        // frontend and engine see the same approvals state. Workspace
+        // rules are loaded into the Arc at startup by the caller.
 
         let app_config = app_config::AppConfig {
             model,

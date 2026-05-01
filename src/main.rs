@@ -581,6 +581,7 @@ async fn main() {
             args.api_base.is_some(),
             args.api_key_env.is_some(),
             startup_auth_error.take(),
+            runtime_approvals,
         );
         app.core.config.model_config = (&model_config).into();
         app.core.skills = Some(tui_skill_loader.clone());
