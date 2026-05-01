@@ -4,10 +4,10 @@
 //! - `Decision`, `RuleSet`, `ModePerms`
 //! - Raw deserialization types and merge helpers
 //! - `DEFAULT_BASH_ALLOW` safe-read-only-command list
-//! - `build_mode` (materializes a `ModePerms` for one Mode)
+//! - `build_mode` (materializes a `ModePerms` for one AgentMode)
 //! - `check_ruleset` (the core pattern-matching decision)
 
-use protocol::Mode;
+use protocol::AgentMode;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -148,10 +148,10 @@ pub(crate) const DEFAULT_BASH_ALLOW: &[&str] = &[
     "strings *",
 ];
 
-pub(super) fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
+pub(super) fn build_mode(raw: &RawModePerms, mode: AgentMode) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
 
-    if mode == Mode::Yolo {
+    if mode == AgentMode::Yolo {
         // Yolo defaults: everything allowed unless explicitly overridden.
         // Any tool not in the map will also default to Allow via check_tool().
         for name in [
@@ -176,7 +176,7 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
             .or_insert(Decision::Allow);
 
         // edit_file: ask in normal/plan, allow in apply
-        let default_edit = if mode == Mode::Apply {
+        let default_edit = if mode == AgentMode::Apply {
             Decision::Allow
         } else {
             Decision::Ask
@@ -184,7 +184,7 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
         tools.entry("edit_file".to_string()).or_insert(default_edit);
 
         // write_file: ask in normal/plan, allow in apply
-        let default_write = if mode == Mode::Apply {
+        let default_write = if mode == AgentMode::Apply {
             Decision::Allow
         } else {
             Decision::Ask
@@ -214,7 +214,7 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
 
     let mut bash_allow = compile_patterns(&raw.bash.allow);
     if bash_allow.is_empty() {
-        if mode == Mode::Yolo {
+        if mode == AgentMode::Yolo {
             bash_allow = vec![glob::Pattern::new("*").unwrap()];
         } else {
             bash_allow = compile_patterns(
@@ -227,12 +227,12 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: Mode) -> ModePerms {
     }
 
     let mut web_allow = compile_patterns(&raw.web_fetch.allow);
-    if mode == Mode::Yolo && web_allow.is_empty() {
+    if mode == AgentMode::Yolo && web_allow.is_empty() {
         web_allow = vec![glob::Pattern::new("*").unwrap()];
     }
 
     let mut mcp_allow = compile_patterns(&raw.mcp.allow);
-    if mode == Mode::Yolo && mcp_allow.is_empty() {
+    if mode == AgentMode::Yolo && mcp_allow.is_empty() {
         mcp_allow = vec![glob::Pattern::new("*").unwrap()];
     }
 

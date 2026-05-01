@@ -16,7 +16,7 @@ use std::time::Instant;
 /// Mirrors the call-scoped fields of the Rust `ToolContext` and is
 /// surfaced to Lua as the second argument of `execute(args, ctx)`.
 pub(crate) struct PluginToolEnv<'a> {
-    pub(crate) mode: protocol::Mode,
+    pub(crate) mode: protocol::AgentMode,
     pub(crate) session_id: &'a str,
     pub(crate) session_dir: &'a std::path::Path,
 }
@@ -245,7 +245,7 @@ impl LuaRuntime {
     /// Return protocol-level plugin tool definitions for registered
     /// tools. The TUI sends these with `StartTurn` so the engine
     /// includes them in LLM tool definitions.
-    pub(crate) fn plugin_tool_defs(&self, _mode: protocol::Mode) -> Vec<protocol::PluginToolDef> {
+    pub(crate) fn plugin_tool_defs(&self, _mode: protocol::AgentMode) -> Vec<protocol::ToolDef> {
         let handlers = self
             .shared
             .plugin_tools
@@ -263,11 +263,11 @@ impl LuaRuntime {
                     .ok()
                     .and_then(|s| serde_json::from_str(&s.to_string_lossy()).ok())
                     .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
-                let modes: Option<Vec<protocol::Mode>> =
+                let modes: Option<Vec<protocol::AgentMode>> =
                     meta_table.get::<mlua::Table>("modes").ok().map(|t| {
                         t.sequence_values::<String>()
                             .filter_map(|r| r.ok())
-                            .filter_map(|s| protocol::Mode::parse(&s))
+                            .filter_map(|s| protocol::AgentMode::parse(&s))
                             .collect()
                     });
                 let execution_mode = meta_table
@@ -279,13 +279,13 @@ impl LuaRuntime {
                         _ => None,
                     })
                     .unwrap_or_default();
-                let hooks = protocol::PluginToolHookFlags {
+                let hooks = protocol::ToolHookFlags {
                     needs_confirm: meta_table.get("hook_needs_confirm").unwrap_or(false),
                     approval_patterns: meta_table.get("hook_approval_patterns").unwrap_or(false),
                     preflight: meta_table.get("hook_preflight").unwrap_or(false),
                 };
                 let override_core: bool = meta_table.get("override_core").unwrap_or(false);
-                defs.push(protocol::PluginToolDef {
+                defs.push(protocol::ToolDef {
                     name: name.clone(),
                     description,
                     parameters,
@@ -301,16 +301,16 @@ impl LuaRuntime {
 
     /// Run the plugin tool's permission hooks for one invocation. Each
     /// hook is called synchronously and its result packaged into
-    /// `PluginToolHooks`. Errors raised by a hook are recorded and the
+    /// `ToolHooks`. Errors raised by a hook are recorded and the
     /// hook is treated as if it returned its no-op default (None /
     /// empty). The engine consumes the result via
-    /// `UiCommand::PluginToolHooksResult`.
+    /// `UiCommand::ToolHooksResponse`.
     pub(crate) fn evaluate_plugin_hooks(
         &self,
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
-    ) -> protocol::PluginToolHooks {
-        let mut out = protocol::PluginToolHooks::default();
+    ) -> protocol::ToolHooks {
+        let mut out = protocol::ToolHooks::default();
 
         // Resolve hook functions inside the lock, then release before
         // calling — mlua functions are clonable Lua values, registry
@@ -535,7 +535,7 @@ fn populate_payload_table(table: &mlua::Table, payload: &ui::Payload) -> mlua::R
 fn build_plugin_ctx(
     lua: &Lua,
     call_id: &str,
-    mode: protocol::Mode,
+    mode: protocol::AgentMode,
     session_id: &str,
     session_dir: &std::path::Path,
 ) -> mlua::Result<mlua::Table> {

@@ -6,7 +6,7 @@
 use crate::permissions::bash::split_shell_commands;
 use crate::permissions::rules::{check_ruleset, Decision, RuleSet};
 use crate::permissions::Permissions;
-use protocol::Mode;
+use protocol::AgentMode;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -140,7 +140,7 @@ impl RuntimeApprovals {
     pub fn is_auto_approved(
         &self,
         permissions: &Permissions,
-        mode: Mode,
+        mode: AgentMode,
         tool_name: &str,
         args: &HashMap<String, Value>,
         desc: &str,

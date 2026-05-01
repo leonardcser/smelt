@@ -269,7 +269,7 @@ pub(crate) struct LuaHandle {
 /// are optional permission hooks the plugin opts in to via
 /// `smelt.tools.register{ needs_confirm = fn, approval_patterns = fn,
 /// preflight = fn }`. When at least one hook is set, the engine
-/// round-trips through `EvaluatePluginToolHooks` per call before
+/// round-trips through `ToolHooksRequest` per call before
 /// dispatching the tool — same Allow / Deny / Ask flow core tools use.
 pub(crate) struct PluginToolHandles {
     pub(crate) execute: LuaHandle,
@@ -1072,7 +1072,7 @@ mod tests {
         static EMPTY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let p = EMPTY_PATH.get_or_init(std::path::PathBuf::new);
         PluginToolEnv {
-            mode: protocol::Mode::Apply,
+            mode: protocol::AgentMode::Apply,
             session_id: "",
             session_dir: p,
         }
@@ -1297,7 +1297,7 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_plugins();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let defs = rt.plugin_tool_defs(protocol::Mode::Normal);
+        let defs = rt.plugin_tool_defs(protocol::AgentMode::Normal);
         let ask = defs
             .iter()
             .find(|d| d.name == "ask_user_question")

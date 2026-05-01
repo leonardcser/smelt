@@ -127,14 +127,12 @@ impl TuiApp {
                     content,
                     is_error,
                 } => {
-                    self.core
-                        .engine
-                        .send(protocol::UiCommand::PluginToolResult {
-                            request_id,
-                            call_id,
-                            content,
-                            is_error,
-                        });
+                    self.core.engine.send(protocol::UiCommand::ToolResult {
+                        request_id,
+                        call_id,
+                        content,
+                        is_error,
+                    });
                 }
                 crate::lua::TaskDriveOutput::Error(msg) => {
                     self.notify_error(msg);

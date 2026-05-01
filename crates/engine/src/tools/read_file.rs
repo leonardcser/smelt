@@ -51,8 +51,8 @@ impl Tool for ReadFileTool {
         })
     }
 
-    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
-        protocol::PluginToolHooks {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::ToolHooks {
+        protocol::ToolHooks {
             needs_confirm: Some(display_path(&str_arg(args, "file_path"))),
             ..Default::default()
         }

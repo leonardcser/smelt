@@ -363,9 +363,9 @@ impl Tool for NotebookEditTool {
         })
     }
 
-    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::ToolHooks {
         let path = str_arg(args, "notebook_path");
-        protocol::PluginToolHooks {
+        protocol::ToolHooks {
             needs_confirm: Some(display_path(&path)),
             approval_patterns: Vec::new(),
             preflight_error: staleness_error(&self.files, &path, "notebook"),

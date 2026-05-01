@@ -4,30 +4,30 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Mode {
+pub enum AgentMode {
     Normal,
     Plan,
     Apply,
     Yolo,
 }
 
-impl Mode {
+impl AgentMode {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "normal" => Some(Mode::Normal),
-            "plan" => Some(Mode::Plan),
-            "apply" => Some(Mode::Apply),
-            "yolo" => Some(Mode::Yolo),
+            "normal" => Some(AgentMode::Normal),
+            "plan" => Some(AgentMode::Plan),
+            "apply" => Some(AgentMode::Apply),
+            "yolo" => Some(AgentMode::Yolo),
             _ => None,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Mode::Normal => "normal",
-            Mode::Plan => "plan",
-            Mode::Apply => "apply",
-            Mode::Yolo => "yolo",
+            AgentMode::Normal => "normal",
+            AgentMode::Plan => "plan",
+            AgentMode::Apply => "apply",
+            AgentMode::Yolo => "yolo",
         }
     }
 

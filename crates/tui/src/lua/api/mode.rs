@@ -1,4 +1,4 @@
-//! `smelt.mode` — `get / set / cycle / cycle_list` over `protocol::Mode`
+//! `smelt.mode` — `get / set / cycle / cycle_list` over `protocol::AgentMode`
 //! (Plan / Apply / Yolo / Normal). Lives at top-level so it does
 //! not collide with the future `smelt.subprocess` (sub-agents).
 //!
@@ -21,7 +21,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     mode_tbl.set(
         "set",
         lua.create_function(|_, v: String| {
-            crate::lua::with_app(|app| match protocol::Mode::parse(&v) {
+            crate::lua::with_app(|app| match protocol::AgentMode::parse(&v) {
                 Some(mode) => app.set_mode(mode),
                 None => app.notify_error(format!("unknown mode: {v}")),
             });
@@ -30,13 +30,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // The configured cycle as a list of mode label strings. Returns
-    // the full `protocol::Mode::ALL` order when no cycle is set so
+    // the full `protocol::AgentMode::ALL` order when no cycle is set so
     // callers don't need to handle the "empty cycle" edge case.
     mode_tbl.set(
         "cycle_list",
         app_read!(lua, |app| {
-            let cycle: &[protocol::Mode] = if app.core.config.mode_cycle.is_empty() {
-                protocol::Mode::ALL
+            let cycle: &[protocol::AgentMode] = if app.core.config.mode_cycle.is_empty() {
+                protocol::AgentMode::ALL
             } else {
                 &app.core.config.mode_cycle
             };

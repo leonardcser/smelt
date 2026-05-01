@@ -14,7 +14,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use protocol::{Content, EngineEvent, Mode, UiCommand};
+use protocol::{AgentMode, Content, EngineEvent, UiCommand};
 
 use super::core::Core;
 use super::headless::{HeadlessSink, OutputFormat};
@@ -119,7 +119,7 @@ impl HeadlessApp {
                     // Still need to handle side-effect events.
                     match ev {
                         EngineEvent::RequestPermission { request_id, .. } => {
-                            let approved = self.core.config.mode == Mode::Yolo;
+                            let approved = self.core.config.mode == AgentMode::Yolo;
                             self.core.engine.send(UiCommand::PermissionDecision {
                                 request_id,
                                 approved,
@@ -193,7 +193,7 @@ impl HeadlessApp {
                         self.sink.log_retry(attempt, delay_ms);
                     }
                     EngineEvent::RequestPermission { request_id, .. } => {
-                        let approved = self.core.config.mode == Mode::Yolo;
+                        let approved = self.core.config.mode == AgentMode::Yolo;
                         self.core.engine.send(UiCommand::PermissionDecision {
                             request_id,
                             approved,

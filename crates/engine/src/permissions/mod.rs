@@ -26,7 +26,7 @@ pub(crate) use rules::DEFAULT_BASH_ALLOW;
 
 use crate::tools::str_arg;
 use bash::{has_output_redirection, is_cd_command};
-use protocol::Mode;
+use protocol::AgentMode;
 use rules::{build_mode, check_ruleset, compile_patterns, merge_mode, ModePerms, RawConfig};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -50,10 +50,10 @@ impl Permissions {
         let raw: RawConfig = serde_yml::from_str(&contents).unwrap_or_default();
         let def = &raw.permissions.default;
         Self {
-            normal: build_mode(&merge_mode(def, &raw.permissions.normal), Mode::Normal),
-            plan: build_mode(&merge_mode(def, &raw.permissions.plan), Mode::Plan),
-            apply: build_mode(&merge_mode(def, &raw.permissions.apply), Mode::Apply),
-            yolo: build_mode(&merge_mode(def, &raw.permissions.yolo), Mode::Yolo),
+            normal: build_mode(&merge_mode(def, &raw.permissions.normal), AgentMode::Normal),
+            plan: build_mode(&merge_mode(def, &raw.permissions.plan), AgentMode::Plan),
+            apply: build_mode(&merge_mode(def, &raw.permissions.apply), AgentMode::Apply),
+            yolo: build_mode(&merge_mode(def, &raw.permissions.yolo), AgentMode::Yolo),
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
         }
@@ -114,18 +114,18 @@ impl Permissions {
         self.restrict_to_workspace = val;
     }
 
-    fn mode_perms(&self, mode: Mode) -> &ModePerms {
+    fn mode_perms(&self, mode: AgentMode) -> &ModePerms {
         match mode {
-            Mode::Normal => &self.normal,
-            Mode::Plan => &self.plan,
-            Mode::Apply => &self.apply,
-            Mode::Yolo => &self.yolo,
+            AgentMode::Normal => &self.normal,
+            AgentMode::Plan => &self.plan,
+            AgentMode::Apply => &self.apply,
+            AgentMode::Yolo => &self.yolo,
         }
     }
 
-    pub(crate) fn check_tool(&self, mode: Mode, tool_name: &str) -> Decision {
+    pub(crate) fn check_tool(&self, mode: AgentMode, tool_name: &str) -> Decision {
         let perms = self.mode_perms(mode);
-        let default = if mode == Mode::Yolo {
+        let default = if mode == AgentMode::Yolo {
             Decision::Allow
         } else {
             Decision::Ask
@@ -135,7 +135,7 @@ impl Permissions {
 
     pub(crate) fn check_tool_pattern(
         &self,
-        mode: Mode,
+        mode: AgentMode,
         tool_name: &str,
         pattern: &str,
     ) -> Decision {
@@ -150,21 +150,21 @@ impl Permissions {
     /// Check permission for an MCP tool call. Matches the qualified tool name
     /// (e.g. `filesystem_read_file`) against glob patterns in the `mcp` ruleset.
     /// Defaults to Allow in yolo mode, Ask otherwise, if no pattern matches.
-    pub(crate) fn check_mcp(&self, mode: Mode, qualified_name: &str) -> Decision {
+    pub(crate) fn check_mcp(&self, mode: AgentMode, qualified_name: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let decision = check_ruleset(&perms.mcp, qualified_name);
-        if decision == Decision::Ask && mode == Mode::Yolo {
+        if decision == Decision::Ask && mode == AgentMode::Yolo {
             Decision::Allow
         } else {
             decision
         }
     }
 
-    pub(crate) fn check_bash(&self, mode: Mode, command: &str) -> Decision {
+    pub(crate) fn check_bash(&self, mode: AgentMode, command: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let command = command.trim();
         // Escalate output redirection only in Normal/Plan modes.
-        let escalate_redirect = matches!(mode, Mode::Normal | Mode::Plan);
+        let escalate_redirect = matches!(mode, AgentMode::Normal | AgentMode::Plan);
         let subcmds = split_shell_commands(command);
         if subcmds.len() <= 1 {
             if is_cd_command(command) {
@@ -204,7 +204,7 @@ impl Permissions {
     /// normal tool/bash/web_fetch rulesets.
     pub fn decide(
         &self,
-        mode: Mode,
+        mode: AgentMode,
         tool_name: &str,
         args: &HashMap<String, Value>,
         is_mcp: bool,
@@ -228,7 +228,7 @@ impl Permissions {
     /// to Ask solely because of paths outside the workspace.
     pub fn was_downgraded(
         &self,
-        mode: Mode,
+        mode: AgentMode,
         tool_name: &str,
         args: &HashMap<String, Value>,
     ) -> bool {
@@ -243,7 +243,7 @@ impl Permissions {
     /// Empty if `restrict_to_workspace` is off or no paths escape.
     /// Get the bash ruleset for the given mode (used by RuntimeApprovals
     /// to check per-subcommand config decisions).
-    pub(crate) fn bash_ruleset(&self, mode: Mode) -> &RuleSet {
+    pub(crate) fn bash_ruleset(&self, mode: AgentMode) -> &RuleSet {
         &self.mode_perms(mode).bash
     }
 
@@ -266,7 +266,7 @@ impl Permissions {
 
 fn decide_base(
     permissions: &Permissions,
-    mode: Mode,
+    mode: AgentMode,
     tool_name: &str,
     args: &HashMap<String, Value>,
 ) -> Decision {

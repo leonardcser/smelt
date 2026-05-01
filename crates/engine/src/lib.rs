@@ -64,7 +64,7 @@ struct PromptContext<'a> {
 }
 
 pub(crate) fn build_system_prompt_full(
-    mode: protocol::Mode,
+    mode: protocol::AgentMode,
     cwd: &std::path::Path,
     extra_instructions: Option<&str>,
     agent_config: Option<&AgentPromptConfig>,
@@ -74,7 +74,7 @@ pub(crate) fn build_system_prompt_full(
     let ctx = PromptContext {
         cwd,
         interactive,
-        write_access: matches!(mode, protocol::Mode::Apply | protocol::Mode::Yolo),
+        write_access: matches!(mode, protocol::AgentMode::Apply | protocol::AgentMode::Yolo),
         multi_agent: agent_config,
         skills_section: skill_section,
         extra_instructions,

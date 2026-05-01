@@ -30,8 +30,8 @@ impl Tool for LoadSkillTool {
         })
     }
 
-    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
-        protocol::PluginToolHooks {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::ToolHooks {
+        protocol::ToolHooks {
             needs_confirm: Some(str_arg(args, "name")),
             ..Default::default()
         }

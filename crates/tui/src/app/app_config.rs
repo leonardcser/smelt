@@ -6,7 +6,7 @@
 
 use crate::{config, state};
 use engine::ModelConfig;
-use protocol::{Mode, ReasoningEffort};
+use protocol::{AgentMode, ReasoningEffort};
 
 pub struct AppConfig {
     pub model: String,
@@ -21,8 +21,8 @@ pub struct AppConfig {
     pub cli_api_base_override: bool,
     pub cli_api_key_env_override: bool,
 
-    pub mode: Mode,
-    pub mode_cycle: Vec<Mode>,
+    pub mode: AgentMode,
+    pub mode_cycle: Vec<AgentMode>,
     pub reasoning_effort: ReasoningEffort,
     pub reasoning_cycle: Vec<ReasoningEffort>,
 

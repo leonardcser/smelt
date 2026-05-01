@@ -26,7 +26,7 @@ pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
 
 use crate::cancel::CancellationToken;
 use crate::provider::{FunctionSchema, Provider, ToolDefinition};
-use protocol::{EngineEvent, PluginToolHooks};
+use protocol::{EngineEvent, ToolHooks};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -122,7 +122,7 @@ pub(crate) trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a>;
-    /// Evaluate per-call permission hooks. Returns a `PluginToolHooks`
+    /// Evaluate per-call permission hooks. Returns a `ToolHooks`
     /// carrying:
     /// - `needs_confirm`: confirm-dialog message (None falls back to the
     ///   tool name).
@@ -132,10 +132,10 @@ pub(crate) trait Tool: Send + Sync {
     ///   and fails the call immediately.
     ///
     /// Mirrors the shape returned by plugin tools through
-    /// `EvaluatePluginToolHooks` so the engine consumes both paths
+    /// `ToolHooksRequest` so the engine consumes both paths
     /// uniformly.
-    fn evaluate_hooks(&self, _args: &HashMap<String, Value>) -> PluginToolHooks {
-        PluginToolHooks::default()
+    fn evaluate_hooks(&self, _args: &HashMap<String, Value>) -> ToolHooks {
+        ToolHooks::default()
     }
 }
 
@@ -173,7 +173,7 @@ pub(crate) trait ToolDispatcher: Send + Sync {
     fn is_mcp(&self, name: &str) -> bool;
 
     /// Per-call permission hooks. `None` means the tool is unknown.
-    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<PluginToolHooks>;
+    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<ToolHooks>;
 
     /// Dispatch a tool call. `None` means the tool is unknown; the
     /// engine handles that case by emitting a synthetic error result.
@@ -207,7 +207,7 @@ impl ToolDispatcher for ToolRegistry {
         self.get(name).is_some_and(|e| e.is_mcp)
     }
 
-    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<PluginToolHooks> {
+    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<ToolHooks> {
         self.get(name).map(|e| e.tool.evaluate_hooks(args))
     }
 

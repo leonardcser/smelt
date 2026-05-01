@@ -15,11 +15,10 @@ pub mod usage;
 
 pub use content::{Content, ContentPart};
 pub use event::{
-    AuxiliaryTask, EngineEvent, PluginToolDef, PluginToolHookFlags, PluginToolHooks,
-    ToolExecutionMode, UiCommand,
+    AuxiliaryTask, EngineEvent, ToolDef, ToolExecutionMode, ToolHookFlags, ToolHooks, UiCommand,
 };
 pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
-pub use mode::{Mode, ReasoningEffort};
+pub use mode::{AgentMode, ReasoningEffort};
 pub use usage::{
     AgentBlockData, AgentToolData, ModelConfigOverrides, PermissionOverrides, RuleSetOverride,
     TokenUsage, TurnMeta,

@@ -1,5 +1,5 @@
 use crate::{setup, Args};
-use protocol::{Mode, ReasoningEffort};
+use protocol::{AgentMode, ReasoningEffort};
 
 /// Read an API key from the given environment variable name.
 /// An empty `key_env` yields an empty key (used by providers that don't need one).
@@ -32,8 +32,8 @@ pub struct ResolvedStartup {
     pub model_config: tui::config::ModelConfig,
     pub settings: tui::state::ResolvedSettings,
     pub multi_agent: bool,
-    pub mode_override: Option<Mode>,
-    pub mode_cycle: Vec<Mode>,
+    pub mode_override: Option<AgentMode>,
+    pub mode_cycle: Vec<AgentMode>,
     pub reasoning_effort: ReasoningEffort,
     pub reasoning_cycle: Vec<ReasoningEffort>,
     pub startup_auth_error: Option<String>,
@@ -337,9 +337,9 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         .as_deref()
         .or(cfg.defaults.mode.as_deref())
         .map(|s| {
-            Mode::parse(s).unwrap_or_else(|| {
+            AgentMode::parse(s).unwrap_or_else(|| {
                 eprintln!("warning: unknown mode '{s}', defaulting to normal");
-                Mode::Normal
+                AgentMode::Normal
             })
         });
 
@@ -347,9 +347,9 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         .mode_cycle
         .as_deref()
         .or(cfg.defaults.mode_cycle.as_deref())
-        .map(Mode::parse_list)
+        .map(AgentMode::parse_list)
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| Mode::ALL.to_vec());
+        .unwrap_or_else(|| AgentMode::ALL.to_vec());
 
     // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
     let reasoning_effort = args

@@ -258,7 +258,7 @@ impl TuiApp {
 
     /// Set the agent mode, persist it, and notify the engine. Marks the
     /// screen dirty so the mode indicator refreshes.
-    pub(crate) fn set_mode(&mut self, mode: Mode) {
+    pub(crate) fn set_mode(&mut self, mode: AgentMode) {
         let old = self.core.config.mode;
         self.core.config.mode = mode;
         state::set_mode(self.core.config.mode);
@@ -273,7 +273,7 @@ impl TuiApp {
         }
         let system_prompt = self.rebuild_system_prompt();
         let plugin_tools = self.core.lua.plugin_tool_defs(self.core.config.mode);
-        self.core.engine.send(UiCommand::SetMode {
+        self.core.engine.send(UiCommand::SetAgentMode {
             mode: self.core.config.mode,
             system_prompt: Some(system_prompt),
             plugin_tools: Some(plugin_tools),
