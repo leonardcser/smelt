@@ -239,7 +239,7 @@ pub struct AuxiliaryRouting {
 }
 
 impl AuxiliaryRouting {
-    pub fn is_enabled_for(&self, task: AuxiliaryTask) -> bool {
+    pub(crate) fn is_enabled_for(&self, task: AuxiliaryTask) -> bool {
         match task {
             AuxiliaryTask::Title => self.use_for.title,
             AuxiliaryTask::Prediction => self.use_for.prediction,
@@ -336,7 +336,7 @@ pub fn resolve_model_ref_with_provider<'a>(
 /// lookup when the reference doesn't match any registered model AND the
 /// provider uses dynamic model discovery (e.g. `codex`), where statically
 /// listing every model under `providers[].models` is impractical.
-pub fn resolve_aux_model_ref<'a>(
+pub(crate) fn resolve_aux_model_ref<'a>(
     models: &'a [ResolvedModel],
     reference: &str,
 ) -> Result<&'a ResolvedModel, ResolveModelRefError> {
@@ -356,7 +356,7 @@ pub fn resolve_aux_model_ref<'a>(
     }
 }
 
-pub fn resolve_provider_ref<'a>(
+pub(crate) fn resolve_provider_ref<'a>(
     models: &'a [ResolvedModel],
     provider: &str,
 ) -> Result<&'a ResolvedModel, ResolveModelRefError> {
