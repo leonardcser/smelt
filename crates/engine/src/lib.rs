@@ -240,7 +240,6 @@ pub struct EngineHandle {
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent>,
-    runtime_approvals: Arc<std::sync::RwLock<permissions::RuntimeApprovals>>,
     agent_msg_tx: Option<tokio::sync::broadcast::Sender<tools::AgentMessageNotification>>,
     spawned_rx: Option<mpsc::UnboundedReceiver<tools::SpawnedChild>>,
     /// Stashed subagent spawn config. `None` when multi-agent is disabled
@@ -260,10 +259,6 @@ impl EngineHandle {
 
     pub fn try_recv(&mut self) -> Result<EngineEvent, mpsc::error::TryRecvError> {
         self.event_rx.try_recv()
-    }
-
-    pub fn runtime_approvals(&self) -> Arc<std::sync::RwLock<permissions::RuntimeApprovals>> {
-        Arc::clone(&self.runtime_approvals)
     }
 
     /// Drain spawned child handles (stdout pipes for subagent streaming).
@@ -527,7 +522,6 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
 
     let registry = tools::build_tools(files);
 
-    let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();
     let event_tx_clone = event_tx.clone();
     tokio::spawn(agent::engine_task(config, registry, cmd_rx, event_tx));
@@ -536,7 +530,6 @@ pub fn start(config: EngineConfig, files: tools::FileStateCache) -> EngineHandle
         cmd_tx,
         event_tx: event_tx_clone,
         event_rx,
-        runtime_approvals,
         agent_msg_tx,
         spawned_rx: if has_multi_agent {
             Some(spawned_rx)
