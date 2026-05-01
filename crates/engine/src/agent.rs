@@ -2,7 +2,7 @@ use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialC
 use crate::log;
 use crate::permissions::{Decision, Permissions, RuntimeApprovals};
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
-use crate::tools::{self, ToolContext, ToolRegistry, ToolResult};
+use crate::tools::{self, ToolContext, ToolDispatcher, ToolRegistry, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
 use protocol::{
     Content, EngineEvent, Message, Mode, ReasoningEffort, Role, ToolOutcome, TurnMeta, UiCommand,
@@ -122,7 +122,7 @@ pub(crate) async fn engine_task(
                             });
                         let mut turn = Turn {
                             provider,
-                            registry: &registry,
+                            dispatcher: &registry,
                             permissions: perm_ref,
                             runtime_approvals: &config.runtime_approvals,
                             cmd_rx: &mut cmd_rx,
@@ -519,12 +519,11 @@ fn build_provider(
 // ── Turn ────────────────────────────────────────────────────────────────────
 
 /// A tool call awaiting execution. Borrows the `ToolCall` from the parent
-/// assistant message and the tool impl from the registry; lifetime `'a`
-/// ties both to the turn iteration that built the plan.
+/// assistant message; the tool name keys the dispatcher when it's time
+/// to launch.
 struct ToolSlot<'a> {
     tc: &'a protocol::ToolCall,
     args: HashMap<String, Value>,
-    tool: &'a dyn tools::Tool,
     confirm_msg: Option<String>,
     start: Instant,
 }
@@ -570,7 +569,7 @@ struct PendingPluginCall<'a> {
 /// Encapsulates the state of a single agent turn.
 struct Turn<'a> {
     provider: Provider,
-    registry: &'a ToolRegistry,
+    dispatcher: &'a dyn ToolDispatcher,
     permissions: &'a Permissions,
     runtime_approvals: &'a Arc<RwLock<RuntimeApprovals>>,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
@@ -972,7 +971,7 @@ impl<'a> Turn<'a> {
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
-                let mut defs = self.registry.definitions(self.permissions, self.mode);
+                let mut defs = self.dispatcher.definitions(self.permissions, self.mode);
                 // Plugin tools with `override_core` shadow the core
                 // definition of the same name — drop the core one so
                 // the LLM only sees a single schema for that tool name.
@@ -1207,7 +1206,7 @@ impl<'a> Turn<'a> {
             // schema-emit time for collisions, see `definitions()`).
             let plugin_tool = self.plugin_tools.iter().find(|pt| {
                 pt.name == tc.function.name
-                    && (pt.override_core || self.registry.get(&tc.function.name).is_none())
+                    && (pt.override_core || !self.dispatcher.contains(&tc.function.name))
             });
             if let Some(pt) = plugin_tool {
                 let is_sequential =
@@ -1247,8 +1246,8 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let entry = match self.registry.get(&tc.function.name) {
-                Some(e) => e,
+            let hooks = match self.dispatcher.evaluate_hooks(&tc.function.name, &args) {
+                Some(h) => h,
                 None => {
                     self.push_tool_result(
                         &tc.id,
@@ -1259,8 +1258,6 @@ impl<'a> Turn<'a> {
                     continue;
                 }
             };
-            let tool = entry.tool.as_ref();
-            let hooks = tool.evaluate_hooks(&args);
 
             // Pre-flight validation: catch errors before prompting (e.g. stale file hash).
             if let Some(err) = hooks.preflight_error {
@@ -1274,7 +1271,7 @@ impl<'a> Turn<'a> {
                 self.mode,
                 &tc.function.name,
                 &args,
-                entry.is_mcp,
+                self.dispatcher.is_mcp(&tc.function.name),
                 &hooks,
             );
 
@@ -1284,7 +1281,6 @@ impl<'a> Turn<'a> {
                     plan.slots.push(ToolSlot {
                         tc,
                         args,
-                        tool,
                         confirm_msg: None,
                         start: tool_start,
                     });
@@ -1322,7 +1318,6 @@ impl<'a> Turn<'a> {
                     plan.slots.push(ToolSlot {
                         tc,
                         args,
-                        tool,
                         confirm_msg: None,
                         start: tool_start,
                     });
@@ -1378,10 +1373,15 @@ impl<'a> Turn<'a> {
         let mut side_futs: futures_util::stream::FuturesUnordered<SideFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
 
+        let dispatcher = self.dispatcher;
         for &i in &plan.ready {
-            let fut = plan.slots[i]
-                .tool
-                .execute(plan.slots[i].args.clone(), &contexts[i]);
+            let fut = dispatcher
+                .dispatch(
+                    &plan.slots[i].tc.function.name,
+                    plan.slots[i].args.clone(),
+                    &contexts[i],
+                )
+                .expect("dispatcher resolved tool at slot-build time");
             futs.push(Box::pin(async move { (i, fut.await) }));
         }
 
@@ -1424,9 +1424,13 @@ impl<'a> Turn<'a> {
                             let (idx, _) = plan.pending_perms.swap_remove(pos);
                             if approved {
                                 plan.slots[idx].confirm_msg = message;
-                                let fut = plan.slots[idx]
-                                    .tool
-                                    .execute(plan.slots[idx].args.clone(), &contexts[idx]);
+                                let fut = dispatcher
+                                    .dispatch(
+                                        &plan.slots[idx].tc.function.name,
+                                        plan.slots[idx].args.clone(),
+                                        &contexts[idx],
+                                    )
+                                    .expect("dispatcher resolved tool at slot-build time");
                                 futs.push(Box::pin(async move { (idx, fut.await) }));
                             } else {
                                 let denial = match message {
@@ -1633,8 +1637,7 @@ impl<'a> Turn<'a> {
                         }
                     }
                     UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
-                        if let Some(entry) = self.registry.get(&tool_name) {
-                            let tool = entry.tool.as_ref();
+                        if dispatcher.contains(&tool_name) {
                             let ctx = ToolContext {
                                 event_tx: self.event_tx.clone(),
                                 call_id: parent_call_id,
@@ -1646,7 +1649,10 @@ impl<'a> Turn<'a> {
                                 api: self.config.api.clone(),
                             };
                             side_futs.push(Box::pin(async move {
-                                let r = tool.execute(args, &ctx).await;
+                                let r = dispatcher
+                                    .dispatch(&tool_name, args, &ctx)
+                                    .expect("dispatcher contains tool")
+                                    .await;
                                 (request_id, r)
                             }));
                         } else {
