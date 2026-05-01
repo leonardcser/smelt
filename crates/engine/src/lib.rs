@@ -1,12 +1,12 @@
 mod agent;
 pub mod auth;
-pub mod cancel;
-pub mod compact;
-pub mod config;
+pub(crate) mod cancel;
+pub(crate) mod compact;
+pub(crate) mod config;
 pub mod config_file;
 pub mod image;
 pub mod log;
-pub mod mcp;
+pub(crate) mod mcp;
 pub mod paths;
 pub mod permissions;
 
@@ -14,7 +14,7 @@ pub mod pricing;
 pub mod provider;
 pub mod redact;
 pub mod registry;
-pub mod skills;
+pub(crate) mod skills;
 pub mod socket;
 pub mod tools;
 
@@ -45,6 +45,7 @@ pub fn compact_threshold_percent() -> u64 {
         .unwrap_or(DEFAULT_COMPACT_THRESHOLD_PERCENT)
 }
 
+pub use compact::SUMMARY_PREFIX;
 pub use config::ModelConfig;
 pub use mcp::McpServerConfig;
 pub use paths::{config_dir, home_dir, state_dir};
