@@ -30,7 +30,7 @@ pub struct DrawContext {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ViewportHit {
+pub(crate) enum ViewportHit {
     Scrollbar,
     Content { row: u16, col: u16 },
 }
@@ -146,7 +146,7 @@ impl WindowViewport {
         self.rect.contains(row, col)
     }
 
-    pub fn hit(&self, row: u16, col: u16) -> Option<ViewportHit> {
+    pub(crate) fn hit(&self, row: u16, col: u16) -> Option<ViewportHit> {
         if !self.contains(row, col) {
             return None;
         }

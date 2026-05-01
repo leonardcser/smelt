@@ -10,7 +10,7 @@ use std::io::Write;
 /// caller paint into `current`, then diffs against `previous` and flushes
 /// only the changed cells. Resize / Ctrl-L / first frame use a full
 /// repaint by setting `force_redraw`.
-pub struct Compositor {
+pub(crate) struct Compositor {
     current: Grid,
     previous: Grid,
     width: u16,
@@ -19,7 +19,7 @@ pub struct Compositor {
 }
 
 impl Compositor {
-    pub fn new(width: u16, height: u16) -> Self {
+    pub(crate) fn new(width: u16, height: u16) -> Self {
         Self {
             current: Grid::new(width, height),
             previous: Grid::new(width, height),
@@ -38,7 +38,7 @@ impl Compositor {
         &self.previous
     }
 
-    pub fn resize(&mut self, width: u16, height: u16) {
+    pub(crate) fn resize(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
         self.current.resize(width, height);
@@ -51,7 +51,7 @@ impl Compositor {
     /// hardware cursor position. `Ui::render` uses the closure to paint
     /// painted splits + overlays and to surface the focused leaf's
     /// hardware cursor.
-    pub fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>>(
+    pub(crate) fn render_with<W: Write, F: FnOnce(&mut Grid, &Theme) -> Option<(u16, u16)>>(
         &mut self,
         theme: &Theme,
         w: &mut W,
@@ -84,7 +84,7 @@ impl Compositor {
         Ok(())
     }
 
-    pub fn force_redraw(&mut self) {
+    pub(crate) fn force_redraw(&mut self) {
         self.force_redraw = true;
     }
 }
