@@ -260,7 +260,7 @@ impl PromptState {
 
     /// Toggle stash: if no stash, save current buf and clear; if stashed, restore.
     /// Attachments are cloned out of the store so the stash survives store clears.
-    pub fn toggle_stash(&mut self) {
+    fn toggle_stash(&mut self) {
         if let Some(snap) = self.stash.take() {
             self.win.edit_buf.buf = snap.buf;
             self.win.cpos = snap.cpos;
@@ -438,7 +438,7 @@ impl PromptState {
     /// Execute a `KeyAction` resolved by the keymap. Handles all editing,
     /// navigation, and app-control actions. Returns `None` for actions that
     /// the caller (app event loop) must handle itself.
-    pub fn execute_key_action(
+    fn execute_key_action(
         &mut self,
         action: KeyAction,
         history: Option<&mut History>,
@@ -1020,7 +1020,7 @@ pub fn char_pos(s: &str, byte_idx: usize) -> usize {
     s[..byte_idx].chars().count()
 }
 
-pub fn byte_of_char(s: &str, n: usize) -> usize {
+fn byte_of_char(s: &str, n: usize) -> usize {
     s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
 }
 
