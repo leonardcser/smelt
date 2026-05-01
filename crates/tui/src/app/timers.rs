@@ -22,7 +22,7 @@ use crate::lua::LuaHandle;
 
 /// Stable handle returned by `set` / `every`. `cancel` consumes one to
 /// drop the underlying registry slot.
-pub type TimerId = u64;
+pub(crate) type TimerId = u64;
 
 struct TimerEntry {
     id: TimerId,
@@ -37,13 +37,13 @@ struct TimerEntry {
 /// counts stay small and order doesn't matter — fire order is by
 /// deadline, picked at drain time.
 #[derive(Default)]
-pub struct Timers {
+pub(crate) struct Timers {
     entries: Vec<TimerEntry>,
     next_id: TimerId,
 }
 
 impl Timers {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             entries: Vec::new(),
             next_id: 1,
@@ -52,13 +52,13 @@ impl Timers {
 
     /// Schedule a one-shot callback to fire after `delay`. Returns the
     /// id `cancel` accepts.
-    pub fn set(&mut self, delay: Duration, handle: LuaHandle) -> TimerId {
+    pub(crate) fn set(&mut self, delay: Duration, handle: LuaHandle) -> TimerId {
         self.push(delay, None, handle)
     }
 
     /// Schedule a recurring callback to fire every `period`, starting
     /// `period` from now. Returns the id `cancel` accepts.
-    pub fn every(&mut self, period: Duration, handle: LuaHandle) -> TimerId {
+    pub(crate) fn every(&mut self, period: Duration, handle: LuaHandle) -> TimerId {
         self.push(period, Some(period), handle)
     }
 
@@ -77,7 +77,7 @@ impl Timers {
     /// Cancel the timer with `id`. Returns `true` if a timer was
     /// removed; `false` if `id` was unknown (already fired or never
     /// existed).
-    pub fn cancel(&mut self, id: TimerId) -> bool {
+    pub(crate) fn cancel(&mut self, id: TimerId) -> bool {
         let Some(idx) = self.entries.iter().position(|e| e.id == id) else {
             return false;
         };
@@ -91,7 +91,7 @@ impl Timers {
     /// callback that re-enters `Timers::set` / `every` / `cancel` is
     /// safe — those calls land on a fresh `&mut Timers` taken via
     /// `with_app`.
-    pub fn drain_due(&mut self, now: Instant, lua: &Lua) -> Vec<mlua::Function> {
+    pub(crate) fn drain_due(&mut self, now: Instant, lua: &Lua) -> Vec<mlua::Function> {
         let mut due = Vec::new();
         self.entries.retain_mut(|e| {
             if e.deadline > now {
