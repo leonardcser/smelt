@@ -11,7 +11,7 @@ use crate::text::{
 
 /// Direction + variant for `f`/`F`/`t`/`T`-style find-char motions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FindKind {
+pub(crate) enum FindKind {
     Forward,
     ForwardTill,
     Backward,
@@ -31,7 +31,7 @@ impl FindKind {
     }
 }
 
-pub fn move_left(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_left(buf: &str, cpos: usize) -> usize {
     if cpos == 0 {
         return 0;
     }
@@ -43,7 +43,7 @@ pub fn move_left(buf: &str, cpos: usize) -> usize {
 }
 
 /// Move right, staying within the current line and not landing on '\n'.
-pub fn move_right_normal(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_right_normal(buf: &str, cpos: usize) -> usize {
     if buf.is_empty() {
         return 0;
     }
@@ -60,11 +60,11 @@ pub fn move_right_normal(buf: &str, cpos: usize) -> usize {
 }
 
 /// Move right inclusive (for operator motions on `l`).
-pub fn move_right_inclusive(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_right_inclusive(buf: &str, cpos: usize) -> usize {
     next_char_boundary(buf, cpos).min(buf.len())
 }
 
-pub fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
+pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
     let next = next_char_boundary(buf, cpos);
     if next >= buf.len() {
         return cpos;
@@ -90,7 +90,7 @@ pub fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
 }
 
 /// End of line for normal mode (on last char, not past it).
-pub fn line_end_normal(buf: &str, cpos: usize) -> usize {
+pub(crate) fn line_end_normal(buf: &str, cpos: usize) -> usize {
     let end = line_end(buf, cpos);
     if end > line_start(buf, cpos) {
         prev_char_boundary(buf, end)
@@ -99,11 +99,11 @@ pub fn line_end_normal(buf: &str, cpos: usize) -> usize {
     }
 }
 
-pub fn first_non_blank(buf: &str, cpos: usize) -> usize {
+pub(crate) fn first_non_blank(buf: &str, cpos: usize) -> usize {
     first_non_blank_at(buf, line_start(buf, cpos))
 }
 
-pub fn first_non_blank_at(buf: &str, from: usize) -> usize {
+pub(crate) fn first_non_blank_at(buf: &str, from: usize) -> usize {
     let eol = line_end(buf, from);
     let mut pos = from;
     while pos < eol {
@@ -117,20 +117,20 @@ pub fn first_non_blank_at(buf: &str, from: usize) -> usize {
 }
 
 /// Range of the full current line including trailing newline (for dd).
-pub fn current_line_range(buf: &str, cpos: usize) -> (usize, usize) {
+pub(crate) fn current_line_range(buf: &str, cpos: usize) -> (usize, usize) {
     let start = line_start(buf, cpos);
     let end = line_end(buf, cpos);
     (start, end)
 }
 
 /// Range of just the content of the current line (no newline) — for S/cc.
-pub fn current_line_content_range(buf: &str, cpos: usize) -> (usize, usize) {
+pub(crate) fn current_line_content_range(buf: &str, cpos: usize) -> (usize, usize) {
     let start = line_start(buf, cpos);
     let end = line_end(buf, cpos);
     (start, end)
 }
 
-pub fn goto_line(buf: &str, line_idx: usize) -> usize {
+pub(crate) fn goto_line(buf: &str, line_idx: usize) -> usize {
     let mut pos = 0;
     for _ in 0..line_idx {
         match buf[pos..].find('\n') {
@@ -143,7 +143,7 @@ pub fn goto_line(buf: &str, line_idx: usize) -> usize {
 
 /// Move down one line. If `want_col` is Some, use that column instead of
 /// the current one (for curswant support). Returns (new_cpos, actual_col).
-pub fn move_down_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
+pub(crate) fn move_down_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
     let sol = line_start(buf, cpos);
     let col = want_col.unwrap_or(cpos - sol);
     let eol = line_end(buf, cpos);
@@ -156,7 +156,7 @@ pub fn move_down_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize,
     (next_sol + col.min(next_len), col)
 }
 
-pub fn move_up_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
+pub(crate) fn move_up_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, usize) {
     let sol = line_start(buf, cpos);
     if sol == 0 {
         let col = want_col.unwrap_or(cpos - sol);
@@ -169,17 +169,17 @@ pub fn move_up_col(buf: &str, cpos: usize, want_col: Option<usize>) -> (usize, u
     (prev_sol + col.min(prev_len), col)
 }
 
-pub fn move_down(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_down(buf: &str, cpos: usize) -> usize {
     move_down_col(buf, cpos, None).0
 }
 
-pub fn move_up(buf: &str, cpos: usize) -> usize {
+pub(crate) fn move_up(buf: &str, cpos: usize) -> usize {
     move_up_col(buf, cpos, None).0
 }
 
 // ── Find char on line ───────────────────────────────────────────────────────
 
-pub fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Option<usize> {
+pub(crate) fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Option<usize> {
     let sol = line_start(buf, cpos);
     let eol = line_end(buf, cpos);
 
@@ -215,7 +215,7 @@ pub fn find_char(buf: &str, cpos: usize, kind: FindKind, ch: char) -> Option<usi
 
 /// Repeat a find-char motion `n` times, adjusting for till variants so
 /// repeated `;`/`,` don't get stuck on the same character.
-pub fn repeat_find(buf: &str, mut pos: usize, kind: FindKind, ch: char, n: usize) -> usize {
+pub(crate) fn repeat_find(buf: &str, mut pos: usize, kind: FindKind, ch: char, n: usize) -> usize {
     for _ in 0..n {
         let search_pos = match kind {
             FindKind::ForwardTill => next_char_boundary(buf, pos),
@@ -231,7 +231,7 @@ pub fn repeat_find(buf: &str, mut pos: usize, kind: FindKind, ch: char, n: usize
 
 // ── Match bracket ───────────────────────────────────────────────────────────
 
-pub fn find_matching_bracket(buf: &str, cpos: usize) -> Option<usize> {
+pub(crate) fn find_matching_bracket(buf: &str, cpos: usize) -> Option<usize> {
     let eol = line_end(buf, cpos);
     let mut start = cpos;
     while start < eol {
@@ -285,7 +285,7 @@ pub fn find_matching_bracket(buf: &str, cpos: usize) -> Option<usize> {
 
 // ── Char-step helpers ───────────────────────────────────────────────────────
 
-pub fn advance_chars(buf: &str, pos: usize, n: usize) -> usize {
+pub(crate) fn advance_chars(buf: &str, pos: usize, n: usize) -> usize {
     let mut p = pos;
     for _ in 0..n {
         if p >= buf.len() {
@@ -296,7 +296,7 @@ pub fn advance_chars(buf: &str, pos: usize, n: usize) -> usize {
     p
 }
 
-pub fn retreat_chars(buf: &str, pos: usize, n: usize) -> usize {
+pub(crate) fn retreat_chars(buf: &str, pos: usize, n: usize) -> usize {
     let mut p = pos;
     for _ in 0..n {
         if p == 0 {
@@ -310,7 +310,7 @@ pub fn retreat_chars(buf: &str, pos: usize, n: usize) -> usize {
 /// Clamp cursor to valid normal-mode position (on a char, not past end).
 /// Exception: if the buffer ends with '\n', `buf.len()` is valid — it
 /// represents the cursor on the empty trailing line.
-pub fn clamp_normal(buf: &str, cpos: &mut usize) {
+pub(crate) fn clamp_normal(buf: &str, cpos: &mut usize) {
     if buf.is_empty() {
         *cpos = 0;
         return;
