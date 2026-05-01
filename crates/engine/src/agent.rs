@@ -1364,10 +1364,7 @@ impl<'a> Turn<'a> {
                 event_tx: self.event_tx.clone(),
                 call_id: s.tc.id.clone(),
                 cancel: self.cancel.clone(),
-                provider: self.provider.clone(),
-                model: self.model.clone(),
                 session_dir: self.session_dir.clone(),
-                api: self.config.api.clone(),
             })
             .collect();
 
@@ -1652,10 +1649,7 @@ impl<'a> Turn<'a> {
                                 event_tx: self.event_tx.clone(),
                                 call_id: parent_call_id,
                                 cancel: self.cancel.clone(),
-                                provider: self.provider.clone(),
-                                model: self.model.clone(),
                                 session_dir: self.session_dir.clone(),
-                                api: self.config.api.clone(),
                             };
                             side_futs.push(Box::pin(async move {
                                 let r = dispatcher
@@ -2061,24 +2055,6 @@ fn send_usage(
         cost_usd: if cost > 0.0 { Some(cost) } else { None },
         background,
     });
-}
-
-/// Calculate cost from token usage and emit a `TokenUsage` event.
-pub(crate) fn emit_usage(
-    tx: &mpsc::UnboundedSender<EngineEvent>,
-    api: &crate::ApiConfig,
-    model: &str,
-    usage: protocol::TokenUsage,
-) {
-    send_usage(
-        tx,
-        &api.provider_type,
-        &api.model_config,
-        model,
-        usage,
-        None,
-        false,
-    );
 }
 
 /// Emit a background `TokenUsage` event (compaction, title, btw, predict).

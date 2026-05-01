@@ -5,13 +5,11 @@ pub mod notebook;
 pub(crate) mod result_dedup;
 mod spawn_agent;
 pub(crate) mod web_cache;
-mod web_fetch;
-mod web_shared;
 
 pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
 
 use crate::cancel::CancellationToken;
-use crate::provider::{FunctionSchema, Provider, ToolDefinition};
+use crate::provider::{FunctionSchema, ToolDefinition};
 use protocol::{EngineEvent, ToolHooks};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -43,7 +41,6 @@ pub use bash::{check_interactive, check_shell_background_operator};
 
 pub use notebook::NotebookRenderData;
 pub(crate) use spawn_agent::AgentMessageNotification;
-pub(crate) use web_fetch::WebFetchTool;
 
 pub(crate) struct ToolResult {
     pub(crate) content: String,
@@ -76,20 +73,16 @@ impl ToolResult {
 }
 
 /// Context provided to tools during execution, giving them access to
-/// engine facilities (event streaming, cancellation, and the LLM provider
-/// for tools that need secondary LLM calls).
-///
-/// All fields are owned (Arc-backed where shared) so a fresh context can be
-/// constructed per call without lifetime gymnastics — this enables side calls
-/// like `smelt.tools.call("bash", args)` from Lua plugin tools.
+/// engine facilities (event streaming, cancellation, and the session
+/// directory). All fields are owned (Arc-backed where shared) so a
+/// fresh context can be constructed per call without lifetime
+/// gymnastics — this enables side calls like
+/// `smelt.tools.call("bash", args)` from Lua plugin tools.
 pub(crate) struct ToolContext {
     pub(crate) event_tx: mpsc::UnboundedSender<EngineEvent>,
     pub(crate) call_id: String,
     pub(crate) cancel: CancellationToken,
-    pub(crate) provider: Provider,
-    pub(crate) model: String,
     pub(crate) session_dir: std::path::PathBuf,
-    pub(crate) api: crate::ApiConfig,
 }
 
 pub(crate) type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
@@ -418,7 +411,6 @@ pub(crate) fn build_tools(
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Box::new(BashTool));
-    r.register(Box::new(WebFetchTool));
     let _ = files;
 
     // Multi-agent tools (conditionally registered). `list_agents`,

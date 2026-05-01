@@ -1029,6 +1029,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.notebook_edit",
         include_str!("../../../../runtime/lua/smelt/tools/notebook_edit.lua"),
     ),
+    (
+        "smelt.tools.web_fetch",
+        include_str!("../../../../runtime/lua/smelt/tools/web_fetch.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1069,6 +1073,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.edit_file",
     "smelt.tools.read_file",
     "smelt.tools.notebook_edit",
+    "smelt.tools.web_fetch",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

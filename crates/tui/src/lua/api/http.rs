@@ -83,7 +83,10 @@ fn response_to_lua(lua: &Lua, resp: &http::Response) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
     t.set("status", resp.status)?;
     t.set("final_url", resp.final_url.clone())?;
-    t.set("body", resp.text())?;
+    // Lua strings are byte-safe; pass raw bytes so binary responses
+    // (e.g. images) survive the boundary intact. Text consumers can
+    // still treat the value as a string.
+    t.set("body", lua.create_string(&resp.body)?)?;
     let h = lua.create_table()?;
     for (k, v) in &resp.headers {
         h.set(k.clone(), v.clone())?;

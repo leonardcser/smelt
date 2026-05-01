@@ -2,8 +2,6 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
-
 fn cache_dir() -> PathBuf {
     crate::paths::cache_dir().join("web")
 }
@@ -32,10 +30,6 @@ pub(crate) fn get(key: &str) -> Option<String> {
         return None;
     }
     Some(rest.to_string())
-}
-
-pub(crate) fn put(key: &str, value: &str) {
-    put_with_ttl(key, value, DEFAULT_TTL);
 }
 
 pub(crate) fn put_with_ttl(key: &str, value: &str, ttl: Duration) {

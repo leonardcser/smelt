@@ -23,6 +23,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         )?,
     )?;
 
+    image.set(
+        "data_url_from_bytes",
+        lua.create_function(|_, (bytes, mime): (mlua::String, String)| {
+            Ok(engine::image::data_url_from_bytes(&bytes.as_bytes(), &mime))
+        })?,
+    )?;
+
     smelt.set("image", image)?;
     Ok(())
 }

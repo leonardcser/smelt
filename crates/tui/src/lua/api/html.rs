@@ -26,6 +26,22 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     html_tbl.set(
+        "to_markdown",
+        lua.create_function(|lua, (source, base): (String, Option<String>)| {
+            let md = html::to_markdown(&source, base.as_deref());
+            let out = lua.create_table()?;
+            out.set("title", md.title)?;
+            out.set("content", md.content)?;
+            let links = lua.create_table()?;
+            for (i, link) in md.links.into_iter().enumerate() {
+                links.set(i + 1, link)?;
+            }
+            out.set("links", links)?;
+            Ok(out)
+        })?,
+    )?;
+
+    html_tbl.set(
         "parse_ddg_results",
         lua.create_function(|lua, source: String| {
             let results = html::parse_ddg_results(&source);

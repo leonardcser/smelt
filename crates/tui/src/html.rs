@@ -2,12 +2,11 @@
 //! parsing, no I/O. Exposed to Lua via `crates/tui/src/lua/api/html.rs`
 //! and composed by tools that need to digest a fetched page.
 //!
-//! Today this module ships the obvious read shapes: title, links, and
-//! a tag-stripped plain-text projection. The full HTML→markdown
-//! converter from `engine/tools/web_shared.rs` migrates here when its
-//! caller (the `web_fetch` tool) moves to Lua in P5.b.
+//! Read shapes ship for title, links, plain text, and a markdown
+//! projection that consumers like `web_fetch` use to feed an LLM
+//! extractor.
 
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use std::collections::HashSet;
 use url::Url;
 
@@ -196,6 +195,335 @@ fn walk(node: &ego_tree::NodeRef<scraper::node::Node>, out: &mut String) {
             }
         }
     }
+}
+
+/// Combined markdown projection: page title, body content rendered as
+/// markdown, and filtered outbound links resolved against `base_url`.
+/// Used by `web_fetch` to digest a fetched page into a single payload
+/// before extraction. Links are deduplicated, fragment-stripped, and
+/// capped at 50; `javascript:` / `mailto:` / `tel:` / pure-fragment
+/// targets are dropped.
+#[derive(Debug, Clone)]
+pub(crate) struct Markdown {
+    pub(crate) title: Option<String>,
+    pub(crate) content: String,
+    pub(crate) links: Vec<String>,
+}
+
+pub(crate) fn to_markdown(html: &str, base_url: Option<&str>) -> Markdown {
+    let doc = Html::parse_document(html);
+
+    let title = Selector::parse("title").ok().and_then(|sel| {
+        doc.select(&sel)
+            .next()
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+
+    let base = base_url.and_then(|s| Url::parse(s).ok());
+    let mut links: Vec<String> = Vec::new();
+    if let (Some(base), Ok(sel)) = (base.as_ref(), Selector::parse("a[href]")) {
+        let mut seen: HashSet<String> = HashSet::new();
+        for el in doc.select(&sel) {
+            if links.len() >= 50 {
+                break;
+            }
+            let Some(href) = el.value().attr("href") else {
+                continue;
+            };
+            let href = href.trim();
+            if href.is_empty()
+                || href.starts_with("javascript:")
+                || href.starts_with("mailto:")
+                || href.starts_with("tel:")
+                || href.starts_with('#')
+            {
+                continue;
+            }
+            let Ok(mut resolved) = base.join(href) else {
+                continue;
+            };
+            resolved.set_fragment(None);
+            let s = resolved.to_string();
+            if seen.insert(s.clone()) {
+                links.push(s);
+            }
+        }
+    }
+
+    let content = match Selector::parse("body")
+        .ok()
+        .and_then(|s| doc.select(&s).next())
+    {
+        Some(body) => {
+            let mut out = String::new();
+            html_to_md(body, &mut out);
+            collapse_blank_lines(&out)
+        }
+        None => to_text(html),
+    };
+
+    Markdown {
+        title,
+        content,
+        links,
+    }
+}
+
+fn html_to_md(el: ElementRef, out: &mut String) {
+    let tag = el.value().name();
+    if SKIP_ELEMENTS.contains(&tag) {
+        return;
+    }
+
+    match tag {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            let level = tag[1..].parse::<usize>().unwrap_or(1);
+            out.push('\n');
+            for _ in 0..level {
+                out.push('#');
+            }
+            out.push(' ');
+            collect_inline_text(el, out);
+            out.push_str("\n\n");
+        }
+        "p" | "div" | "section" | "article" | "main" | "header" | "footer" | "nav" | "aside" => {
+            let is_block = matches!(tag, "p" | "div");
+            if is_block {
+                ensure_blank_line(out);
+            }
+            walk_children(el, out);
+            if is_block {
+                out.push('\n');
+            }
+        }
+        "br" => out.push('\n'),
+        "hr" => out.push_str("\n---\n\n"),
+        "a" => {
+            let href = el.value().attr("href").unwrap_or("");
+            let mut link_text = String::new();
+            collect_inline_text(el, &mut link_text);
+            if link_text.trim().is_empty() {
+                out.push_str(href);
+            } else if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") {
+                out.push_str(&link_text);
+            } else {
+                out.push('[');
+                out.push_str(link_text.trim());
+                out.push_str("](");
+                out.push_str(href);
+                out.push(')');
+            }
+        }
+        "img" => {
+            let alt = el.value().attr("alt").unwrap_or("");
+            let src = el.value().attr("src").unwrap_or("");
+            if !src.is_empty() {
+                out.push_str("![");
+                out.push_str(alt);
+                out.push_str("](");
+                out.push_str(src);
+                out.push(')');
+            }
+        }
+        "strong" | "b" => {
+            out.push_str("**");
+            collect_inline_text(el, out);
+            out.push_str("**");
+        }
+        "em" | "i" => {
+            out.push('*');
+            collect_inline_text(el, out);
+            out.push('*');
+        }
+        "code" => {
+            out.push('`');
+            collect_inline_text(el, out);
+            out.push('`');
+        }
+        "pre" => {
+            ensure_blank_line(out);
+            out.push_str("```\n");
+            for desc in el.descendants() {
+                if let Some(t) = desc.value().as_text() {
+                    out.push_str(t);
+                }
+            }
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n\n");
+        }
+        "ul" | "ol" => {
+            ensure_blank_line(out);
+            let ordered = tag == "ol";
+            let mut idx = 1u32;
+            for child in el.children() {
+                if let Some(li) = ElementRef::wrap(child) {
+                    if li.value().name() == "li" {
+                        if ordered {
+                            out.push_str(&format!("{idx}. "));
+                            idx += 1;
+                        } else {
+                            out.push_str("- ");
+                        }
+                        collect_inline_text(li, out);
+                        out.push('\n');
+                    }
+                }
+            }
+            out.push('\n');
+        }
+        "blockquote" => {
+            ensure_blank_line(out);
+            let mut inner = String::new();
+            walk_children(el, &mut inner);
+            for line in inner.trim().lines() {
+                out.push_str("> ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        "table" => {
+            ensure_blank_line(out);
+            render_table(el, out);
+            out.push('\n');
+        }
+        _ => walk_children(el, out),
+    }
+}
+
+fn walk_children(el: ElementRef, out: &mut String) {
+    for child in el.children() {
+        if let Some(t) = child.value().as_text() {
+            out.push_str(t);
+        } else if let Some(child_el) = ElementRef::wrap(child) {
+            html_to_md(child_el, out);
+        }
+    }
+}
+
+fn collect_inline_text(el: ElementRef, out: &mut String) {
+    for child in el.children() {
+        if let Some(t) = child.value().as_text() {
+            out.push_str(t);
+        } else if let Some(child_el) = ElementRef::wrap(child) {
+            let tag = child_el.value().name();
+            if SKIP_ELEMENTS.contains(&tag) {
+                continue;
+            }
+            match tag {
+                "strong" | "b" => {
+                    out.push_str("**");
+                    collect_inline_text(child_el, out);
+                    out.push_str("**");
+                }
+                "em" | "i" => {
+                    out.push('*');
+                    collect_inline_text(child_el, out);
+                    out.push('*');
+                }
+                "code" => {
+                    out.push('`');
+                    collect_inline_text(child_el, out);
+                    out.push('`');
+                }
+                "a" => html_to_md(child_el, out),
+                "br" => out.push('\n'),
+                _ => collect_inline_text(child_el, out),
+            }
+        }
+    }
+}
+
+fn ensure_blank_line(out: &mut String) {
+    if out.is_empty() {
+        return;
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+}
+
+fn render_table(table: ElementRef, out: &mut String) {
+    let row_sel = match Selector::parse("tr") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let th_sel = match Selector::parse("th") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let td_sel = match Selector::parse("td") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut has_header = false;
+
+    for row in table.select(&row_sel) {
+        let ths: Vec<String> = row
+            .select(&th_sel)
+            .map(|c| c.text().collect::<String>().trim().to_string())
+            .collect();
+        if !ths.is_empty() {
+            has_header = true;
+            rows.push(ths);
+            continue;
+        }
+        let tds: Vec<String> = row
+            .select(&td_sel)
+            .map(|c| c.text().collect::<String>().trim().to_string())
+            .collect();
+        if !tds.is_empty() {
+            rows.push(tds);
+        }
+    }
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    for row in &rows {
+        out.push('|');
+        for i in 0..cols {
+            out.push(' ');
+            out.push_str(row.get(i).map(|s| s.as_str()).unwrap_or(""));
+            out.push_str(" |");
+        }
+        out.push('\n');
+        if has_header && std::ptr::eq(row, &rows[0]) {
+            out.push('|');
+            for _ in 0..cols {
+                out.push_str(" --- |");
+            }
+            out.push('\n');
+        }
+    }
+}
+
+fn collapse_blank_lines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut blank_count = 0u32;
+    for line in s.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                out.push('\n');
+            }
+        } else {
+            blank_count = 0;
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.trim().to_string()
 }
 
 fn collapse_whitespace(s: &str) -> String {

@@ -25,14 +25,6 @@ pub(crate) struct Response {
     pub(crate) body: Vec<u8>,
 }
 
-impl Response {
-    /// Body decoded as UTF-8 (lossy). Convenience for tools that want
-    /// text output.
-    pub(crate) fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-}
-
 /// Options accepted by [`get`]. Defaults: 30s timeout, follow up to 10
 /// redirects, no extra headers.
 #[derive(Debug, Clone, Default)]
