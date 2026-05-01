@@ -444,7 +444,7 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
 /// Only mutates `content`. `reasoning_content` and `tool_calls.arguments`
 /// are left alone — they reflect the model's own prior thought and actions,
 /// generated from already-redacted inputs.
-pub fn redact_message(msg: &mut protocol::Message) {
+pub(crate) fn redact_message(msg: &mut protocol::Message) {
     if let Some(ref mut content) = msg.content {
         redact_content(content);
     }

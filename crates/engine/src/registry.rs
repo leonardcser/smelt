@@ -101,7 +101,7 @@ pub fn next_agent_id() -> String {
 }
 
 /// Find an agent by its human-readable ID (e.g. "agent-1").
-pub fn find_by_id(agent_id: &str) -> Option<RegistryEntry> {
+pub(crate) fn find_by_id(agent_id: &str) -> Option<RegistryEntry> {
     iter_entries()
         .into_iter()
         .map(|(_, e)| e)
@@ -158,7 +158,7 @@ fn is_pid_alive(_pid: u32) -> bool {
 
 /// Discover all live agents in the same scope (git root or cwd).
 /// Prunes dead entries as a side effect.
-pub fn discover(scope: &str) -> Vec<RegistryEntry> {
+pub(crate) fn discover(scope: &str) -> Vec<RegistryEntry> {
     let mut result = vec![];
     for (path, reg) in iter_entries() {
         if !is_pid_alive(reg.pid) {

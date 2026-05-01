@@ -16,7 +16,7 @@ use crate::provider::{ChatOptions, Provider, ProviderError, TokenUsage};
 use protocol::{Content, Message, ReasoningEffort, Role};
 
 /// Handoff instructions handed to the summarizing model.
-pub const SUMMARIZATION_PROMPT: &str = include_str!("prompts/compact.md");
+pub(crate) const SUMMARIZATION_PROMPT: &str = include_str!("prompts/compact.md");
 
 /// Lead-in text the _next_ model sees at the top of the handoff summary.
 /// Used both as a marker to detect "already summarized" messages on repeat
@@ -26,7 +26,7 @@ pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md
 
 /// Soft cap on user-message text preserved verbatim after compaction, so the
 /// replacement history leaves room for the next turn in the context window.
-pub const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+pub(crate) const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 
 /// Per-message cap when flattening history for the summarizer: stops a single
 /// oversized tool output from eating the compact prompt's budget.
@@ -42,7 +42,7 @@ const MAX_EMPTY_RETRIES: u8 = 2;
 
 /// Controls how much context the replacement history preserves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InitialContextInjection {
+pub(crate) enum InitialContextInjection {
     /// Drop everything except the summary. Fits a user-initiated `/compact`
     /// where a fresh user message is expected to arrive next.
     DoNotInject,
@@ -53,7 +53,7 @@ pub enum InitialContextInjection {
 
 /// Why compaction is running. Surfaced to logs so flakiness is diagnosable.
 #[derive(Debug, Clone, Copy)]
-pub enum CompactReason {
+pub(crate) enum CompactReason {
     /// The prompt crossed the configured context-window percentage.
     ContextLimit,
     /// The user invoked `/compact`.
@@ -71,7 +71,7 @@ impl CompactReason {
 
 /// Which point in the turn lifecycle triggered compaction.
 #[derive(Debug, Clone, Copy)]
-pub enum CompactPhase {
+pub(crate) enum CompactPhase {
     MidTurn,
     Manual,
 }
@@ -89,7 +89,7 @@ impl CompactPhase {
 /// when. Bundled into a single options struct so `run_compact` doesn't grow
 /// an unwieldy positional argument list.
 #[derive(Debug, Clone, Copy)]
-pub struct CompactOptions {
+pub(crate) struct CompactOptions {
     pub injection: InitialContextInjection,
     pub phase: CompactPhase,
     pub reason: CompactReason,
@@ -107,7 +107,7 @@ pub struct CompactOptions {
 ///   [`MAX_CONTEXT_TRIMS`] times.
 /// - If the model returns an empty summary, retries up to
 ///   [`MAX_EMPTY_RETRIES`] times before giving up.
-pub async fn run_compact(
+pub(crate) async fn run_compact(
     provider: &Provider,
     history: &[Message],
     model: &str,
