@@ -13,7 +13,7 @@ use crossterm::style::Color;
 pub use ui::theme::DEFAULT_ACCENT;
 
 /// Look up a preset by name. Returns the ansi value if found.
-pub fn preset_by_name(name: &str) -> Option<u8> {
+pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
     PRESETS
         .iter()
         .find(|(n, _, _)| *n == name)
@@ -28,7 +28,7 @@ pub fn preset_by_name(name: &str) -> Option<u8> {
 /// result on `theme`. Must be called *before* entering the TUI's
 /// raw-mode / alternate screen since we temporarily enable raw mode
 /// ourselves for the OSC query.
-pub fn detect_background(theme: &mut ui::Theme) {
+pub(crate) fn detect_background(theme: &mut ui::Theme) {
     if let Some(light) = detect_light_background() {
         theme.set_light(light);
     }
@@ -188,7 +188,7 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 /// `Comment`, `ErrorMsg`) and use the `Smelt*` prefix for app-specific
 /// roles (`SmeltAccent`, `SmeltAgent`, `SmeltModePlan`, …). Code with
 /// a `DrawContext` reads these via `ctx.theme.get("Visual")` etc.
-pub fn populate_ui_theme(theme: &mut ui::Theme) {
+pub(crate) fn populate_ui_theme(theme: &mut ui::Theme) {
     use ui::grid::Style;
 
     let is_light = theme.is_light();
