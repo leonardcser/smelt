@@ -106,7 +106,7 @@ impl TuiApp {
         self.notify(format!("forked from {original_id}"));
     }
 
-    pub fn reset_session(&mut self) {
+    pub(crate) fn reset_session(&mut self) {
         // Cancel any in-flight engine work (agent turn, title generation, etc.)
         // before clearing state so stale events don't restore old data.
         self.core.engine.send(UiCommand::Cancel);
@@ -239,7 +239,7 @@ impl TuiApp {
     // ── History / session ────────────────────────────────────────────────
 
     /// Rebuild the screen from session history and import persisted render cache.
-    pub fn restore_screen(&mut self) {
+    pub(crate) fn restore_screen(&mut self) {
         self.rebuild_screen_from_history();
     }
 
@@ -474,7 +474,7 @@ impl TuiApp {
         }
     }
 
-    pub fn save_session(&mut self) {
+    pub(crate) fn save_session(&mut self) {
         let _perf = crate::perf::begin("session:save");
         if self.core.session.messages.is_empty() {
             return;
@@ -578,11 +578,11 @@ impl TuiApp {
         });
     }
 
-    pub fn is_compacting(&self) -> bool {
+    pub(crate) fn is_compacting(&self) -> bool {
         self.working.is_compacting()
     }
 
-    pub fn compact_history(&mut self, instructions: Option<String>) {
+    pub(crate) fn compact_history(&mut self, instructions: Option<String>) {
         self.pending_compact_epoch = self.compact_epoch;
         {
             self.working.begin(TurnPhase::Compacting);
@@ -633,7 +633,10 @@ impl TuiApp {
         }
     }
 
-    pub fn rewind_to(&mut self, block_idx: usize) -> Option<(String, Vec<(String, String)>)> {
+    pub(crate) fn rewind_to(
+        &mut self,
+        block_idx: usize,
+    ) -> Option<(String, Vec<(String, String)>)> {
         let turns = self.user_turns();
         let turn_text = turns
             .iter()
@@ -697,7 +700,7 @@ impl TuiApp {
 
     // ── Agent internals ──────────────────────────────────────────────────
 
-    pub fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {
+    pub(crate) fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {
         self.push_block(Block::User {
             text: input.to_string(),
             image_labels,

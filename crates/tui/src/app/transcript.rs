@@ -18,10 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct TranscriptData {
-    pub clamped_scroll: u16,
-    pub total_rows: u16,
-    pub scrollbar_col: u16,
-    pub viewport: ui::WindowViewport,
+    pub(crate) clamped_scroll: u16,
+    pub(crate) total_rows: u16,
+    pub(crate) scrollbar_col: u16,
+    pub(crate) viewport: ui::WindowViewport,
 }
 
 /// Soft cursor placement carried back from `compute_transcript_cursor`
@@ -29,19 +29,19 @@ pub(crate) struct TranscriptData {
 /// `glyph` is the buffer character under the cursor cell so the block
 /// cursor renders the same glyph.
 pub(crate) struct SoftCursor {
-    pub col: u16,
-    pub row: u16,
-    pub glyph: char,
+    pub(crate) col: u16,
+    pub(crate) row: u16,
+    pub(crate) glyph: char,
 }
 
 pub(crate) struct TranscriptCursor {
-    pub clamped_line: u16,
-    pub clamped_col: u16,
-    pub soft_cursor: Option<SoftCursor>,
+    pub(crate) clamped_line: u16,
+    pub(crate) clamped_col: u16,
+    pub(crate) soft_cursor: Option<SoftCursor>,
 }
 
 impl TuiApp {
-    pub fn start_active_agent(&mut self, agent_id: String) {
+    pub(crate) fn start_active_agent(&mut self, agent_id: String) {
         self.parser
             .start_active_agent(&mut self.transcript.history, agent_id);
     }
@@ -62,17 +62,17 @@ impl TuiApp {
         );
     }
 
-    pub fn cancel_active_agents(&mut self) {
+    pub(crate) fn cancel_active_agents(&mut self) {
         self.parser
             .cancel_active_agents(&mut self.transcript.history);
     }
 
-    pub fn finish_active_agent(&mut self, agent_id: &str) {
+    pub(crate) fn finish_active_agent(&mut self, agent_id: &str) {
         self.parser
             .finish_active_agent(&mut self.transcript.history, agent_id);
     }
 
-    pub fn begin_turn(&mut self) {
+    pub(crate) fn begin_turn(&mut self) {
         self.parser.begin_turn();
     }
 
@@ -84,12 +84,12 @@ impl TuiApp {
         self.transcript.push(block);
     }
 
-    pub fn append_streaming_thinking(&mut self, delta: &str) {
+    pub(crate) fn append_streaming_thinking(&mut self, delta: &str) {
         self.parser
             .append_streaming_thinking(&mut self.transcript.history, delta);
     }
 
-    pub fn flush_streaming_thinking(&mut self) {
+    pub(crate) fn flush_streaming_thinking(&mut self) {
         self.parser
             .flush_streaming_thinking(&mut self.transcript.history);
     }
@@ -117,17 +117,17 @@ impl TuiApp {
         }
     }
 
-    pub fn append_streaming_text(&mut self, delta: &str) {
+    pub(crate) fn append_streaming_text(&mut self, delta: &str) {
         self.parser
             .append_streaming_text(&mut self.transcript.history, delta);
     }
 
-    pub fn flush_streaming_text(&mut self) {
+    pub(crate) fn flush_streaming_text(&mut self) {
         self.parser
             .flush_streaming_text(&mut self.transcript.history);
     }
 
-    pub fn start_tool(
+    pub(crate) fn start_tool(
         &mut self,
         call_id: String,
         name: String,
@@ -138,29 +138,29 @@ impl TuiApp {
             .start_tool(&mut self.transcript.history, call_id, name, summary, args);
     }
 
-    pub fn start_exec(&mut self, command: String) {
+    pub(crate) fn start_exec(&mut self, command: String) {
         self.parser
             .start_exec(&mut self.transcript.history, command);
     }
 
-    pub fn append_exec_output(&mut self, chunk: &str) {
+    pub(crate) fn append_exec_output(&mut self, chunk: &str) {
         self.parser
             .append_exec_output(&mut self.transcript.history, chunk);
     }
 
-    pub fn finish_exec(&mut self, exit_code: Option<i32>) {
+    pub(crate) fn finish_exec(&mut self, exit_code: Option<i32>) {
         self.parser.finish_exec(exit_code);
     }
 
-    pub fn finalize_exec(&mut self) {
+    pub(crate) fn finalize_exec(&mut self) {
         self.parser.finalize_exec(&mut self.transcript.history);
     }
 
-    pub fn has_active_exec(&self) -> bool {
+    pub(crate) fn has_active_exec(&self) -> bool {
         self.parser.has_active_exec()
     }
 
-    pub fn append_active_output(&mut self, call_id: &str, chunk: &str) {
+    pub(crate) fn append_active_output(&mut self, call_id: &str, chunk: &str) {
         self.parser
             .append_active_output(&mut self.transcript.history, call_id, chunk);
     }
@@ -170,7 +170,7 @@ impl TuiApp {
             .set_active_status(&mut self.transcript.history, call_id, status);
     }
 
-    pub fn set_active_user_message(&mut self, call_id: &str, msg: String) {
+    pub(crate) fn set_active_user_message(&mut self, call_id: &str, msg: String) {
         self.parser
             .set_active_user_message(&mut self.transcript.history, call_id, msg);
     }
@@ -191,7 +191,7 @@ impl TuiApp {
         );
     }
 
-    pub fn has_transcript_content(&mut self, show_thinking: bool) -> bool {
+    pub(crate) fn has_transcript_content(&mut self, show_thinking: bool) -> bool {
         !self.transcript.history.is_empty() || self.has_ephemeral(show_thinking)
     }
 
@@ -199,7 +199,7 @@ impl TuiApp {
     /// are no ephemeral rows (returns an `Arc::clone` of the cached
     /// snapshot); otherwise clones the vec once to append ephemeral
     /// rows. Callers treat it as a `&[String]` via deref coercion.
-    pub fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
+    pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let tw = self.transcript_width() as u16;
         if !self.has_ephemeral(show_thinking) {
             let snap = self.transcript.snapshot(tw, show_thinking);
@@ -225,7 +225,10 @@ impl TuiApp {
     /// Soft-wrap positions are "transparent" to word-select; hard
     /// positions are the boundaries used by line-select. Ephemeral
     /// rows (appended after the snapshot) are treated as hard breaks.
-    pub fn transcript_line_breaks(&mut self, show_thinking: bool) -> (Vec<usize>, Vec<usize>) {
+    pub(crate) fn transcript_line_breaks(
+        &mut self,
+        show_thinking: bool,
+    ) -> (Vec<usize>, Vec<usize>) {
         let tw = self.transcript_width() as u16;
         let snap = self.transcript.snapshot(tw, show_thinking);
         let rows = snap.rows.clone();
@@ -266,7 +269,11 @@ impl TuiApp {
         (soft, hard)
     }
 
-    pub fn block_text_at_row(&mut self, abs_row: usize, show_thinking: bool) -> Option<String> {
+    pub(crate) fn block_text_at_row(
+        &mut self,
+        abs_row: usize,
+        show_thinking: bool,
+    ) -> Option<String> {
         let tw = self.transcript_width() as u16;
         // Prefer the block's raw markdown source (text-bearing variants
         // expose `Block::raw_text`) so yanking a rendered markdown block
@@ -287,7 +294,7 @@ impl TuiApp {
         snap.block_text_at(abs_row)
     }
 
-    pub fn snap_col_to_selectable(
+    pub(crate) fn snap_col_to_selectable(
         &mut self,
         abs_row: usize,
         col: usize,
@@ -300,7 +307,7 @@ impl TuiApp {
             .unwrap_or(col)
     }
 
-    pub fn snap_cpos_to_selectable(
+    pub(crate) fn snap_cpos_to_selectable(
         &mut self,
         rows: &[String],
         cpos: usize,
@@ -326,13 +333,18 @@ impl TuiApp {
         cpos
     }
 
-    pub fn copy_display_range(&mut self, start: usize, end: usize, show_thinking: bool) -> String {
+    pub(crate) fn copy_display_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        show_thinking: bool,
+    ) -> String {
         let tw = self.transcript_width() as u16;
         let snap = self.transcript.snapshot(tw, show_thinking);
         snap.copy_byte_range(start, end)
     }
 
-    pub fn finish_transcript_turn(&mut self) {
+    pub(crate) fn finish_transcript_turn(&mut self) {
         let _perf = crate::perf::begin("render:finish_turn");
         self.parser
             .finalize_active_tools(&mut self.transcript.history);
@@ -353,13 +365,13 @@ impl TuiApp {
     /// Invalidate the width-dependent block layout cache when the
     /// terminal width changes. Called from the resize handler; the
     /// projection picks up the fresh layouts on the next render.
-    pub fn invalidate_for_width(&mut self, width: u16) {
+    pub(crate) fn invalidate_for_width(&mut self, width: u16) {
         if width as usize != self.transcript.history.cache_width {
             self.transcript.history.invalidate_for_width(width as usize);
         }
     }
 
-    pub fn clear_transcript(&mut self) {
+    pub(crate) fn clear_transcript(&mut self) {
         self.transcript.history.clear();
         self.parser.clear();
     }
@@ -384,7 +396,7 @@ impl TuiApp {
         }
     }
 
-    pub fn layout_cache_dirty(&self) -> bool {
+    pub(crate) fn layout_cache_dirty(&self) -> bool {
         self.transcript.history.cache_dirty
     }
 
@@ -481,11 +493,11 @@ impl TuiApp {
         self.transcript.history.cache_dirty = false;
     }
 
-    pub fn user_turns(&self) -> Vec<(usize, String)> {
+    pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
         self.transcript.user_turns()
     }
 
-    pub fn truncate_to(&mut self, block_idx: usize) {
+    pub(crate) fn truncate_to(&mut self, block_idx: usize) {
         self.transcript.truncate_to(block_idx);
         self.parser.clear_tools_and_agents();
     }
@@ -493,7 +505,7 @@ impl TuiApp {
     /// Update spinner animation state. Call before rendering. Returns
     /// `true` if the spinner frame changed and the caller should
     /// redraw.
-    pub fn update_spinner(&mut self) -> bool {
+    pub(crate) fn update_spinner(&mut self) -> bool {
         let mut changed = false;
         if let (Some(elapsed), Some(prev_frame)) =
             (self.working.elapsed(), self.working.last_spinner_frame())
