@@ -325,39 +325,6 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
     StatsOutput { left, right }
 }
 
-/// Count visual rows needed to display the stats panels.
-/// Accounts for whether side-by-side fits the current terminal width.
-pub fn stats_row_count(left: &[StatsLine], right: &[StatsLine]) -> usize {
-    if right.is_empty() {
-        return left.len();
-    }
-
-    let left_lc = label_col_width(left);
-    let right_lc = label_col_width(right);
-    let left_width = left
-        .iter()
-        .map(|l| stats_line_visual_width(l, left_lc))
-        .max()
-        .unwrap_or(0)
-        + 2;
-    let right_width = right
-        .iter()
-        .map(|l| stats_line_visual_width(l, right_lc))
-        .max()
-        .unwrap_or(0);
-    let term_width = crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80);
-    let gap = 5;
-
-    if left_width + gap + right_width + 2 <= term_width {
-        left.len().max(right.len())
-    } else {
-        // Sequential: left + blank separator + right
-        left.len() + 1 + right.len()
-    }
-}
-
 /// Visual width of a stats line (excluding the 2-char left margin).
 /// Minimum gap between label and value columns.
 const KV_GAP: usize = 2;

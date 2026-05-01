@@ -21,12 +21,6 @@ pub const VERSION: &str = "1";
 /// Buffer-level operations — text, attachments, whole-buffer replace.
 pub mod buf {
     use crate::input::PromptState;
-    use ui::EditBuffer;
-
-    /// Read the text of a buffer.
-    pub fn get_text(buffer: &EditBuffer) -> &str {
-        &buffer.buf
-    }
 
     /// Replace the prompt buffer's text wholesale. Snapshots undo,
     /// clears attachments + shift-selection anchor, resets paste

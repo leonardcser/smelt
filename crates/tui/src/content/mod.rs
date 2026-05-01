@@ -18,7 +18,7 @@ pub use status::StatusItem;
 pub use transcript::{SnapshotCell, TranscriptSnapshot};
 pub use viewport::ViewportGeom;
 
-pub(crate) use selection::{scan_at_token, truncate_str, try_at_ref, wrap_line};
+pub(crate) use selection::{truncate_str, try_at_ref, wrap_line};
 
 pub(crate) use status::BarSpan;
 pub use status::{StatusPosition, StyleState};

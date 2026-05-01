@@ -274,7 +274,7 @@ pub(super) fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
 
 /// Scan an `@path` or `@"path with spaces"` token starting at position `i`.
 /// Returns `(token_string, path_str, end_index)`.
-pub(crate) fn scan_at_token(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+fn scan_at_token(chars: &[char], i: usize) -> Option<(String, String, usize)> {
     if chars[i] != '@' {
         return None;
     }
