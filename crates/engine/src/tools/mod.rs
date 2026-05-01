@@ -1,4 +1,3 @@
-pub(crate) mod background;
 pub mod file_state;
 pub mod notebook;
 pub(crate) mod result_dedup;
@@ -13,25 +12,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::mpsc;
-
-/// Kill the entire process group spawned by a child.
-/// The child must have been spawned with `.process_group(0)` so it leads its
-/// own group. We send SIGKILL to the negative PID (i.e. the group).
-pub(crate) fn kill_process_group(child: &tokio::process::Child) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // SAFETY: pid is a valid process group ID (we set process_group(0) at spawn).
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = child;
-    }
-}
-
-pub use background::{ProcessInfo, ProcessRegistry};
 
 pub use notebook::NotebookRenderData;
 

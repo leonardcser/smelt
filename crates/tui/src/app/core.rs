@@ -7,8 +7,9 @@ use super::{
     engine_bridge::EngineBridge, timers::Timers,
 };
 use crate::lua::LuaRuntime;
+use crate::process::ProcessRegistry;
 use crate::session::Session;
-use engine::tools::{FileStateCache, ProcessRegistry};
+use engine::tools::FileStateCache;
 use engine::{EngineHandle, SkillLoader};
 use std::sync::Arc;
 
