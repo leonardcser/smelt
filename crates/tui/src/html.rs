@@ -55,6 +55,92 @@ pub(crate) fn links(html: &str, base_url: Option<&str>) -> Vec<String> {
     out
 }
 
+/// One DuckDuckGo HTML search result row: title text, resolved
+/// destination URL, and an optional snippet.
+#[derive(Debug, Clone)]
+pub(crate) struct DdgResult {
+    pub(crate) title: String,
+    pub(crate) link: String,
+    pub(crate) description: String,
+}
+
+/// Parse the DuckDuckGo HTML results page (`html.duckduckgo.com/html/`)
+/// into a list of [`DdgResult`]s. Returns at most 20 entries — enough
+/// for the model, soft enough on token budget. Empty title or empty
+/// resolved link skips the row.
+pub(crate) fn parse_ddg_results(html: &str) -> Vec<DdgResult> {
+    let doc = Html::parse_document(html);
+    let result_sel = match Selector::parse("div.result, div.web-result") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let title_sel = match Selector::parse("a.result__a") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let snippet_sel = match Selector::parse("a.result__snippet") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+    for el in doc.select(&result_sel) {
+        if results.len() >= 20 {
+            break;
+        }
+        let Some(title_el) = el.select(&title_sel).next() else {
+            continue;
+        };
+        let title: String = title_el.text().collect::<String>().trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let raw_href = title_el.value().attr("href").unwrap_or("");
+        let link = extract_ddg_url(raw_href);
+        if link.is_empty() {
+            continue;
+        }
+        let description = el
+            .select(&snippet_sel)
+            .next()
+            .map(|s| s.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+        results.push(DdgResult {
+            title,
+            link,
+            description,
+        });
+    }
+    results
+}
+
+fn extract_ddg_url(ddg_url: &str) -> String {
+    if ddg_url.contains("uddg=") {
+        if let Some(start) = ddg_url.find("uddg=") {
+            let after = &ddg_url[start + 5..];
+            let encoded = if let Some(end) = after.find('&') {
+                &after[..end]
+            } else {
+                after
+            };
+            return url::form_urlencoded::parse(encoded.as_bytes())
+                .next()
+                .map(|(k, v)| {
+                    if v.is_empty() {
+                        k.to_string()
+                    } else {
+                        format!("{k}={v}")
+                    }
+                })
+                .unwrap_or_default();
+        }
+    }
+    if ddg_url.starts_with("http://") || ddg_url.starts_with("https://") {
+        return ddg_url.to_string();
+    }
+    String::new()
+}
+
 /// Plain-text projection: walks the DOM, skips script/style/etc, joins
 /// visible text with spaces. Whitespace is collapsed to single spaces;
 /// blocks introduce a newline. Good enough for "read what the page

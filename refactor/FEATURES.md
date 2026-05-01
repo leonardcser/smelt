@@ -84,7 +84,7 @@ to invoke_ the feature.
 | `glob`                | `runtime/lua/smelt/tools/glob.lua` | P5.b — landed; composes `smelt.fs.glob`            | working |
 | `grep`                | `runtime/lua/smelt/tools/grep.lua` | P5.b — landed; composes `smelt.grep.run` + `smelt.process.run` fallback | working |
 | `web_fetch`           | `engine/tools/web_fetch.rs`       | P5.b                                                | working |
-| `web_search`          | `engine/tools/web_search.rs`      | P5.b                                                | working |
+| `web_search`          | `runtime/lua/smelt/tools/web_search.lua` | P5.b — landed; composes `smelt.http.{post,cache,random_user_agent}` + `smelt.html.parse_ddg_results` | working |
 | `ask_user_question`   | `plugins/ask_user_question.lua`   | P5.b → `tools/ask_user_question.lua`                | working |
 | `spawn_agent`         | `engine/tools/spawn_agent.rs`     | P5.b                                                | working |
 | `list_agents`         | `runtime/lua/smelt/tools/list_agents.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
@@ -279,8 +279,8 @@ to invoke_ the feature.
 | `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size / glob`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.os` (`getenv / setenv / unsetenv / platform / arch / tempdir / home / cwd / set_cwd / pid`) | `lua/api/os.rs` | P3.c (landed this session) | working |
 | `smelt.grep` (`run(pattern, path, opts)` over ripgrep — content / files_with_matches / count modes; case / multiline / context / glob / type / timeout) | `lua/api/grep.rs` + `tui/grep.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.http` (`get(url, opts)` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.html` (`title / links / to_text` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.http` (`get / post / random_user_agent / cache.{get,put}` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` + `tui/http/cache.rs` | P3.a + P3.c + P5.b (POST + UA rotator + cache) | working |
+| `smelt.html` (`title / links / to_text / parse_ddg_results` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c + P5.b (DDG parser) | working |
 | `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `tui::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.notebook.parse` (Jupyter `.ipynb` parse over `tui::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.parse.frontmatter` (YAML frontmatter splitter)   | `lua/api/parse.rs`                  | P3.c/P4.e (custom-commands plugin)         | working        |

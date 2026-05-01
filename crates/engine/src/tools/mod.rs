@@ -8,7 +8,6 @@ pub(crate) mod result_dedup;
 mod spawn_agent;
 pub(crate) mod web_cache;
 mod web_fetch;
-mod web_search;
 mod web_shared;
 mod write_file;
 
@@ -54,7 +53,6 @@ pub use notebook::NotebookRenderData;
 pub(crate) use read_file::ReadFileTool;
 pub(crate) use spawn_agent::AgentMessageNotification;
 pub(crate) use web_fetch::WebFetchTool;
-pub(crate) use web_search::WebSearchTool;
 pub(crate) use write_file::WriteFileTool;
 
 pub(crate) struct ToolResult {
@@ -468,7 +466,6 @@ pub(crate) fn build_tools(
     }));
     r.register(Box::new(BashTool));
     r.register(Box::new(WebFetchTool));
-    r.register(Box::new(WebSearchTool));
     r.register(Box::new(NotebookEditTool {
         files: files.clone(),
     }));
