@@ -141,7 +141,7 @@ impl Cells {
     /// Register a converter from a stored cell value of type `T` to
     /// `mlua::Value`. The drain pump and `get_lua` use it whenever a
     /// cell's slot value is a `T` (matched by `TypeId`).
-    pub(crate) fn register_lua_projector<T, F>(&mut self, project: F)
+    fn register_lua_projector<T, F>(&mut self, project: F)
     where
         T: Any + 'static,
         F: Fn(&T, &mlua::Lua) -> mlua::Value + 'static,
