@@ -46,7 +46,7 @@ impl TuiApp {
             .start_active_agent(&mut self.transcript.history, agent_id);
     }
 
-    pub fn update_active_agent(
+    pub(crate) fn update_active_agent(
         &mut self,
         agent_id: &str,
         slug: Option<&str>,
@@ -76,11 +76,11 @@ impl TuiApp {
         self.parser.begin_turn();
     }
 
-    pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
+    pub(crate) fn push_tool_call(&mut self, block: Block, state: ToolState) {
         self.transcript.push_tool_call(block, state);
     }
 
-    pub fn push_block(&mut self, block: Block) {
+    pub(crate) fn push_block(&mut self, block: Block) {
         self.transcript.push(block);
     }
 
@@ -165,7 +165,7 @@ impl TuiApp {
             .append_active_output(&mut self.transcript.history, call_id, chunk);
     }
 
-    pub fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
+    pub(crate) fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
         self.parser
             .set_active_status(&mut self.transcript.history, call_id, status);
     }
@@ -175,7 +175,7 @@ impl TuiApp {
             .set_active_user_message(&mut self.transcript.history, call_id, msg);
     }
 
-    pub fn finish_tool(
+    pub(crate) fn finish_tool(
         &mut self,
         call_id: &str,
         status: ToolStatus,
@@ -338,15 +338,15 @@ impl TuiApp {
             .finalize_active_tools(&mut self.transcript.history);
     }
 
-    pub fn block_view_state(&self, id: BlockId) -> ViewState {
+    pub(crate) fn block_view_state(&self, id: BlockId) -> ViewState {
         self.transcript.block_view_state(id)
     }
 
-    pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
+    pub(crate) fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
         self.transcript.set_block_view_state(id, state);
     }
 
-    pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
+    pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.transcript.drain_finished_blocks()
     }
 
@@ -364,7 +364,7 @@ impl TuiApp {
         self.parser.clear();
     }
 
-    pub fn export_render_cache(&self) -> Option<RenderCache> {
+    pub(crate) fn export_render_cache(&self) -> Option<RenderCache> {
         let mut cache = RenderCache::new(String::new());
         for id in &self.transcript.history.order {
             if let Some(Block::ToolCall { call_id, .. }) = self.transcript.history.blocks.get(id) {
@@ -388,7 +388,7 @@ impl TuiApp {
         self.transcript.history.cache_dirty
     }
 
-    pub fn export_layout_cache(&mut self) -> Option<PersistedLayoutCache> {
+    pub(crate) fn export_layout_cache(&mut self) -> Option<PersistedLayoutCache> {
         if self.transcript.history.is_empty() {
             return None;
         }
@@ -430,7 +430,7 @@ impl TuiApp {
         Some(cache)
     }
 
-    pub fn import_layout_cache(&mut self, cache: PersistedLayoutCache) {
+    pub(crate) fn import_layout_cache(&mut self, cache: PersistedLayoutCache) {
         if !cache.is_compatible(self.ui.theme().is_light()) {
             return;
         }

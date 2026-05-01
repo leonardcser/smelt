@@ -562,7 +562,6 @@ impl TuiApp {
                 tool_calls: Vec::new(),
                 status: super::AgentTrackStatus::Working,
                 blocking: child.blocking,
-                started_at: Instant::now(),
                 context_tokens: None,
                 cost_usd: 0.0,
             });

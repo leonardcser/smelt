@@ -20,9 +20,9 @@ mod web_search;
 mod web_shared;
 mod write_file;
 
-pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
 #[cfg(test)]
 pub(crate) use file_state::FileState;
+pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
 
 use crate::cancel::CancellationToken;
 use crate::permissions::{Decision, Permissions};
@@ -54,14 +54,14 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 }
 
 pub use background::{ProcessInfo, ProcessRegistry};
-pub use bash::{check_interactive, check_shell_background_operator};
 pub(crate) use bash::BashTool;
+pub use bash::{check_interactive, check_shell_background_operator};
 pub(crate) use edit_file::EditFileTool;
 
 pub(crate) use glob::GlobTool;
 pub(crate) use grep::GrepTool;
-pub use notebook::NotebookRenderData;
 pub(crate) use notebook::NotebookEditTool;
+pub use notebook::NotebookRenderData;
 pub(crate) use read_file::ReadFileTool;
 pub(crate) use spawn_agent::AgentMessageNotification;
 pub(crate) use web_fetch::WebFetchTool;

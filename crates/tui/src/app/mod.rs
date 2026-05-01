@@ -35,16 +35,16 @@ pub(crate) use host::Host;
 /// Snapshot of a tracked agent's state, published by the main loop
 /// and consumed by the agents dialog.
 #[derive(Clone)]
-pub struct AgentSnapshot {
-    pub agent_id: String,
-    pub prompt: Arc<String>,
-    pub tool_calls: Vec<AgentToolEntry>,
-    pub context_tokens: Option<u32>,
-    pub cost_usd: f64,
+pub(crate) struct AgentSnapshot {
+    pub(crate) agent_id: String,
+    pub(crate) prompt: Arc<String>,
+    pub(crate) tool_calls: Vec<AgentToolEntry>,
+    pub(crate) context_tokens: Option<u32>,
+    pub(crate) cost_usd: f64,
 }
 
 /// Shared, live-updating list of agent snapshots.
-pub type SharedSnapshots = Arc<Mutex<Vec<AgentSnapshot>>>;
+pub(crate) type SharedSnapshots = Arc<Mutex<Vec<AgentSnapshot>>>;
 
 pub(crate) use crate::app::transcript_model::{
     AgentBlockStatus, ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest,
@@ -77,35 +77,34 @@ use std::time::{Duration, Instant};
 
 /// A single tool call recorded from a subagent's event stream.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct AgentToolEntry {
-    pub call_id: String,
-    pub tool_name: String,
-    pub summary: String,
-    pub status: ToolStatus,
-    pub elapsed: Option<Duration>,
+pub(crate) struct AgentToolEntry {
+    pub(crate) call_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) summary: String,
+    pub(crate) status: ToolStatus,
+    pub(crate) elapsed: Option<Duration>,
 }
 
 /// State for a spawned subagent (blocking or background).
-pub struct TrackedAgent {
-    pub agent_id: String,
-    pub pid: u32,
-    pub prompt: Arc<String>,
-    pub slug: Option<String>,
-    pub event_rx: tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
+pub(crate) struct TrackedAgent {
+    pub(crate) agent_id: String,
+    pub(crate) pid: u32,
+    pub(crate) prompt: Arc<String>,
+    pub(crate) slug: Option<String>,
+    pub(crate) event_rx: tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
     /// Completed tool calls (for /agents dialog and blocking block rendering).
-    pub tool_calls: Vec<AgentToolEntry>,
-    pub status: AgentTrackStatus,
+    pub(crate) tool_calls: Vec<AgentToolEntry>,
+    pub(crate) status: AgentTrackStatus,
     /// Whether the parent LLM is waiting for this agent (blocking spawn).
-    pub blocking: bool,
-    pub started_at: Instant,
+    pub(crate) blocking: bool,
     /// Latest prompt-token count reported for this subagent.
-    pub context_tokens: Option<u32>,
+    pub(crate) context_tokens: Option<u32>,
     /// Accumulated cost in USD from this subagent's TokenUsage events.
-    pub cost_usd: f64,
+    pub(crate) cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentTrackStatus {
+pub(crate) enum AgentTrackStatus {
     Working,
     Idle,
     Error,
@@ -206,9 +205,9 @@ pub struct TuiApp {
     /// Human-readable name for this agent.
     pub agent_id: String,
     /// All tracked subagents (blocking and background).
-    pub agents: Vec<TrackedAgent>,
+    pub(crate) agents: Vec<TrackedAgent>,
     /// Shared agent snapshots for live dialog updates.
-    pub agent_snapshots: crate::app::SharedSnapshots,
+    pub(crate) agent_snapshots: crate::app::SharedSnapshots,
     pub(crate) permissions: Arc<Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `TuiApp` so reducer handlers (`apply_ops`) can mutate
@@ -381,7 +380,7 @@ enum DeferredDialog {
 
 // ── Supporting types ─────────────────────────────────────────────────────────
 
-pub enum SessionControl {
+pub(crate) enum SessionControl {
     Continue,
     NeedsConfirm(Box<ConfirmRequest>),
     Done,

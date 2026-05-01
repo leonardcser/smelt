@@ -395,12 +395,7 @@ pub fn start(config: EngineConfig) -> EngineHandle {
     let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();
     let event_tx_clone = event_tx.clone();
-    tokio::spawn(agent::engine_task(
-        config,
-        registry,
-        cmd_rx,
-        event_tx,
-    ));
+    tokio::spawn(agent::engine_task(config, registry, cmd_rx, event_tx));
 
     EngineHandle {
         cmd_tx,

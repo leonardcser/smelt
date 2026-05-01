@@ -42,9 +42,9 @@ pub struct TranscriptSnapshot {
     /// fully-selected rows instead of cell-based reconstruction.
     pub source_text: Vec<Option<String>>,
     /// For each row, the `BlockId` that produced it (`None` for gap rows).
-    pub block_of_row: Vec<Option<BlockId>>,
+    pub(crate) block_of_row: Vec<Option<BlockId>>,
     /// Row range `[start..end)` for each block, in insertion order.
-    pub row_of_block: HashMap<BlockId, Range<u16>>,
+    pub(crate) row_of_block: HashMap<BlockId, Range<u16>>,
     /// Generation counter at build time — compared against
     /// `BlockHistory`'s counter to detect staleness.
     generation: u64,

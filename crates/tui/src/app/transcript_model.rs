@@ -14,24 +14,24 @@ use std::time::{Duration, Instant};
 /// In-flight blocking agent — a thin handle to a streaming `Block::Agent`.
 /// The full state (slug, tool_calls, status, elapsed) lives in the block
 /// itself and is refreshed via `rewrite` as engine events arrive.
-pub struct ActiveAgent {
-    pub agent_id: String,
-    pub block_id: BlockId,
-    pub start_time: Instant,
+pub(crate) struct ActiveAgent {
+    pub(crate) agent_id: String,
+    pub(crate) block_id: BlockId,
+    pub(crate) start_time: Instant,
     /// Frozen elapsed time once the agent finishes; while `None`, live
     /// elapsed ticks are rewritten into the block on each spinner frame.
-    pub final_elapsed: Option<Duration>,
+    pub(crate) final_elapsed: Option<Duration>,
 }
 
 /// In-flight tool call — a thin handle to a streaming `Block::ToolCall`.
 /// The full state (status, output, user_message, elapsed) lives in
 /// `tool_states` keyed by `call_id`; rewrites go through
 /// `TuiApp::update_tool_state` which invalidates the layout cache.
-pub struct ActiveTool {
-    pub call_id: String,
-    pub name: String,
-    pub block_id: BlockId,
-    pub start_time: Instant,
+pub(crate) struct ActiveTool {
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) block_id: BlockId,
+    pub(crate) start_time: Instant,
 }
 
 impl ActiveTool {
@@ -51,20 +51,20 @@ impl ActiveTool {
 /// `EngineEvent::RequestPermission` through `SessionControl`, `DeferredDialog`,
 /// `ConfirmContext`, and `ConfirmDialog::new`.
 #[derive(Clone)]
-pub struct ConfirmRequest {
-    pub call_id: String,
-    pub tool_name: String,
-    pub desc: String,
-    pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub approval_patterns: Vec<String>,
+pub(crate) struct ConfirmRequest {
+    pub(crate) call_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) desc: String,
+    pub(crate) args: std::collections::HashMap<String, serde_json::Value>,
+    pub(crate) approval_patterns: Vec<String>,
     /// Set during dispatch when paths outside the workspace are detected.
-    pub outside_dir: Option<std::path::PathBuf>,
-    pub summary: Option<String>,
-    pub request_id: u64,
+    pub(crate) outside_dir: Option<std::path::PathBuf>,
+    pub(crate) summary: Option<String>,
+    pub(crate) request_id: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ToolStatus {
+pub(crate) enum ToolStatus {
     Pending,
     Confirm,
     Ok,
@@ -73,14 +73,14 @@ pub enum ToolStatus {
 }
 
 #[derive(Clone)]
-pub struct ToolOutput {
-    pub content: String,
-    pub is_error: bool,
-    pub metadata: Option<serde_json::Value>,
-    pub render_cache: Option<ToolOutputRenderCache>,
+pub(crate) struct ToolOutput {
+    pub(crate) content: String,
+    pub(crate) is_error: bool,
+    pub(crate) metadata: Option<serde_json::Value>,
+    pub(crate) render_cache: Option<ToolOutputRenderCache>,
 }
 
-pub type ToolOutputRef = Box<ToolOutput>;
+pub(crate) type ToolOutputRef = Box<ToolOutput>;
 
 /// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id` on
 /// `BlockHistory::tool_states`. Holds every field of a tool block that can
@@ -88,15 +88,15 @@ pub type ToolOutputRef = Box<ToolOutput>;
 /// finalized elapsed, etc.). Splitting this out keeps `Block::ToolCall`
 /// immutable so its layout can be cached permanently once terminal.
 #[derive(Clone)]
-pub struct ToolState {
-    pub status: ToolStatus,
-    pub elapsed: Option<Duration>,
-    pub output: Option<ToolOutputRef>,
-    pub user_message: Option<String>,
+pub(crate) struct ToolState {
+    pub(crate) status: ToolStatus,
+    pub(crate) elapsed: Option<Duration>,
+    pub(crate) output: Option<ToolOutputRef>,
+    pub(crate) user_message: Option<String>,
 }
 
 impl ToolState {
-    pub fn is_terminal(&self) -> bool {
+    pub(crate) fn is_terminal(&self) -> bool {
         matches!(
             self.status,
             ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
@@ -105,7 +105,7 @@ impl ToolState {
 }
 
 #[derive(Clone, serde::Serialize)]
-pub enum Block {
+pub(crate) enum Block {
     User {
         text: String,
         /// Bracketed labels for image attachments (e.g. `[screenshot.png]`).
@@ -131,11 +131,6 @@ pub enum Block {
         name: String,
         summary: String,
         args: HashMap<String, serde_json::Value>,
-    },
-    Confirm {
-        tool: String,
-        desc: String,
-        choice: Option<ConfirmChoice>,
     },
     Hint {
         content: String,
@@ -178,7 +173,7 @@ impl Block {
     /// intermediate `to_value` step, two blocks with identical content
     /// but different HashMap insertion orders would produce different
     /// hashes.
-    pub fn content_hash(&self) -> u64 {
+    pub(crate) fn content_hash(&self) -> u64 {
         let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
         let bytes = serde_json::to_vec(&value).unwrap_or_default();
         seahash::hash(&bytes)
@@ -193,7 +188,7 @@ impl Block {
     /// Returns `None` for structured blocks (tool calls, agent headers,
     /// confirm dialogs) that don't have a single "markdown source"; the
     /// caller falls back to cell-walking for those.
-    pub fn raw_text(&self) -> Option<String> {
+    pub(crate) fn raw_text(&self) -> Option<String> {
         match self {
             Block::User { text, .. } => Some(text.clone()),
             Block::Text { content }
@@ -203,33 +198,33 @@ impl Block {
             Block::Compacted { summary } => Some(summary.clone()),
             Block::CodeLine { content, .. } => Some(content.clone()),
             Block::Exec { command, output } => Some(format!("$ {command}\n{output}")),
-            Block::ToolCall { .. } | Block::Confirm { .. } | Block::Agent { .. } => None,
+            Block::ToolCall { .. } | Block::Agent { .. } => None,
         }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AgentBlockStatus {
+pub(crate) enum AgentBlockStatus {
     Running,
     Done,
     Error,
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Serialize)]
-pub enum ApprovalScope {
+pub(crate) enum ApprovalScope {
     Session,
     Workspace,
 }
 
 /// A single runtime permission rule: one tool + one pattern.
 #[derive(Clone)]
-pub struct PermissionEntry {
-    pub tool: String,
-    pub pattern: String,
+pub(crate) struct PermissionEntry {
+    pub(crate) tool: String,
+    pub(crate) pattern: String,
 }
 
 #[derive(Clone, PartialEq, serde::Serialize)]
-pub enum ConfirmChoice {
+pub(crate) enum ConfirmChoice {
     Yes,
     No,
     Always(ApprovalScope),
@@ -244,7 +239,7 @@ pub enum ConfirmChoice {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-pub struct BlockId(pub u64);
+pub(crate) struct BlockId(pub(crate) u64);
 
 /// Per-block view state — how the block is presented inside the
 /// transcript. Independent of the block's [`Status`] (a still-streaming
@@ -255,7 +250,7 @@ pub struct BlockId(pub u64);
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
-pub enum ViewState {
+pub(crate) enum ViewState {
     /// Full content — default.
     #[default]
     Expanded,
@@ -285,51 +280,51 @@ pub(crate) enum Status {
 /// Cache key for a single `DisplayBlock` layout — the inputs to
 /// `layout_block` that affect the laid-out output for a given block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct LayoutKey {
-    pub width: u16,
-    pub show_thinking: bool,
-    pub view_state: ViewState,
+pub(crate) struct LayoutKey {
+    pub(crate) width: u16,
+    pub(crate) show_thinking: bool,
+    pub(crate) view_state: ViewState,
     /// Content hash of the block this layout was produced for. When a
     /// block mutates (streaming append / rewrite), its content hash
     /// changes and the new `LayoutKey` misses the old cached layout
     /// — automatic invalidation by keying, not by eviction.
-    pub content_hash: u64,
+    pub(crate) content_hash: u64,
 }
 
 /// Per-block cached artifacts. Keeps a bounded LRU of the most recent
 /// `LayoutKey → DisplayBlock` pairs so that resize cycles (e.g. 100→80→100)
 /// can hit the cache on every step.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct BlockArtifact {
+pub(crate) struct BlockArtifact {
     /// `(LayoutKey, DisplayBlock)` entries ordered most-recently-used first.
-    pub layouts: Vec<(LayoutKey, DisplayBlock)>,
+    pub(crate) layouts: Vec<(LayoutKey, DisplayBlock)>,
 }
 
 impl BlockArtifact {
     pub(crate) const MAX_LAYOUTS: usize = 4;
 
-    pub fn get(&self, key: LayoutKey) -> Option<&DisplayBlock> {
+    pub(crate) fn get(&self, key: LayoutKey) -> Option<&DisplayBlock> {
         self.layouts.iter().find(|(k, _)| *k == key).map(|(_, b)| b)
     }
 
-    pub fn insert(&mut self, key: LayoutKey, block: DisplayBlock) {
+    pub(crate) fn insert(&mut self, key: LayoutKey, block: DisplayBlock) {
         self.layouts.retain(|(k, _)| *k != key);
         self.layouts.insert(0, (key, block));
         self.layouts.truncate(Self::MAX_LAYOUTS);
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.layouts.clear();
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.layouts.is_empty()
     }
 
     /// Drop cached layouts whose replay would be stale at `new_width`.
     /// Layouts whose `layout_width` equals `new_width` or whose source
     /// didn't wrap and still fits are preserved.
-    pub fn invalidate_for_width(&mut self, new_width: u16) {
+    pub(crate) fn invalidate_for_width(&mut self, new_width: u16) {
         self.layouts
             .retain(|(k, b)| k.width == new_width || b.is_valid_at(new_width));
     }
@@ -914,13 +909,6 @@ mod tests {
             name: "bash".into(),
             summary: "ls".into(),
             args: HashMap::new(),
-        }
-        .raw_text()
-        .is_none());
-        assert!(Block::Confirm {
-            tool: "bash".into(),
-            desc: "run ls".into(),
-            choice: None,
         }
         .raw_text()
         .is_none());
