@@ -133,16 +133,6 @@ pub(crate) trait Tool: Send + Sync {
         vec![]
     }
 
-    /// Whether this tool requires a human in the loop.
-    fn interactive_only(&self) -> bool {
-        false
-    }
-
-    /// Which modes this tool is available in. None means all modes.
-    fn modes(&self) -> Option<&[Mode]> {
-        None
-    }
-
     /// Whether this tool is an MCP tool (uses `mcp` permission ruleset).
     fn is_mcp(&self) -> bool {
         false
@@ -151,18 +141,6 @@ pub(crate) trait Tool: Send + Sync {
     /// Pre-flight validation run before showing the permission dialog.
     /// Return `Some(error)` to skip the dialog and fail the tool immediately.
     fn preflight(&self, _args: &HashMap<String, Value>) -> Option<String> {
-        None
-    }
-
-    /// Optional decision override, consulted before the config rule-set.
-    /// Used by tools with dynamic scope (e.g. `edit_file` auto-allowed on
-    /// plan files in Plan mode). Returning `None` defers to the rules.
-    fn decide_override(
-        &self,
-        _args: &HashMap<String, Value>,
-        _mode: Mode,
-        _session_dir: &std::path::Path,
-    ) -> Option<Decision> {
         None
     }
 }
@@ -192,19 +170,10 @@ impl ToolRegistry {
         &self,
         permissions: &Permissions,
         mode: Mode,
-        interactive: bool,
     ) -> Vec<ToolDefinition> {
         self.tools
             .iter()
             .filter(|t| {
-                if t.interactive_only() && !interactive {
-                    return false;
-                }
-                if let Some(modes) = t.modes() {
-                    if !modes.contains(&mode) {
-                        return false;
-                    }
-                }
                 if t.is_mcp() {
                     permissions.check_mcp(mode, t.name()) != Decision::Deny
                 } else {

@@ -941,9 +941,7 @@ impl<'a> Turn<'a> {
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
-                let mut defs =
-                    self.registry
-                        .definitions(self.permissions, self.mode, self.config.interactive);
+                let mut defs = self.registry.definitions(self.permissions, self.mode);
                 // Plugin tools with `override_core` shadow the core
                 // definition of the same name — drop the core one so
                 // the LLM only sees a single schema for that tool name.
@@ -1231,12 +1229,9 @@ impl<'a> Turn<'a> {
                 }
             };
 
-            let mut decision = tool
-                .decide_override(&args, self.mode, &self.session_dir)
-                .unwrap_or_else(|| {
-                    self.permissions
-                        .decide(self.mode, &tc.function.name, &args, tool.is_mcp())
-                });
+            let mut decision =
+                self.permissions
+                    .decide(self.mode, &tc.function.name, &args, tool.is_mcp());
 
             // Runtime approvals (session + workspace) can turn Ask → Allow.
             if decision == Decision::Ask {
