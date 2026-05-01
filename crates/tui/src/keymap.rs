@@ -478,7 +478,11 @@ static BINDINGS: &[Binding] = &[
 
 /// Look up the first matching action for the given key event and context.
 /// Returns `None` if no binding matches (caller should try vim / char insert).
-pub(crate) fn lookup(code: KeyCode, modifiers: KeyModifiers, ctx: &KeyContext) -> Option<KeyAction> {
+pub(crate) fn lookup(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    ctx: &KeyContext,
+) -> Option<KeyAction> {
     for b in BINDINGS {
         if b.code != code {
             continue;

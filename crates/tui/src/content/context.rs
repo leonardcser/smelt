@@ -11,7 +11,7 @@ use ui::Theme;
 pub struct LayoutContext {
     pub width: u16,
     pub show_thinking: bool,
-    pub view_state: ViewState,
+    pub(crate) view_state: ViewState,
 }
 
 /// Context for the paint stage. Carries the active theme so

@@ -32,8 +32,8 @@ pub enum ColorMode {
 /// event with `verbose = true`; the headless variant honours the
 /// CLI's `--format` and `-v` flags.
 pub struct HeadlessSink {
-    pub format: OutputFormat,
-    pub verbose: bool,
+    pub(super) format: OutputFormat,
+    pub(super) verbose: bool,
 }
 
 impl HeadlessSink {
@@ -53,11 +53,11 @@ impl HeadlessSink {
     }
 
     /// Write a single `EngineEvent` as a JSON line to stdout.
-    pub fn emit_json(&self, ev: &EngineEvent) {
+    pub(super) fn emit_json(&self, ev: &EngineEvent) {
         println!("{}", serde_json::to_string(ev).unwrap());
     }
 
-    pub fn log_thinking(&self, content: &str) {
+    pub(super) fn log_thinking(&self, content: &str) {
         let di = dim_italic();
         let r = reset();
         for line in content.lines() {
@@ -65,7 +65,7 @@ impl HeadlessSink {
         }
     }
 
-    pub fn log_tool(
+    pub(super) fn log_tool(
         &self,
         tool_name: &str,
         summary: &str,
@@ -92,20 +92,20 @@ impl HeadlessSink {
         }
     }
 
-    pub fn log_retry(&self, attempt: u32, delay_ms: u64) {
+    pub(super) fn log_retry(&self, attempt: u32, delay_ms: u64) {
         let d = dim();
         let r = reset();
         let secs = delay_ms as f64 / 1000.0;
         eprintln!("{d}\u{27f3} retry #{attempt} ({secs:.1}s){r}");
     }
 
-    pub fn log_error(&self, message: &str) {
+    pub(super) fn log_error(&self, message: &str) {
         let c = ansi_fg(crossterm::style::Color::Red);
         let r = reset();
         eprintln!("{c}! {message}{r}");
     }
 
-    pub fn log_token_usage(
+    pub(super) fn log_token_usage(
         &self,
         usage: &protocol::TokenUsage,
         tokens_per_sec: Option<f64>,

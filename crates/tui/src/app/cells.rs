@@ -229,7 +229,11 @@ impl Cells {
     /// Register a subscriber callback against `name`. Returns the
     /// subscription id `unsubscribe` accepts, or `None` when `name`
     /// isn't declared.
-    pub(crate) fn subscribe_kind(&mut self, name: &str, kind: SubscriberKind) -> Option<SubscriptionId> {
+    pub(crate) fn subscribe_kind(
+        &mut self,
+        name: &str,
+        kind: SubscriberKind,
+    ) -> Option<SubscriptionId> {
         let slot = self.slots.get_mut(name)?;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);

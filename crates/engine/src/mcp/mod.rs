@@ -258,7 +258,6 @@ impl McpManager {
             Ok(output)
         }
     }
-
 }
 
 fn sanitize_name(name: &str) -> String {

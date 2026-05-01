@@ -7,8 +7,7 @@
 //! further knowledge of `Block` variants.
 
 use super::transcript_model::{
-    AgentBlockStatus, ApprovalScope, Block, ConfirmChoice, ToolOutput, ToolState, ToolStatus,
-    ViewState,
+    AgentBlockStatus, Block, ToolOutput, ToolState, ToolStatus, ViewState,
 };
 use crate::content::display::{
     ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
@@ -32,7 +31,7 @@ use agent::render_agent_block;
 #[cfg(test)]
 use markdown::is_horizontal_rule;
 pub(crate) use markdown::render_markdown_inner;
-use tools::{pluralize, render_confirm_result, render_tool, render_wrapped_output};
+use tools::{pluralize, render_tool, render_wrapped_output};
 
 use std::time::Duration;
 
@@ -299,7 +298,6 @@ pub(super) fn render_block(
         Block::Text { .. } => crate::perf::begin("render:text"),
         Block::CodeLine { .. } => crate::perf::begin("render:code_line"),
         Block::ToolCall { .. } => crate::perf::begin("render:tool_call"),
-        Block::Confirm { .. } => crate::perf::begin("render:confirm"),
         Block::Hint { .. } => crate::perf::begin("render:hint"),
         Block::Compacted { .. } => crate::perf::begin("render:compacted"),
         Block::Exec { .. } => crate::perf::begin("render:exec"),
@@ -397,9 +395,6 @@ pub(super) fn render_block(
                 state.user_message.as_deref(),
                 width,
             )
-        }
-        Block::Confirm { tool, desc, choice } => {
-            render_confirm_result(out, tool, desc, choice.clone(), width)
         }
         Block::Hint { content } => {
             out.push_dim_italic();

@@ -29,20 +29,20 @@ pub(crate) const LAYOUT_CACHE_VERSION: u32 = 6;
 /// share cached layouts. Per-layout width validity is enforced lazily
 /// by `DisplayBlock::is_valid_at` during the next paint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedLayoutCache {
-    pub version: u32,
+pub(crate) struct PersistedLayoutCache {
+    pub(crate) version: u32,
     /// Light/dark mode at the time of capture. Syntect picks a different
     /// syntax theme based on `theme::is_light()`, and those colors get
     /// baked into `DisplayBlock` spans at layout time. Resuming a session
     /// in a terminal with a different background detection produces
     /// stale syntax-highlight colors, so we drop the cache on mismatch.
     #[serde(default)]
-    pub is_light: bool,
-    pub blocks: HashMap<u64, BlockArtifact>,
+    pub(crate) is_light: bool,
+    pub(crate) blocks: HashMap<u64, BlockArtifact>,
 }
 
 impl PersistedLayoutCache {
-    pub fn new(is_light: bool) -> Self {
+    pub(crate) fn new(is_light: bool) -> Self {
         Self {
             version: LAYOUT_CACHE_VERSION,
             is_light,
@@ -50,7 +50,7 @@ impl PersistedLayoutCache {
         }
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn serialize(&self) -> Vec<u8> {
         use flate2::write::DeflateEncoder;
         use flate2::Compression;
 
@@ -62,7 +62,7 @@ impl PersistedLayoutCache {
         enc.finish().unwrap_or_default()
     }
 
-    pub fn deserialize(data: &[u8]) -> Option<Self> {
+    pub(crate) fn deserialize(data: &[u8]) -> Option<Self> {
         use flate2::read::DeflateDecoder;
         use std::io::Read;
 
@@ -78,7 +78,7 @@ impl PersistedLayoutCache {
     /// Compatible iff version matches AND the persisted light/dark mode
     /// matches current detection. Mismatched modes mean stale syntect
     /// colors throughout the cache.
-    pub fn is_compatible(&self, current_is_light: bool) -> bool {
+    pub(crate) fn is_compatible(&self, current_is_light: bool) -> bool {
         self.version == LAYOUT_CACHE_VERSION && self.is_light == current_is_light
     }
 }
@@ -90,15 +90,15 @@ impl Default for PersistedLayoutCache {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RenderCache {
-    pub version: u32,
-    pub session_hash: String,
+pub(crate) struct RenderCache {
+    pub(crate) version: u32,
+    pub(crate) session_hash: String,
     #[serde(default)]
-    pub tool_outputs: HashMap<String, ToolOutputRenderCache>,
+    pub(crate) tool_outputs: HashMap<String, ToolOutputRenderCache>,
 }
 
 impl RenderCache {
-    pub fn new(session_hash: String) -> Self {
+    pub(crate) fn new(session_hash: String) -> Self {
         Self {
             version: RENDER_CACHE_VERSION,
             session_hash,
@@ -106,7 +106,7 @@ impl RenderCache {
         }
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub(crate) fn serialize(&self) -> Vec<u8> {
         use flate2::write::DeflateEncoder;
         use flate2::Compression;
 
@@ -118,7 +118,7 @@ impl RenderCache {
         enc.finish().unwrap_or_default()
     }
 
-    pub fn deserialize(data: &[u8]) -> Option<Self> {
+    pub(crate) fn deserialize(data: &[u8]) -> Option<Self> {
         use flate2::read::DeflateDecoder;
         use std::io::Read;
 
@@ -131,32 +131,28 @@ impl RenderCache {
         serde_json::from_slice(&payload).ok()
     }
 
-    pub fn is_compatible(&self, session_hash: &str) -> bool {
-        self.version == RENDER_CACHE_VERSION && self.session_hash == session_hash
-    }
-
-    pub fn get_tool_output(&self, call_id: &str) -> Option<&ToolOutputRenderCache> {
+    pub(crate) fn get_tool_output(&self, call_id: &str) -> Option<&ToolOutputRenderCache> {
         self.tool_outputs.get(call_id)
     }
 
-    pub fn insert_tool_output(&mut self, call_id: String, cache: ToolOutputRenderCache) {
+    pub(crate) fn insert_tool_output(&mut self, call_id: String, cache: ToolOutputRenderCache) {
         self.tool_outputs.insert(call_id, cache);
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolOutputRenderCache {
+pub(crate) enum ToolOutputRenderCache {
     InlineDiff(CachedInlineDiff),
     NotebookEdit(CachedNotebookEdit),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedNotebookEdit {
-    pub data: NotebookRenderData,
-    pub diff: Option<CachedInlineDiff>,
+pub(crate) struct CachedNotebookEdit {
+    pub(crate) data: NotebookRenderData,
+    pub(crate) diff: Option<CachedInlineDiff>,
 }
 
-pub fn build_tool_output_render_cache(
+pub(crate) fn build_tool_output_render_cache(
     name: &str,
     args: &HashMap<String, serde_json::Value>,
     content: &str,
