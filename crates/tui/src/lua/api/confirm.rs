@@ -25,7 +25,7 @@ use mlua::prelude::*;
 
 use crate::app::cells::ConfirmResolved;
 use crate::app::dialogs::confirm;
-use crate::app::transcript_model::{ApprovalScope, ConfirmChoice};
+use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -91,23 +91,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // smelt.confirm._resolve(handle_id, choice_idx, message?).
-    // `choice_idx` is 1-based to match Lua. Removes the registry
+    // smelt.confirm._resolve(handle_id, decision, message?).
+    // `decision` is the label string Lua built alongside the option
+    // labels (`"yes"` / `"no"` / `"always_session"` / …); same lexicon
+    // the `confirm_resolved` cell publishes. Removes the registry
     // entry; the caller is expected to close the dialog.
     confirm_tbl.set(
         "_resolve",
         lua.create_function(
-            |_, (handle_id, choice_idx, message): (u64, usize, Option<String>)| {
+            |_, (handle_id, decision, message): (u64, String, Option<String>)| {
                 crate::lua::with_app(|app| {
                     let entry = match app.core.confirms.take(handle_id) {
                         Some(e) => e,
                         None => return,
                     };
-                    let choice = entry
-                        .choices
-                        .get(choice_idx.saturating_sub(1))
-                        .cloned()
-                        .unwrap_or(ConfirmChoice::No);
+                    let choice = parse_decision(&decision, &entry.req);
                     app.core.cells.set_dyn(
                         "confirm_resolved",
                         std::rc::Rc::new(ConfirmResolved {
@@ -131,6 +129,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
 /// Stable short label for the `confirm_resolved` cell payload. Plugins
 /// branch on this rather than reading the `ConfirmChoice` Rust enum.
+/// Same lexicon `confirm.lua` passes to `_resolve` to build the
+/// matching `ConfirmChoice`.
 fn decision_label(choice: &ConfirmChoice) -> &'static str {
     match choice {
         ConfirmChoice::Yes => "yes",
@@ -148,4 +148,30 @@ fn decision_label(choice: &ConfirmChoice) -> &'static str {
             ApprovalScope::Workspace => "always_dir_workspace",
         },
     }
+}
+
+/// Reconstruct a `ConfirmChoice` from the Lua-supplied decision label
+/// and the live request payload (which still carries `outside_dir`
+/// and `approval_patterns`). Unknown labels collapse to `No`.
+fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
+    use ApprovalScope::*;
+    use ConfirmChoice::*;
+    match decision {
+        "yes" => Yes,
+        "no" => No,
+        "always_session" => Always(Session),
+        "always_workspace" => Always(Workspace),
+        "always_pattern_session" => AlwaysPatterns(req.approval_patterns.clone(), Session),
+        "always_pattern_workspace" => AlwaysPatterns(req.approval_patterns.clone(), Workspace),
+        "always_dir_session" => AlwaysDir(outside_dir_string(req), Session),
+        "always_dir_workspace" => AlwaysDir(outside_dir_string(req), Workspace),
+        _ => No,
+    }
+}
+
+fn outside_dir_string(req: &ConfirmRequest) -> String {
+    req.outside_dir
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }

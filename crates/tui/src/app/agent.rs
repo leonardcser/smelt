@@ -973,11 +973,12 @@ impl TuiApp {
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
 
                 // Register the request and fire the Lua dialog. The
-                // dialog (runtime/lua/smelt/confirm.lua) reads the
-                // payload from the `confirm_requested` cell and
-                // resolves through `smelt.confirm._resolve` on submit
-                // / dismiss.
-                let (labels, choices) = crate::app::dialogs::confirm::build_options(&req);
+                // dialog (runtime/lua/smelt/dialogs/confirm.lua) reads
+                // the payload from the `confirm_requested` cell, builds
+                // its own option labels from `outside_dir` +
+                // `approval_patterns`, and resolves through
+                // `smelt.confirm._resolve(handle_id, decision, message)`
+                // on submit / dismiss.
                 let snapshot = crate::app::cells::ConfirmRequested {
                     handle_id: 0,
                     tool_name: req.tool_name.clone(),
@@ -989,10 +990,8 @@ impl TuiApp {
                         .as_ref()
                         .map(|p| p.to_string_lossy().into_owned()),
                     approval_patterns: req.approval_patterns.clone(),
-                    options: labels,
-                    cwd_label: crate::app::dialogs::confirm::cwd_label(),
                 };
-                let handle_id = self.core.confirms.register(*req, choices);
+                let handle_id = self.core.confirms.register(*req);
                 self.core.cells.set_dyn(
                     "confirm_requested",
                     std::rc::Rc::new(crate::app::cells::ConfirmRequested {

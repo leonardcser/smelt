@@ -407,7 +407,10 @@ pub(crate) struct ToolEnd {
 /// dialog reads the request data straight from the cell instead of
 /// looking it up by handle. `handle_id` keys the `_resolve` /
 /// `_render_title` / `_back_tab` Rust-side primitives that still need
-/// to find the underlying `Confirms` entry.
+/// to find the underlying `Confirms` entry. Option labels and the
+/// `~/`-rewritten cwd label are derived in `confirm.lua` directly
+/// from `outside_dir` / `approval_patterns` + `smelt.os.{cwd,home}`,
+/// so neither lives in this snapshot.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfirmRequested {
     pub(crate) handle_id: u64,
@@ -417,8 +420,6 @@ pub(crate) struct ConfirmRequested {
     pub(crate) args: std::collections::HashMap<String, serde_json::Value>,
     pub(crate) outside_dir: Option<String>,
     pub(crate) approval_patterns: Vec<String>,
-    pub(crate) options: Vec<String>,
-    pub(crate) cwd_label: String,
 }
 
 /// Register projectors for primitive types we publish, declare every
@@ -562,7 +563,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("tool_name", r.tool_name.as_str());
         let _ = t.set("desc", r.desc.as_str());
         let _ = t.set("summary", r.summary.clone().unwrap_or_default());
-        let _ = t.set("cwd_label", r.cwd_label.as_str());
         match &r.outside_dir {
             Some(s) => {
                 let _ = t.set("outside_dir", s.as_str());
@@ -576,12 +576,6 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
                 let _ = patterns.set(i + 1, p.as_str());
             }
             let _ = t.set("approval_patterns", patterns);
-        }
-        if let Ok(opts) = lua.create_table() {
-            for (i, label) in r.options.iter().enumerate() {
-                let _ = opts.set(i + 1, label.as_str());
-            }
-            let _ = t.set("options", opts);
         }
         if let Ok(args) = lua.create_table() {
             for (k, v) in &r.args {
@@ -1073,8 +1067,6 @@ mod tests {
                 args: std::collections::HashMap::new(),
                 outside_dir: None,
                 approval_patterns: vec!["bash:ls".into()],
-                options: vec!["yes".into(), "no".into()],
-                cwd_label: "~/work".into(),
             }),
         );
 
@@ -1117,10 +1109,6 @@ mod tests {
                 assert_eq!(t.get::<i64>("handle_id").unwrap(), 42);
                 assert_eq!(t.get::<String>("tool_name").unwrap(), "bash");
                 assert_eq!(t.get::<String>("desc").unwrap(), "ls");
-                assert_eq!(t.get::<String>("cwd_label").unwrap(), "~/work");
-                let opts: mlua::Table = t.get("options").unwrap();
-                assert_eq!(opts.get::<String>(1).unwrap(), "yes");
-                assert_eq!(opts.get::<String>(2).unwrap(), "no");
                 let patterns: mlua::Table = t.get("approval_patterns").unwrap();
                 assert_eq!(patterns.get::<String>(1).unwrap(), "bash:ls");
                 assert!(matches!(
