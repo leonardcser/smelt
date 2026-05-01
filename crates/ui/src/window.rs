@@ -51,17 +51,17 @@ impl ScrollbarState {
         })
     }
 
-    pub fn max_scroll(&self) -> u16 {
+    fn max_scroll(&self) -> u16 {
         self.total_rows.saturating_sub(self.viewport_rows)
     }
 
-    pub fn thumb_size(&self) -> u16 {
+    fn thumb_size(&self) -> u16 {
         let rows = self.viewport_rows as usize;
         let total = self.total_rows as usize;
         ((rows * rows) / total).max(1) as u16
     }
 
-    pub fn max_thumb_top(&self) -> u16 {
+    fn max_thumb_top(&self) -> u16 {
         self.viewport_rows.saturating_sub(self.thumb_size())
     }
 
@@ -142,7 +142,7 @@ impl WindowViewport {
         }
     }
 
-    pub fn contains(&self, row: u16, col: u16) -> bool {
+    fn contains(&self, row: u16, col: u16) -> bool {
         self.rect.contains(row, col)
     }
 
@@ -902,42 +902,6 @@ impl Window {
     }
 
     /// Shift `scroll_top` by `delta` rows, clamped to
-    /// `[0, total_lines - viewport_rows]`. Intentionally does **not**
-    /// touch `cpos`, `cursor_line`, or curswant — wheel / scrollbar
-    /// scrolling moves the viewport only, letting the cursor scroll out
-    /// of view until the next keyboard motion or click re-anchors it.
-    /// Matches tmux copy-mode semantics: "wheel pans the buffer,
-    /// keyboard moves the cursor."
-    pub fn scroll_view_by(&mut self, delta: isize, total_lines: usize, viewport_rows: u16) {
-        if delta == 0 {
-            return;
-        }
-        let max_scroll = total_lines.saturating_sub(viewport_rows as usize) as isize;
-        let new = ((self.scroll_top as isize) + delta).clamp(0, max_scroll);
-        self.scroll_top = new as u16;
-        self.follow_tail = new >= max_scroll;
-    }
-
-    /// Adjust `scroll_top` so the cursor's visual row (`cursor_line`)
-    /// sits inside the viewport. Top edge → scroll up to align cursor;
-    /// bottom edge → scroll down by one row past the cursor. No-op if
-    /// already visible. Called by every cpos-mutating site (key insert,
-    /// vim motion, paste, click-to-position) — the universal "keep the
-    /// cursor visible" policy shared by transcript, prompt, and dialog
-    /// buffer panels.
-    pub fn ensure_cursor_visible(&mut self, cursor_line: usize, viewport_rows: u16) {
-        let viewport = viewport_rows as usize;
-        if viewport == 0 {
-            return;
-        }
-        let scroll_top = self.scroll_top as usize;
-        if cursor_line < scroll_top {
-            self.scroll_top = cursor_line as u16;
-        } else if cursor_line >= scroll_top + viewport {
-            self.scroll_top = (cursor_line + 1 - viewport) as u16;
-        }
-    }
-
     pub fn scroll_by_lines(
         &mut self,
         delta: isize,
@@ -1210,26 +1174,6 @@ mod tests {
             cursor_shape: CursorShape::Hidden,
             theme: Theme::default(),
         }
-    }
-
-    #[test]
-    fn scroll_view_by_unsticks_from_bottom() {
-        let mut w = make_win();
-        w.scroll_top = 80;
-        w.follow_tail = true;
-        w.scroll_view_by(-3, 100, 20);
-        assert_eq!(w.scroll_top, 77);
-        assert!(!w.follow_tail);
-    }
-
-    #[test]
-    fn scroll_view_by_restickes_at_bottom() {
-        let mut w = make_win();
-        w.scroll_top = 70;
-        w.follow_tail = false;
-        w.scroll_view_by(10, 100, 20);
-        assert_eq!(w.scroll_top, 80);
-        assert!(w.follow_tail);
     }
 
     #[test]

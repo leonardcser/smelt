@@ -416,10 +416,6 @@ impl Buffer {
         self
     }
 
-    pub fn has_parser(&self) -> bool {
-        self.parser.is_some()
-    }
-
     /// Update the source driving the parser. The next
     /// `ensure_rendered_at` will re-run `parse`; without a parser
     /// attached, the source is held but never consulted.
