@@ -62,7 +62,7 @@ Then ten architectural decisions landed across REFACTOR / ARCHITECTURE
    `EngineHandle = cmd_tx + event_rx`, nothing more.
 9. **Multi-agent → plugin pattern (Option B).** Engine drops the
    multi-agent concept entirely. Sub-agents are child processes
-   spawned by Lua tools (`spawn_agent.lua` etc.) through a new
+   spawned by optional Lua plugins/tools (`spawn_agent.lua` etc.) through a new
    `tui::subprocess` capability (spawn / send / on_event / wait /
    kill). Sub-agent replies are tool results; transcript renders them
    as ordinary tool calls (no special widget). Removed:

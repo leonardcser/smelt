@@ -386,15 +386,16 @@ grids. `tui` is still red — it consumes the new shapes in P2.
 
 **Goal:** split `App` into a headless-safe `Core` plus `TuiApp` /
 `HeadlessApp` frontends, carve subsystems out of the god-struct,
-install the `Host` + `UiHost` traits, build `EngineBridge` and
-`ToolRuntime` as real types, and introduce `Cells` (which also
+install the `Host` + `UiHost` traits, introduce the engine-event
+bridge/reducer and `Cells` (which also
 subsumes the autocmd registry) + `Timers`. The 106-field god-struct
 goes away.
 
 Order within the phase: subsystem structs first (ownership boundaries),
 then `Core` aggregates them, then `TuiApp` and `HeadlessApp` wrap
 `Core`, then `Host` / `UiHost` impls, then the reactive layer (Cells +
-Timers), then bridges (EngineBridge, ToolRuntime).
+Timers), then the engine-event bridge/reducer. Tool dispatch can stay
+inside `LuaRuntime` unless a split-out runtime earns its keep.
 
 Headless is a first-class consumer of this split — there is no
 "headless mode flag" inside the TUI; `HeadlessApp` is its own struct
@@ -521,15 +522,18 @@ bridges, then the aggregate.
   / `turn_end` / `tool_start` / `tool_end` / `input_submit`. mode
   + model "change" events fold onto the `agent_mode` / `model`
   cells (the new value is the payload); plugins update accordingly.
-- **a.10** — `ToolRuntime { registry: Map<name, LuaTool> }` — own
-  type, impls `engine::ToolDispatcher` (depends on P5.a's trait
-  shape — may defer).
-- **a.11** ✅ — `EngineBridge` carve-out: `App.engine` typed
-  `engine_bridge::EngineBridge` over today's `EngineHandle` (`send`
-  / `recv` / `try_recv` / `processes()` / `drain_spawned()`); two
-  `select!` engine-drain gates swap from
-  `focused_overlay_blocks_agent()` to `confirms.is_clear()`. P2.d
-  folds the engine-event drain into this type.
+- **a.10** — Tool dispatch landing spot. Default: keep the registry +
+  `engine::ToolDispatcher` impl on `LuaRuntime`, since that's where tool
+  registration, hooks, coroutine parking, and result delivery already
+  live. Only split out a `ToolRuntime` type if a later ownership or
+  execution boundary makes that materially cleaner.
+- **a.11** ✅ — initial engine-event bridge carve-out: `App.engine`
+  wrapped in `engine_bridge::EngineBridge` over today's `EngineHandle`
+  (`send` / `recv` / `try_recv` / `drain_spawned()`); two `select!`
+  engine-drain gates swap from `focused_overlay_blocks_agent()` to
+  `confirms.is_clear()`. This wrapper is transitional: either P2.d/P5
+  turns it into the full event-to-buffer/cell bridge, or the thin
+  wrapper is deleted and the reducer stays as plain code.
 - **a.12** — Aggregate `Core` + `TuiApp` / `HeadlessApp`. Splits across
   two sessions because the subsystem aggregation (~350 callsite renames)
   and the frontend split (App → `TuiApp` + new `HeadlessApp` over the
@@ -857,7 +861,9 @@ remains a future option.
 Each Rust dialog file (`crates/tui/src/app/dialogs/*.rs`) collapses
 to a request-emit + a resolution primitive on the appropriate
 namespace (`smelt.confirm.*`). Lua composes the panels via
-`smelt.ui.dialog.open` (Overlay + LayoutTree + N Windows).
+generic `buf` / `win` / `overlay` / `layout` primitives exposed through
+`smelt.ui.*`; no dialog-specific Rust framework or translator survives in the
+target shape.
 Multi-question flows are a Lua loop opening N dialogs in sequence —
 no tab-strip widget in the framework.
 
@@ -890,10 +896,10 @@ code — only parsing + extmark population.
 
 **Goal:** the 15 Rust tool implementations in `engine/tools/` move into
 `runtime/lua/smelt/tools/` (plus reorganization of the few tools already
-in Lua: `ask_user_question`, `exit_plan_mode`, `read_process_output` /
-`stop_process` / `run_in_background` flag from `background_commands`).
-Engine becomes schema + dispatcher only. Mode gating becomes a
-Lua-tool `hooks` concern. The 5 utility files in `engine/tools/`
+in Lua: `ask_user_question`, `exit_plan_mode`, and the background-process
+helpers that sit beside, not inside, `bash`). Engine becomes schema +
+dispatcher only. Mode gating becomes a Lua-tool `hooks` concern. The 5
+utility files in `engine/tools/`
 (`background`, `file_state`, `web_cache`, `web_shared`, `result_dedup`)
 already moved to `tui::*` capabilities in P3.a.
 
@@ -922,14 +928,14 @@ Land in `runtime/lua/smelt/tools/`:
 
 `bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
 `glob.lua`, `grep.lua`, `web_fetch.lua`, `web_search.lua`,
-`notebook_edit.lua`, plus `load_skill.lua` and the agent-management
-tools (`spawn_agent.lua`, `stop_agent.lua`, `message_agent.lua`,
-`peek_agent.lua`, `list_agents.lua`).
+`notebook_edit.lua`, plus `load_skill.lua`. Optional workflows can ship as
+plugins over the same primitives; they do not need to be built into the core
+tool set.
 
-**Agent tools are subprocess tools.** They compose
-`tui::subprocess` and a thin Lua-side registry — no engine
-knowledge. The transcript renders these calls as ordinary tool
-calls (no special widget). Concretely:
+**Agent tools are optional subprocess tools.** When a multi-agent plugin is
+enabled, it composes `tui::subprocess` and a thin Lua-side registry — no
+engine knowledge. The transcript renders these calls as ordinary tool calls
+(no special widget). Concretely:
 
 - `spawn_agent.lua` calls
   `smelt.subprocess.spawn("smelt", { "--agent", id, … })`,
@@ -943,7 +949,7 @@ calls (no special widget). Concretely:
 - `peek_agent.lua` reads the latest cell value.
 - `list_agents.lua` enumerates the Lua-side registry table.
 
-A built-in `runtime/lua/smelt/plugins/multi_agent.lua` carries the
+A removable `runtime/lua/smelt/plugins/multi_agent.lua` carries the
 shared state (the `id → handle` table, the `agent:<id>:status`
 cells) so the tools don't duplicate it. Plugin authors who want
 fancier agent UI (live token streaming, dedicated transcript
@@ -979,6 +985,11 @@ re-implement complicated parsing / safety logic in Lua. Specifically:
 The principle: the tool body, schema, hooks, and output formatting are
 Lua; anything fragile or performance-sensitive is a one-line FFI call
 into a `tui::*` capability.
+
+**Foreground bash stays foreground-only.** `bash.lua` owns shell execution,
+streaming, and approval logic for normal commands. Background execution and
+process-management UX live in a separate plugin/tool surface over
+`smelt.process`, so `bash` itself does not grow process-registry semantics.
 
 ### P5.c — Engine cleanup
 

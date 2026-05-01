@@ -10,7 +10,7 @@ For meta-rules and the doc index, see `README.md`.
 | Layer  | Scope                                                                 | Harness                                                                          | Assertion                                                                            |
 | ------ | --------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | **L1** | `ui` primitives: Buffer, Window, vim recipe, cells, layout, theme, extmarks | pure unit, no event loop                                                         | marker DSL: `("foo #[bar\|]# baz", "diw", "foo #[ \|]# baz")` + `assert_eq!`         |
-| **L2** | engine ↔ Lua ↔ tools ↔ permissions ↔ persistence                       | `HeadlessApp` + wiremock'd LLM + custom `init.lua` via `XDG_CONFIG_HOME`         | `insta` snapshot of persisted `Vec<Message>`                                         |
+| **L2** | engine ↔ Lua ↔ tools ↔ permissions ↔ persistence                       | subprocess harness running `smelt --headless --format json` against a wiremock'd LLM + custom `init.lua` via `XDG_CONFIG_HOME` | `insta` snapshot of the JSONL event stream                                           |
 | **L3** | widgets, dialogs, focus chain, mouse hit-testing, drag-select         | (a) `Grid::with_lines([...])` render; (b) tiny Pilot driving real `TuiApp`       | `assert_eq!(grid, expected)` / widget-state queries                                  |
 
 Each layer tests what it owns. Don't snapshot rendering inside L1; don't drive
@@ -43,44 +43,33 @@ No event loop, no rendering. Pure data round-trip.
 
 ## L2 — engine integration (headless + wiremock)
 
-Drive `HeadlessApp` against a wiremock'd LLM. Each scenario:
+Drive the `smelt` binary in headless JSON mode against a wiremock'd LLM. Each
+scenario:
 
 1. Spin up wiremock with canned SSE responses (cassettes).
 2. Tempdir + `XDG_CONFIG_HOME` → write `init.lua` (registers test tools, sets
    permissions, etc.).
-3. Construct `HeadlessApp` pointing at the mock server.
-4. Drive with prompt or `UiCommand` sequence.
-5. Wait for `TurnComplete`.
-6. Snapshot the persisted session `Vec<Message>` via `insta`.
+3. Write `config.yaml` / `init.lua` under the temp config dir.
+4. Run `smelt --headless --format json --no-tool-calling -m <model> <prompt>`.
+5. Parse stdout as JSONL `EngineEvent`s and wait for `TurnComplete`.
+6. Snapshot the JSONL event stream via `insta`.
 
 Layout:
 
 ```
-crates/tui/tests/
+tests/
   common/
-    harness.rs          # spawn HeadlessApp pointing at wiremock
-    cassettes/          # canned SSE streams
-    init_lua/           # per-scenario init.lua fragments
-  scenarios/
-    plain_turn.rs
-    tool_confirm_allow.rs
-    tool_confirm_deny.rs
-    retry_then_succeed.rs
-    midblock_turn_end.rs
-    multi_turn.rs
-    compact.rs
-    fork.rs
-    plugin_hook_needs_confirm.rs
-    multi_agent_subprocess.rs
-    mode_cycle_plan_to_apply.rs
+    harness.rs          # spawn wiremock + run the built binary
+  scenarios.rs          # scenario-style JSONL snapshots
   snapshots/            # insta defaults
 ```
 
 Deps (dev-only): `wiremock`, `insta`, `tempfile`.
 
-The persisted `Vec<Message>` shape lives in the `protocol` crate, which the
-refactor barely touches — goldens written today survive P0–P7. They are the
-"no feature dropped" gate, mechanised.
+The event stream shape lives in `protocol::EngineEvent`, which the refactor is
+already exercising end to end here. These goldens are still the practical "no
+feature dropped" gate; they just pin the externally visible headless stream
+instead of persisted session state.
 
 ## L3 — rendering + interactions
 
@@ -150,9 +139,9 @@ breaks open. L3 follows when widgets stabilise.
 ## How to add a test
 
 - **L1** — add `#[test]` next to the function under test. Use marker DSL.
-- **L2** — add `crates/tui/tests/scenarios/<flow>.rs`. New cassette in
-  `cassettes/`, new init.lua fragment in `init_lua/`. Run `cargo insta review`
-  to bless the snapshot.
+- **L2** — add a new `#[tokio::test]` in `tests/scenarios.rs` and extend
+  `tests/common/harness.rs` as needed. Run `cargo insta review` to bless the
+  snapshot.
 - **L3a** — add `#[test]` in the widget's module.
 - **L3b** — add `crates/tui/tests/interaction/<flow>.rs`.
 

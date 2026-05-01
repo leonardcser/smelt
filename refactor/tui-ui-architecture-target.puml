@@ -76,8 +76,7 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
     timers:        Timers
     cells:         Cells
     lua:           LuaRuntime
-    tools:         ToolRuntime
-    engine_bridge: EngineBridge
+    engine:        EngineHandle
     --
     runs the event loop
     impl Host (no Ui knowledge)
@@ -166,15 +165,12 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
                               ' Cell<()>.set(()).
       glob_subscribe(pattern, CbId)
     }
-    class ToolRuntime {
-      registry: Map<name, LuaTool>
-      impls engine::ToolDispatcher
-    }
     class LuaRuntime <<mlua>> {
       plugin scripts
       callback queue
       coroutine tasks
       TLS pointer to &mut Host
+      tool registry + dispatch
       cancel: cooperative —
         coroutine resumes with
         Err(Canceled)
@@ -186,8 +182,8 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
   }
 
   package "engine bridge" as EB #FFE9B5 {
-    class EngineBridge {
-      drains event_rx → host calls
+    class EngineEventBridge {
+      drains event_rx → reducer/host calls
       TextDelta → Buffer.append
         (Rust-only; no Lua per chunk)
       ToolStarted/Finished, block end
@@ -297,8 +293,7 @@ package "crate: ui  (generic terminal UI primitives)" as UI #E6F1FF {
       cells() : &mut Cells
       timers() : &mut Timers
       lua()   : &mut LuaRuntime
-      tools() : &mut ToolRuntime
-      engine(): &mut EngineBridge
+      engine(): &mut EngineHandle
       session(): &mut Session
       confirms(): &mut Confirms
       ' Everything Lua bindings need
@@ -310,13 +305,19 @@ package "crate: ui  (generic terminal UI primitives)" as UI #E6F1FF {
       ' parse/grep/fuzzy/au/theme.
       ' Headless impls only this.
     }
-    interface UiHost <<extends Host — TuiApp impl>> {
+    interface UiHost <<TuiApp impl>> {
       ui()    : &mut Ui
       focus(win: WinId)
       fire_win_event(win: WinId, ev: WinEvent)
       buf_create / buf_mut
       win_open / win_close / win_mut
       overlay_open / overlay_close
+      ' viewport_for / rows_for /
+      ' breaks_for are transitional
+      ' escape hatches while prompt /
+      ' transcript still have app-owned
+      ' projections. Target is to
+      ' shrink or delete them.
       ' Ui-shaped surface only.
       ' Lua bindings under
       ' smelt.ui / smelt.win /
@@ -493,7 +494,7 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
                   approval_patterns,
                   preflight)
       ' Implemented by tui's
-      ' ToolRuntime — engine never
+      ' Lua runtime — engine never
       ' executes tools itself.
     }
     class ToolResult
@@ -626,8 +627,7 @@ Core *--> Clipboard
 Core *--> Timers
 Core *--> Cells
 Core *--> LuaRuntime
-Core *--> ToolRuntime
-Core *--> EngineBridge
+Core *--> EngineHandle
 
 TuiApp      *--> Core
 TuiApp      *--> WellKnown
@@ -635,18 +635,16 @@ TuiApp      --> Ui            : drives compositor
 HeadlessApp *--> Core
 
 Core        ..|> Host         : impls (Ui-agnostic)
-TuiApp      ..|> UiHost       : impls (extends Host\nwith Ui surface)
+TuiApp      ..|> UiHost       : impls with Ui surface
 HeadlessApp ..|> Host         : impls only Host\n(no UiHost)
-UiHost      --|> Host         : extends
-ToolRuntime ..|> ToolDispatcher : impls (engine's\ndispatch trait)
 
 WellKnown ..> Window  : refs by WinId
 Session   ..> Buffer  : transcript + prompt\nvia BufId on WellKnown
 
-EngineBridge --> EngineHandle : owns
-EngineBridge ..> Confirms        : registers requests
-EngineBridge ..> Session         : update history,\ncosts, snapshots
-EngineBridge ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage), …
+EngineEventBridge --> EngineHandle : reads event stream
+EngineEventBridge ..> Confirms        : registers requests
+EngineEventBridge ..> Session         : update history,\ncosts, snapshots
+EngineEventBridge ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage), …
 Confirms ..> EngineHandle        : PermissionDecision
 
 LuaRuntime *--> CommandRegistry

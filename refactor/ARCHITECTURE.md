@@ -31,6 +31,11 @@ Every change lands closer to all three, never farther from any.
    commands, and statusline segments exist; how panels compose; how the UI
    reacts. Same model as Neovim — small Rust core, everything user-facing is a
    plugin. **A feature living in Rust that could live in Lua is a bug.**
+   Built-in Lua still needs a boundary: generic capabilities live in Rust,
+   default product UX can live in built-in Lua, and optional workflows
+   (multi-agent orchestration, background-process management, etc.) should be
+   removable plugins over those primitives rather than baked into the core
+   engine or default tool semantics.
 
 ## Crate map
 
@@ -47,9 +52,9 @@ protocol  ←  engine  ←──┐
 | Crate                    | Role                                                                    |
 | ------------------------ | ----------------------------------------------------------------------- |
 | `protocol`               | Wire types, pure data, serde-serializable. Stable contract, no behavior |
-| `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept** — sub-agents are just child processes spawned by Lua tools through `tui::subprocess`. Engine emits `RequestPermission` events when the dispatcher signals `needs_confirm`, but holds no rules, modes, or approvals. **Zero UI imports** |
+| `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept** — sub-agents, if enabled, are just child processes spawned by optional Lua plugins through `tui::subprocess`. Engine emits `RequestPermission` events when the dispatcher signals `needs_confirm`, but holds no rules, modes, or approvals. **Zero UI imports** |
 | `ui`                     | Generic terminal UI primitives. Buffer, Window, LayoutTree, Overlay, Theme, Grid/diff. Could ship standalone at the data/rendering layer — no smelt knowledge |
-| `tui`                    | Smelt's binary. `Core` + `TuiApp` / `HeadlessApp` frontends, subsystems, Lua bridge, EngineBridge, ToolRuntime, Rust capabilities (parse/process/subprocess/fs/http/html/notebook/grep/path/fuzzy/permissions) |
+| `tui`                    | Smelt's binary. `Core` + `TuiApp` / `HeadlessApp` frontends, subsystems, Lua bridge, engine-event bridge/reducer, Rust capabilities (parse/process/subprocess/fs/http/html/notebook/grep/path/fuzzy/permissions) |
 | `runtime/lua/smelt/`     | The whole UX. Widgets, dialogs, commands, statusline, transcript/diff presentation, themes, tools |
 
 **Litmus test for placement.** Stable wire contract → `protocol`.
@@ -104,8 +109,10 @@ Composition/chrome lives outside Window:
 
 A dialog, picker, text input, notification, statusline, cmdline, or list is
 not a separate Rust widget category in the target. It is one or more Windows,
-usually composed by Lua/tui helpers into a LayoutTree/Overlay with keymap
-recipes and buffer/extmark content.
+composed in Lua into a LayoutTree/Overlay with keymap recipes and
+buffer/extmark content. Rust may expose generic primitives (`buf`, `win`,
+`overlay`, `layout`) and small helper bindings, but not a dialog-specific
+framework or translator layer.
 
 ### The discriminator
 
@@ -477,15 +484,17 @@ There is no `smelt-worker` second binary, no `EngineConfig.interactive`
 flag inside the engine, and no `if interactive { … } else { … }`
 branches scattered through tui code. Each entry point constructs the
 right `App` type up-front and the borrow checker keeps them apart.
-`HeadlessApp` differs from `TuiApp` only by which trait it impls
-(`Host` vs `Host + UiHost`) and what kind of sink it carries — the
-event loop, Cells, Timers, Lua runtime, EngineBridge, and tools are
-identical.
+`HeadlessApp` differs from `TuiApp` only by which trait surface it
+exposes and what kind of sink it carries — the event loop, Cells,
+Timers, Lua runtime, and engine channel boundary are identical.
 
 ### Side effects — `Host` and `UiHost`, no Effect enum
 
-Side effects are direct method calls on a host trait. Two traits, one
-extends the other:
+Side effects are direct method calls on host traits. Keep the traits
+small: `Host` covers Ui-agnostic subsystems; `UiHost` covers the
+compositor-bearing surface only. **`UiHost` does not extend `Host`.**
+That keeps `ui` free of tui-defined types and avoids turning the traits
+into a second application object model.
 
 ```rust
 trait Host {
@@ -493,14 +502,13 @@ trait Host {
     fn cells(&mut self)     -> &mut Cells;
     fn timers(&mut self)    -> &mut Timers;
     fn lua(&mut self)       -> &mut LuaRuntime;
-    fn tools(&mut self)     -> &mut ToolRuntime;
-    fn engine(&mut self)    -> &mut EngineBridge;
+    fn engine(&mut self)    -> &mut EngineHandle;
     fn session(&mut self)   -> &mut Session;
     fn confirms(&mut self)  -> &mut Confirms;
     // … nothing that mentions Ui / Window / Buffer / Overlay
 }
 
-trait UiHost: Host {
+trait UiHost {
     fn ui(&mut self) -> &mut Ui;
     fn focus(&mut self, win: WinId);
     fn fire_win_event(&mut self, win: WinId, ev: WinEvent);
@@ -516,10 +524,10 @@ trait UiHost: Host {
 
 `Core` impls `Host`. `TuiApp` impls both `Host` and `UiHost`.
 `HeadlessApp` impls only `Host`. `Window::handle(Event, EventCtx)`
-reads per-pane data from `EventCtx`; the host builds the ctx via
-`UiHost::{rows_for, breaks_for, viewport_for}` plus the App-owned
-`vim_mode` and clipboard before the call, so Window doesn't reborrow
-through a host trait while the caller holds `&mut self.window_field`.
+reads per-pane data from `EventCtx`; the current `viewport_for` /
+`rows_for` / `breaks_for` helpers are transitional escape hatches while
+prompt/transcript still have app-owned projections. They should shrink
+or disappear once those surfaces are ordinary buffers/windows.
 Lua bindings divide by trait:
 
 - **Host-only bindings** (work in headless and tui):
@@ -644,9 +652,9 @@ engine-side state leaks** — today's `processes`, `permissions`, and
 owners move into `tui::*`. The same channel-only shape powers headless
 and sub-agent frontends without cherry-picking engine internals.
 
-`tui::EngineBridge` drains `event_rx` and calls Host methods directly
-(focus, fire_event, perms.register). Lua/UI actions call
-`app.engine.send(UiCommand)`.
+The engine/event bridge drains `event_rx` and updates buffers, cells,
+and session state. Lua/UI actions send `UiCommand`s back across the
+same channel boundary.
 
 **Single event loop.** One `select!` merges `terminal_rx`, `engine.event_rx`,
 `lua_callback_rx`, `cells_rx`, and the animation tick. Each event dispatches
@@ -661,7 +669,7 @@ and must not pay FFI cost per chunk. The path is:
 EngineEvent::TextDelta { delta }
    │
    ▼
-EngineBridge (Rust)
+Engine/event bridge (Rust)
    │
    ▼
 Buffer::append(span)              ' pure mutation, no Lua
@@ -682,16 +690,24 @@ handler treats it the same as a complete block (highlights what's
 there); the `incomplete` flag is informational so plugins can render a
 truncation marker if they want.
 
-The `EngineBridge` translates engine events into Buffer mutations + `WinEvent`
-fires. It does not own segment state, does not orchestrate transitions, does
-not maintain content caches. The Buffer is the source of truth.
+If the bridge remains a distinct type, it should own the full
+event-to-buffer/cell fan-out. If it stays a thin wrapper around
+`EngineHandle`, delete the wrapper and keep translation as plain reducer
+code. The target is not the current middle state where both coexist. The
+Buffer is the source of truth.
 
 ## Dialogs — one question per dialog
 
-The dialog framework is a thin wrapper: an Overlay containing N Window
-panels, with focus routing and a result coroutine. **It owns no
-multi-question state.** The framework primitive is "open a dialog with one
+There is no Rust dialog framework in the target. A dialog is just a Lua
+composition of generic primitives: one or more buffers/windows plus an
+overlay/layout composition, with focus routing and a result coroutine.
+**It owns no multi-question state.** The primitive is "open a dialog with one
 prompt; coroutine yields until submit/dismiss."
+
+That means no Rust-side dialog schema, no panel descriptor types, and no
+translator from a dialog DSL into UI primitives. If a Lua helper exists
+(`smelt.ui.dialog.open`), it is sugar over generic `buf` / `win` /
+`overlay` / `layout` operations, not a second framework.
 
 Multi-question flows are a Lua pattern, not a framework feature:
 
@@ -727,7 +743,7 @@ Three small invariants the runtime enforces.
 3. **Dialog stacking is the compositor's existing layer stack.** Open order
    = z order. Top dialog has focus; below ones stay rendered (dimmed if the
    theme says so) but cannot be focused while a modal is on top. No special
-   framework code.
+   Rust framework code.
 
 ## Tools — Lua-owned, Rust-composed (FFI for intricate logic)
 
@@ -735,10 +751,16 @@ All tools live in `runtime/lua/smelt/tools/*.lua`. Bash, read, write, edit,
 glob, grep, web_fetch, web_search, notebook, agent — every one. Engine
 holds only the schema + dispatcher trait, no Rust impls.
 
-**Engine asks the dispatcher → tui's `ToolRuntime` finds the Lua impl →
+**Engine asks the dispatcher → tui's Lua runtime finds the impl →
 runs it as a coroutine → returns the result.** The coroutine yields on
 async Rust calls (process spawn, HTTP fetch, FS read), resumes when they
 complete.
+
+`ToolRuntime` is a conceptual role, not a required runtime object. If the
+Lua runtime already owns tool registration, hook evaluation, coroutine
+parking, and result delivery, keep it there. Add a separate
+`ToolRuntime` type only if it buys a materially cleaner ownership or
+execution boundary.
 
 The principle is **everything in Lua; FFI for intricate logic**. The
 tool body — schema, hooks, control flow, error handling, output
@@ -843,8 +865,8 @@ binding.
 | App subsystems (Session, Confirms, Clipboard, Timers, Cells) | `tui::Core`                              |
 | Frontends (TuiApp, HeadlessApp)                           | `tui::` (own files)                         |
 | Lua bridge (TLS pointer + bindings)                       | `tui::lua::api/<name>.rs`                   |
-| Engine ↔ Lua bridge (RequestPermission, queue_event)      | `tui::EngineBridge`                         |
-| Tool dispatch (ToolDispatcher impl)                       | `tui::ToolRuntime`                          |
+| Engine ↔ Lua bridge (RequestPermission, queue_event)      | `tui` engine-event bridge / reducer         |
+| Tool dispatch (ToolDispatcher impl)                       | `tui` Lua runtime (or a split-out tool runtime if it earns it) |
 | Slash commands (`/model`, `/theme`, `/resume`, …)         | Lua                                         |
 | Dialogs (confirm, permissions, agents, rewind, …)         | Lua                                         |
 | Tools (bash, read, write, edit, glob, grep, …)            | Lua (compose Rust capabilities)             |
@@ -931,14 +953,15 @@ the `eprintln!`s before committing.
 - Selection = fg-accent on the cursor row. No bg fill, no cursor glyph, no
   layout shift.
 
-## Multi-agent — a plugin pattern, not an engine concept
+## Multi-agent — an optional plugin pattern, not an engine concept
 
 Engine has no notion of "agents." There is no `Role::Agent`, no
 `AgentBlockData`, no `AgentMessage` event, no `EngineConfig.multi_agent`,
 no agent registry inside engine. From engine's perspective every
 sub-agent is _just another tool call from the parent's LLM_:
 `spawn_agent`, `message_agent`, `stop_agent`, etc. are Lua tools
-composing one generic capability — `tui::subprocess`.
+from an optional plugin composing one generic capability —
+`tui::subprocess`.
 
 ```rust
 // tui::subprocess — generic IPC primitive for any long-running child.
@@ -959,7 +982,7 @@ command, an MCP server. The parent receives structured events through
 `on_event` and decides what to do with them. This generalizes past
 agents into a single primitive.
 
-A sub-agent under this model:
+An optional multi-agent plugin under this model:
 
 - `spawn_agent.lua` calls `tui::subprocess.spawn("smelt", {"--agent", id})`,
   registers an `on_event` handler that fires a Lua-side cell (e.g.
