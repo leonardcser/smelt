@@ -4,24 +4,27 @@
 //! the `LuaTaskRuntime` bridge (`drive_tasks`), and plugin-tool
 //! execution (`plugin_tool_defs`, `execute_plugin_tool`).
 
-use super::{LuaHandle, LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult};
+#[cfg(test)]
+use super::LuaHandle;
+use super::{LuaRuntime, TaskCompletion, TaskDriveOutput, TaskEvent, ToolExecResult};
 use mlua::prelude::*;
+#[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// Per-call environment passed to a plugin tool's `execute` handler.
 /// Mirrors the call-scoped fields of the Rust `ToolContext` and is
 /// surfaced to Lua as the second argument of `execute(args, ctx)`.
-pub struct PluginToolEnv<'a> {
-    pub mode: protocol::Mode,
-    pub session_id: &'a str,
-    pub session_dir: &'a std::path::Path,
+pub(crate) struct PluginToolEnv<'a> {
+    pub(crate) mode: protocol::Mode,
+    pub(crate) session_id: &'a str,
+    pub(crate) session_dir: &'a std::path::Path,
 }
 
 impl LuaRuntime {
     /// Fire the `on_response` callback for a completed `engine.ask()`
     /// call. Errors surface as `notify_error` toasts.
-    pub fn fire_callback(&self, id: u64, content: &str) {
+    pub(crate) fn fire_callback(&self, id: u64, content: &str) {
         let handle = {
             let Ok(mut cbs) = self.shared.callbacks.lock() else {
                 return;
@@ -39,14 +42,14 @@ impl LuaRuntime {
         }
     }
 
-    pub fn remove_callback(&self, id: u64) {
+    pub(crate) fn remove_callback(&self, id: u64) {
         if let Ok(mut cbs) = self.shared.callbacks.lock() {
             cbs.remove(&id);
         }
     }
 
     /// Satisfy a `TaskWait::External(id)` from outside the runtime.
-    pub fn resolve_external(&self, external_id: u64, value: mlua::Value) -> bool {
+    pub(crate) fn resolve_external(&self, external_id: u64, value: mlua::Value) -> bool {
         let Ok(mut rt) = self.shared.tasks.lock() else {
             return false;
         };
@@ -57,7 +60,7 @@ impl LuaRuntime {
     /// side-call with the engine's `CoreToolResult`. Builds the
     /// `{ content, is_error, metadata }` table on the runtime's Lua
     /// context.
-    pub fn resolve_core_tool_call(
+    pub(crate) fn resolve_core_tool_call(
         &self,
         request_id: u64,
         content: String,
@@ -91,7 +94,7 @@ impl LuaRuntime {
     }
 
     /// Drain the task-runtime inbox and apply each event.
-    pub fn pump_task_events(&self) {
+    pub(crate) fn pump_task_events(&self) {
         let events: Vec<TaskEvent> = {
             let Ok(mut inbox) = self.shared.task_inbox.lock() else {
                 return;
@@ -109,8 +112,12 @@ impl LuaRuntime {
     }
 
     /// Register a Lua callable under a fresh u64 id in
-    /// `shared.callbacks`.
-    pub fn register_callback(&self, func: mlua::Function) -> mlua::Result<u64> {
+    /// `shared.callbacks`. Test-only: production registers callbacks
+    /// through [`crate::lua::register_callback_handle`] which writes
+    /// directly into `LuaShared.callbacks` without going through this
+    /// runtime method.
+    #[cfg(test)]
+    pub(super) fn register_callback(&self, func: mlua::Function) -> mlua::Result<u64> {
         let key = self.lua.create_registry_value(func)?;
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut cbs) = self.shared.callbacks.lock() {
@@ -120,14 +127,19 @@ impl LuaRuntime {
     }
 
     /// Invoke the Lua function registered under `handle.0` with a
-    /// table derived from `payload`. The table shape is:
-    /// - `Payload::None` → empty table.
-    /// - `Payload::Key` → `{ code = "<KeyCode>", mods = "<KeyModifiers>" }`.
-    /// - `Payload::Selection` → `{ index = <one-based usize> }`.
-    /// - `Payload::Text` → `{ text = <string> }`.
-    ///
-    /// Adds `win` (the source WinId) to the table.
-    pub fn invoke_callback(&self, handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload) {
+    /// table derived from `payload`. Test-only: production splits this
+    /// into [`Self::prepare_invocation`] (called while `&LuaRuntime` is
+    /// borrowed) plus a separate `func.call::<()>(payload_table)`
+    /// invocation after Rust borrows on `TuiApp` have lapsed (see
+    /// `app/lua_bridge.rs::flush_callbacks`). Tests use the merged
+    /// path for terseness.
+    #[cfg(test)]
+    pub(super) fn invoke_callback(
+        &self,
+        handle: ui::LuaHandle,
+        win: ui::WinId,
+        payload: &ui::Payload,
+    ) {
         if let Some((func, payload_table)) = self.prepare_invocation(handle, win, payload) {
             if let Err(e) = func.call::<()>(payload_table) {
                 self.record_error(format!("callback `{}`: {e}", handle.0));
@@ -144,7 +156,7 @@ impl LuaRuntime {
     /// reach `&mut TuiApp` through [`crate::lua::with_app`]). Returns
     /// `None` when the handle is already dropped or when payload
     /// construction errored — both recorded as Lua errors.
-    pub fn prepare_invocation(
+    pub(crate) fn prepare_invocation(
         &self,
         handle: ui::LuaHandle,
         win: ui::WinId,
@@ -175,7 +187,7 @@ impl LuaRuntime {
 
     /// Record a callback error from outside the runtime's usual call
     /// path (e.g. a phase-2 invocation in `TuiApp::drain_lua_invocations`).
-    pub fn record_callback_error(&self, handle_id: u64, err: impl std::fmt::Display) {
+    pub(crate) fn record_callback_error(&self, handle_id: u64, err: impl std::fmt::Display) {
         self.record_error(format!("callback `{handle_id}`: {err}"));
     }
 
@@ -186,7 +198,7 @@ impl LuaRuntime {
     /// borrow). The host drains this queue right after the ui call
     /// returns and invokes each callback with the TLS app pointer
     /// installed, giving Lua bindings sole access to TuiApp state.
-    pub fn queue_invocation(&self, handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload) {
+    pub(crate) fn queue_invocation(&self, handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload) {
         if let Ok(mut q) = self.shared.pending_invocations.lock() {
             q.push(crate::lua::PendingInvocation {
                 handle,
@@ -200,7 +212,7 @@ impl LuaRuntime {
     /// `ui.dispatch_event` / `ui.fire_win_event` returns, under an
     /// [`crate::lua::install_app_ptr`] scope so each Lua body can reach
     /// `&mut TuiApp` through [`crate::lua::with_app`].
-    pub fn drain_invocations(&self) -> Vec<crate::lua::PendingInvocation> {
+    pub(crate) fn drain_invocations(&self) -> Vec<crate::lua::PendingInvocation> {
         match self.shared.pending_invocations.lock() {
             Ok(mut q) => std::mem::take(&mut *q),
             Err(_) => Vec::new(),
@@ -210,7 +222,7 @@ impl LuaRuntime {
     /// Drive the LuaTask runtime: resume any tasks whose waits have
     /// been satisfied, park any new yields, and return the outputs
     /// for the app to act on.
-    pub fn drive_tasks(&self) -> Vec<TaskDriveOutput> {
+    pub(crate) fn drive_tasks(&self) -> Vec<TaskDriveOutput> {
         let Ok(mut rt) = self.shared.tasks.lock() else {
             return Vec::new();
         };
@@ -228,7 +240,7 @@ impl LuaRuntime {
     /// Return protocol-level plugin tool definitions for registered
     /// tools. The TUI sends these with `StartTurn` so the engine
     /// includes them in LLM tool definitions.
-    pub fn plugin_tool_defs(&self, _mode: protocol::Mode) -> Vec<protocol::PluginToolDef> {
+    pub(crate) fn plugin_tool_defs(&self, _mode: protocol::Mode) -> Vec<protocol::PluginToolDef> {
         let handlers = self
             .shared
             .plugin_tools
@@ -288,7 +300,7 @@ impl LuaRuntime {
     /// hook is treated as if it returned its no-op default (None /
     /// empty). The engine consumes the result via
     /// `UiCommand::PluginToolHooksResult`.
-    pub fn evaluate_plugin_hooks(
+    pub(crate) fn evaluate_plugin_hooks(
         &self,
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
@@ -378,7 +390,7 @@ impl LuaRuntime {
     /// registered handler. Returns `Immediate` if the handler
     /// completes synchronously, `Pending` if it yields and will
     /// deliver later via `drive_tasks`.
-    pub fn execute_plugin_tool(
+    pub(crate) fn execute_plugin_tool(
         &self,
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
