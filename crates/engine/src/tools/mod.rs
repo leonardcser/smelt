@@ -483,23 +483,23 @@ pub struct SpawnedChild {
 
 /// Configuration for multi-agent tool registration.
 pub(crate) struct MultiAgentToolConfig {
-    pub scope: String,
-    pub pid: u32,
-    pub agent_id: String,
-    pub depth: u8,
-    pub max_depth: u8,
-    pub max_agents: u8,
+    pub(crate) scope: String,
+    pub(crate) pid: u32,
+    pub(crate) agent_id: String,
+    pub(crate) depth: u8,
+    pub(crate) max_depth: u8,
+    pub(crate) max_agents: u8,
     /// Shared mutable slug — updated by title generation, read by message_agent.
-    pub slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// API config for spawned subagents.
-    pub api_base: String,
-    pub api_key_env: String,
-    pub model: String,
-    pub provider_type: String,
+    pub(crate) api_base: String,
+    pub(crate) api_key_env: String,
+    pub(crate) model: String,
+    pub(crate) provider_type: String,
     /// Broadcast channel for agent message notifications (used by blocking spawn).
-    pub agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
+    pub(crate) agent_msg_tx: Option<tokio::sync::broadcast::Sender<AgentMessageNotification>>,
     /// Channel for sending spawned child handles (stdout pipes) to the parent.
-    pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
+    pub(crate) spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
 }
 
 pub(crate) fn build_tools(
