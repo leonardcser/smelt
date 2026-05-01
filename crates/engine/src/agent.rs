@@ -602,6 +602,37 @@ impl<'a> Turn<'a> {
         let _ = self.event_tx.send(event);
     }
 
+    /// Resolve the per-call permission `Decision` for a tool, applying the
+    /// runtime-approval upgrade (`Ask` → `Allow`) when an existing session
+    /// or workspace approval matches. Used by both the core-tool and
+    /// plugin-tool launch paths.
+    ///
+    /// Takes individual field references rather than `&self` so the
+    /// helper composes inside the `select!` loop where `self.cmd_rx` is
+    /// already mutably borrowed.
+    fn resolve_decision(
+        permissions: &Permissions,
+        runtime_approvals: &Arc<RwLock<RuntimeApprovals>>,
+        mode: Mode,
+        name: &str,
+        args: &HashMap<String, Value>,
+        is_mcp: bool,
+        hooks: &protocol::PluginToolHooks,
+    ) -> Decision {
+        let mut decision = permissions.decide(mode, name, args, is_mcp);
+        if decision == Decision::Ask {
+            let rt = runtime_approvals.read().unwrap();
+            let desc = hooks
+                .needs_confirm
+                .clone()
+                .unwrap_or_else(|| name.to_string());
+            if rt.is_auto_approved(permissions, mode, name, args, &desc) {
+                decision = Decision::Allow;
+            }
+        }
+        decision
+    }
+
     /// Push a message into history. When `redact_secrets` is enabled, content
     /// from user/tool/agent roles — the only roles that carry data entering
     /// from outside the model — is scrubbed at this boundary. Model-generated
@@ -1237,22 +1268,15 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let mut decision =
-                self.permissions
-                    .decide(self.mode, &tc.function.name, &args, entry.is_mcp);
-
-            // Runtime approvals (session + workspace) can turn Ask → Allow.
-            if decision == Decision::Ask {
-                let rt = self.runtime_approvals.read().unwrap();
-                let desc = hooks
-                    .needs_confirm
-                    .clone()
-                    .unwrap_or_else(|| tc.function.name.clone());
-                if rt.is_auto_approved(self.permissions, self.mode, &tc.function.name, &args, &desc)
-                {
-                    decision = Decision::Allow;
-                }
-            }
+            let decision = Self::resolve_decision(
+                self.permissions,
+                self.runtime_approvals,
+                self.mode,
+                &tc.function.name,
+                &args,
+                entry.is_mcp,
+                &hooks,
+            );
 
             let idx = plan.slots.len();
             match decision {
@@ -1503,28 +1527,15 @@ impl<'a> Turn<'a> {
                                 // ruleset by design — e.g. a plugin "bash" goes
                                 // through the bash subcommand-split machinery in
                                 // permissions::decide_base.
-                                let mut decision = self.permissions.decide(
+                                let decision = Self::resolve_decision(
+                                    self.permissions,
+                                    self.runtime_approvals,
                                     self.mode,
                                     &pending.tc.function.name,
                                     &pending.args,
                                     false,
+                                    &hooks,
                                 );
-                                if decision == Decision::Ask {
-                                    let rt = self.runtime_approvals.read().unwrap();
-                                    let desc = hooks
-                                        .needs_confirm
-                                        .clone()
-                                        .unwrap_or_else(|| pending.tc.function.name.clone());
-                                    if rt.is_auto_approved(
-                                        self.permissions,
-                                        self.mode,
-                                        &pending.tc.function.name,
-                                        &pending.args,
-                                        &desc,
-                                    ) {
-                                        decision = Decision::Allow;
-                                    }
-                                }
                                 match decision {
                                     Decision::Allow => {
                                         if pending.is_sequential {
