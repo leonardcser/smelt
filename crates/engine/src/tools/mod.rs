@@ -27,7 +27,7 @@ pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
 use crate::cancel::CancellationToken;
 use crate::permissions::{Decision, Permissions};
 use crate::provider::{FunctionSchema, Provider, ToolDefinition};
-use protocol::{EngineEvent, Mode};
+use protocol::{EngineEvent, Mode, PluginToolHooks};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -123,20 +123,20 @@ pub(crate) trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a>;
-    fn needs_confirm(&self, _args: &HashMap<String, Value>) -> Option<String> {
-        None
-    }
-
-    /// Returns glob patterns for session-level "always allow" approval.
-    /// Each pattern is matched independently against individual sub-commands.
-    fn approval_patterns(&self, _args: &HashMap<String, Value>) -> Vec<String> {
-        vec![]
-    }
-
-    /// Pre-flight validation run before showing the permission dialog.
-    /// Return `Some(error)` to skip the dialog and fail the tool immediately.
-    fn preflight(&self, _args: &HashMap<String, Value>) -> Option<String> {
-        None
+    /// Evaluate per-call permission hooks. Returns a `PluginToolHooks`
+    /// carrying:
+    /// - `needs_confirm`: confirm-dialog message (None falls back to the
+    ///   tool name).
+    /// - `approval_patterns`: glob patterns offered as session-level
+    ///   "always allow" choices.
+    /// - `preflight_error`: pre-execution error that skips the dialog
+    ///   and fails the call immediately.
+    ///
+    /// Mirrors the shape returned by plugin tools through
+    /// `EvaluatePluginToolHooks` so the engine consumes both paths
+    /// uniformly.
+    fn evaluate_hooks(&self, _args: &HashMap<String, Value>) -> PluginToolHooks {
+        PluginToolHooks::default()
     }
 }
 

@@ -363,13 +363,13 @@ impl Tool for NotebookEditTool {
         })
     }
 
-    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        Some(display_path(&str_arg(args, "notebook_path")))
-    }
-
-    fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
         let path = str_arg(args, "notebook_path");
-        staleness_error(&self.files, &path, "notebook")
+        protocol::PluginToolHooks {
+            needs_confirm: Some(display_path(&path)),
+            approval_patterns: Vec::new(),
+            preflight_error: staleness_error(&self.files, &path, "notebook"),
+        }
     }
 
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {

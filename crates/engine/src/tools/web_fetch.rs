@@ -58,16 +58,16 @@ impl Tool for WebFetchTool {
         })
     }
 
-    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
         let url = str_arg(args, "url");
-        Some(url.to_string())
-    }
-
-    fn approval_patterns(&self, args: &HashMap<String, Value>) -> Vec<String> {
         // Only generate a pattern for the requested URL's domain. If the
         // response redirects to a different domain we re-prompt rather than
         // silently following (see execute / fetch_raw).
-        domain_pattern(&str_arg(args, "url")).into_iter().collect()
+        protocol::PluginToolHooks {
+            needs_confirm: Some(url.clone()),
+            approval_patterns: domain_pattern(&url).into_iter().collect(),
+            preflight_error: None,
+        }
     }
 
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {

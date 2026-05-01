@@ -43,13 +43,13 @@ impl Tool for EditFileTool {
         })
     }
 
-    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        Some(display_path(&str_arg(args, "file_path")))
-    }
-
-    fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
         let path = str_arg(args, "file_path");
-        staleness_error(&self.files, &path, "file")
+        protocol::PluginToolHooks {
+            needs_confirm: Some(display_path(&path)),
+            approval_patterns: Vec::new(),
+            preflight_error: staleness_error(&self.files, &path, "file"),
+        }
     }
 
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
@@ -157,7 +157,8 @@ mod tests {
         std::fs::write(tmp.path(), "hello\n").unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
         let err = tool
-            .preflight(&args(&path, "hello", "world", false))
+            .evaluate_hooks(&args(&path, "hello", "world", false))
+            .preflight_error
             .expect("preflight error");
         assert!(err.contains("must use read_file"));
         assert!(err.contains("file"));
@@ -175,7 +176,8 @@ mod tests {
         sleep(Duration::from_millis(1100));
         std::fs::write(tmp.path(), "modified\n").unwrap();
         let err = tool
-            .preflight(&args(&path, "modified", "changed", false))
+            .evaluate_hooks(&args(&path, "modified", "changed", false))
+            .preflight_error
             .expect("preflight error");
         assert!(err.contains("modified since last read"));
     }
@@ -187,7 +189,10 @@ mod tests {
         std::fs::write(tmp.path(), "hello world\n").unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
         cached_read(&cache, &path, "hello world\n");
-        assert!(tool.preflight(&args(&path, "hello", "hi", false)).is_none());
+        assert!(tool
+            .evaluate_hooks(&args(&path, "hello", "hi", false))
+            .preflight_error
+            .is_none());
     }
 
     #[test]

@@ -38,19 +38,20 @@ impl Tool for WriteFileTool {
         })
     }
 
-    fn needs_confirm(&self, args: &HashMap<String, Value>) -> Option<String> {
-        Some(display_path(&str_arg(args, "file_path")))
-    }
-
-    fn preflight(&self, args: &HashMap<String, Value>) -> Option<String> {
+    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::PluginToolHooks {
         let path = str_arg(args, "file_path");
-        if !Path::new(&path).exists() {
-            return None;
+        let preflight_error = if !Path::new(&path).exists() {
+            None
+        } else if !self.files.has(&path) {
+            Some(UNREAD_OVERWRITE_ERR.into())
+        } else {
+            staleness_error(&self.files, &path, "file")
+        };
+        protocol::PluginToolHooks {
+            needs_confirm: Some(display_path(&path)),
+            approval_patterns: Vec::new(),
+            preflight_error,
         }
-        if !self.files.has(&path) {
-            return Some(UNREAD_OVERWRITE_ERR.into());
-        }
-        staleness_error(&self.files, &path, "file")
     }
 
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
@@ -137,7 +138,10 @@ mod tests {
         let (tool, cache) = mk_tool();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.txt").to_string_lossy().into_owned();
-        assert!(tool.preflight(&args(&path, "hello")).is_none());
+        assert!(tool
+            .evaluate_hooks(&args(&path, "hello"))
+            .preflight_error
+            .is_none());
         let r = tool.run(&args(&path, "hello"));
         assert!(!r.is_error, "{}", r.content);
         assert_eq!(cache.get(&path).unwrap().content, "hello");
@@ -150,7 +154,10 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "existing\n").unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
-        let err = tool.preflight(&args(&path, "new")).expect("preflight err");
+        let err = tool
+            .evaluate_hooks(&args(&path, "new"))
+            .preflight_error
+            .expect("preflight err");
         assert_eq!(err, UNREAD_OVERWRITE_ERR);
         let r = tool.run(&args(&path, "new"));
         assert!(r.is_error);
@@ -164,7 +171,10 @@ mod tests {
         std::fs::write(tmp.path(), "old\n").unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
         cached_read(&cache, &path, "old\n");
-        assert!(tool.preflight(&args(&path, "new content")).is_none());
+        assert!(tool
+            .evaluate_hooks(&args(&path, "new content"))
+            .preflight_error
+            .is_none());
         let r = tool.run(&args(&path, "new content"));
         assert!(!r.is_error, "{}", r.content);
         let cached = cache.get(&path).unwrap();
