@@ -16,7 +16,7 @@ const SKIP_ELEMENTS: &[&str] = &[
 ];
 
 /// Extract the document title, if present.
-pub fn title(html: &str) -> Option<String> {
+pub(crate) fn title(html: &str) -> Option<String> {
     let doc = Html::parse_document(html);
     let sel = Selector::parse("title").ok()?;
     doc.select(&sel)
@@ -27,7 +27,7 @@ pub fn title(html: &str) -> Option<String> {
 
 /// Extract `<a href>` targets, resolved against `base_url` when given.
 /// Output is unique-preserving-insertion-order.
-pub fn links(html: &str, base_url: Option<&str>) -> Vec<String> {
+pub(crate) fn links(html: &str, base_url: Option<&str>) -> Vec<String> {
     let doc = Html::parse_document(html);
     let Ok(sel) = Selector::parse("a[href]") else {
         return Vec::new();
@@ -59,7 +59,7 @@ pub fn links(html: &str, base_url: Option<&str>) -> Vec<String> {
 /// visible text with spaces. Whitespace is collapsed to single spaces;
 /// blocks introduce a newline. Good enough for "read what the page
 /// says"; not a faithful renderer.
-pub fn to_text(html: &str) -> String {
+pub(crate) fn to_text(html: &str) -> String {
     let doc = Html::parse_document(html);
     let mut out = String::new();
     if let Some(root) = doc.tree.root().first_child() {

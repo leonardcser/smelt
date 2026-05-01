@@ -13,14 +13,14 @@
 use serde_json::Value;
 
 /// File-extension probe (case-insensitive).
-pub fn is_notebook_path(path: &str) -> bool {
+pub(crate) fn is_notebook_path(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".ipynb")
 }
 
 /// Cell types Jupyter recognises. Anything unfamiliar surfaces as
 /// `Other(_)` so callers don't lose information.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CellKind {
+pub(crate) enum CellKind {
     Code,
     Markdown,
     Raw,
@@ -28,7 +28,7 @@ pub enum CellKind {
 }
 
 impl CellKind {
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             CellKind::Code => "code",
             CellKind::Markdown => "markdown",
@@ -49,24 +49,24 @@ impl CellKind {
 
 /// One notebook cell, normalised into a plain `source` string.
 #[derive(Debug, Clone)]
-pub struct Cell {
-    pub kind: CellKind,
-    pub id: Option<String>,
-    pub source: String,
-    pub execution_count: Option<i64>,
+pub(crate) struct Cell {
+    pub(crate) kind: CellKind,
+    pub(crate) id: Option<String>,
+    pub(crate) source: String,
+    pub(crate) execution_count: Option<i64>,
 }
 
 /// Parsed notebook view. `format_*` mirror nbformat's top-level keys;
 /// `cells` walks `cells[]` in order.
 #[derive(Debug, Clone)]
-pub struct Notebook {
-    pub format: Option<i64>,
-    pub format_minor: Option<i64>,
-    pub cells: Vec<Cell>,
+pub(crate) struct Notebook {
+    pub(crate) format: Option<i64>,
+    pub(crate) format_minor: Option<i64>,
+    pub(crate) cells: Vec<Cell>,
 }
 
 /// Parse `.ipynb` JSON. Errors surface as `serde_json::Error`.
-pub fn parse(json: &str) -> Result<Notebook, serde_json::Error> {
+pub(crate) fn parse(json: &str) -> Result<Notebook, serde_json::Error> {
     let raw: Value = serde_json::from_str(json)?;
     let format = raw.get("nbformat").and_then(|v| v.as_i64());
     let format_minor = raw.get("nbformat_minor").and_then(|v| v.as_i64());

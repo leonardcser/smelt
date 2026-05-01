@@ -15,17 +15,17 @@ use std::time::Duration;
 
 /// Result of a single HTTP request.
 #[derive(Debug, Clone)]
-pub struct Response {
-    pub status: u16,
-    pub final_url: String,
-    pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
+pub(crate) struct Response {
+    pub(crate) status: u16,
+    pub(crate) final_url: String,
+    pub(crate) headers: HashMap<String, String>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl Response {
     /// Body decoded as UTF-8 (lossy). Convenience for tools that want
     /// text output.
-    pub fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
 }
@@ -33,16 +33,16 @@ impl Response {
 /// Options accepted by [`get`]. Defaults: 30s timeout, follow up to 10
 /// redirects, no extra headers.
 #[derive(Debug, Clone, Default)]
-pub struct Options {
-    pub timeout: Option<Duration>,
-    pub max_redirects: Option<usize>,
-    pub headers: HashMap<String, String>,
+pub(crate) struct Options {
+    pub(crate) timeout: Option<Duration>,
+    pub(crate) max_redirects: Option<usize>,
+    pub(crate) headers: HashMap<String, String>,
 }
 
 /// GET `url` with the given options. Errors surface as
 /// `reqwest::Error` so callers (Lua bindings, tools) can decide how
 /// to format them.
-pub fn get(url: &str, opts: &Options) -> Result<Response, reqwest::Error> {
+pub(crate) fn get(url: &str, opts: &Options) -> Result<Response, reqwest::Error> {
     let timeout = opts.timeout.unwrap_or(Duration::from_secs(30));
     let max_redirects = opts.max_redirects.unwrap_or(10);
 
