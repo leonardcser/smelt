@@ -151,7 +151,7 @@ pub struct CallbackCtx<'a> {
 /// Per-window callback registry owned by `Ui`. Keyed by WinId so
 /// closing a window removes all its bindings cleanly.
 #[derive(Default)]
-pub struct Callbacks {
+pub(crate) struct Callbacks {
     keymaps: HashMap<WinId, HashMap<KeyBind, Callback>>,
     events: HashMap<WinId, HashMap<WinEvent, Vec<Callback>>>,
     /// Per-window fallback key handler tried after specific `keymaps`
@@ -162,7 +162,7 @@ pub struct Callbacks {
 }
 
 impl Callbacks {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -170,11 +170,16 @@ impl Callbacks {
     /// (if any), so callers with `Callback::Lua` bindings can drop the
     /// stale `LuaHandle` from their side registry.
     #[must_use]
-    pub fn set_keymap(&mut self, win: WinId, key: KeyBind, cb: Callback) -> Option<Callback> {
+    pub(crate) fn set_keymap(
+        &mut self,
+        win: WinId,
+        key: KeyBind,
+        cb: Callback,
+    ) -> Option<Callback> {
         self.keymaps.entry(win).or_default().insert(key, cb)
     }
 
-    pub fn clear_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
+    pub(crate) fn clear_keymap(&mut self, win: WinId, key: KeyBind) -> Option<Callback> {
         self.keymaps.get_mut(&win).and_then(|t| t.remove(&key))
     }
 
@@ -182,7 +187,12 @@ impl Callbacks {
     /// Lua plugins attach picker-lifetime handlers to other windows (e.g.
     /// `on_event(prompt, "text_changed", …)`); they need a way to tear
     /// down exactly their own binding without nuking co-existing ones.
-    pub fn clear_event_by_id(&mut self, win: WinId, ev: WinEvent, id: u64) -> Option<Callback> {
+    pub(crate) fn clear_event_by_id(
+        &mut self,
+        win: WinId,
+        ev: WinEvent,
+        id: u64,
+    ) -> Option<Callback> {
         let list = self.events.get_mut(&win)?.get_mut(&ev)?;
         let pos = list
             .iter()
@@ -190,7 +200,7 @@ impl Callbacks {
         Some(list.remove(pos))
     }
 
-    pub fn on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
+    pub(crate) fn on_event(&mut self, win: WinId, ev: WinEvent, cb: Callback) {
         self.events
             .entry(win)
             .or_default()
@@ -203,7 +213,7 @@ impl Callbacks {
     /// `Callback::Lua` handles that were attached, so the caller can
     /// drop them from the Lua-side registry.
     #[must_use]
-    pub fn clear_all(&mut self, win: WinId) -> Vec<u64> {
+    pub(crate) fn clear_all(&mut self, win: WinId) -> Vec<u64> {
         let mut lua_ids = Vec::new();
         if let Some(table) = self.keymaps.remove(&win) {
             for cb in table.into_values() {
@@ -231,7 +241,7 @@ impl Callbacks {
     /// specific `keymaps` miss. Returns the displaced `Callback` (if
     /// any) so Lua-side handles can be cleaned up.
     #[must_use]
-    pub fn set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
+    pub(crate) fn set_key_fallback(&mut self, win: WinId, cb: Callback) -> Option<Callback> {
         self.key_fallback.insert(win, cb)
     }
 
@@ -245,7 +255,7 @@ impl Callbacks {
 
     /// List every window that has at least one callback registered
     /// for `ev`. Used by `Ui::dispatch_tick`.
-    pub fn wins_with_event(&self, ev: WinEvent) -> Vec<WinId> {
+    pub(crate) fn wins_with_event(&self, ev: WinEvent) -> Vec<WinId> {
         self.events
             .iter()
             .filter_map(|(win, table)| table.get(&ev).filter(|v| !v.is_empty()).map(|_| *win))
