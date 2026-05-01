@@ -646,7 +646,7 @@ impl LuaRuntime {
     /// All Lua-registered `/commands` as `(name, description)`, sorted
     /// by name. Backs the free-fn `list_commands` reader used by the
     /// `/`-completer.
-    pub(crate) fn list_commands_with_desc(&self) -> Vec<(String, Option<String>)> {
+    fn list_commands_with_desc(&self) -> Vec<(String, Option<String>)> {
         let mut items: Vec<(String, Option<String>)> = self
             .shared
             .commands
