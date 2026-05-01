@@ -212,7 +212,7 @@ to invoke_ the feature.
 | `auto_compact` setting                                | settings + compact loop           | P2                          | working |
 | `multi_agent` setting                                 | settings + agent gating           | P5.c — replaced by Lua-side toggle in `plugins/multi_agent.lua`; engine has no multi-agent concept | working |
 | `context_window` override                             | settings                          | n/a                         | working |
-| Custom statusline items (`smelt.statusline.register`) | `lua/api/dispatch.rs`             | P4.c (cells-driven)         | working |
+| Custom statusline items (`smelt.statusline.register`) | `lua/api/statusline.rs` + `runtime/lua/smelt/status.lua`           | P4.c                        | working — the shipped `core` composer plus user-registered sources both flow through the same `smelt.statusline.register(name, fn)` path; Rust runs the responsive layout. |
 | Vim mode opt-in                                       | settings + `plugins/toggles.lua`  | P4                          | working |
 
 ## Persistence & lifecycle
@@ -270,7 +270,7 @@ to invoke_ the feature.
 | `smelt.notify` / `smelt.notify_error`                   | `lua/api/mod.rs`                    | P3.b                                       | working        |
 | `smelt.buf.*` (create/lines/text/extmark)               | `lua/api/widgets.rs`                | P3.b → `lua/api/buf.rs` (extmarks!)        | working        |
 | `smelt.win.*`                                           | `lua/api/widgets.rs`                | P3.b → `lua/api/win.rs`                    | working        |
-| `smelt.statusline.register/set`                         | `lua/api/dispatch.rs`               | P4.c (cells-driven spec)                   | working        |
+| `smelt.statusline.{register,unregister,snapshot}`       | `lua/api/statusline.rs`             | P4.c (composer fully Lua)                  | working        |
 | `smelt.cell.new/get/set/subscribe`                      | `lua/api/dispatch.rs` + `app/cells.rs` | P2.a.4b (landed; `smelt.cell(name)` handle + `:glob_subscribe` shipped); a.4c migrates built-ins | working |
 | `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/dispatch.rs`               | thin alias over `smelt.timer.set`          | working        |
 | `smelt.timer.set/every/cancel` namespace                | `lua/api/dispatch.rs` + `app/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |

@@ -199,6 +199,59 @@ pub(super) fn color_to_lua(lua: &Lua, color: crossterm::style::Color) -> LuaResu
     Ok(t)
 }
 
+/// Project a `crossterm::style::Color` to an ANSI palette index for
+/// the `statusline_item_from` decoder, which only reads `u8` fg/bg.
+/// `Color::Reset` returns `None` (no override). Named legacy colors
+/// map to the canonical 0..15 ANSI slots.
+pub(super) fn color_to_ansi(color: crossterm::style::Color) -> Option<u8> {
+    use crossterm::style::Color;
+    match color {
+        Color::AnsiValue(v) => Some(v),
+        Color::Reset => None,
+        Color::Black => Some(0),
+        Color::DarkRed => Some(1),
+        Color::DarkGreen => Some(2),
+        Color::DarkYellow => Some(3),
+        Color::DarkBlue => Some(4),
+        Color::DarkMagenta => Some(5),
+        Color::DarkCyan => Some(6),
+        Color::Grey => Some(7),
+        Color::DarkGrey => Some(8),
+        Color::Red => Some(9),
+        Color::Green => Some(10),
+        Color::Yellow => Some(11),
+        Color::Blue => Some(12),
+        Color::Magenta => Some(13),
+        Color::Cyan => Some(14),
+        Color::White => Some(15),
+        Color::Rgb { r, g, b } => Some(rgb_to_ansi256(r, g, b)),
+    }
+}
+
+/// Approximate an RGB triple to the nearest ANSI 256 palette entry
+/// using the standard 16 + 6×6×6 cube + 24-step grayscale layout.
+fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    if r == g && g == b {
+        if r < 8 {
+            return 16;
+        }
+        if r > 248 {
+            return 231;
+        }
+        return 232 + ((r - 8) / 10);
+    }
+    let to_cube = |c: u8| -> u8 {
+        if c < 48 {
+            0
+        } else if c < 115 {
+            1
+        } else {
+            ((c - 35) / 40).min(5)
+        }
+    };
+    16 + 36 * to_cube(r) + 6 * to_cube(g) + to_cube(b)
+}
+
 /// Decode a Lua color table to an ANSI palette index. Accepts
 /// `{ ansi = u8 }`, `{ preset = "name" }`, or `{ rgb = { r, g, b } }`
 /// (rgb is down-sampled via the nearest-palette approximation).
