@@ -74,7 +74,7 @@ pub fn add_provider(provider: &NewProvider) -> Result<(), String> {
     add_provider_to(provider, &default_path())
 }
 
-pub fn add_provider_to(provider: &NewProvider, path: &Path) -> Result<(), String> {
+fn add_provider_to(provider: &NewProvider, path: &Path) -> Result<(), String> {
     let mut root = read_config(path)?;
     let map = root
         .as_mapping_mut()

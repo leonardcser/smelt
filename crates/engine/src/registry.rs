@@ -118,7 +118,7 @@ pub fn register(entry: &RegistryEntry) -> std::io::Result<()> {
 }
 
 /// Remove this agent's entry from the registry.
-pub fn deregister(pid: u32) {
+fn deregister(pid: u32) {
     let _ = std::fs::remove_file(entry_path(pid));
 }
 

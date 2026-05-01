@@ -9,7 +9,7 @@ pub fn is_image_file(path: &str) -> bool {
     IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
-pub fn mime_from_extension(path: &str) -> &'static str {
+fn mime_from_extension(path: &str) -> &'static str {
     match path
         .rsplit('.')
         .next()
