@@ -198,7 +198,7 @@ pub struct TuiApp {
     pub(in crate::app) working: working::WorkingState,
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).
-    pub transcript_gutters: crate::window::WindowGutters,
+    pub(crate) transcript_gutters: crate::window::WindowGutters,
     /// Last-computed viewport layout (status / transcript / prompt
     /// rows). Updated each frame in `render_normal`; read by mouse
     /// hit-testing and viewport-rows estimation.

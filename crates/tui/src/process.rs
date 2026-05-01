@@ -21,26 +21,26 @@ use std::time::{Duration, Instant};
 /// Options accepted by [`run`]. Defaults: 30s timeout, inherit env,
 /// no stdin, capture stdout+stderr.
 #[derive(Debug, Clone, Default)]
-pub struct Options {
-    pub cwd: Option<String>,
-    pub env: HashMap<String, String>,
-    pub timeout: Option<Duration>,
+pub(crate) struct Options {
+    pub(crate) cwd: Option<String>,
+    pub(crate) env: HashMap<String, String>,
+    pub(crate) timeout: Option<Duration>,
     /// Optional stdin text; written to the child's stdin then closed.
-    pub stdin: Option<String>,
+    pub(crate) stdin: Option<String>,
 }
 
 /// Result of a single short-lived process invocation.
 #[derive(Debug, Clone)]
-pub struct Output {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-    pub timed_out: bool,
+pub(crate) struct Output {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: i32,
+    pub(crate) timed_out: bool,
 }
 
 /// Run `cmd` with `args` and the given options, awaiting exit (or the
 /// configured timeout). Stdout/stderr are captured as UTF-8 (lossy).
-pub fn run<I, S>(cmd: &str, args: I, opts: &Options) -> io::Result<Output>
+pub(crate) fn run<I, S>(cmd: &str, args: I, opts: &Options) -> io::Result<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

@@ -5,7 +5,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 /// Format a USD cost for display.
-pub fn format_cost(usd: f64) -> String {
+pub(crate) fn format_cost(usd: f64) -> String {
     if usd < 0.01 {
         format!("${:.4}", usd)
     } else if usd < 1.0 {
@@ -16,20 +16,20 @@ pub fn format_cost(usd: f64) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricsEntry {
-    pub timestamp_ms: u64,
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub model: String,
+pub(crate) struct MetricsEntry {
+    pub(crate) timestamp_ms: u64,
+    pub(crate) prompt_tokens: u32,
+    pub(crate) completion_tokens: u32,
+    pub(crate) model: String,
     /// Cost of this LLM call in USD. Absent in old entries.
     #[serde(default)]
-    pub cost_usd: Option<f64>,
+    pub(crate) cost_usd: Option<f64>,
     #[serde(default)]
-    pub cache_read_tokens: Option<u32>,
+    pub(crate) cache_read_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_write_tokens: Option<u32>,
+    pub(crate) cache_write_tokens: Option<u32>,
     #[serde(default)]
-    pub reasoning_tokens: Option<u32>,
+    pub(crate) reasoning_tokens: Option<u32>,
 }
 
 fn metrics_path() -> PathBuf {
@@ -37,7 +37,7 @@ fn metrics_path() -> PathBuf {
 }
 
 /// Append a single entry to the metrics JSONL file.
-pub fn append(entry: &MetricsEntry) {
+pub(crate) fn append(entry: &MetricsEntry) {
     let path = metrics_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -55,7 +55,7 @@ pub fn append(entry: &MetricsEntry) {
 }
 
 /// Load all metrics entries from disk.
-pub fn load() -> Vec<MetricsEntry> {
+pub(crate) fn load() -> Vec<MetricsEntry> {
     let path = metrics_path();
     let Ok(f) = std::fs::File::open(&path) else {
         return Vec::new();
@@ -152,7 +152,7 @@ fn aggregate(entries: &[MetricsEntry]) -> Stats {
 
 // ── Structured output for the renderer ──────────────────────────────────────
 
-pub enum StatsLine {
+pub(crate) enum StatsLine {
     /// Dim label + normal value.
     Kv { label: String, value: String },
     /// Section heading (dim).
@@ -168,7 +168,7 @@ pub enum StatsLine {
 }
 
 #[derive(Clone, Copy)]
-pub enum HeatCell {
+pub(crate) enum HeatCell {
     Empty,
     /// Intensity 0..=3 (maps to increasing brightness).
     Level(u8),
@@ -187,12 +187,12 @@ fn sparkline(values: &[u64]) -> String {
         .collect()
 }
 
-pub struct StatsOutput {
-    pub left: Vec<StatsLine>,
-    pub right: Vec<StatsLine>,
+pub(crate) struct StatsOutput {
+    pub(crate) left: Vec<StatsLine>,
+    pub(crate) right: Vec<StatsLine>,
 }
 
-pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
+pub(crate) fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
     if entries.is_empty() {
         return StatsOutput {
             left: vec![StatsLine::Heading("No metrics recorded yet.".into())],
@@ -390,7 +390,7 @@ fn stats_line_to_text(line: &StatsLine, label_col: usize) -> String {
 /// Render full `/stats` output as a single string. Two-column layout
 /// joined row-by-row when both columns are present; falls back to
 /// sequential left → blank → right.
-pub fn render_stats_text(out: &StatsOutput) -> String {
+pub(crate) fn render_stats_text(out: &StatsOutput) -> String {
     let left_col = label_col_width(&out.left);
     let right_col = label_col_width(&out.right);
     if out.right.is_empty() {
@@ -453,7 +453,7 @@ pub fn render_stats_text(out: &StatsOutput) -> String {
 }
 
 /// Render `/cost` output (single column) as a plain string.
-pub fn render_cost_text(lines: &[StatsLine]) -> String {
+pub(crate) fn render_cost_text(lines: &[StatsLine]) -> String {
     let col = label_col_width(lines);
     lines
         .iter()
@@ -462,7 +462,7 @@ pub fn render_cost_text(lines: &[StatsLine]) -> String {
         .join("\n")
 }
 
-pub fn render_session_cost(
+pub(crate) fn render_session_cost(
     cost_usd: f64,
     model: &str,
     turns: usize,

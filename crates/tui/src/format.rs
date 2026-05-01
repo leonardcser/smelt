@@ -27,7 +27,7 @@ use crate::content::to_buffer::render_into_buffer;
 /// [`BufFormat::into_parser`] to get a trait object that can be
 /// attached to a `ui::Buffer`.
 #[derive(Clone, Debug)]
-pub enum BufFormat {
+pub(crate) enum BufFormat {
     /// Plain text, soft-wrapped to the render width. Copy-friendly:
     /// wrap continuations are marked so vim/visual copies round-trip
     /// without the inserted line breaks.
@@ -63,7 +63,7 @@ impl BufFormat {
     /// Resolve a full mode spec from a Lua opts table: `{ mode = "…",
     /// path = "…", old = "…" }`. Unknown modes or missing payloads
     /// produce `Err(msg)`.
-    pub fn from_lua_spec(mode: &str, opts: &mlua::Table) -> Result<Self, String> {
+    pub(crate) fn from_lua_spec(mode: &str, opts: &mlua::Table) -> Result<Self, String> {
         if let Some(simple) = Self::parse_simple(mode) {
             return Ok(simple);
         }
@@ -87,7 +87,7 @@ impl BufFormat {
 
     /// Wrap this mode in a trait object ready to attach to a buffer
     /// via [`ui::Buffer::attach`] / [`ui::Buffer::set_parser`].
-    pub fn into_parser(self) -> Arc<dyn BufferParser> {
+    pub(crate) fn into_parser(self) -> Arc<dyn BufferParser> {
         Arc::new(ModeParser { mode: self })
     }
 }

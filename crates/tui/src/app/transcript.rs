@@ -549,10 +549,7 @@ impl TuiApp {
         let clamped_scroll = scroll_top.min(total_rows.saturating_sub(viewport_rows));
 
         let layer_w = gutters.layer_width(width as u16);
-        let scrollbar_col = match gutters.scrollbar {
-            Some(crate::window::GutterSide::Left) => 0,
-            _ => layer_w.saturating_sub(1),
-        };
+        let scrollbar_col = layer_w.saturating_sub(1);
 
         // Snapshot visible rows for the soft-cursor glyph lookup in
         // `compute_transcript_cursor`.

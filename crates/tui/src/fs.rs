@@ -11,33 +11,33 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Read the entire file as a UTF-8 string.
-pub fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
+pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     std::fs::read_to_string(path)
 }
 
 /// Write `contents` to `path`, replacing existing contents.
-pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
+pub(crate) fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     std::fs::write(path, contents)
 }
 
 /// `true` if the path exists (file, dir, or otherwise).
-pub fn exists(path: impl AsRef<Path>) -> bool {
+pub(crate) fn exists(path: impl AsRef<Path>) -> bool {
     path.as_ref().exists()
 }
 
 /// `true` if the path resolves to a regular file.
-pub fn is_file(path: impl AsRef<Path>) -> bool {
+pub(crate) fn is_file(path: impl AsRef<Path>) -> bool {
     path.as_ref().is_file()
 }
 
 /// `true` if the path resolves to a directory.
-pub fn is_dir(path: impl AsRef<Path>) -> bool {
+pub(crate) fn is_dir(path: impl AsRef<Path>) -> bool {
     path.as_ref().is_dir()
 }
 
 /// Enumerate a directory's immediate entries. Returns absolute (or
 /// input-relative) paths in OS order — callers sort if they care.
-pub fn read_dir(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
+pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(path)? {
         out.push(entry?.path());
@@ -46,43 +46,43 @@ pub fn read_dir(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
 }
 
 /// Create a directory. Errors if the parent does not exist.
-pub fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
+pub(crate) fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::create_dir(path)
 }
 
 /// Create a directory and any missing parents.
-pub fn mkdir_all(path: impl AsRef<Path>) -> io::Result<()> {
+pub(crate) fn mkdir_all(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
 /// Remove a regular file.
-pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
+pub(crate) fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::remove_file(path)
 }
 
 /// Remove an empty directory.
-pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
+pub(crate) fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::remove_dir(path)
 }
 
 /// Remove a directory and all its contents.
-pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
+pub(crate) fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     std::fs::remove_dir_all(path)
 }
 
 /// Rename or move a path.
-pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
+pub(crate) fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     std::fs::rename(from, to)
 }
 
 /// Copy the file `from` to `to`, returning the number of bytes copied.
-pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
+pub(crate) fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
     std::fs::copy(from, to)
 }
 
 /// Modification time as Unix epoch seconds. `None` if the platform
 /// does not expose mtime or the value is before the epoch.
-pub fn mtime_secs(path: impl AsRef<Path>) -> io::Result<Option<u64>> {
+pub(crate) fn mtime_secs(path: impl AsRef<Path>) -> io::Result<Option<u64>> {
     let meta = std::fs::metadata(path)?;
     let modified = meta.modified()?;
     Ok(modified
@@ -93,7 +93,7 @@ pub fn mtime_secs(path: impl AsRef<Path>) -> io::Result<Option<u64>> {
 
 /// File size in bytes, or directory link metadata size on platforms
 /// that report it.
-pub fn size(path: impl AsRef<Path>) -> io::Result<u64> {
+pub(crate) fn size(path: impl AsRef<Path>) -> io::Result<u64> {
     Ok(std::fs::metadata(path)?.len())
 }
 
