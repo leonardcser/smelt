@@ -106,14 +106,14 @@ impl ToolResult {
 /// constructed per call without lifetime gymnastics — this enables side calls
 /// like `smelt.tools.call("bash", args)` from Lua plugin tools.
 pub(crate) struct ToolContext {
-    pub event_tx: mpsc::UnboundedSender<EngineEvent>,
-    pub call_id: String,
-    pub cancel: CancellationToken,
-    pub provider: Provider,
-    pub model: String,
-    pub session_dir: std::path::PathBuf,
-    pub file_locks: FileLocks,
-    pub api: crate::ApiConfig,
+    pub(crate) event_tx: mpsc::UnboundedSender<EngineEvent>,
+    pub(crate) call_id: String,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) provider: Provider,
+    pub(crate) model: String,
+    pub(crate) session_dir: std::path::PathBuf,
+    pub(crate) file_locks: FileLocks,
+    pub(crate) api: crate::ApiConfig,
 }
 
 pub(crate) type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
@@ -173,22 +173,22 @@ pub(crate) struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
+    pub(crate) fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
     }
 
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+    pub(crate) fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
             .find(|t| t.name() == name)
             .map(|t| t.as_ref())
     }
 
-    pub fn definitions(
+    pub(crate) fn definitions(
         &self,
         permissions: &Permissions,
         mode: Mode,

@@ -20,12 +20,12 @@ pub fn enable() {
     ENABLED.store(true, Relaxed);
 }
 
-pub fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     ENABLED.load(Relaxed)
 }
 
 /// Current `(alloc_count, alloc_bytes)` totals. Monotonic; take deltas.
-pub fn snapshot() -> (u64, u64) {
+pub(crate) fn snapshot() -> (u64, u64) {
     (ALLOC_COUNT.load(Relaxed), ALLOC_BYTES.load(Relaxed))
 }
 

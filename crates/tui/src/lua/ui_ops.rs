@@ -62,7 +62,7 @@ pub(crate) struct DialogOpenResult {
 // - `{ kind = "options",  items = [{label}], selected? = <1-based index> }`
 // - `{ kind = "input",    placeholder? = "..." }`
 
-pub fn open_dialog(app: &mut TuiApp, opts: mlua::Table) -> Result<DialogOpenResult, String> {
+pub(crate) fn open_dialog(app: &mut TuiApp, opts: mlua::Table) -> Result<DialogOpenResult, String> {
     let title: Option<String> = opts.get("title").ok();
     let panels_tbl: mlua::Table = opts
         .get("panels")
@@ -750,7 +750,7 @@ fn parse_panel_height(panel: &mlua::Table) -> Result<Option<PanelHeight>, String
     }
 }
 
-pub fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::PickerItem, String> {
+pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::PickerItem, String> {
     match v {
         mlua::Value::String(s) => Ok(crate::picker::PickerItem::new(
             s.to_string_lossy().to_string(),
