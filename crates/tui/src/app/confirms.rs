@@ -27,8 +27,8 @@ use crate::app::transcript_model::{ConfirmChoice, ConfirmRequest};
 /// `dialogs::confirm::build_options` so resolve can look up the
 /// user's pick by index.
 pub(crate) struct ConfirmEntry {
-    pub req: ConfirmRequest,
-    pub choices: Vec<ConfirmChoice>,
+    pub(crate) req: ConfirmRequest,
+    pub(crate) choices: Vec<ConfirmChoice>,
 }
 
 #[derive(Default)]

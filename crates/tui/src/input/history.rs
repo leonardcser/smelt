@@ -11,7 +11,7 @@ pub(crate) struct History {
 const RECORD_SEP: char = '\x1e';
 
 impl History {
-    pub fn load() -> Self {
+    pub(crate) fn load() -> Self {
         let path = config::state_dir().join("history");
         let entries = std::fs::read_to_string(&path)
             .unwrap_or_default()
@@ -28,7 +28,7 @@ impl History {
         }
     }
 
-    pub fn push(&mut self, entry: String) {
+    pub(crate) fn push(&mut self, entry: String) {
         if !entry.is_empty() && self.entries.last().is_none_or(|last| *last != entry) {
             self.entries.push(entry.clone());
             self.append_to_file(&entry);
@@ -82,7 +82,7 @@ impl History {
         }
     }
 
-    pub fn entries(&self) -> &[String] {
+    pub(crate) fn entries(&self) -> &[String] {
         &self.entries
     }
 }

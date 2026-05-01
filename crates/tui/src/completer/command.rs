@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use super::{Completer, CompleterKind, CompletionItem};
 
 impl Completer {
-    pub fn is_command(s: &str) -> bool {
+    pub(crate) fn is_command(s: &str) -> bool {
         crate::custom_commands::is_custom_command(s) || crate::lua::is_lua_command(s)
     }
 
-    pub fn commands(anchor: usize) -> Self {
+    pub(crate) fn commands(anchor: usize) -> Self {
         let mut all_items: Vec<CompletionItem> = Vec::new();
         for (name, desc) in crate::custom_commands::list() {
             all_items.push(CompletionItem {
@@ -42,7 +42,7 @@ impl Completer {
         }
     }
 
-    pub fn command_args(anchor: usize, items: &[String]) -> Self {
+    pub(crate) fn command_args(anchor: usize, items: &[String]) -> Self {
         let all_items: Vec<CompletionItem> = items
             .iter()
             .map(|s| CompletionItem {

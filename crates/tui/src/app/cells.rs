@@ -42,7 +42,7 @@ use crate::lua::LuaHandle;
 /// rely on the per-`TypeId` projector to project them into Lua at
 /// fire time.
 pub(crate) struct LuaCellValue {
-    pub key: mlua::RegistryKey,
+    pub(crate) key: mlua::RegistryKey,
 }
 
 /// Per-`TypeId` converter from a stored cell value (`&dyn Any`) to a
@@ -89,8 +89,8 @@ struct Slot {
 /// `(value)`, glob subscribers receive `(name, value)` — matching
 /// nvim's `pattern`-augmented autocmd ergonomics.
 pub(crate) struct PendingCallback {
-    pub kind: SubscriberKind,
-    pub is_glob: bool,
+    pub(crate) kind: SubscriberKind,
+    pub(crate) is_glob: bool,
 }
 
 /// One queued notification: the value snapshot at the moment of `set`
@@ -98,9 +98,9 @@ pub(crate) struct PendingCallback {
 /// fires each callback in registration order after the `&mut Cells`
 /// borrow releases.
 pub(crate) struct PendingFire {
-    pub name: String,
-    pub value: Rc<dyn Any>,
-    pub callbacks: Vec<PendingCallback>,
+    pub(crate) name: String,
+    pub(crate) value: Rc<dyn Any>,
+    pub(crate) callbacks: Vec<PendingCallback>,
 }
 
 /// Typed name → value registry plus a pending-fire queue.
@@ -323,13 +323,13 @@ impl Cells {
 /// reading `smelt.cell("agent_mode"):get()` at startup see the right
 /// value before any flip publishes.
 pub(crate) struct BuiltinSeeds {
-    pub vim_mode: String,
-    pub agent_mode: String,
-    pub model: String,
-    pub reasoning: String,
-    pub cwd: String,
-    pub session_title: String,
-    pub branch: String,
+    pub(crate) vim_mode: String,
+    pub(crate) agent_mode: String,
+    pub(crate) model: String,
+    pub(crate) reasoning: String,
+    pub(crate) cwd: String,
+    pub(crate) session_title: String,
+    pub(crate) branch: String,
 }
 
 /// Sentinel placeholder for event-shaped cells whose setter hasn't
@@ -347,7 +347,7 @@ pub(crate) struct EventStub;
 /// structured error fields later.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TurnError {
-    pub message: String,
+    pub(crate) message: String,
 }
 
 /// Payload for the `confirm_resolved` cell. `decision` is a stable
@@ -357,8 +357,8 @@ pub(crate) struct TurnError {
 /// matching the resolved `ConfirmChoice` variant + scope.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfirmResolved {
-    pub handle_id: u64,
-    pub decision: String,
+    pub(crate) handle_id: u64,
+    pub(crate) decision: String,
 }
 
 /// Payload for the `history` cell. `kind` is a short stable string
@@ -367,8 +367,8 @@ pub(crate) struct ConfirmResolved {
 /// the new size without having to reach into TuiApp state.
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryDelta {
-    pub kind: String,
-    pub count: usize,
+    pub(crate) kind: String,
+    pub(crate) count: usize,
 }
 
 /// Payload for the `turn_end` cell. Fires from `TuiApp::finish_turn` on
@@ -378,7 +378,7 @@ pub(crate) struct HistoryDelta {
 /// query `smelt.session.messages()` from the callback.
 #[derive(Debug, Clone)]
 pub(crate) struct TurnEnd {
-    pub cancelled: bool,
+    pub(crate) cancelled: bool,
 }
 
 /// Payload for the `tool_start` cell. Fires once per tool invocation
@@ -386,8 +386,8 @@ pub(crate) struct TurnEnd {
 /// engine ships; nested objects round-trip through `json_to_lua`.
 #[derive(Debug, Clone)]
 pub(crate) struct ToolStart {
-    pub tool: String,
-    pub args: std::collections::HashMap<String, serde_json::Value>,
+    pub(crate) tool: String,
+    pub(crate) args: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Payload for the `tool_end` cell. Fires on engine `ToolFinished`
@@ -396,9 +396,9 @@ pub(crate) struct ToolStart {
 /// timestamp the run.
 #[derive(Debug, Clone)]
 pub(crate) struct ToolEnd {
-    pub tool: String,
-    pub is_error: bool,
-    pub elapsed_ms: Option<u64>,
+    pub(crate) tool: String,
+    pub(crate) is_error: bool,
+    pub(crate) elapsed_ms: Option<u64>,
 }
 
 /// Payload for the `confirm_requested` cell. Carries the full request
@@ -410,15 +410,15 @@ pub(crate) struct ToolEnd {
 /// to find the underlying `Confirms` entry.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfirmRequested {
-    pub handle_id: u64,
-    pub tool_name: String,
-    pub desc: String,
-    pub summary: Option<String>,
-    pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub outside_dir: Option<String>,
-    pub approval_patterns: Vec<String>,
-    pub options: Vec<String>,
-    pub cwd_label: String,
+    pub(crate) handle_id: u64,
+    pub(crate) tool_name: String,
+    pub(crate) desc: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) args: std::collections::HashMap<String, serde_json::Value>,
+    pub(crate) outside_dir: Option<String>,
+    pub(crate) approval_patterns: Vec<String>,
+    pub(crate) options: Vec<String>,
+    pub(crate) cwd_label: String,
 }
 
 /// Register projectors for primitive types we publish, declare every
