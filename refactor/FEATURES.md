@@ -122,7 +122,7 @@ to invoke_ the feature.
 | `/yank-block` (opt-in)                            | `plugins/yank_block.lua`          | P4                               | working |
 | `/reflect`                                        | `runtime/lua/smelt/plugins/reflect.lua`                              | P4.e | working — fully Lua: body inlined; submits via `smelt.engine.submit_command` |
 | `/simplify`                                       | `runtime/lua/smelt/plugins/simplify.lua`                             | P4.e | working — fully Lua: multi-agent + solo bodies inlined; branches on `smelt.engine.multi_agent()` |
-| Custom commands (`~/.config/smelt/commands/*.md`) | `custom_commands.rs`              | P4.e                             | working |
+| Custom commands (`~/.config/smelt/commands/*.md`) | `runtime/lua/smelt/plugins/custom_commands.lua` | P4.e            | working — fully Lua: scans dir at startup, parses YAML frontmatter via `smelt.parse.frontmatter`, evaluates exec blocks via `smelt.process.run`, submits via `smelt.engine.submit_command(name, body, overrides)` |
 | `! <shell>` (shell escape)                        | `app/cmdline.rs`                  | P4 (cmdline widget)              | working |
 
 ## Dialogs / interactive surfaces

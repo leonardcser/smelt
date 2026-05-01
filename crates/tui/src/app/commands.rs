@@ -67,10 +67,6 @@ impl TuiApp {
                 let turn = self.begin_agent_turn(display, content);
                 self.agent = Some(turn);
             }
-            InputOutcome::CustomCommand(cmd) => {
-                let turn = self.begin_custom_command_turn(*cmd);
-                self.agent = Some(turn);
-            }
             InputOutcome::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
@@ -107,19 +103,21 @@ impl TuiApp {
         if !crate::completer::Completer::is_command(&normalized) {
             return None;
         }
-        // Custom commands need their own agent turn — queue them so they
-        // run after the current turn finishes.
-        if crate::custom_commands::is_custom_command(&normalized) {
-            return None;
-        }
 
-        // Access control: a command opts out of mid-turn execution
-        // by registering with `{ while_busy = false }` (e.g. /compact,
-        // /fork, /resume).
         let name = normalized
             .strip_prefix('/')
             .and_then(|s| s.split_whitespace().next())
             .unwrap_or("");
+        // Commands that spawn their own agent turn (user-defined custom
+        // commands) opt into `queue_when_busy` so the dispatcher defers
+        // them to after the current turn instead of running mid-turn or
+        // erroring.
+        if !name.is_empty() && self.core.lua.command_queues_when_busy(name) {
+            return None;
+        }
+        // Access control: a command opts out of mid-turn execution
+        // by registering with `{ while_busy = false }` (e.g. /compact,
+        // /fork, /resume).
         if !name.is_empty() && self.core.lua.command_blocks_while_busy(name) == Some(true) {
             self.notify_error(format!("cannot run /{name} while agent is working"));
             return Some(EventOutcome::Noop);

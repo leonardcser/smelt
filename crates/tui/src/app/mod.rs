@@ -346,7 +346,6 @@ pub(crate) enum CommandAction {
 enum InputOutcome {
     Continue,
     StartAgent,
-    CustomCommand(Box<crate::custom_commands::CustomCommand>),
     Exec(
         tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
@@ -1131,10 +1130,7 @@ impl TuiApp {
             // ── Auto-start from leftover queued messages (one per turn) ──
             if self.agent.is_none() && !self.queued_messages.is_empty() && !self.is_compacting() {
                 let text = self.queued_messages.remove(0);
-                if let Some(cmd) = crate::custom_commands::resolve(text.trim()) {
-                    let turn = self.begin_custom_command_turn(cmd);
-                    self.agent = Some(turn);
-                } else if !text.is_empty() {
+                if !text.is_empty() {
                     let outcome = self.process_input(&text);
                     let content = Content::text(text.clone());
                     self.apply_input_outcome(outcome, content, &text);

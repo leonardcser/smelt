@@ -40,29 +40,40 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         })?,
     )?;
 
-    // smelt.engine.submit_command(name, body) — start a turn from a
-    // Lua-rendered slash-command template. `name` is the bare command
-    // (e.g. `"reflect"`) and shows in the transcript as `/name`;
-    // `body` is the fully resolved prompt the LLM sees. No-op when
-    // an agent turn is already running.
+    // smelt.engine.submit_command(name, body, overrides?) — start a
+    // turn from a Lua-rendered slash-command template. `name` is the
+    // bare command (e.g. `"reflect"`) and shows in the transcript as
+    // `/name`; `body` is the fully resolved prompt the LLM sees;
+    // optional `overrides` is a Lua table mirroring the YAML
+    // frontmatter on user-defined commands (`provider`, `model`,
+    // `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`,
+    // `reasoning_effort`, `tools`, `bash`, `web_fetch`; the three
+    // rule-set keys take a sub-table with `allow` / `ask` / `deny`
+    // arrays). No-op when an agent turn is already running.
     engine_tbl.set(
         "submit_command",
-        lua.create_function(|_, (name, body): (String, String)| {
-            crate::lua::with_app(|app| {
-                if app.agent.is_some() {
-                    app.notify_error(format!("cannot run /{name} while agent is working"));
-                    return;
-                }
-                let cmd = crate::custom_commands::CustomCommand {
-                    name,
-                    body,
-                    overrides: Default::default(),
+        lua.create_function(
+            |_, (name, body, overrides): (String, String, Option<mlua::Table>)| {
+                let parsed = match overrides.as_ref() {
+                    Some(t) => parse_overrides(t)?,
+                    None => Default::default(),
                 };
-                let turn = app.begin_custom_command_turn(cmd);
-                app.agent = Some(turn);
-            });
-            Ok(())
-        })?,
+                crate::lua::with_app(|app| {
+                    if app.agent.is_some() {
+                        app.notify_error(format!("cannot run /{name} while agent is working"));
+                        return;
+                    }
+                    let cmd = crate::custom_commands::CustomCommand {
+                        name,
+                        body,
+                        overrides: parsed,
+                    };
+                    let turn = app.begin_custom_command_turn(cmd);
+                    app.agent = Some(turn);
+                });
+                Ok(())
+            },
+        )?,
     )?;
 
     // smelt.engine.ask({ system, messages?, question?, task?, on_response })
@@ -131,4 +142,43 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     smelt.set("engine", engine_tbl)?;
     Ok(())
+}
+
+fn parse_overrides(t: &mlua::Table) -> LuaResult<crate::custom_commands::CommandOverrides> {
+    use crate::custom_commands::{CommandOverrides, RuleOverride};
+
+    fn rule(t: &mlua::Table, key: &str) -> LuaResult<Option<RuleOverride>> {
+        let Some(sub) = t.get::<Option<mlua::Table>>(key)? else {
+            return Ok(None);
+        };
+        Ok(Some(RuleOverride {
+            allow: list(&sub, "allow")?,
+            ask: list(&sub, "ask")?,
+            deny: list(&sub, "deny")?,
+        }))
+    }
+    fn list(t: &mlua::Table, key: &str) -> LuaResult<Vec<String>> {
+        let Some(v) = t.get::<Option<mlua::Table>>(key)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for pair in v.sequence_values::<String>() {
+            out.push(pair?);
+        }
+        Ok(out)
+    }
+
+    Ok(CommandOverrides {
+        provider: t.get::<Option<String>>("provider")?,
+        model: t.get::<Option<String>>("model")?,
+        temperature: t.get::<Option<f64>>("temperature")?,
+        top_p: t.get::<Option<f64>>("top_p")?,
+        top_k: t.get::<Option<u32>>("top_k")?,
+        min_p: t.get::<Option<f64>>("min_p")?,
+        repeat_penalty: t.get::<Option<f64>>("repeat_penalty")?,
+        reasoning_effort: t.get::<Option<String>>("reasoning_effort")?,
+        tools: rule(t, "tools")?,
+        bash: rule(t, "bash")?,
+        web_fetch: rule(t, "web_fetch")?,
+    })
 }
