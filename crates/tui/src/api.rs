@@ -46,13 +46,7 @@ pub mod buf {
 /// register here; keybindings resolve to names that route through
 /// `run`. Modelled on nvim's `nvim_command` / `user_command` split.
 pub mod cmd {
-    use crate::app::TuiApp;
-
-    /// Result of running a command — tells the caller whether the app
-    /// should continue, quit, clear, open a dialog, etc. Thin wrapper
-    /// around the internal `CommandAction` so the outer API can evolve
-    /// without exposing every enum variant.
-    pub use crate::app::commands::CommandOutcome as Outcome;
+    use crate::app::{CommandAction, TuiApp};
 
     /// Run a command line. Accepts `/name args...` or `:name args...`
     /// or a bare `name`. Parses the name, looks it up in the registry,
@@ -61,7 +55,7 @@ pub mod cmd {
     /// The same code path runs whether the user typed the command,
     /// pressed a keybind that resolved to `Action::Cmd(name)`, or a
     /// plugin invoked it programmatically.
-    pub fn run(app: &mut TuiApp, line: &str) -> Outcome {
+    pub fn run(app: &mut TuiApp, line: &str) -> CommandAction {
         crate::app::commands::run_command(app, line)
     }
 }
