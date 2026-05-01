@@ -971,7 +971,20 @@ impl<'a> Turn<'a> {
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
-                let mut defs = self.dispatcher.definitions(self.permissions, self.mode);
+                let mut defs: Vec<ToolDefinition> = self
+                    .dispatcher
+                    .definitions()
+                    .into_iter()
+                    .filter(|d| {
+                        let name = d.function.name.as_str();
+                        let allowed = if self.dispatcher.is_mcp(name) {
+                            self.permissions.check_mcp(self.mode, name)
+                        } else {
+                            self.permissions.check_tool(self.mode, name)
+                        };
+                        allowed != Decision::Deny
+                    })
+                    .collect();
                 // Plugin tools with `override_core` shadow the core
                 // definition of the same name — drop the core one so
                 // the LLM only sees a single schema for that tool name.
