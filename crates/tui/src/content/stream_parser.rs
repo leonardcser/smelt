@@ -418,7 +418,12 @@ impl StreamParser {
             })
     }
 
-    pub(crate) fn append_active_output(&mut self, history: &mut BlockHistory, call_id: &str, chunk: &str) {
+    pub(crate) fn append_active_output(
+        &mut self,
+        history: &mut BlockHistory,
+        call_id: &str,
+        chunk: &str,
+    ) {
         let Some(cid) = self.resolve_active_call_id(history, call_id) else {
             return;
         };

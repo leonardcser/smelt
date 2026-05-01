@@ -7,10 +7,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     /// Tool name (e.g. "bash") or "directory" for dir-based approvals.
-    pub tool: String,
+    pub(crate) tool: String,
     /// Glob patterns — empty means "allow all" for this tool.
     #[serde(default)]
-    pub patterns: Vec<String>,
+    pub(crate) patterns: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ pub fn load(cwd: &str) -> Vec<Rule> {
     store.rules
 }
 
-pub fn save(cwd: &str, rules: &[Rule]) {
+pub(crate) fn save(cwd: &str, rules: &[Rule]) {
     let path = permissions_path(cwd);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -94,7 +94,7 @@ pub fn save(cwd: &str, rules: &[Rule]) {
 }
 
 /// Add a tool-level approval rule for the workspace.
-pub fn add_tool(cwd: &str, tool: &str, patterns: Vec<String>) {
+pub(crate) fn add_tool(cwd: &str, tool: &str, patterns: Vec<String>) {
     let mut rules = load(cwd);
     // Merge with existing rule for this tool if present.
     if let Some(existing) = rules.iter_mut().find(|r| r.tool == tool) {
@@ -117,7 +117,7 @@ pub fn add_tool(cwd: &str, tool: &str, patterns: Vec<String>) {
 }
 
 /// Add a directory-level approval rule for the workspace.
-pub fn add_dir(cwd: &str, dir: &str) {
+pub(crate) fn add_dir(cwd: &str, dir: &str) {
     let mut rules = load(cwd);
     let already = rules
         .iter()

@@ -1,4 +1,8 @@
-pub(crate) fn query_match_score(query: &str, query_words: &[&str], fields: &[String]) -> Option<u32> {
+pub(crate) fn query_match_score(
+    query: &str,
+    query_words: &[&str],
+    fields: &[String],
+) -> Option<u32> {
     let field_words: Vec<Vec<&str>> = fields.iter().map(|field| split_words(field)).collect();
     let exact_primary = field_words
         .first()
