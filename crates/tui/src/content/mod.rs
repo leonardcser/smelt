@@ -65,25 +65,25 @@ pub(crate) fn is_table_separator(line: &str) -> bool {
 /// gets a colored left border prefix and a right border suffix with padding.
 pub(crate) struct BoxContext {
     /// Left border string printed before each line (e.g. "   │ ").
-    pub left: &'static str,
+    pub(crate) left: &'static str,
     /// Right border string printed after padding (e.g. " │").
-    pub right: &'static str,
+    pub(crate) right: &'static str,
     /// Color for the border characters.
-    pub color: display::ColorValue,
+    pub(crate) color: display::ColorValue,
     /// Inner content width (between left and right borders).
-    pub inner_w: usize,
+    pub(crate) inner_w: usize,
 }
 
 impl BoxContext {
     /// Print the left border with color.
-    pub fn print_left(&self, out: &mut layout_out::SpanCollector) {
+    pub(crate) fn print_left(&self, out: &mut layout_out::SpanCollector) {
         out.push_fg(self.color);
         out.print_gutter(self.left);
         out.pop_style();
     }
 
     /// Print right-side padding and border for a line that used `cols` content columns.
-    pub fn print_right(&self, out: &mut layout_out::SpanCollector, cols: usize) {
+    pub(crate) fn print_right(&self, out: &mut layout_out::SpanCollector, cols: usize) {
         let pad = self.inner_w.saturating_sub(cols);
         if pad > 0 {
             out.print_gutter(&" ".repeat(pad));

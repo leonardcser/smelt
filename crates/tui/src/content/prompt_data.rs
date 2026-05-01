@@ -37,39 +37,39 @@ impl WindowRow {
 }
 
 pub(crate) struct PromptInput<'a> {
-    pub queued: &'a [String],
-    pub stash: &'a Option<crate::input::InputSnapshot>,
-    pub input: &'a PromptState,
-    pub vim_mode: ui::VimMode,
-    pub clipboard: &'a ui::Clipboard,
-    pub width: u16,
-    pub height: u16,
-    pub has_prompt_cursor: bool,
-    pub bar_info: BarInfo,
+    pub(crate) queued: &'a [String],
+    pub(crate) stash: &'a Option<crate::input::InputSnapshot>,
+    pub(crate) input: &'a PromptState,
+    pub(crate) vim_mode: ui::VimMode,
+    pub(crate) clipboard: &'a ui::Clipboard,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) has_prompt_cursor: bool,
+    pub(crate) bar_info: BarInfo,
 }
 
 pub(crate) struct BarInfo {
-    pub model_label: Option<String>,
-    pub reasoning_effort: protocol::ReasoningEffort,
-    pub show_tokens: bool,
-    pub context_tokens: Option<u32>,
-    pub context_window: Option<u32>,
-    pub show_cost: bool,
-    pub session_cost_usd: f64,
+    pub(crate) model_label: Option<String>,
+    pub(crate) reasoning_effort: protocol::ReasoningEffort,
+    pub(crate) show_tokens: bool,
+    pub(crate) context_tokens: Option<u32>,
+    pub(crate) context_window: Option<u32>,
+    pub(crate) show_cost: bool,
+    pub(crate) session_cost_usd: f64,
 }
 
 pub(crate) struct PromptOutput {
-    pub cursor: Option<(u16, u16)>,
-    pub cursor_style: Option<(Style, char)>,
-    pub input_viewport: Option<InputViewport>,
+    pub(crate) cursor: Option<(u16, u16)>,
+    pub(crate) cursor_style: Option<(Style, char)>,
+    pub(crate) input_viewport: Option<InputViewport>,
 }
 
 pub(crate) struct InputViewport {
-    pub top_row: u16,
-    pub rows: u16,
-    pub content_width: u16,
-    pub total_rows: u16,
-    pub scroll_top: u16,
+    pub(crate) top_row: u16,
+    pub(crate) rows: u16,
+    pub(crate) content_width: u16,
+    pub(crate) total_rows: u16,
+    pub(crate) scroll_top: u16,
 }
 
 fn cursor_style(theme: &ui::Theme) -> (Color, Color) {

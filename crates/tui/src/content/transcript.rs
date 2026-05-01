@@ -14,33 +14,33 @@ use std::sync::Arc;
 /// copy/selection metadata from the span that produced it.
 #[derive(Clone, Debug)]
 pub(crate) struct SnapshotCell {
-    pub ch: char,
-    pub meta: super::display::SpanMeta,
+    pub(crate) ch: char,
+    pub(crate) meta: super::display::SpanMeta,
 }
 
 /// Cached, width-keyed projection of the full transcript into plain-text
 /// rows with block↔row mappings. Built lazily by `Transcript::snapshot()`
 /// and invalidated on any block mutation or width change.
 pub(crate) struct TranscriptSnapshot {
-    pub width: u16,
-    pub show_thinking: bool,
+    pub(crate) width: u16,
+    pub(crate) show_thinking: bool,
     /// One entry per row in the full transcript (including gap rows).
     /// `Arc` so callers that only need to read rows can share the cache
     /// without a deep clone — only the rare "append ephemeral rows"
     /// path pays the copy.
-    pub rows: Arc<Vec<String>>,
+    pub(crate) rows: Arc<Vec<String>>,
     /// Per-cell metadata for each row, parallel to `rows`. Each inner
     /// vec has one `SnapshotCell` per display column. Used by
     /// `copy_range` to respect `SpanMeta.selectable` / `copy_as`.
-    pub row_cells: Vec<Vec<SnapshotCell>>,
+    pub(crate) row_cells: Vec<Vec<SnapshotCell>>,
     /// True when this row is a soft-wrap continuation of the previous
     /// logical line. `copy_range` suppresses `\n` before these rows.
-    pub soft_wrapped: Vec<bool>,
+    pub(crate) soft_wrapped: Vec<bool>,
     /// Raw source text for each row. `Some(line)` on the first display
     /// row of a source line; `None` on soft-wrap continuations and rows
     /// without source annotation. `copy_range` uses this for
     /// fully-selected rows instead of cell-based reconstruction.
-    pub source_text: Vec<Option<String>>,
+    pub(crate) source_text: Vec<Option<String>>,
     /// For each row, the `BlockId` that produced it (`None` for gap rows).
     pub(crate) block_of_row: Vec<Option<BlockId>>,
     /// Row range `[start..end)` for each block, in insertion order.
@@ -116,7 +116,7 @@ impl TranscriptSnapshot {
     /// Convert a byte offset in the `rows.join("\n")` text into a
     /// `(row, col_chars)` position. `col_chars` is a character index,
     /// matching `row_cells` indexing.
-    pub fn byte_to_row_col(&self, byte: usize) -> (usize, usize) {
+    pub(crate) fn byte_to_row_col(&self, byte: usize) -> (usize, usize) {
         let mut acc = 0usize;
         for (r, row) in self.rows.iter().enumerate() {
             let row_end = acc + row.len();
@@ -135,7 +135,7 @@ impl TranscriptSnapshot {
     /// `SpanMeta`. This is the primary copy primitive — selection ranges
     /// expressed as byte offsets (from vim visual or cursor anchor) are
     /// converted to `(row, col)` and routed through `copy_range`.
-    pub fn copy_byte_range(&self, start: usize, end: usize) -> String {
+    pub(crate) fn copy_byte_range(&self, start: usize, end: usize) -> String {
         let (sr, sc) = self.byte_to_row_col(start);
         let (er, ec) = self.byte_to_row_col(end);
         self.copy_range(sr, sc, er, ec)
@@ -144,7 +144,7 @@ impl TranscriptSnapshot {
     /// Extract the selectable text of the block at `abs_row`. Uses
     /// `block_of_row` to find the block, then `row_of_block` for its
     /// full row range, and `copy_range` to get SpanMeta-aware text.
-    pub fn block_text_at(&self, abs_row: usize) -> Option<String> {
+    pub(crate) fn block_text_at(&self, abs_row: usize) -> Option<String> {
         let block_id = (*self.block_of_row.get(abs_row)?)?;
         let range = self.row_of_block.get(&block_id)?;
         let start_row = range.start as usize;
@@ -169,7 +169,7 @@ impl TranscriptSnapshot {
     /// Snap a `(row, col)` position to the nearest selectable cell,
     /// searching forward then backward on the same row. Returns the
     /// adjusted `(row, col)` or `None` if the row has no selectable cells.
-    pub fn snap_to_selectable(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+    pub(crate) fn snap_to_selectable(&self, row: usize, col: usize) -> Option<(usize, usize)> {
         let cells = self.row_cells.get(row)?;
         if cells.is_empty() {
             return None;
@@ -199,7 +199,7 @@ pub(crate) struct Transcript {
 }
 
 impl Transcript {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             history: BlockHistory::new(),
             cached_snapshot: None,
@@ -209,7 +209,7 @@ impl Transcript {
     /// Get or rebuild the cached transcript snapshot at the given width.
     /// The snapshot is invalidated when blocks change (generation mismatch)
     /// or width/show_thinking changes.
-    pub fn snapshot(&mut self, width: u16, show_thinking: bool) -> &TranscriptSnapshot {
+    pub(crate) fn snapshot(&mut self, width: u16, show_thinking: bool) -> &TranscriptSnapshot {
         let gen = self.history.generation();
         let valid = self.cached_snapshot.as_ref().is_some_and(|s| {
             s.generation == gen && s.width == width && s.show_thinking == show_thinking
@@ -304,25 +304,25 @@ impl Transcript {
 
     // ── Accessors ─────────────────────────────────────────────────────
 
-    pub fn block(&self, id: BlockId) -> Option<&Block> {
+    pub(crate) fn block(&self, id: BlockId) -> Option<&Block> {
         self.history.blocks.get(&id)
     }
 
-    pub fn block_view_state(&self, id: BlockId) -> ViewState {
+    pub(crate) fn block_view_state(&self, id: BlockId) -> ViewState {
         self.history.view_state(id)
     }
 
-    pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
+    pub(crate) fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
         self.history.set_view_state(id, state);
     }
 
-    pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
+    pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.history.drain_finished_blocks()
     }
 
     // ── Mutations ─────────────────────────────────────────────────────
 
-    pub fn push(&mut self, block: Block) {
+    pub(crate) fn push(&mut self, block: Block) {
         let block = match block {
             Block::Text { content } => {
                 let t = content.trim();
@@ -371,7 +371,7 @@ impl Transcript {
         self.history.push(block);
     }
 
-    pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
+    pub(crate) fn push_tool_call(&mut self, block: Block, state: ToolState) {
         debug_assert!(matches!(block, Block::ToolCall { .. }));
         let call_id = match &block {
             Block::ToolCall { call_id, .. } => call_id.clone(),
@@ -380,11 +380,11 @@ impl Transcript {
         self.history.push_with_state(block, call_id, state);
     }
 
-    pub fn truncate_to(&mut self, block_idx: usize) {
+    pub(crate) fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
     }
 
-    pub fn user_turns(&self) -> Vec<(usize, String)> {
+    pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
         self.history
             .order
             .iter()

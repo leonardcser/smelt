@@ -74,9 +74,9 @@ pub(crate) fn render_into_buffer(
 
 #[derive(Default)]
 pub(crate) struct ProjectedLine {
-    pub text: String,
-    pub highlights: Vec<(u16, u16, SpanStyle, SpanMeta)>,
-    pub decoration: LineDecoration,
+    pub(crate) text: String,
+    pub(crate) highlights: Vec<(u16, u16, SpanStyle, SpanMeta)>,
+    pub(crate) decoration: LineDecoration,
 }
 
 pub(crate) fn project_display_line(dline: &DisplayLine, theme: &Theme) -> ProjectedLine {
