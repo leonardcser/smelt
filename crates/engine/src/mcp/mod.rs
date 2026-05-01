@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
-pub use tool_adapter::McpTool;
+pub(crate) use tool_adapter::McpTool;
 
 /// Configuration for a single MCP server.
 #[derive(Debug, Clone, Deserialize)]
@@ -40,7 +40,7 @@ fn default_true() -> bool {
 
 /// A discovered MCP tool definition (before wrapping as a Tool trait object).
 #[derive(Debug, Clone)]
-pub struct McpToolDef {
+pub(crate) struct McpToolDef {
     pub server_name: String,
     pub tool_name: String,
     pub description: String,
@@ -49,7 +49,7 @@ pub struct McpToolDef {
 }
 
 impl McpToolDef {
-    pub fn qualified_name(&self) -> String {
+    fn qualified_name(&self) -> String {
         sanitize_name(&format!("{}_{}", self.server_name, self.tool_name))
     }
 }
@@ -60,14 +60,14 @@ struct McpConnection {
 }
 
 /// Manages all MCP server connections and their tools.
-pub struct McpManager {
+pub(crate) struct McpManager {
     connections: RwLock<HashMap<String, McpConnection>>,
 }
 
 impl McpManager {
     /// Connect to all configured MCP servers. Servers that fail to connect
     /// are logged and skipped — they don't block the agent from starting.
-    pub async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
+    pub(crate) async fn start(configs: &HashMap<String, McpServerConfig>) -> Arc<Self> {
         let manager = Arc::new(Self {
             connections: RwLock::new(HashMap::new()),
         });
@@ -198,7 +198,7 @@ impl McpManager {
     }
 
     /// Get all discovered MCP tool definitions across all connected servers.
-    pub async fn tool_defs(&self) -> Vec<McpToolDef> {
+    pub(crate) async fn tool_defs(&self) -> Vec<McpToolDef> {
         let conns = self.connections.read().await;
         conns.values().flat_map(|c| c.tools.clone()).collect()
     }
@@ -206,7 +206,7 @@ impl McpManager {
     /// Call a tool on the appropriate MCP server.
     /// Acquires the connection lock briefly to clone the client handle,
     /// then releases it before the potentially slow remote call.
-    pub async fn call_tool(
+    pub(crate) async fn call_tool(
         &self,
         server_name: &str,
         tool_name: &str,
@@ -259,18 +259,6 @@ impl McpManager {
         }
     }
 
-    /// Shut down all MCP connections gracefully.
-    pub async fn shutdown(&self) {
-        let mut conns = self.connections.write().await;
-        for (name, conn) in conns.drain() {
-            log::entry(
-                log::Level::Info,
-                "mcp_shutdown",
-                &serde_json::json!({"server": name}),
-            );
-            let _ = conn.client.cancel().await;
-        }
-    }
 }
 
 fn sanitize_name(name: &str) -> String {

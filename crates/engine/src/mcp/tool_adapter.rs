@@ -5,14 +5,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Wraps an MCP tool definition as a native Tool trait object.
-pub struct McpTool {
+pub(crate) struct McpTool {
     def: McpToolDef,
     qualified_name: String,
     manager: Arc<McpManager>,
 }
 
 impl McpTool {
-    pub fn new(def: McpToolDef, manager: Arc<McpManager>) -> Self {
+    pub(crate) fn new(def: McpToolDef, manager: Arc<McpManager>) -> Self {
         let qualified_name = def.qualified_name();
         Self {
             def,
