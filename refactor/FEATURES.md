@@ -76,7 +76,7 @@ to invoke_ the feature.
 | `read_file`           | `runtime/lua/smelt/tools/read_file.lua` | P5.b — landed; composes `smelt.image.*` + `smelt.notebook.read` + `smelt.fs.file_state.*` | working |
 | `write_file`          | `runtime/lua/smelt/tools/write_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + `smelt.notebook.is_notebook_path` | working |
 | `edit_file`           | `runtime/lua/smelt/tools/edit_file.lua` | P5.b — landed; composes `smelt.fs.file_state.*` + `try_flock` + Lua-side find/replace | working |
-| `edit_notebook`       | `engine/tools/notebook.rs`        | P5.b                                                | working |
+| `edit_notebook`       | `runtime/lua/smelt/tools/notebook_edit.lua` | P5.b — landed; thin Lua wrapper over `smelt.notebook.apply_edit` (intricate JSON cell munging stays Rust) | working |
 | `bash`                | `engine/tools/bash.rs`            | P5.b                                                | working |
 | `run_in_background` (bash flag, not a tool) | `plugins/background_commands.lua` (overrides bash registration) | P5.b → flag on `tools/bash.lua` | working |
 | `read_process_output` | `plugins/background_commands.lua` | P5.b                                                | working |

@@ -4,10 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{
-    display_path, staleness_error, str_arg, FileStateCache, Tool, ToolContext, ToolFuture,
-    ToolResult,
-};
+use super::{display_path, staleness_error, str_arg, FileStateCache, ToolResult};
 
 #[derive(Debug, Clone)]
 struct NotebookCellSnapshot {
@@ -323,68 +320,33 @@ fn render_data_from_snapshots(
 // Editing
 // ---------------------------------------------------------------------------
 
-pub(crate) struct NotebookEditTool {
-    pub(crate) files: FileStateCache,
+/// Result of a successful `apply_edit`. Carries the human-readable
+/// confirmation message plus the dialog metadata payload (the same
+/// `NotebookRenderData`-shaped JSON the Rust tool attached as
+/// `ToolResult::with_metadata`). The Lua tool fans both into its
+/// `{ content, metadata }` return shape.
+pub struct NotebookEditOutcome {
+    pub message: String,
+    pub metadata: Value,
 }
 
-impl Tool for NotebookEditTool {
-    fn name(&self) -> &str {
-        "edit_notebook"
-    }
-
-    fn description(&self) -> &str {
-        "Edit a Jupyter notebook (.ipynb) cell. Supports replacing, inserting, and deleting cells. Identify cells by cell_id or cell_number (0-indexed)."
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "notebook_path": {
-                    "type": "string",
-                    "description": "The absolute path to the Jupyter notebook file"
-                },
-                "cell_number": {
-                    "type": "integer",
-                    "description": "The 0-indexed cell number to edit. Used when cell_id is not provided."
-                },
-                "cell_id": {
-                    "type": "string",
-                    "description": "The ID of the cell to edit. Takes precedence over cell_number. When inserting, the new cell is placed after this cell (omit to insert at the beginning)."
-                },
-                "new_source": {
-                    "type": "string",
-                    "description": "The new source content for the cell. Required for replace and insert."
-                },
-                "cell_type": {
-                    "type": "string",
-                    "enum": ["code", "markdown"],
-                    "description": "The cell type. Required for insert, defaults to current type for replace."
-                },
-                "edit_mode": {
-                    "type": "string",
-                    "enum": ["replace", "insert", "delete"],
-                    "description": "The edit operation. Defaults to replace."
-                }
-            },
-            "required": ["notebook_path"]
-        })
-    }
-
-    fn evaluate_hooks(&self, args: &HashMap<String, Value>) -> protocol::ToolHooks {
-        let path = str_arg(args, "notebook_path");
-        protocol::ToolHooks {
-            needs_confirm: Some(display_path(&path)),
-            approval_patterns: Vec::new(),
-            preflight_error: staleness_error(&self.files, &path, "notebook"),
-        }
-    }
-
-    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a> {
-        Box::pin(async move {
-            let path = str_arg(&args, "notebook_path");
-            let _guard = ctx.file_locks.lock(&path).await;
-            tokio::task::block_in_place(|| run_edit(&args, &self.files))
+/// Public entry-point for the Lua `edit_notebook` tool. Performs the
+/// JSON cell munging, writes the notebook with one-space indent
+/// (matching Jupyter convention), and records the new content in the
+/// shared file-state cache. The caller holds the per-path advisory
+/// lock for the duration of the call (acquired via
+/// `engine::tools::try_flock`).
+pub fn apply_edit(
+    args: &HashMap<String, Value>,
+    files: &FileStateCache,
+) -> Result<NotebookEditOutcome, String> {
+    let r = run_edit(args, files);
+    if r.is_error {
+        Err(r.content)
+    } else {
+        Ok(NotebookEditOutcome {
+            message: r.content,
+            metadata: r.metadata.unwrap_or(Value::Null),
         })
     }
 }

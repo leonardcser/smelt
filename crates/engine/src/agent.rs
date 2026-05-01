@@ -33,7 +33,6 @@ pub(crate) async fn engine_task(
 ) {
     let client = reqwest::Client::new();
     crate::pricing::spawn_catalog_fetch(client.clone());
-    let file_locks = tools::FileLocks::default();
 
     // Connect MCP servers and register their tools.
     let _mcp_manager = if !config.mcp_servers.is_empty() {
@@ -143,7 +142,6 @@ pub(crate) async fn engine_task(
                             started_at: Instant::now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
-                            file_locks: &file_locks,
                             context_window,
                             compacted_this_turn: false,
                         };
@@ -578,7 +576,6 @@ struct Turn<'a> {
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
-    file_locks: &'a tools::FileLocks,
     messages: Vec<Message>,
     mode: AgentMode,
     reasoning_effort: ReasoningEffort,
@@ -1370,7 +1367,6 @@ impl<'a> Turn<'a> {
                 provider: self.provider.clone(),
                 model: self.model.clone(),
                 session_dir: self.session_dir.clone(),
-                file_locks: self.file_locks.clone(),
                 api: self.config.api.clone(),
             })
             .collect();
@@ -1659,7 +1655,6 @@ impl<'a> Turn<'a> {
                                 provider: self.provider.clone(),
                                 model: self.model.clone(),
                                 session_dir: self.session_dir.clone(),
-                                file_locks: self.file_locks.clone(),
                                 api: self.config.api.clone(),
                             };
                             side_futs.push(Box::pin(async move {

@@ -75,6 +75,36 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    // `smelt.notebook.apply_edit(args)` performs the JSON cell munging
+    // for the Lua `edit_notebook` tool. The caller already holds the
+    // per-path advisory flock; this writes the file, populates the
+    // shared file-state cache via `record_write`, and returns the
+    // confirmation message + metadata table on success. On failure
+    // returns `(nil, error_string)`.
+    notebook.set(
+        "apply_edit",
+        lua.create_function(|lua, args: mlua::Table| {
+            let args_map = lua_table_to_json_map(&args)
+                .map_err(|e| LuaError::RuntimeError(format!("notebook.apply_edit: {e}")))?;
+            let result = crate::lua::try_with_app(|app| {
+                engine::tools::notebook::apply_edit(&args_map, &app.core.files)
+            });
+            match result {
+                Some(Ok(outcome)) => {
+                    let row = lua.create_table()?;
+                    row.set("message", outcome.message)?;
+                    row.set(
+                        "metadata",
+                        super::json_to_lua_value(lua, &outcome.metadata)?,
+                    )?;
+                    Ok((Some(LuaValue::Table(row)), None))
+                }
+                Some(Err(err)) => Ok((None, Some(err))),
+                None => Ok((None, Some("notebook.apply_edit: no app context".into()))),
+            }
+        })?,
+    )?;
+
     smelt.set("notebook", notebook)?;
     Ok(())
 }

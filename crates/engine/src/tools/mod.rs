@@ -17,7 +17,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -42,7 +41,6 @@ pub use background::{ProcessInfo, ProcessRegistry};
 pub(crate) use bash::BashTool;
 pub use bash::{check_interactive, check_shell_background_operator};
 
-pub(crate) use notebook::NotebookEditTool;
 pub use notebook::NotebookRenderData;
 pub(crate) use spawn_agent::AgentMessageNotification;
 pub(crate) use web_fetch::WebFetchTool;
@@ -91,7 +89,6 @@ pub(crate) struct ToolContext {
     pub(crate) provider: Provider,
     pub(crate) model: String,
     pub(crate) session_dir: std::path::PathBuf,
-    pub(crate) file_locks: FileLocks,
     pub(crate) api: crate::ApiConfig,
 }
 
@@ -385,29 +382,6 @@ pub struct FlockGuard {
     _file: Option<()>,
 }
 
-/// Per-path locks that serialize concurrent file-mutating operations.
-/// Concurrent tool calls (edit_file, write_file, edit_notebook) targeting
-/// the same file will execute sequentially, while different files remain
-/// parallel. Entries are pruned when no one else holds a reference.
-#[derive(Clone, Default)]
-pub(crate) struct FileLocks(Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>);
-
-impl FileLocks {
-    pub(crate) async fn lock(&self, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let mutex = {
-            let mut map = self.0.lock().unwrap();
-            // Prune idle entries (strong_count == 1 means only the map holds it).
-            if map.len() > 32 {
-                map.retain(|_, v| Arc::strong_count(v) > 1);
-            }
-            map.entry(path.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        mutex.lock_owned().await
-    }
-}
-
 /// A handle to a spawned child process, carrying the piped stdout.
 pub struct SpawnedChild {
     pub agent_id: String,
@@ -445,7 +419,7 @@ pub(crate) fn build_tools(
     let mut r = ToolRegistry::new();
     r.register(Box::new(BashTool));
     r.register(Box::new(WebFetchTool));
-    r.register(Box::new(NotebookEditTool { files }));
+    let _ = files;
 
     // Multi-agent tools (conditionally registered). `list_agents`,
     // `message_agent`, and `peek_agent` all live in
