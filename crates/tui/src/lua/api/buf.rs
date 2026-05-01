@@ -31,13 +31,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .next_buf_id
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::lua::with_app(|app| {
-                    match app.ui.buf_create_with_id(
-                        ui::BufId(id),
-                        ui::buffer::BufCreateOpts {
-                            buftype: ui::buffer::BufType::Scratch,
-                            ..Default::default()
-                        },
-                    ) {
+                    match app
+                        .ui
+                        .buf_create_with_id(ui::BufId(id), ui::buffer::BufCreateOpts::default())
+                    {
                         Ok(bid) => {
                             if let Some(fmt) = format {
                                 if let Some(buf) = app.ui.buf_mut(bid) {
