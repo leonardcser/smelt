@@ -3,17 +3,17 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-pub type AttachmentId = u64;
+pub(crate) type AttachmentId = u64;
 
 /// A single attachment: either a collapsed paste or an image.
 #[derive(Clone, Debug)]
-pub enum Attachment {
+pub(crate) enum Attachment {
     Paste { content: String },
     Image { label: String, data_url: String },
 }
 
 impl Attachment {
-    pub fn display_label(&self) -> String {
+    pub(crate) fn display_label(&self) -> String {
         match self {
             Attachment::Paste { content } => {
                 let lines = content.lines().count().max(1);
@@ -23,7 +23,7 @@ impl Attachment {
         }
     }
 
-    pub fn expanded_text(&self) -> &str {
+    pub(crate) fn expanded_text(&self) -> &str {
         match self {
             Attachment::Paste { content } => content.as_str(),
             Attachment::Image { .. } => "",
@@ -72,7 +72,7 @@ impl AttachmentStore {
     }
 
     /// Insert an attachment, deduplicating by content hash.
-    pub fn insert(&mut self, att: Attachment) -> AttachmentId {
+    pub(crate) fn insert(&mut self, att: Attachment) -> AttachmentId {
         let hash = att.content_hash();
         if let Some(&existing) = self.hash_to_id.get(&hash) {
             return existing;
@@ -84,37 +84,37 @@ impl AttachmentStore {
         id
     }
 
-    pub fn get(&self, id: AttachmentId) -> Option<&Attachment> {
+    pub(crate) fn get(&self, id: AttachmentId) -> Option<&Attachment> {
         self.entries.get(&id)
     }
 
-    pub fn display_label(&self, id: AttachmentId) -> String {
+    pub(crate) fn display_label(&self, id: AttachmentId) -> String {
         self.entries
             .get(&id)
             .map(|a| a.display_label())
             .unwrap_or_else(|| "[?]".into())
     }
 
-    pub fn expanded_text(&self, id: AttachmentId) -> &str {
+    pub(crate) fn expanded_text(&self, id: AttachmentId) -> &str {
         self.entries
             .get(&id)
             .map(|a| a.expanded_text())
             .unwrap_or("")
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.hash_to_id.clear();
         self.next_id = 1;
     }
 
     /// Insert an image and return its ID. Convenience wrapper.
-    pub fn insert_image(&mut self, label: String, data_url: String) -> AttachmentId {
+    pub(crate) fn insert_image(&mut self, label: String, data_url: String) -> AttachmentId {
         self.insert(Attachment::Image { label, data_url })
     }
 
     /// Insert a paste and return its ID. Convenience wrapper.
-    pub fn insert_paste(&mut self, content: String) -> AttachmentId {
+    pub(crate) fn insert_paste(&mut self, content: String) -> AttachmentId {
         self.insert(Attachment::Paste { content })
     }
 
@@ -122,7 +122,7 @@ impl AttachmentStore {
 
     /// Snapshot `(filename, data_url)` pairs for every image attachment.
     /// Shared by the background persister and the sync `save_blobs` path.
-    pub fn image_blobs(&self) -> Vec<(String, String)> {
+    pub(crate) fn image_blobs(&self) -> Vec<(String, String)> {
         self.entries
             .values()
             .filter_map(|att| match att {
@@ -138,7 +138,7 @@ impl AttachmentStore {
 
     /// Write all image attachments as blob files and return the
     /// data_url → `blob:<filename>` replacement map.
-    pub fn save_blobs(&self, blob_dir: &Path) -> HashMap<String, String> {
+    pub(crate) fn save_blobs(&self, blob_dir: &Path) -> HashMap<String, String> {
         let blobs = self.image_blobs();
         if blobs.is_empty() {
             return HashMap::new();
@@ -157,7 +157,7 @@ impl AttachmentStore {
 
     /// Read blob files and resolve `blob:` refs back to data URLs.
     /// Returns a map from `blob:<filename>` → data URL string.
-    pub fn load_blobs(blob_dir: &Path) -> HashMap<String, String> {
+    pub(crate) fn load_blobs(blob_dir: &Path) -> HashMap<String, String> {
         let mut blob_to_url = HashMap::new();
         let Ok(entries) = fs::read_dir(blob_dir) else {
             return blob_to_url;
