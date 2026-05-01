@@ -1,6 +1,12 @@
-//! `smelt.reasoning` — `get / set / cycle` over `protocol::ReasoningEffort`
-//! (Off / Low / Medium / High / Max). Mirrors `smelt.mode`; lives at
-//! top-level so the surface stays symmetric.
+//! `smelt.reasoning` — `get / set / cycle / cycle_list` over
+//! `protocol::ReasoningEffort` (Off / Low / Medium / High / Max).
+//! Mirrors `smelt.mode`; lives at top-level so the surface stays
+//! symmetric.
+//!
+//! `cycle` is seeded as a no-op stub here so callers always see a
+//! function; `runtime/lua/smelt/modes.lua` overrides it with the
+//! real Lua-side cycle implementation that reads `cycle_list` and
+//! calls `set`.
 
 use super::app_read;
 use mlua::prelude::*;
@@ -29,13 +35,23 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    // The configured cycle as a list of effort labels. Returns the
+    // empty list when no cycle is configured — Lua callers treat
+    // that as "leave reasoning unchanged" to mirror the historical
+    // `cycle_within` no-op behaviour.
     reasoning_tbl.set(
-        "cycle",
-        lua.create_function(|_, ()| {
-            crate::lua::with_app(|app| app.cycle_reasoning());
-            Ok(())
-        })?,
+        "cycle_list",
+        app_read!(lua, |app| {
+            app.core
+                .config
+                .reasoning_cycle
+                .iter()
+                .map(|e| e.label().to_string())
+                .collect::<Vec<_>>()
+        }),
     )?;
+
+    reasoning_tbl.set("cycle", lua.create_function(|_, ()| Ok(()))?)?;
 
     smelt.set("reasoning", reasoning_tbl)?;
     Ok(())
