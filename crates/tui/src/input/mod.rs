@@ -14,7 +14,7 @@ use protocol::Content;
 use ui::VimMode;
 use vim_bridge::VimBridgeResult;
 
-pub const ATTACHMENT_MARKER: char = '\u{FFFC}';
+pub(crate) const ATTACHMENT_MARKER: char = '\u{FFFC}';
 
 /// Back-reference emitted in place of repeated paste expansions so the model
 /// sees the placement without paying tokens for the duplicate body.

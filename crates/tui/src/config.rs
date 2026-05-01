@@ -288,7 +288,7 @@ pub fn resolve_model_ref<'a>(
     resolve_model_ref_with_provider(models, reference, None)
 }
 
-pub fn resolve_model_ref_with_provider<'a>(
+pub(crate) fn resolve_model_ref_with_provider<'a>(
     models: &'a [ResolvedModel],
     reference: &str,
     provider: Option<&str>,
