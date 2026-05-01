@@ -180,7 +180,7 @@ pub struct TuiApp {
     /// constructed on first Tab press (it queries Lua command names),
     /// dropped on cmdline close or any text mutation that invalidates
     /// the current selection.
-    pub cmdline_completer: Option<crate::completer::Completer>,
+    pub(crate) cmdline_completer: Option<crate::completer::Completer>,
     /// Per-leaf bookkeeping for open picker overlays. Populated by
     /// `crate::picker::open` and cleaned up by `close_overlay_leaf` when the
     /// leaf closes. Lookup keyed by leaf `WinId` so `set_items` /

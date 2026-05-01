@@ -5,7 +5,7 @@
 
 use crate::fuzzy::score::{recency_bonus, split_words};
 
-pub fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
+pub(crate) fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
     let base = crate::fuzzy::fuzzy_score(text, query)? as i64;
     let text_norm = text.trim().to_lowercase();
     let query_norm = query.trim().to_lowercase();

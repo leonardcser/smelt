@@ -1,4 +1,4 @@
-pub mod score;
+pub(crate) mod score;
 
 /// Fuzzy match with relevance scoring.
 /// Returns `None` if no match, `Some(score)` if matched.
@@ -8,7 +8,7 @@ pub mod score;
 /// - Matches at the start of the string or after a separator (`/`, `-`, `_`, `.`)
 /// - Consecutive matching characters
 /// - Shorter candidates (less noise)
-pub fn fuzzy_score(text: &str, query: &str) -> Option<u32> {
+pub(crate) fn fuzzy_score(text: &str, query: &str) -> Option<u32> {
     if query.is_empty() {
         return Some(0);
     }

@@ -36,7 +36,7 @@ thread_local! {
 /// guard. Typically called at the top of any function that drives Lua
 /// (callback invocation, command dispatch, autocmd emission, task
 /// resumption).
-pub fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
+pub(crate) fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
     let ptr = NonNull::from(&mut *app);
     let old = APP.with(|cell| cell.replace(Some(ptr)));
     AppPtrGuard { old }
@@ -44,7 +44,7 @@ pub fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
 
 /// Drop guard returned by [`install_app_ptr`]. Restores the previous
 /// slot (usually `None`, but nested installs are supported).
-pub struct AppPtrGuard {
+pub(crate) struct AppPtrGuard {
     old: Option<NonNull<TuiApp>>,
 }
 
