@@ -3,7 +3,7 @@ mod completer_bridge;
 mod history;
 mod vim_bridge;
 
-pub use history::History;
+pub(crate) use history::History;
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::CompleterSession;
@@ -25,7 +25,7 @@ const PASTE_LINE_THRESHOLD: usize = 12;
 /// Snapshot of the input buffer state (used for Ctrl+S stash).
 /// Owns its attachment data so it survives store clears across sessions.
 #[derive(Clone, Debug)]
-pub struct InputSnapshot {
+pub(crate) struct InputSnapshot {
     pub buf: String,
     pub cpos: usize,
     pub attachments: Vec<Attachment>,
@@ -38,7 +38,7 @@ pub struct InputSnapshot {
 /// editable buffer) plus prompt-specific side-cars (completer, stash,
 /// history, attachments). `Deref<Target = EditBuffer>` gives direct
 /// access to `input.buf`, `input.attachment_ids`, etc.
-pub struct PromptState {
+pub(crate) struct PromptState {
     pub win: ui::Window,
     pub store: AttachmentStore,
     pub(crate) completer: Option<CompleterSession>,
@@ -65,7 +65,7 @@ impl std::ops::Deref for PromptState {
 }
 
 /// What the caller should do after `handle_event`.
-pub enum Action {
+pub(crate) enum Action {
     Redraw,
     Submit { content: Content, display: String },
     SubmitEmpty,
@@ -375,15 +375,6 @@ impl PromptState {
             }
         }
         result
-    }
-
-    pub fn image_count(&self) -> usize {
-        self.win
-            .edit_buf
-            .attachment_ids
-            .iter()
-            .filter(|&&id| matches!(self.store.get(id), Some(Attachment::Image { .. })))
-            .count()
     }
 
     /// Attach an image at the current cursor position.
@@ -1016,7 +1007,7 @@ impl PromptState {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-pub fn char_pos(s: &str, byte_idx: usize) -> usize {
+pub(crate) fn char_pos(s: &str, byte_idx: usize) -> usize {
     s[..byte_idx].chars().count()
 }
 
@@ -1128,7 +1119,7 @@ pub(super) fn find_slash_anchor(buf: &str, cpos: usize) -> Option<usize> {
 
 /// Result of pressing Esc during agent processing.
 #[derive(Debug, PartialEq)]
-pub enum EscAction {
+pub(crate) enum EscAction {
     /// Vim was in insert mode — switch to normal, double-Esc timer started.
     VimToNormal,
     /// Unqueue messages back into the input buffer.
@@ -1144,7 +1135,7 @@ pub enum EscAction {
 /// `vim_mode_at_first_esc` tracks the vim mode before the Esc sequence started,
 /// so that a double-Esc cancel can restore it (the first Esc may have switched
 /// vim from insert → normal).
-pub fn resolve_agent_esc(
+pub(crate) fn resolve_agent_esc(
     vim_mode: Option<VimMode>,
     has_queued: bool,
     last_esc: &mut Option<std::time::Instant>,

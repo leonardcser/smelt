@@ -129,8 +129,8 @@ pub struct TuiApp {
     /// `compute_transcript_cursor` to look up the glyph under the soft
     /// cursor.
     pub(crate) last_viewport_text: Vec<String>,
-    pub input_history: History,
-    pub input: PromptState,
+    pub(crate) input_history: History,
+    pub(crate) input: PromptState,
     exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
     exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub queued_messages: Vec<String>,
