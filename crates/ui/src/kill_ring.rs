@@ -10,7 +10,7 @@ const KILL_RING_MAX: usize = 32;
 
 /// How long the post-yank highlight flash stays on screen. Matches
 /// nvim's `vim.highlight.on_yank` default.
-pub const YANK_FLASH_DURATION: Duration = Duration::from_millis(200);
+pub(crate) const YANK_FLASH_DURATION: Duration = Duration::from_millis(200);
 
 /// Emacs-style kill ring with yank-pop support.
 ///
@@ -140,7 +140,13 @@ impl KillRing {
     /// Clears `last_yank_at` so a delete / change doesn't inherit a prior
     /// yank's flash window — yank-only sites must call `mark_yanked`
     /// after this to re-stamp the timestamp.
-    pub fn set_with_source(&mut self, text: String, linewise: bool, start: usize, end: usize) {
+    pub(crate) fn set_with_source(
+        &mut self,
+        text: String,
+        linewise: bool,
+        start: usize,
+        end: usize,
+    ) {
         self.current = text;
         self.linewise = linewise;
         self.source_range = Some((start, end));
@@ -151,7 +157,7 @@ impl KillRing {
         &self.current
     }
 
-    pub fn is_linewise(&self) -> bool {
+    pub(crate) fn is_linewise(&self) -> bool {
         self.linewise
     }
 
@@ -163,7 +169,7 @@ impl KillRing {
     /// Drives the post-yank highlight flash. Vim yank operations call
     /// this immediately after `set_with_source`; delete / change do
     /// not, so the flash only fires on actual copies.
-    pub fn mark_yanked(&mut self) {
+    pub(crate) fn mark_yanked(&mut self) {
         self.last_yank_at = Some(Instant::now());
     }
 
