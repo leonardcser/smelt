@@ -18,16 +18,16 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 /// One image blob to write alongside the session.
-pub struct Blob {
-    pub filename: String,
-    pub data_url: String,
+pub(crate) struct Blob {
+    pub(crate) filename: String,
+    pub(crate) data_url: String,
 }
 
-pub struct PersistRequest {
-    pub session: Session,
-    pub blobs: Vec<Blob>,
-    pub render_cache: Option<RenderCache>,
-    pub layout_cache: Option<PersistedLayoutCache>,
+pub(crate) struct PersistRequest {
+    pub(crate) session: Session,
+    pub(crate) blobs: Vec<Blob>,
+    pub(crate) render_cache: Option<RenderCache>,
+    pub(crate) layout_cache: Option<PersistedLayoutCache>,
 }
 
 enum Cmd {
@@ -35,13 +35,13 @@ enum Cmd {
     Flush(Sender<()>),
 }
 
-pub struct Persister {
+pub(crate) struct Persister {
     tx: Option<Sender<Cmd>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Persister {
-    pub fn spawn() -> Self {
+    pub(crate) fn spawn() -> Self {
         let (tx, rx) = mpsc::channel();
         let handle = thread::Builder::new()
             .name("smelt-persist".into())
@@ -53,7 +53,7 @@ impl Persister {
         }
     }
 
-    pub fn save(&self, req: PersistRequest) {
+    pub(crate) fn save(&self, req: PersistRequest) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Cmd::Save(Box::new(req)));
         }
@@ -61,7 +61,7 @@ impl Persister {
 
     /// Block until all queued saves have been written. No-op if the worker
     /// has already exited (panic or shutdown).
-    pub fn flush(&self) {
+    pub(crate) fn flush(&self) {
         let Some(tx) = &self.tx else { return };
         if self.handle.as_ref().is_some_and(|h| h.is_finished()) {
             return;

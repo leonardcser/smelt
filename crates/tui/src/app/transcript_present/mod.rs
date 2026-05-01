@@ -38,12 +38,12 @@ use std::time::Duration;
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines
 /// with a computed `block_w` for multiline bubble rendering.
 pub(crate) struct UserBlockGeometry {
-    pub lines: Vec<String>,
-    pub block_w: usize,
+    pub(crate) lines: Vec<String>,
+    pub(crate) block_w: usize,
 }
 
 impl UserBlockGeometry {
-    pub fn new(text: &str, text_w: usize) -> Self {
+    pub(crate) fn new(text: &str, text_w: usize) -> Self {
         let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
         let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
         let end = all_lines
