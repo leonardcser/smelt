@@ -16,75 +16,75 @@ const MIN_PREFIX_LEN: usize = 4;
 pub struct Session {
     pub id: String,
     #[serde(default)]
-    pub title: Option<String>,
+    pub(crate) title: Option<String>,
     #[serde(default)]
-    pub slug: Option<String>,
+    pub(crate) slug: Option<String>,
     #[serde(default)]
-    pub first_user_message: Option<String>,
+    pub(crate) first_user_message: Option<String>,
     #[serde(default)]
-    pub created_at_ms: u64,
+    pub(crate) created_at_ms: u64,
     #[serde(default)]
-    pub updated_at_ms: u64,
+    pub(crate) updated_at_ms: u64,
     #[serde(default)]
-    pub mode: Option<String>,
+    pub(crate) mode: Option<String>,
     #[serde(default)]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub parent_id: Option<String>,
+    pub(crate) parent_id: Option<String>,
     #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
-    pub context_tokens: Option<u32>,
+    pub(crate) context_tokens: Option<u32>,
     #[serde(default)]
-    pub token_snapshots: Vec<(usize, u32)>,
+    pub(crate) token_snapshots: Vec<(usize, u32)>,
     /// Accumulated session cost in USD, keyed by history length.
     #[serde(default)]
-    pub cost_snapshots: Vec<(usize, f64)>,
+    pub(crate) cost_snapshots: Vec<(usize, f64)>,
     /// Per-turn metadata keyed by history length at capture time, parallel
     /// to `token_snapshots`.
     #[serde(default)]
-    pub turn_metas: Vec<(usize, TurnMeta)>,
+    pub(crate) turn_metas: Vec<(usize, TurnMeta)>,
     /// Running session cost in USD. Mirrors the last entry in
     /// `cost_snapshots` between turns; updated incrementally as token
     /// usage events arrive within a turn.
     #[serde(default)]
-    pub session_cost_usd: f64,
+    pub(crate) session_cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMeta {
-    pub id: String,
+pub(crate) struct SessionMeta {
+    pub(crate) id: String,
     #[serde(default)]
-    pub title: Option<String>,
+    pub(crate) title: Option<String>,
     #[serde(default)]
-    pub slug: Option<String>,
+    pub(crate) slug: Option<String>,
     #[serde(default)]
-    pub first_user_message: Option<String>,
+    pub(crate) first_user_message: Option<String>,
     #[serde(default)]
-    pub created_at_ms: u64,
+    pub(crate) created_at_ms: u64,
     #[serde(default)]
-    pub updated_at_ms: u64,
+    pub(crate) updated_at_ms: u64,
     #[serde(default)]
-    pub mode: Option<String>,
+    pub(crate) mode: Option<String>,
     #[serde(default)]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     #[serde(default)]
-    pub cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    pub parent_id: Option<String>,
+    pub(crate) parent_id: Option<String>,
     #[serde(default)]
-    pub context_tokens: Option<u32>,
+    pub(crate) context_tokens: Option<u32>,
     /// Approximate byte size of the session's text content (message bodies,
     /// reasoning, tool-call args). Used to show session size in the resume
     /// dialog without loading full session.json.
     #[serde(default)]
-    pub text_bytes: Option<u64>,
+    pub(crate) text_bytes: Option<u64>,
 }
 
 impl Default for Session {
@@ -94,7 +94,7 @@ impl Default for Session {
 }
 
 impl Session {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let now = now_ms();
         let id = new_session_id(now);
         let cwd = std::env::current_dir()
@@ -121,7 +121,7 @@ impl Session {
         }
     }
 
-    pub fn meta(&self) -> SessionMeta {
+    fn meta(&self) -> SessionMeta {
         SessionMeta {
             id: self.id.clone(),
             title: self.title.clone(),
@@ -140,7 +140,7 @@ impl Session {
     }
 
     /// Create a fork: same content, new ID, parent_id pointing back.
-    pub fn fork(&self) -> Self {
+    pub(crate) fn fork(&self) -> Self {
         let now = now_ms();
         Self {
             id: new_session_id(now),
@@ -164,7 +164,7 @@ impl Session {
     }
 }
 
-pub fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -174,7 +174,7 @@ pub fn now_ms() -> u64 {
 // ── Save / Load / Delete ─────────────────────────────────────────────────────
 
 /// Return the directory for a session on disk.
-pub fn dir_for(session: &Session) -> PathBuf {
+pub(crate) fn dir_for(session: &Session) -> PathBuf {
     sessions_dir().join(&session.id)
 }
 
@@ -191,7 +191,10 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
 /// Safe to call from a background thread — does no I/O on `store`.
 ///
 /// Message content is redacted at ingress, so save does no extra redaction.
-pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMap<String, String>) {
+pub(crate) fn save_with_blobs(
+    session: &Session,
+    url_to_blob: &std::collections::HashMap<String, String>,
+) {
     let _perf = crate::perf::begin("session:write");
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
@@ -349,14 +352,14 @@ fn resolve_prefix(prefix: &str) -> Option<String> {
     }
 }
 
-pub fn delete(id: &str) {
+pub(crate) fn delete(id: &str) {
     let session_dir = sessions_dir().join(id);
     if session_dir.is_dir() {
         let _ = fs::remove_dir_all(&session_dir);
     }
 }
 
-pub fn list_sessions() -> Vec<SessionMeta> {
+pub(crate) fn list_sessions() -> Vec<SessionMeta> {
     let _perf = crate::perf::begin("session:list");
     let dir = sessions_dir();
     let Ok(entries) = fs::read_dir(&dir) else {
