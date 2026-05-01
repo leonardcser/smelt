@@ -53,7 +53,7 @@ impl Default for ProcessRegistry {
 }
 
 impl ProcessRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 

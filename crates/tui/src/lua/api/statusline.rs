@@ -197,10 +197,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     // agents" trio on the right-of-throbber strip.
     let blocked = app.focused_overlay_blocks_agent();
     t.set("permission_pending", app.pending_dialog && !blocked)?;
-    t.set(
-        "running_procs",
-        app.core.engine.processes().running_count() as i64,
-    )?;
+    t.set("running_procs", app.core.processes.running_count() as i64)?;
     t.set("running_agents", app.agents.len() as i64)?;
     if let Some(label) = &app.task_label {
         t.set("task_label", label.as_str())?;

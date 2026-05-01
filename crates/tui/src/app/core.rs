@@ -8,7 +8,7 @@ use super::{
 };
 use crate::lua::LuaRuntime;
 use crate::session::Session;
-use engine::tools::FileStateCache;
+use engine::tools::{FileStateCache, ProcessRegistry};
 use engine::{EngineHandle, SkillLoader};
 use std::sync::Arc;
 
@@ -98,6 +98,12 @@ pub struct Core {
     /// `edit_notebook` tools and Lua-side migrations both see one
     /// view. Exposed to Lua via `smelt.fs.file_state.*`.
     pub files: FileStateCache,
+    /// Background-process registry. Owned by the frontend; engine
+    /// has no consumer of this since the bash tool's
+    /// `run_in_background` flag migrated to Lua. Surfaced to Lua via
+    /// `smelt.process.{list,read_output,spawn_bg}` and read by the
+    /// statusline + `/clear`-style session resets.
+    pub processes: ProcessRegistry,
 }
 
 impl Core {
@@ -136,6 +142,7 @@ impl Core {
             frontend,
             skills: None,
             files,
+            processes: ProcessRegistry::new(),
         }
     }
 }

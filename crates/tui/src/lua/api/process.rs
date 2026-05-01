@@ -18,8 +18,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     process_tbl.set(
         "list",
         lua.create_function(|lua, ()| {
-            let procs = crate::lua::try_with_app(|app| app.core.engine.processes().list())
-                .unwrap_or_default();
+            let procs =
+                crate::lua::try_with_app(|app| app.core.processes.list()).unwrap_or_default();
             let out = lua.create_table()?;
             for (i, p) in procs.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -35,7 +35,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "kill",
         lua.create_function(|_, id: String| {
             crate::lua::with_app(|app| {
-                let registry = app.core.engine.processes().clone();
+                let registry = app.core.processes.clone();
                 tokio::spawn(async move {
                     let _ = registry.stop(&id).await;
                 });
@@ -46,7 +46,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     process_tbl.set(
         "read_output",
         lua.create_function(|lua, id: String| {
-            let read = crate::lua::try_with_app(|app| app.core.engine.processes().read(&id));
+            let read = crate::lua::try_with_app(|app| app.core.processes.read(&id));
             match read {
                 Some(Ok((text, running, exit_code))) => {
                     let t = lua.create_table()?;
@@ -69,7 +69,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     process_tbl.set(
         "spawn_bg",
         lua.create_function(|_, command: String| -> LuaResult<String> {
-            let registry = crate::lua::try_with_app(|app| app.core.engine.processes().clone())
+            let registry = crate::lua::try_with_app(|app| app.core.processes.clone())
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
             let mut cmd = tokio::process::Command::new("sh");
             cmd.arg("-c")
