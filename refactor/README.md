@@ -135,6 +135,12 @@ need attention.
 A phase isn't landed until `P<n>.md` is written and companion files reflect
 what happened.
 
+**Commit docs with the code, not separately.** The commit message carries
+the detail. Only split docs into their own commit when the docs change is
+large enough to stand alone (e.g. FEATURES.md refresh after multiple
+features land together). Never produce a `docs(refactor): record <X>`
+commit whose entire diff is one bullet in `P<n>.md`.
+
 ## Verify when it makes sense
 
 - **At phase boundaries:**
@@ -173,11 +179,6 @@ what happened.
 
 **Status:** in-progress | done **Started:** YYYY-MM-DD **Landed:** YYYY-MM-DD
 
-## Sub-phases landed
-
-One bullet per sub-phase: `**<id>** (\`<sha>\`) — <one-line summary>.`
-The commit message carries the detail; this file is an index.
-
 ## Decisions made
 
 One bullet per non-obvious choice: `**<title>** (\`<sha>\`) — <one line>.`
@@ -198,4 +199,5 @@ when they unblock.
 What must be true before `P<n+1>` starts.
 ```
 
-Body of every entry is one line. Detail lives in `git log` — don't duplicate.
+No "Sub-phases landed" section — that's `git log`. The phase log records
+decisions and deferrals, not commit history.

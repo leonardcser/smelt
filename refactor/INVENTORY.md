@@ -7,7 +7,8 @@ something, check here first.**
 Maintenance rules:
 
 - When a phase lands, update the **Status** column for every row it touched
-  (mark `done`, note the actual destination).
+  (mark `done`, note the actual destination). **Status updates happen at
+  phase boundaries, not per-commit.**
 - When a fate decision changes mid-phase, update the row immediately and log the
   decision in the current `P<n>.md`.
 - A new file added to the codebase = a new row here, in the same commit.
