@@ -271,14 +271,14 @@ pub struct TuiApp {
     pub prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: ui::Ui,
     /// `WinId`s of the well-known split-tree surfaces. The matching
-    /// `Buffer`s are reached via `Ui::win_buf` / `win_buf_mut`.
+    /// `Buffer`s are reached via `Ui::win_buf_mut`.
     pub(crate) well_known: WellKnown,
 }
 
 /// The well-known split-tree windows that smelt always carries:
 /// the prompt, the transcript, and the statusline, plus the
 /// transient cmdline overlay leaf. Buffers are reached through
-/// `Ui::win_buf{,_mut}(WinId)` — there's exactly one `Buffer` per
+/// `Ui::win_buf_mut(WinId)` — there's exactly one `Buffer` per
 /// well-known `Window`.
 pub struct WellKnown {
     /// Prompt input window. Stable id `ui::PROMPT_WIN`. Its buffer

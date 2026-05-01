@@ -311,18 +311,6 @@ impl Ui {
         self.bufs.get_mut(&id)
     }
 
-    /// Resolve a `WinId` to its backing `BufId`, if the window exists.
-    pub fn win_buf_id(&self, win: WinId) -> Option<BufId> {
-        self.wins.get(&win).map(|w| w.buf)
-    }
-
-    /// Borrow the buffer backing `win`, if both the window and buffer
-    /// exist.
-    pub fn win_buf(&self, win: WinId) -> Option<&Buffer> {
-        let id = self.win_buf_id(win)?;
-        self.bufs.get(&id)
-    }
-
     /// Mutably borrow the buffer backing `win`, if both the window and
     /// buffer exist.
     pub fn win_buf_mut(&mut self, win: WinId) -> Option<&mut Buffer> {
