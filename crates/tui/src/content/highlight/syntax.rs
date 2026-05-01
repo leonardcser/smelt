@@ -252,12 +252,6 @@ impl<'a> BashHighlighter<'a> {
         }
     }
 
-    /// Advance the highlighter state without emitting output.
-    pub(crate) fn advance(&mut self, line: &str) {
-        let line_with_nl = format!("{}\n", line);
-        let _ = self.h.highlight_line(&line_with_nl, &SYNTAX_SET);
-    }
-
     /// Print a single line with syntax highlighting.
     /// Does not emit a newline — the caller controls line breaks.
     pub(crate) fn print_line(&mut self, out: &mut SpanCollector, line: &str) {
