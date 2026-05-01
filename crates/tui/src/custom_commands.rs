@@ -85,9 +85,10 @@ pub(crate) fn list() -> Vec<(String, String)> {
 /// Resolve a user-defined custom command (`~/.config/smelt/commands/<name>.md`)
 /// from input like `"/commit"` or `"/commit fix typos"`. Any text after the
 /// command name is appended to the body as extra user instructions. Returns
-/// `None` for missing files; built-in command bodies (`/reflect`, `/simplify`)
-/// resolve through `crate::builtin_commands::resolve` directly, called from
-/// the `submit_builtin_command` Lua binding.
+/// `None` for missing files; built-in `/reflect` and `/simplify` are
+/// Lua-registered slash commands now (see
+/// `runtime/lua/smelt/plugins/{reflect,simplify}.lua`) and call
+/// `smelt.engine.submit_command` directly.
 pub(crate) fn resolve(input: &str) -> Option<CustomCommand> {
     let after_slash = input.strip_prefix('/')?;
     let name = after_slash.split_whitespace().next()?;

@@ -2900,7 +2900,6 @@ dependencies = [
  "futures-core",
  "glob",
  "libc",
- "minijinja",
  "mlua",
  "protocol",
  "reqwest",
