@@ -206,7 +206,7 @@ pub struct VimWindowState {
 
 impl VimWindowState {
     /// Pop count1 (defaulting to 1), clearing both count accumulators.
-    pub(crate) fn take_count(&mut self) -> usize {
+    fn take_count(&mut self) -> usize {
         let n = self.count1.unwrap_or(1);
         self.count1 = None;
         self.count2 = None;
@@ -214,7 +214,7 @@ impl VimWindowState {
     }
 
     /// Pop count1 * count2 (each defaulting to 1) and clear both.
-    pub(crate) fn effective_count(&mut self) -> usize {
+    fn effective_count(&mut self) -> usize {
         let c1 = self.count1.unwrap_or(1);
         let c2 = self.count2.unwrap_or(1);
         self.count1 = None;
@@ -223,13 +223,13 @@ impl VimWindowState {
     }
 
     /// Clear count accumulators only — leaves `sub` untouched.
-    pub(crate) fn reset_counts(&mut self) {
+    fn reset_counts(&mut self) {
         self.count1 = None;
         self.count2 = None;
     }
 
     /// Reset the entire pending sequence: `sub = Ready`, both counts cleared.
-    pub(crate) fn reset_pending(&mut self) {
+    fn reset_pending(&mut self) {
         self.sub = SubState::Ready;
         self.reset_counts();
     }
