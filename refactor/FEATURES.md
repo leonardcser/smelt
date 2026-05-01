@@ -65,7 +65,7 @@ to invoke_ the feature.
 | Multi-agent: stop                                             | `engine/tools/stop_agent.rs`                              | P5.b                          | working |
 | Multi-agent: message                                          | `engine/tools/message_agent.rs`                           | P5.b                          | working |
 | Multi-agent: peek                                             | `engine/tools/peek_agent.rs`                              | P5.b                          | working |
-| Multi-agent: list                                             | `engine/tools/list_agents.rs`                             | P5.b                          | working |
+| Multi-agent: list                                             | `runtime/lua/smelt/tools/list_agents.lua`                 | P5.b — landed; composes `smelt.agent.discover()` | working |
 | MCP servers                                                   | `engine/mcp/`                                             | n/a (kept)                    | working |
 | Skills loader                                                 | `engine/skills.rs` + `runtime/lua/smelt/tools/load_skill.lua` | P5.b — `load_skill` Lua-side; loader stays on `Core.skills` for FFI | working |
 
@@ -87,7 +87,7 @@ to invoke_ the feature.
 | `web_search`          | `engine/tools/web_search.rs`      | P5.b                                                | working |
 | `ask_user_question`   | `plugins/ask_user_question.lua`   | P5.b → `tools/ask_user_question.lua`                | working |
 | `spawn_agent`         | `engine/tools/spawn_agent.rs`     | P5.b                                                | working |
-| `list_agents`         | `engine/tools/list_agents.rs`     | P5.b                                                | working |
+| `list_agents`         | `runtime/lua/smelt/tools/list_agents.lua` | P5.b — landed; gated on `smelt.engine.multi_agent()` | working |
 | `message_agent`       | `engine/tools/message_agent.rs`   | P5.b                                                | working |
 | `peek_agent`          | `engine/tools/peek_agent.rs`      | P5.b                                                | working |
 | `stop_agent`          | `engine/tools/stop_agent.rs`      | P5.b                                                | working |

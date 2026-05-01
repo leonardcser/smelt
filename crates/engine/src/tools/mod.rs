@@ -2,7 +2,6 @@ pub(crate) mod background;
 mod bash;
 mod edit_file;
 mod file_state;
-mod list_agents;
 mod message_agent;
 mod notebook;
 mod peek_agent;
@@ -480,12 +479,10 @@ pub(crate) fn build_tools(
         files: files.clone(),
     }));
 
-    // Multi-agent tools (conditionally registered).
+    // Multi-agent tools (conditionally registered). `list_agents` lives
+    // in `runtime/lua/smelt/tools/list_agents.lua` now (gated by
+    // `smelt.engine.multi_agent()`).
     if let Some(ma) = ma {
-        r.register(Box::new(list_agents::ListAgentsTool {
-            scope: ma.scope.clone(),
-            my_pid: ma.pid,
-        }));
         r.register(Box::new(message_agent::MessageAgentTool {
             my_id: ma.agent_id.clone(),
             my_slug: ma.slug,

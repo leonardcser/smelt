@@ -993,6 +993,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         "smelt.tools.load_skill",
         include_str!("../../../../runtime/lua/smelt/tools/load_skill.lua"),
     ),
+    (
+        "smelt.tools.list_agents",
+        include_str!("../../../../runtime/lua/smelt/tools/list_agents.lua"),
+    ),
 ];
 
 /// Plugins that must always be active (the user can't opt out via
@@ -1024,6 +1028,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.glob",
     "smelt.tools.grep",
     "smelt.tools.load_skill",
+    "smelt.tools.list_agents",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

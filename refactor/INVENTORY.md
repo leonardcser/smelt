@@ -239,7 +239,6 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/bash.rs`                | 355  | Bash tool                      | moved-to-lua | P5.b  | pending | `tools/bash.lua` composes `tui::process`                        |
 | `tools/edit_file.rs`           | 233  | Edit tool                      | moved-to-lua | P5.b  | pending | `tools/edit_file.lua` composes `tui::fs`                        |
 | `tools/file_state.rs`          | 340  | File metadata tracking         | moved-to-capability | P3.a  | pending | → `tui::fs::file_state` (mtime tracking for edit_file race detection)            |
-| `tools/list_agents.rs`         | 90   | List agents tool               | moved-to-lua | P5.b  | pending | `tools/list_agents.lua`                                         |
 | `tools/message_agent.rs`       | 98   | Message agent tool             | moved-to-lua | P5.b  | pending | `tools/message_agent.lua`                                       |
 | `tools/mod.rs`                 | 614  | Tool trait + ToolDispatcher trait + ToolResult + ctx  | restructured | P5.a  | partial | Dead methods (`interactive_only` / `modes` / `decide_override`) and the `interactive: bool` arg on `definitions` retired in `9c356d8`. `is_mcp` lifted off the trait into a `ToolEntry { tool, is_mcp }` flag set via `register` / `register_mcp` (`030aecd`). `needs_confirm` / `preflight` / `approval_patterns` collapsed into `evaluate_hooks` (`a26a42e`). `pub(crate) trait ToolDispatcher` (definitions / contains / is_mcp / evaluate_hooks / dispatch) impl'd for `ToolRegistry` (this session) — engine routes every per-call decision through it; `ToolSlot::tool` field retired. Visibility lift to `pub` + `engine::start` injection point ride the next P5.a sub-phase. |
 | `tools/notebook.rs`            | 677  | Notebook tool                  | moved-to-lua | P5.b  | pending | `tools/notebook_edit.lua` over `tui::notebook`                  |
@@ -306,6 +305,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 | `tools/glob.lua`                  | 53  | Built-in `glob` tool                  | added        | P5.b  | landed  | First core-tool migration off engine. `override = true` plugin tool composes `smelt.fs.glob` (globset + ignore::WalkBuilder) and inherits the `needs_confirm` shape from the retired Rust `GlobTool`. |
 | `tools/grep.lua`                  | 175 | Built-in `grep` tool                  | added        | P5.b  | landed  | `override = true` plugin tool over `smelt.grep.run` (ripgrep) with a `smelt.process.run("grep", ...)` fallback. Lua-side `offset` / `head_limit` slicing + stdout+stderr concatenation match the retired Rust `GrepTool`. Schema preserves the `-i` / `-n` / `-A` / `-B` / `-C` / `context` / `multiline` / `output_mode` knobs verbatim. |
 | `tools/load_skill.lua`            | 33  | Built-in `load_skill` tool            | added        | P5.b  | landed  | `override = true` plugin tool composing `smelt.skills.content` (FFI into the shared `engine::SkillLoader` parked on `Core.skills`). Engine still consumes `prompt_section()` for the system prompt; the `LoadSkillTool` Rust impl retires alongside. |
+| `tools/list_agents.lua`           | 76  | Built-in `list_agents` tool           | added        | P5.b  | landed  | `override = true` plugin tool over `smelt.agent.discover()` + `smelt.agent.my_pid()`; gated on `smelt.engine.multi_agent()` so single-agent runs don't see it. Reproduces the workspace-scope discovery + owned/peer split + aligned columns the retired Rust `ListAgentsTool` produced. |
 
 **To be created (P4.a):**
 
@@ -317,7 +317,7 @@ Legend for **Status**: `pending` (not yet touched), `in-progress`, `done`.
 - `bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
   `web_fetch.lua`, `web_search.lua`, `notebook_edit.lua`,
   `spawn_agent.lua`, `stop_agent.lua`, `message_agent.lua`, `peek_agent.lua`,
-  `list_agents.lua`, `ask_user_question.lua` (moved from
+  `ask_user_question.lua` (moved from
   plugins), `exit_plan_mode.lua` (extracted from `plan_mode.lua`)
 
 ## `src/`

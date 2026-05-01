@@ -158,7 +158,7 @@ fn is_pid_alive(_pid: u32) -> bool {
 
 /// Discover all live agents in the same scope (git root or cwd).
 /// Prunes dead entries as a side effect.
-pub(crate) fn discover(scope: &str) -> Vec<RegistryEntry> {
+pub fn discover(scope: &str) -> Vec<RegistryEntry> {
     let mut result = vec![];
     for (path, reg) in iter_entries() {
         if !is_pid_alive(reg.pid) {

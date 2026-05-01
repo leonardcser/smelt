@@ -8,6 +8,58 @@ use mlua::prelude::*;
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let agent_tbl = lua.create_table()?;
     agent_tbl.set(
+        "my_pid",
+        lua.create_function(|_, ()| Ok(std::process::id()))?,
+    )?;
+    agent_tbl.set(
+        "workspace_scope",
+        lua.create_function(|_, ()| {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let scope = engine::paths::git_root(&cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
+            Ok(scope)
+        })?,
+    )?;
+    agent_tbl.set(
+        "discover",
+        lua.create_function(|lua, scope: Option<String>| {
+            let scope = scope.unwrap_or_else(|| {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                engine::paths::git_root(&cwd)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| cwd.to_string_lossy().into_owned())
+            });
+            let entries = engine::registry::discover(&scope);
+            let out = lua.create_table()?;
+            for (i, e) in entries.into_iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("pid", e.pid)?;
+                match e.parent_pid {
+                    Some(p) => row.set("parent_pid", p)?,
+                    None => row.set("parent_pid", LuaNil)?,
+                }
+                row.set("agent_id", e.agent_id)?;
+                row.set("session_id", e.session_id)?;
+                row.set("cwd", e.cwd)?;
+                row.set(
+                    "status",
+                    match e.status {
+                        engine::registry::AgentStatus::Working => "working",
+                        engine::registry::AgentStatus::Idle => "idle",
+                    },
+                )?;
+                row.set("task_slug", e.task_slug.unwrap_or_default())?;
+                row.set("git_root", e.git_root.unwrap_or_default())?;
+                row.set("git_branch", e.git_branch.unwrap_or_default())?;
+                row.set("depth", e.depth)?;
+                row.set("started_at", e.started_at)?;
+                out.set(i + 1, row)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    agent_tbl.set(
         "list",
         lua.create_function(|lua, ()| {
             let my_pid = std::process::id();
