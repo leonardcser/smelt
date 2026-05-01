@@ -1,14 +1,14 @@
-pub use ui::Rect;
+pub(crate) use ui::Rect;
 
 #[derive(Clone, Debug, Default)]
-pub struct LayoutState {
+pub(crate) struct LayoutState {
     pub transcript: Rect,
     pub prompt: Rect,
     pub status: Rect,
 }
 
 #[derive(Debug)]
-pub struct LayoutInput {
+pub(crate) struct LayoutInput {
     pub term_height: u16,
     /// Natural height claimed by the prompt area, including the row
     /// reserved for the status line. The tree splits this between a
@@ -22,7 +22,7 @@ pub struct LayoutInput {
 /// holding the prompt and status leaves stacked tightly. The host
 /// publishes this tree to `Ui` via `Ui::set_layout` once per frame;
 /// `Ui` resolves rects against the current terminal area.
-pub fn build_layout_tree(input: &LayoutInput, status_win: ui::WinId) -> ui::LayoutTree {
+pub(crate) fn build_layout_tree(input: &LayoutInput, status_win: ui::WinId) -> ui::LayoutTree {
     let LayoutInput {
         term_height,
         prompt_height,
@@ -83,7 +83,7 @@ impl LayoutState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HitRegion {
+pub(crate) enum HitRegion {
     Transcript,
     Prompt,
     Status,

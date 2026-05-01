@@ -13,7 +13,7 @@ use crossterm::style::Color;
 /// span. The status bar is the only consumer; it converts to
 /// `ui::grid::Style` at paint time via `style_to_grid` below.
 #[derive(Clone, Default, PartialEq)]
-pub struct StyleState {
+pub(crate) struct StyleState {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
     pub bold: bool,
@@ -26,7 +26,7 @@ pub struct StyleState {
 /// A structured status item that Lua (or internal code) provides.
 /// Rust owns width fitting, priority dropping, and truncation.
 #[derive(Clone, Debug)]
-pub struct StatusItem {
+pub(crate) struct StatusItem {
     pub text: String,
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -61,7 +61,7 @@ impl StatusItem {
 /// sync with the actual focused window instead of a cached viewport
 /// field that only some code paths update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StatusPosition {
+pub(crate) struct StatusPosition {
     /// 1-indexed logical line of the cursor.
     pub line: u32,
     /// 1-indexed display column of the cursor.
