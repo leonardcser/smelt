@@ -14,7 +14,7 @@ pub struct ModelPricing {
 
 impl ModelPricing {
     /// Calculate the cost in USD for the given token usage.
-    pub fn cost(&self, usage: &TokenUsage) -> f64 {
+    pub(crate) fn cost(&self, usage: &TokenUsage) -> f64 {
         let input = usage.prompt_tokens.unwrap_or(0) as f64;
         let output = usage.completion_tokens.unwrap_or(0) as f64;
         let cache_read = usage.cache_read_tokens.unwrap_or(0) as f64;
