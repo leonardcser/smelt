@@ -12,12 +12,12 @@ use std::path::PathBuf;
 
 /// Credential persistence backend parameterized by provider-specific addresses.
 pub(crate) struct CredStore {
-    pub keyring_service: &'static str,
-    pub keyring_user: &'static str,
-    pub file_path: PathBuf,
+    pub(crate) keyring_service: &'static str,
+    pub(crate) keyring_user: &'static str,
+    pub(crate) file_path: PathBuf,
     /// Environment variable checked first on load. Lets a parent process pass
     /// credentials to a child without touching disk.
-    pub env_var: &'static str,
+    pub(crate) env_var: &'static str,
 }
 
 impl CredStore {

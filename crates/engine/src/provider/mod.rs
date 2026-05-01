@@ -21,14 +21,14 @@ use std::time::{Duration, Instant};
 pub(crate) struct ToolDefinition {
     #[serde(rename = "type")]
     def_type: AlwaysFunctionDef,
-    pub function: FunctionSchema,
+    pub(crate) function: FunctionSchema,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct FunctionSchema {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,10 +53,10 @@ impl ToolDefinition {
 
 /// Internal parsed fields from an API response. Shared across backends.
 pub(crate) struct ParsedResponse {
-    pub content: Option<String>,
-    pub reasoning: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: TokenUsage,
+    pub(crate) content: Option<String>,
+    pub(crate) reasoning: Option<String>,
+    pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) usage: TokenUsage,
 }
 
 impl ParsedResponse {
@@ -111,11 +111,11 @@ pub(crate) enum StreamDelta<'a> {
 }
 
 pub(crate) struct LLMResponse {
-    pub content: Option<String>,
-    pub reasoning_content: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: TokenUsage,
-    pub tokens_per_sec: Option<f64>,
+    pub(crate) content: Option<String>,
+    pub(crate) reasoning_content: Option<String>,
+    pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) usage: TokenUsage,
+    pub(crate) tokens_per_sec: Option<f64>,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -339,16 +339,16 @@ impl ProviderKind {
 /// usually emits valid JSON thanks to the prompt, but without enforcement.
 #[derive(Clone)]
 pub(crate) struct ResponseFormat {
-    pub name: String,
-    pub schema: serde_json::Value,
+    pub(crate) name: String,
+    pub(crate) schema: serde_json::Value,
 }
 
 /// Execution-time options for a `Provider::chat()` call.
 pub(crate) struct ChatOptions<'a> {
-    pub cancel: &'a CancellationToken,
-    pub on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
-    pub on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
-    pub response_format: Option<ResponseFormat>,
+    pub(crate) cancel: &'a CancellationToken,
+    pub(crate) on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
+    pub(crate) on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
+    pub(crate) response_format: Option<ResponseFormat>,
 }
 
 impl<'a> ChatOptions<'a> {
