@@ -27,7 +27,6 @@ fn next_request_id() -> u64 {
 pub async fn engine_task(
     mut config: EngineConfig,
     mut registry: ToolRegistry,
-    processes: tools::ProcessRegistry,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
@@ -52,9 +51,6 @@ pub async fn engine_task(
 
     let _ = event_tx.send(EngineEvent::Ready);
 
-    // Process completion channel for background processes
-    let (proc_done_tx, mut proc_done_rx) = mpsc::unbounded_channel::<(String, Option<i32>)>();
-
     // Context window size — set from config or lazily fetched from the
     // provider API on the first turn.
     let mut context_window: Option<u32> = config.context_window;
@@ -63,7 +59,7 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, session_dir, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, plugin_tools } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, plugin_tools } => {
 
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -129,8 +125,6 @@ pub async fn engine_task(
                             registry: &registry,
                             permissions: perm_ref,
                             runtime_approvals: &config.runtime_approvals,
-                            processes: &processes,
-                            proc_done_tx: &proc_done_tx,
                             cmd_rx: &mut cmd_rx,
                             event_tx: &event_tx,
                             config: &config,
@@ -144,7 +138,6 @@ pub async fn engine_task(
                             system_prompt,
                             agent_config,
                             plugin_tools,
-                            session_id,
                             session_dir,
                             started_at: Instant::now(),
                             tps_samples: Vec::new(),
@@ -240,9 +233,6 @@ pub async fn engine_task(
                     }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
-            }
-            Some((id, exit_code)) = proc_done_rx.recv() => {
-                let _ = event_tx.send(EngineEvent::ProcessCompleted { id, exit_code });
             }
             else => break,
         }
@@ -583,8 +573,6 @@ struct Turn<'a> {
     registry: &'a ToolRegistry,
     permissions: &'a Permissions,
     runtime_approvals: &'a Arc<RwLock<RuntimeApprovals>>,
-    processes: &'a tools::ProcessRegistry,
-    proc_done_tx: &'a mpsc::UnboundedSender<(String, Option<i32>)>,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
     config: &'a EngineConfig,
@@ -599,7 +587,6 @@ struct Turn<'a> {
     system_prompt: String,
     agent_config: Option<crate::AgentPromptConfig>,
     plugin_tools: Vec<protocol::PluginToolDef>,
-    session_id: String,
     session_dir: PathBuf,
     started_at: Instant,
     tps_samples: Vec<f64>,
@@ -1350,11 +1337,8 @@ impl<'a> Turn<'a> {
                 event_tx: self.event_tx.clone(),
                 call_id: s.tc.id.clone(),
                 cancel: self.cancel.clone(),
-                processes: self.processes.clone(),
-                proc_done_tx: self.proc_done_tx.clone(),
                 provider: self.provider.clone(),
                 model: self.model.clone(),
-                session_id: self.session_id.clone(),
                 session_dir: self.session_dir.clone(),
                 file_locks: self.file_locks.clone(),
                 api: self.config.api.clone(),
@@ -1646,11 +1630,8 @@ impl<'a> Turn<'a> {
                                 event_tx: self.event_tx.clone(),
                                 call_id: parent_call_id,
                                 cancel: self.cancel.clone(),
-                                processes: self.processes.clone(),
-                                proc_done_tx: self.proc_done_tx.clone(),
                                 provider: self.provider.clone(),
                                 model: self.model.clone(),
-                                session_id: self.session_id.clone(),
                                 session_dir: self.session_dir.clone(),
                                 file_locks: self.file_locks.clone(),
                                 api: self.config.api.clone(),

@@ -24,7 +24,6 @@ pub struct SpawnAgentTool {
 #[derive(Clone, Debug)]
 pub struct AgentMessageNotification {
     pub from_id: String,
-    pub from_slug: String,
     pub message: String,
 }
 

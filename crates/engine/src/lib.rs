@@ -317,7 +317,6 @@ impl EventInjector {
         if let Some(ref tx) = self.agent_msg_tx {
             let _ = tx.send(tools::AgentMessageNotification {
                 from_id: from_id.clone(),
-                from_slug: from_slug.clone(),
                 message: message.clone(),
             });
         }
@@ -378,7 +377,6 @@ pub fn start(config: EngineConfig) -> EngineHandle {
             depth: ma.depth,
             max_depth: ma.max_depth,
             max_agents: ma.max_agents,
-            parent_pid: ma.parent_pid,
             slug: std::sync::Arc::new(std::sync::Mutex::new(None)),
             api_base: config.api.base.clone(),
             api_key_env: config.api.key_env.clone(),
@@ -396,12 +394,10 @@ pub fn start(config: EngineConfig) -> EngineHandle {
     let permissions = Arc::clone(&config.permissions);
     let runtime_approvals = Arc::clone(&config.runtime_approvals);
     let has_multi_agent = config.multi_agent.is_some();
-    let processes_clone = processes.clone();
     let event_tx_clone = event_tx.clone();
     tokio::spawn(agent::engine_task(
         config,
         registry,
-        processes_clone,
         cmd_rx,
         event_tx,
     ));

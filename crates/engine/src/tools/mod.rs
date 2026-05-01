@@ -11,7 +11,7 @@ mod message_agent;
 mod notebook;
 mod peek_agent;
 mod read_file;
-pub mod result_dedup;
+pub(crate) mod result_dedup;
 mod spawn_agent;
 mod stop_agent;
 pub(crate) mod web_cache;
@@ -20,7 +20,9 @@ mod web_search;
 mod web_shared;
 mod write_file;
 
-pub use file_state::{file_mtime_ms, normalize_path, staleness_error, FileState, FileStateCache};
+pub(crate) use file_state::{file_mtime_ms, staleness_error, FileStateCache};
+#[cfg(test)]
+pub(crate) use file_state::FileState;
 
 use crate::cancel::CancellationToken;
 use crate::permissions::{Decision, Permissions};
@@ -52,19 +54,21 @@ pub(crate) fn kill_process_group(child: &tokio::process::Child) {
 }
 
 pub use background::{ProcessInfo, ProcessRegistry};
-pub use bash::{check_interactive, check_shell_background_operator, BashTool};
-pub use edit_file::EditFileTool;
+pub use bash::{check_interactive, check_shell_background_operator};
+pub(crate) use bash::BashTool;
+pub(crate) use edit_file::EditFileTool;
 
-pub use glob::GlobTool;
-pub use grep::GrepTool;
-pub use notebook::{NotebookEditTool, NotebookRenderData};
-pub use read_file::ReadFileTool;
-pub use spawn_agent::AgentMessageNotification;
-pub use web_fetch::WebFetchTool;
-pub use web_search::WebSearchTool;
-pub use write_file::WriteFileTool;
+pub(crate) use glob::GlobTool;
+pub(crate) use grep::GrepTool;
+pub use notebook::NotebookRenderData;
+pub(crate) use notebook::NotebookEditTool;
+pub(crate) use read_file::ReadFileTool;
+pub(crate) use spawn_agent::AgentMessageNotification;
+pub(crate) use web_fetch::WebFetchTool;
+pub(crate) use web_search::WebSearchTool;
+pub(crate) use write_file::WriteFileTool;
 
-pub struct ToolResult {
+pub(crate) struct ToolResult {
     pub content: String,
     pub is_error: bool,
     /// Structured metadata passed through to ToolOutcome for machine-readable data.
@@ -95,29 +99,26 @@ impl ToolResult {
 }
 
 /// Context provided to tools during execution, giving them access to
-/// engine facilities (event streaming, cancellation, background processes,
-/// and the LLM provider for tools that need secondary LLM calls).
+/// engine facilities (event streaming, cancellation, and the LLM provider
+/// for tools that need secondary LLM calls).
 ///
 /// All fields are owned (Arc-backed where shared) so a fresh context can be
 /// constructed per call without lifetime gymnastics — this enables side calls
 /// like `smelt.tools.call("bash", args)` from Lua plugin tools.
-pub struct ToolContext {
+pub(crate) struct ToolContext {
     pub event_tx: mpsc::UnboundedSender<EngineEvent>,
     pub call_id: String,
     pub cancel: CancellationToken,
-    pub processes: ProcessRegistry,
-    pub proc_done_tx: mpsc::UnboundedSender<(String, Option<i32>)>,
     pub provider: Provider,
     pub model: String,
-    pub session_id: String,
     pub session_dir: std::path::PathBuf,
     pub file_locks: FileLocks,
     pub api: crate::ApiConfig,
 }
 
-pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
+pub(crate) type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
 
-pub trait Tool: Send + Sync {
+pub(crate) trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
@@ -167,7 +168,7 @@ pub trait Tool: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct ToolRegistry {
+pub(crate) struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
 
@@ -221,7 +222,7 @@ impl ToolRegistry {
     }
 }
 
-pub fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
+pub(crate) fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
     args.get(key)
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -280,7 +281,7 @@ pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> Strin
 }
 
 /// Convert an absolute path to a relative one if it's inside the cwd.
-pub fn display_path(path: &str) -> String {
+pub(crate) fn display_path(path: &str) -> String {
     if let Ok(cwd) = std::env::current_dir() {
         let prefix = cwd.to_string_lossy();
         if let Some(rest) = path.strip_prefix(prefix.as_ref()) {
@@ -296,7 +297,7 @@ pub fn display_path(path: &str) -> String {
 
 /// Build a confirm label like `"pattern"` or `"pattern in dir"`, omitting the
 /// path when it is the cwd.
-pub fn confirm_with_optional_path(label: String, path: &str) -> Option<String> {
+pub(crate) fn confirm_with_optional_path(label: String, path: &str) -> Option<String> {
     if path.is_empty() || path == "." {
         Some(label)
     } else {
@@ -307,11 +308,11 @@ pub fn confirm_with_optional_path(label: String, path: &str) -> Option<String> {
 /// Maximum lines of tool output sent to the LLM. Individual tools may
 /// enforce their own (often larger) limits before this; this is the final
 /// trim applied when building the API request.
-pub const MAX_TOOL_OUTPUT_LINES: usize = 2000;
+pub(crate) const MAX_TOOL_OUTPUT_LINES: usize = 2000;
 
 /// Trim tool output to `max_lines` for LLM context. Appends a note with
 /// the total line count when truncated.
-pub fn trim_tool_output(content: &str, max_lines: usize) -> String {
+pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
     if content == "no matches found" {
         return content.to_string();
     }
@@ -338,7 +339,7 @@ pub(crate) fn bool_arg(args: &HashMap<String, Value>, key: &str) -> bool {
 
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
-pub fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> Duration {
+pub(crate) fn timeout_arg(args: &HashMap<String, Value>, default_secs: u64) -> Duration {
     let ms = args
         .get("timeout_ms")
         .and_then(|v| v.as_u64())
@@ -451,10 +452,10 @@ pub(crate) struct FlockGuard {
 /// the same file will execute sequentially, while different files remain
 /// parallel. Entries are pruned when no one else holds a reference.
 #[derive(Clone, Default)]
-pub struct FileLocks(Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>);
+pub(crate) struct FileLocks(Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>);
 
 impl FileLocks {
-    pub async fn lock(&self, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(crate) async fn lock(&self, path: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let mutex = {
             let mut map = self.0.lock().unwrap();
             // Prune idle entries (strong_count == 1 means only the map holds it).
@@ -481,14 +482,13 @@ pub struct SpawnedChild {
 }
 
 /// Configuration for multi-agent tool registration.
-pub struct MultiAgentToolConfig {
+pub(crate) struct MultiAgentToolConfig {
     pub scope: String,
     pub pid: u32,
     pub agent_id: String,
     pub depth: u8,
     pub max_depth: u8,
     pub max_agents: u8,
-    pub parent_pid: Option<u32>,
     /// Shared mutable slug — updated by title generation, read by message_agent.
     pub slug: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// API config for spawned subagents.
@@ -502,7 +502,7 @@ pub struct MultiAgentToolConfig {
     pub spawned_tx: Option<mpsc::UnboundedSender<SpawnedChild>>,
 }
 
-pub fn build_tools(
+pub(crate) fn build_tools(
     _processes: ProcessRegistry,
     ma: Option<MultiAgentToolConfig>,
     skills: Option<std::sync::Arc<crate::skills::SkillLoader>>,

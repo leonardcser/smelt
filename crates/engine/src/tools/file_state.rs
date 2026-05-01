@@ -16,13 +16,13 @@ pub struct FileState {
     pub read_range: Option<(usize, usize)>,
 }
 
-pub const MAX_ENTRIES: usize = 100;
-pub const MAX_TOTAL_BYTES: usize = 25 * 1024 * 1024;
+const MAX_ENTRIES: usize = 100;
+const MAX_TOTAL_BYTES: usize = 25 * 1024 * 1024;
 
 /// Collapse `.` and `..` segments without touching the filesystem. Absolute
 /// paths stay absolute. Used as the cache key so `./foo` and `foo/../foo`
 /// hit the same entry.
-pub fn normalize_path(p: &str) -> String {
+fn normalize_path(p: &str) -> String {
     let path = Path::new(p);
     let mut out = PathBuf::new();
     for comp in path.components() {
@@ -158,11 +158,6 @@ impl FileStateCache {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.0.lock().map(|m| m.entries.len()).unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.0.lock().map(|m| m.entries.is_empty()).unwrap_or(true)
     }
 }
 
