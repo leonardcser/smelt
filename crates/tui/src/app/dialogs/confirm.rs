@@ -1,14 +1,18 @@
 //! Confirm dialog — built-in tool approvals.
 //!
-//! The dialog itself lives in `runtime/lua/smelt/confirm.lua`. This
-//! file holds the Rust-side primitives the Lua orchestrator calls:
+//! The dialog itself lives in `runtime/lua/smelt/dialogs/confirm.lua`.
+//! This file holds the one Rust-side primitive the Lua orchestrator
+//! still calls — [`render_title_into_buf`], which fills the title
+//! buffer with ` tool: desc Allow?` (bash-highlit when the tool is
+//! `bash`). The inline bash highlight on the desc keeps title
+//! composition Rust-side until we have a span-level Lua API.
 //!
-//! - [`render_title_into_buf`] — fills the title buffer with
-//!   ` tool: desc Allow?` (bash-highlit when the tool is `bash`).
-//! - [`build_options`] — yes / no + dynamic "always allow …" entries
-//!   per approval scope. Returns the labels (for the OptionList
-//!   widget) and the parallel `ConfirmChoice` array (looked up on
-//!   resolve by index).
+//! Option labels (yes / no + dynamic "always allow …" entries) and
+//! the `~/`-rewritten cwd label are built in Lua directly from the
+//! request payload (`outside_dir` + `approval_patterns` +
+//! `smelt.os.{cwd,home}`); resolution rides a stable decision-label
+//! string (`"yes"` / `"always_session"` / …) — see
+//! `lua/api/confirm.rs::parse_decision`.
 //!
 //! Summary + preview buffers are composed in Lua via
 //! `smelt.{diff,syntax,bash,notebook}.render`.
@@ -17,7 +21,7 @@
 
 use super::super::TuiApp;
 use crate::app::dialogs::confirm_preview::ConfirmPreview;
-use crate::app::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
+use crate::app::transcript_model::ConfirmRequest;
 use crate::content::display::{ColorRole, ColorValue};
 use crate::content::layout_out::SpanCollector;
 use ui::BufId;
@@ -76,81 +80,4 @@ fn render_title(
         sink.print(shown);
     }
     sink.newline();
-}
-
-/// `~/path` rewrite over the process CWD. Shared between
-/// `build_options` (always-allow labels) and the
-/// `confirm_requested` cell payload (so a Lua plugin sees the same
-/// label the dialog renders).
-pub(crate) fn cwd_label() -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| {
-            let home = engine::home_dir();
-            if let Ok(rel) = p.strip_prefix(&home) {
-                return Some(format!("~/{}", rel.display()));
-            }
-            p.to_str().map(String::from)
-        })
-        .unwrap_or_default()
-}
-
-/// `(labels, choices)` for the OptionList widget. The two arrays are
-/// parallel — index into `labels` matches the same `ConfirmChoice`
-/// entry. Yes / No are always first; "always allow …" variants vary
-/// by whether the request has an outside-cwd directory or
-/// approval-pattern globs.
-pub(crate) fn build_options(req: &ConfirmRequest) -> (Vec<String>, Vec<ConfirmChoice>) {
-    let mut labels: Vec<String> = Vec::new();
-    let mut choices: Vec<ConfirmChoice> = Vec::new();
-
-    labels.push("yes".into());
-    choices.push(ConfirmChoice::Yes);
-    labels.push("no".into());
-    choices.push(ConfirmChoice::No);
-
-    let cwd_label = cwd_label();
-
-    let has_dir = req.outside_dir.is_some();
-    let has_patterns = !req.approval_patterns.is_empty();
-
-    if let Some(ref dir) = req.outside_dir {
-        let dir_str = dir.to_string_lossy().into_owned();
-        labels.push(format!("allow {dir_str}"));
-        choices.push(ConfirmChoice::AlwaysDir(
-            dir_str.clone(),
-            ApprovalScope::Session,
-        ));
-        labels.push(format!("allow {dir_str} in {cwd_label}"));
-        choices.push(ConfirmChoice::AlwaysDir(dir_str, ApprovalScope::Workspace));
-    }
-    if has_patterns {
-        let display: Vec<&str> = req
-            .approval_patterns
-            .iter()
-            .map(|p| {
-                let d = p.strip_suffix("/*").unwrap_or(p);
-                d.split("://").nth(1).unwrap_or(d)
-            })
-            .collect();
-        let display_str = display.join(", ");
-        labels.push(format!("allow {display_str}"));
-        choices.push(ConfirmChoice::AlwaysPatterns(
-            req.approval_patterns.clone(),
-            ApprovalScope::Session,
-        ));
-        labels.push(format!("allow {display_str} in {cwd_label}"));
-        choices.push(ConfirmChoice::AlwaysPatterns(
-            req.approval_patterns.clone(),
-            ApprovalScope::Workspace,
-        ));
-    }
-    if !has_dir && !has_patterns {
-        labels.push("always allow".into());
-        choices.push(ConfirmChoice::Always(ApprovalScope::Session));
-        labels.push(format!("always allow in {cwd_label}"));
-        choices.push(ConfirmChoice::Always(ApprovalScope::Workspace));
-    }
-
-    (labels, choices)
 }

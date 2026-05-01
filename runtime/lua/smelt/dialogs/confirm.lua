@@ -43,6 +43,62 @@ local function fill_preview(buf, req)
   end
 end
 
+-- `~/`-rewrite of the process cwd, used for "in {cwd}" labels on the
+-- workspace-scoped variants. Falls back to the absolute path if the
+-- cwd is outside HOME.
+local function pretty_cwd()
+  local cwd = smelt.os.cwd() or ""
+  local home = smelt.os.home()
+  if home and home ~= "" and cwd:sub(1, #home) == home then
+    local rest = cwd:sub(#home + 1)
+    if rest == "" then return "~" end
+    return "~" .. rest
+  end
+  return cwd
+end
+
+-- Build (labels, decisions) in parallel from the request payload.
+-- Decision strings round-trip through `smelt.confirm._resolve`; the
+-- `confirm_resolved` cell payload publishes the same string so plugin
+-- subscribers branch on a stable lexicon.
+local function build_options(req)
+  local labels, decisions = {}, {}
+  local function push(label, decision)
+    labels[#labels + 1] = label
+    decisions[#decisions + 1] = decision
+  end
+
+  push("yes", "yes")
+  push("no", "no")
+
+  local cwd = pretty_cwd()
+  local has_dir = req.outside_dir ~= nil and req.outside_dir ~= ""
+  local has_patterns = req.approval_patterns and #req.approval_patterns > 0
+
+  if has_dir then
+    local dir = req.outside_dir
+    push("allow " .. dir, "always_dir_session")
+    push("allow " .. dir .. " in " .. cwd, "always_dir_workspace")
+  end
+  if has_patterns then
+    local display = {}
+    for i, p in ipairs(req.approval_patterns) do
+      local d = p:gsub("/%*$", "")
+      local stripped = d:match("^[^:]+://(.+)$") or d
+      display[i] = stripped
+    end
+    local display_str = table.concat(display, ", ")
+    push("allow " .. display_str, "always_pattern_session")
+    push("allow " .. display_str .. " in " .. cwd, "always_pattern_workspace")
+  end
+  if not has_dir and not has_patterns then
+    push("always allow", "always_session")
+    push("always allow in " .. cwd, "always_workspace")
+  end
+
+  return labels, decisions
+end
+
 function smelt.confirm.open(handle_id)
   -- Request payload (tool / desc / args / options / approval patterns
   -- / outside_dir / cwd_label / handle_id) flows through the
@@ -63,8 +119,9 @@ function smelt.confirm.open(handle_id)
   end
   fill_preview(preview_buf, req)
 
+  local labels, decisions = build_options(req)
   local items = {}
-  for i, label in ipairs(req.options) do
+  for i, label in ipairs(labels) do
     items[i] = { label = label }
   end
 
@@ -105,7 +162,8 @@ function smelt.confirm.open(handle_id)
   local function close_with(idx, message)
     if resolved then return end
     resolved = true
-    smelt.confirm._resolve(handle_id, idx, message)
+    local decision = decisions[idx] or "no"
+    smelt.confirm._resolve(handle_id, decision, message)
     d:close()
   end
 

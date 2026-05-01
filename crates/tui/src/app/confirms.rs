@@ -1,12 +1,15 @@
 //! `Confirms` — pending tool-approval dialog requests.
 //!
-//! Each entry pairs the live `ConfirmRequest` (tool name, args, desc,
-//! optional outside-cwd dir + approval patterns) with the resolved
-//! choice array the dialog presents. The dialog reads the request
-//! payload from the `confirm_requested` cell (a typed
-//! `ConfirmRequested` snapshot covering tool / desc / args / options
-//! / cwd label / outside dir) and resolves it through a single
-//! `smelt.confirm._resolve(handle_id, choice_idx, message)` primitive.
+//! Each entry holds the live `ConfirmRequest` (tool name, args, desc,
+//! optional outside-cwd dir + approval patterns). The dialog reads
+//! the request payload from the `confirm_requested` cell (tool /
+//! desc / args / outside dir / approval patterns) and resolves it
+//! through `smelt.confirm._resolve(handle_id, decision, message)`,
+//! where `decision` is one of the stable label strings (`"yes"` /
+//! `"no"` / `"always_session"` / …) `confirm.lua` builds alongside
+//! the option labels. The `confirm_resolved` cell republishes the
+//! same string so plugin subscribers branch on one lexicon.
+//!
 //! Two ancillary primitives (`_render_title`, `_back_tab`) are still
 //! handle-keyed because they reach into Rust-only state (span-level
 //! bash highlight, mode toggle + auto-allow check) — once they grow
@@ -20,15 +23,12 @@
 
 use std::collections::HashMap;
 
-use crate::app::transcript_model::{ConfirmChoice, ConfirmRequest};
+use crate::app::transcript_model::ConfirmRequest;
 
 /// Live Confirm request held in `Confirms::pending` while the Lua
-/// dialog is open. The choices array is populated by
-/// `dialogs::confirm::build_options` so resolve can look up the
-/// user's pick by index.
+/// dialog is open.
 pub(crate) struct ConfirmEntry {
     pub(crate) req: ConfirmRequest,
-    pub(crate) choices: Vec<ConfirmChoice>,
 }
 
 #[derive(Default)]
@@ -45,10 +45,10 @@ impl Confirms {
         }
     }
 
-    pub(crate) fn register(&mut self, req: ConfirmRequest, choices: Vec<ConfirmChoice>) -> u64 {
+    pub(crate) fn register(&mut self, req: ConfirmRequest) -> u64 {
         let id = self.next_handle;
         self.next_handle = self.next_handle.wrapping_add(1);
-        self.pending.insert(id, ConfirmEntry { req, choices });
+        self.pending.insert(id, ConfirmEntry { req });
         id
     }
 
