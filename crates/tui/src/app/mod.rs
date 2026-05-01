@@ -50,7 +50,6 @@ pub(crate) use crate::app::transcript_model::{
     AgentBlockStatus, ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest,
     PermissionEntry, ToolOutput, ToolState, ToolStatus, ViewState,
 };
-pub(crate) use crate::app::working::{TurnOutcome, TurnPhase};
 use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
 use crate::{content, session, state};
@@ -196,7 +195,7 @@ pub struct TuiApp {
     /// Live-turn + last-turn state driving the status bar spinner and
     /// result line. `begin(TurnPhase::...)` / `finish(TurnOutcome::...)`
     /// are the write paths, mirrored from engine lifecycle events.
-    pub working: working::WorkingState,
+    pub(in crate::app) working: working::WorkingState,
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).
     pub transcript_gutters: crate::window::WindowGutters,

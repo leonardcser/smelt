@@ -13,7 +13,8 @@
 //!    drive today's transcript model directly.
 
 use crate::app::transcript_model::{Block, ToolOutput, ToolStatus};
-use crate::app::{ConfirmRequest, PendingTool, SessionControl, TuiApp, TurnOutcome, TurnPhase};
+use crate::app::working::{TurnOutcome, TurnPhase};
+use crate::app::{ConfirmRequest, PendingTool, SessionControl, TuiApp};
 use engine::{tools, EngineHandle};
 use protocol::{EngineEvent, UiCommand};
 use std::time::Duration;

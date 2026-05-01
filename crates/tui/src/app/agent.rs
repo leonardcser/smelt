@@ -1,3 +1,4 @@
+use super::working::{TurnOutcome, TurnPhase};
 use super::*;
 
 impl TuiApp {
