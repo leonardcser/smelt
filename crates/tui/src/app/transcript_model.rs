@@ -92,7 +92,7 @@ impl ToolState {
     }
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(crate) enum Block {
     User {
         text: String,
