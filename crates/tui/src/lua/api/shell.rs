@@ -1,6 +1,6 @@
 //! `smelt.shell` bindings — pure parsing helpers consumed by the
 //! Lua-side `bash` tool and `background_commands` plugin. Wraps
-//! `engine::permissions::split_shell_commands` for AST-level
+//! `crate::permissions::split_shell_commands` for AST-level
 //! splitting, plus inline interactive-binary / shell-background
 //! validators (the legacy engine `BashTool` owned these).
 
@@ -16,7 +16,7 @@ const INTERACTIVE_BINS: &[&str] = &[
 const GIT_INTERACTIVE_SUBCMDS: &[&str] = &["rebase", "add", "checkout", "clean", "stash"];
 
 fn check_interactive(command: &str) -> Option<&'static str> {
-    let cmds = engine::permissions::split_shell_commands(command);
+    let cmds = crate::permissions::split_shell_commands(command);
     for subcmd in &cmds {
         let parts: Vec<&str> = subcmd.split_whitespace().collect();
         let bin = match parts.first() {
@@ -42,7 +42,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
 }
 
 fn check_shell_background_operator(command: &str) -> Option<String> {
-    let has = engine::permissions::split_shell_commands_with_ops(command)
+    let has = crate::permissions::split_shell_commands_with_ops(command)
         .iter()
         .any(|(_, op)| op.as_deref() == Some("&"));
     if has {
@@ -60,13 +60,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     shell_tbl.set(
         "split",
         lua.create_function(|_, command: String| {
-            Ok(engine::permissions::split_shell_commands(&command))
+            Ok(crate::permissions::split_shell_commands(&command))
         })?,
     )?;
     shell_tbl.set(
         "split_with_ops",
         lua.create_function(|lua, command: String| {
-            let parts = engine::permissions::split_shell_commands_with_ops(&command);
+            let parts = crate::permissions::split_shell_commands_with_ops(&command);
             let out = lua.create_table()?;
             for (i, (cmd, op)) in parts.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -99,7 +99,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     shell_tbl.set(
         "is_default_bash_allow",
         lua.create_function(|_, pattern: String| {
-            Ok(engine::permissions::DEFAULT_BASH_ALLOW.contains(&pattern.as_str()))
+            Ok(crate::permissions::DEFAULT_BASH_ALLOW.contains(&pattern.as_str()))
         })?,
     )?;
     smelt.set("shell", shell_tbl)?;

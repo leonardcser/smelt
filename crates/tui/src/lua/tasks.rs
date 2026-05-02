@@ -404,7 +404,7 @@ impl LuaRuntime {
 
         if let Some(func) = needs_confirm_fn {
             match func.call::<Option<String>>(args_table.clone()) {
-                Ok(s) => out.needs_confirm = s,
+                Ok(s) => out.confirm_message = s,
                 Err(e) => self.record_error(format!("tool hook needs_confirm: {e}")),
             }
         }
@@ -422,7 +422,8 @@ impl LuaRuntime {
         }
         if let Some(func) = preflight_fn {
             match func.call::<Option<String>>(args_table) {
-                Ok(s) => out.preflight_error = s,
+                Ok(Some(s)) => out.decision = protocol::Decision::Error(s),
+                Ok(None) => {}
                 Err(e) => self.record_error(format!("tool hook preflight: {e}")),
             }
         }

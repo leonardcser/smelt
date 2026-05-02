@@ -88,8 +88,7 @@ pub struct ToolEntry {
 /// `is_mcp` to pick the right ruleset. When permissions move to Lua
 /// hooks (P5.c) the engine-side filter retires.
 pub trait ToolDispatcher: Send + Sync {
-    /// All tool definitions registered with this dispatcher. The engine
-    /// applies permission filtering externally.
+    /// All tool definitions registered with this dispatcher.
     fn definitions(&self) -> Vec<ToolDefinition>;
 
     /// True when the named tool exists in this dispatcher.
@@ -99,8 +98,20 @@ pub trait ToolDispatcher: Send + Sync {
     /// ruleset rather than the per-tool `tools` ruleset.
     fn is_mcp(&self, name: &str) -> bool;
 
+    /// Whether the tool should be visible to the LLM in the given mode.
+    /// `false` hides tools whose policy decision is `Deny`.
+    fn is_visible(&self, _name: &str, _mode: protocol::AgentMode) -> bool {
+        true
+    }
+
     /// Per-call permission hooks. `None` means the tool is unknown.
-    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<ToolHooks>;
+    /// The dispatcher evaluates policy and returns the final decision.
+    fn evaluate_hooks(
+        &self,
+        name: &str,
+        args: &HashMap<String, Value>,
+        mode: protocol::AgentMode,
+    ) -> Option<ToolHooks>;
 
     /// Dispatch a tool call. `None` means the tool is unknown; the
     /// engine handles that case by emitting a synthetic error result.
@@ -134,7 +145,12 @@ impl ToolDispatcher for ToolRegistry {
         self.get(name).is_some_and(|e| e.is_mcp)
     }
 
-    fn evaluate_hooks(&self, name: &str, args: &HashMap<String, Value>) -> Option<ToolHooks> {
+    fn evaluate_hooks(
+        &self,
+        name: &str,
+        args: &HashMap<String, Value>,
+        _mode: protocol::AgentMode,
+    ) -> Option<ToolHooks> {
         self.get(name).map(|e| e.tool.evaluate_hooks(args))
     }
 

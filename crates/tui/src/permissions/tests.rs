@@ -1436,14 +1436,14 @@ fn runtime_dir_approval_does_not_affect_inside_workspace_request() {
 fn dirs_approved_tilde_stored_absolute_queried() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let abs = format!("{}/syncthing/vault/file.txt", home.display());
     assert!(rt.dirs_approved(&[abs]));
 }
 
 #[test]
 fn dirs_approved_absolute_stored_tilde_queried() {
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(home.join("syncthing"));
     assert!(rt.dirs_approved(&["~/syncthing/vault/file.txt".to_string()]));
@@ -1555,7 +1555,7 @@ fn perms_with_workspace_default_bash(workspace: &str) -> Permissions {
 
 #[test]
 fn tilde_dir_approval_works_for_absolute_read_file() {
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace(&workspace);
     let mut rt = RuntimeApprovals::new();
@@ -1569,7 +1569,7 @@ fn tilde_dir_approval_works_for_absolute_read_file() {
 
 #[test]
 fn absolute_dir_approval_works_for_tilde_bash() {
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace(&workspace);
     let mut rt = RuntimeApprovals::new();
@@ -1586,7 +1586,7 @@ fn absolute_dir_approval_works_for_tilde_bash() {
 
 #[test]
 fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_default_bash(&workspace);
     let mut rt = RuntimeApprovals::new();
@@ -1605,7 +1605,7 @@ fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
 
 #[test]
 fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_default_bash(&workspace);
     let mut rt = RuntimeApprovals::new();
@@ -1643,7 +1643,7 @@ fn compound_command_default_allowed_with_dir_approval() {
 fn compound_command_with_ask_subcommand_needs_tool_approval() {
     // `find | python3` — find is in DEFAULT_BASH_ALLOW, python3 is not.
     // Dir approval alone is insufficient; the Ask subcommand needs its own approval.
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_default_bash(&workspace);
     let mut rt = RuntimeApprovals::new();
@@ -1660,7 +1660,7 @@ fn compound_command_with_ask_subcommand_needs_tool_approval() {
 
 #[test]
 fn compound_command_with_ask_subcommand_and_tool_approval() {
-    let home = crate::paths::home_dir();
+    let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
     let p = perms_with_workspace_default_bash(&workspace);
     let mut rt = RuntimeApprovals::new();

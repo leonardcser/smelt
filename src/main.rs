@@ -288,7 +288,7 @@ async fn main() {
 
     // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let mut permissions = engine::Permissions::load();
+    let mut permissions = tui::permissions::Permissions::load();
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
     let permissions = Arc::new(permissions);
@@ -300,7 +300,7 @@ async fn main() {
         let cwd_str = cwd.to_string_lossy();
         let rules = tui::permissions::store::load(&cwd_str);
         let (ws_tools, ws_dirs) = tui::permissions::store::into_approvals(&rules);
-        let mut rt = engine::permissions::RuntimeApprovals::new();
+        let mut rt = tui::permissions::RuntimeApprovals::new();
         rt.load_workspace(ws_tools, ws_dirs);
         Arc::new(std::sync::RwLock::new(rt))
     };
@@ -318,7 +318,12 @@ async fn main() {
     let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
-    let mcp_dispatcher = tui::mcp::dispatcher::McpDispatcher::start(&cfg.mcp).await;
+    let mcp_dispatcher = tui::mcp::dispatcher::McpDispatcher::start(
+        &cfg.mcp,
+        Arc::clone(&permissions),
+        Arc::clone(&runtime_approvals),
+    )
+    .await;
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> = match mcp_dispatcher {
         Some(d) => Box::new(d),
         None => Box::new(engine::tools::ToolRegistry::new()),
@@ -338,8 +343,6 @@ async fn main() {
             instructions,
             system_prompt_override,
             cwd: cwd.clone(),
-            permissions: permissions.clone(),
-            runtime_approvals: runtime_approvals.clone(),
             skills: Some(skill_loader),
             auto_compact: settings.auto_compact,
             context_window: cfg.settings.context_window,

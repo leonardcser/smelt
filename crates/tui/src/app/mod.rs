@@ -38,7 +38,7 @@ pub(crate) use crate::app::transcript_model::{
 use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
 use crate::{content, session, state};
-use engine::{permissions::Decision, EngineHandle, Permissions};
+use engine::{EngineHandle};
 use protocol::{AgentMode, Content, Message, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{
@@ -90,7 +90,7 @@ pub struct TuiApp {
     /// Runtime approvals shared with the engine. The engine checks these
     /// during `decide()` to auto-approve tools without sending
     /// `RequestPermission`. The TUI writes to them when the user approves.
-    pub(crate) runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
+    pub(crate) runtime_approvals: Arc<std::sync::RwLock<crate::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
     pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
@@ -154,7 +154,7 @@ pub struct TuiApp {
     /// hit-testing and viewport-rows estimation.
     pub(crate) layout: content::layout::LayoutState,
 
-    pub(crate) permissions: Arc<Permissions>,
+    pub(crate) permissions: Arc<crate::permissions::Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `TuiApp` so reducer handlers (`apply_ops`) can mutate
     /// it directly rather than threading `&mut Option<TurnState>`
@@ -338,7 +338,7 @@ impl TuiApp {
         api_base: String,
         api_key_env: String,
         provider_type: String,
-        permissions: Arc<Permissions>,
+        permissions: Arc<crate::permissions::Permissions>,
         engine: EngineHandle,
         settings: state::ResolvedSettings,
         reasoning_effort: protocol::ReasoningEffort,
@@ -350,7 +350,7 @@ impl TuiApp {
         cli_api_base_override: bool,
         cli_api_key_env_override: bool,
         startup_auth_error: Option<String>,
-        runtime_approvals: Arc<std::sync::RwLock<engine::permissions::RuntimeApprovals>>,
+        runtime_approvals: Arc<std::sync::RwLock<crate::permissions::RuntimeApprovals>>,
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();

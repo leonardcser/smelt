@@ -94,7 +94,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 if app
                     .permissions
                     .decide(app.core.config.mode, &tool_name, &args, false)
-                    == engine::permissions::Decision::Allow
+                    == protocol::Decision::Allow
                 {
                     app.set_active_status(
                         &call_id,

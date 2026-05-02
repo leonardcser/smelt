@@ -8,7 +8,7 @@ pub mod image;
 pub mod log;
 
 pub mod paths;
-pub mod permissions;
+
 
 pub mod pricing;
 pub mod provider;
@@ -47,7 +47,7 @@ pub fn compact_threshold_percent() -> u64 {
 pub use compact::SUMMARY_PREFIX;
 pub use config::ModelConfig;
 pub use paths::{config_dir, home_dir, state_dir};
-pub use permissions::Permissions;
+
 pub use provider::{Provider, ProviderKind};
 pub use skills::SkillLoader;
 
@@ -146,11 +146,6 @@ pub struct EngineConfig {
     /// template, mode overlays, and AGENTS.md instructions).
     pub system_prompt_override: Option<String>,
     pub cwd: PathBuf,
-    pub permissions: Arc<Permissions>,
-    /// Runtime approvals shared between engine and TUI.
-    pub runtime_approvals: Arc<std::sync::RwLock<permissions::RuntimeApprovals>>,
-    /// MCP server configurations.
-
     /// Pre-loaded skill loader.
     pub skills: Option<Arc<SkillLoader>>,
     /// Auto-compact when context usage crosses the threshold.

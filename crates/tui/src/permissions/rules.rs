@@ -8,15 +8,9 @@
 //! - `check_ruleset` (the core pattern-matching decision)
 
 use protocol::AgentMode;
+use protocol::Decision;
 use serde::Deserialize;
 use std::collections::HashMap;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decision {
-    Allow,
-    Ask,
-    Deny,
-}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]

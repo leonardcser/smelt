@@ -1,5 +1,6 @@
 use super::working::{TurnOutcome, TurnPhase};
 use super::*;
+use protocol::Decision;
 
 impl TuiApp {
     /// Send a permission decision to the local engine.

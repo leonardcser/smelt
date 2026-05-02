@@ -324,13 +324,30 @@ pub(crate) fn handle_event(
         }
         EngineEvent::ToolHooksRequest {
             request_id,
+            call_id: _,
             tool_name,
             args,
-            ..
+            mode,
         } => {
             let _guard = crate::lua::install_app_ptr(app);
-            let hooks = app.core.lua.evaluate_hooks(&tool_name, &args);
+            let mut hooks = app.core.lua.evaluate_hooks(&tool_name, &args);
             drop(_guard);
+            // Apply permission policy on the TUI side.
+            if !matches!(hooks.decision, protocol::Decision::Error(_)) {
+                let decision = app.permissions.decide(mode, &tool_name, &args, false);
+                let mut decision = decision;
+                if decision == protocol::Decision::Ask {
+                    let desc = hooks
+                        .confirm_message
+                        .clone()
+                        .unwrap_or_else(|| tool_name.clone());
+                    let rt = app.runtime_approvals.read().unwrap();
+                    if rt.is_auto_approved(&app.permissions, mode, &tool_name, &args, &desc) {
+                        decision = protocol::Decision::Allow;
+                    }
+                }
+                hooks.decision = decision;
+            }
             app.core
                 .engine
                 .send(protocol::UiCommand::ToolHooksResponse { request_id, hooks });
