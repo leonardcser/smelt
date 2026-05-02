@@ -449,7 +449,15 @@ impl Window {
         viewport_rows: u16,
         mode: &mut VimMode,
     ) {
-        self.cpos = end.saturating_sub(1).max(start);
+        // Vim visual_range uses next_char_boundary to include the char
+        // at cpos, so cpos lands on the last selected char. Non-vim
+        // selection_range_at is exclusive at cpos, so cpos must land
+        // one past the last selected char to include it.
+        self.cpos = if self.vim_enabled {
+            end.saturating_sub(1).max(start)
+        } else {
+            end
+        };
         let offsets = Self::line_start_offsets(rows);
         self.sync_from_cpos(rows, &offsets, viewport_rows);
         if self.vim_enabled {
@@ -609,17 +617,20 @@ impl Window {
                 ctx.vim_mode,
                 ctx.clipboard,
             ),
-            Event::Mouse(me) => self.handle_mouse(
-                me,
-                MouseCtx {
-                    rows: ctx.rows,
-                    soft_breaks: ctx.soft_breaks,
-                    hard_breaks: ctx.hard_breaks,
-                    viewport: ctx.viewport,
-                    click_count: ctx.click_count,
-                    vim_mode: ctx.vim_mode,
-                },
-            ),
+            Event::Mouse(me) => {
+                let (status, _) = self.handle_mouse(
+                    me,
+                    MouseCtx {
+                        rows: ctx.rows,
+                        soft_breaks: ctx.soft_breaks,
+                        hard_breaks: ctx.hard_breaks,
+                        viewport: ctx.viewport,
+                        click_count: ctx.click_count,
+                        vim_mode: ctx.vim_mode,
+                    },
+                );
+                status
+            }
             Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Paste(_) => {
                 Status::Ignored
             }
@@ -635,10 +646,16 @@ impl Window {
     /// double-click word-select, triple-click line-select, drag
     /// extension anchored to the original word/line when applicable.
     /// The window's `drag_anchor_*` fields are managed internally so
-    /// successive `Drag` events extend by the right unit. Clipboard
-    /// side effects are the host's job — Window only mutates its own
-    /// selection state.
-    pub(crate) fn handle_mouse(&mut self, event: MouseEvent, mut ctx: MouseCtx) -> Status {
+    /// successive `Drag` events extend by the right unit.
+    ///
+    /// On `MouseUp`, if a selection was active, the selected text is
+    /// returned as `Some(text)` so the host can push it to the
+    /// clipboard. Window still clears its own selection state.
+    pub fn handle_mouse(
+        &mut self,
+        event: MouseEvent,
+        mut ctx: MouseCtx,
+    ) -> (Status, Option<String>) {
         // Build the joined buffer once and pass it down. Mouse helpers
         // operate on this `&str` instead of `self.edit_buf.buf`, which
         // lets surfaces whose `edit_buf.buf` is *not* `rows.join("\n")`
@@ -649,10 +666,18 @@ impl Window {
         // need it to be true.
         let buf = ctx.rows.join("\n");
         match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.mouse_down(event, &mut ctx, &buf),
-            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(event, &mut ctx, &buf),
-            MouseEventKind::Up(MouseButton::Left) => self.mouse_up(&mut ctx, &buf),
-            _ => Status::Ignored,
+            MouseEventKind::Down(MouseButton::Left) => {
+                (self.mouse_down(event, &mut ctx, &buf), None)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                (self.mouse_drag(event, &mut ctx, &buf), None)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let yank = self.mouse_yank_text(&ctx, &buf);
+                let status = self.mouse_up(&mut ctx, &buf);
+                (status, yank)
+            }
+            _ => (Status::Ignored, None),
         }
     }
 
@@ -757,6 +782,24 @@ impl Window {
             self.extend_selection(self.cpos);
         }
         Status::Consumed
+    }
+
+    /// Compute the text to yank from the current selection state,
+    /// *before* `mouse_up` clears the anchors. Returns `None` when
+    /// no selection is active or the range is empty.
+    fn mouse_yank_text(&self, ctx: &MouseCtx, buf: &str) -> Option<String> {
+        let cpos = self.compute_cpos(ctx.rows);
+        let (start, end) = if self.vim_enabled {
+            vim::visual_range(&self.vim_state, buf, cpos, *ctx.vim_mode)?
+        } else {
+            self.selection_range_at(cpos)?
+        };
+        let start = start.min(buf.len());
+        let end = end.min(buf.len());
+        if start >= end {
+            return None;
+        }
+        Some(buf[start..end].to_string())
     }
 
     fn mouse_up(&mut self, ctx: &mut MouseCtx, _buf: &str) -> Status {
@@ -1271,11 +1314,12 @@ mod tests {
             click_count: 1,
             vim_mode: &mut mode,
         };
-        let r = w.handle_mouse(
+        let (r, yank) = w.handle_mouse(
             click_event(MouseEventKind::Down(MouseButton::Left), 1, 7),
             ctx,
         );
         assert_eq!(r, Status::Capture);
+        assert!(yank.is_none());
         assert_eq!(w.cursor_line, 1);
         assert_eq!(w.cursor_col, 7);
         assert!(w.selection_anchor.is_some());
@@ -1744,5 +1788,144 @@ mod tests {
         w.render(&buf, &mut slice, &ctx);
         // No scrollbar: rightmost column's bg untouched (Reset/None).
         assert_ne!(grid.cell(19, 0).style.bg, Some(track_bg));
+    }
+
+    #[test]
+    fn mouse_drag_yank_on_up() {
+        let mut w = make_win();
+        let mut mode = VimMode::Normal;
+        let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let rect = Rect::new(0, 0, 20, 5);
+        let viewport = viewport_for(&rows, rect);
+
+        // Down on 'h' (row 0, col 0)
+        let ctx = MouseCtx {
+            rows: &rows,
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 1,
+            vim_mode: &mut mode,
+        };
+        let (r, yank) = w.handle_mouse(
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
+            ctx,
+        );
+        assert_eq!(r, Status::Capture);
+        assert!(yank.is_none());
+
+        // Drag to 'o' in "world" (row 0, col 7)
+        let ctx = MouseCtx {
+            rows: &rows,
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 1,
+            vim_mode: &mut mode,
+        };
+        let (r, yank) = w.handle_mouse(
+            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 7),
+            ctx,
+        );
+        assert_eq!(r, Status::Consumed);
+        assert!(yank.is_none());
+
+        // Up — selected text "hello wo" is returned
+        let ctx = MouseCtx {
+            rows: &rows,
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 1,
+            vim_mode: &mut mode,
+        };
+        let (r, yank) = w.handle_mouse(
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 7),
+            ctx,
+        );
+        assert_eq!(r, Status::Consumed);
+        assert_eq!(yank, Some("hello w".into()));
+    }
+
+    #[test]
+    fn mouse_double_click_yank_word() {
+        let mut w = make_win();
+        let mut mode = VimMode::Normal;
+        let rows: Vec<String> = vec!["hello world".into()];
+        let rect = Rect::new(0, 0, 20, 5);
+        let viewport = viewport_for(&rows, rect);
+
+        // Double-click on "world" (row 0, col 8)
+        let ctx = MouseCtx {
+            rows: &rows,
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 2,
+            vim_mode: &mut mode,
+        };
+        let (r, yank) = w.handle_mouse(
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 8),
+            ctx,
+        );
+        assert_eq!(r, Status::Capture);
+        assert!(yank.is_none()); // yank on Down, not Up
+
+        // Up returns the selected word
+        let ctx = MouseCtx {
+            rows: &rows,
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 2,
+            vim_mode: &mut mode,
+        };
+        let (r, yank) = w.handle_mouse(
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 8),
+            ctx,
+        );
+        assert_eq!(r, Status::Consumed);
+        assert_eq!(yank, Some("world".into()));
+    }
+
+    #[test]
+    fn mouse_triple_click_yank_line() {
+        let mut w = make_win();
+        let mut mode = VimMode::Normal;
+        let rows: Vec<String> = vec!["hello world".into(), "second line".into()];
+        let rect = Rect::new(0, 0, 20, 5);
+        let viewport = viewport_for(&rows, rect);
+
+        // Triple-click on the first line
+        let ctx = MouseCtx {
+            rows: &rows,
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 3,
+            vim_mode: &mut mode,
+        };
+        let (r, yank) = w.handle_mouse(
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            ctx,
+        );
+        assert_eq!(r, Status::Capture);
+        assert!(yank.is_none());
+
+        // Up returns the selected line
+        let ctx = MouseCtx {
+            rows: &rows,
+            soft_breaks: &[],
+            hard_breaks: &hard_breaks(&rows),
+            viewport,
+            click_count: 3,
+            vim_mode: &mut mode,
+        };
+        let (r, yank) = w.handle_mouse(
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 4),
+            ctx,
+        );
+        assert_eq!(r, Status::Consumed);
+        assert_eq!(yank, Some("hello world".into()));
     }
 }

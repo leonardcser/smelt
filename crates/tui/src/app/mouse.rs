@@ -104,7 +104,12 @@ impl TuiApp {
                 if is_down {
                     self.app_focus = crate::app::AppFocus::Content;
                 }
-                self.handle_content_mouse(me, count);
+                let yank = self.handle_content_mouse(me, count);
+                if is_up {
+                    if let Some(text) = yank {
+                        self.yank_to_clipboard(text);
+                    }
+                }
             }
             return EventOutcome::Redraw;
         }
@@ -127,6 +132,19 @@ impl TuiApp {
         }
 
         EventOutcome::Noop
+    }
+
+    /// Push selected text to the system clipboard and kill ring.
+    /// Called on mouse-up when the transcript (or future dialog buffer)
+    /// had an active selection.
+    fn yank_to_clipboard(&mut self, text: String) {
+        if self.core.clipboard.write(&text).is_ok() {
+            self.core
+                .clipboard
+                .kill_ring
+                .record_clipboard_write(text.clone());
+        }
+        self.core.clipboard.kill_ring.set_with_linewise(text, false);
     }
 
     /// Scroll the pane under the mouse cursor by `delta` lines (positive
@@ -196,8 +214,10 @@ impl TuiApp {
     /// The prompt's source buffer ≠ wrapped display rows, so we
     /// translate window state into wrapped-row byte space before the
     /// call, run the dispatch, then translate cpos / anchors back to
-    /// source bytes. Yank text is re-sliced from source so soft-wrap
-    /// `\n`s don't leak into the clipboard.
+    /// source bytes.
+    ///
+    /// Prompt mouse yank is not implemented yet — the wrapped display
+    /// text would need byte-range translation back to source bytes.
     fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
         let Some(vp) = ui::UiHost::viewport_for(self, ui::PROMPT_WIN) else {
             return;
@@ -238,17 +258,15 @@ impl TuiApp {
             }
         }
 
-        // Build the same `EventCtx` shape the transcript uses.
-        let ctx = ui::EventCtx {
+        let mouse_ctx = ui::MouseCtx {
             rows: &wrap.rows,
             soft_breaks: &wrap.soft_breaks,
             hard_breaks: &wrap.hard_breaks,
             viewport: vp,
             click_count,
             vim_mode: &mut self.vim_mode,
-            clipboard: &mut self.core.clipboard,
         };
-        let action = self.input.win.handle(ui::Event::Mouse(me), ctx);
+        let (_, _yank) = self.input.win.handle_mouse(me, mouse_ctx);
 
         // Post-call: translate state on `state.win` back to source
         // bytes. `Window::mouse_up` already cleared its anchors, so
@@ -279,8 +297,6 @@ impl TuiApp {
                 );
             }
         }
-
-        let _ = action;
     }
 
     /// Drive a transcript-pane mouse event through `Window::handle_mouse`.
@@ -289,32 +305,27 @@ impl TuiApp {
     /// cell (so hidden-thinking summary rows route to the fold marker
     /// instead of empty padding), and lets the window mutate its own
     /// selection state.
-    fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let Some(rows) = ui::UiHost::rows_for(self, ui::TRANSCRIPT_WIN) else {
-            return;
-        };
+    ///
+    /// On `MouseUp`, returns the selected text so the host can yank
+    /// it to the clipboard.
+    fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) -> Option<String> {
+        let rows = ui::UiHost::rows_for(self, ui::TRANSCRIPT_WIN)?;
         if rows.is_empty() {
-            return;
+            return None;
         }
-        let Some((soft, hard)) = ui::UiHost::breaks_for(self, ui::TRANSCRIPT_WIN) else {
-            return;
-        };
-        let Some(viewport) = ui::UiHost::viewport_for(self, ui::TRANSCRIPT_WIN) else {
-            return;
-        };
+        let (soft, hard) = ui::UiHost::breaks_for(self, ui::TRANSCRIPT_WIN)?;
+        let viewport = ui::UiHost::viewport_for(self, ui::TRANSCRIPT_WIN)?;
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
-        let ctx = ui::EventCtx {
+        let mouse_ctx = ui::MouseCtx {
             rows: &rows,
             soft_breaks: &soft,
             hard_breaks: &hard,
             viewport,
             click_count,
             vim_mode: &mut self.vim_mode,
-            clipboard: &mut self.core.clipboard,
         };
-        let _ = self
-            .transcript_window
-            .handle(ui::Event::Mouse(snapped), ctx);
+        let (_, yank) = self.transcript_window.handle_mouse(snapped, mouse_ctx);
+        yank
     }
 
     /// Translate `me`'s screen column into a *selectable* column for the
