@@ -319,7 +319,7 @@ pub(crate) fn handle_event(
             // Plugins open their own confirm dialogs via
             // `smelt.ui.dialog.open` from inside `execute`. The
             // core no longer special-cases plugin tools here.
-            app.handle_plugin_tool(request_id, call_id, tool_name, args);
+            app.handle_tool_call(request_id, call_id, tool_name, args);
             SessionControl::Continue
         }
         EngineEvent::ToolHooksRequest {
@@ -329,7 +329,7 @@ pub(crate) fn handle_event(
             ..
         } => {
             let _guard = crate::lua::install_app_ptr(app);
-            let hooks = app.core.lua.evaluate_plugin_hooks(&tool_name, &args);
+            let hooks = app.core.lua.evaluate_hooks(&tool_name, &args);
             drop(_guard);
             app.core
                 .engine

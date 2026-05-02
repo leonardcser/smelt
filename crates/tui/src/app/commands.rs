@@ -272,11 +272,11 @@ impl TuiApp {
             self.drain_cells_pending();
         }
         let system_prompt = self.rebuild_system_prompt();
-        let plugin_tools = self.core.lua.plugin_tool_defs(self.core.config.mode);
+        let tools = self.core.lua.tool_defs(self.core.config.mode);
         self.core.engine.send(UiCommand::SetAgentMode {
             mode: self.core.config.mode,
             system_prompt: Some(system_prompt),
-            plugin_tools: Some(plugin_tools),
+            tools: Some(tools),
         });
     }
 

@@ -79,7 +79,7 @@ impl HeadlessApp {
             model_config_overrides: None,
             permission_overrides: None,
             system_prompt: None,
-            plugin_tools: vec![],
+            tools: vec![],
         });
 
         // In text mode, buffer assistant text and only print to stdout at the end.

@@ -21,10 +21,10 @@ pub enum AuxiliaryTask {
     Btw,
 }
 
-/// How a plugin tool interacts with concurrent tool execution.
+/// How a registered tool interacts with concurrent tool execution.
 ///
 /// `Concurrent` (default): runs alongside other tools via the engine's
-/// `pending_plugins` channel — good for pure data fetches with no UI.
+/// `pending_tools` channel — good for pure data fetches with no UI.
 ///
 /// `Sequential`: deferred until after every concurrent tool has
 /// finished, then dispatched one at a time. Used by tools that open a
@@ -39,7 +39,7 @@ pub enum ToolExecutionMode {
     Sequential,
 }
 
-/// A tool defined by a Lua plugin. Sent from TUI to engine so the engine
+/// A tool defined in Lua. Sent from TUI to engine so the engine
 /// can include it in LLM tool definitions and proxy execution back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
@@ -51,25 +51,25 @@ pub struct ToolDef {
     pub modes: Option<Vec<AgentMode>>,
     #[serde(default)]
     pub execution_mode: ToolExecutionMode,
-    /// When `true`, this plugin tool replaces the core Rust tool of the
+    /// When `true`, this tool replaces the core Rust tool of the
     /// same name. The engine drops the core definition from the LLM
-    /// schema and dispatches calls to the plugin instead. When `false`
+    /// schema and dispatches calls to Lua instead. When `false`
     /// (default), registering a name that collides with a core tool
     /// is an error reported back to the user.
     #[serde(default)]
     pub override_core: bool,
-    /// Hook signals declared by the plugin. Each `true` flag tells the
+    /// Hook signals declared by the tool. Each `true` flag tells the
     /// engine to round-trip through `ToolHooksRequest` before
     /// dispatching the tool — to ask the user for permission, run a
     /// preflight check, etc. When all flags are false the engine
     /// dispatches the tool directly (today's behavior, no permission
-    /// gate). Plugin tools that touch security-sensitive surfaces
+    /// gate). Tools that touch security-sensitive surfaces
     /// (bash, file mutation) MUST opt in.
     #[serde(default)]
     pub hooks: ToolHookFlags,
 }
 
-/// Which permission hooks a plugin tool has registered. Sent with
+/// Which permission hooks a tool has registered. Sent with
 /// `ToolDef` so the engine knows whether to ask the TUI to
 /// evaluate them per-call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ impl ToolHookFlags {
     }
 }
 
-/// Result of evaluating a plugin tool's permission hooks for a specific
+/// Result of evaluating a tool's permission hooks for a specific
 /// invocation. Returned by the TUI in response to
 /// `EngineEvent::ToolHooksRequest`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -217,7 +217,7 @@ pub enum EngineEvent {
     /// Engine is shutting down.
     Shutdown { reason: Option<String> },
 
-    /// Engine needs the TUI to execute a plugin-defined tool.
+    /// Engine needs the TUI to execute a Lua-defined tool.
     ToolDispatch {
         request_id: u64,
         call_id: String,
@@ -225,7 +225,7 @@ pub enum EngineEvent {
         args: HashMap<String, serde_json::Value>,
     },
 
-    /// Engine asks the TUI to evaluate a plugin tool's permission
+    /// Engine asks the TUI to evaluate a tool's permission
     /// hooks (`needs_confirm`, `approval_patterns`, `preflight`) for a
     /// specific invocation. The TUI replies with
     /// `UiCommand::ToolHooksResponse`, after which the engine
@@ -238,7 +238,7 @@ pub enum EngineEvent {
         mode: AgentMode,
     },
 
-    /// Result of a core-tool side call requested by a Lua plugin via
+    /// Result of a core-tool side call requested by Lua via
     /// `smelt.tools.call`. Streamed back so the suspended Lua coroutine
     /// can resume with the tool's output.
     CoreToolResult {
@@ -273,7 +273,7 @@ pub enum UiCommand {
         /// Per-turn model parameter overrides (from custom commands).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         model_config_overrides: Option<ModelConfigOverrides>,
-        /// Per-turn permission overrides (from custom commands or Lua plugins).
+        /// Per-turn permission overrides (from custom commands or Lua).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         permission_overrides: Option<PermissionOverrides>,
         /// Full system prompt assembled by the TUI (from prompt sections).
@@ -281,11 +281,11 @@ pub enum UiCommand {
         /// its built-in template.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         system_prompt: Option<String>,
-        /// Plugin-defined tools registered by Lua plugins. The engine
+        /// Tools registered in Lua. The engine
         /// includes these in the LLM tool definitions and proxies execution
         /// back to the TUI via `ToolDispatch`.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
-        plugin_tools: Vec<ToolDef>,
+        tools: Vec<ToolDef>,
     },
 
     /// Inject a message mid-turn (steering / type-ahead).
@@ -307,9 +307,9 @@ pub enum UiCommand {
         /// Updated system prompt for the new mode (if managed by TUI).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         system_prompt: Option<String>,
-        /// Updated plugin tools for the new mode.
+        /// Updated tools for the new mode.
         #[serde(skip_serializing_if = "Option::is_none", default)]
-        plugin_tools: Option<Vec<ToolDef>>,
+        tools: Option<Vec<ToolDef>>,
     },
 
     /// Change reasoning effort while the engine is running.
@@ -349,7 +349,7 @@ pub enum UiCommand {
         generation: u64,
     },
 
-    /// One-shot LLM call initiated by a Lua plugin. The engine spawns
+    /// One-shot LLM call initiated by Lua. The engine spawns
     /// a fire-and-forget request routed through `task`'s auxiliary
     /// model (or the primary model when the routing slot is empty) and
     /// returns the response as `EngineAskResponse`.
@@ -361,7 +361,7 @@ pub enum UiCommand {
         task: AuxiliaryTask,
     },
 
-    /// Result of a plugin tool execution (response to `ToolDispatch`).
+    /// Result of a tool execution (response to `ToolDispatch`).
     ToolResult {
         request_id: u64,
         call_id: String,
@@ -369,15 +369,15 @@ pub enum UiCommand {
         is_error: bool,
     },
 
-    /// Result of evaluating a plugin tool's permission hooks (response
+    /// Result of evaluating a tool's permission hooks (response
     /// to `EngineEvent::ToolHooksRequest`).
     ToolHooksResponse { request_id: u64, hooks: ToolHooks },
 
-    /// Side-call from a Lua plugin to a core (or another plugin) tool.
+    /// Side-call from Lua to a core tool.
     /// The engine runs the named tool and replies with
-    /// `EngineEvent::CoreToolResult`. The plugin's parent `call_id` is
+    /// `EngineEvent::CoreToolResult`. The parent `call_id` is
     /// reused so streamed output (e.g. `ToolOutput`) is grouped under
-    /// the visible plugin invocation.
+    /// the visible tool invocation.
     CallCoreTool {
         request_id: u64,
         parent_call_id: String,
