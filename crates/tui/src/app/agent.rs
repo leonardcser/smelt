@@ -64,7 +64,7 @@ impl TuiApp {
         self.flush_lua_callbacks();
 
         let system_prompt = self.rebuild_system_prompt();
-        let plugin_tools = self.core.lua.plugin_tool_defs(self.core.config.mode);
+        let tools = self.core.lua.tool_defs(self.core.config.mode);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -83,7 +83,7 @@ impl TuiApp {
             model_config_overrides: None,
             permission_overrides: None,
             system_prompt: Some(system_prompt),
-            plugin_tools,
+            tools,
         });
 
         TurnState {
@@ -255,7 +255,7 @@ impl TuiApp {
             model_config_overrides,
             permission_overrides,
             system_prompt: None,
-            plugin_tools: vec![],
+            tools: vec![],
         });
 
         TurnState {
@@ -356,7 +356,7 @@ impl TuiApp {
     /// completes synchronously and the result is forwarded right away.
     /// A handler that yields (e.g. via `smelt.ui.dialog.open`) parks;
     /// its result arrives later through `drive_tasks()`.
-    pub(super) fn handle_plugin_tool(
+    pub(super) fn handle_tool_call(
         &mut self,
         request_id: u64,
         call_id: String,
@@ -366,12 +366,12 @@ impl TuiApp {
         let mode = self.core.config.mode;
         let session_id = self.core.session.id.clone();
         let session_dir = crate::session::dir_for(&self.core.session);
-        match self.core.lua.execute_plugin_tool(
+        match self.core.lua.execute_tool(
             &tool_name,
             &args,
             request_id,
             &call_id,
-            crate::lua::PluginToolEnv {
+            crate::lua::ToolEnv {
                 mode,
                 session_id: &session_id,
                 session_dir: &session_dir,

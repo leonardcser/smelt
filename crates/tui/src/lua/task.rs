@@ -228,7 +228,7 @@ fn fail_completion(completion: &TaskCompletion, msg: &str, outputs: &mut Vec<Tas
         outputs.push(TaskDriveOutput::ToolComplete {
             request_id: *request_id,
             call_id: call_id.clone(),
-            content: format!("plugin tool error: {msg}"),
+            content: format!("tool error: {msg}"),
             is_error: true,
         });
     }
@@ -288,7 +288,7 @@ fn coerce_tool_result(v: &LuaValue) -> (String, bool) {
         LuaValue::Nil => (String::new(), false),
         other => (
             format!(
-                "plugin tool returned non-string value: {}",
+                "tool returned non-string value: {}",
                 other.type_name()
             ),
             true,

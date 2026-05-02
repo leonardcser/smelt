@@ -35,7 +35,7 @@ pub(crate) use app_ref::{
 };
 
 pub(crate) use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
-pub(crate) use tasks::PluginToolEnv;
+pub(crate) use tasks::ToolEnv;
 
 /// Outcome of invoking a plugin tool handler.
 pub(crate) enum ToolExecResult {
@@ -271,7 +271,7 @@ pub(crate) struct LuaHandle {
 /// preflight = fn }`. When at least one hook is set, the engine
 /// round-trips through `ToolHooksRequest` per call before
 /// dispatching the tool — same Allow / Deny / Ask flow core tools use.
-pub(crate) struct PluginToolHandles {
+pub(crate) struct ToolHandles {
     pub(crate) execute: LuaHandle,
     pub(crate) needs_confirm: Option<LuaHandle>,
     pub(crate) approval_patterns: Option<LuaHandle>,
@@ -326,7 +326,7 @@ pub(crate) struct LuaShared {
     /// order plugins called `smelt.statusline.register`. Re-registering
     /// an existing name updates in place without changing position.
     pub(crate) statusline_sources: Mutex<Vec<(String, StatusSource)>>,
-    pub(crate) plugin_tools: Mutex<HashMap<String, PluginToolHandles>>,
+    pub(crate) tools: Mutex<HashMap<String, ToolHandles>>,
     pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub(crate) next_id: AtomicU64,
     /// Separate counter for buffer IDs minted by `smelt.buf.create`.
@@ -407,7 +407,7 @@ impl Default for LuaShared {
             commands: Mutex::new(HashMap::new()),
             keymaps: Mutex::new(HashMap::new()),
             statusline_sources: Mutex::new(Vec::new()),
-            plugin_tools: Mutex::new(HashMap::new()),
+            tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             next_buf_id: AtomicU64::new(ui::LUA_BUF_ID_BASE),
@@ -1183,10 +1183,10 @@ mod tests {
             .expect("install_test_notify");
     }
 
-    fn test_env() -> PluginToolEnv<'static> {
+    fn test_env() -> ToolEnv<'static> {
         static EMPTY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let p = EMPTY_PATH.get_or_init(std::path::PathBuf::new);
-        PluginToolEnv {
+        ToolEnv {
             mode: protocol::AgentMode::Apply,
             session_id: "",
             session_dir: p,
@@ -1412,7 +1412,7 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_plugins();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let defs = rt.plugin_tool_defs(protocol::AgentMode::Normal);
+        let defs = rt.tool_defs(protocol::AgentMode::Normal);
         let ask = defs
             .iter()
             .find(|d| d.name == "ask_user_question")
@@ -1421,7 +1421,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_tool_summary_comes_from_lua() {
+    fn tool_summary_comes_from_lua() {
         let rt = LuaRuntime::new();
         rt.lua
             .load(
@@ -1457,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_tool_runs_as_task_immediate() {
+    fn tool_runs_as_task_immediate() {
         let rt = LuaRuntime::new();
         rt.lua
             .load(
@@ -1474,7 +1474,7 @@ mod tests {
             .unwrap();
         let mut args = std::collections::HashMap::new();
         args.insert("who".into(), serde_json::json!("world"));
-        match rt.execute_plugin_tool("echo", &args, 1, "c1", test_env()) {
+        match rt.execute_tool("echo", &args, 1, "c1", test_env()) {
             ToolExecResult::Immediate { content, is_error } => {
                 assert_eq!(content, "hi world");
                 assert!(!is_error);
@@ -1484,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_tool_yield_returns_pending_then_tool_complete() {
+    fn tool_yield_returns_pending_then_tool_complete() {
         let rt = LuaRuntime::new();
         rt.lua
             .load(
@@ -1503,7 +1503,7 @@ mod tests {
             .exec()
             .unwrap();
         let args = std::collections::HashMap::new();
-        match rt.execute_plugin_tool("wait_then_yes", &args, 7, "c9", test_env()) {
+        match rt.execute_tool("wait_then_yes", &args, 7, "c9", test_env()) {
             ToolExecResult::Pending => {}
             ToolExecResult::Immediate { .. } => panic!("expected pending after yield"),
         }

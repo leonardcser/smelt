@@ -2,7 +2,7 @@
 //! callbacks (`register_callback`, `invoke_callback`, `fire_callback`),
 //! the parked-task resume API (`resolve_external` + `pump_task_events`),
 //! the `LuaTaskRuntime` bridge (`drive_tasks`), and plugin-tool
-//! execution (`plugin_tool_defs`, `execute_plugin_tool`).
+//! execution (`tool_defs`, `execute_tool`).
 
 #[cfg(test)]
 use super::LuaHandle;
@@ -15,7 +15,7 @@ use std::time::Instant;
 /// Per-call environment passed to a plugin tool's `execute` handler.
 /// Mirrors the call-scoped fields of the Rust `ToolContext` and is
 /// surfaced to Lua as the second argument of `execute(args, ctx)`.
-pub(crate) struct PluginToolEnv<'a> {
+pub(crate) struct ToolEnv<'a> {
     pub(crate) mode: protocol::AgentMode,
     pub(crate) session_id: &'a str,
     pub(crate) session_dir: &'a std::path::Path,
@@ -266,10 +266,10 @@ impl LuaRuntime {
     /// Return protocol-level plugin tool definitions for registered
     /// tools. The TUI sends these with `StartTurn` so the engine
     /// includes them in LLM tool definitions.
-    pub(crate) fn plugin_tool_defs(&self, _mode: protocol::AgentMode) -> Vec<protocol::ToolDef> {
+    pub(crate) fn tool_defs(&self, _mode: protocol::AgentMode) -> Vec<protocol::ToolDef> {
         let handlers = self
             .shared
-            .plugin_tools
+            .tools
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut defs = Vec::new();
@@ -360,7 +360,7 @@ impl LuaRuntime {
     /// hook is treated as if it returned its no-op default (None /
     /// empty). The engine consumes the result via
     /// `UiCommand::ToolHooksResponse`.
-    pub(crate) fn evaluate_plugin_hooks(
+    pub(crate) fn evaluate_hooks(
         &self,
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
@@ -373,7 +373,7 @@ impl LuaRuntime {
         let (needs_confirm_fn, approval_patterns_fn, preflight_fn) = {
             let handlers = self
                 .shared
-                .plugin_tools
+                .tools
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let Some(h) = handlers.get(tool_name) else {
@@ -397,7 +397,7 @@ impl LuaRuntime {
         let args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
-                self.record_error(format!("plugin hooks: build args: {e}"));
+                self.record_error(format!("tool hooks: build args: {e}"));
                 return out;
             }
         };
@@ -405,7 +405,7 @@ impl LuaRuntime {
         if let Some(func) = needs_confirm_fn {
             match func.call::<Option<String>>(args_table.clone()) {
                 Ok(s) => out.needs_confirm = s,
-                Err(e) => self.record_error(format!("plugin hook needs_confirm: {e}")),
+                Err(e) => self.record_error(format!("tool hook needs_confirm: {e}")),
             }
         }
         if let Some(func) = approval_patterns_fn {
@@ -417,13 +417,13 @@ impl LuaRuntime {
                         .collect();
                 }
                 Ok(None) => {}
-                Err(e) => self.record_error(format!("plugin hook approval_patterns: {e}")),
+                Err(e) => self.record_error(format!("tool hook approval_patterns: {e}")),
             }
         }
         if let Some(func) = preflight_fn {
             match func.call::<Option<String>>(args_table) {
                 Ok(s) => out.preflight_error = s,
-                Err(e) => self.record_error(format!("plugin hook preflight: {e}")),
+                Err(e) => self.record_error(format!("tool hook preflight: {e}")),
             }
         }
 
@@ -431,7 +431,7 @@ impl LuaRuntime {
     }
 
     /// Build a Lua args table from a serde_json args map. Pulled out of
-    /// `execute_plugin_tool` so `evaluate_plugin_hooks` shares the same
+    /// `execute_tool` so `evaluate_hooks` shares the same
     /// conversion path.
     fn args_to_lua_table(
         &self,
@@ -450,15 +450,15 @@ impl LuaRuntime {
     /// registered handler. Returns `Immediate` if the handler
     /// completes synchronously, `Pending` if it yields and will
     /// deliver later via `drive_tasks`.
-    pub(crate) fn execute_plugin_tool(
+    pub(crate) fn execute_tool(
         &self,
         tool_name: &str,
         args: &std::collections::HashMap<String, serde_json::Value>,
         request_id: u64,
         call_id: &str,
-        env: PluginToolEnv<'_>,
+        env: ToolEnv<'_>,
     ) -> ToolExecResult {
-        let PluginToolEnv {
+        let ToolEnv {
             mode,
             session_id,
             session_dir,
@@ -466,12 +466,12 @@ impl LuaRuntime {
         let func = {
             let handlers = self
                 .shared
-                .plugin_tools
+                .tools
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let Some(handle) = handlers.get(tool_name) else {
                 return ToolExecResult::Immediate {
-                    content: format!("no plugin tool registered: {tool_name}"),
+                    content: format!("no tool registered: {tool_name}"),
                     is_error: true,
                 };
             };
@@ -482,7 +482,7 @@ impl LuaRuntime {
                 Ok(f) => f,
                 Err(_) => {
                     return ToolExecResult::Immediate {
-                        content: format!("plugin tool handler not found: {tool_name}"),
+                        content: format!("tool handler not found: {tool_name}"),
                         is_error: true,
                     };
                 }
@@ -493,7 +493,7 @@ impl LuaRuntime {
             Ok(t) => t,
             Err(e) => {
                 return ToolExecResult::Immediate {
-                    content: format!("plugin tool arg table: {e}"),
+                    content: format!("tool arg table: {e}"),
                     is_error: true,
                 };
             }
@@ -502,11 +502,11 @@ impl LuaRuntime {
         // Per-call ctx table — equivalent to ToolContext for core tools.
         // call_id, mode, session_dir, session_id let the plugin tool
         // route output, scope filesystem operations, etc.
-        let ctx_table = match build_plugin_ctx(&self.lua, call_id, mode, session_id, session_dir) {
+        let ctx_table = match build_tool_ctx(&self.lua, call_id, mode, session_id, session_dir) {
             Ok(t) => t,
             Err(e) => {
                 return ToolExecResult::Immediate {
-                    content: format!("plugin tool ctx table: {e}"),
+                    content: format!("tool ctx table: {e}"),
                     is_error: true,
                 };
             }
@@ -535,7 +535,7 @@ impl LuaRuntime {
             },
         ) {
             return ToolExecResult::Immediate {
-                content: format!("plugin tool spawn: {e}"),
+                content: format!("tool spawn: {e}"),
                 is_error: true,
             };
         }
@@ -582,12 +582,12 @@ fn populate_payload_table(table: &mlua::Table, payload: &ui::Payload) -> mlua::R
 }
 
 /// Build the per-call ctx table passed as the second argument to
-/// plugin tool `execute` handlers. Mirrors the shape of `ToolContext`
+/// tool `execute` handlers. Mirrors the shape of `ToolContext`
 /// for core Rust tools but only exposes call-scoped data — fields
 /// `event_tx`, `cancel`, `processes`, `file_locks` are reached via
 /// dedicated `smelt.process.*` / `smelt.fs.*` primitives that resolve
 /// the TuiApp state internally.
-fn build_plugin_ctx(
+fn build_tool_ctx(
     lua: &Lua,
     call_id: &str,
     mode: protocol::AgentMode,

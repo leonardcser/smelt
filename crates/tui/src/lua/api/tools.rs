@@ -4,7 +4,7 @@
 //! `smelt.tools.call` mints request ids for and yields after.
 
 use super::{lua_table_to_args, lua_table_to_json};
-use crate::lua::{LuaHandle, LuaShared, PluginToolHandles};
+use crate::lua::{LuaHandle, LuaShared, ToolHandles};
 use mlua::prelude::*;
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         if let Ok(mode_str) = def.get::<String>("execution_mode") {
             meta.set("execution_mode", mode_str)?;
         }
-        // Hook flag bits — let `plugin_tool_defs` build
+        // Hook flag bits — let `tool_defs` build
         // `ToolHookFlags` without reaching back into the
         // handles map.
         meta.set("hook_needs_confirm", needs_confirm_handle.is_some())?;
@@ -66,10 +66,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         }
         lua.set_named_registry_value(&format!("__pt_meta_{name}"), meta)?;
 
-        if let Ok(mut map) = s.plugin_tools.lock() {
+        if let Ok(mut map) = s.tools.lock() {
             map.insert(
                 name,
-                PluginToolHandles {
+                ToolHandles {
                     execute: LuaHandle { key },
                     needs_confirm: needs_confirm_handle,
                     approval_patterns: approval_patterns_handle,
@@ -85,7 +85,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         tools_tbl.set(
             "unregister",
             lua.create_function(move |_, name: String| {
-                if let Ok(mut map) = s.plugin_tools.lock() {
+                if let Ok(mut map) = s.tools.lock() {
                     map.remove(&name);
                 }
                 Ok(())
