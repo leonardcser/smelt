@@ -35,9 +35,9 @@ fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
         .to_string()
 }
 use protocol::AgentMode;
-use rules::{
-    build_mode, check_ruleset, compile_patterns, merge_mode, ModePerms, RawConfig, RawPerms,
-};
+use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerms};
+#[cfg(test)]
+use rules::compile_patterns;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -84,7 +84,7 @@ impl Permissions {
     /// Create a clone with per-turn permission overrides layered on top.
     /// Override rules are prepended (checked first) to the existing rules
     /// for every mode.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_overrides(&self, overrides: &protocol::PermissionOverrides) -> Self {
         let mut cloned = self.clone();
         fn apply_to_mode(mode: &mut ModePerms, overrides: &protocol::PermissionOverrides) {

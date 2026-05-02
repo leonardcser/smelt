@@ -1116,4 +1116,130 @@ mod tests {
             other => panic!("expected Table, got {other:?}"),
         }
     }
+
+    #[test]
+    fn builtin_cells_queue_subscribers_on_set() {
+        // P6.f: every state-changing event in the engine pipeline
+        // reaches the right cell setter and queues subscribers.
+        let lua = Lua::new();
+        let mut cells = build_with_builtins(BuiltinSeeds {
+            vim_mode: "Insert".into(),
+            agent_mode: "normal".into(),
+            model: "m".into(),
+            reasoning: "off".into(),
+            cwd: "/".into(),
+            session_title: String::new(),
+            branch: String::new(),
+        });
+
+        // Subscribe to a mix of stateful and event-shaped built-in cells.
+        for name in [
+            "agent_mode",
+            "turn_complete",
+            "turn_error",
+            "tool_start",
+            "tool_end",
+            "history",
+            "confirm_requested",
+            "confirm_resolved",
+        ] {
+            cells
+                .subscribe_kind(name, SubscriberKind::Lua(handle(&lua, "function() end")))
+                .expect("builtin cell should be declared");
+        }
+
+        cells.set_dyn("agent_mode", Rc::new("apply".to_string()));
+        cells.set_dyn(
+            "turn_complete",
+            Rc::new(TurnMeta {
+                elapsed_ms: 100,
+                avg_tps: None,
+                interrupted: false,
+                tool_elapsed: std::collections::HashMap::new(),
+            }),
+        );
+        cells.set_dyn(
+            "turn_error",
+            Rc::new(TurnError {
+                message: "err".into(),
+            }),
+        );
+        cells.set_dyn(
+            "tool_start",
+            Rc::new(ToolStart {
+                tool: "bash".into(),
+                args: std::collections::HashMap::new(),
+            }),
+        );
+        cells.set_dyn(
+            "tool_end",
+            Rc::new(ToolEnd {
+                tool: "bash".into(),
+                is_error: false,
+                elapsed_ms: None,
+            }),
+        );
+        cells.set_dyn(
+            "history",
+            Rc::new(HistoryDelta {
+                kind: "append".into(),
+                count: 1,
+            }),
+        );
+        cells.set_dyn(
+            "confirm_requested",
+            Rc::new(ConfirmRequested {
+                handle_id: 1,
+                tool_name: "bash".into(),
+                desc: "ls".into(),
+                summary: None,
+                args: std::collections::HashMap::new(),
+                outside_dir: None,
+                approval_patterns: vec![],
+            }),
+        );
+        cells.set_dyn(
+            "confirm_resolved",
+            Rc::new(ConfirmResolved {
+                handle_id: 1,
+                decision: "yes".into(),
+            }),
+        );
+
+        let fires = cells.drain_pending();
+        let names: std::collections::HashSet<_> = fires.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            fires.len(),
+            8,
+            "missing cells: {:?}",
+            [
+                "agent_mode",
+                "turn_complete",
+                "turn_error",
+                "tool_start",
+                "tool_end",
+                "history",
+                "confirm_requested",
+                "confirm_resolved"
+            ]
+            .iter()
+            .filter(|n| !names.contains(**n))
+            .collect::<Vec<_>>()
+        );
+        for expected in [
+            "agent_mode",
+            "turn_complete",
+            "turn_error",
+            "tool_start",
+            "tool_end",
+            "history",
+            "confirm_requested",
+            "confirm_resolved",
+        ] {
+            assert!(
+                names.contains(expected),
+                "expected {expected} to fire subscribers"
+            );
+        }
+    }
 }

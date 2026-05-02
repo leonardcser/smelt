@@ -2,7 +2,7 @@
 
 Decisions and rationale for smelt's target shape. Pairs with two siblings:
 
-- **`tui-ui-architecture-target.puml`** — class diagram. _How things relate
+- **`tui-ui-architecture.puml`** — class diagram. _How things relate
   structurally._ Types, fields, packages, arrows. No prose.
 - **`REFACTOR.md`** — implementation plan. _How we get there._ Step-by-step
   migration, ordering, deletions per step.

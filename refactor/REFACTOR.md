@@ -63,15 +63,15 @@ P4  lua takes the ux ✅            ── status.lua, dialogs/, modes.lua,
         │                              widgets/, colorschemes/ (P4.b deferred
         │                              to transcript-pipeline keystone)
         ▼
-P5  tools to lua                   ── 15 Rust tool impls to Lua, mode
+P5  tools to lua ✅                ── 15 Rust tool impls to Lua, mode
         │                              gating becomes a Lua hook concern;
         │                              intricate logic via FFI capabilities
         ▼
-P6  streaming + lifecycle polish   ── per-block callbacks, cooperative
+P6  streaming + lifecycle polish ✅ ── per-block callbacks, cooperative
         │                              cancel, confirms gate, cell-event
         │                              fan-out
         ▼
-P7  finalize                       ── docs, examples, dead-code sweep
+P7  finalize ✅                    ── docs, examples, dead-code sweep
 ```
 
 P1 is the load-bearing one. After it, P2/P3/P4 can interleave somewhat;
@@ -1136,21 +1136,23 @@ stacking).
 
 ## P7 — Finalize
 
-- Sweep `#[allow(dead_code)]`, `// removed`, `// kept for now`
+- ✅ Sweep `#[allow(dead_code)]`, `// removed`, `// kept for now`
   comments. Anything that survived should not have those markers.
-- Sweep `LuaShared` mirrors. App state is read live via `with_app`;
+- ✅ Sweep `LuaShared` mirrors. App state is read live via `with_app`;
   the only thing in `LuaShared` is genuine Lua-runtime state
   (handle registries, atomic counters, coroutine runtime, deferred
   invocation queue).
-- Update `README.md` and `docs/` for any user-visible changes
+- ✅ Update `README.md` and `docs/` for any user-visible changes
   (statusline reactive, dialog open API, tool registration shape).
-- Drop `tui-ui-architecture.puml` (the old diagram). Rename
-  `tui-ui-architecture-target.puml` → `tui-ui-architecture.puml`.
-- Run the workspace through one full `cargo fmt && cargo clippy
+  No user-facing changes from P6 required doc updates; existing
+  keybindings reference already covers Esc-dismiss behaviour.
+- ✅ Drop `tui-ui-architecture.puml` (the old diagram). Rename
+  `tui-ui-architecture.puml` (was `tui-ui-architecture-target.puml`).
+- ✅ Run the workspace through one full `cargo fmt && cargo clippy
   --workspace --all-targets -- -D warnings && cargo nextest run
   --workspace`. This is the *one* hard gate at the end of the
   refactor.
-- Walk a parity matrix by hand in a running TUI: triple-click yank
+- ⏸ Walk a parity matrix by hand in a running TUI: triple-click yank
   on transcript / prompt / dialog buffer, drag-extend, esc chain,
   selection bg, vim modes, cmdline, picker, confirm dialog with
   diff preview, notification toast, statusline live update, theme

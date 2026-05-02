@@ -28,12 +28,6 @@ impl ToolResult {
             metadata: None,
         }
     }
-
-    #[allow(dead_code)]
-    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
 }
 
 /// Context provided to tools during execution. All Tool impls left in
