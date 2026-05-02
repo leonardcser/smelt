@@ -1093,7 +1093,6 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.commands.btw",
     "smelt.commands.export",
     "smelt.dialogs.rewind",
-    "smelt.plugins.background_commands",
     "smelt.commands.help",
     "smelt.dialogs.permissions",
     "smelt.dialogs.resume",
@@ -1120,6 +1119,7 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.notebook_edit",
     "smelt.tools.web_fetch",
     "smelt.tools.bash",
+    "smelt.plugins.background_commands",
 ];
 
 /// Register a custom Lua package searcher that resolves `require("smelt.…")`

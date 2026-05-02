@@ -1,11 +1,59 @@
 -- Built-in background_commands plugin.
 --
--- Registers the `read_process_output` and `stop_process` tools that
--- the LLM uses to interact with backgrounded jobs, plus the `/ps`
--- slash command for managing them from the TUI. The
--- `run_in_background` flag itself lives on `tools/bash.lua` — both
--- the foreground streaming branch and the `spawn_bg` branch are one
--- registration there.
+-- Overrides the `bash` tool to add a `run_in_background` parameter,
+-- and registers the `read_process_output` and `stop_process` tools
+-- that the LLM uses to interact with backgrounded jobs, plus the `/ps`
+-- slash command for managing them from the TUI.
+
+local bash = require("smelt.tools.bash")
+
+-- ── bash override (adds run_in_background) ────────────────────────────
+
+local BG_PARAM_DESC =
+"Run the command in the background and return a process ID. Use read_process_output to check output and stop_process to kill it."
+
+local function execute(args, ctx)
+  if args.run_in_background then
+    local command = args.command or ""
+
+    local err = smelt.shell.check_interactive(command)
+    if err then
+      return { content = err, is_error = true }
+    end
+    err = smelt.shell.check_background_op(command)
+    if err then
+      return { content = err, is_error = true }
+    end
+
+    local ok, id_or_err = pcall(smelt.process.spawn_bg, command)
+    if not ok then
+      return { content = tostring(id_or_err), is_error = true }
+    end
+    return "background process started with id: " .. id_or_err
+  end
+
+  return bash.execute(args, ctx)
+end
+
+smelt.tools.register({
+  name = "bash",
+  override = true,
+  description =
+  "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). For long-running processes set run_in_background=true. Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
+  parameters = {
+    type = "object",
+    properties = {
+      command = { type = "string", description = "Shell command to execute" },
+      description = { type = "string", description = "Short (max 10 words) description of what this command does" },
+      timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 120000, max: 600000)" },
+      run_in_background = { type = "boolean", description = BG_PARAM_DESC },
+    },
+    required = { "command" },
+  },
+  needs_confirm = function(args) return args.command or "" end,
+  approval_patterns = bash.approval_patterns,
+  execute = execute,
+})
 
 -- ── read_process_output ───────────────────────────────────────────────
 
