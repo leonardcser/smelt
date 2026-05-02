@@ -330,7 +330,6 @@ impl TuiApp {
                                 out
                             });
 
-                            let summary = tool_arg_summary(&tc.function.name, &args);
                             let status = if let Some(ref out) = output {
                                 if out.content.contains("denied this tool call")
                                     || out.content.contains("blocked this tool call")
@@ -347,6 +346,7 @@ impl TuiApp {
                             let elapsed = tool_elapsed
                                 .get(&tc.id)
                                 .map(|ms| Duration::from_millis(*ms));
+                            let summary = self.core.lua.tool_summary(&tc.function.name, &args);
                             self.push_tool_call(
                                 Block::ToolCall {
                                     call_id: tc.id.clone(),

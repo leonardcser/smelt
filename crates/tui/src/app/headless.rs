@@ -75,7 +75,11 @@ impl HeadlessSink {
             let c = ansi_fg(crossterm::style::Color::AnsiValue(77));
             format!("{c}✓{r}")
         };
-        eprintln!("{mark} {d}{tool_name}{r} {summary} {d}({time}){r}");
+        if summary.is_empty() {
+            eprintln!("{mark} {d}{tool_name}{r} {d}({time}){r}");
+        } else {
+            eprintln!("{mark} {d}{tool_name}{r} {summary} {d}({time}){r}");
+        }
 
         if !output.is_empty() {
             for line in output.lines() {

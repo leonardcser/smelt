@@ -4,10 +4,16 @@
 //! and decide whether any of them escape the configured workspace root.
 
 use crate::permissions::bash::strip_heredoc_bodies;
-use crate::tools::str_arg;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
 
 // ── Workspace path restriction ───────────────────────────────────────────────
 

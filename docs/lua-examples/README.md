@@ -69,7 +69,8 @@ hangs off `smelt.*` — flat namespace, Neovim-style.
 
 ### Tools / Prompt sections
 
-- `smelt.tools.register({name, description, parameters, execute, …})` — register a Lua tool
+- `smelt.tools.register({name, description, parameters, execute, summary?, …})` — register a Lua tool
+- `summary(args)` is optional; it controls the one-line label shown in the transcript and headless logs for that tool call. If omitted, smelt uses a Lua-side default summary based on common argument names such as `command`, `file_path`, `path`, `url`, and `query`.
 - `smelt.tools.unregister(name)` / `smelt.tools.resolve(request_id, call_id, result)`
 - `smelt.prompt.set_section(name, content)` / `remove_section(name)` — custom prompt chrome
 

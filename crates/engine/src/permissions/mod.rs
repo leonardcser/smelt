@@ -24,8 +24,14 @@ pub use rules::Decision;
 use rules::RuleSet;
 pub use rules::DEFAULT_BASH_ALLOW;
 
-use crate::tools::str_arg;
 use bash::{has_output_redirection, is_cd_command};
+
+fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
 use protocol::AgentMode;
 use rules::{build_mode, check_ruleset, compile_patterns, merge_mode, ModePerms, RawConfig};
 use serde_json::Value;

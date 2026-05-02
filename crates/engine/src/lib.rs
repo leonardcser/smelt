@@ -13,8 +13,10 @@ pub mod permissions;
 pub mod pricing;
 pub mod provider;
 pub mod redact;
+pub(crate) mod result_dedup;
 pub(crate) mod skills;
 pub mod tools;
+pub(crate) mod trim;
 
 use protocol::{EngineEvent, UiCommand};
 use std::collections::HashMap;

@@ -320,6 +320,40 @@ impl LuaRuntime {
         defs
     }
 
+    /// Compute the one-line summary for a registered plugin tool by
+    /// calling its Lua-side `summary(args)` function, when present.
+    pub(crate) fn tool_summary(
+        &self,
+        tool_name: &str,
+        args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> String {
+        let meta = match self
+            .lua
+            .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
+        {
+            Ok(meta) => meta,
+            Err(_) => return String::new(),
+        };
+        let func = match meta.get::<mlua::Function>("summary") {
+            Ok(func) => func,
+            Err(_) => return String::new(),
+        };
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool summary: build args: {e}"));
+                return String::new();
+            }
+        };
+        match func.call::<String>(args_table) {
+            Ok(summary) => summary,
+            Err(e) => {
+                self.record_error(format!("tool summary `{tool_name}`: {e}"));
+                String::new()
+            }
+        }
+    }
+
     /// Run the plugin tool's permission hooks for one invocation. Each
     /// hook is called synchronously and its result packaged into
     /// `ToolHooks`. Errors raised by a hook are recorded and the

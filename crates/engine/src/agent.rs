@@ -2,7 +2,7 @@ use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialC
 use crate::log;
 use crate::permissions::{Decision, Permissions, RuntimeApprovals};
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
-use crate::tools::{self, ToolContext, ToolDispatcher, ToolRegistry, ToolResult};
+use crate::tools::{ToolContext, ToolDispatcher, ToolRegistry, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,
@@ -1140,13 +1140,11 @@ impl<'a> Turn<'a> {
             let args: HashMap<String, Value> =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
-            let summary = tools::tool_arg_summary(&tc.function.name, &args);
             let tool_start = Instant::now();
             self.emit(EngineEvent::ToolStarted {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
                 args: args.clone(),
-                summary,
             });
 
             // Plugin-tool dispatch. A plugin tool with `override_core`
@@ -1251,7 +1249,11 @@ impl<'a> Turn<'a> {
                         .needs_confirm
                         .unwrap_or_else(|| tc.function.name.clone());
                     let cmd_summary = if tc.function.name == "bash" {
-                        let d = tools::str_arg(&args, "description");
+                        let d = args
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         (!d.is_empty()).then_some(d)
                     } else {
                         None
@@ -1526,7 +1528,7 @@ impl<'a> Turn<'a> {
                                     Decision::Ask => {
                                         let cmd_summary =
                                             if pending.tc.function.name == "bash" {
-                                                let d = tools::str_arg(&pending.args, "description");
+                                                let d = pending.args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                                 (!d.is_empty()).then_some(d)
                                             } else {
                                                 None
@@ -1757,8 +1759,8 @@ impl<'a> Turn<'a> {
                 tool_content.push_str(&format!("\n\nUser message: {msg}"));
             }
             let history_content =
-                match tools::result_dedup::duplicate_of(&tool_content, is_error, &self.messages) {
-                    Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
+                match crate::result_dedup::duplicate_of(&tool_content, is_error, &self.messages) {
+                    Some(prior_id) => crate::result_dedup::dedup_stub(prior_id),
                     None => tool_content,
                 };
             self.push_message(Message::tool(slot.tc.id.clone(), history_content, is_error));
@@ -1940,8 +1942,8 @@ impl<'a> Turn<'a> {
         started_at: Option<Instant>,
     ) {
         let history_content =
-            match tools::result_dedup::duplicate_of(content, is_error, &self.messages) {
-                Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
+            match crate::result_dedup::duplicate_of(content, is_error, &self.messages) {
+                Some(prior_id) => crate::result_dedup::dedup_stub(prior_id),
                 None => content.to_string(),
             };
         self.push_message(Message::tool(

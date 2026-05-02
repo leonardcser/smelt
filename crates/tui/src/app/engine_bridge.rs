@@ -140,16 +140,11 @@ pub(crate) fn handle_event(
             call_id,
             tool_name,
             args,
-            summary,
         } => {
             app.flush_streaming_thinking();
             app.flush_streaming_text();
-            app.start_tool(
-                call_id.clone(),
-                tool_name.clone(),
-                summary.clone(),
-                args.clone(),
-            );
+            let summary = app.core.lua.tool_summary(&tool_name, &args);
+            app.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
             app.core.cells.set_dyn(
                 "tool_start",
                 std::rc::Rc::new(crate::app::cells::ToolStart {
