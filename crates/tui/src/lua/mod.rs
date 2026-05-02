@@ -557,7 +557,10 @@ impl LuaRuntime {
         if let Some(path) = path {
             if path.exists() {
                 if let Err(e) = self.load_init(&path) {
-                    let label = self.init_lua_path.as_ref().map(|p| p.display().to_string())
+                    let label = self
+                        .init_lua_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "~/.config/smelt/init.lua".to_string());
                     self.load_error = Some(format!("{label}: {e}"));
                 }

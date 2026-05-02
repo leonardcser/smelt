@@ -648,13 +648,12 @@ impl TuiApp {
         pending_dialogs: &mut VecDeque<DeferredDialog>,
         last_keypress: Option<Instant>,
     ) -> LoopAction {
-        // Queue dialogs when a blocking overlay is open or the user is typing.
+        // Defer dialogs while the user is actively typing.
         // The queue is drained in the main loop via re-dispatch, so auto-approval
         // checks re-run (handles "always allow" → recheck).
-        let should_queue = self.focused_overlay_blocks_agent()
-            || (last_keypress
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
-                && !self.input.buf.is_empty());
+        let should_queue = last_keypress
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
+            && !self.input.buf.is_empty();
 
         match ctrl {
             SessionControl::Continue => LoopAction::Continue,

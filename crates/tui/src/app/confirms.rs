@@ -22,6 +22,8 @@
 //! `engine.event_rx` only when no dialog is open.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::app::transcript_model::ConfirmRequest;
 
@@ -35,6 +37,7 @@ pub(crate) struct ConfirmEntry {
 pub(crate) struct Confirms {
     pending: HashMap<u64, ConfirmEntry>,
     next_handle: u64,
+    is_clear_flag: Arc<AtomicBool>,
 }
 
 impl Confirms {
@@ -42,6 +45,7 @@ impl Confirms {
         Self {
             pending: HashMap::new(),
             next_handle: 1,
+            is_clear_flag: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -49,6 +53,8 @@ impl Confirms {
         let id = self.next_handle;
         self.next_handle = self.next_handle.wrapping_add(1);
         self.pending.insert(id, ConfirmEntry { req });
+        self.is_clear_flag
+            .store(self.pending.is_empty(), Ordering::Relaxed);
         id
     }
 
@@ -57,15 +63,24 @@ impl Confirms {
     }
 
     pub(crate) fn take(&mut self, id: u64) -> Option<ConfirmEntry> {
-        self.pending.remove(&id)
+        let result = self.pending.remove(&id);
+        self.is_clear_flag
+            .store(self.pending.is_empty(), Ordering::Relaxed);
+        result
     }
 
     /// `true` when no dialog request is registered. The main-loop
     /// tick reads this to publish the `confirms_pending` cell so
     /// plugin / statusline subscribers fan out from one signal, and
-    /// the `EngineBridge` carve-out (P2.a.11) gates engine drain on
-    /// it so streaming pauses while a confirm is open.
+    /// the `EngineBridge` gates engine drain on it so streaming
+    /// pauses while a confirm is open.
     pub(crate) fn is_clear(&self) -> bool {
-        self.pending.is_empty()
+        self.is_clear_flag.load(Ordering::Relaxed)
+    }
+
+    /// Share the `is_clear` flag with `EngineBridge` so the gate
+    /// lives in one place.
+    pub(crate) fn is_clear_flag(&self) -> Arc<AtomicBool> {
+        self.is_clear_flag.clone()
     }
 }

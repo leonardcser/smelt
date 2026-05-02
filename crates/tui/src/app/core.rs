@@ -117,15 +117,17 @@ impl Core {
             session_title: String::new(),
             branch: String::new(),
         });
+        let confirms = Confirms::new();
+        let confirms_flag = confirms.is_clear_flag();
         Self {
             config,
             session: Session::new(),
-            confirms: Confirms::new(),
+            confirms,
             clipboard: ui::Clipboard::new(Box::new(commands::SystemSink)),
             timers: Timers::new(),
             cells,
             lua: LuaRuntime::new(),
-            engine: EngineBridge::new(engine),
+            engine: EngineBridge::new(engine, confirms_flag),
             frontend,
             skills: None,
             files: crate::fs::FileStateCache::new(),

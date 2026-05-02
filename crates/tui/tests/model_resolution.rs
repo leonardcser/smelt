@@ -1,6 +1,6 @@
 use tui::config::{
-    resolve_model_ref, AuxiliaryConfig, AuxiliaryTask, AuxiliaryUseForConfig,
-    Config, ModelConfig, ProviderConfig, ResolveModelRefError,
+    resolve_model_ref, AuxiliaryConfig, AuxiliaryTask, AuxiliaryUseForConfig, Config, ModelConfig,
+    ProviderConfig, ResolveModelRefError,
 };
 
 fn openai_provider() -> ProviderConfig {

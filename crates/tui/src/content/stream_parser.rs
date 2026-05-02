@@ -613,9 +613,12 @@ mod tests {
         parser.append_streaming_text(&mut history, "hello world");
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
-        assert_eq!(history.block_at(0), &Block::Text {
-            content: "hello world".into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "hello world".into(),
+            }
+        );
         assert_eq!(history.status(history.order[0]), Status::Done);
     }
 
@@ -627,9 +630,12 @@ mod tests {
         }
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
-        assert_eq!(history.block_at(0), &Block::Text {
-            content: "hello world".into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "hello world".into(),
+            }
+        );
     }
 
     #[test]
@@ -649,9 +655,12 @@ mod tests {
         parser.append_streaming_thinking(&mut history, "thinking...");
         parser.flush_streaming_thinking(&mut history);
         assert_eq!(history.len(), 1);
-        assert_eq!(history.block_at(0), &Block::Thinking {
-            content: "thinking...".into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Thinking {
+                content: "thinking...".into(),
+            }
+        );
         assert_eq!(history.status(history.order[0]), Status::Done);
     }
 
@@ -662,12 +671,18 @@ mod tests {
         parser.append_streaming_text(&mut history, "text");
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 2);
-        assert_eq!(history.block_at(0), &Block::Thinking {
-            content: "thinking".into(),
-        });
-        assert_eq!(history.block_at(1), &Block::Text {
-            content: "text".into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Thinking {
+                content: "thinking".into(),
+            }
+        );
+        assert_eq!(
+            history.block_at(1),
+            &Block::Text {
+                content: "text".into(),
+            }
+        );
     }
 
     // -- Code blocks --------------------------------------------------
@@ -801,13 +816,7 @@ mod tests {
         );
         let tool_block_id = history.order[0];
         assert_eq!(history.status(tool_block_id), Status::Streaming);
-        parser.finish_tool(
-            &mut history,
-            "c1",
-            ToolStatus::Ok,
-            None,
-            None,
-        );
+        parser.finish_tool(&mut history, "c1", ToolStatus::Ok, None, None);
         assert_eq!(history.status(tool_block_id), Status::Done);
     }
 
@@ -840,9 +849,12 @@ mod tests {
         parser.append_streaming_text(&mut history, "partial");
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
-        assert_eq!(history.block_at(0), &Block::Text {
-            content: "partial".into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "partial".into(),
+            }
+        );
         assert_eq!(history.status(history.order[0]), Status::Done);
     }
 
@@ -872,9 +884,12 @@ mod tests {
         }
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
-        assert_eq!(history.block_at(0), &Block::Text {
-            content: "line1\nline2".into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "line1\nline2".into(),
+            }
+        );
     }
 
     #[test]
@@ -901,12 +916,18 @@ mod tests {
         parser.append_streaming_text(&mut history, "first paragraph\n\nsecond paragraph");
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 2);
-        assert_eq!(history.block_at(0), &Block::Text {
-            content: "first paragraph".into(),
-        });
-        assert_eq!(history.block_at(1), &Block::Text {
-            content: "second paragraph".into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "first paragraph".into(),
+            }
+        );
+        assert_eq!(
+            history.block_at(1),
+            &Block::Text {
+                content: "second paragraph".into(),
+            }
+        );
     }
 
     // -- No-drop invariant --------------------------------------------
@@ -920,8 +941,11 @@ mod tests {
         }
         parser.flush_streaming_text(&mut history);
         assert_eq!(history.len(), 1);
-        assert_eq!(history.block_at(0), &Block::Text {
-            content: full.into(),
-        });
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: full.into(),
+            }
+        );
     }
 }
