@@ -92,8 +92,7 @@ pub struct Core {
     /// Exposed to Lua via `smelt.fs.file_state.*`.
     pub files: crate::fs::FileStateCache,
     /// Background-process registry. Owned by the frontend; engine
-    /// has no consumer of this since the bash tool's
-    /// `run_in_background` flag migrated to Lua. Surfaced to Lua via
+    /// has no consumer of this. Surfaced to Lua via
     /// `smelt.process.{list,read_output,spawn_bg}` and read by the
     /// statusline + `/clear`-style session resets.
     pub processes: ProcessRegistry,

@@ -247,8 +247,8 @@ fn kill_group_sigkill(child: &tokio::process::Child) {
 fn kill_group_sigkill(_child: &tokio::process::Child) {}
 
 // ── Background-process registry ───────────────────────────────────────
-// Long-lived `proc_<n>` children spawned by the bash tool's
-// `run_in_background` flag. Output buffered on the registry; the Lua
+// Long-lived `proc_<n>` children spawned via the `bash` tool's
+// `run_in_background` parameter. Output buffered on the registry; the Lua
 // `read_process_output` / `stop_process` tools read or terminate
 // running entries. Read by the statusline indicator and cleared on
 // session reset.

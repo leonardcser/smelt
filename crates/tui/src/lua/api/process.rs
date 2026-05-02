@@ -1,6 +1,5 @@
 //! `smelt.process` bindings — list, kill, read output, spawn
-//! background processes against the same `ProcessRegistry` the
-//! engine uses for `bash run_in_background=true`.
+//! background processes against the `ProcessRegistry`.
 //!
 //! `smelt.process.run` is the synchronous short-lived counterpart over
 //! `tui::process::run` — `Command::new(cmd).args(args).output()` with
@@ -62,10 +61,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
     // smelt.process.spawn_bg(command) → string id, or raises on
-    // spawn error. Adds the child to the same `ProcessRegistry`
-    // that the engine uses, so `smelt.process.list/read_output/kill`
-    // (and the core `read_process_output` / `stop_process` tools)
-    // observe it the same way as `bash run_in_background=true`.
+    // spawn error. Adds the child to the `ProcessRegistry` so
+    // `smelt.process.list/read_output/kill` and the background-process
+    // tools observe it consistently.
     process_tbl.set(
         "spawn_bg",
         lua.create_function(|_, command: String| -> LuaResult<String> {
