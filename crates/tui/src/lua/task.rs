@@ -24,8 +24,10 @@
 //! ```
 
 use mlua::prelude::*;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 /// What a parked task is waiting for. When the wait is satisfied the
 /// driver resumes the thread with the stored values.
@@ -60,6 +62,7 @@ struct LuaTask {
     thread: mlua::Thread,
     wait: TaskWait,
     completion: TaskCompletion,
+    cancel: CancellationToken,
 }
 
 /// One output per drive tick. The app loop consumes these and maps
@@ -112,6 +115,7 @@ impl LuaTaskRuntime {
             thread,
             wait: TaskWait::Ready(initial_args),
             completion,
+            cancel: CancellationToken::new(),
         });
         Ok(id)
     }
@@ -130,6 +134,23 @@ impl LuaTaskRuntime {
         false
     }
 
+    /// Cancel every active task. Sleep tasks become ready with a
+    /// cancel marker; External tasks are resolved with a cancel marker.
+    pub(crate) fn cancel_all(&mut self, lua: &Lua) {
+        let marker = cancelled_marker(lua);
+        for task in &mut self.tasks {
+            task.cancel.cancel();
+            match &task.wait {
+                TaskWait::Sleep(_) | TaskWait::External(_) => {
+                    let mut mv = LuaMultiValue::new();
+                    mv.push_back(marker.clone());
+                    task.wait = TaskWait::Ready(mv);
+                }
+                TaskWait::Ready(_) => {}
+            }
+        }
+    }
+
     /// Drive all ready tasks once. Each ready task is resumed; if it
     /// yields, it's parked on a new wait; if it returns, its
     /// completion is reported.
@@ -139,7 +160,10 @@ impl LuaTaskRuntime {
         while i < self.tasks.len() {
             let ready = match &self.tasks[i].wait {
                 TaskWait::Ready(_) => true,
-                TaskWait::Sleep(deadline) => *deadline <= now,
+                TaskWait::Sleep(deadline) => {
+                    // Cancelled sleep tasks wake immediately.
+                    self.tasks[i].cancel.is_cancelled() || *deadline <= now
+                }
                 TaskWait::External(_) => false,
             };
             if !ready {
@@ -167,7 +191,9 @@ impl LuaTaskRuntime {
                 // unreachable per ready check above:
                 TaskWait::External(_) => LuaMultiValue::new(),
             };
-        let result: LuaResult<LuaValue> = task.thread.resume(resume_args);
+        let cancel = task.cancel.clone();
+        let result: LuaResult<LuaValue> =
+            with_task_cancel(cancel, || task.thread.resume(resume_args));
 
         match result {
             Ok(v) => {
@@ -192,14 +218,26 @@ impl LuaTaskRuntime {
                 // Still yielded — decode the yield table.
                 match decode_yield(lua, v) {
                     Ok(Yield::Sleep(d)) => {
-                        task.wait = TaskWait::Sleep(Instant::now() + d);
+                        if task.cancel.is_cancelled() {
+                            let mut mv = LuaMultiValue::new();
+                            mv.push_back(cancelled_marker(lua));
+                            task.wait = TaskWait::Ready(mv);
+                        } else {
+                            task.wait = TaskWait::Sleep(Instant::now() + d);
+                        }
                         false
                     }
                     Ok(Yield::External(id)) => {
                         // No Rust-side output — resolution comes from a
                         // Lua runtime file calling `smelt.task.resume`
                         // or from a reducer-side op (dialog/picker open).
-                        task.wait = TaskWait::External(id);
+                        if task.cancel.is_cancelled() {
+                            let mut mv = LuaMultiValue::new();
+                            mv.push_back(cancelled_marker(lua));
+                            task.wait = TaskWait::Ready(mv);
+                        } else {
+                            task.wait = TaskWait::External(id);
+                        }
                         false
                     }
                     Err(msg) => {
@@ -217,6 +255,39 @@ impl LuaTaskRuntime {
             }
         }
     }
+}
+
+// Thread-local slot that holds the current task's cancellation token
+// while its coroutine is executing. Lua bindings that spawn async work
+// read this to wire cancellation through.
+thread_local! {
+    static CURRENT_TASK_CANCEL: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
+}
+
+/// Install the current task's cancellation token for the duration of
+/// the closure. Lua async bindings call [`current_task_cancel`] to
+/// propagate cancellation into in-flight tokio tasks.
+pub(crate) fn with_task_cancel<R>(cancel: CancellationToken, f: impl FnOnce() -> R) -> R {
+    CURRENT_TASK_CANCEL.with(|c| *c.borrow_mut() = Some(cancel));
+    let r = f();
+    CURRENT_TASK_CANCEL.with(|c| *c.borrow_mut() = None);
+    r
+}
+
+/// Read the cancellation token of the task currently executing its
+/// coroutine. Returns `None` when called outside `step_task`.
+pub(crate) fn current_task_cancel() -> Option<CancellationToken> {
+    CURRENT_TASK_CANCEL.with(|c| c.borrow().clone())
+}
+
+/// Build the Lua cancel-marker table `{"__cancelled" = true}`.
+fn cancelled_marker(lua: &Lua) -> LuaValue {
+    lua.create_table()
+        .and_then(|t| {
+            t.set("__cancelled", true)?;
+            Ok(LuaValue::Table(t))
+        })
+        .unwrap_or(LuaValue::Nil)
 }
 
 fn fail_completion(completion: &TaskCompletion, msg: &str, outputs: &mut Vec<TaskDriveOutput>) {
@@ -464,5 +535,119 @@ mod tests {
         assert!(res.is_err());
         let msg = format!("{}", res.unwrap_err());
         assert!(msg.contains("not inside a task"));
+    }
+
+    #[test]
+    fn cancel_all_resolves_sleep_with_cancel_marker() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua
+            .load(
+                r#"function()
+                local r = smelt.sleep(100)
+                return r
+              end"#,
+            )
+            .eval()
+            .unwrap();
+        rt.spawn(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+        )
+        .unwrap();
+
+        // First drive parks on sleep.
+        let out = rt.drive(&lua, Instant::now());
+        assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::Sleep(_)));
+
+        // Cancel all tasks.
+        rt.cancel_all(&lua);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::Ready(_)));
+
+        // Next drive resumes with the cancel marker.
+        let out = rt.drive(&lua, Instant::now());
+        assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 0);
+    }
+
+    #[test]
+    fn cancel_all_resolves_external_with_cancel_marker() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua
+            .load(
+                r#"function()
+                local r = coroutine.yield({__yield = "external", id = 42})
+                return r
+              end"#,
+            )
+            .eval()
+            .unwrap();
+        rt.spawn(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+        )
+        .unwrap();
+
+        // First drive parks on external.
+        let out = rt.drive(&lua, Instant::now());
+        assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::External(42)));
+
+        // Cancel all tasks.
+        rt.cancel_all(&lua);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::Ready(_)));
+
+        // Next drive resumes with the cancel marker.
+        let out = rt.drive(&lua, Instant::now());
+        assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 0);
+    }
+
+    #[test]
+    fn cancelled_task_that_yields_again_gets_marker() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        // Task does some sync work, then sleeps.
+        let func: mlua::Function = lua
+            .load(
+                r#"function()
+                local x = 1
+                local r = smelt.sleep(100)
+                return r
+              end"#,
+            )
+            .eval()
+            .unwrap();
+        rt.spawn(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+        )
+        .unwrap();
+
+        // Cancel before first drive.
+        rt.cancel_all(&lua);
+
+        // Drive: task runs, does sync work, yields sleep.
+        // step_task sees cancelled token and replaces the sleep
+        // with a Ready(cancel_marker).
+        let out = rt.drive(&lua, Instant::now());
+        assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::Ready(_)));
+
+        // Next drive resumes with cancel marker and finishes.
+        let out = rt.drive(&lua, Instant::now());
+        assert!(out.is_empty());
+        assert_eq!(rt.tasks.len(), 0);
     }
 }

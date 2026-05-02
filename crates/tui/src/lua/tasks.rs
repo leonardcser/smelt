@@ -263,6 +263,17 @@ impl LuaRuntime {
         forward
     }
 
+    /// Cancel every active Lua task. Called when the user aborts the
+    /// agent so that parked coroutines (sleeping or waiting on async
+    /// Rust calls) resume with a cancel marker that the Lua bootstrap
+    /// turns into a thrown error for `pcall` cleanup.
+    pub(crate) fn cancel_tasks(&self) {
+        let Ok(mut rt) = self.shared.tasks.lock() else {
+            return;
+        };
+        rt.cancel_all(&self.lua);
+    }
+
     /// Return protocol-level plugin tool definitions for registered
     /// tools. The TUI sends these with `StartTurn` so the engine
     /// includes them in LLM tool definitions.
