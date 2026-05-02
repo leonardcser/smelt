@@ -77,10 +77,10 @@ pub struct ToolEntry {
 /// engine can synthesise a "tool not found" result when the LLM emits
 /// a call for a tool the dispatcher doesn't know.
 ///
-/// The trait carries no permission policy — engine applies its rules
-/// over the unfiltered tool list returned by `definitions`, using
-/// `is_mcp` to pick the right ruleset. When permissions move to Lua
-/// hooks (P5.c) the engine-side filter retires.
+/// The trait carries no permission policy — the engine returns the
+/// unfiltered tool list from `definitions` and applies no mode or
+/// permission filtering. That concern moved to `tui::permissions` and
+/// Lua-tool hooks in P5.c.
 pub trait ToolDispatcher: Send + Sync {
     /// All tool definitions registered with this dispatcher.
     fn definitions(&self) -> Vec<ToolDefinition>;
