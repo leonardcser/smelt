@@ -172,7 +172,7 @@ pub(crate) fn compute_prompt(
     // (`TuiApp::clear_prompt_completer` etc.) drop the storage entirely.
     buf.clear_namespace(completer_ns, 0, usize::MAX);
     if let Some(text) = prediction {
-        let row = if input.input.buf.is_empty() {
+        let row = if input.input.win.text.is_empty() {
             input_offset
         } else {
             total_lines
@@ -584,29 +584,29 @@ fn compute_input_area(
     let height = input.height as usize;
     let state = input.input;
 
-    let spans = build_display_spans(&state.buf, &state.attachment_ids, &state.store);
+    let spans = build_display_spans(&state.win.text, &state.win.attachment_ids, &state.store);
     let display_buf = spans_to_string(&spans);
     let char_kinds = build_char_kinds(&spans);
-    let display_cursor = map_cursor(state.cursor_char(), &state.buf, &spans);
+    let display_cursor = map_cursor(state.cursor_char(), &state.win.text, &spans);
     let display_selection = state
         .display_selection_range(input.vim_mode, input.clipboard)
         .map(|(start, end)| {
-            let raw_start_char = crate::input::char_pos(&state.buf, start);
-            let raw_end_char = crate::input::char_pos(&state.buf, end);
-            let ds = map_cursor(raw_start_char, &state.buf, &spans);
-            let de = map_cursor(raw_end_char, &state.buf, &spans);
+            let raw_start_char = crate::input::char_pos(&state.win.text, start);
+            let raw_end_char = crate::input::char_pos(&state.win.text, end);
+            let ds = map_cursor(raw_start_char, &state.win.text, &spans);
+            let de = map_cursor(raw_end_char, &state.win.text, &spans);
             (ds, de)
         });
     let (visual_lines, cursor_line, _, cursor_char_in_line) =
         wrap_and_locate_cursor(&display_buf, &char_kinds, display_cursor, usable);
     // Slash commands and `!exec` are single-line by design. Multi-line
     // buffers render as plain text.
-    let single_line = !state.buf.contains('\n');
+    let single_line = !state.win.text.contains('\n');
     let plain_only = !single_line;
-    let is_command = !plain_only && crate::completer::Completer::is_command(state.buf.trim());
-    let is_exec =
-        !plain_only && matches!(state.buf.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
-    let is_exec_invalid = !plain_only && state.buf == "!";
+    let is_command = !plain_only && crate::completer::Completer::is_command(state.win.text.trim());
+    let is_exec = !plain_only
+        && matches!(state.win.text.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
+    let is_exec_invalid = !plain_only && state.win.text == "!";
     let total_content_rows = visual_lines.len();
 
     let fixed = row_offset as usize + 1; // bottom bar (status is its own splits leaf)

@@ -14,7 +14,7 @@
 //! latter shape (`ExtmarkOpts::virt_text`); production has no
 //! virt-text convenience method.
 
-use crate::BufId;
+use crate::{AttachmentId, BufId};
 use crossterm::style::Color;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -287,6 +287,15 @@ pub struct Buffer {
     source: String,
     source_tick: u64,
     last_render: Option<(u64, u16)>,
+    /// Edit-state fields absorbed from `EditBuffer` (P1.a-tail).
+    /// Per-buffer undo/redo stack. `None` capacity disables undo
+    /// (used for readonly buffers).
+    pub history: crate::undo::UndoHistory,
+    /// Attachment markers inside the buffer text.
+    pub attachment_ids: Vec<AttachmentId>,
+    /// Whether this buffer can be edited. Windows check this before
+    /// running any edit-producing operation.
+    pub readonly: bool,
 }
 
 impl Buffer {
@@ -319,6 +328,9 @@ impl Buffer {
             source: String::new(),
             source_tick: 0,
             last_render: None,
+            history: crate::undo::UndoHistory::default(),
+            attachment_ids: Vec::new(),
+            readonly: false,
         }
     }
 

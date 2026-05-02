@@ -323,9 +323,9 @@ impl TuiApp {
             let leftover = std::mem::take(&mut self.queued_messages);
             if !leftover.is_empty() {
                 let mut combined = leftover.join("\n");
-                if !self.input.buf.is_empty() {
+                if !self.input.win.text.is_empty() {
                     combined.push('\n');
-                    combined.push_str(&self.input.buf);
+                    combined.push_str(&self.input.win.text);
                 }
                 let __mode = self.vim_mode;
                 crate::api::buf::replace(&mut self.input, combined, None, __mode);
@@ -405,7 +405,7 @@ impl TuiApp {
     }
 
     pub(super) fn handle_input_prediction(&mut self, text: String) {
-        if self.input.buf.is_empty() {
+        if self.input.win.text.is_empty() {
             self.set_prompt_completer(text);
         }
     }
@@ -654,7 +654,7 @@ impl TuiApp {
         // checks re-run (handles "always allow" → recheck).
         let should_queue = last_keypress
             .is_some_and(|t| t.elapsed() < Duration::from_millis(CONFIRM_DEFER_MS))
-            && !self.input.buf.is_empty();
+            && !self.input.win.text.is_empty();
 
         match ctrl {
             SessionControl::Continue => LoopAction::Continue,

@@ -163,14 +163,14 @@ impl TuiApp {
         );
         if on_prompt {
             self.app_focus = crate::app::AppFocus::Prompt;
-            // Prompt's `edit_buf.buf` is the source buffer (≠ wrapped
+            // Prompt's `win.text` is the source buffer (≠ wrapped
             // display rows). The vertical-motion helper operates on
             // source rows; the renderer's `ensure_cursor_visible`
             // (Step 6) syncs `scroll_top` to keep the cursor visible.
             // Once 7b lands the row-space adapter, this collapses into
             // a shared `Window::scroll_by_lines` call with the rest.
             let (new_pos, new_want) = ui::text::vertical_move(
-                &self.input.win.edit_buf.buf,
+                &self.input.win.text,
                 self.input.win.cpos,
                 delta,
                 self.input.win.curswant,

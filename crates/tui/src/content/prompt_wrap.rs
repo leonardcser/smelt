@@ -41,8 +41,8 @@ pub(crate) struct PromptWrap {
 
 impl PromptWrap {
     pub(crate) fn build(state: &PromptState, usable: usize) -> Self {
-        let src_buf = &state.win.edit_buf.buf;
-        let spans = build_display_spans(src_buf, &state.win.edit_buf.attachment_ids, &state.store);
+        let src_buf = &state.win.text;
+        let spans = build_display_spans(src_buf, &state.win.attachment_ids, &state.store);
         let display_buf = spans_to_string(&spans);
         let char_kinds = build_char_kinds(&spans);
 
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn translates_plain_buffer_identity() {
         let mut state = PromptState::new();
-        state.win.edit_buf.buf = "hello world".to_string();
+        state.win.text = "hello world".to_string();
         let w = PromptWrap::build(&state, 80);
         assert_eq!(w.rows, vec!["hello world".to_string()]);
         assert_eq!(w.src_to_wrapped(0), 0);
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn translates_hard_break() {
         let mut state = PromptState::new();
-        state.win.edit_buf.buf = "abc\ndef".to_string();
+        state.win.text = "abc\ndef".to_string();
         let w = PromptWrap::build(&state, 80);
         assert_eq!(w.rows, vec!["abc".to_string(), "def".to_string()]);
         assert_eq!(w.joined, "abc\ndef");
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn translates_soft_break() {
         let mut state = PromptState::new();
-        state.win.edit_buf.buf = "hello world foo".to_string();
+        state.win.text = "hello world foo".to_string();
         // usable = 8 forces a soft wrap.
         let w = PromptWrap::build(&state, 8);
         assert!(!w.soft_breaks.is_empty());

@@ -209,7 +209,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     // both prompt and content focus. `nil` for an empty transcript.
     let position = match app.app_focus {
         crate::app::AppFocus::Prompt => {
-            let buf = &app.input.buf;
+            let buf = &app.input.win.text;
             let cpos = app.input.win.cpos.min(buf.len());
             let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
             let line_start = buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0);

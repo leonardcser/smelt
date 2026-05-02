@@ -92,7 +92,7 @@ impl TuiApp {
         let viewport = self.viewport_rows_estimate();
         self.transcript_window.resync(&rows, viewport);
         let ctx = KeyContext {
-            buf_empty: self.transcript_window.edit_buf.buf.is_empty(),
+            buf_empty: self.transcript_window.text.is_empty(),
             vim_non_insert: false,
             vim_enabled: false,
             agent_running: false,
@@ -136,7 +136,7 @@ impl TuiApp {
                 self.move_content_cursor_by_lines(d);
                 return EventOutcome::Redraw;
             }
-            let buf = self.transcript_window.edit_buf.buf.clone();
+            let buf = self.transcript_window.text.clone();
             let mv: Option<usize> = match action {
                 KeyAction::MoveLeft | KeyAction::SelectLeft => Some(ui::text::prev_char_boundary(
                     &buf,

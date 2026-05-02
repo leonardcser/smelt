@@ -40,10 +40,10 @@ impl PromptState {
 
         let result = {
             let mut ctx = VimContext {
-                buf: &mut self.win.edit_buf.buf,
+                buf: &mut self.win.text,
                 cpos: &mut self.win.cpos,
-                attachments: &mut self.win.edit_buf.attachment_ids,
-                history: &mut self.win.edit_buf.history,
+                attachments: &mut self.win.attachment_ids,
+                history: &mut self.win.history,
                 clipboard,
                 mode,
                 curswant: &mut self.win.curswant,
@@ -61,7 +61,7 @@ impl PromptState {
                 VimBridgeResult::Handled(Action::Redraw)
             }
             vim::Action::Submit => {
-                if self.win.edit_buf.buf.is_empty() && self.win.edit_buf.attachment_ids.is_empty() {
+                if self.win.text.is_empty() && self.win.attachment_ids.is_empty() {
                     VimBridgeResult::Handled(Action::SubmitEmpty)
                 } else {
                     let display = self.message_display_text();
@@ -71,11 +71,8 @@ impl PromptState {
                 }
             }
             vim::Action::HistoryPrev => {
-                if let Some(entry) = history
-                    .as_deref_mut()
-                    .and_then(|h| h.up(&self.win.edit_buf.buf))
-                {
-                    self.win.edit_buf.buf = entry.to_string();
+                if let Some(entry) = history.as_deref_mut().and_then(|h| h.up(&self.win.text)) {
+                    self.win.text = entry.to_string();
                     self.win.cpos = 0;
                     self.sync_completer();
                 }
@@ -83,8 +80,8 @@ impl PromptState {
             }
             vim::Action::HistoryNext => {
                 if let Some(entry) = history.as_deref_mut().and_then(|h| h.down()) {
-                    self.win.edit_buf.buf = entry.to_string();
-                    self.win.cpos = self.win.edit_buf.buf.len();
+                    self.win.text = entry.to_string();
+                    self.win.cpos = self.win.text.len();
                     self.sync_completer();
                 }
                 VimBridgeResult::Handled(Action::Redraw)
