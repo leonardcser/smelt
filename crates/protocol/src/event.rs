@@ -143,7 +143,6 @@ pub enum EngineEvent {
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
-        summary: String,
     },
 
     /// Incremental output from a running tool (stdout/stderr lines).

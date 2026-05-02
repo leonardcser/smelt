@@ -16,8 +16,8 @@ use crate::content::highlight::{
 };
 use crate::content::layout_out::{display_width, SpanCollector};
 use crate::content::{truncate_str, wrap_line, LayoutContext};
+use crate::notebook::NotebookRenderData;
 use crate::utils::format_duration;
-use engine::tools::NotebookRenderData;
 use std::collections::HashMap;
 
 mod markdown;
@@ -520,11 +520,13 @@ mod tests {
     }
 
     fn tool_call() -> Block {
+        let mut args = HashMap::new();
+        args.insert("command".into(), serde_json::Value::String("ls".into()));
         Block::ToolCall {
             call_id: "call-1".into(),
             name: "bash".into(),
             summary: "ls".into(),
-            args: HashMap::new(),
+            args,
         }
     }
 
@@ -982,11 +984,16 @@ mod tests {
         // A bash command that wraps at width 30 should produce:
         // - Row 0: source_text = full command, soft_wrapped = false
         // - Row 1+: source_text = None, soft_wrapped = true
+        let mut args = HashMap::new();
+        args.insert(
+            "command".into(),
+            serde_json::Value::String("echo hello && echo world && echo done".into()),
+        );
         let block = Block::ToolCall {
             call_id: "c1".into(),
             name: "bash".into(),
             summary: "echo hello && echo world && echo done".into(),
-            args: HashMap::new(),
+            args,
         };
         let state = ToolState {
             status: ToolStatus::Ok,
@@ -1027,11 +1034,16 @@ mod tests {
     fn bash_tool_multiline_command_only_wraps_mark_soft() {
         // A multi-line command (real newlines) should NOT mark line 2
         // as soft-wrapped — only segments within a wrapped line should.
+        let mut args = HashMap::new();
+        args.insert(
+            "command".into(),
+            serde_json::Value::String("echo one\necho two".into()),
+        );
         let block = Block::ToolCall {
             call_id: "c2".into(),
             name: "bash".into(),
             summary: "echo one\necho two".into(),
-            args: HashMap::new(),
+            args,
         };
         let state = ToolState {
             status: ToolStatus::Ok,
@@ -1056,11 +1068,13 @@ mod tests {
 
     #[test]
     fn bash_tool_time_suffix_is_non_selectable() {
+        let mut args = HashMap::new();
+        args.insert("command".into(), serde_json::Value::String("ls".into()));
         let block = Block::ToolCall {
             call_id: "c3".into(),
             name: "bash".into(),
             summary: "ls".into(),
-            args: HashMap::new(),
+            args,
         };
         let state = ToolState {
             status: ToolStatus::Ok,

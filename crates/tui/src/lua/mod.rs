@@ -1421,6 +1421,28 @@ mod tests {
     }
 
     #[test]
+    fn plugin_tool_summary_comes_from_lua() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.tools.register({
+                  name = "echo_summary",
+                  description = "",
+                  parameters = { type = "object", properties = {} },
+                  summary = function(args) return "lua:" .. (args.label or "") end,
+                  execute = function(args) return args.label or "" end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let mut args = std::collections::HashMap::new();
+        args.insert("label".into(), serde_json::json!("ok"));
+        assert_eq!(rt.tool_summary("echo_summary", &args), "lua:ok");
+    }
+
+    #[test]
     fn dialog_open_outside_task_errors() {
         // Calling `smelt.ui.dialog.open` outside a yieldable coroutine
         // (the runtime file's first guard) must raise. With plugins

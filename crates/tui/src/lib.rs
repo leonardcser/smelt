@@ -29,5 +29,6 @@ pub mod session;
 pub(crate) mod sleep_inhibit;
 pub mod state;
 pub mod theme;
+pub(crate) mod tools;
 pub(crate) mod utils;
 pub(crate) mod window;

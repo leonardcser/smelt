@@ -1,10 +1,10 @@
 //! `smelt.notebook` bindings.
 //!
 //! - `render(buf_id, args)` paints an `edit_notebook` preview into a
-//!   Buffer the caller owns (UiHost-only). Builds a typed
-//!   `NotebookRenderData` from the tool args (insert / delete /
-//!   replace cell), then prints it via the same syntax / inline-diff
-//!   helpers the transcript renderer uses.
+//!   Buffer the caller owns (UiHost-only). It asks `tui::notebook`
+//!   for typed `NotebookRenderData` from the tool args (insert /
+//!   delete / replace cell), then prints it via the same syntax /
+//!   inline-diff helpers the transcript renderer uses.
 //! - `parse / is_notebook_path` are Host-tier read shapes over
 //!   `tui::notebook` for plugins that want to introspect a
 //!   notebook's structure.
@@ -14,7 +14,7 @@ use crate::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::content::layout_out::SpanCollector;
 use crate::content::wrap_line;
 use crate::notebook;
-use engine::tools::NotebookRenderData;
+use crate::notebook::NotebookRenderData;
 use mlua::prelude::*;
 use std::collections::HashMap;
 use ui::BufId;
@@ -27,7 +27,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let args = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.render: {e}")))?;
             crate::lua::with_app(|app| {
-                let Some(data) = build_notebook_preview(&args) else {
+                let Some(data) = crate::notebook::preview_render_data(&args) else {
                     return;
                 };
                 let theme_snap = app.ui.theme().clone();
@@ -64,11 +64,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     notebook.set(
         "read",
         lua.create_function(|_, (path, offset, limit): (String, u64, u64)| {
-            match engine::tools::notebook::render_notebook_text(
-                &path,
-                offset as usize,
-                limit as usize,
-            ) {
+            match crate::notebook::render_notebook_text(&path, offset as usize, limit as usize) {
                 Ok(s) => Ok((Some(s), None)),
                 Err(err) => Ok((None, Some(err))),
             }
@@ -87,7 +83,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let args_map = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.apply_edit: {e}")))?;
             let result = crate::lua::try_with_app(|app| {
-                engine::tools::notebook::apply_edit(&args_map, &app.core.files)
+                crate::notebook::apply_edit(&args_map, &app.core.files)
             });
             match result {
                 Some(Ok(outcome)) => {
@@ -179,131 +175,6 @@ fn lua_value_to_json(v: &mlua::Value) -> mlua::Result<serde_json::Value> {
         }
         _ => J::Null,
     })
-}
-
-/// Build a typed `NotebookRenderData` from the `edit_notebook` tool
-/// args. Returns `None` when the notebook can't be located, parsed,
-/// or the targeted cell is out of bounds — the dialog leaves the
-/// preview pane blank in that case rather than rendering a stub.
-fn build_notebook_preview(args: &HashMap<String, serde_json::Value>) -> Option<NotebookRenderData> {
-    let path = args
-        .get("notebook_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let cells = parsed.get("cells").and_then(|c| c.as_array())?;
-
-    let edit_mode = args
-        .get("edit_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("replace");
-    let cell_id = args.get("cell_id").and_then(|v| v.as_str()).unwrap_or("");
-    let cell_number = args.get("cell_number").and_then(|v| v.as_i64());
-    let new_source = args
-        .get("new_source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let requested_type = args
-        .get("cell_type")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    let target_idx = if !cell_id.is_empty() {
-        cells
-            .iter()
-            .position(|c| c.get("id").and_then(|v| v.as_str()) == Some(cell_id))
-    } else {
-        cell_number.and_then(|n| if n < 0 { None } else { Some(n as usize) })
-    };
-
-    match edit_mode {
-        "insert" => {
-            let insert_at = if cell_id.is_empty() && cell_number.is_none() {
-                0
-            } else {
-                match target_idx {
-                    Some(i) if i < cells.len() => i + 1,
-                    _ => return None,
-                }
-            };
-            Some(NotebookRenderData {
-                edit_mode: "insert".into(),
-                path: path.into(),
-                index: insert_at,
-                old_type: None,
-                new_type: requested_type,
-                cell_id: None,
-                old_source: String::new(),
-                new_source,
-            })
-        }
-        "delete" => {
-            let idx = match target_idx {
-                Some(i) if i < cells.len() => i,
-                _ => return None,
-            };
-            let cell = &cells[idx];
-            Some(NotebookRenderData {
-                edit_mode: "delete".into(),
-                path: path.into(),
-                index: idx,
-                old_type: cell
-                    .get("cell_type")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                new_type: None,
-                cell_id: cell.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                old_source: cell
-                    .get("source")
-                    .and_then(join_string_or_array)
-                    .unwrap_or_default(),
-                new_source: String::new(),
-            })
-        }
-        _ => {
-            let idx = match target_idx {
-                Some(i) if i < cells.len() => i,
-                _ => return None,
-            };
-            let cell = &cells[idx];
-            Some(NotebookRenderData {
-                edit_mode: "replace".into(),
-                path: path.into(),
-                index: idx,
-                old_type: cell
-                    .get("cell_type")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                new_type: requested_type.or_else(|| {
-                    cell.get("cell_type")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                }),
-                cell_id: cell.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                old_source: cell
-                    .get("source")
-                    .and_then(join_string_or_array)
-                    .unwrap_or_default(),
-                new_source,
-            })
-        }
-    }
-}
-
-fn join_string_or_array(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Array(arr) => Some(
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(""),
-        ),
-        _ => None,
-    }
 }
 
 fn render_notebook_preview(

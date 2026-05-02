@@ -3,7 +3,7 @@ use super::{collect_indexed_tool_calls, non_empty, sse};
 use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
-use crate::tools::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
+use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 

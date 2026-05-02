@@ -78,7 +78,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     // absolute otherwise. `"."` for cwd itself.
     path_tbl.set(
         "display",
-        lua.create_function(|_, p: String| Ok(engine::tools::display_path(&p)))?,
+        lua.create_function(|_, p: String| Ok(crate::tools::display_path(&p)))?,
     )?;
 
     // `smelt.path.config_dir()` — `~/.config/smelt` (or the

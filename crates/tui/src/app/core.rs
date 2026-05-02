@@ -90,7 +90,7 @@ pub struct Core {
     pub skills: Option<Arc<SkillLoader>>,
     /// Shared file-observation cache (mtime + content + read range).
     /// Exposed to Lua via `smelt.fs.file_state.*`.
-    pub files: engine::tools::FileStateCache,
+    pub files: crate::fs::FileStateCache,
     /// Background-process registry. Owned by the frontend; engine
     /// has no consumer of this since the bash tool's
     /// `run_in_background` flag migrated to Lua. Surfaced to Lua via
@@ -129,7 +129,7 @@ impl Core {
             engine: EngineBridge::new(engine),
             frontend,
             skills: None,
-            files: engine::tools::FileStateCache::new(),
+            files: crate::fs::FileStateCache::new(),
             processes: ProcessRegistry::new(),
         }
     }

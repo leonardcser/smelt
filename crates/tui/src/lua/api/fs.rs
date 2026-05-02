@@ -6,7 +6,7 @@
 //! lets plugin code do `local data, err = smelt.fs.read(p)` without
 //! `pcall`.
 
-use engine::tools::FlockGuard;
+use crate::fs::FlockGuard;
 use mlua::prelude::*;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -156,7 +156,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "try_flock",
-        lua.create_function(|_, p: String| match engine::tools::try_flock(&p) {
+        lua.create_function(|_, p: String| match crate::fs::try_flock(&p) {
             Ok(guard) => Ok((Some(FlockHandle::new(guard)), None)),
             Err(err) => Ok((None, Some(err))),
         })?,
@@ -167,7 +167,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 }
 
 /// Userdata wrapper for an exclusive advisory lock acquired via
-/// `engine::tools::try_flock`. Released on `:release()` or when garbage
+/// `crate::fs::try_flock`. Released on `:release()` or when garbage
 /// collected. Lua tools that mutate a file under a flock acquire one of
 /// these and let it drop when the write completes.
 struct FlockHandle(RefCell<Option<FlockGuard>>);
@@ -190,7 +190,7 @@ impl LuaUserData for FlockHandle {
 /// `smelt.fs.file_state` — shared mtime + content + read-range cache.
 /// Read by Lua `read_file` / `write_file` / `edit_file` / `notebook_edit`
 /// during their migration off the engine impls. Backed by the same
-/// `engine::tools::FileStateCache` engine-side tools see, parked on
+/// `crate::fs::FileStateCache` engine-side tools see, parked on
 /// `Core.files`.
 fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
@@ -254,7 +254,7 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
         lua.create_function(|_, (p, noun): (String, Option<String>)| {
             let noun = noun.unwrap_or_else(|| "file".into());
             Ok(crate::lua::try_with_app(|app| {
-                engine::tools::staleness_error(&app.core.files, &p, &noun)
+                crate::fs::staleness_error(&app.core.files, &p, &noun)
             })
             .flatten())
         })?,
@@ -262,7 +262,7 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
 
     t.set(
         "mtime_ms",
-        lua.create_function(|_, p: String| match engine::tools::file_mtime_ms(&p) {
+        lua.create_function(|_, p: String| match crate::fs::file_mtime_ms(&p) {
             Ok(ms) => Ok((Some(ms), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         })?,

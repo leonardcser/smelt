@@ -83,6 +83,7 @@ function M.register()
       },
       required = { "plan_summary" },
     },
+    summary = function(_) return "plan ready" end,
     execute = function(args)
       local summary = args.plan_summary or ""
 

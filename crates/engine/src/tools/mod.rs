@@ -1,12 +1,4 @@
-pub mod file_state;
-pub mod notebook;
-pub(crate) mod result_dedup;
-pub(crate) mod web_cache;
-
-pub use file_state::{file_mtime_ms, staleness_error, FileState, FileStateCache};
-
 use crate::provider::{FunctionSchema, ToolDefinition};
-pub use notebook::NotebookRenderData;
 use protocol::ToolHooks;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -37,6 +29,7 @@ impl ToolResult {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = Some(metadata);
         self
@@ -172,124 +165,6 @@ impl ToolRegistry {
     pub(crate) fn get(&self, name: &str) -> Option<&ToolEntry> {
         self.tools.iter().find(|e| e.tool.name() == name)
     }
-}
-
-pub(crate) fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-pub fn tool_arg_summary(tool_name: &str, args: &HashMap<String, Value>) -> String {
-    match tool_name {
-        "bash" => str_arg(args, "command"),
-        "read_file" | "write_file" | "edit_file" => display_path(&str_arg(args, "file_path")),
-        "edit_notebook" => display_path(&str_arg(args, "notebook_path")),
-        "glob" | "grep" => {
-            confirm_with_optional_path(str_arg(args, "pattern"), &str_arg(args, "path"))
-                .unwrap_or_default()
-        }
-        "web_fetch" => str_arg(args, "url"),
-        "web_search" => str_arg(args, "query"),
-        "exit_plan_mode" => "plan ready".into(),
-        "read_process_output" | "stop_process" => str_arg(args, "id"),
-        "ask_user_question" => {
-            let count = args
-                .get("questions")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            format!("{} question{}", count, if count == 1 { "" } else { "s" })
-        }
-        "load_skill" => str_arg(args, "name"),
-        _ => String::new(),
-    }
-}
-
-/// Convert an absolute path to a relative one if it's inside the cwd.
-pub fn display_path(path: &str) -> String {
-    if let Ok(cwd) = std::env::current_dir() {
-        let prefix = cwd.to_string_lossy();
-        if let Some(rest) = path.strip_prefix(prefix.as_ref()) {
-            let rest = rest.strip_prefix('/').unwrap_or(rest);
-            if rest.is_empty() {
-                return ".".into();
-            }
-            return rest.into();
-        }
-    }
-    path.into()
-}
-
-/// Build a confirm label like `"pattern"` or `"pattern in dir"`, omitting the
-/// path when it is the cwd.
-pub(crate) fn confirm_with_optional_path(label: String, path: &str) -> Option<String> {
-    if path.is_empty() || path == "." {
-        Some(label)
-    } else {
-        Some(format!("{} in {}", label, display_path(path)))
-    }
-}
-
-/// Maximum lines of tool output sent to the LLM. Individual tools may
-/// enforce their own (often larger) limits before this; this is the final
-/// trim applied when building the API request.
-pub(crate) const MAX_TOOL_OUTPUT_LINES: usize = 2000;
-
-/// Trim tool output to `max_lines` for LLM context. Appends a note with
-/// the total line count when truncated.
-pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
-    if content == "no matches found" {
-        return content.to_string();
-    }
-    let total = content.lines().count();
-    if total <= max_lines {
-        return content.to_string();
-    }
-    let mut out: String = content
-        .lines()
-        .take(max_lines)
-        .collect::<Vec<_>>()
-        .join("\n");
-    out.push_str(&format!("\n... (trimmed, {} lines total)", total));
-    out
-}
-
-/// Acquire an exclusive, non-blocking advisory lock on the given file path.
-/// Returns `Ok(guard)` on success. Returns `Err(message)` if the file is
-/// locked by another process (EWOULDBLOCK) or on any other I/O error.
-/// The lock is released when the guard is dropped.
-#[cfg(unix)]
-pub fn try_flock(path: &str) -> Result<FlockGuard, String> {
-    use std::os::unix::io::AsRawFd;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| e.to_string())?;
-    let fd = file.as_raw_fd();
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.kind() == std::io::ErrorKind::WouldBlock {
-            return Err("File is currently being edited by another agent, try again later.".into());
-        }
-        return Err(format!("flock error: {err}"));
-    }
-    Ok(FlockGuard { _file: file })
-}
-
-#[cfg(not(unix))]
-pub fn try_flock(_path: &str) -> Result<FlockGuard, String> {
-    Ok(FlockGuard { _file: None })
-}
-
-pub struct FlockGuard {
-    #[cfg(unix)]
-    _file: std::fs::File,
-    #[cfg(not(unix))]
-    _file: Option<()>,
 }
 
 pub(crate) fn build_tools() -> ToolRegistry {

@@ -139,9 +139,9 @@ impl HeadlessApp {
                     EngineEvent::ToolStarted {
                         call_id,
                         tool_name,
-                        summary,
-                        ..
+                        args,
                     } => {
+                        let summary = self.core.lua.tool_summary(&tool_name, &args);
                         pending_tools.insert(call_id, (tool_name, summary, String::new()));
                     }
                     EngineEvent::ToolOutput { call_id, chunk } if self.sink.verbose => {

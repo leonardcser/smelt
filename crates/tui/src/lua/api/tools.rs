@@ -33,6 +33,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             .ok()
             .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
             .transpose()?;
+        let summary_fn = def.get::<mlua::Function>("summary").ok();
 
         let meta = lua.create_table()?;
         let desc: String = def.get("description").unwrap_or_default();
@@ -60,6 +61,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         // dispatch to the plugin.
         let override_core: bool = def.get::<bool>("override").unwrap_or(false);
         meta.set("override_core", override_core)?;
+        if let Some(summary) = summary_fn {
+            meta.set("summary", summary)?;
+        }
         lua.set_named_registry_value(&format!("__pt_meta_{name}"), meta)?;
 
         if let Ok(mut map) = s.plugin_tools.lock() {
