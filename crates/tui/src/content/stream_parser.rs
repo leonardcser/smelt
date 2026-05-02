@@ -596,3 +596,332 @@ impl StreamParser {
         history.set_status(id, Status::Done);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> (StreamParser, BlockHistory) {
+        (StreamParser::new(), BlockHistory::new())
+    }
+
+    // -- Text streaming -----------------------------------------------
+
+    #[test]
+    fn text_single_chunk() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "hello world");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.block_at(0), &Block::Text {
+            content: "hello world".into(),
+        });
+        assert_eq!(history.status(history.order[0]), Status::Done);
+    }
+
+    #[test]
+    fn text_multi_chunk_same_result() {
+        let (mut parser, mut history) = setup();
+        for chunk in ["hel", "lo wo", "rld"] {
+            parser.append_streaming_text(&mut history, chunk);
+        }
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.block_at(0), &Block::Text {
+            content: "hello world".into(),
+        });
+    }
+
+    #[test]
+    fn text_empty_deltas_no_blocks() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "");
+        parser.append_streaming_text(&mut history, "");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 0);
+    }
+
+    // -- Thinking streaming -------------------------------------------
+
+    #[test]
+    fn thinking_then_flush() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_thinking(&mut history, "thinking...");
+        parser.flush_streaming_thinking(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.block_at(0), &Block::Thinking {
+            content: "thinking...".into(),
+        });
+        assert_eq!(history.status(history.order[0]), Status::Done);
+    }
+
+    #[test]
+    fn thinking_auto_flushes_when_text_arrives() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_thinking(&mut history, "thinking");
+        parser.append_streaming_text(&mut history, "text");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.block_at(0), &Block::Thinking {
+            content: "thinking".into(),
+        });
+        assert_eq!(history.block_at(1), &Block::Text {
+            content: "text".into(),
+        });
+    }
+
+    // -- Code blocks --------------------------------------------------
+
+    #[test]
+    fn code_block_detected() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "```rust\nfn main() {}\n```");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.block_at(0),
+            &Block::CodeLine {
+                content: "fn main() {}".into(),
+                lang: "rust".into(),
+            }
+        );
+        assert_eq!(
+            history.block_at(1),
+            &Block::CodeLine {
+                content: "```".into(),
+                lang: "rust".into(),
+            }
+        );
+        assert_eq!(history.status(history.order[0]), Status::Done);
+    }
+
+    #[test]
+    fn code_block_chunked_at_line_boundaries() {
+        let (mut parser, mut history) = setup();
+        for chunk in ["```rust\n", "fn main() {}\n", "```"] {
+            parser.append_streaming_text(&mut history, chunk);
+        }
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.block_at(0),
+            &Block::CodeLine {
+                content: "fn main() {}".into(),
+                lang: "rust".into(),
+            }
+        );
+        assert_eq!(
+            history.block_at(1),
+            &Block::CodeLine {
+                content: "```".into(),
+                lang: "rust".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn code_block_with_multiple_lines() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "```py\nprint(1)\nprint(2)\n```");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history.block_at(0),
+            &Block::CodeLine {
+                content: "print(1)".into(),
+                lang: "py".into(),
+            }
+        );
+        assert_eq!(
+            history.block_at(1),
+            &Block::CodeLine {
+                content: "print(2)".into(),
+                lang: "py".into(),
+            }
+        );
+        assert_eq!(
+            history.block_at(2),
+            &Block::CodeLine {
+                content: "```".into(),
+                lang: "py".into(),
+            }
+        );
+    }
+
+    // -- Tables -------------------------------------------------------
+
+    #[test]
+    fn table_detected() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "| a | b |\n|---|---|\n| 1 | 2 |");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
+            }
+        );
+        assert_eq!(history.status(history.order[0]), Status::Done);
+    }
+
+    // -- Tool lifecycle -----------------------------------------------
+
+    #[test]
+    fn tool_start_flushes_active_text() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "before tool");
+        parser.start_tool(
+            &mut history,
+            "c1".into(),
+            "bash".into(),
+            "bash".into(),
+            HashMap::new(),
+        );
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "before tool".into(),
+            }
+        );
+        assert!(matches!(history.block_at(1), Block::ToolCall { .. }));
+        assert_eq!(history.status(history.order[0]), Status::Streaming);
+    }
+
+    #[test]
+    fn tool_finish_sets_done() {
+        let (mut parser, mut history) = setup();
+        parser.start_tool(
+            &mut history,
+            "c1".into(),
+            "bash".into(),
+            "bash".into(),
+            HashMap::new(),
+        );
+        let tool_block_id = history.order[0];
+        assert_eq!(history.status(tool_block_id), Status::Streaming);
+        parser.finish_tool(
+            &mut history,
+            "c1",
+            ToolStatus::Ok,
+            None,
+            None,
+        );
+        assert_eq!(history.status(tool_block_id), Status::Done);
+    }
+
+    // -- Exec lifecycle -----------------------------------------------
+
+    #[test]
+    fn exec_lifecycle() {
+        let (mut parser, mut history) = setup();
+        parser.start_exec(&mut history, "ls".into());
+        assert_eq!(history.len(), 1);
+        let exec_id = history.order[0];
+        assert_eq!(history.status(exec_id), Status::Streaming);
+        parser.append_exec_output(&mut history, "file.txt");
+        assert_eq!(
+            history.block_at(0),
+            &Block::Exec {
+                command: "ls".into(),
+                output: "file.txt".into(),
+            }
+        );
+        parser.finalize_exec(&mut history);
+        assert_eq!(history.status(exec_id), Status::Done);
+    }
+
+    // -- Turn flush ---------------------------------------------------
+
+    #[test]
+    fn turn_flush_captures_partial_text() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "partial");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.block_at(0), &Block::Text {
+            content: "partial".into(),
+        });
+        assert_eq!(history.status(history.order[0]), Status::Done);
+    }
+
+    #[test]
+    fn turn_flush_captures_partial_code_line() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "```rust\npartial");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.block_at(0),
+            &Block::CodeLine {
+                content: "partial".into(),
+                lang: "rust".into(),
+            }
+        );
+        assert_eq!(history.status(history.order[0]), Status::Done);
+    }
+
+    // -- Chunk boundary stress ----------------------------------------
+
+    #[test]
+    fn newline_split_across_chunks() {
+        let (mut parser, mut history) = setup();
+        for chunk in ["line1\n", "line2"] {
+            parser.append_streaming_text(&mut history, chunk);
+        }
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.block_at(0), &Block::Text {
+            content: "line1\nline2".into(),
+        });
+    }
+
+    #[test]
+    fn table_row_split_across_chunks() {
+        let (mut parser, mut history) = setup();
+        for chunk in ["| a ", "| b |\n|---", "--|\n| 1 | 2 |"] {
+            parser.append_streaming_text(&mut history, chunk);
+        }
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "| a | b |\n|-----|\n| 1 | 2 |".into(),
+            }
+        );
+    }
+
+    // -- Paragraph break ----------------------------------------------
+
+    #[test]
+    fn text_paragraph_break() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "first paragraph\n\nsecond paragraph");
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.block_at(0), &Block::Text {
+            content: "first paragraph".into(),
+        });
+        assert_eq!(history.block_at(1), &Block::Text {
+            content: "second paragraph".into(),
+        });
+    }
+
+    // -- No-drop invariant --------------------------------------------
+
+    #[test]
+    fn no_text_lost_across_many_small_chunks() {
+        let (mut parser, mut history) = setup();
+        let full = "The quick brown fox jumps over the lazy dog.";
+        for ch in full.chars() {
+            parser.append_streaming_text(&mut history, &ch.to_string());
+        }
+        parser.flush_streaming_text(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.block_at(0), &Block::Text {
+            content: full.into(),
+        });
+    }
+}
