@@ -202,7 +202,7 @@ pub struct Config {
     pub theme: ThemeConfig,
     /// MCP server configurations.
     #[serde(default)]
-    pub mcp: std::collections::HashMap<String, engine::McpServerConfig>,
+    pub mcp: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
     /// Skills configuration.
     #[serde(default)]
     pub skills: SkillsConfig,

@@ -2900,6 +2900,7 @@ dependencies = [
  "mlua",
  "protocol",
  "reqwest",
+ "rmcp",
  "scraper",
  "seahash",
  "serde",

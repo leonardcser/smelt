@@ -5,15 +5,15 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-pub(crate) struct ToolResult {
-    pub(crate) content: String,
-    pub(crate) is_error: bool,
+pub struct ToolResult {
+    pub content: String,
+    pub is_error: bool,
     /// Structured metadata passed through to ToolOutcome for machine-readable data.
-    pub(crate) metadata: Option<serde_json::Value>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl ToolResult {
-    pub(crate) fn ok(content: impl Into<String>) -> Self {
+    pub fn ok(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
             is_error: false,
@@ -21,7 +21,7 @@ impl ToolResult {
         }
     }
 
-    pub(crate) fn err(content: impl Into<String>) -> Self {
+    pub fn err(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
             is_error: true,
@@ -30,7 +30,7 @@ impl ToolResult {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
@@ -40,11 +40,11 @@ impl ToolResult {
 /// engine (MCP adapters) ignore it — kept as a placeholder so the
 /// trait signature can grow back if a future engine-side tool needs
 /// cancel propagation or other engine facilities.
-pub(crate) struct ToolContext;
+pub struct ToolContext;
 
-pub(crate) type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
+pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
 
-pub(crate) trait Tool: Send + Sync {
+pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
@@ -66,7 +66,7 @@ pub(crate) trait Tool: Send + Sync {
     }
 }
 
-pub(crate) struct ToolEntry {
+pub struct ToolEntry {
     pub(crate) tool: Box<dyn Tool>,
     /// MCP tools use the `mcp` permission ruleset rather than the per-tool
     /// `tools` ruleset; tracked here so the trait stays dispatch-only.
@@ -87,7 +87,7 @@ pub(crate) struct ToolEntry {
 /// over the unfiltered tool list returned by `definitions`, using
 /// `is_mcp` to pick the right ruleset. When permissions move to Lua
 /// hooks (P5.c) the engine-side filter retires.
-pub(crate) trait ToolDispatcher: Send + Sync {
+pub trait ToolDispatcher: Send + Sync {
     /// All tool definitions registered with this dispatcher. The engine
     /// applies permission filtering externally.
     fn definitions(&self) -> Vec<ToolDefinition>;
@@ -149,24 +149,24 @@ impl ToolDispatcher for ToolRegistry {
 }
 
 #[derive(Default)]
-pub(crate) struct ToolRegistry {
+pub struct ToolRegistry {
     tools: Vec<ToolEntry>,
 }
 
 impl ToolRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn register_mcp(&mut self, tool: Box<dyn Tool>) {
+    pub fn register_mcp(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(ToolEntry { tool, is_mcp: true });
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<&ToolEntry> {
+    pub fn get(&self, name: &str) -> Option<&ToolEntry> {
         self.tools.iter().find(|e| e.tool.name() == name)
     }
 }
 
-pub(crate) fn build_tools() -> ToolRegistry {
+pub fn build_tools() -> ToolRegistry {
     ToolRegistry::new()
 }

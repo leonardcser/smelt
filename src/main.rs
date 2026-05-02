@@ -318,27 +318,35 @@ async fn main() {
     let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
-    let engine_handle = engine::start(engine::EngineConfig {
-        api: engine::ApiConfig {
-            base: api_base,
-            key: api_key,
-            key_env: api_key_env.clone(),
-            provider_type,
-            model_config: (&model_config).into(),
+    let mcp_dispatcher = tui::mcp::dispatcher::McpDispatcher::start(&cfg.mcp).await;
+    let dispatcher: Box<dyn engine::tools::ToolDispatcher> = match mcp_dispatcher {
+        Some(d) => Box::new(d),
+        None => Box::new(engine::tools::ToolRegistry::new()),
+    };
+
+    let engine_handle = engine::start(
+        engine::EngineConfig {
+            api: engine::ApiConfig {
+                base: api_base,
+                key: api_key,
+                key_env: api_key_env.clone(),
+                provider_type,
+                model_config: (&model_config).into(),
+            },
+            model: model.clone(),
+            auxiliary,
+            instructions,
+            system_prompt_override,
+            cwd: cwd.clone(),
+            permissions: permissions.clone(),
+            runtime_approvals: runtime_approvals.clone(),
+            skills: Some(skill_loader),
+            auto_compact: settings.auto_compact,
+            context_window: cfg.settings.context_window,
+            redact_secrets: settings.redact_secrets,
         },
-        model: model.clone(),
-        auxiliary,
-        instructions,
-        system_prompt_override,
-        cwd: cwd.clone(),
-        permissions: permissions.clone(),
-        runtime_approvals: runtime_approvals.clone(),
-        mcp_servers: cfg.mcp.clone(),
-        skills: Some(skill_loader),
-        auto_compact: settings.auto_compact,
-        context_window: cfg.settings.context_window,
-        redact_secrets: settings.redact_secrets,
-    });
+        dispatcher,
+    );
     // Fetch context window in background (only needed for interactive TUI display).
     // If the user set it in config, skip the fetch entirely.
     let ctx_rx = if !args.headless && cfg.settings.context_window.is_none() {

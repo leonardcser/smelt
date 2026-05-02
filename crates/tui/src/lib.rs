@@ -15,6 +15,7 @@ pub(crate) mod http;
 pub(crate) mod input;
 pub mod instructions;
 pub(crate) mod keymap;
+pub mod mcp;
 pub(crate) mod lua;
 pub(crate) mod metrics;
 pub(crate) mod notebook;

@@ -18,17 +18,17 @@ use std::time::{Duration, Instant};
 // ── Tool definitions ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ToolDefinition {
+pub struct ToolDefinition {
     #[serde(rename = "type")]
     def_type: AlwaysFunctionDef,
     pub(crate) function: FunctionSchema,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct FunctionSchema {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) parameters: serde_json::Value,
+pub struct FunctionSchema {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +41,7 @@ impl Serialize for AlwaysFunctionDef {
 }
 
 impl ToolDefinition {
-    pub(crate) fn new(function: FunctionSchema) -> Self {
+    pub fn new(function: FunctionSchema) -> Self {
         Self {
             def_type: AlwaysFunctionDef,
             function,
