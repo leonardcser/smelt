@@ -29,7 +29,7 @@ impl TuiApp {
     /// handler are drained before returning so downstream code sees
     /// a consistent state.
     pub(super) fn emit_prompt_text_changed_if_dirty(&mut self) {
-        let current_text = self.input.win.edit_buf.buf.clone();
+        let current_text = self.input.win.text.clone();
         if self.last_prompt_text == current_text {
             return;
         }

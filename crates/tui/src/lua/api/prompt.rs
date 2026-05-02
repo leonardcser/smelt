@@ -11,10 +11,7 @@ use mlua::prelude::*;
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let prompt_tbl = lua.create_table()?;
     prompt_tbl.set("win_id", lua.create_function(|_, ()| Ok(ui::PROMPT_WIN.0))?)?;
-    prompt_tbl.set(
-        "text",
-        app_read!(lua, |app| app.input.win.edit_buf.buf.clone()),
-    )?;
+    prompt_tbl.set("text", app_read!(lua, |app| app.input.win.text.clone()))?;
     prompt_tbl.set(
         "set_text",
         lua.create_function(|_, text: String| {

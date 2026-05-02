@@ -115,10 +115,10 @@ impl PromptState {
             let start = comp.anchor;
             if comp.kind == CompleterKind::CommandArg {
                 // Replace just the argument portion after the command prefix.
-                self.win.edit_buf.buf.replace_range(start..end, label);
+                self.win.text.replace_range(start..end, label);
                 self.win.cpos = start + label.len();
             } else {
-                let trigger = &self.win.edit_buf.buf[start..start + 1];
+                let trigger = &self.win.text[start..start + 1];
                 let replacement = if trigger == "/" {
                     format!("/{} ", label)
                 } else if label.contains(' ') {
@@ -126,10 +126,7 @@ impl PromptState {
                 } else {
                     format!("@{} ", label)
                 };
-                self.win
-                    .edit_buf
-                    .buf
-                    .replace_range(start..end, &replacement);
+                self.win.text.replace_range(start..end, &replacement);
                 self.win.cpos = start + replacement.len();
             }
         }
@@ -139,7 +136,7 @@ impl PromptState {
     pub(super) fn sync_completer(&mut self) {
         // Slash commands are single-line by design — once the user has
         // broken into multiple lines, hide the command picker.
-        let single_line = !self.win.edit_buf.buf.contains('\n');
+        let single_line = !self.win.text.contains('\n');
         if single_line {
             if let Some((src_idx, arg_anchor)) = self.find_command_arg_zone() {
                 let items = self.command_arg_sources[src_idx].1.clone();
@@ -151,8 +148,8 @@ impl PromptState {
                 );
                 return;
             }
-            if find_slash_anchor(&self.win.edit_buf.buf, self.win.cpos).is_some() {
-                let query = self.win.edit_buf.buf[1..self.win.cpos].to_string();
+            if find_slash_anchor(&self.win.text, self.win.cpos).is_some() {
+                let query = self.win.text[1..self.win.cpos].to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
                     || Completer::commands(0),
@@ -168,9 +165,9 @@ impl PromptState {
     /// Shows the file or command picker if the cursor is inside an @/slash
     /// zone, hides it otherwise.
     pub(super) fn recompute_completer(&mut self) {
-        if let Some(at_pos) = cursor_in_at_zone(&self.win.edit_buf.buf, self.win.cpos) {
+        if let Some(at_pos) = cursor_in_at_zone(&self.win.text, self.win.cpos) {
             let query = if self.win.cpos > at_pos + 1 {
-                self.win.edit_buf.buf[at_pos + 1..self.win.cpos].to_string()
+                self.win.text[at_pos + 1..self.win.cpos].to_string()
             } else {
                 String::new()
             };
@@ -189,7 +186,7 @@ impl PromptState {
         }
         // Slash commands are single-line by design — once the user has
         // broken into multiple lines, hide the command picker.
-        let single_line = !self.win.edit_buf.buf.contains('\n');
+        let single_line = !self.win.text.contains('\n');
         if single_line {
             if let Some((src_idx, arg_anchor)) = self.find_command_arg_zone() {
                 let items = self.command_arg_sources[src_idx].1.clone();
@@ -201,11 +198,11 @@ impl PromptState {
                 );
                 return;
             }
-            if find_slash_anchor(&self.win.edit_buf.buf, self.win.cpos).is_some()
-                || (self.win.cpos == 0 && self.win.edit_buf.buf.starts_with('/'))
+            if find_slash_anchor(&self.win.text, self.win.cpos).is_some()
+                || (self.win.cpos == 0 && self.win.text.starts_with('/'))
             {
                 let end = self.win.cpos.max(1);
-                let query = self.win.edit_buf.buf[1..end].to_string();
+                let query = self.win.text[1..end].to_string();
                 self.set_or_update_completer(
                     CompleterKind::Command,
                     || Completer::commands(0),
@@ -236,7 +233,7 @@ impl PromptState {
 
     fn arg_query(&self, anchor: usize) -> String {
         if self.win.cpos > anchor {
-            self.win.edit_buf.buf[anchor..self.win.cpos].to_string()
+            self.win.text[anchor..self.win.cpos].to_string()
         } else {
             String::new()
         }
@@ -248,9 +245,9 @@ impl PromptState {
     fn find_command_arg_zone(&self) -> Option<(usize, usize)> {
         for (i, (cmd, _)) in self.command_arg_sources.iter().enumerate() {
             let anchor = cmd.len() + 1; // "/cmd" + space
-            if self.win.edit_buf.buf.len() >= anchor
-                && self.win.edit_buf.buf.starts_with(cmd.as_str())
-                && self.win.edit_buf.buf.as_bytes()[cmd.len()] == b' '
+            if self.win.text.len() >= anchor
+                && self.win.text.starts_with(cmd.as_str())
+                && self.win.text.as_bytes()[cmd.len()] == b' '
                 && self.win.cpos >= anchor
             {
                 return Some((i, anchor));

@@ -1,6 +1,5 @@
 use crate::buffer::Buffer;
 use crate::clipboard::Clipboard;
-use crate::edit_buffer::EditBuffer;
 use crate::event::Status;
 use crate::grid::{GridSlice, Style};
 use crate::layout::{Gutters, Rect};
@@ -271,7 +270,17 @@ pub struct Window {
     /// without an extra render-time channel.
     pub viewport: Option<WindowViewport>,
 
-    pub edit_buf: EditBuffer,
+    /// Flat text content for this window. For Buffer-backed windows
+    /// this mirrors `buffer.text()`; for prompt editing it is the
+    /// live editable source.
+    pub text: String,
+    /// Attachment markers inside `text`.
+    pub attachment_ids: Vec<crate::AttachmentId>,
+    /// Undo/redo stack. `None` capacity disables undo (used for readonly
+    /// buffers).
+    pub history: crate::undo::UndoHistory,
+    /// Whether this window's text can be edited.
+    pub readonly: bool,
     pub cpos: usize,
     /// Vim mode is enabled on this Window. Combined with `vim_state`
     /// it gates the keystroke dispatcher in `dispatch_vim_key`.
@@ -328,7 +337,10 @@ impl Window {
             focusable: true,
             cursor_line_highlight: false,
             viewport: None,
-            edit_buf: EditBuffer::readonly(),
+            text: String::new(),
+            attachment_ids: Vec::new(),
+            history: crate::undo::UndoHistory::default(),
+            readonly: true,
             cpos: 0,
             vim_enabled: false,
             vim_state: VimWindowState::default(),
@@ -408,8 +420,7 @@ impl Window {
         viewport_rows: u16,
         mode: &mut VimMode,
     ) -> Option<(usize, usize)> {
-        let (start, end) =
-            crate::edit_buffer::big_word_range_at_transparent(buf, cpos, transparent)?;
+        let (start, end) = crate::text::big_word_range_at_transparent(buf, cpos, transparent)?;
         self.finish_range_select(start, end, rows, viewport_rows, mode);
         Some((start, end))
     }
@@ -431,7 +442,7 @@ impl Window {
         viewport_rows: u16,
         mode: &mut VimMode,
     ) -> Option<(usize, usize)> {
-        let (start, end) = crate::edit_buffer::line_range_at(buf, cpos, hard_breaks)?;
+        let (start, end) = crate::text::line_range_at(buf, cpos, hard_breaks)?;
         self.finish_range_select(start, end, rows, viewport_rows, mode);
         Some((start, end))
     }
@@ -472,13 +483,13 @@ impl Window {
             return;
         }
         let offsets = Self::line_start_offsets(rows);
-        self.edit_buf.buf = rows.join("\n");
+        self.text = rows.join("\n");
         self.sync_from_cpos(rows, &offsets, viewport_rows);
     }
 
     pub fn refocus(&mut self, rows: &[String], viewport_rows: u16, mode: &mut VimMode) {
         if rows.is_empty() {
-            self.edit_buf.buf.clear();
+            self.text.clear();
             self.cpos = 0;
             self.cursor_line = 0;
             self.cursor_col = 0;
@@ -492,7 +503,7 @@ impl Window {
             let total = rows.len();
             let last_line = total.saturating_sub(1);
             let offsets = Self::line_start_offsets(rows);
-            self.edit_buf.buf = rows.join("\n");
+            self.text = rows.join("\n");
             self.cpos = offsets[last_line];
             self.sync_from_cpos(rows, &offsets, viewport_rows);
             self.cursor_positioned = true;
@@ -510,7 +521,7 @@ impl Window {
             return;
         }
         let offsets = Self::line_start_offsets(rows);
-        self.edit_buf.buf = rows.join("\n");
+        self.text = rows.join("\n");
         let total = rows.len() as u16;
         let max = total.saturating_sub(viewport_rows);
         self.scroll_top = self.scroll_top.min(max);
@@ -589,7 +600,7 @@ impl Window {
 
     fn mount(&mut self, rows: &[String]) -> Vec<usize> {
         let offsets = Self::line_start_offsets(rows);
-        self.edit_buf.buf = rows.join("\n");
+        self.text = rows.join("\n");
         self.cpos = self.visible_cpos(rows, &offsets);
         offsets
     }
@@ -657,11 +668,11 @@ impl Window {
         mut ctx: MouseCtx,
     ) -> (Status, Option<String>) {
         // Build the joined buffer once and pass it down. Mouse helpers
-        // operate on this `&str` instead of `self.edit_buf.buf`, which
-        // lets surfaces whose `edit_buf.buf` is *not* `rows.join("\n")`
+        // operate on this `&str` instead of `self.text`, which
+        // lets surfaces whose `self.text` is *not* `rows.join("\n")`
         // (the prompt — source buffer ≠ wrapped display rows) reuse
         // `Window::handle_mouse` directly. The transcript and dialog
-        // buffer panels still keep `edit_buf.buf == rows.join("\n")`
+        // buffer panels still keep `self.text == rows.join("\n")`
         // via their existing sync paths; the buffer arg just doesn't
         // need it to be true.
         let buf = ctx.rows.join("\n");
@@ -828,12 +839,12 @@ impl Window {
         };
         let p = self.compute_cpos(ctx.rows);
         let (new_cpos, new_anchor) = if p >= we {
-            let far = crate::edit_buffer::word_range_at_transparent(buf, p, ctx.soft_breaks)
+            let far = crate::text::word_range_at_transparent(buf, p, ctx.soft_breaks)
                 .map(|(_, e)| e.saturating_sub(1).max(ws))
                 .unwrap_or(p.max(we.saturating_sub(1)));
             (far, ws)
         } else if p < ws {
-            let near = crate::edit_buffer::word_range_at_transparent(buf, p, ctx.soft_breaks)
+            let near = crate::text::word_range_at_transparent(buf, p, ctx.soft_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
             (near, we.saturating_sub(1).max(ws))
@@ -855,12 +866,12 @@ impl Window {
         };
         let p = self.compute_cpos(ctx.rows);
         let (new_cpos, new_anchor) = if p >= le {
-            let far = crate::edit_buffer::line_range_at(buf, p, ctx.hard_breaks)
+            let far = crate::text::line_range_at(buf, p, ctx.hard_breaks)
                 .map(|(_, e)| e.saturating_sub(1).max(ls))
                 .unwrap_or(p.max(le.saturating_sub(1)));
             (far, ls)
         } else if p < ls {
-            let near = crate::edit_buffer::line_range_at(buf, p, ctx.hard_breaks)
+            let near = crate::text::line_range_at(buf, p, ctx.hard_breaks)
                 .map(|(s, _)| s)
                 .unwrap_or(p);
             (near, le.saturating_sub(1).max(ls))
@@ -930,10 +941,10 @@ impl Window {
         };
         let mut cpos = self.cpos;
         let mut ctx = VimContext {
-            buf: &mut self.edit_buf.buf,
+            buf: &mut self.text,
             cpos: &mut cpos,
-            attachments: &mut self.edit_buf.attachment_ids,
-            history: &mut self.edit_buf.history,
+            attachments: &mut self.attachment_ids,
+            history: &mut self.history,
             clipboard,
             mode,
             curswant: &mut self.curswant,
@@ -956,8 +967,7 @@ impl Window {
             return;
         }
         let offsets = self.mount(rows);
-        let (new_cpos, new_want) =
-            text::vertical_move(&self.edit_buf.buf, self.cpos, delta, self.curswant);
+        let (new_cpos, new_want) = text::vertical_move(&self.text, self.cpos, delta, self.curswant);
         self.curswant = Some(new_want);
         self.cpos = new_cpos;
         if self.vim_enabled && *mode == VimMode::Insert {
@@ -980,9 +990,9 @@ impl Window {
         }
         let line_idx = line_idx.min(rows.len() - 1);
         let offsets = Self::line_start_offsets(rows);
-        // Intentionally do NOT write `self.edit_buf.buf` here. Mouse
+        // Intentionally do NOT write `self.text` here. Mouse
         // helpers are pure over `(rows, &str buf)` so the prompt — whose
-        // `edit_buf.buf` is the source buffer, not the wrapped display
+        // `self.text` is the source buffer, not the wrapped display
         // rows — can run through `Window::handle_mouse` without losing
         // its source content.
         let line = &rows[line_idx];

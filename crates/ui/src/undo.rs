@@ -8,6 +8,7 @@
 
 use crate::AttachmentId;
 
+#[derive(Clone)]
 pub struct UndoEntry {
     pub buf: String,
     pub cpos: usize,
@@ -28,6 +29,22 @@ pub struct UndoHistory {
     undo: Vec<UndoEntry>,
     redo: Vec<UndoEntry>,
     cap: Option<usize>,
+}
+
+impl Default for UndoHistory {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl Clone for UndoHistory {
+    fn clone(&self) -> Self {
+        Self {
+            undo: self.undo.clone(),
+            redo: self.redo.clone(),
+            cap: self.cap,
+        }
+    }
 }
 
 impl UndoHistory {

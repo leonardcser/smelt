@@ -375,7 +375,7 @@ impl TuiApp {
         }) = ev
         {
             let ghost_text = self.prompt_completer_text();
-            let ghost = ghost_text.is_some() && self.input.buf.is_empty();
+            let ghost = ghost_text.is_some() && self.input.win.text.is_empty();
             let ctx = self.input.key_context(false, ghost, self.vim_mode);
 
             // Dismiss ghost text on keys that affect input content.
@@ -510,9 +510,9 @@ impl TuiApp {
                 }
                 EscAction::Unqueue => {
                     let mut combined = self.queued_messages.join("\n");
-                    if !self.input.buf.is_empty() {
+                    if !self.input.win.text.is_empty() {
                         combined.push('\n');
-                        combined.push_str(&self.input.buf);
+                        combined.push_str(&self.input.win.text);
                     }
                     let mode = self.vim_mode;
                     crate::api::buf::replace(&mut self.input, combined, None, mode);
@@ -628,7 +628,7 @@ impl TuiApp {
                 return;
             }
         };
-        if let Err(e) = std::fs::write(tmp.path(), &self.input.buf) {
+        if let Err(e) = std::fs::write(tmp.path(), &self.input.win.text) {
             self.notify_error(format!("write tmp: {e}"));
             return;
         }

@@ -728,7 +728,7 @@ impl TuiApp {
             }
         }
 
-        let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.buf, &[], 0, usable);
+        let (visual_lines, _, _, _) = wrap_and_locate_cursor(&state.win.text, &[], 0, usable);
         let input_rows = visual_lines.len() as u16;
 
         queued_rows + stash + 1 + input_rows + 1 + 1

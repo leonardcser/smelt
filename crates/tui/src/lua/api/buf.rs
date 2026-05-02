@@ -8,10 +8,7 @@ use std::sync::Arc;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let buf_tbl = lua.create_table()?;
-    buf_tbl.set(
-        "text",
-        app_read!(lua, |app| app.input.win.edit_buf.buf.clone()),
-    )?;
+    buf_tbl.set("text", app_read!(lua, |app| app.input.win.text.clone()))?;
     {
         let s = shared.clone();
         buf_tbl.set(
