@@ -8,7 +8,11 @@ function smelt.sleep(ms)
   if not coroutine.isyieldable() then
     error("smelt.sleep: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
-  return coroutine.yield({ __yield = "sleep", ms = ms })
+  local result = coroutine.yield({ __yield = "sleep", ms = ms })
+  if type(result) == "table" and result.__cancelled then
+    error("cancelled", 2)
+  end
+  return result
 end
 
 -- Park the running task until `smelt.task.resume(id, value)` fires (from a
@@ -19,7 +23,11 @@ function smelt.task.wait(id)
   if not coroutine.isyieldable() then
     error("smelt.task.wait: call from inside smelt.spawn(fn) or tool.execute", 2)
   end
-  return coroutine.yield({ __yield = "external", id = id })
+  local result = coroutine.yield({ __yield = "external", id = id })
+  if type(result) == "table" and result.__cancelled then
+    error("cancelled", 2)
+  end
+  return result
 end
 
 -- Side-call from a plugin tool's `execute` into a core (or another plugin)
@@ -33,7 +41,11 @@ function smelt.tools.call(name, args, parent_call_id)
   end
   local id = smelt.task.alloc()
   smelt.tools.__send_call(id, parent_call_id or "", name, args or {})
-  return coroutine.yield({ __yield = "external", id = id })
+  local result = coroutine.yield({ __yield = "external", id = id })
+  if type(result) == "table" and result.__cancelled then
+    error("cancelled", 2)
+  end
+  return result
 end
 
 function smelt.tools.default_summary(args)

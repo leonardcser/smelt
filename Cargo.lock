@@ -2878,6 +2878,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "tokio",
+ "tokio-util",
  "two-face",
  "ui",
  "unicode-width",

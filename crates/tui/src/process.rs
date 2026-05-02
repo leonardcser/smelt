@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
 use tokio::sync::mpsc;
 
 /// Options accepted by [`run`]. Defaults: 30s timeout, inherit env,
@@ -139,7 +140,16 @@ pub(crate) async fn run_streaming(
     command: &str,
     timeout: Duration,
     mut on_line: impl FnMut(String),
+    cancel: Option<CancellationToken>,
 ) -> StreamOutput {
+    if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+        return StreamOutput {
+            content: "cancelled".to_string(),
+            is_error: true,
+            timed_out: false,
+        };
+    }
+
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)
@@ -176,6 +186,15 @@ pub(crate) async fn run_streaming(
             break;
         }
         tokio::select! {
+            biased;
+            _ = cancel.as_ref().unwrap().cancelled(), if cancel.as_ref().is_some_and(|c| !c.is_cancelled()) => {
+                kill_process_group(&child);
+                return StreamOutput {
+                    content: "cancelled".to_string(),
+                    is_error: true,
+                    timed_out: false,
+                };
+            }
             line = stdout_reader.next_line(), if !stdout_done => {
                 match line {
                     Ok(Some(line)) => {

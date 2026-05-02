@@ -124,12 +124,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         "process.run_streaming: app unavailable",
                     ));
                 };
+                let cancel = crate::lua::task::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
                 tokio::spawn(async move {
                     let on_line = |line: String| {
                         injector.inject_tool_output(call_id.clone(), line);
                     };
-                    let out = process::run_streaming(&command, timeout, on_line).await;
+                    let out = process::run_streaming(&command, timeout, on_line, cancel.clone()).await;
+                    if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                        let payload = serde_json::json!({ "__cancelled": true });
+                        sink.resolve_json(task_id, payload);
+                        return;
+                    }
                     let payload = serde_json::json!({
                         "content": out.content,
                         "is_error": out.is_error,

@@ -272,6 +272,7 @@ impl TuiApp {
     pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
+        self.core.lua.cancel_tasks();
         {
             self.working.finish(TurnOutcome::Interrupted);
         };
