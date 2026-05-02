@@ -35,9 +35,9 @@ fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
         .to_string()
 }
 use protocol::AgentMode;
-use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerms};
 #[cfg(test)]
 use rules::compile_patterns;
+use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerms};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
