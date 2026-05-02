@@ -1,6 +1,6 @@
-mod tool_adapter;
+pub mod dispatcher;
 
-use crate::log;
+use engine::log;
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
@@ -11,8 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::RwLock;
-
-pub(crate) use tool_adapter::McpTool;
 
 /// Configuration for a single MCP server.
 #[derive(Debug, Clone, Deserialize)]
@@ -49,7 +47,7 @@ pub(crate) struct McpToolDef {
 }
 
 impl McpToolDef {
-    fn qualified_name(&self) -> String {
+    pub fn qualified_name(&self) -> String {
         sanitize_name(&format!("{}_{}", self.server_name, self.tool_name))
     }
 }
@@ -198,7 +196,7 @@ impl McpManager {
     }
 
     /// Get all discovered MCP tool definitions across all connected servers.
-    pub(crate) async fn tool_defs(&self) -> Vec<McpToolDef> {
+    pub async fn tool_defs(&self) -> Vec<McpToolDef> {
         let conns = self.connections.read().await;
         conns.values().flat_map(|c| c.tools.clone()).collect()
     }
@@ -206,7 +204,7 @@ impl McpManager {
     /// Call a tool on the appropriate MCP server.
     /// Acquires the connection lock briefly to clone the client handle,
     /// then releases it before the potentially slow remote call.
-    pub(crate) async fn call_tool(
+    pub async fn call_tool(
         &self,
         server_name: &str,
         tool_name: &str,

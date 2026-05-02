@@ -6,7 +6,7 @@ pub(crate) mod config;
 pub mod config_file;
 pub mod image;
 pub mod log;
-pub(crate) mod mcp;
+
 pub mod paths;
 pub mod permissions;
 
@@ -19,7 +19,6 @@ pub mod tools;
 pub(crate) mod trim;
 
 use protocol::{EngineEvent, UiCommand};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -47,7 +46,6 @@ pub fn compact_threshold_percent() -> u64 {
 
 pub use compact::SUMMARY_PREFIX;
 pub use config::ModelConfig;
-pub use mcp::McpServerConfig;
 pub use paths::{config_dir, home_dir, state_dir};
 pub use permissions::Permissions;
 pub use provider::{Provider, ProviderKind};
@@ -152,7 +150,7 @@ pub struct EngineConfig {
     /// Runtime approvals shared between engine and TUI.
     pub runtime_approvals: Arc<std::sync::RwLock<permissions::RuntimeApprovals>>,
     /// MCP server configurations.
-    pub mcp_servers: HashMap<String, McpServerConfig>,
+
     /// Pre-loaded skill loader.
     pub skills: Option<Arc<SkillLoader>>,
     /// Auto-compact when context usage crosses the threshold.
@@ -241,14 +239,15 @@ impl EventInjector {
 ///
 /// MCP servers are connected asynchronously — this must be called from
 /// within a tokio runtime.
-pub fn start(config: EngineConfig) -> EngineHandle {
+pub fn start(
+    config: EngineConfig,
+    dispatcher: Box<dyn tools::ToolDispatcher>,
+) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-    let registry = tools::build_tools();
-
     let event_tx_clone = event_tx.clone();
-    tokio::spawn(agent::engine_task(config, registry, cmd_rx, event_tx));
+    tokio::spawn(agent::engine_task(config, dispatcher, cmd_rx, event_tx));
 
     EngineHandle {
         cmd_tx,

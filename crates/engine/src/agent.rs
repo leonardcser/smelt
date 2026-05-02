@@ -2,7 +2,7 @@ use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialC
 use crate::log;
 use crate::permissions::{Decision, Permissions, RuntimeApprovals};
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
-use crate::tools::{ToolContext, ToolDispatcher, ToolRegistry, ToolResult};
+use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,
@@ -26,27 +26,12 @@ fn next_request_id() -> u64 {
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
 pub(crate) async fn engine_task(
     mut config: EngineConfig,
-    mut registry: ToolRegistry,
+    dispatcher: Box<dyn crate::tools::ToolDispatcher>,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
     let client = reqwest::Client::new();
     crate::pricing::spawn_catalog_fetch(client.clone());
-
-    // Connect MCP servers and register their tools.
-    let _mcp_manager = if !config.mcp_servers.is_empty() {
-        let mgr = crate::mcp::McpManager::start(&config.mcp_servers).await;
-        let tool_defs = mgr.tool_defs().await;
-        for def in tool_defs {
-            registry.register_mcp(Box::new(crate::mcp::McpTool::new(
-                def,
-                std::sync::Arc::clone(&mgr),
-            )));
-        }
-        Some(mgr)
-    } else {
-        None
-    };
 
     let _ = event_tx.send(EngineEvent::Ready);
 
@@ -87,7 +72,7 @@ pub(crate) async fn engine_task(
                             });
                         let mut turn = Turn {
                             provider,
-                            dispatcher: &registry,
+                            dispatcher: &*dispatcher,
                             permissions: perm_ref,
                             runtime_approvals: &config.runtime_approvals,
                             cmd_rx: &mut cmd_rx,
