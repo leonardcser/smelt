@@ -123,7 +123,10 @@ impl Core {
             config,
             session: Session::new(),
             confirms,
-            clipboard: ui::Clipboard::new(Box::new(commands::SystemSink)),
+            clipboard: ui::Clipboard::new(match frontend {
+                FrontendKind::Tui => Box::new(commands::Osc52Sink),
+                FrontendKind::Headless => Box::new(commands::SystemSink),
+            }),
             timers: Timers::new(),
             cells,
             lua: LuaRuntime::new(),

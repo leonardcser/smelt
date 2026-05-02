@@ -1,4 +1,5 @@
 use super::*;
+use base64::Engine;
 
 pub(crate) enum ExecEvent {
     Output(String),
@@ -373,5 +374,27 @@ impl ui::Sink for SystemSink {
     }
     fn write(&mut self, text: &str) -> Result<(), String> {
         copy_to_clipboard(text)
+    }
+}
+
+/// OSC 52 clipboard sink: writes the terminal escape sequence
+/// `\x1b]52;c;<base64>\x07` to stdout so the terminal copies the
+/// text to the system clipboard. Works over SSH/tmux with modern
+/// terminals (iTerm2, kitty, alacritty, foot, wezterm, tmux
+/// `set-clipboard on`, etc.). Read falls back to subprocess helpers.
+pub(crate) struct Osc52Sink;
+
+impl ui::Sink for Osc52Sink {
+    fn read(&mut self) -> Option<String> {
+        paste_from_clipboard()
+    }
+    fn write(&mut self, text: &str) -> Result<(), String> {
+        use std::io::Write;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes())
+            .map_err(|e| e.to_string())?;
+        stdout.flush().map_err(|e| e.to_string())
     }
 }
