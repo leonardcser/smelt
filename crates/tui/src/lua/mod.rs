@@ -365,6 +365,11 @@ pub(crate) struct LuaShared {
     /// inbox and renders. Optional so `LuaShared::default()` stays
     /// trivially constructable.
     pub(crate) wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
+    // ── Config registries (populated by init.lua before engine starts) ───────
+    pub(crate) providers: Mutex<Vec<crate::config::ProviderConfig>>,
+    pub(crate) permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
+    pub(crate) mcp_configs: Mutex<std::collections::HashMap<String, crate::mcp::McpServerConfig>>,
+    pub(crate) settings_overrides: Mutex<std::collections::HashMap<String, String>>,
 }
 
 /// A callback invocation recorded by the ui dispatch path while
@@ -417,6 +422,10 @@ impl Default for LuaShared {
             pending_invocations: Mutex::new(Vec::new()),
             json_inbox: Arc::new(Mutex::new(Vec::new())),
             wakeup_tx: std::sync::OnceLock::new(),
+            providers: Mutex::new(Vec::new()),
+            permission_rules: Mutex::new(None),
+            mcp_configs: Mutex::new(std::collections::HashMap::new()),
+            settings_overrides: Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -458,10 +467,13 @@ impl LuaResumeSink {
 }
 
 /// User-scoped Lua state + any recorded startup error.
-pub(crate) struct LuaRuntime {
+pub struct LuaRuntime {
     pub(crate) lua: Lua,
     pub(crate) load_error: Option<String>,
     shared: Arc<LuaShared>,
+    /// Optional override for the path to `init.lua`.
+    /// If `None`, the default `XDG_CONFIG_HOME/smelt/init.lua` is used.
+    init_lua_path: Option<std::path::PathBuf>,
 }
 
 impl LuaRuntime {
@@ -472,7 +484,7 @@ impl LuaRuntime {
     /// (available models, settings, history) so plugins that read those
     /// at registration time (e.g. `/model` declaring `args = model_keys`)
     /// see real data.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let lua = Lua::new();
         // `Arc<LuaShared>` is single-threaded in practice (all Lua
         // callbacks fire on the TUI thread). The task runtime holds
@@ -489,6 +501,7 @@ impl LuaRuntime {
             lua,
             load_error,
             shared,
+            init_lua_path: None,
         };
 
         if rt.load_error.is_none() {
@@ -508,10 +521,53 @@ impl LuaRuntime {
         &self.shared
     }
 
-    /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
-    /// *after* pushing startup snapshots so plugins see populated
-    /// `smelt.engine.models()` etc.
-    pub(crate) fn load_plugins(&mut self) {
+    /// Read the load error, if any. Returns `None` when init.lua and
+    /// all autoload modules loaded successfully.
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    /// Run `~/.config/smelt/init.lua` only. Safe to call before
+    /// `TuiApp` exists — config bindings write to `LuaShared` and
+    /// don't need `with_app`.
+    pub fn to_config(&self) -> crate::config::Config {
+        crate::config::Config::from_lua_shared(self.shared())
+    }
+
+    /// Take any permission rules registered by Lua config.
+    pub fn take_permission_rules(&self) -> Option<crate::permissions::rules::RawPerms> {
+        self.shared()
+            .permission_rules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// Set a custom path for `init.lua` (overrides the default
+    /// `XDG_CONFIG_HOME/smelt/init.lua`).
+    pub fn set_init_lua_path(&mut self, path: std::path::PathBuf) {
+        self.init_lua_path = Some(path);
+    }
+
+    pub fn load_user_config(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        let path = self.init_lua_path.clone().or_else(init_lua_path);
+        if let Some(path) = path {
+            if path.exists() {
+                if let Err(e) = self.load_init(&path) {
+                    let label = self.init_lua_path.as_ref().map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "~/.config/smelt/init.lua".to_string());
+                    self.load_error = Some(format!("{label}: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Run embedded autoload plugins only. Call *after* installing
+    /// the TLS app pointer so plugins that read `with_app` work.
+    pub(crate) fn load_autoload(&mut self) {
         if self.load_error.is_some() {
             return;
         }
@@ -522,13 +578,14 @@ impl LuaRuntime {
                 return;
             }
         }
-        if let Some(path) = init_lua_path() {
-            if path.exists() {
-                if let Err(e) = self.load_init(&path) {
-                    self.load_error = Some(format!("~/.config/smelt/init.lua: {e}"));
-                }
-            }
-        }
+    }
+
+    /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
+    /// *after* pushing startup snapshots so plugins see populated
+    /// `smelt.engine.models()` etc.
+    pub(crate) fn load_plugins(&mut self) {
+        self.load_user_config();
+        self.load_autoload();
     }
 
     fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {

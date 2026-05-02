@@ -17,7 +17,7 @@ pub struct Args {
     command: Option<Commands>,
     /// Initial message to send (auto-submits on startup)
     message: Option<String>,
-    #[arg(long, value_name = "PATH", help = "Path to a custom config file")]
+    #[arg(long, value_name = "PATH", help = "Path to a custom init.lua")]
     config: Option<String>,
     #[arg(long)]
     api_base: Option<String>,
@@ -138,7 +138,19 @@ async fn main() {
         return;
     }
 
-    let s = startup::resolve(&args).await;
+    // Phase 1: run Lua init.lua for config registration (before engine starts).
+    let mut lua_runtime = tui::lua::LuaRuntime::new();
+    if let Some(ref path) = args.config {
+        lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
+    }
+    lua_runtime.load_user_config();
+    let lua_cfg = lua_runtime.to_config();
+    let lua_permission_rules = lua_runtime.take_permission_rules();
+    if let Some(err) = lua_runtime.load_error() {
+        eprintln!("warning: lua init: {err}");
+    }
+
+    let s = startup::resolve(&args, lua_cfg).await;
     let startup::ResolvedStartup {
         cfg,
         available_models,
@@ -288,7 +300,10 @@ async fn main() {
 
     // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let mut permissions = tui::permissions::Permissions::load();
+    let mut permissions = match lua_permission_rules {
+        Some(raw) => tui::permissions::Permissions::from_raw(&raw),
+        None => tui::permissions::Permissions::load(),
+    };
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
     let permissions = Arc::new(permissions);

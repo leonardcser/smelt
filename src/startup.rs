@@ -80,27 +80,11 @@ fn resolve_model_reference(
     }
 }
 
-/// Load config (honouring `--config` + `--set`), fetch dynamic model lists,
-/// resolve the active model, auxiliary routing, API keys, and all pure
-/// defaults merges (mode, reasoning, settings).
-pub async fn resolve(args: &Args) -> ResolvedStartup {
-    let mut cfg = match args.config {
-        Some(ref path) => {
-            let c = tui::config::Config::load_from(std::path::Path::new(path));
-            match c.source {
-                Some(tui::config::ConfigSource::NotFound) => {
-                    eprintln!("error: config file not found: {path}");
-                    std::process::exit(1);
-                }
-                Some(tui::config::ConfigSource::ParseError) => {
-                    // warning already printed by load_from
-                    std::process::exit(1);
-                }
-                _ => c,
-            }
-        }
-        None => tui::config::Config::load(),
-    };
+/// Build config from Lua registries (already populated by init.lua),
+/// honour `--set`, fetch dynamic model lists, resolve the active model,
+/// auxiliary routing, API keys, and all pure defaults merges.
+pub async fn resolve(args: &Args, cfg: tui::config::Config) -> ResolvedStartup {
+    let mut cfg = cfg;
 
     for pair in &args.set {
         let Some((key, value)) = pair.split_once('=') else {

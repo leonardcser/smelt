@@ -14,29 +14,29 @@ use std::collections::HashMap;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(super) struct RawRuleSet {
-    pub(super) allow: Vec<String>,
-    pub(super) ask: Vec<String>,
-    pub(super) deny: Vec<String>,
+pub struct RawRuleSet {
+    pub(crate) allow: Vec<String>,
+    pub(crate) ask: Vec<String>,
+    pub(crate) deny: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(super) struct RawModePerms {
-    pub(super) tools: RawRuleSet,
-    pub(super) bash: RawRuleSet,
-    pub(super) web_fetch: RawRuleSet,
-    pub(super) mcp: RawRuleSet,
+pub struct RawModePerms {
+    pub(crate) tools: RawRuleSet,
+    pub(crate) bash: RawRuleSet,
+    pub(crate) web_fetch: RawRuleSet,
+    pub(crate) mcp: RawRuleSet,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(super) struct RawPerms {
-    pub(super) default: RawModePerms,
-    pub(super) normal: RawModePerms,
-    pub(super) plan: RawModePerms,
-    pub(super) apply: RawModePerms,
-    pub(super) yolo: RawModePerms,
+pub struct RawPerms {
+    pub(crate) default: RawModePerms,
+    pub(crate) normal: RawModePerms,
+    pub(crate) plan: RawModePerms,
+    pub(crate) apply: RawModePerms,
+    pub(crate) yolo: RawModePerms,
 }
 
 fn merge_ruleset(default: &RawRuleSet, mode: &RawRuleSet) -> RawRuleSet {
@@ -58,7 +58,7 @@ pub(super) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawMode
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub(super) struct RawConfig {
+pub(crate) struct RawConfig {
     pub(super) permissions: RawPerms,
 }
 

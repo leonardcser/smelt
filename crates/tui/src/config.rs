@@ -1,5 +1,3 @@
-use serde::de::{self, Deserializer};
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn config_dir() -> PathBuf {
@@ -10,8 +8,7 @@ pub(crate) fn state_dir() -> PathBuf {
     engine::state_dir()
 }
 
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default, Clone)]
 pub struct ModelConfig {
     pub name: Option<String>,
     pub temperature: Option<f64>,
@@ -48,37 +45,16 @@ impl From<&ModelConfig> for engine::ModelConfig {
     }
 }
 
-fn deserialize_models<'de, D>(deserializer: D) -> Result<Vec<ModelConfig>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let values: Vec<serde_yml::Value> = Vec::deserialize(deserializer)?;
-    values
-        .into_iter()
-        .map(|v| match v {
-            serde_yml::Value::String(s) => Ok(ModelConfig {
-                name: Some(s),
-                ..Default::default()
-            }),
-            other => serde_yml::from_value(other).map_err(de::Error::custom),
-        })
-        .collect()
-}
-
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProviderConfig {
     pub name: Option<String>,
-    #[serde(rename = "type")]
     pub provider_type: Option<String>,
     pub api_base: Option<String>,
     pub api_key_env: Option<String>,
-    #[serde(deserialize_with = "deserialize_models", default)]
     pub models: Vec<ModelConfig>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 pub struct SettingsConfig {
     pub vim_mode: Option<bool>,
     pub auto_compact: Option<bool>,
@@ -120,20 +96,12 @@ impl SettingsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AuxiliaryUseForConfig {
-    #[serde(default = "default_true")]
     pub title: bool,
-    #[serde(default = "default_true")]
     pub prediction: bool,
-    #[serde(default = "default_true")]
     pub compaction: bool,
-    #[serde(default = "default_true")]
     pub btw: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for AuxiliaryUseForConfig {
@@ -147,21 +115,18 @@ impl Default for AuxiliaryUseForConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default, Clone)]
 pub struct AuxiliaryConfig {
     pub model: Option<String>,
     pub use_for: AuxiliaryUseForConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 pub struct ThemeConfig {
     pub accent: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 pub struct DefaultsConfig {
     pub model: Option<String>,
     /// Starting mode: normal, plan, apply, yolo.
@@ -184,33 +149,26 @@ pub enum ConfigSource {
 }
 
 /// Configuration for the skills system.
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default, Clone)]
 pub struct SkillsConfig {
     /// Extra directories to scan for skills.
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 pub struct Config {
-    #[serde(default)]
     pub providers: Vec<ProviderConfig>,
     pub defaults: DefaultsConfig,
     pub settings: SettingsConfig,
     pub auxiliary: AuxiliaryConfig,
     pub theme: ThemeConfig,
     /// MCP server configurations.
-    #[serde(default)]
     pub mcp: std::collections::HashMap<String, crate::mcp::McpServerConfig>,
     /// Skills configuration.
-    #[serde(default)]
     pub skills: SkillsConfig,
-    /// Path the config was loaded from (not serialized).
-    #[serde(skip)]
+    /// Path the config was loaded from.
     pub path: PathBuf,
     /// How the config was resolved.
-    #[serde(skip)]
     pub source: Option<ConfigSource>,
 }
 
@@ -389,33 +347,15 @@ pub(crate) fn resolve_provider_ref<'a>(
 
 impl Config {
     pub fn load() -> Self {
-        Self::load_from(&config_dir().join("config.yaml"))
+        Self {
+            path: config_dir().join("init.lua"),
+            source: Some(ConfigSource::NotFound),
+            ..Self::default()
+        }
     }
 
-    pub fn load_from(path: &Path) -> Self {
-        let path = path.to_path_buf();
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            return Self {
-                path,
-                source: Some(ConfigSource::NotFound),
-                ..Self::default()
-            };
-        };
-        match serde_yml::from_str(&contents) {
-            Ok(cfg) => Self {
-                path,
-                source: Some(ConfigSource::Loaded),
-                ..cfg
-            },
-            Err(e) => {
-                eprintln!("warning: failed to parse {}: {}", path.display(), e);
-                Self {
-                    path,
-                    source: Some(ConfigSource::ParseError),
-                    ..Self::default()
-                }
-            }
-        }
+    pub fn load_from(_path: &Path) -> Self {
+        Self::load()
     }
 
     /// Flatten providers + models into a list of resolved model entries.
@@ -542,6 +482,35 @@ impl Config {
     }
 
     /// Returns true if the config has a Copilot provider.
+    /// Build a `Config` from the Lua-registered state in `LuaShared`.
+    /// Called by startup after `init.lua` has run.
+    pub(crate) fn from_lua_shared(shared: &crate::lua::LuaShared) -> Self {
+        let providers = shared
+            .providers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mcp = shared
+            .mcp_configs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut settings = SettingsConfig::default();
+        let overrides = shared
+            .settings_overrides
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (key, value) in overrides.iter() {
+            let _ = settings.apply(key, value);
+        }
+        Self {
+            providers,
+            mcp,
+            settings,
+            ..Default::default()
+        }
+    }
+
     pub fn has_copilot_provider(&self) -> bool {
         self.providers
             .iter()
@@ -604,25 +573,45 @@ mod tests {
 
     #[test]
     fn resolve_models_from_config() {
-        let yaml = r#"
-providers:
-  - name: zai
-    type: openai-compatible
-    api_base: https://api.z.ai/api/coding/paas/v4
-    api_key_env: Z_AI_API_KEY
-    models:
-      - glm-4.7
-  - name: box
-    type: openai-compatible
-    api_base: https://llm.box.home.arpa
-    api_key_env: BOX_API_KEY
-    models:
-      - Qwen3.5-122B-A10B-Q4_0
-      - Qwen3.5-27B-Q8_0
-      - gpt-oss-120b-Q8_0
-      - gpt-oss-20b-Q8_0
-"#;
-        let cfg: Config = serde_yml::from_str(yaml).unwrap();
+        let cfg = Config {
+            providers: vec![
+                ProviderConfig {
+                    name: Some("zai".to_string()),
+                    provider_type: Some("openai-compatible".to_string()),
+                    api_base: Some("https://api.z.ai/api/coding/paas/v4".to_string()),
+                    api_key_env: Some("Z_AI_API_KEY".to_string()),
+                    models: vec![ModelConfig {
+                        name: Some("glm-4.7".to_string()),
+                        ..Default::default()
+                    }],
+                },
+                ProviderConfig {
+                    name: Some("box".to_string()),
+                    provider_type: Some("openai-compatible".to_string()),
+                    api_base: Some("https://llm.box.home.arpa".to_string()),
+                    api_key_env: Some("BOX_API_KEY".to_string()),
+                    models: vec![
+                        ModelConfig {
+                            name: Some("Qwen3.5-122B-A10B-Q4_0".to_string()),
+                            ..Default::default()
+                        },
+                        ModelConfig {
+                            name: Some("Qwen3.5-27B-Q8_0".to_string()),
+                            ..Default::default()
+                        },
+                        ModelConfig {
+                            name: Some("gpt-oss-120b-Q8_0".to_string()),
+                            ..Default::default()
+                        },
+                        ModelConfig {
+                            name: Some("gpt-oss-20b-Q8_0".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                },
+            ],
+            ..Default::default()
+        };
         let resolved = cfg.resolve_models();
 
         assert_eq!(resolved.len(), 5);

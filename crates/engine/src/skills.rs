@@ -1,11 +1,8 @@
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Deserialize)]
 struct SkillFrontmatter {
     name: String,
-    #[serde(default)]
     description: String,
 }
 
@@ -123,7 +120,7 @@ fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
 fn parse_skill(path: &Path) -> Option<SkillEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let (fm, body) = split_frontmatter(&text)?;
-    let meta: SkillFrontmatter = serde_yml::from_str(fm).ok()?;
+    let meta = parse_frontmatter(fm)?;
 
     // Pre-build the formatted output
     let mut formatted = format!("<skill name=\"{}\">\n{}", meta.name, body);
@@ -159,6 +156,38 @@ fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     let yaml = after_first[..end].trim();
     let body = after_first[end + 4..].trim_start();
     Some((yaml, body))
+}
+
+/// Parse a minimal YAML frontmatter block: only `name` and `description`
+/// keys are recognised. Values may be unquoted, double-quoted, or
+/// single-quoted strings.
+fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
+    let mut name = None;
+    let mut description = String::new();
+    for line in yaml.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("name:") {
+            name = Some(unquote_yaml(rest.trim()));
+        } else if let Some(rest) = line.strip_prefix("description:") {
+            description = unquote_yaml(rest.trim());
+        }
+    }
+    name.map(|name| SkillFrontmatter { name, description })
+}
+
+fn unquote_yaml(s: &str) -> String {
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        let first = bytes[0] as char;
+        let last = bytes[bytes.len() - 1] as char;
+        if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
 }
 
 /// List non-SKILL.md files in a skill directory (up to 10).
@@ -206,7 +235,7 @@ mod tests {
     #[test]
     fn parse_frontmatter_with_serde() {
         let yaml = "name: test-skill\ndescription: A test skill";
-        let fm: SkillFrontmatter = serde_yml::from_str(yaml).unwrap();
+        let fm = parse_frontmatter(yaml).unwrap();
         assert_eq!(fm.name, "test-skill");
         assert_eq!(fm.description, "A test skill");
     }
@@ -214,7 +243,7 @@ mod tests {
     #[test]
     fn parse_frontmatter_quoted() {
         let yaml = "name: \"quoted-name\"\ndescription: 'quoted desc'";
-        let fm: SkillFrontmatter = serde_yml::from_str(yaml).unwrap();
+        let fm = parse_frontmatter(yaml).unwrap();
         assert_eq!(fm.name, "quoted-name");
         assert_eq!(fm.description, "quoted desc");
     }

@@ -38,7 +38,7 @@ pub(crate) use crate::app::transcript_model::{
 use crate::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
 use crate::session::Session;
 use crate::{content, session, state};
-use engine::{EngineHandle};
+use engine::EngineHandle;
 use protocol::{AgentMode, Content, Message, ReasoningEffort, Role, UiCommand};
 
 use crossterm::{

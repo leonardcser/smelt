@@ -1,21 +1,43 @@
 # Configuration Reference
 
-Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
+Config file: `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
 
-If no config file exists, an interactive setup wizard runs on first launch. If
-the file exists but fails to parse, a warning is printed and defaults are used.
+Load a different file with `--config <path>`.
+
+If no config file exists, an interactive setup wizard runs on first launch.
+
+## init.lua
+
+`init.lua` is evaluated at startup before the engine starts. It can register
+providers, MCP servers, settings, and permission rules by calling APIs on the
+`smelt` table. Anything else you put in the file (custom commands, keymaps,
+autocmds) behaves like a plugin and is also loaded at startup.
 
 ## Providers
 
-Each entry under `providers` defines a connection to an LLM API.
+Register a provider with `smelt.provider.register`:
+
+```lua
+smelt.provider.register("ollama", {
+  type = "openai-compatible",
+  api_base = "http://localhost:11434/v1",
+  models = { "glm-5", "qwen3.5:27b" },
+})
+
+smelt.provider.register("openai", {
+  type = "openai",
+  api_base = "https://api.openai.com/v1",
+  api_key_env = "OPENAI_API_KEY",
+  models = { "gpt-5.4" },
+})
+```
 
 | Field         | Description                                                                 |
 | ------------- | --------------------------------------------------------------------------- |
-| `name`        | Unique identifier (used in `defaults.model` as prefix)                      |
 | `type`        | `openai`, `codex`, `anthropic`, `copilot`, or `openai-compatible`           |
 | `api_base`    | API endpoint URL                                                            |
 | `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)   |
-| `models`      | List of available models (optional for `codex`/`copilot` — fetched via API) |
+| `models`      | Array of model names (optional for `codex`/`copilot` — fetched via API)     |
 
 ### Provider Types
 
@@ -29,24 +51,35 @@ Each entry under `providers` defines a connection to an LLM API.
 
 ### Model Configuration
 
-Models can be strings or objects with per-model overrides:
+Models can be plain strings or tables with per-model overrides:
 
-```yaml
-models:
-  - gpt-5.4 # simple form
-  - name: qwen3.5:27b # object form
-    temperature: 0.8
-    top_p: 0.95
-    top_k: 40 # openai-compatible & anthropic only
-    min_p: 0.01 # openai-compatible only
-    repeat_penalty: 1.0 # openai-compatible only
-    tool_calling: false # disable tools for this model
-  - name: custom-model
-    input_cost: 2.0 # $/1M input tokens
-    output_cost: 8.0 # $/1M output tokens
-    cache_read_cost: 0.5 # $/1M cache-read tokens
-    cache_write_cost: 0.0 # $/1M cache-write tokens
+```lua
+smelt.provider.register("ollama", {
+  type = "openai-compatible",
+  api_base = "http://localhost:11434/v1",
+  models = {
+    "glm-5",
+    { name = "qwen3.5:27b", temperature = 0.8, top_p = 0.95, top_k = 40, min_p = 0.01, repeat_penalty = 1.0 },
+    { name = "llama3:8b", tool_calling = false },
+    { name = "custom-model", input_cost = 2.0, output_cost = 8.0, cache_read_cost = 0.5, cache_write_cost = 0.0 },
+  },
+})
 ```
+
+Per-model overrides:
+
+| Field            | Description                                          |
+| ---------------- | ---------------------------------------------------- |
+| `temperature`    | Sampling temperature                                 |
+| `top_p`          | Top-p (nucleus) sampling                             |
+| `top_k`          | Top-k sampling (openai-compatible & anthropic only)  |
+| `min_p`          | Min-p sampling (openai-compatible only)              |
+| `repeat_penalty` | Repetition penalty (openai-compatible only)          |
+| `tool_calling`   | Set to `false` to disable tools for this model       |
+| `input_cost`     | USD per 1M input tokens                              |
+| `output_cost`    | USD per 1M output tokens                             |
+| `cache_read_cost`| USD per 1M cache-read tokens                         |
+| `cache_write_cost`| USD per 1M cache-write tokens                       |
 
 #### Pricing
 
@@ -60,47 +93,39 @@ models default to zero cost.
 
 ## Defaults
 
-```yaml
-defaults:
-  model: ollama/glm-5 # provider_name/model_name
-  mode: normal # starting mode
-  mode_cycle: [normal, plan, apply, yolo] # Shift+Tab cycle
-  reasoning_effort: "off" # starting level
-  reasoning_cycle: ["off", "low", "medium", "high", "max"] # Ctrl+T cycle
-```
+Model selection follows this precedence:
+
+1. `--model` CLI flag
+2. Last used model (cached from previous session)
+3. First model in the providers list
+
+Switch models at runtime with `/model`.
+
+Starting mode and reasoning effort can be changed at runtime or via CLI flags:
+
+| CLI flag                     | Description                                               |
+| ---------------------------- | --------------------------------------------------------- |
+| `--mode <MODE>`              | Starting mode: `normal`, `plan`, `apply`, `yolo`          |
+| `--mode-cycle <MODES>`       | Modes for `Shift+Tab` cycling (comma-separated)           |
+| `--reasoning-effort <LEVEL>` | Starting reasoning: `off`, `low`, `medium`, `high`, `max` |
+| `--reasoning-cycle <LEVELS>` | Levels for `Ctrl+T` cycling (comma-separated)             |
 
 Reasoning effort controls how deeply the model thinks before responding.
 Supported by Anthropic (`thinking`), OpenAI (`reasoning`), and openai-compatible
 providers that support `reasoning_effort`. For OpenAI, `max` maps to `xhigh`.
 Models that don't support thinking ignore this setting.
 
-Model selection follows this precedence:
-
-1. `--model` CLI flag
-2. `defaults.model` in config
-3. Last used model (cached from previous session)
-4. First model in the providers list
-
-If `defaults.model` is set, the cached selection is ignored. Prefer the
-`provider_name/model_name` form in config. Bare model names are accepted only
-when they resolve unambiguously.
-
 ## Auxiliary Model
 
-Use `auxiliary` to route small background/meta requests to a different model.
-`auxiliary.model` must be listed under `providers[].models` (codex providers can
-be referenced by provider name, since their models are fetched dynamically).
-Resolution uses the same rules as `defaults.model`.
+Use the auxiliary model to route small background/meta requests to a different
+model. The auxiliary model must be one you've registered under a provider.
+Resolution uses the same rules as the primary model.
 
-```yaml
-auxiliary:
-  model: openai/gpt-5.4-mini
-  use_for:
-    btw: false
-```
+Set the auxiliary model at runtime via `/settings` or with the `--set`
+flag (`--set auxiliary.model=provider/model`).
 
 Each `use_for` toggle defaults to `true`; set a task to `false` to fall back to
-your primary model. When `auxiliary.model` is omitted, no auxiliary routing
+your primary model. When no auxiliary model is set, no auxiliary routing
 happens.
 
 | Key          | Description                                      |
@@ -111,6 +136,14 @@ happens.
 | `btw`        | `/btw` side-question requests                    |
 
 ## Settings
+
+Set defaults in `init.lua` with `smelt.settings.set`:
+
+```lua
+smelt.settings.set("vim_mode", true)
+smelt.settings.set("auto_compact", false)
+smelt.settings.set("show_tps", true)
+```
 
 All toggleable at runtime via `/settings`.
 
@@ -130,34 +163,30 @@ All toggleable at runtime via `/settings`.
 
 ## Theme
 
-```yaml
-theme:
-  accent: ember
-```
+Change accent color at runtime with `/theme`. Presets: `ember`, `coral`, `rose`,
+`gold`, `ice`, `sky`, `blue`, `lavender`, `lilac`, `mint`, `sage`, `silver`. Or
+a raw ANSI value (0–255).
 
-Presets: `ember`, `coral`, `rose`, `gold`, `ice`, `sky`, `blue`, `lavender`,
-`lilac`, `mint`, `sage`, `silver`. Or a raw ANSI value (0–255).
+The task slug color is separate — change it per-session with `/color`.
 
 ## MCP (Model Context Protocol)
 
 Connect external tool servers that expose tools via the MCP protocol. Each
 server runs as a child process communicating over stdio.
 
-```yaml
-mcp:
-  filesystem:
-    type: local
-    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-    env:
-      DEBUG: "true"
-    timeout: 30000 # ms, default 30000
-    enabled: true # default true
+```lua
+smelt.mcp.register("filesystem", {
+  command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp" },
+  env = { DEBUG = "true" },
+  timeout = 30000, -- ms, default 30000
+  enabled = true,  -- default true
+})
 ```
 
 | Field     | Description                                      |
 | --------- | ------------------------------------------------ |
-| `type`    | `local` (stdio child process)                    |
-| `command` | Command and arguments to spawn the MCP server    |
+| `command` | Array of strings: executable and arguments       |
+| `args`    | Additional arguments (appended to `command`)     |
 | `env`     | Environment variables for the server process     |
 | `timeout` | Connection and tool call timeout in milliseconds |
 | `enabled` | Set to `false` to skip connecting on startup     |
@@ -168,38 +197,18 @@ MCP tools appear in the agent's tool list with names prefixed by the server name
 ### MCP Permissions
 
 MCP tools use a separate `mcp` ruleset in the permissions config. Patterns are
-matched against the qualified tool name (`servername_toolname`):
-
-```yaml
-permissions:
-  normal:
-    mcp:
-      allow: ["filesystem_*"] # allow all filesystem server tools
-      deny: ["dangerous_server_*"] # block an entire server
-  yolo:
-    mcp:
-      allow: ["*"] # allow all MCP tools in yolo mode
-```
+matched against the qualified tool name (`servername_toolname`). See the
+[Permissions Reference](permissions.md) for details.
 
 ## Skills
 
 Skills are on-demand knowledge packs the agent can load via the `load_skill`
 tool.
 
-```yaml
-skills:
-  paths:
-    - ~/my-skills
-    - ./project-skills
-```
-
-### Discovery Locations
-
-Skills are scanned from these directories (later entries override):
+They are scanned from these directories (later entries override):
 
 1. `~/.config/smelt/skills/*/SKILL.md` — global user skills
 2. `.smelt/skills/*/SKILL.md` — project-local skills
-3. Paths from `skills.paths` in config
 
 ### Skill Format
 
@@ -236,7 +245,7 @@ All runtime data is stored under the XDG base directories:
 
 | Directory                           | Contents                                            |
 | ----------------------------------- | --------------------------------------------------- |
-| `$XDG_CONFIG_HOME/smelt/`           | `config.yaml`, custom commands, global skills       |
+| `$XDG_CONFIG_HOME/smelt/`           | `init.lua`, custom commands, global skills          |
 | `$XDG_STATE_HOME/smelt/sessions/`   | Saved sessions (`session.json`, `meta.json`, blobs) |
 | `$XDG_STATE_HOME/smelt/state.json`  | Persisted state (last model, mode, accent color)    |
 | `$XDG_STATE_HOME/smelt/registry/`   | Multi-agent registry entries                        |
@@ -268,112 +277,117 @@ list is cached in `$XDG_CACHE_HOME/smelt/copilot_models.json`.
 
 ## Full Example
 
-```yaml
-providers:
-  - name: ollama
-    type: openai-compatible
-    api_base: http://localhost:11434/v1
-    models:
-      - glm-5
-      - name: qwen3.5:27b
-        temperature: 0.8
-        top_p: 0.95
-        top_k: 40
-        min_p: 0.01
-        repeat_penalty: 1.0
-      - name: llama3:8b
-        tool_calling: false
+```lua
+-- Auto-generated by smelt setup wizard
 
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5.4
+smelt.provider.register("ollama", {
+  type = "openai-compatible",
+  api_base = "http://localhost:11434/v1",
+  models = {
+    "glm-5",
+    { name = "qwen3.5:27b", temperature = 0.8, top_p = 0.95, top_k = 40, min_p = 0.01, repeat_penalty = 1.0 },
+    { name = "llama3:8b", tool_calling = false },
+  },
+})
 
-  - name: codex
-    type: codex # models fetched automatically from the API
-    api_base: https://chatgpt.com/backend-api/codex
+smelt.provider.register("openai", {
+  type = "openai",
+  api_base = "https://api.openai.com/v1",
+  api_key_env = "OPENAI_API_KEY",
+  models = { "gpt-5.4" },
+})
 
-  - name: copilot
-    type: copilot # models fetched automatically from the API
-    api_base: https://api.individual.githubcopilot.com # overridden at runtime
+smelt.provider.register("codex", {
+  type = "codex",
+  api_base = "https://chatgpt.com/backend-api/codex",
+})
 
-  - name: anthropic
-    type: anthropic
-    api_base: https://api.anthropic.com/v1
-    api_key_env: ANTHROPIC_API_KEY
-    models:
-      - claude-sonnet-4-6
+smelt.provider.register("copilot", {
+  type = "copilot",
+  api_base = "https://api.individual.githubcopilot.com",
+})
 
-  - name: openrouter
-    type: openai
-    api_base: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    models:
-      - anthropic/claude-sonnet-4-6
-      - openai/gpt-5.4
+smelt.provider.register("anthropic", {
+  type = "anthropic",
+  api_base = "https://api.anthropic.com/v1",
+  api_key_env = "ANTHROPIC_API_KEY",
+  models = { "claude-sonnet-4-6" },
+})
 
-defaults:
-  model: ollama/glm-5
-  mode: normal
-  mode_cycle: [normal, plan, apply, yolo]
-  reasoning_effort: "off"
-  reasoning_cycle: ["off", "low", "medium", "high", "max"]
+smelt.provider.register("openrouter", {
+  type = "openai",
+  api_base = "https://openrouter.ai/api/v1",
+  api_key_env = "OPENROUTER_API_KEY",
+  models = { "anthropic/claude-sonnet-4-6", "openai/gpt-5.4" },
+})
 
-settings:
-  vim_mode: false
-  auto_compact: false
-  show_tps: true
-  show_tokens: true
-  show_cost: true
-  input_prediction: true
-  task_slug: true
-  show_thinking: true
-  restrict_to_workspace: true
-  redact_secrets: true
+smelt.settings.set("vim_mode", false)
+smelt.settings.set("auto_compact", false)
+smelt.settings.set("show_tps", true)
+smelt.settings.set("show_tokens", true)
+smelt.settings.set("show_cost", true)
+smelt.settings.set("input_prediction", true)
+smelt.settings.set("task_slug", true)
+smelt.settings.set("show_thinking", true)
+smelt.settings.set("restrict_to_workspace", true)
+smelt.settings.set("redact_secrets", true)
 
-theme:
-  accent: lavender
+smelt.mcp.register("filesystem", {
+  command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp" },
+  timeout = 30000,
+})
 
-permissions:
-  normal:
-    tools:
-      allow: [read_file, glob, grep]
-      ask: [edit_file, write_file]
-      deny: []
-    bash:
-      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
-      ask: []
-      deny: []
-    web_fetch:
-      allow: ["https://docs.rs/*", "https://github.com/*"]
-      deny: ["https://evil.com/*"]
-  plan:
-    tools:
-      allow: [read_file, glob, grep]
-    bash:
-      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
-  apply:
-    tools:
-      allow: [read_file, glob, grep, edit_file, write_file]
-    bash:
-      allow: ["ls *", "grep *", "find *", "cat *", "tail *", "head *"]
-  yolo:
-    tools:
-      deny: []
-    bash:
-      deny: ["rm -rf /*"]
-    mcp:
-      allow: ["*"]
-
-mcp:
-  filesystem:
-    type: local
-    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-    timeout: 30000
-
-skills:
-  paths:
-    - ~/my-skills
+smelt.permissions.set_rules({
+  default = {
+    tools = {
+      allow = { "web_search" },
+    },
+    web_fetch = {
+      allow = { "*" },
+    },
+    bash = {
+      allow = { "git log *", "git diff *" },
+    },
+  },
+  normal = {
+    tools = {
+      allow = { "read_file", "glob", "grep" },
+      ask = { "edit_file", "write_file" },
+    },
+    bash = {
+      allow = { "ls *", "grep *", "find *", "cat *", "tail *", "head *" },
+    },
+    web_fetch = {
+      allow = { "https://docs.rs/*", "https://github.com/*" },
+      deny = { "https://evil.com/*" },
+    },
+  },
+  plan = {
+    tools = {
+      allow = { "read_file", "glob", "grep" },
+    },
+    bash = {
+      allow = { "ls *", "grep *", "find *", "cat *", "tail *", "head *" },
+    },
+  },
+  apply = {
+    tools = {
+      allow = { "read_file", "glob", "grep", "edit_file", "write_file" },
+    },
+    bash = {
+      allow = { "ls *", "grep *", "find *", "cat *", "tail *", "head *" },
+    },
+  },
+  yolo = {
+    tools = {
+      deny = {},
+    },
+    bash = {
+      deny = { "rm -rf /*" },
+    },
+    mcp = {
+      allow = { "*" },
+    },
+  },
+})
 ```

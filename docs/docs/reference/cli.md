@@ -18,7 +18,7 @@ arguments and no config file launches the interactive setup wizard.
 
 | Flag                  | Description                                                                                                                       |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `--config <PATH>`     | Path to a custom config file                                                                                                      |
+| `--config <PATH>`     | Path to a custom `init.lua`                                                                                                       |
 | `-m, --model <MODEL>` | Model to use. With configured providers, prefer `provider_name/model_name`; with `--api-base`, use the provider-native model name |
 | `--api-base <URL>`    | API base URL (overrides config)                                                                                                   |
 | `--api-key-env <VAR>` | Env var holding the API key                                                                                                       |

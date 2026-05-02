@@ -1049,9 +1049,10 @@ process-management UX live in a separate plugin/tool surface over
 
 Greenfield — no migration story. One config format only.
 
-- Delete `serde_yml` dependency and the YAML config loader (today's
-  `Permissions::load` reads `~/.config/smelt/config.yaml`; that goes
-  along with the rest of the engine permissions move in P5.c).
+- Delete `serde_yml` dependency and the YAML config loader. `Config`
+  no longer derives `Deserialize`; all config population is imperative
+  (Lua APIs write to `LuaShared` registries, `Config::from_lua_shared`
+  builds the Rust struct).
 - Delete the TOML keymap loader (if present) — keymaps are
   `smelt.keymap.set(mode, key, fn)` calls in `init.lua` or plugins.
 - Bind every today-YAML setting through Lua:

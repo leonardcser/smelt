@@ -5,9 +5,9 @@
 
 use crate::permissions::bash::split_shell_commands;
 use crate::permissions::rules::{check_ruleset, RuleSet};
-use protocol::Decision;
 use crate::permissions::Permissions;
 use protocol::AgentMode;
+use protocol::Decision;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

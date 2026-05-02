@@ -267,11 +267,7 @@ impl LuaRuntime {
     /// tools. The TUI sends these with `StartTurn` so the engine
     /// includes them in LLM tool definitions.
     pub(crate) fn tool_defs(&self, _mode: protocol::AgentMode) -> Vec<protocol::ToolDef> {
-        let handlers = self
-            .shared
-            .tools
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
         let mut defs = Vec::new();
         for name in handlers.keys() {
             if let Ok(meta_table) = self
@@ -371,11 +367,7 @@ impl LuaRuntime {
         // calling — mlua functions are clonable Lua values, registry
         // keys are not.
         let (needs_confirm_fn, approval_patterns_fn, preflight_fn) = {
-            let handlers = self
-                .shared
-                .tools
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = handlers.get(tool_name) else {
                 return out;
             };
@@ -465,11 +457,7 @@ impl LuaRuntime {
             session_dir,
         } = env;
         let func = {
-            let handlers = self
-                .shared
-                .tools
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
             let Some(handle) = handlers.get(tool_name) else {
                 return ToolExecResult::Immediate {
                     content: format!("no tool registered: {tool_name}"),

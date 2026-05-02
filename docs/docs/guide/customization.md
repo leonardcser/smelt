@@ -2,7 +2,7 @@
 
 ## Config File
 
-The config lives at `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
+The config lives at `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
 Load a different file with `--config <path>`.
 
 The [Getting Started](getting-started.md) guide covers basic provider setup. See
@@ -10,26 +10,18 @@ the [Configuration Reference](../reference/configuration.md) for every option.
 
 ## Runtime Settings
 
-Toggle settings at runtime with `/settings`, set defaults in config under
-`settings:`, or override from the CLI with `--set key=value`. See the
+Toggle settings at runtime with `/settings`, set defaults in `init.lua` with
+`smelt.settings.set`, or override from the CLI with `--set key=value`. See the
 [Configuration Reference](../reference/configuration.md#settings) for all
 available settings.
 
 ## Auxiliary Model
 
 Keep your main conversation on one model and send smaller background requests to
-another. The auxiliary model must be one you've registered under
-`providers[].models`:
+another. The auxiliary model must be one you've registered under a provider.
 
-```yaml
-auxiliary:
-  model: openai/gpt-5.4-mini
-  use_for:
-    btw: false
-```
-
-See the [Configuration Reference](../reference/configuration.md#auxiliary-model)
-for the full option list.
+Set the auxiliary model at runtime via `/settings` or with `--set
+auxiliary.model=provider/model`.
 
 ## Themes
 
@@ -38,14 +30,7 @@ Thirteen accent color presets:
 > `ember` · `coral` · `rose` · `gold` · `ice` · `sky` · `blue` · `lavender` ·
 > `lilac` · `mint` · `sage` · `silver`
 
-Set in config:
-
-```yaml
-theme:
-  accent: mint
-```
-
-Or change at runtime with `/theme`. You can also use a raw ANSI color value
+Change at runtime with `/theme`. You can also use a raw ANSI color value
 (0–255).
 
 The task slug color is separate — change it per-session with `/color`.
@@ -94,7 +79,8 @@ format.
 
 Connect external tool servers via the
 [Model Context Protocol](https://modelcontextprotocol.io). Servers run as child
-processes and their tools become available to the agent. See the
+processes and their tools become available to the agent. Register them in
+`init.lua` with `smelt.mcp.register` — see the
 [Configuration Reference](../reference/configuration.md#mcp-model-context-protocol)
 for setup.
 
@@ -105,6 +91,6 @@ for global instructions). Its contents are automatically appended to the system
 prompt for every conversation in that directory.
 
 Use it for project conventions, coding standards, or any persistent context the
-agent should know about.
+agent should know.
 
 Disable with `--no-system-prompt`.

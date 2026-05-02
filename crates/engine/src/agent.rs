@@ -1,9 +1,9 @@
 use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialContextInjection};
 use crate::log;
-use protocol::Decision;
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
 use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
+use protocol::Decision;
 use protocol::{
     AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,
     UiCommand,
@@ -856,7 +856,10 @@ impl<'a> Turn<'a> {
                     .dispatcher
                     .definitions()
                     .into_iter()
-                    .filter(|d| self.dispatcher.is_visible(d.function.name.as_str(), self.mode))
+                    .filter(|d| {
+                        self.dispatcher
+                            .is_visible(d.function.name.as_str(), self.mode)
+                    })
                     .collect();
                 // Plugin tools with `override_core` shadow the core
                 // definition of the same name — drop the core one so
@@ -1130,7 +1133,10 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let hooks = match self.dispatcher.evaluate_hooks(&tc.function.name, &args, self.mode) {
+            let hooks = match self
+                .dispatcher
+                .evaluate_hooks(&tc.function.name, &args, self.mode)
+            {
                 Some(h) => h,
                 None => {
                     self.push_tool_result(

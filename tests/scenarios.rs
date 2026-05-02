@@ -14,7 +14,7 @@ async fn smoke_harness_starts() {
     assert!(h.mock.uri().starts_with("http://"));
     h.write_config("anthropic", "claude-test");
     h.write_init_lua("");
-    let cfg = h.config_dir.path().join("smelt").join("config.yaml");
+    let cfg = h.config_dir.path().join("smelt").join("init.lua");
     assert!(cfg.exists());
 }
 
