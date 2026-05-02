@@ -998,50 +998,48 @@ impl TuiApp {
                 }
             }
 
-            // ── Drain engine events (paused only for Confirm) ──
-            if self.confirms().is_clear() {
-                loop {
-                    let ev = match self.engine().try_recv() {
-                        Ok(ev) => ev,
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                            engine::log::entry(
-                                engine::log::Level::Warn,
-                                "engine_stop",
-                                &serde_json::json!({
-                                    "reason": "channel_disconnected",
-                                    "source": "try_recv_drain",
-                                }),
-                            );
-                            self.discard_turn(false);
-                            break;
-                        }
-                    };
-                    // Take the TurnState out for the duration of the
-                    // dispatch so `engine_bridge::handle_event` can
-                    // borrow its fields while we still hold `&mut self`.
-                    let action = if let Some(mut ag) = self.agent.take() {
-                        let ctrl =
-                            engine_bridge::handle_event(self, ev, ag.turn_id, &mut ag.pending);
-                        let action = self.dispatch_control(
-                            ctrl,
-                            &ag.pending,
-                            &mut pending_dialogs,
-                            t.last_keypress,
+            // ── Drain engine events ──
+            // Gate lives inside EngineBridge (Confirms::is_clear).
+            loop {
+                let ev = match self.engine().try_recv() {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        engine::log::entry(
+                            engine::log::Level::Warn,
+                            "engine_stop",
+                            &serde_json::json!({
+                                "reason": "channel_disconnected",
+                                "source": "try_recv_drain",
+                            }),
                         );
-                        self.agent = Some(ag);
-                        action
-                    } else {
-                        // No active turn — handle out-of-band events.
-                        engine_bridge::handle_idle_event(self, ev);
-                        LoopAction::Continue
-                    };
-                    match action {
-                        LoopAction::Continue => {}
-                        LoopAction::Done => {
-                            self.discard_turn(false);
-                            break;
-                        }
+                        self.discard_turn(false);
+                        break;
+                    }
+                };
+                // Take the TurnState out for the duration of the
+                // dispatch so `engine_bridge::handle_event` can
+                // borrow its fields while we still hold `&mut self`.
+                let action = if let Some(mut ag) = self.agent.take() {
+                    let ctrl = engine_bridge::handle_event(self, ev, ag.turn_id, &mut ag.pending);
+                    let action = self.dispatch_control(
+                        ctrl,
+                        &ag.pending,
+                        &mut pending_dialogs,
+                        t.last_keypress,
+                    );
+                    self.agent = Some(ag);
+                    action
+                } else {
+                    // No active turn — handle out-of-band events.
+                    engine_bridge::handle_idle_event(self, ev);
+                    LoopAction::Continue
+                };
+                match action {
+                    LoopAction::Continue => {}
+                    LoopAction::Done => {
+                        self.discard_turn(false);
+                        break;
                     }
                 }
             }
@@ -1200,7 +1198,7 @@ impl TuiApp {
                     self.render_normal(self.agent.is_some());
                 }
 
-                Some(ev) = self.core.engine.recv(), if self.core.confirms.is_clear() => {
+                Some(ev) = self.core.engine.recv() => {
                     if let Some(mut ag) = self.agent.take() {
                         let ctrl =
                             engine_bridge::handle_event(self, ev, ag.turn_id, &mut ag.pending);

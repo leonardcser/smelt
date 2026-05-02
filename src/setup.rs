@@ -273,7 +273,10 @@ pub async fn run_auth_command() {
         };
         println!("\n  Add the following to your init.lua:\n");
         println!("{}", provider_to_lua(&provider));
-        println!("  (init.lua location: {})", engine::config_dir().join("init.lua").display());
+        println!(
+            "  (init.lua location: {})",
+            engine::config_dir().join("init.lua").display()
+        );
     }
 }
 

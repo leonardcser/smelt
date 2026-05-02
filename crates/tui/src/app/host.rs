@@ -26,7 +26,6 @@
 //! [`P2.a.10`]: ../../../refactor/REFACTOR.md
 
 use super::cells::Cells;
-use super::confirms::Confirms;
 use super::core::Core;
 use super::engine_bridge::EngineBridge;
 use super::headless_app::HeadlessApp;
@@ -39,7 +38,7 @@ use crate::session::Session;
 /// the module docs for the split between this trait and `ui::UiHost`.
 ///
 /// `pub(crate)` so the trait visibility matches the most-private
-/// return type today (`Confirms`, `EngineBridge`, `Cells`, `Timers`
+/// return type today (`EngineBridge`, `Cells`, `Timers`
 /// are all `pub(crate)`). The trait stays internal to the `tui`
 /// crate; that's where every consumer lives.
 pub(crate) trait Host {
@@ -49,7 +48,6 @@ pub(crate) trait Host {
     fn lua(&mut self) -> &mut LuaRuntime;
     fn engine(&mut self) -> &mut EngineBridge;
     fn session(&mut self) -> &mut Session;
-    fn confirms(&mut self) -> &mut Confirms;
 }
 
 impl Host for Core {
@@ -70,9 +68,6 @@ impl Host for Core {
     }
     fn session(&mut self) -> &mut Session {
         &mut self.session
-    }
-    fn confirms(&mut self) -> &mut Confirms {
-        &mut self.confirms
     }
 }
 
@@ -97,9 +92,6 @@ impl Host for TuiApp {
     fn session(&mut self) -> &mut Session {
         self.core.session()
     }
-    fn confirms(&mut self) -> &mut Confirms {
-        self.core.confirms()
-    }
 }
 
 impl Host for HeadlessApp {
@@ -120,9 +112,6 @@ impl Host for HeadlessApp {
     }
     fn session(&mut self) -> &mut Session {
         self.core.session()
-    }
-    fn confirms(&mut self) -> &mut Confirms {
-        self.core.confirms()
     }
 }
 
