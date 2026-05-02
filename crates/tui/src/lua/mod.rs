@@ -937,7 +937,7 @@ pub(super) fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-/// Modules embedded in the binary, available via `require("smelt.plugins.X")`.
+/// Modules embedded in the binary, available via `require("smelt.*")`.
 /// Bootstrap primitives (`_bootstrap.lua`, `dialog.lua`, `widgets/picker.lua`,
 /// `widgets/prompt_picker.lua`, `cmd.lua`, `dialogs/confirm.lua`) are
 /// loaded via `load_bootstrap_chunks`, not here — they don't need to be
@@ -948,8 +948,8 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/plan_mode.lua"),
     ),
     (
-        "smelt.plugins.btw",
-        include_str!("../../../../runtime/lua/smelt/plugins/btw.lua"),
+        "smelt.commands.btw",
+        include_str!("../../../../runtime/lua/smelt/commands/btw.lua"),
     ),
     (
         "smelt.plugins.predict",
@@ -960,8 +960,8 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/tools/ask_user_question.lua"),
     ),
     (
-        "smelt.plugins.export",
-        include_str!("../../../../runtime/lua/smelt/plugins/export.lua"),
+        "smelt.commands.export",
+        include_str!("../../../../runtime/lua/smelt/commands/export.lua"),
     ),
     (
         "smelt.dialogs.rewind",
@@ -972,8 +972,8 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/plugins/background_commands.lua"),
     ),
     (
-        "smelt.plugins.help",
-        include_str!("../../../../runtime/lua/smelt/plugins/help.lua"),
+        "smelt.commands.help",
+        include_str!("../../../../runtime/lua/smelt/commands/help.lua"),
     ),
     (
         "smelt.plugins.yank_block",
@@ -988,56 +988,56 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/dialogs/resume.lua"),
     ),
     (
-        "smelt.plugins.theme",
-        include_str!("../../../../runtime/lua/smelt/plugins/theme.lua"),
+        "smelt.commands.theme",
+        include_str!("../../../../runtime/lua/smelt/commands/theme.lua"),
     ),
     (
-        "smelt.plugins.color",
-        include_str!("../../../../runtime/lua/smelt/plugins/color.lua"),
+        "smelt.commands.color",
+        include_str!("../../../../runtime/lua/smelt/commands/color.lua"),
     ),
     (
-        "smelt.plugins.model",
-        include_str!("../../../../runtime/lua/smelt/plugins/model.lua"),
+        "smelt.commands.model",
+        include_str!("../../../../runtime/lua/smelt/commands/model.lua"),
     ),
     (
-        "smelt.plugins.settings",
-        include_str!("../../../../runtime/lua/smelt/plugins/settings.lua"),
+        "smelt.commands.settings",
+        include_str!("../../../../runtime/lua/smelt/commands/settings.lua"),
     ),
     (
-        "smelt.plugins.history_search",
-        include_str!("../../../../runtime/lua/smelt/plugins/history_search.lua"),
+        "smelt.commands.history_search",
+        include_str!("../../../../runtime/lua/smelt/commands/history_search.lua"),
     ),
     (
-        "smelt.plugins.toggles",
-        include_str!("../../../../runtime/lua/smelt/plugins/toggles.lua"),
+        "smelt.commands.toggles",
+        include_str!("../../../../runtime/lua/smelt/commands/toggles.lua"),
     ),
     (
-        "smelt.plugins.stats",
-        include_str!("../../../../runtime/lua/smelt/plugins/stats.lua"),
+        "smelt.commands.stats",
+        include_str!("../../../../runtime/lua/smelt/commands/stats.lua"),
     ),
     (
-        "smelt.plugins.session",
-        include_str!("../../../../runtime/lua/smelt/plugins/session.lua"),
+        "smelt.commands.session",
+        include_str!("../../../../runtime/lua/smelt/commands/session.lua"),
     ),
     (
-        "smelt.plugins.quit",
-        include_str!("../../../../runtime/lua/smelt/plugins/quit.lua"),
+        "smelt.commands.quit",
+        include_str!("../../../../runtime/lua/smelt/commands/quit.lua"),
     ),
     (
-        "smelt.plugins.compact",
-        include_str!("../../../../runtime/lua/smelt/plugins/compact.lua"),
+        "smelt.commands.compact",
+        include_str!("../../../../runtime/lua/smelt/commands/compact.lua"),
     ),
     (
-        "smelt.plugins.reflect",
-        include_str!("../../../../runtime/lua/smelt/plugins/reflect.lua"),
+        "smelt.commands.reflect",
+        include_str!("../../../../runtime/lua/smelt/commands/reflect.lua"),
     ),
     (
-        "smelt.plugins.simplify",
-        include_str!("../../../../runtime/lua/smelt/plugins/simplify.lua"),
+        "smelt.commands.simplify",
+        include_str!("../../../../runtime/lua/smelt/commands/simplify.lua"),
     ),
     (
-        "smelt.plugins.custom_commands",
-        include_str!("../../../../runtime/lua/smelt/plugins/custom_commands.lua"),
+        "smelt.commands.custom_commands",
+        include_str!("../../../../runtime/lua/smelt/commands/custom_commands.lua"),
     ),
     (
         "smelt.colorschemes.default",
@@ -1080,10 +1080,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/tools/web_fetch.lua"),
     ),
     (
-        "smelt.tools.exit_plan_mode",
-        include_str!("../../../../runtime/lua/smelt/tools/exit_plan_mode.lua"),
-    ),
-    (
         "smelt.tools.bash",
         include_str!("../../../../runtime/lua/smelt/tools/bash.lua"),
     ),
@@ -1094,26 +1090,26 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
 /// after the embedded searcher is set up, before user init.lua runs.
 const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.tools.ask_user_question",
-    "smelt.plugins.btw",
-    "smelt.plugins.export",
+    "smelt.commands.btw",
+    "smelt.commands.export",
     "smelt.dialogs.rewind",
     "smelt.plugins.background_commands",
-    "smelt.plugins.help",
+    "smelt.commands.help",
     "smelt.dialogs.permissions",
     "smelt.dialogs.resume",
-    "smelt.plugins.theme",
-    "smelt.plugins.color",
-    "smelt.plugins.model",
-    "smelt.plugins.settings",
-    "smelt.plugins.history_search",
-    "smelt.plugins.toggles",
-    "smelt.plugins.stats",
-    "smelt.plugins.session",
-    "smelt.plugins.quit",
-    "smelt.plugins.compact",
-    "smelt.plugins.reflect",
-    "smelt.plugins.simplify",
-    "smelt.plugins.custom_commands",
+    "smelt.commands.theme",
+    "smelt.commands.color",
+    "smelt.commands.model",
+    "smelt.commands.settings",
+    "smelt.commands.history_search",
+    "smelt.commands.toggles",
+    "smelt.commands.stats",
+    "smelt.commands.session",
+    "smelt.commands.quit",
+    "smelt.commands.compact",
+    "smelt.commands.reflect",
+    "smelt.commands.simplify",
+    "smelt.commands.custom_commands",
     "smelt.tools.glob",
     "smelt.tools.grep",
     "smelt.tools.load_skill",
