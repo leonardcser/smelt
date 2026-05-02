@@ -246,7 +246,10 @@ impl NotebookRenderData {
 /// when the notebook can't be read, parsed, or the targeted cell is
 /// out of bounds; callers can then leave the preview pane blank.
 pub fn preview_render_data(args: &HashMap<String, Value>) -> Option<NotebookRenderData> {
-    let path = args.get("notebook_path").and_then(|v| v.as_str()).unwrap_or("");
+    let path = args
+        .get("notebook_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let raw = std::fs::read_to_string(path).ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
     let cells = parsed.get("cells").and_then(|c| c.as_array())?;

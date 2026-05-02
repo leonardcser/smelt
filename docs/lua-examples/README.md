@@ -2,6 +2,7 @@
 
 Drop any of these files into `~/.config/smelt/init.lua` (or `dofile` them from your own `init.lua`) to try them out.
 
+- **config.lua** — register providers, MCP servers, settings, and permission rules in `init.lua`.
 - **per_project.lua** — auto-load `$PWD/.smelt/init.lua` on top of the user config.
 - **mode_keybinds.lua** — `<C-y>` copies transcript or prompt depending on focused window, demonstrating `smelt.win.focus()` for context-aware keybinds.
 - **yank_block.lua** — opts into the optional `/yank-block` plugin and binds `<Space>y` to it.
@@ -30,6 +31,15 @@ hangs off `smelt.*` — flat namespace, Neovim-style.
 - `smelt.cmd.register(name, fn, opts?)` — register a user command (`opts.desc` for completer text)
 - `smelt.cmd.run(line)` — execute a command
 - `smelt.cmd.list()` — list registered command names
+
+### Config (evaluated at startup before the engine starts)
+
+- `smelt.provider.register(name, { type, api_base, api_key_env, models })` — register a provider
+- `smelt.provider.list()` — list registered provider names
+- `smelt.mcp.register(name, { command, args, env, timeout, enabled })` — register an MCP server
+- `smelt.mcp.list()` — list registered MCP server names
+- `smelt.settings.set(key, value)` — set a config setting (bool, number, or string)
+- `smelt.permissions.set_rules({ default = ..., normal = ..., plan = ..., apply = ..., yolo = ... })` — configure permission rules
 
 ### Transcript / Prompt / Windows
 

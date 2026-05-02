@@ -49,7 +49,7 @@ scenario:
 1. Spin up wiremock with canned SSE responses (cassettes).
 2. Tempdir + `XDG_CONFIG_HOME` → write `init.lua` (registers test tools, sets
    permissions, etc.).
-3. Write `config.yaml` / `init.lua` under the temp config dir.
+3. Write `init.lua` under the temp config dir.
 4. Run `smelt --headless --format json --no-tool-calling -m <model> <prompt>`.
 5. Parse stdout as JSONL `EngineEvent`s and wait for `TurnComplete`.
 6. Snapshot the JSONL event stream via `insta`.

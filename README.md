@@ -92,43 +92,35 @@ smelt --model claude-opus-4-5 --api-base https://api.anthropic.com/v1 --api-key-
 
 ## Configuration
 
-Config file: `~/.config/smelt/config.yaml` (respects `$XDG_CONFIG_HOME`).
+Config file: `~/.config/smelt/init.lua` (respects `$XDG_CONFIG_HOME`).
 
-```yaml
-providers:
-  - name: ollama
-    type: openai-compatible # or: openai, anthropic, codex, copilot
-    api_base: http://localhost:11434/v1
-    models:
-      - qwen3.5:27b
+```lua
+smelt.provider.register("ollama", {
+  type = "openai-compatible", -- or: "openai", "anthropic", "codex", "copilot"
+  api_base = "http://localhost:11434/v1",
+  models = { "qwen3.5:27b" },
+})
 
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5.4
+smelt.provider.register("openai", {
+  type = "openai",
+  api_base = "https://api.openai.com/v1",
+  api_key_env = "OPENAI_API_KEY",
+  models = { "gpt-5.4" },
+})
 
-  - name: codex
-    type: codex # uses ChatGPT subscription — models fetched automatically
-    api_base: https://chatgpt.com/backend-api/codex
+smelt.provider.register("codex", {
+  type = "codex", -- uses ChatGPT subscription — models fetched automatically
+  api_base = "https://chatgpt.com/backend-api/codex",
+})
 
-  - name: copilot
-    type: copilot # uses GitHub Copilot subscription — models fetched automatically
-    api_base: https://api.individual.githubcopilot.com
+smelt.provider.register("copilot", {
+  type = "copilot", -- uses GitHub Copilot subscription — models fetched automatically
+  api_base = "https://api.individual.githubcopilot.com",
+})
 
-defaults:
-  model: ollama/qwen3.5:27b # provider_name/model_name
-
-auxiliary:
-  model: openai/gpt-5.4-mini
-  use_for:
-    btw: false
-
-settings:
-  vim_mode: false
-  auto_compact: false
-  redact_secrets: true # on by default — scrubs secrets from user input and tool results before they reach the LLM
+smelt.settings.set("vim_mode", false)
+smelt.settings.set("auto_compact", false)
+smelt.settings.set("redact_secrets", true) -- on by default — scrubs secrets from user input and tool results before they reach the LLM
 ```
 
 See the [full documentation](https://leonardcser.github.io/smelt/) for all

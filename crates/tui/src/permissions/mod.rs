@@ -14,8 +14,8 @@
 pub(crate) mod approvals;
 pub(crate) mod bash;
 pub(crate) mod rules;
-pub(crate) mod workspace;
 pub mod store;
+pub(crate) mod workspace;
 
 #[cfg(test)]
 mod tests;
@@ -35,7 +35,9 @@ fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
         .to_string()
 }
 use protocol::AgentMode;
-use rules::{build_mode, check_ruleset, compile_patterns, merge_mode, ModePerms, RawConfig};
+use rules::{
+    build_mode, check_ruleset, compile_patterns, merge_mode, ModePerms, RawConfig, RawPerms,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -53,15 +55,27 @@ pub struct Permissions {
 
 impl Permissions {
     pub fn load() -> Self {
-        let path = engine::paths::config_dir().join("config.yaml");
-        let contents = std::fs::read_to_string(&path).unwrap_or_default();
-        let raw: RawConfig = serde_yml::from_str(&contents).unwrap_or_default();
+        let raw = RawConfig::default();
         let def = &raw.permissions.default;
         Self {
             normal: build_mode(&merge_mode(def, &raw.permissions.normal), AgentMode::Normal),
             plan: build_mode(&merge_mode(def, &raw.permissions.plan), AgentMode::Plan),
             apply: build_mode(&merge_mode(def, &raw.permissions.apply), AgentMode::Apply),
             yolo: build_mode(&merge_mode(def, &raw.permissions.yolo), AgentMode::Yolo),
+            restrict_to_workspace: true,
+            workspace: PathBuf::new(),
+        }
+    }
+
+    /// Build from a Lua-populated `RawPerms`. Called by startup after
+    /// `init.lua` has run `smelt.permissions.set_rules`.
+    pub fn from_raw(raw: &RawPerms) -> Self {
+        let def = &raw.default;
+        Self {
+            normal: build_mode(&merge_mode(def, &raw.normal), AgentMode::Normal),
+            plan: build_mode(&merge_mode(def, &raw.plan), AgentMode::Plan),
+            apply: build_mode(&merge_mode(def, &raw.apply), AgentMode::Apply),
+            yolo: build_mode(&merge_mode(def, &raw.yolo), AgentMode::Yolo),
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
         }

@@ -287,10 +287,7 @@ fn coerce_tool_result(v: &LuaValue) -> (String, bool) {
         }
         LuaValue::Nil => (String::new(), false),
         other => (
-            format!(
-                "tool returned non-string value: {}",
-                other.type_name()
-            ),
+            format!("tool returned non-string value: {}", other.type_name()),
             true,
         ),
     }

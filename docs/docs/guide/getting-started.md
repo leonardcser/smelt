@@ -29,7 +29,7 @@
 
 ## First-Time Setup
 
-Just run `smelt`. It will create `~/.config/smelt/config.yaml` and you're ready
+Just run `smelt`. It will create `~/.config/smelt/init.lua` and you're ready
 to go.
 
 You can also skip the wizard and connect directly with CLI flags.
@@ -102,33 +102,29 @@ SGLang, llama.cpp.
 
 ## Writing a Config File
 
-Once you have a setup you like, save it to `~/.config/smelt/config.yaml` so you
+Once you have a setup you like, save it to `~/.config/smelt/init.lua` so you
 don't need CLI flags every time:
 
-```yaml
-providers:
-  - name: ollama
-    type: openai-compatible
-    api_base: http://localhost:11434/v1
-    models:
-      - qwen3.5:27b
+```lua
+smelt.provider.register("ollama", {
+  type = "openai-compatible",
+  api_base = "http://localhost:11434/v1",
+  models = { "qwen3.5:27b" },
+})
 
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5.4
+smelt.provider.register("openai", {
+  type = "openai",
+  api_base = "https://api.openai.com/v1",
+  api_key_env = "OPENAI_API_KEY",
+  models = { "gpt-5.4" },
+})
 
-  - name: anthropic
-    type: openai-compatible
-    api_base: https://api.anthropic.com/v1
-    api_key_env: ANTHROPIC_API_KEY
-    models:
-      - claude-opus-4-6
-
-defaults:
-  model: ollama/qwen3.5:27b # provider_name/model_name
+smelt.provider.register("anthropic", {
+  type = "openai-compatible",
+  api_base = "https://api.anthropic.com/v1",
+  api_key_env = "ANTHROPIC_API_KEY",
+  models = { "claude-opus-4-6" },
+})
 ```
 
 Now just run `smelt` — it connects to your default model automatically. Switch

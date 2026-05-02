@@ -22,25 +22,32 @@ impl Harness {
         Self { mock, config_dir }
     }
 
-    /// Write a `config.yaml` that routes all provider traffic through
-    /// the wiremock server. `provider_type` is one of `anthropic` /
+    /// Write an `init.lua` that registers a provider routing all traffic
+    /// through the wiremock server. `provider_type` is one of `anthropic` /
     /// `openai` / `openai-compatible` / etc.
     pub fn write_config(&self, provider_type: &str, model: &str) {
         let smelt_dir = self.smelt_dir();
         std::fs::create_dir_all(&smelt_dir).expect("mkdir");
-        let yaml = format!(
-            "providers:\n  - name: test\n    type: {provider_type}\n    api_base: {api_base}\n    api_key_env: SMELT_TEST_API_KEY\n    models:\n      - {model}\n",
+        let lua = format!(
+            "smelt.provider.register(\"test\", {{\n  type = \"{provider_type}\",\n  api_base = \"{api_base}\",\n  api_key_env = \"SMELT_TEST_API_KEY\",\n  models = {{ \"{model}\" }},\n}})\n",
             api_base = self.mock.uri(),
         );
-        std::fs::write(smelt_dir.join("config.yaml"), yaml).expect("write config");
+        std::fs::write(smelt_dir.join("init.lua"), lua).expect("write init.lua");
     }
 
-    /// Write `init.lua` to the tempdir. Pass empty string for no plugin
-    /// configuration.
+    /// Append `src` to `init.lua` in the tempdir. Pass empty string for no
+    /// additional configuration.
     pub fn write_init_lua(&self, src: &str) {
         let smelt_dir = self.smelt_dir();
         std::fs::create_dir_all(&smelt_dir).expect("mkdir");
-        std::fs::write(smelt_dir.join("init.lua"), src).expect("write init.lua");
+        let path = smelt_dir.join("init.lua");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open init.lua");
+        use std::io::Write;
+        file.write_all(src.as_bytes()).expect("append init.lua");
     }
 
     /// Mount a `POST /messages` stub returning a canned Anthropic SSE

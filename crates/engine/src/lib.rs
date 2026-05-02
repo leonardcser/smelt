@@ -3,12 +3,10 @@ pub mod auth;
 pub(crate) mod cancel;
 pub(crate) mod compact;
 pub(crate) mod config;
-pub mod config_file;
 pub mod image;
 pub mod log;
 
 pub mod paths;
-
 
 pub mod pricing;
 pub mod provider;
@@ -234,10 +232,7 @@ impl EventInjector {
 ///
 /// MCP servers are connected asynchronously — this must be called from
 /// within a tokio runtime.
-pub fn start(
-    config: EngineConfig,
-    dispatcher: Box<dyn tools::ToolDispatcher>,
-) -> EngineHandle {
+pub fn start(config: EngineConfig, dispatcher: Box<dyn tools::ToolDispatcher>) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
 

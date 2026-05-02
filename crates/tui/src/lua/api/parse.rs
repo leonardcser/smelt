@@ -28,8 +28,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             } else {
                 String::new()
             };
-            let value: serde_json::Value =
-                serde_yml::from_str(yaml).unwrap_or(serde_json::Value::Null);
+            let value = yaml_to_json(yaml);
             let lua_value = json_to_lua(lua, value)?;
             Ok((lua_value, body))
         })?,
@@ -37,6 +36,55 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     smelt.set("parse", parse_tbl)?;
     Ok(())
+}
+
+/// Minimal YAML frontmatter → JSON value. Only handles the subset
+/// used by skill and custom-command frontmatter: scalar strings,
+/// arrays of strings, and one-level mappings of strings → strings /
+/// arrays of strings.
+fn yaml_to_json(yaml: &str) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    let mut current_key: Option<String> = None;
+    let mut current_arr: Vec<serde_json::Value> = Vec::new();
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, val)) = trimmed.split_once(':') {
+            // Flush previous array if any
+            if let Some(k) = current_key.take() {
+                map.insert(k, serde_json::Value::Array(current_arr.clone()));
+                current_arr.clear();
+            }
+            let key = key.trim().to_string();
+            let val = val.trim();
+            if val.is_empty() {
+                current_key = Some(key);
+            } else {
+                map.insert(key, serde_json::Value::String(unquote(val)));
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("-") {
+            let val = rest.trim();
+            current_arr.push(serde_json::Value::String(unquote(val)));
+        }
+    }
+    if let Some(k) = current_key.take() {
+        map.insert(k, serde_json::Value::Array(current_arr));
+    }
+    serde_json::Value::Object(map)
+}
+
+fn unquote(s: &str) -> String {
+    if s.len() >= 2 {
+        let first = s.chars().next().unwrap();
+        let last = s.chars().last().unwrap();
+        if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
 }
 
 fn json_to_lua(lua: &Lua, v: serde_json::Value) -> LuaResult<mlua::Value> {
