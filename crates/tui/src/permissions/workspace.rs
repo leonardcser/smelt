@@ -71,7 +71,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 fn resolve_path(path_str: &str, workspace: &Path) -> PathBuf {
     if let Some(rest) = path_str.strip_prefix("~/") {
-        let resolved = crate::paths::home_dir().join(rest);
+        let resolved = engine::paths::home_dir().join(rest);
         resolved
             .canonicalize()
             .unwrap_or_else(|_| normalize_path(&resolved))

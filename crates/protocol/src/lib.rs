@@ -15,7 +15,8 @@ pub mod usage;
 
 pub use content::{Content, ContentPart};
 pub use event::{
-    AuxiliaryTask, EngineEvent, ToolDef, ToolExecutionMode, ToolHookFlags, ToolHooks, UiCommand,
+    AuxiliaryTask, Decision, EngineEvent, ToolDef, ToolExecutionMode, ToolHookFlags, ToolHooks,
+    UiCommand,
 };
 pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
 pub use mode::{AgentMode, ReasoningEffort};

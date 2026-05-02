@@ -1,6 +1,6 @@
 use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialContextInjection};
 use crate::log;
-use crate::permissions::{Decision, Permissions, RuntimeApprovals};
+use protocol::Decision;
 use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
 use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
@@ -11,7 +11,7 @@ use protocol::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -43,7 +43,7 @@ pub(crate) async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir: _, model_config_overrides, permission_overrides, system_prompt: tui_system_prompt, tools } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir: _, model_config_overrides, permission_overrides: _, system_prompt: tui_system_prompt, tools } => {
 
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -52,13 +52,6 @@ pub(crate) async fn engine_task(
                         if let Some(overrides) = model_config_overrides {
                             provider.apply_model_overrides(&overrides);
                         }
-                        let turn_permissions: Permissions;
-                        let perm_ref: &Permissions = if let Some(ref perm_ovr) = permission_overrides {
-                            turn_permissions = config.permissions.with_overrides(perm_ovr);
-                            &turn_permissions
-                        } else {
-                            &config.permissions
-                        };
                         let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
                         let system_prompt = tui_system_prompt
                             .or_else(|| config.system_prompt_override.clone())
@@ -73,8 +66,6 @@ pub(crate) async fn engine_task(
                         let mut turn = Turn {
                             provider,
                             dispatcher: &*dispatcher,
-                            permissions: perm_ref,
-                            runtime_approvals: &config.runtime_approvals,
                             cmd_rx: &mut cmd_rx,
                             event_tx: &event_tx,
                             config: &config,
@@ -517,8 +508,6 @@ struct PendingToolCall<'a> {
 struct Turn<'a> {
     provider: Provider,
     dispatcher: &'a dyn ToolDispatcher,
-    permissions: &'a Permissions,
-    runtime_approvals: &'a Arc<RwLock<RuntimeApprovals>>,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
     config: &'a EngineConfig,
@@ -543,37 +532,6 @@ struct Turn<'a> {
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
-    }
-
-    /// Resolve the per-call permission `Decision` for a tool, applying the
-    /// runtime-approval upgrade (`Ask` → `Allow`) when an existing session
-    /// or workspace approval matches. Used by both the core-tool and
-    /// tool launch paths.
-    ///
-    /// Takes individual field references rather than `&self` so the
-    /// helper composes inside the `select!` loop where `self.cmd_rx` is
-    /// already mutably borrowed.
-    fn resolve_decision(
-        permissions: &Permissions,
-        runtime_approvals: &Arc<RwLock<RuntimeApprovals>>,
-        mode: AgentMode,
-        name: &str,
-        args: &HashMap<String, Value>,
-        is_mcp: bool,
-        hooks: &protocol::ToolHooks,
-    ) -> Decision {
-        let mut decision = permissions.decide(mode, name, args, is_mcp);
-        if decision == Decision::Ask {
-            let rt = runtime_approvals.read().unwrap();
-            let desc = hooks
-                .needs_confirm
-                .clone()
-                .unwrap_or_else(|| name.to_string());
-            if rt.is_auto_approved(permissions, mode, name, args, &desc) {
-                decision = Decision::Allow;
-            }
-        }
-        decision
     }
 
     /// Push a message into history. When `redact_secrets` is enabled, content
@@ -898,15 +856,7 @@ impl<'a> Turn<'a> {
                     .dispatcher
                     .definitions()
                     .into_iter()
-                    .filter(|d| {
-                        let name = d.function.name.as_str();
-                        let allowed = if self.dispatcher.is_mcp(name) {
-                            self.permissions.check_mcp(self.mode, name)
-                        } else {
-                            self.permissions.check_tool(self.mode, name)
-                        };
-                        allowed != Decision::Deny
-                    })
+                    .filter(|d| self.dispatcher.is_visible(d.function.name.as_str(), self.mode))
                     .collect();
                 // Plugin tools with `override_core` shadow the core
                 // definition of the same name — drop the core one so
@@ -1180,7 +1130,7 @@ impl<'a> Turn<'a> {
                 continue;
             }
 
-            let hooks = match self.dispatcher.evaluate_hooks(&tc.function.name, &args) {
+            let hooks = match self.dispatcher.evaluate_hooks(&tc.function.name, &args, self.mode) {
                 Some(h) => h,
                 None => {
                     self.push_tool_result(
@@ -1193,24 +1143,8 @@ impl<'a> Turn<'a> {
                 }
             };
 
-            // Pre-flight validation: catch errors before prompting (e.g. stale file hash).
-            if let Some(err) = hooks.preflight_error {
-                self.push_tool_result(&tc.id, &err, true, None);
-                continue;
-            }
-
-            let decision = Self::resolve_decision(
-                self.permissions,
-                self.runtime_approvals,
-                self.mode,
-                &tc.function.name,
-                &args,
-                self.dispatcher.is_mcp(&tc.function.name),
-                &hooks,
-            );
-
             let idx = plan.slots.len();
-            match decision {
+            match hooks.decision {
                 Decision::Allow => {
                     plan.slots.push(ToolSlot {
                         tc,
@@ -1229,9 +1163,12 @@ impl<'a> Turn<'a> {
                         None,
                     );
                 }
+                Decision::Error(ref err) => {
+                    self.push_tool_result(&tc.id, err, true, None);
+                }
                 Decision::Ask => {
                     let desc = hooks
-                        .needs_confirm
+                        .confirm_message
                         .unwrap_or_else(|| tc.function.name.clone());
                     let cmd_summary = if tc.function.name == "bash" {
                         let d = args
@@ -1434,108 +1371,92 @@ impl<'a> Turn<'a> {
                             .position(|(rid, _)| *rid == request_id)
                         {
                             let (_, pending) = plan.pending_tool_hooks.swap_remove(pos);
-                            // Preflight: bail immediately on hook error.
-                            if let Some(err) = hooks.preflight_error {
-                                let elapsed_ms =
-                                    Some(pending.tool_start.elapsed().as_millis() as u64);
-                                let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                                    call_id: pending.tc.id.clone(),
-                                    result: ToolOutcome {
-                                        content: err.clone(),
-                                        is_error: true,
-                                        metadata: None,
-                                    },
-                                    elapsed_ms,
-                                });
-                                tool_results.push((pending.tc.id.clone(), err, true));
-                                outstanding -= 1;
-                            } else {
-                                // Same Decision flow core tools use, keyed on tool
-                                // name. Tools that shadow a core name
-                                // (override_core) inherit that name's permission
-                                // ruleset by design — e.g. a Lua "bash" goes
-                                // through the bash subcommand-split machinery in
-                                // permissions::decide_base.
-                                let decision = Self::resolve_decision(
-                                    self.permissions,
-                                    self.runtime_approvals,
-                                    self.mode,
-                                    &pending.tc.function.name,
-                                    &pending.args,
-                                    false,
-                                    &hooks,
-                                );
-                                match decision {
-                                    Decision::Allow => {
-                                        if pending.is_sequential {
-                                            plan.sequential_tools.push((
-                                                pending.tc,
-                                                pending.args,
-                                                pending.tool_start,
-                                            ));
-                                        } else {
-                                            let rid = next_request_id();
-                                            let _ = self
-                                                .event_tx
-                                                .send(EngineEvent::ToolDispatch {
-                                                    request_id: rid,
-                                                    call_id: pending.tc.id.clone(),
-                                                    tool_name: pending.tc.function.name.clone(),
-                                                    args: pending.args.clone(),
-                                                });
-                                            plan.pending_tools.push((
-                                                rid,
-                                                pending.tc.id.clone(),
-                                                pending.tool_start,
-                                            ));
-                                        }
-                                    }
-                                    Decision::Deny => {
-                                        let denial = "The user's permission settings blocked \
-                                                      this tool call. Try a different approach \
-                                                      or ask the user for guidance."
-                                            .to_string();
-                                        let elapsed_ms = Some(
-                                            pending.tool_start.elapsed().as_millis() as u64,
-                                        );
-                                        let _ = self.event_tx.send(EngineEvent::ToolFinished {
-                                            call_id: pending.tc.id.clone(),
-                                            result: ToolOutcome {
-                                                content: denial.clone(),
-                                                is_error: false,
-                                                metadata: None,
-                                            },
-                                            elapsed_ms,
-                                        });
-                                        tool_results.push((pending.tc.id.clone(), denial, false));
-                                        outstanding -= 1;
-                                    }
-                                    Decision::Ask => {
-                                        let cmd_summary =
-                                            if pending.tc.function.name == "bash" {
-                                                let d = pending.args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                                (!d.is_empty()).then_some(d)
-                                            } else {
-                                                None
-                                            };
-                                        let confirm_msg = hooks
-                                            .needs_confirm
-                                            .clone()
-                                            .unwrap_or_else(|| pending.tc.function.name.clone());
+                            match hooks.decision {
+                                Decision::Allow => {
+                                    if pending.is_sequential {
+                                        plan.sequential_tools.push((
+                                            pending.tc,
+                                            pending.args,
+                                            pending.tool_start,
+                                        ));
+                                    } else {
                                         let rid = next_request_id();
                                         let _ = self
                                             .event_tx
-                                            .send(EngineEvent::RequestPermission {
+                                            .send(EngineEvent::ToolDispatch {
                                                 request_id: rid,
                                                 call_id: pending.tc.id.clone(),
                                                 tool_name: pending.tc.function.name.clone(),
                                                 args: pending.args.clone(),
-                                                confirm_message: confirm_msg,
-                                                approval_patterns: hooks.approval_patterns,
-                                                summary: cmd_summary,
                                             });
-                                        plan.pending_tool_perms.push((rid, pending));
+                                        plan.pending_tools.push((
+                                            rid,
+                                            pending.tc.id.clone(),
+                                            pending.tool_start,
+                                        ));
                                     }
+                                }
+                                Decision::Deny => {
+                                    let denial = "The user's permission settings blocked \
+                                                  this tool call. Try a different approach \
+                                                  or ask the user for guidance."
+                                        .to_string();
+                                    let elapsed_ms = Some(
+                                        pending.tool_start.elapsed().as_millis() as u64,
+                                    );
+                                    let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                        call_id: pending.tc.id.clone(),
+                                        result: ToolOutcome {
+                                            content: denial.clone(),
+                                            is_error: false,
+                                            metadata: None,
+                                        },
+                                        elapsed_ms,
+                                    });
+                                    tool_results.push((pending.tc.id.clone(), denial, false));
+                                    outstanding -= 1;
+                                }
+                                Decision::Error(ref err) => {
+                                    let elapsed_ms = Some(
+                                        pending.tool_start.elapsed().as_millis() as u64,
+                                    );
+                                    let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                        call_id: pending.tc.id.clone(),
+                                        result: ToolOutcome {
+                                            content: err.clone(),
+                                            is_error: true,
+                                            metadata: None,
+                                        },
+                                        elapsed_ms,
+                                    });
+                                    tool_results.push((pending.tc.id.clone(), err.clone(), true));
+                                    outstanding -= 1;
+                                }
+                                Decision::Ask => {
+                                    let cmd_summary =
+                                        if pending.tc.function.name == "bash" {
+                                            let d = pending.args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                            (!d.is_empty()).then_some(d)
+                                        } else {
+                                            None
+                                        };
+                                    let confirm_msg = hooks
+                                        .confirm_message
+                                        .clone()
+                                        .unwrap_or_else(|| pending.tc.function.name.clone());
+                                    let rid = next_request_id();
+                                    let _ = self
+                                        .event_tx
+                                        .send(EngineEvent::RequestPermission {
+                                            request_id: rid,
+                                            call_id: pending.tc.id.clone(),
+                                            tool_name: pending.tc.function.name.clone(),
+                                            args: pending.args.clone(),
+                                            confirm_message: confirm_msg,
+                                            approval_patterns: hooks.approval_patterns,
+                                            summary: cmd_summary,
+                                        });
+                                    plan.pending_tool_perms.push((rid, pending));
                                 }
                             }
                         }

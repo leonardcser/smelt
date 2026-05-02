@@ -4,7 +4,8 @@
 //! `"cargo test *"` once, and future matching calls skip the confirm dialog.
 
 use crate::permissions::bash::split_shell_commands;
-use crate::permissions::rules::{check_ruleset, Decision, RuleSet};
+use crate::permissions::rules::{check_ruleset, RuleSet};
+use protocol::Decision;
 use crate::permissions::Permissions;
 use protocol::AgentMode;
 use serde_json::Value;
@@ -50,14 +51,14 @@ impl RuntimeApprovals {
     }
 
     pub fn add_session_dir(&mut self, dir: PathBuf) {
-        let dir = crate::paths::expand_tilde(&dir);
+        let dir = engine::paths::expand_tilde(&dir);
         if !self.session_dirs.contains(&dir) {
             self.session_dirs.push(dir);
         }
     }
 
     pub fn add_workspace_dir(&mut self, dir: PathBuf) {
-        let dir = crate::paths::expand_tilde(&dir);
+        let dir = engine::paths::expand_tilde(&dir);
         if !self.workspace_dirs.contains(&dir) {
             self.workspace_dirs.push(dir);
         }
@@ -78,7 +79,7 @@ impl RuntimeApprovals {
         self.workspace_tools = tools;
         self.workspace_dirs = dirs
             .into_iter()
-            .map(|d| crate::paths::expand_tilde(&d))
+            .map(|d| engine::paths::expand_tilde(&d))
             .collect();
     }
 
@@ -203,7 +204,7 @@ impl RuntimeApprovals {
         self.session_tools = tools;
         self.session_dirs = dirs
             .into_iter()
-            .map(|d| crate::paths::expand_tilde(&d))
+            .map(|d| engine::paths::expand_tilde(&d))
             .collect();
     }
 
@@ -223,7 +224,7 @@ impl RuntimeApprovals {
             return false;
         }
         paths.iter().all(|p| {
-            let path = crate::paths::expand_tilde(Path::new(p));
+            let path = engine::paths::expand_tilde(Path::new(p));
             let dir = path.parent().unwrap_or(&path);
             all_dirs
                 .iter()

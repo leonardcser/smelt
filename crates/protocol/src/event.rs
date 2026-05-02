@@ -90,21 +90,40 @@ impl ToolHookFlags {
     }
 }
 
+/// Final permission decision for a single tool call, produced by the
+/// dispatcher after evaluating hooks and checking policy.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    #[default]
+    Allow,
+    Ask,
+    Deny,
+    #[serde(rename = "error")]
+    Error(String),
+}
+
 /// Result of evaluating a tool's permission hooks for a specific
 /// invocation. Returned by the TUI in response to
-/// `EngineEvent::ToolHooksRequest`.
+/// `EngineEvent::ToolHooksRequest` (Lua tools) or by the dispatcher's
+/// `evaluate_hooks` (MCP / core tools).
+///
+/// The `decision` field is authoritative: `Allow` → dispatch,
+/// `Ask` → prompt the user, `Deny` → synthetic denial,
+/// `Error(msg)` → synthetic error result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolHooks {
-    /// Confirm dialog message; `None` falls back to the tool name.
+    /// Final permission decision.
     #[serde(default)]
-    pub needs_confirm: Option<String>,
+    pub decision: Decision,
+    /// Confirm dialog message; used when `decision == Ask`.
+    /// `None` falls back to the tool name.
+    #[serde(default)]
+    pub confirm_message: Option<String>,
     /// Approval patterns to offer "always allow" for.
+    /// Used when `decision == Ask`.
     #[serde(default)]
     pub approval_patterns: Vec<String>,
-    /// Pre-flight error; `Some` fails the call immediately without
-    /// asking the user.
-    #[serde(default)]
-    pub preflight_error: Option<String>,
 }
 
 /// Events emitted by the engine. The UI consumes these to update its display.
