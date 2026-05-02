@@ -24,10 +24,10 @@ operating rules.
 @refactor/README.md
 @refactor/REFACTOR.md
 @refactor/ARCHITECTURE.md
-@refactor/tui-ui-architecture-target.puml
+@refactor/tui-ui-architecture.puml
 @refactor/INVENTORY.md
 @refactor/FEATURES.md
 @refactor/DECISIONS.md
 @refactor/TRACE.md
 @refactor/TESTING.md
-@refactor/P6.md
+@refactor/P7.md

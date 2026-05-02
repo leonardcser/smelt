@@ -52,8 +52,8 @@ ARCH=refactor/ARCHITECTURE.md
 DECISIONS=refactor/DECISIONS.md
 TRACE=refactor/TRACE.md
 TESTING=refactor/TESTING.md
-PUML=refactor/tui-ui-architecture-target.puml
-SVG=refactor/tui-ui-architecture-target.svg
+PUML=refactor/tui-ui-architecture.puml
+SVG=refactor/tui-ui-architecture.svg
 
 for f in "$README" "$REFACTOR" "$PROMPT" "$INVENTORY" "$FEATURES" "$ARCH" "$DECISIONS" "$TRACE" "$TESTING" "$PUML"; do
   [[ -f $f ]] || { fail "missing: $f"; exit 1; }

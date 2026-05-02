@@ -130,7 +130,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     let on_line = |line: String| {
                         injector.inject_tool_output(call_id.clone(), line);
                     };
-                    let out = process::run_streaming(&command, timeout, on_line, cancel.clone()).await;
+                    let out =
+                        process::run_streaming(&command, timeout, on_line, cancel.clone()).await;
                     if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
                         let payload = serde_json::json!({ "__cancelled": true });
                         sink.resolve_json(task_id, payload);

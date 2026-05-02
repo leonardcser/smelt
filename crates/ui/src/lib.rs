@@ -1191,18 +1191,85 @@ impl Ui {
         mods: crossterm::event::KeyModifiers,
         lua_invoke: &mut LuaInvoke,
     ) -> Status {
-        // Modal overlay built-in: bare Esc on an active modal closes
-        // the topmost modal. Universal dismiss is fundamental
-        // behaviour, not user-customisable. Before closing, fires
-        // `WinEvent::Dismiss` on the modal's root leaf so dialog-side
-        // `on_event("dismiss", …)` handlers can flush pending state
-        // (e.g. unsubmitted input text). `fire_win_event` already
-        // redirects leaf events to the root, so a single dispatch
-        // suffices regardless of which leaf has focus. Leaves can
-        // register their own callbacks for `q` / `Ctrl+C` / Submit
-        // etc. through the regular `Callbacks` registry — see the
-        // `focus()`-routed dispatch below.
-        if matches!(code, crossterm::event::KeyCode::Esc)
+        let key = KeyBind::new(code, mods);
+        // Pending follow-up dispatched after the keymap callback
+        // returns. `CallbackResult::Event` writes here so a Rust
+        // callback can synthesize a `WinEvent` (e.g. a list's Enter
+        // binding firing `Submit`) without needing direct access to
+        // `lua_invoke`.
+        let mut follow_up: Option<(WinEvent, Payload)> = None;
+        let result = if let Some(win) = self.focus() {
+            if let Some(mut cb) = self.callbacks.take_keymap(win, key) {
+                let r = match &mut cb {
+                    Callback::Rust(inner) => {
+                        let mut ctx = CallbackCtx {
+                            ui: self,
+                            win,
+                            payload: Payload::Key { code, mods },
+                        };
+                        let r = inner(&mut ctx);
+                        match r {
+                            CallbackResult::Consumed => Status::Consumed,
+                            CallbackResult::Pass => Status::Ignored,
+                            CallbackResult::Event(ev, payload) => {
+                                follow_up = Some((ev, payload));
+                                Status::Consumed
+                            }
+                        }
+                    }
+                    Callback::Lua(handle) => {
+                        let payload = Payload::Key { code, mods };
+                        lua_invoke(*handle, win, &payload);
+                        Status::Consumed
+                    }
+                };
+                self.callbacks.restore_keymap(win, key, cb);
+                r
+            } else if let Some(mut cb) = self.callbacks.take_key_fallback(win) {
+                let r = match &mut cb {
+                    Callback::Rust(inner) => {
+                        let mut ctx = CallbackCtx {
+                            ui: self,
+                            win,
+                            payload: Payload::Key { code, mods },
+                        };
+                        let r = inner(&mut ctx);
+                        match r {
+                            CallbackResult::Consumed => Status::Consumed,
+                            CallbackResult::Pass => Status::Ignored,
+                            CallbackResult::Event(ev, payload) => {
+                                follow_up = Some((ev, payload));
+                                Status::Consumed
+                            }
+                        }
+                    }
+                    Callback::Lua(handle) => {
+                        let payload = Payload::Key { code, mods };
+                        lua_invoke(*handle, win, &payload);
+                        Status::Consumed
+                    }
+                };
+                self.callbacks.restore_key_fallback(win, cb);
+                r
+            } else {
+                Status::Ignored
+            }
+        } else {
+            Status::Ignored
+        };
+
+        if let Some((ev, payload)) = follow_up {
+            if let Some(win) = self.focus() {
+                self.fire_win_event(win, ev, payload, lua_invoke);
+            }
+        }
+
+        // Esc chain: if the focused window ignored bare Esc, fall
+        // through to dismissing the active modal. This lets a leaf
+        // consume Esc first (e.g. clearing its own selection) before
+        // the overlay closes.
+        if result == Status::Ignored
+            && matches!(code, crossterm::event::KeyCode::Esc)
             && mods == crossterm::event::KeyModifiers::NONE
         {
             if let Some(modal) = self.active_modal() {
@@ -1221,75 +1288,6 @@ impl Ui {
                 }
                 return Status::Consumed;
             }
-        }
-        let Some(win) = self.focus() else {
-            return Status::Ignored;
-        };
-        let key = KeyBind::new(code, mods);
-        // Pending follow-up dispatched after the keymap callback
-        // returns. `CallbackResult::Event` writes here so a Rust
-        // callback can synthesize a `WinEvent` (e.g. a list's Enter
-        // binding firing `Submit`) without needing direct access to
-        // `lua_invoke`.
-        let mut follow_up: Option<(WinEvent, Payload)> = None;
-        let result = if let Some(mut cb) = self.callbacks.take_keymap(win, key) {
-            let r = match &mut cb {
-                Callback::Rust(inner) => {
-                    let mut ctx = CallbackCtx {
-                        ui: self,
-                        win,
-                        payload: Payload::Key { code, mods },
-                    };
-                    let r = inner(&mut ctx);
-                    match r {
-                        CallbackResult::Consumed => Status::Consumed,
-                        CallbackResult::Pass => Status::Ignored,
-                        CallbackResult::Event(ev, payload) => {
-                            follow_up = Some((ev, payload));
-                            Status::Consumed
-                        }
-                    }
-                }
-                Callback::Lua(handle) => {
-                    let payload = Payload::Key { code, mods };
-                    lua_invoke(*handle, win, &payload);
-                    Status::Consumed
-                }
-            };
-            self.callbacks.restore_keymap(win, key, cb);
-            r
-        } else if let Some(mut cb) = self.callbacks.take_key_fallback(win) {
-            let r = match &mut cb {
-                Callback::Rust(inner) => {
-                    let mut ctx = CallbackCtx {
-                        ui: self,
-                        win,
-                        payload: Payload::Key { code, mods },
-                    };
-                    let r = inner(&mut ctx);
-                    match r {
-                        CallbackResult::Consumed => Status::Consumed,
-                        CallbackResult::Pass => Status::Ignored,
-                        CallbackResult::Event(ev, payload) => {
-                            follow_up = Some((ev, payload));
-                            Status::Consumed
-                        }
-                    }
-                }
-                Callback::Lua(handle) => {
-                    let payload = Payload::Key { code, mods };
-                    lua_invoke(*handle, win, &payload);
-                    Status::Consumed
-                }
-            };
-            self.callbacks.restore_key_fallback(win, cb);
-            r
-        } else {
-            Status::Ignored
-        };
-
-        if let Some((ev, payload)) = follow_up {
-            self.fire_win_event(win, ev, payload, lua_invoke);
         }
 
         result
@@ -2611,6 +2609,42 @@ mod tests {
         assert_eq!(result, Status::Consumed);
         assert_eq!(*count.lock().unwrap(), 1);
         assert!(ui.overlay(id).is_none());
+    }
+
+    #[test]
+    fn modal_esc_consumed_by_focused_leaf_does_not_dismiss() {
+        // Esc chain: the focused window gets first dibs. If its
+        // keymap consumes Esc, the modal stays open.
+        let mut ui = make_ui();
+        let a = WinId(60);
+        let b = WinId(61);
+        let id = ui.overlay_open(modal_overlay_with_leaves(a, b, WinId(62)));
+        ui.set_focus(a);
+
+        let esc_consumed = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let esc_cb = esc_consumed.clone();
+        let cb: Callback = Callback::Rust(Box::new(move |_| {
+            *esc_cb.lock().unwrap() = true;
+            CallbackResult::Consumed
+        }));
+        let _ = ui.win_set_keymap(
+            a,
+            KeyBind::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            cb,
+        );
+
+        let result = dispatch_key(
+            &mut ui,
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(result, Status::Consumed);
+        assert!(*esc_consumed.lock().unwrap());
+        // Modal stays open because the leaf consumed Esc.
+        assert!(ui.overlay(id).is_some());
     }
 
     #[test]

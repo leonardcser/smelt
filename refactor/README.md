@@ -5,7 +5,7 @@ Entry point for the smelt rebuild. Short by design.
 ## What this is
 
 A multi-phase rewrite of smelt's Rust + Lua surface to the target shape in
-`tui-ui-architecture-target.puml`. Greenfield: no users, no migration story,
+`tui-ui-architecture.puml`. Greenfield: no users, no migration story,
 no backward compatibility. The only artefact that matters is the final shape.
 
 ## The plan is not final
@@ -150,7 +150,7 @@ commit whose entire diff is one bullet in `P<n>.md`.
 - **For UI changes:** drive the binary in a tmux side-pane (see
   `ARCHITECTURE.md` § Testing TUI changes).
 - **For puml edits:** regenerate the SVG
-  (`plantuml -tsvg refactor/tui-ui-architecture-target.puml`).
+  (`plantuml -tsvg refactor/tui-ui-architecture.puml`).
 
 ## The documents
 
@@ -159,7 +159,7 @@ commit whose entire diff is one bullet in `P<n>.md`.
 | `README.md` (this)                | Meta rules + index.                              |
 | `REFACTOR.md`                     | Sequencing — phases P0..P7 and their content.    |
 | `ARCHITECTURE.md`                 | Target intent — decisions, rationale.            |
-| `tui-ui-architecture-target.puml` | Canonical structure diagram.                     |
+| `tui-ui-architecture.puml` | Canonical structure diagram.                     |
 | `INVENTORY.md`                    | Per-file ledger: every source file → its fate.   |
 | `FEATURES.md`                     | User-facing parity checklist.                    |
 | `P<n>.md`                         | Per-phase log: what landed + decisions made.     |
