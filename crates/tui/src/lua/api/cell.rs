@@ -8,7 +8,7 @@ use crate::lua::LuaHandle;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    use crate::app::cells::{LuaCellValue, SubscriberKind};
+    use crate::core::cells::{LuaCellValue, SubscriberKind};
     use std::rc::Rc;
 
     let cell_tbl = lua.create_table()?;
@@ -154,7 +154,7 @@ struct CellHandle {
 
 impl mlua::UserData for CellHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        use crate::app::cells::{LuaCellValue, SubscriberKind};
+        use crate::core::cells::{LuaCellValue, SubscriberKind};
         use std::rc::Rc;
 
         methods.add_method("get", |lua, this, _: ()| -> LuaResult<mlua::Value> {

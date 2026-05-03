@@ -529,7 +529,7 @@ bridges, then the aggregate.
   live. Only split out a `ToolRuntime` type if a later ownership or
   execution boundary makes that materially cleaner.
 - **a.11** ✅ — initial engine-event bridge carve-out: `App.engine`
-  wrapped in `engine_bridge::EngineBridge` over today's `EngineHandle`
+  wrapped in `engine_client::EngineClient` over today's `EngineHandle`
   (`send` / `recv` / `try_recv` / `drain_spawned()`); two `select!`
   engine-drain gates swap from `focused_overlay_blocks_agent()` to
   `confirms.is_clear()`. This wrapper is transitional: either P2.d/P5
@@ -695,7 +695,7 @@ Drains `engine.event_rx` in the `select!`. Translates events into
 direct host calls. Splits:
 
 - **P2.d.1** ✅ — engine event handlers relocate from `agent.rs` to
-  `engine_bridge.rs` as free functions over `&mut TuiApp`.
+  `engine_client.rs` as free functions over `&mut TuiApp`.
 - **P2.d.2 (deferred)** — full target fold (`TextDelta` →
   `Buffer::append`; `ToolStarted/Finished` / block-end →
   `Buffer::attach`'s `on_block`; `RequestPermission` →
@@ -734,7 +734,7 @@ unit warrants it):
 - `tui::parse` — markdown / diff / syntax (delegates to syntect, LCS).
 - `tui::process` — short-lived shell commands. ✅ `run` shipped
   (this session); streaming `spawn -> Handle` rides P5.b.
-- `tui::subprocess` — long-lived child with bidirectional event
+- `app::process` long-lived IPC — long-lived child with bidirectional event
   channel (`spawn`, `send`, `on_event`, `wait`, `kill`). Future
   primitive for MCP servers, long-running background commands, etc.
   Wire format is opaque (stdio / socket); JSON framing is a convention
@@ -808,14 +808,14 @@ Newly bound Lua surface:
   `rules_for(mode, kind)` (read accessor for the ruleset configured
   via `set_rules`), `outside_workspace_paths`, `is_approved`,
   `approve`, `load_workspace`, `save_workspace`, `set_rules`.
-- `smelt.subprocess` — deferred/YAGNI. `smelt.process.run` and
+- `smelt.process` long-lived IPC — deferred/YAGNI. `smelt.process.run` and
   `smelt.process.run_streaming` cover the surface today.
 - `smelt.frontend` — `is_interactive()`, `kind()`. Tools branch on
   this when they need the human-vs-headless distinction. ✅ (`e38572d`).
 - `smelt.mode` — `get / set / cycle` over AgentMode (Plan/Apply/Yolo).
   Renamed from `smelt.agent.mode` to avoid collision with
-  future `smelt.subprocess`. ✅ (`ad9eccc`).
-- `smelt.path` — wraps `tui::path`. ✅ (`de7fb87`).
+  future `smelt.process` long-lived IPC. ✅ (`ad9eccc`).
+- `smelt.path` — wraps `app::path`. ✅ (`de7fb87`).
 - `smelt.parse`, `smelt.fs`, `smelt.http`, `smelt.html`,
   `smelt.notebook`, `smelt.os`, `smelt.fuzzy`, `smelt.grep` — wrap
   their capability module.

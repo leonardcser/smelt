@@ -10,15 +10,15 @@ use std::sync::Arc;
 pub struct McpDispatcher {
     manager: Arc<McpManager>,
     defs: Vec<McpToolDef>,
-    permissions: Arc<crate::permissions::Permissions>,
-    runtime_approvals: Arc<std::sync::RwLock<crate::permissions::RuntimeApprovals>>,
+    permissions: Arc<crate::core::permissions::Permissions>,
+    runtime_approvals: Arc<std::sync::RwLock<crate::core::permissions::RuntimeApprovals>>,
 }
 
 impl McpDispatcher {
     pub async fn start(
         configs: &HashMap<String, crate::mcp::McpServerConfig>,
-        permissions: Arc<crate::permissions::Permissions>,
-        runtime_approvals: Arc<std::sync::RwLock<crate::permissions::RuntimeApprovals>>,
+        permissions: Arc<crate::core::permissions::Permissions>,
+        runtime_approvals: Arc<std::sync::RwLock<crate::core::permissions::RuntimeApprovals>>,
     ) -> Option<Self> {
         if configs.is_empty() {
             return None;

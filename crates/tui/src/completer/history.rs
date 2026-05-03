@@ -3,10 +3,10 @@
 //! `smelt.history.search(query)`, which wraps this function. Tests
 //! exercise the scorer directly.
 
-use crate::fuzzy::score::{recency_bonus, split_words};
+use crate::core::fuzzy::score::{recency_bonus, split_words};
 
 pub(crate) fn history_score(text: &str, query: &str, recency_rank: usize) -> Option<u32> {
-    let base = crate::fuzzy::fuzzy_score(text, query)? as i64;
+    let base = crate::core::fuzzy::fuzzy_score(text, query)? as i64;
     let text_norm = text.trim().to_lowercase();
     let query_norm = query.trim().to_lowercase();
 

@@ -235,7 +235,7 @@ fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
 /// Save the render cache alongside the session.
 pub(crate) fn save_render_cache(
     session: &Session,
-    cache: &crate::app::transcript_cache::RenderCache,
+    cache: &crate::core::transcript_cache::RenderCache,
 ) {
     let session_dir = dir_for(session);
     let _ = fs::create_dir_all(&session_dir);
@@ -247,12 +247,12 @@ pub(crate) fn save_render_cache(
 /// missing, corrupt, or built by an incompatible version.
 pub(crate) fn load_render_cache(
     session: &Session,
-) -> Option<crate::app::transcript_cache::RenderCache> {
+) -> Option<crate::core::transcript_cache::RenderCache> {
     let session_dir = dir_for(session);
     let path = render_cache_path(&session_dir);
     let data = fs::read(path).ok()?;
-    let cache = crate::app::transcript_cache::RenderCache::deserialize(&data)?;
-    if cache.version != crate::app::transcript_cache::RENDER_CACHE_VERSION {
+    let cache = crate::core::transcript_cache::RenderCache::deserialize(&data)?;
+    if cache.version != crate::core::transcript_cache::RENDER_CACHE_VERSION {
         return None;
     }
     Some(cache)
@@ -262,7 +262,7 @@ pub(crate) fn load_render_cache(
 /// the session.
 pub(crate) fn save_layout_cache(
     session: &Session,
-    cache: &crate::app::transcript_cache::PersistedLayoutCache,
+    cache: &crate::core::transcript_cache::PersistedLayoutCache,
 ) {
     let _perf = crate::perf::begin("session:write_layout");
     let session_dir = dir_for(session);
@@ -277,13 +277,13 @@ pub(crate) fn save_layout_cache(
 /// file is missing, corrupt, or built by an incompatible version.
 pub(crate) fn load_layout_cache(
     session: &Session,
-) -> Option<crate::app::transcript_cache::PersistedLayoutCache> {
+) -> Option<crate::core::transcript_cache::PersistedLayoutCache> {
     let _perf = crate::perf::begin("session:read_layout");
     let session_dir = dir_for(session);
     let path = layout_cache_path(&session_dir);
     let data = fs::read(path).ok()?;
-    let cache = crate::app::transcript_cache::PersistedLayoutCache::deserialize(&data)?;
-    if cache.version != crate::app::transcript_cache::LAYOUT_CACHE_VERSION {
+    let cache = crate::core::transcript_cache::PersistedLayoutCache::deserialize(&data)?;
+    if cache.version != crate::core::transcript_cache::LAYOUT_CACHE_VERSION {
         return None;
     }
     Some(cache)

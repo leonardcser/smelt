@@ -1270,8 +1270,7 @@ impl Ui {
             && mods == crossterm::event::KeyModifiers::NONE
             || matches!(code, crossterm::event::KeyCode::Char('c'))
                 && mods == crossterm::event::KeyModifiers::CONTROL;
-        if result == Status::Ignored && is_dismiss_chord
-        {
+        if result == Status::Ignored && is_dismiss_chord {
             if let Some(modal) = self.active_modal() {
                 if let Some(root) = self
                     .overlay(modal)

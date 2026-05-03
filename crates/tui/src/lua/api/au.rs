@@ -6,7 +6,7 @@ use crate::lua::LuaHandle;
 use mlua::prelude::*;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    use crate::app::cells::{LuaCellValue, SubscriberKind};
+    use crate::core::cells::{LuaCellValue, SubscriberKind};
     use std::rc::Rc;
 
     let au_tbl = lua.create_table()?;

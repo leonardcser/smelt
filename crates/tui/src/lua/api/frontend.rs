@@ -17,7 +17,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "kind",
         lua.create_function(|_, ()| {
             Ok(crate::lua::try_with_app(|app| app.core.frontend.as_str())
-                .unwrap_or(crate::app::FrontendKind::Tui.as_str()))
+                .unwrap_or(crate::core::FrontendKind::Tui.as_str()))
         })?,
     )?;
 

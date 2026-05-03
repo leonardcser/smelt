@@ -1,13 +1,16 @@
 //! `smelt.permissions` bindings — list current session + workspace
 //! rules, sync a Lua-built ruleset back through the App. Pre-P5
-//! surface over `RuntimeApprovals` + [`crate::permissions::store`];
-//! grows the rest of the `tui::permissions` capability surface in
+//! surface over `RuntimeApprovals` + [`crate::core::permissions::store`];
+//! grows the rest of the `app::permissions` capability surface in
 //! P5.c when engine permission policy lands here.
 
 use mlua::prelude::*;
 use std::sync::Arc;
 
-fn parse_ruleset(_lua: &Lua, t: &mlua::Table) -> LuaResult<crate::permissions::rules::RawRuleSet> {
+fn parse_ruleset(
+    _lua: &Lua,
+    t: &mlua::Table,
+) -> LuaResult<crate::core::permissions::rules::RawRuleSet> {
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -26,13 +29,13 @@ fn parse_ruleset(_lua: &Lua, t: &mlua::Table) -> LuaResult<crate::permissions::r
             deny.push(v);
         }
     }
-    Ok(crate::permissions::rules::RawRuleSet { allow, ask, deny })
+    Ok(crate::core::permissions::rules::RawRuleSet { allow, ask, deny })
 }
 
 fn parse_mode_perms(
     lua: &Lua,
     t: &mlua::Table,
-) -> LuaResult<crate::permissions::rules::RawModePerms> {
+) -> LuaResult<crate::core::permissions::rules::RawModePerms> {
     let tools = t
         .get::<Option<mlua::Table>>("tools")
         .ok()
@@ -61,7 +64,7 @@ fn parse_mode_perms(
         .map(|tbl| parse_ruleset(lua, &tbl))
         .transpose()?
         .unwrap_or_default();
-    Ok(crate::permissions::rules::RawModePerms {
+    Ok(crate::core::permissions::rules::RawModePerms {
         tools,
         bash,
         web_fetch,
@@ -97,7 +100,7 @@ pub(super) fn register(
             }
             out.set("session", session_arr)?;
             let workspace_arr = lua.create_table()?;
-            for (i, rule) in crate::permissions::store::load(&cwd)
+            for (i, rule) in crate::core::permissions::store::load(&cwd)
                 .into_iter()
                 .enumerate()
             {
@@ -117,17 +120,17 @@ pub(super) fn register(
     permissions_tbl.set(
         "sync",
         lua.create_function(|_, spec: mlua::Table| {
-            let mut session_entries: Vec<crate::app::transcript_model::PermissionEntry> =
+            let mut session_entries: Vec<crate::core::transcript_model::PermissionEntry> =
                 Vec::new();
             if let Ok(arr) = spec.get::<mlua::Table>("session") {
                 for row in arr.sequence_values::<mlua::Table>().flatten() {
                     let tool: String = row.get("tool").unwrap_or_default();
                     let pattern: String = row.get("pattern").unwrap_or_default();
                     session_entries
-                        .push(crate::app::transcript_model::PermissionEntry { tool, pattern });
+                        .push(crate::core::transcript_model::PermissionEntry { tool, pattern });
                 }
             }
-            let mut workspace_rules: Vec<crate::permissions::store::Rule> = Vec::new();
+            let mut workspace_rules: Vec<crate::core::permissions::store::Rule> = Vec::new();
             if let Ok(arr) = spec.get::<mlua::Table>("workspace") {
                 for row in arr.sequence_values::<mlua::Table>().flatten() {
                     let tool: String = row.get("tool").unwrap_or_default();
@@ -137,7 +140,7 @@ pub(super) fn register(
                             patterns.push(p);
                         }
                     }
-                    workspace_rules.push(crate::permissions::store::Rule { tool, patterns });
+                    workspace_rules.push(crate::core::permissions::store::Rule { tool, patterns });
                 }
             }
             crate::lua::with_app(|app| app.sync_permissions(session_entries, workspace_rules));
@@ -184,7 +187,7 @@ pub(super) fn register(
                     .map(|t| parse_mode_perms(lua, &t))
                     .transpose()?
                     .unwrap_or_default();
-                let rules = crate::permissions::rules::RawPerms {
+                let rules = crate::core::permissions::rules::RawPerms {
                     default,
                     normal,
                     plan,

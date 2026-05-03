@@ -2,15 +2,15 @@
 //! background processes against the `ProcessRegistry`.
 //!
 //! `smelt.process.run` is the synchronous short-lived counterpart over
-//! `tui::process::run` — `Command::new(cmd).args(args).output()` with
+//! `app::process::run` — `Command::new(cmd).args(args).output()` with
 //! timeout, cwd, env, optional stdin. Long-lived bidirectional
-//! children land in `tui::subprocess` (P3.a).
+//! children land in `app::process` (P3.a).
 
 use mlua::prelude::*;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::process;
+use crate::core::process;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let process_tbl = lua.create_table()?;

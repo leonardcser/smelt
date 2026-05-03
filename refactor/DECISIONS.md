@@ -38,7 +38,7 @@ Then ten architectural decisions landed across REFACTOR / ARCHITECTURE
    (markdown bold copies as `**bold**`).
 4. **Core / TuiApp / HeadlessApp + Host / UiHost.** `Core`
    (headless-safe) holds session/confirms/clipboard/timers/cells/lua/
-   tools/engine_bridge; `TuiApp` adds `well_known + ui::Ui`;
+   tools/engine_client; `TuiApp` adds `well_known + ui::Ui`;
    `HeadlessApp` adds a JSON/text sink. `Host` is Ui-agnostic;
    `UiHost: Host` carries the compositor surface. `HeadlessApp` impls
    only `Host` — UiHost-only Lua bindings (`smelt.ui / .win / .buf /

@@ -1,4 +1,4 @@
-use crate::fuzzy::score::{query_match_score, split_words};
+use crate::core::fuzzy::score::{query_match_score, split_words};
 
 pub(crate) mod command;
 pub(crate) mod file;

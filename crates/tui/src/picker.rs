@@ -18,7 +18,7 @@
 //! leaf via `close_overlay_leaf` (or `Ui::win_close`) cascades through
 //! `overlay_close` to remove the overlay.
 
-use crate::app::TuiApp;
+use crate::core::TuiApp;
 use crossterm::style::Color;
 use ui::buffer::{BufCreateOpts, SpanStyle};
 use ui::layout::Anchor;
