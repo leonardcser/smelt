@@ -1,11 +1,12 @@
 //! Mouse event handling: wheel scrolling, drag-select, scrollbar drag, cell-click hit-testing.
 
-use super::*;
+use crate::core::*;
+use crate::term::content::HitRegion;
 use crossterm::event::{MouseEvent, MouseEventKind};
 
 impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
-    pub(super) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
+    pub(crate) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
         use crossterm::event::MouseButton;
         // Wheel-over-overlay absorb, active-modal click-outside
         // absorb, and the scrollbar drag gesture all live in
@@ -53,7 +54,7 @@ impl TuiApp {
             };
         }
 
-        if self.layout.hit_test(me.row, me.column) == content::HitRegion::Status {
+        if self.layout.hit_test(me.row, me.column) == HitRegion::Status {
             return EventOutcome::Noop;
         }
 
@@ -121,7 +122,7 @@ impl TuiApp {
         if matches!(me.kind, MouseEventKind::Down(_))
             && matches!(
                 self.layout.hit_test(me.row, me.column),
-                content::HitRegion::Prompt | content::HitRegion::Status
+                HitRegion::Prompt | HitRegion::Status
             )
         {
             if self.app_focus != crate::core::AppFocus::Prompt {
@@ -156,7 +157,7 @@ impl TuiApp {
     /// every buffer surface. Routing reads `Ui::hit_test(row, col,
     /// None)`: a `Window(PROMPT_WIN)` hit drives the prompt; anything
     /// else falls back to the transcript scroll path.
-    pub(super) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
+    pub(crate) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
         let on_prompt = matches!(
             self.ui.hit_test(row, col, None),
             Some(crate::ui::HitTarget::Window(w)) if w == crate::ui::PROMPT_WIN
@@ -200,7 +201,7 @@ impl TuiApp {
     /// Edge detection lives on `Ui::poll_drag_autoscroll`; per-pane
     /// scroll-by-line action stays here so transcript-specific cursor
     /// snapping rides with it.
-    pub(super) fn tick_drag_autoscroll(&mut self) {
+    pub(crate) fn tick_drag_autoscroll(&mut self) {
         let Some((win, delta)) = self.ui.poll_drag_autoscroll() else {
             return;
         };

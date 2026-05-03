@@ -378,10 +378,10 @@ pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<super::WinId, Re
 /// border row, after the top-left corner glyph; truncates at the
 /// pre-corner column.
 pub fn paint_chrome(
-    grid: &mut super::grid::Grid,
+    grid: &mut crate::ui::grid::Grid,
     area: Rect,
     chrome: &Chrome,
-    _theme: &super::theme::Theme,
+    _theme: &crate::ui::theme::Theme,
 ) {
     let Some(border) = chrome.border else {
         return;
@@ -545,8 +545,8 @@ pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::WinId;
     use super::*;
+    use crate::ui::WinId;
 
     const A: WinId = WinId(100);
     const B: WinId = WinId(101);
@@ -887,20 +887,20 @@ mod tests {
 
     #[test]
     fn paint_chrome_no_border_is_noop() {
-        let mut grid = super::grid::Grid::new(10, 5);
+        let mut grid = crate::ui::grid::Grid::new(10, 5);
         let chrome = Chrome::default();
         paint_chrome(
             &mut grid,
             Rect::new(0, 0, 10, 5),
             &chrome,
-            &super::theme::Theme::default(),
+            &crate::ui::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, ' ');
     }
 
     #[test]
     fn paint_chrome_single_border_draws_corners_and_edges() {
-        let mut grid = super::grid::Grid::new(10, 5);
+        let mut grid = crate::ui::grid::Grid::new(10, 5);
         let chrome = Chrome {
             border: Some(Border::Single),
             ..Chrome::default()
@@ -909,7 +909,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 10, 5),
             &chrome,
-            &super::theme::Theme::default(),
+            &crate::ui::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(9, 0).symbol, '┐');
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn paint_chrome_title_lands_on_top_border() {
-        let mut grid = super::grid::Grid::new(20, 5);
+        let mut grid = crate::ui::grid::Grid::new(20, 5);
         let chrome = Chrome {
             border: Some(Border::Rounded),
             title: Some("hello".into()),
@@ -931,7 +931,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 20, 5),
             &chrome,
-            &super::theme::Theme::default(),
+            &crate::ui::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '╭');
         assert_eq!(grid.cell(1, 0).symbol, 'h');
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn paint_chrome_truncates_title_to_inner_width() {
-        let mut grid = super::grid::Grid::new(8, 3);
+        let mut grid = crate::ui::grid::Grid::new(8, 3);
         let chrome = Chrome {
             border: Some(Border::Single),
             title: Some("muchtoolong".into()),
@@ -952,7 +952,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 8, 3),
             &chrome,
-            &super::theme::Theme::default(),
+            &crate::ui::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(1, 0).symbol, 'm');

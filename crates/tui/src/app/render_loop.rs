@@ -1,10 +1,11 @@
 //! Per-frame render loop: projects transcript/prompt/status into the
 //! compositor layers and syncs the prompt-docked completer overlay.
 
-use super::*;
+use crate::core::*;
+use crate::term::content::{layout, prompt_data};
 
 impl TuiApp {
-    pub(super) fn render_normal(&mut self, agent_running: bool) {
+    pub(crate) fn render_normal(&mut self, agent_running: bool) {
         let _perf = crate::perf::begin("app:tick_compositor");
         self.update_spinner();
         // Re-populate the theme registry from the host atomics so any
@@ -40,14 +41,14 @@ impl TuiApp {
         // the current terminal area on demand. `LayoutState::from_ui`
         // reads the resolved transcript / prompt / status rects back
         // out for downstream sync.
-        self.ui.set_layout(content::layout::build_layout_tree(
-            &content::layout::LayoutInput {
+        self.ui.set_layout(layout::build_layout_tree(
+            &layout::LayoutInput {
                 term_height: term_h,
                 prompt_height: natural_prompt_height,
             },
             self.well_known.statusline,
         ));
-        self.layout = content::layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
+        self.layout = layout::LayoutState::from_ui(&self.ui, self.well_known.statusline);
         let viewport_rows = self.layout.viewport_rows();
         let prompt_rect = self.layout.prompt;
         let prompt_height = prompt_rect.height;
@@ -260,7 +261,7 @@ impl TuiApp {
         queued: &[String],
         has_prompt_cursor: bool,
     ) {
-        let bar_info = content::prompt_data::BarInfo {
+        let bar_info = prompt_data::BarInfo {
             model_label: Some(self.core.config.model.clone()),
             reasoning_effort: self.core.config.reasoning_effort,
             show_tokens: self.core.config.settings.show_tokens,
@@ -271,7 +272,7 @@ impl TuiApp {
         };
 
         let prompt_output = {
-            let mut prompt_input = content::prompt_data::PromptInput {
+            let mut prompt_input = prompt_data::PromptInput {
                 queued,
                 stash: &self.input.stash,
                 input: &self.input,
@@ -287,7 +288,7 @@ impl TuiApp {
                 .ui
                 .win_buf_mut(self.well_known.prompt)
                 .expect("prompt window must be registered at startup");
-            content::prompt_data::compute_prompt(&mut prompt_input, input_buf, &theme)
+            prompt_data::compute_prompt(&mut prompt_input, input_buf, &theme)
         };
 
         let cursor = prompt_output.cursor;

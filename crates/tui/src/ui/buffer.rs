@@ -130,7 +130,6 @@ pub struct Span {
 /// `ExtmarkPayload::VirtText`).
 #[derive(Clone, Debug)]
 pub struct VirtualText {
-    pub line: usize,
     pub col: usize,
     pub text: String,
     pub hl_group: Option<String>,
@@ -641,7 +640,6 @@ impl Buffer {
                 }
                 if let ExtmarkPayload::VirtText { text, hl_group } = &mark.payload {
                     out.push(VirtualText {
-                        line: mark.start_row,
                         col: mark.start_col,
                         text: text.clone(),
                         hl_group: hl_group.clone(),

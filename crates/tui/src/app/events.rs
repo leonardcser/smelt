@@ -1,13 +1,17 @@
-use super::working::TurnOutcome;
-use super::*;
+use crate::core::working::TurnOutcome;
+use crate::core::*;
 
 use crate::keymap::{self, KeyAction};
+use crate::term::input::{resolve_agent_esc, Action, EscAction};
 use crate::ui::UiHost;
+use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEvent},
     terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
+use protocol::Content;
+use std::io;
 use std::time::{Duration, Instant};
 
 impl TuiApp {
@@ -15,7 +19,7 @@ impl TuiApp {
 
     /// Handle a single terminal event, potentially starting/stopping agents.
     /// Returns `true` if the app should quit.
-    pub(super) fn dispatch_terminal_event(&mut self, ev: Event, t: &mut Timers) -> bool {
+    pub(crate) fn dispatch_terminal_event(&mut self, ev: Event, t: &mut Timers) -> bool {
         if matches!(ev, Event::FocusGained | Event::FocusLost) {
             let focused = matches!(ev, Event::FocusGained);
             if self.term_focused != focused {
@@ -354,7 +358,7 @@ impl TuiApp {
                     } else {
                         "/rewind"
                     };
-                    super::commands::run_command(self, line);
+                    crate::core::commands::run_command(self, line);
                     return EventOutcome::Redraw;
                 }
                 // Single Esc in normal mode — start timer.
@@ -427,7 +431,7 @@ impl TuiApp {
                         return EventOutcome::Redraw;
                     }
                     KeyAction::OpenHelp => {
-                        super::commands::run_command(self, "/help");
+                        crate::core::commands::run_command(self, "/help");
                         return EventOutcome::Redraw;
                     }
                     _ => {
@@ -700,7 +704,7 @@ impl TuiApp {
 
     // ── Input processing (commands, settings, rewind, shell) ─────────────
 
-    pub(super) fn process_input(&mut self, input: &str) -> InputOutcome {
+    pub(crate) fn process_input(&mut self, input: &str) -> InputOutcome {
         if input.is_empty() {
             return InputOutcome::Continue;
         }
@@ -721,7 +725,7 @@ impl TuiApp {
             trimmed.to_string()
         };
 
-        match super::commands::run_command(self, &dispatch_input) {
+        match crate::core::commands::run_command(self, &dispatch_input) {
             CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }
@@ -751,7 +755,7 @@ impl TuiApp {
     /// actual rendered height from the previous frame plus the 1-row
     /// gap, so multi-line prompts (and completion menus) don't cause
     /// the scroll math to overshoot.
-    pub(super) fn viewport_rows_estimate(&self) -> u16 {
+    pub(crate) fn viewport_rows_estimate(&self) -> u16 {
         self.layout.viewport_rows().max(1)
     }
 
@@ -773,7 +777,7 @@ impl TuiApp {
     /// `WinEvent::Dismiss` on the overlay's root leaf so the dialog's
     /// callbacks can flush any pending state (e.g. Permissions syncs
     /// its edits before close).
-    pub(super) fn close_focused_non_blocking_overlay(&mut self) {
+    pub(crate) fn close_focused_non_blocking_overlay(&mut self) {
         let Some(overlay_id) = self.ui.focused_overlay() else {
             return;
         };
@@ -812,7 +816,7 @@ impl TuiApp {
     /// Snap the transcript cursor to the nearest selectable cell.
     /// Called after every cursor motion to skip non-selectable gutters
     /// and padding now that the cursor operates in display-text space.
-    pub(super) fn snap_transcript_cursor(&mut self) {
+    pub(crate) fn snap_transcript_cursor(&mut self) {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let snapped = self.snap_cpos_to_selectable(
             &rows,

@@ -1190,8 +1190,11 @@ A GUI or web frontend uses `core` directly and ignores `ui` entirely.
 
 - Move terminal-specific files (`events.rs`, `mouse.rs`, `render_loop.rs`,
   `status_bar.rs`, `cmdline.rs`, `content_keys.rs`, `pane_focus.rs`) from
-  `core/` to `tui/src/` (flat or under `tui/src/chrome/`).  After this,
-  `core/` has zero `crossterm` imports.
+  `core/` to `tui/src/app/`.  These are self-contained `impl TuiApp` blocks
+  with crossterm imports; moving them first avoids the `pub(super)` visibility
+  trap that blocked an earlier premature `TuiApp` extraction.
+  `core/mod.rs` still carries `run()` and its crossterm imports — those leave
+  when `TuiApp` is extracted in P8.a.4.
 - Replace crossterm color usage in `headless.rs` and `working.rs` with
   ANSI strings or a tiny internal color enum.
 - Dissolve `term/content/`: headless-safe display model (`DisplayBlock`,

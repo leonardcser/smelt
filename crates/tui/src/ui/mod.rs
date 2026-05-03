@@ -23,20 +23,20 @@ pub type AttachmentId = u64;
 /// and the event payload.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
-pub use crate::core::clipboard::{Clipboard, NullSink, Sink};
-pub use buffer::{Buffer, BufferParser, Span, SpanStyle};
+pub use crate::core::clipboard::Clipboard;
+pub use buffer::Buffer;
 use callback::Callbacks;
 pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
 use compositor::Compositor;
 pub use event::{Event, Status};
-pub use grid::{Cell, Grid, GridSlice, Style};
+pub use grid::{Grid, Style};
 pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
-pub use layout::{Anchor, Border, Constraint, Corner, Gutters, LayoutTree, Rect, SeparatorStyle};
+pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, Rect};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
-pub use vim::{VimMode, VimWindowState};
+pub use vim::VimMode;
 pub use window::{
     CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,
     WindowViewport,
@@ -1337,16 +1337,6 @@ pub trait UiHost {
     /// changed. Mirrors [`Ui::set_focus`].
     fn set_focus(&mut self, win: WinId) -> bool;
 
-    /// Fire a `WinEvent` on `win`'s registered callbacks. Mirrors
-    /// [`Ui::fire_win_event`].
-    fn fire_win_event(
-        &mut self,
-        win: WinId,
-        ev: WinEvent,
-        payload: Payload,
-        lua_invoke: &mut LuaInvoke,
-    );
-
     /// Create a fresh buffer with an auto-allocated `BufId`.
     /// Mirrors [`Ui::buf_create`].
     fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId;
@@ -1369,11 +1359,6 @@ pub trait UiHost {
 
     /// Register an overlay. Mirrors [`Ui::overlay_open`].
     fn overlay_open(&mut self, overlay: Overlay) -> OverlayId;
-
-    /// Close an overlay. Returns the removed `Overlay` for callers
-    /// that want to inspect its layout. Mirrors [`Ui::overlay_close`].
-    #[must_use]
-    fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay>;
 
     /// Last-painted viewport rect + content width + scrollbar geometry
     /// for `win`. Mirrors `Ui::win(win)?.viewport`. Hosts that project
@@ -1413,15 +1398,6 @@ impl UiHost for Ui {
     fn set_focus(&mut self, win: WinId) -> bool {
         Ui::set_focus(self, win)
     }
-    fn fire_win_event(
-        &mut self,
-        win: WinId,
-        ev: WinEvent,
-        payload: Payload,
-        lua_invoke: &mut LuaInvoke,
-    ) {
-        Ui::fire_win_event(self, win, ev, payload, lua_invoke)
-    }
     fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId {
         Ui::buf_create(self, opts)
     }
@@ -1439,9 +1415,6 @@ impl UiHost for Ui {
     }
     fn overlay_open(&mut self, overlay: Overlay) -> OverlayId {
         Ui::overlay_open(self, overlay)
-    }
-    fn overlay_close(&mut self, id: OverlayId) -> Option<Overlay> {
-        Ui::overlay_close(self, id)
     }
     fn viewport_for(&self, win: WinId) -> Option<WindowViewport> {
         Ui::win(self, win).and_then(|w| w.viewport)
@@ -2899,8 +2872,7 @@ mod tests {
                 CallbackResult::Consumed
             })),
         );
-        UiHost::fire_win_event(
-            &mut ui,
+        ui.fire_win_event(
             win,
             WinEvent::TextChanged,
             Payload::Text {
@@ -2912,7 +2884,7 @@ mod tests {
 
         // Close paths through the trait clean up the structures the
         // open paths created.
-        let removed = UiHost::overlay_close(&mut ui, oid);
+        let removed = ui.overlay_close(oid);
         assert!(removed.is_some());
         let cb_ids = UiHost::win_close(&mut ui, win);
         assert!(cb_ids.is_empty());

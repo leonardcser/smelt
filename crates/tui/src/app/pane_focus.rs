@@ -3,15 +3,15 @@
 //! `dispatch_block_key` gets first crack at a key before buffer /
 //! window keymaps (nvim-style layering).
 
-use super::*;
-use crossterm::event::{Event, KeyEvent};
-use std::time::Duration;
+use crate::core::*;
+use crossterm::event::{Event, KeyCode, KeyEvent};
+use std::time::{Duration, Instant};
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.
 const PANE_CHORD_WINDOW: Duration = Duration::from_millis(750);
 
 impl TuiApp {
-    pub(super) fn handle_pane_chord(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
+    pub(crate) fn handle_pane_chord(&mut self, ev: &Event, t: &mut Timers) -> Option<EventOutcome> {
         use crossterm::event::KeyModifiers as M;
         let Event::Key(k) = ev else { return None };
 
@@ -88,7 +88,7 @@ impl TuiApp {
     /// Try to handle a key as a block-scoped binding. Returns `Some` if
     /// the key was consumed, `None` to fall through to buffer/window
     /// keymaps.
-    pub(super) fn dispatch_block_key(&mut self, k: KeyEvent) -> Option<EventOutcome> {
+    pub(crate) fn dispatch_block_key(&mut self, k: KeyEvent) -> Option<EventOutcome> {
         use crossterm::event::KeyModifiers as M;
         if k.modifiers != M::NONE {
             return None;

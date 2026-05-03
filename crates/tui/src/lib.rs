@@ -1,5 +1,6 @@
 pub mod alloc;
 pub(crate) mod api;
+pub(crate) mod app;
 pub mod attachment;
 pub(crate) mod completer;
 pub mod config;

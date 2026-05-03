@@ -1,4 +1,3 @@
-use super::Clipboard;
 use super::motions::{
     advance_chars, clamp_normal, current_line_content_range, current_line_range, find_char,
     find_matching_bracket, first_non_blank, first_non_blank_at, goto_line, line_end_normal,
@@ -12,6 +11,7 @@ use super::text::{
 use super::text_objects::text_object;
 use super::undo::{UndoEntry, UndoHistory};
 use super::AttachmentId;
+use super::Clipboard;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -35,8 +35,6 @@ pub enum Action {
     HistoryPrev,
     /// Navigate history down.
     HistoryNext,
-    /// Open buffer in $EDITOR.
-    EditInEditor,
     /// Center the input viewport on the cursor (zz).
     CenterScroll,
     /// Key not handled — caller should use its own logic.
@@ -1863,7 +1861,7 @@ mod tests {
         writes: usize,
     }
     struct MemSink(std::rc::Rc<std::cell::RefCell<MemSinkInner>>);
-    impl super::clipboard::Sink for MemSink {
+    impl crate::core::clipboard::Sink for MemSink {
         fn read(&mut self) -> Option<String> {
             self.0.borrow().text.clone()
         }

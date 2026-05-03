@@ -86,7 +86,6 @@ impl PromptState {
                 }
                 VimBridgeResult::Handled(Action::Redraw)
             }
-            vim::Action::EditInEditor => VimBridgeResult::Handled(Action::EditInEditor),
             vim::Action::CenterScroll => VimBridgeResult::Handled(Action::CenterScroll),
             vim::Action::Passthrough => VimBridgeResult::Passthrough,
         }

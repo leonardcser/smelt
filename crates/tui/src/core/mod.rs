@@ -4,13 +4,10 @@ mod agent;
 pub(crate) mod app_config;
 pub(crate) mod cells;
 pub(crate) mod clipboard;
-mod cmdline;
 pub(crate) mod commands;
 pub(crate) mod confirms;
-mod content_keys;
 pub(crate) mod core;
 pub(crate) mod engine_client;
-mod events;
 pub(crate) mod fs;
 pub(crate) mod fuzzy;
 pub(crate) mod grep;
@@ -20,16 +17,13 @@ mod history;
 pub(crate) mod host;
 pub(crate) mod html;
 pub(crate) mod http;
+pub(crate) mod kill_ring;
 mod lua_bridge;
 mod lua_handlers;
-mod mouse;
 pub(crate) mod notebook;
-mod pane_focus;
 pub(crate) mod path;
 pub mod permissions;
 pub(crate) mod process;
-mod render_loop;
-mod status_bar;
 pub(crate) mod timers;
 pub(crate) mod tools;
 mod transcript;
@@ -37,7 +31,6 @@ pub(crate) mod transcript_cache;
 pub(crate) mod transcript_model;
 pub(crate) mod transcript_present;
 pub(crate) mod working;
-pub(crate) mod kill_ring;
 
 pub use app_config::AppConfig;
 pub use clipboard::{Clipboard, NullSink, Sink};
@@ -52,7 +45,7 @@ pub(crate) use crate::core::transcript_model::{
 };
 use crate::session::Session;
 use crate::term::content;
-use crate::term::input::{resolve_agent_esc, Action, EscAction, History, PromptState};
+use crate::term::input::{History, PromptState};
 use crate::{session, state};
 use engine::EngineHandle;
 use protocol::{AgentMode, Content, Message, ReasoningEffort, Role, UiCommand};
@@ -61,7 +54,7 @@ use crossterm::{
     cursor,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, EventStream, KeyCode, KeyEvent, KeyModifiers,
+        EnableFocusChange, EnableMouseCapture, EventStream,
     },
     terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
@@ -94,8 +87,8 @@ pub struct TuiApp {
     pub(crate) last_viewport_text: Vec<String>,
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
-    exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
-    exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
+    pub(crate) exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<commands::ExecEvent>>,
+    pub(crate) exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Wakeup signal from cross-thread tokio tasks (streaming
     /// subprocess spawn, future async work) that pushed a
     /// `TaskEvent::ExternalResolvedJson` to the Lua inbox. Drains
@@ -182,11 +175,11 @@ pub struct TuiApp {
     sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     persister: crate::persist::Persister,
     pending_title: bool,
-    last_width: u16,
-    last_height: u16,
+    pub(crate) last_width: u16,
+    pub(crate) last_height: u16,
     next_turn_id: u64,
     /// Incremented on rewind/clear/load to invalidate in-flight compactions.
-    compact_epoch: u64,
+    pub(crate) compact_epoch: u64,
     /// The `compact_epoch` value when the last compaction was requested.
     pending_compact_epoch: u64,
     /// TurnMeta from the engine, consumed by `finish_turn`.
@@ -273,7 +266,7 @@ pub(super) struct TurnState {
     _perf: Option<crate::perf::Guard>,
 }
 
-enum EventOutcome {
+pub(crate) enum EventOutcome {
     Noop,
     Redraw,
     Quit,
@@ -299,7 +292,7 @@ pub(crate) enum CommandAction {
     ),
 }
 
-enum InputOutcome {
+pub(crate) enum InputOutcome {
     Continue,
     StartAgent,
     Exec(
@@ -309,14 +302,14 @@ enum InputOutcome {
 }
 
 /// Mutable timer state shared across event handlers.
-struct Timers {
-    last_esc: Option<Instant>,
-    esc_vim_mode: Option<crate::ui::VimMode>,
-    last_ctrlc: Option<Instant>,
-    last_keypress: Option<Instant>,
+pub(crate) struct Timers {
+    pub(crate) last_esc: Option<Instant>,
+    pub(crate) esc_vim_mode: Option<crate::ui::VimMode>,
+    pub(crate) last_ctrlc: Option<Instant>,
+    pub(crate) last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord. When set, the next key consumes the
     /// chord to navigate panes instead of flowing to input handling.
-    pending_pane_chord: Option<Instant>,
+    pub(crate) pending_pane_chord: Option<Instant>,
 }
 
 /// How long after the last keypress before we show a deferred permission dialog.
@@ -765,7 +758,9 @@ impl TuiApp {
         let gap = "  ";
         let line = format!("{indent}{label}{gap}{message}");
 
-        let buf = self.ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
+        let buf = self
+            .ui
+            .buf_create(crate::ui::buffer::BufCreateOpts::default());
 
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;
@@ -1002,7 +997,9 @@ impl TuiApp {
             {
                 let lua = &self.core.lua;
                 let mut lua_invoke =
-                    |handle: crate::ui::LuaHandle, win: crate::ui::WinId, payload: &crate::ui::Payload| {
+                    |handle: crate::ui::LuaHandle,
+                     win: crate::ui::WinId,
+                     payload: &crate::ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
                 self.ui.dispatch_tick(&mut lua_invoke);

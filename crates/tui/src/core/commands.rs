@@ -58,7 +58,7 @@ impl TuiApp {
     /// fallback, and auto-start-from-queued loop. Quit is not an outcome
     /// here — `/quit` and friends set `pending_quit` directly via the Lua
     /// `smelt.quit()` body, and the main loop honors it on the next tick.
-    pub(super) fn apply_input_outcome(
+    pub(crate) fn apply_input_outcome(
         &mut self,
         outcome: InputOutcome,
         content: Content,
@@ -79,7 +79,7 @@ impl TuiApp {
 
     /// Execute a command while the agent is running.
     /// Returns the `EventOutcome` to use, or `None` to queue as a message.
-    pub(super) fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
+    pub(crate) fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
         let is_from_paste = self.input.skip_shell_escape();
 
         // Shell escape — `! cmd` (skipped while pasting). Dispatched
