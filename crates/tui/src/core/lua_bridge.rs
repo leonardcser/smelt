@@ -9,7 +9,7 @@ impl TuiApp {
     /// the TuiApp-owned single-global `vim_mode` whenever the focused
     /// surface has a Vim instance attached. Returns `None` for
     /// surfaces without vim (nvim's "no mode in widget windows").
-    pub(super) fn current_vim_mode_label(&self) -> Option<String> {
+    pub(crate) fn current_vim_mode_label(&self) -> Option<String> {
         if let Some(win) = self.ui.focused_window() {
             if win.vim_enabled {
                 return Some(format!("{:?}", self.vim_mode));
@@ -28,7 +28,7 @@ impl TuiApp {
     /// runs in the callback's own invocation pass; ops pushed by the
     /// handler are drained before returning so downstream code sees
     /// a consistent state.
-    pub(super) fn emit_prompt_text_changed_if_dirty(&mut self) {
+    pub(crate) fn emit_prompt_text_changed_if_dirty(&mut self) {
         let current_text = self.input.win.text.clone();
         if self.last_prompt_text == current_text {
             return;
@@ -52,7 +52,7 @@ impl TuiApp {
 
     /// Drain pending Lua callback invocations + the task-runtime
     /// inbox. Call after any Lua handler dispatch.
-    pub(super) fn flush_lua_callbacks(&mut self) {
+    pub(crate) fn flush_lua_callbacks(&mut self) {
         self.drain_lua_invocations();
         self.core.lua.pump_task_events();
     }

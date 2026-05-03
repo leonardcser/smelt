@@ -13,8 +13,8 @@
 //! (border drag, title-bar grab) — distinct from any `WinId`s
 //! contained in the overlay's layout.
 
-use super::layout::{Anchor, Corner, LayoutTree, Rect};
 use super::WinId;
+use crate::ui::layout::{Anchor, Corner, LayoutTree, Rect};
 use std::collections::HashMap;
 
 /// Stable handle for an overlay. Distinct from `WinId` so chrome
@@ -241,9 +241,9 @@ fn clamp_axis(pos: i32, term: u16, span: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::layout::{Anchor, Constraint, Corner};
     use super::WinId;
     use super::*;
+    use crate::ui::layout::{Anchor, Constraint, Corner};
 
     #[test]
     fn overlay_defaults_are_sensible() {

@@ -26,7 +26,7 @@ pub(super) enum TurnPhase {
 
 /// Outcome of a completed turn.
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum TurnOutcome {
+pub(crate) enum TurnOutcome {
     Done,
     Interrupted,
 }
@@ -106,7 +106,7 @@ impl WorkingState {
     }
 
     /// Archive the live turn's metadata as `last` and clear live.
-    pub(super) fn finish(&mut self, outcome: TurnOutcome) {
+    pub(crate) fn finish(&mut self, outcome: TurnOutcome) {
         let (elapsed, avg_tps) = match self.live.take() {
             Some(live) => (live.effective_elapsed(), avg(&live.tps_samples)),
             None => (Duration::ZERO, None),
@@ -159,7 +159,7 @@ impl WorkingState {
     /// `effective_elapsed` and the spinner freeze. On resume, `since`
     /// is shifted forward by the pause duration so subsequent reads of
     /// `since.elapsed()` are still correct. Idempotent.
-    pub(super) fn set_paused(&mut self, paused: bool) {
+    pub(crate) fn set_paused(&mut self, paused: bool) {
         let Some(live) = self.live.as_mut() else {
             return;
         };

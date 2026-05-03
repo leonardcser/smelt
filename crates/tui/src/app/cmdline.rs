@@ -7,13 +7,13 @@
 //! directly, including text editing, history navigation, completer
 //! cycling, command execution, and dismissal.
 
-use super::*;
 use crate::core::CommandAction;
+use crate::core::*;
 use crate::ui::buffer::BufCreateOpts;
 use crate::ui::layout::Anchor;
 use crate::ui::UiHost;
 use crate::ui::{Constraint, LayoutTree, Overlay, SplitConfig};
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 
 /// Visible prefix glyph rendered as the first cell of the cmdline
 /// buffer. Cursor positions and editing operations clamp to columns
@@ -122,7 +122,7 @@ impl TuiApp {
     /// ours. The overlay leaf carries no callbacks so a `None` return
     /// silently swallows the key — same as the legacy widget's
     /// `Status::Ignored` path.
-    pub(super) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
+    pub(crate) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
@@ -365,7 +365,7 @@ impl TuiApp {
         if line.is_empty() {
             return false;
         }
-        let action = super::commands::run_command(self, &format!(":{line}"));
+        let action = crate::core::commands::run_command(self, &format!(":{line}"));
         match action {
             CommandAction::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);

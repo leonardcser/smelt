@@ -5,12 +5,12 @@
 //! the resulting list, and writes the styled line into the
 //! `well_known.statusline` buffer.
 
-use super::*;
+use crate::core::*;
 
 impl TuiApp {
-    pub(super) fn refresh_status_bar(&mut self) {
+    pub(crate) fn refresh_status_bar(&mut self) {
+        use crate::term::content::status::{spans_to_buffer_line, StatusSpan};
         use crate::ui::buffer::SpanStyle;
-        use content::status::{spans_to_buffer_line, StatusSpan};
         use crossterm::style::Color;
 
         let (term_w, _) = self.ui.terminal_size();

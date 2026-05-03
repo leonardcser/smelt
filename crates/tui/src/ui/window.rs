@@ -1,12 +1,12 @@
 use super::buffer::Buffer;
-use super::Clipboard;
 use super::event::Status;
 use super::grid::{GridSlice, Style};
 use super::layout::{Gutters, Rect};
 use super::text::{self, byte_to_cell, cell_to_byte};
-use super::theme::Theme;
 use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
+use super::Clipboard;
 use super::{BufId, WinId};
+use crate::ui::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 /// Per-frame paint context handed to `Window::render`. Carries terminal
@@ -1184,7 +1184,7 @@ fn merge_styles(base: Style, top: Style) -> Style {
 /// (row default). `Some` fields on the span override; `None` keeps
 /// the base. Boolean attributes OR together so `bold` / `dim` /
 /// `italic` accumulate across layers.
-fn merge_span_style(base: Style, span: &super::buffer::SpanStyle) -> Style {
+fn merge_span_style(base: Style, span: &crate::ui::buffer::SpanStyle) -> Style {
     Style {
         fg: span.fg.or(base.fg),
         bg: span.bg.or(base.bg),
@@ -1198,11 +1198,11 @@ fn merge_span_style(base: Style, span: &super::buffer::SpanStyle) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::buffer::BufCreateOpts;
-    use super::grid::Grid;
-    use super::theme::Theme;
     use super::BufId;
     use super::*;
+    use crate::ui::buffer::BufCreateOpts;
+    use crate::ui::grid::Grid;
+    use crate::ui::theme::Theme;
 
     fn make_win() -> Window {
         Window::new(
@@ -1398,7 +1398,7 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 1; // second visible row
         let mut theme = Theme::default();
-        let bg = super::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1428,7 +1428,7 @@ mod tests {
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
         let w = make_win();
         let mut theme = Theme::default();
-        let bg = super::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1451,7 +1451,7 @@ mod tests {
         // that range have `dim = true`; cells outside don't.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abcdefgh".into()]);
-        buf.add_highlight(0, 2, 5, super::buffer::SpanStyle::dim());
+        buf.add_highlight(0, 2, 5, crate::ui::buffer::SpanStyle::dim());
         let w = make_win();
         let theme = Theme::default();
         let ctx = DrawContext {
@@ -1480,12 +1480,12 @@ mod tests {
         // up bg=cursor and bold=true.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["hello".into()]);
-        buf.add_highlight(0, 0, 3, super::buffer::SpanStyle::bold());
+        buf.add_highlight(0, 0, 3, crate::ui::buffer::SpanStyle::bold());
         let mut w = make_win();
         w.cursor_line_highlight = true;
         w.cursor_line = 0;
         let mut theme = Theme::default();
-        let bg = super::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1515,7 +1515,7 @@ mod tests {
         let mut w = make_win();
         w.cursor_line_highlight = true;
         let mut theme = Theme::default();
-        let bg = super::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1546,7 +1546,7 @@ mod tests {
             ns,
             0,
             3,
-            super::buffer::ExtmarkOpts::virt_text("xy".into(), None),
+            crate::ui::buffer::ExtmarkOpts::virt_text("xy".into(), None),
         );
         let w = make_win();
         let theme = Theme::default();
@@ -1577,7 +1577,7 @@ mod tests {
         buf.set_virtual_text(0, "ghost".into(), Some("Ghost".into()));
         let w = make_win();
         let mut theme = Theme::default();
-        theme.set("Ghost", super::grid::Style::dim());
+        theme.set("Ghost", crate::ui::grid::Style::dim());
         let ctx = DrawContext {
             terminal_width: 40,
             terminal_height: 10,
@@ -1630,10 +1630,10 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 0;
         let mut theme = Theme::default();
-        let bg = super::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         // Ghost group only sets `dim`, not bg/fg.
-        theme.set("Ghost", super::grid::Style::dim());
+        theme.set("Ghost", crate::ui::grid::Style::dim());
         let ctx = DrawContext {
             terminal_width: 40,
             terminal_height: 10,
@@ -1656,7 +1656,7 @@ mod tests {
         let mut w = make_win();
         w.cursor_line = 0;
         w.cursor_col = 1;
-        let cursor_style = super::grid::Style::bg(crossterm::style::Color::White);
+        let cursor_style = crate::ui::grid::Style::bg(crossterm::style::Color::White);
         let mut ctx = ctx();
         ctx.focused = true;
         ctx.cursor_shape = CursorShape::Block {
@@ -1688,7 +1688,7 @@ mod tests {
         ctx.focused = false;
         ctx.cursor_shape = CursorShape::Block {
             glyph: 'X',
-            style: super::grid::Style::default(),
+            style: crate::ui::grid::Style::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1708,7 +1708,7 @@ mod tests {
         ctx.focused = true;
         ctx.cursor_shape = CursorShape::Block {
             glyph: '!',
-            style: super::grid::Style::default(),
+            style: crate::ui::grid::Style::default(),
         };
         let mut grid = Grid::new(10, 1);
         let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
@@ -1753,8 +1753,8 @@ mod tests {
         let mut theme = Theme::default();
         let thumb_bg = crossterm::style::Color::AnsiValue(220);
         let track_bg = crossterm::style::Color::AnsiValue(238);
-        theme.set("SmeltScrollbarThumb", super::grid::Style::bg(thumb_bg));
-        theme.set("SmeltScrollbarTrack", super::grid::Style::bg(track_bg));
+        theme.set("SmeltScrollbarThumb", crate::ui::grid::Style::bg(thumb_bg));
+        theme.set("SmeltScrollbarTrack", crate::ui::grid::Style::bg(track_bg));
         let ctx = DrawContext {
             terminal_width: 20,
             terminal_height: 10,
@@ -1785,7 +1785,7 @@ mod tests {
         ));
         let mut theme = Theme::default();
         let track_bg = crossterm::style::Color::AnsiValue(238);
-        theme.set("SmeltScrollbarTrack", super::grid::Style::bg(track_bg));
+        theme.set("SmeltScrollbarTrack", crate::ui::grid::Style::bg(track_bg));
         let ctx = DrawContext {
             terminal_width: 20,
             terminal_height: 10,

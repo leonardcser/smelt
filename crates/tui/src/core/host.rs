@@ -128,15 +128,6 @@ impl crate::ui::UiHost for TuiApp {
     fn set_focus(&mut self, win: crate::ui::WinId) -> bool {
         self.ui.set_focus(win)
     }
-    fn fire_win_event(
-        &mut self,
-        win: crate::ui::WinId,
-        ev: crate::ui::WinEvent,
-        payload: crate::ui::Payload,
-        lua_invoke: &mut crate::ui::LuaInvoke,
-    ) {
-        self.ui.fire_win_event(win, ev, payload, lua_invoke)
-    }
     fn buf_create(&mut self, opts: crate::ui::buffer::BufCreateOpts) -> crate::ui::BufId {
         self.ui.buf_create(opts)
     }
@@ -158,9 +149,6 @@ impl crate::ui::UiHost for TuiApp {
     }
     fn overlay_open(&mut self, overlay: crate::ui::Overlay) -> crate::ui::OverlayId {
         self.ui.overlay_open(overlay)
-    }
-    fn overlay_close(&mut self, id: crate::ui::OverlayId) -> Option<crate::ui::Overlay> {
-        self.ui.overlay_close(id)
     }
     fn viewport_for(&self, win: crate::ui::WinId) -> Option<crate::ui::WindowViewport> {
         self.ui.win(win).and_then(|w| w.viewport)

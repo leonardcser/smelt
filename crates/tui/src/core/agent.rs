@@ -1,10 +1,10 @@
 use super::working::{TurnOutcome, TurnPhase};
+use super::*;
 use crate::core::{
     DeferredDialog, LoopAction, PendingTool, SessionControl, TurnState, CONFIRM_DEFER_MS,
 };
-use std::time::{Duration, Instant};
-use super::*;
 use protocol::Decision;
+use std::time::{Duration, Instant};
 
 impl TuiApp {
     /// Send a permission decision to the local engine.
@@ -287,7 +287,7 @@ impl TuiApp {
     /// Finish and drop the active turn (no-op when idle). Combines
     /// the `finish_turn` + `self.agent = None` pair every cancel
     /// site needs.
-    pub(super) fn discard_turn(&mut self, cancelled: bool) {
+    pub(crate) fn discard_turn(&mut self, cancelled: bool) {
         if self.agent.is_some() {
             self.finish_turn(cancelled);
             self.agent = None;

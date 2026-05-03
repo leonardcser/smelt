@@ -8,7 +8,7 @@ impl TuiApp {
     /// in history. The `display` string is the rendered form of the submitted
     /// message; `content` is what gets sent to the engine. Both are scrubbed
     /// so the UI and the LLM see the same redacted form.
-    pub(super) fn redact_user_submission(&self, content: &mut Content, display: &mut String) {
+    pub(crate) fn redact_user_submission(&self, content: &mut Content, display: &mut String) {
         if self.core.config.settings.redact_secrets {
             engine::redact::redact_content(content);
             *display = engine::redact::redact(display);

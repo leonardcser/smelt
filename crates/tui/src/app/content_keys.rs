@@ -2,11 +2,11 @@
 //! transcript buffer. Routes arrow keys, page keys, and vim motions;
 //! Enter runs a block-scoped keymap; Ctrl-C returns focus to the prompt.
 
-use super::*;
-use crossterm::event::{Event, KeyEvent};
+use crate::core::*;
+use crossterm::event::{Event, KeyCode, KeyEvent};
 
 impl TuiApp {
-    pub(super) fn handle_event_app_history(&mut self, ev: &Event) -> EventOutcome {
+    pub(crate) fn handle_event_app_history(&mut self, ev: &Event) -> EventOutcome {
         let k = match ev {
             Event::Key(k) => *k,
             _ => return EventOutcome::Noop,
@@ -204,7 +204,7 @@ impl TuiApp {
     /// `TranscriptWindow::scroll_by_lines`, which reuses vim `j`/`k` so
     /// vertical motion shares one code path (with `curswant`) across
     /// mouse wheel, Ctrl-U/D, arrows and j/k.
-    pub(super) fn move_content_cursor_by_lines(&mut self, delta: isize) {
+    pub(crate) fn move_content_cursor_by_lines(&mut self, delta: isize) {
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
@@ -240,7 +240,10 @@ impl TuiApp {
             None,
         );
         let status = {
-            let prev_sink = self.core.clipboard.swap_sink(Box::new(crate::core::NullSink));
+            let prev_sink = self
+                .core
+                .clipboard
+                .swap_sink(Box::new(crate::core::NullSink));
             let ctx = crate::ui::EventCtx {
                 rows: &rows,
                 soft_breaks: &[],
