@@ -2,13 +2,15 @@
 //! (thinking / text / tools / exec), projection to a
 //! crate::ui::Buffer, and the transcript-cursor glyph cache.
 
-use super::transcript_model::{Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState};
-use super::*;
 use crate::core::transcript_cache::{PersistedLayoutCache, RenderCache};
+use crate::core::transcript_model::{
+    Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
+};
 use crate::core::transcript_present as blocks;
 use crate::core::transcript_present::{
     gap_between, render_thinking_summary, thinking_summary, Element,
 };
+use crate::core::*;
 use crate::term::content::layout_out::SpanCollector;
 use crate::term::content::selection::wrap_and_locate_cursor;
 use std::collections::HashMap;

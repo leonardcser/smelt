@@ -2,7 +2,7 @@
 //! Lua callback invocations + the task-runtime inbox so dispatched
 //! handlers see a consistent state.
 
-use super::*;
+use crate::core::*;
 
 impl TuiApp {
     /// Vim-mode label for the currently focused buffer Window. Reads
@@ -71,7 +71,7 @@ impl TuiApp {
     /// each function with no Rust-level borrow on self alive — so a
     /// Lua body that reaches back via `with_app` gets the sole `&mut
     /// TuiApp` reborrow.
-    pub(super) fn drain_lua_invocations(&mut self) {
+    pub(crate) fn drain_lua_invocations(&mut self) {
         loop {
             let pending = self.core.lua.drain_invocations();
             if pending.is_empty() {
@@ -112,7 +112,7 @@ impl TuiApp {
     /// is `ToolComplete` (tool-as-task results). Dialog/picker opens
     /// now ride on `UiOp::OpenLuaDialog` / `OpenLuaPicker` and are
     /// resolved inside `apply_ui_op`.
-    pub(super) fn drive_lua_tasks(&mut self) {
+    pub(crate) fn drive_lua_tasks(&mut self) {
         self.flush_lua_callbacks();
         let outs = self.core.lua.drive_tasks();
         // Drain the ops pushed by the coroutine *before* it yielded —

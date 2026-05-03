@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 /// `since` and the phase; `Retrying` additionally carries a delay and
 /// attempt counter for the countdown display.
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum TurnPhase {
+pub(crate) enum TurnPhase {
     Working,
     Compacting,
     Retrying { delay: Duration, attempt: u32 },
@@ -81,7 +81,7 @@ impl WorkingState {
 
     /// Start a new live turn, or update the phase of the currently-
     /// running one (keeps `since` and accumulated `tps_samples`).
-    pub(super) fn begin(&mut self, phase: TurnPhase) {
+    pub(crate) fn begin(&mut self, phase: TurnPhase) {
         let retry_deadline = match phase {
             TurnPhase::Retrying { delay, .. } => Some(Instant::now() + delay),
             _ => None,
@@ -118,7 +118,7 @@ impl WorkingState {
         });
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.live = None;
         self.last = None;
     }
@@ -147,7 +147,7 @@ impl WorkingState {
     /// Elapsed time for the display — `since` for a live turn,
     /// archived `elapsed` otherwise. Live elapsed excludes time
     /// during which a blocking dialog paused the turn.
-    pub(super) fn elapsed(&self) -> Option<Duration> {
+    pub(crate) fn elapsed(&self) -> Option<Duration> {
         if let Some(live) = self.live.as_ref() {
             Some(live.effective_elapsed())
         } else {
@@ -173,17 +173,17 @@ impl WorkingState {
         }
     }
 
-    pub(super) fn last_spinner_frame(&self) -> Option<usize> {
+    pub(crate) fn last_spinner_frame(&self) -> Option<usize> {
         self.live.as_ref().map(|l| l.last_spinner_frame)
     }
 
-    pub(super) fn set_last_spinner_frame(&mut self, frame: usize) {
+    pub(crate) fn set_last_spinner_frame(&mut self, frame: usize) {
         if let Some(live) = self.live.as_mut() {
             live.last_spinner_frame = frame;
         }
     }
 
-    pub(super) fn turn_meta(&self) -> Option<TurnMeta> {
+    pub(crate) fn turn_meta(&self) -> Option<TurnMeta> {
         if let Some(live) = self.live.as_ref() {
             return Some(TurnMeta {
                 elapsed_ms: live.effective_elapsed().as_millis() as u64,
@@ -200,7 +200,7 @@ impl WorkingState {
         })
     }
 
-    pub(super) fn restore_from_turn_meta(&mut self, meta: &TurnMeta) {
+    pub(crate) fn restore_from_turn_meta(&mut self, meta: &TurnMeta) {
         self.live = None;
         self.last = Some(LastTurn {
             outcome: if meta.interrupted {

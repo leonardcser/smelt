@@ -1,6 +1,5 @@
 #![allow(clippy::module_inception)]
 
-mod agent;
 pub(crate) mod app_config;
 pub(crate) mod cells;
 pub(crate) mod clipboard;
@@ -13,20 +12,16 @@ pub(crate) mod fuzzy;
 pub(crate) mod grep;
 mod headless;
 pub(crate) mod headless_app;
-mod history;
 pub(crate) mod host;
 pub(crate) mod html;
 pub(crate) mod http;
 pub(crate) mod kill_ring;
-mod lua_bridge;
-mod lua_handlers;
 pub(crate) mod notebook;
 pub(crate) mod path;
 pub mod permissions;
 pub(crate) mod process;
 pub(crate) mod timers;
 pub(crate) mod tools;
-mod transcript;
 pub(crate) mod transcript_cache;
 pub(crate) mod transcript_model;
 pub(crate) mod transcript_present;
@@ -44,11 +39,11 @@ pub(crate) use crate::core::transcript_model::{
     ToolState, ToolStatus, ViewState,
 };
 use crate::session::Session;
+use crate::state;
 use crate::term::content;
 use crate::term::input::{History, PromptState};
-use crate::{session, state};
 use engine::EngineHandle;
-use protocol::{AgentMode, Content, Message, ReasoningEffort, Role, UiCommand};
+use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
 use crossterm::{
     cursor,
@@ -61,7 +56,7 @@ use crossterm::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::PathBuf;
+
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -172,18 +167,18 @@ pub struct TuiApp {
     pub(crate) agent: Option<TurnState>,
     /// Monotonic counter to discard stale predictions.
     predict_generation: u64,
-    sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
-    persister: crate::persist::Persister,
-    pending_title: bool,
+    pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
+    pub(crate) persister: crate::persist::Persister,
+    pub(crate) pending_title: bool,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
-    next_turn_id: u64,
+    pub(crate) next_turn_id: u64,
     /// Incremented on rewind/clear/load to invalidate in-flight compactions.
     pub(crate) compact_epoch: u64,
     /// The `compact_epoch` value when the last compaction was requested.
-    pending_compact_epoch: u64,
+    pub(crate) pending_compact_epoch: u64,
     /// TurnMeta from the engine, consumed by `finish_turn`.
-    pending_turn_meta: Option<protocol::TurnMeta>,
+    pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
     startup_auth_error: Option<String>,
     /// TuiApp-level focus (Prompt = editing buffer; History = navigating transcript).
     pub(crate) app_focus: AppFocus,
@@ -260,10 +255,10 @@ pub(crate) enum AppFocus {
     Content,
 }
 
-pub(super) struct TurnState {
-    turn_id: u64,
-    pending: Vec<PendingTool>,
-    _perf: Option<crate::perf::Guard>,
+pub(crate) struct TurnState {
+    pub(crate) turn_id: u64,
+    pub(crate) pending: Vec<PendingTool>,
+    pub(crate) _perf: Option<crate::perf::Guard>,
 }
 
 pub(crate) enum EventOutcome {
@@ -313,10 +308,10 @@ pub(crate) struct Timers {
 }
 
 /// How long after the last keypress before we show a deferred permission dialog.
-const CONFIRM_DEFER_MS: u64 = 1500;
+pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
 
 /// A permission dialog deferred because the user was actively typing.
-enum DeferredDialog {
+pub(crate) enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
 }
 
@@ -328,7 +323,7 @@ pub(crate) enum SessionControl {
     Done,
 }
 
-enum LoopAction {
+pub(crate) enum LoopAction {
     Continue,
     Done,
 }
