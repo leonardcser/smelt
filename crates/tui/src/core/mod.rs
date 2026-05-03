@@ -31,6 +31,7 @@ pub(crate) mod working;
 
 pub use app_config::AppConfig;
 pub use clipboard::{Clipboard, NullSink, Sink};
+pub(crate) use clipboard::{Osc52Sink, SystemSink};
 pub use core::{Core, FrontendKind};
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;

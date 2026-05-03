@@ -3,8 +3,8 @@
 //! `Core::new(config, engine)` is the only construction path.
 
 use super::{
-    app_config::AppConfig, cells, cells::Cells, commands, confirms::Confirms,
-    engine_client::EngineClient, timers::Timers,
+    app_config::AppConfig, cells, cells::Cells, confirms::Confirms, engine_client::EngineClient,
+    timers::Timers, Osc52Sink, SystemSink,
 };
 use crate::core::process::ProcessRegistry;
 use crate::lua::LuaRuntime;
@@ -125,8 +125,8 @@ impl Core {
             session: Session::new(),
             confirms,
             clipboard: crate::core::Clipboard::new(match frontend {
-                FrontendKind::Tui => Box::new(commands::Osc52Sink),
-                FrontendKind::Headless => Box::new(commands::SystemSink),
+                FrontendKind::Tui => Box::new(Osc52Sink),
+                FrontendKind::Headless => Box::new(SystemSink),
             }),
             timers: Timers::new(),
             cells,
