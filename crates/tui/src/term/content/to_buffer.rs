@@ -1,14 +1,14 @@
 //! Projection: turn `DisplayBlock` output (produced by `SpanCollector`)
-//! into a `ui::Buffer` so content rendered by `print_inline_diff`,
+//! into a `crate::ui::Buffer` so content rendered by `print_inline_diff`,
 //! `print_syntax_file`, `render_markdown_inner`, etc. flows through the
 //! normal buffer → view → grid path and inherits scrollbar, selection,
 //! and vim motions.
 
 use super::display::{ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
+use crate::ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
+use crate::ui::Theme;
 use crossterm::style::Color;
-use ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
-use ui::Theme;
 
 /// Resolve a `ColorValue` against a theme registry. The theme is
 /// borrowed for the render so a single redraw is theme-consistent.
@@ -160,9 +160,9 @@ pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
 mod tests {
     use super::*;
     use crate::term::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
+    use crate::ui::buffer::BufCreateOpts;
+    use crate::ui::BufId;
     use crossterm::style::Color;
-    use ui::buffer::BufCreateOpts;
-    use ui::BufId;
 
     fn test_theme() -> Theme {
         let mut t = Theme::new();

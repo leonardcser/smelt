@@ -1,4 +1,4 @@
-use crate::layout::Rect;
+use super::layout::Rect;
 use crossterm::style::Color;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -15,9 +15,9 @@ use crate::term::content::display::{ColorRole, ColorValue};
 use crate::term::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::term::content::layout_out::SpanCollector;
 use crate::term::content::wrap_line;
+use crate::ui::BufId;
 use mlua::prelude::*;
 use std::collections::HashMap;
-use ui::BufId;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let notebook = lua.create_table()?;

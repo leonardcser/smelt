@@ -13,8 +13,8 @@
 //! (border drag, title-bar grab) — distinct from any `WinId`s
 //! contained in the overlay's layout.
 
-use crate::layout::{Anchor, Corner, LayoutTree, Rect};
-use crate::WinId;
+use super::layout::{Anchor, Corner, LayoutTree, Rect};
+use super::WinId;
 use std::collections::HashMap;
 
 /// Stable handle for an overlay. Distinct from `WinId` so chrome
@@ -30,7 +30,7 @@ pub struct OverlayId(pub u32);
 /// or focus-promote on click depending on the overlay's policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayHitTarget {
-    Window(crate::WinId),
+    Window(super::WinId),
     Chrome,
 }
 
@@ -43,8 +43,8 @@ pub enum OverlayHitTarget {
 /// but `Ui::hit_test` doesn't return it yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitTarget {
-    Window(crate::WinId),
-    Scrollbar { owner: crate::WinId },
+    Window(super::WinId),
+    Scrollbar { owner: super::WinId },
     Chrome { owner: OverlayId },
 }
 
@@ -241,9 +241,9 @@ fn clamp_axis(pos: i32, term: u16, span: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use super::layout::{Anchor, Constraint, Corner};
+    use super::WinId;
     use super::*;
-    use crate::layout::{Anchor, Constraint, Corner};
-    use crate::WinId;
 
     #[test]
     fn overlay_defaults_are_sensible() {

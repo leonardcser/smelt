@@ -13,6 +13,25 @@ use protocol::EngineEvent;
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
+/// Minimal color enum for headless output.  Maps directly to ANSI
+/// escape sequences; no dependency on crossterm.
+enum AnsiColor {
+    Red,
+    Green,
+}
+
+impl AnsiColor {
+    fn fg(self) -> &'static str {
+        if !stderr_supports_color() {
+            return "";
+        }
+        match self {
+            AnsiColor::Red => "\x1b[31m",
+            AnsiColor::Green => "\x1b[38;5;77m",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Text,
@@ -69,10 +88,10 @@ impl HeadlessSink {
         let time = format_elapsed(elapsed_ms);
         let d = dim();
         let mark = if is_error {
-            let c = ansi_fg(crossterm::style::Color::Red);
+            let c = AnsiColor::Red.fg();
             format!("{c}✗{r}")
         } else {
-            let c = ansi_fg(crossterm::style::Color::AnsiValue(77));
+            let c = AnsiColor::Green.fg();
             format!("{c}✓{r}")
         };
         if summary.is_empty() {
@@ -96,7 +115,7 @@ impl HeadlessSink {
     }
 
     pub(super) fn log_error(&self, message: &str) {
-        let c = ansi_fg(crossterm::style::Color::Red);
+        let c = AnsiColor::Red.fg();
         let r = reset();
         eprintln!("{c}! {message}{r}");
     }
@@ -171,24 +190,6 @@ fn stderr_supports_color() -> bool {
         }
         std::io::stderr().is_terminal()
     })
-}
-
-/// Map a `crossterm::style::Color` to its ANSI escape foreground string.
-fn ansi_fg(c: crossterm::style::Color) -> &'static str {
-    if !stderr_supports_color() {
-        return "";
-    }
-    use crossterm::style::Color;
-    // Leak a small string per unique color (bounded by theme constants).
-    match c {
-        Color::AnsiValue(n) => {
-            let s: String = format!("\x1b[38;5;{n}m");
-            &*Box::leak(s.into_boxed_str())
-        }
-        Color::Red => "\x1b[31m",
-        Color::DarkGrey => "\x1b[90m",
-        _ => "",
-    }
 }
 
 fn reset() -> &'static str {

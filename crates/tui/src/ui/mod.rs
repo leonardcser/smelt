@@ -1,11 +1,9 @@
 pub mod buffer;
 pub mod callback;
-pub(crate) mod clipboard;
 pub(crate) mod compositor;
 pub(crate) mod event;
 pub(crate) mod flush;
 pub mod grid;
-pub(crate) mod kill_ring;
 pub mod layout;
 pub(crate) mod motions;
 pub(crate) mod overlay;
@@ -25,10 +23,10 @@ pub type AttachmentId = u64;
 /// and the event payload.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
+pub use crate::core::clipboard::{Clipboard, NullSink, Sink};
 pub use buffer::{Buffer, BufferParser, Span, SpanStyle};
 use callback::Callbacks;
 pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
-pub use clipboard::{Clipboard, NullSink, Sink};
 use compositor::Compositor;
 pub use event::{Event, Status};
 pub use grid::{Cell, Grid, GridSlice, Style};

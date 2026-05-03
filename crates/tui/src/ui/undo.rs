@@ -6,7 +6,7 @@
 //! buffer state on each operation; the history only stores states and never
 //! mutates the live buffer directly.
 
-use crate::AttachmentId;
+use super::AttachmentId;
 
 #[derive(Clone)]
 pub struct UndoEntry {

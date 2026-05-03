@@ -12,7 +12,7 @@
 //! `ui::Ui` mutations — no return channel for effect strings.
 //!
 //! This is the single behavior mechanism for window input.
-use crate::WinId;
+use super::WinId;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
@@ -143,7 +143,7 @@ impl std::fmt::Debug for Callback {
 /// for effect strings — all side effects flow through `AppOp` or
 /// direct `ui::Ui` mutation.
 pub struct CallbackCtx<'a> {
-    pub ui: &'a mut crate::Ui,
+    pub ui: &'a mut super::Ui,
     pub win: WinId,
     pub payload: Payload,
 }

@@ -1,4 +1,8 @@
 use super::working::{TurnOutcome, TurnPhase};
+use crate::core::{
+    DeferredDialog, LoopAction, PendingTool, SessionControl, TurnState, CONFIRM_DEFER_MS,
+};
+use std::time::{Duration, Instant};
 use super::*;
 use protocol::Decision;
 

@@ -5,11 +5,11 @@
 //! Names that aren't set fall back to `Style::default()` — nvim's
 //! policy of no panic on typo. `link()` aliases one name to another.
 //!
-//! Replaces the host-side `crate::theme::*` flat module of color
+//! Replaces the host-side `super::theme::*` flat module of color
 //! constants and the `Ui::set_selection_bg` / `selection_style()` shim
 //! that fanned out one slot to every widget.
 
-use crate::grid::Style;
+use super::grid::Style;
 use crossterm::style::Color;
 use std::collections::HashMap;
 

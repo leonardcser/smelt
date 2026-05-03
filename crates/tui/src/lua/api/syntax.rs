@@ -3,8 +3,8 @@
 
 use crate::term::content::highlight::print_syntax_file;
 use crate::term::content::to_buffer::render_into_buffer;
+use crate::ui::BufId;
 use mlua::prelude::*;
-use ui::BufId;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let syntax = lua.create_table()?;

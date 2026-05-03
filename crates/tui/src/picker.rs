@@ -19,12 +19,12 @@
 //! `overlay_close` to remove the overlay.
 
 use crate::core::TuiApp;
-use crossterm::style::Color;
-use ui::buffer::{BufCreateOpts, SpanStyle};
-use ui::layout::Anchor;
-use ui::{
+use crate::ui::buffer::{BufCreateOpts, SpanStyle};
+use crate::ui::layout::Anchor;
+use crate::ui::{
     BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId, PROMPT_WIN,
 };
+use crossterm::style::Color;
 
 /// One row in a picker. Prefix sits left of the label; description (if
 /// any) prints in a column-aligned dim block to the right of the

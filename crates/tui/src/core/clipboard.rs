@@ -7,7 +7,7 @@
 //! subprocess-backed system sink, headless / tests plug in
 //! `NullSink` (or a memory-backed test sink).
 
-use crate::kill_ring::KillRing;
+use super::kill_ring::KillRing;
 
 /// Read/write handle on the underlying system clipboard. Implementors
 /// shell out to `pbcopy` / `wl-copy` / `xclip` (in the binary), or

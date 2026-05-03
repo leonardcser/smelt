@@ -117,7 +117,7 @@ pub struct Chrome {
 pub enum LayoutTree {
     /// Terminal node identifying a single window. The constraint
     /// governing its size lives in its parent's `items`.
-    Leaf(crate::WinId),
+    Leaf(super::WinId),
     /// Vertical container; children stack top-to-bottom.
     Vbox { items: Vec<Item>, chrome: Chrome },
     /// Horizontal container; children pack left-to-right.
@@ -143,7 +143,7 @@ impl LayoutTree {
     }
 
     /// Terminal leaf for a single window.
-    pub fn leaf(win: crate::WinId) -> Self {
+    pub fn leaf(win: super::WinId) -> Self {
         Self::Leaf(win)
     }
 
@@ -178,7 +178,7 @@ impl LayoutTree {
     /// Whether this tree contains `win` as one of its leaves
     /// (depth-first). Pure structural check — no rect math, no
     /// dependency on terminal size.
-    pub fn contains_leaf(&self, win: crate::WinId) -> bool {
+    pub fn contains_leaf(&self, win: super::WinId) -> bool {
         match self {
             LayoutTree::Leaf(w) => *w == win,
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
@@ -190,13 +190,13 @@ impl LayoutTree {
     /// Leaf `WinId`s in document (depth-first, declaration) order.
     /// Used by Tab cycling to walk focusable windows in a stable
     /// sequence the user can predict.
-    pub fn leaves_in_order(&self) -> Vec<crate::WinId> {
+    pub fn leaves_in_order(&self) -> Vec<super::WinId> {
         let mut out = Vec::new();
         self.collect_leaves(&mut out);
         out
     }
 
-    fn collect_leaves(&self, out: &mut Vec<crate::WinId>) {
+    fn collect_leaves(&self, out: &mut Vec<super::WinId>) {
         match self {
             LayoutTree::Leaf(w) => out.push(*w),
             LayoutTree::Vbox { items, .. } | LayoutTree::Hbox { items, .. } => {
@@ -334,7 +334,7 @@ pub enum Anchor {
     /// notification one row above the prompt is `attach: NW,
     /// row_offset: -1, col_offset: 0`.
     Win {
-        target: crate::WinId,
+        target: super::WinId,
         attach: Corner,
         row_offset: i32,
         col_offset: i32,
@@ -364,7 +364,7 @@ pub struct Gutters {
     pub scrollbar: bool,
 }
 
-pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<crate::WinId, Rect> {
+pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<super::WinId, Rect> {
     let mut result = HashMap::new();
     // Top-level tree gets the full area; its constraint is implicit.
     resolve_node(tree, area, &mut result);
@@ -378,10 +378,10 @@ pub fn resolve_layout(tree: &LayoutTree, area: Rect) -> HashMap<crate::WinId, Re
 /// border row, after the top-left corner glyph; truncates at the
 /// pre-corner column.
 pub fn paint_chrome(
-    grid: &mut crate::grid::Grid,
+    grid: &mut super::grid::Grid,
     area: Rect,
     chrome: &Chrome,
-    _theme: &crate::theme::Theme,
+    _theme: &super::theme::Theme,
 ) {
     let Some(border) = chrome.border else {
         return;
@@ -395,7 +395,7 @@ pub fn paint_chrome(
         Border::Double => ('═', '║', '╔', '╗', '╚', '╝'),
         Border::Rounded => ('─', '│', '╭', '╮', '╰', '╯'),
     };
-    let style = crate::grid::Style::default();
+    let style = super::grid::Style::default();
     let right = area.left + area.width - 1;
     let bottom = area.top + area.height - 1;
 
@@ -425,7 +425,7 @@ pub fn paint_chrome(
     }
 }
 
-fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<crate::WinId, Rect>) {
+fn resolve_node(node: &LayoutTree, area: Rect, out: &mut HashMap<super::WinId, Rect>) {
     match node {
         LayoutTree::Leaf(win) => {
             out.insert(*win, area);
@@ -444,7 +444,7 @@ fn resolve_box(
     chrome: &Chrome,
     area: Rect,
     vertical: bool,
-    out: &mut HashMap<crate::WinId, Rect>,
+    out: &mut HashMap<super::WinId, Rect>,
 ) {
     let inner = match chrome.border {
         Some(_) => Rect::new(
@@ -545,8 +545,8 @@ pub(crate) fn resolve_constraints(items: &[Item], total: u16) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use super::WinId;
     use super::*;
-    use crate::WinId;
 
     const A: WinId = WinId(100);
     const B: WinId = WinId(101);
@@ -887,20 +887,20 @@ mod tests {
 
     #[test]
     fn paint_chrome_no_border_is_noop() {
-        let mut grid = crate::grid::Grid::new(10, 5);
+        let mut grid = super::grid::Grid::new(10, 5);
         let chrome = Chrome::default();
         paint_chrome(
             &mut grid,
             Rect::new(0, 0, 10, 5),
             &chrome,
-            &crate::theme::Theme::default(),
+            &super::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, ' ');
     }
 
     #[test]
     fn paint_chrome_single_border_draws_corners_and_edges() {
-        let mut grid = crate::grid::Grid::new(10, 5);
+        let mut grid = super::grid::Grid::new(10, 5);
         let chrome = Chrome {
             border: Some(Border::Single),
             ..Chrome::default()
@@ -909,7 +909,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 10, 5),
             &chrome,
-            &crate::theme::Theme::default(),
+            &super::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(9, 0).symbol, '┐');
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn paint_chrome_title_lands_on_top_border() {
-        let mut grid = crate::grid::Grid::new(20, 5);
+        let mut grid = super::grid::Grid::new(20, 5);
         let chrome = Chrome {
             border: Some(Border::Rounded),
             title: Some("hello".into()),
@@ -931,7 +931,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 20, 5),
             &chrome,
-            &crate::theme::Theme::default(),
+            &super::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '╭');
         assert_eq!(grid.cell(1, 0).symbol, 'h');
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn paint_chrome_truncates_title_to_inner_width() {
-        let mut grid = crate::grid::Grid::new(8, 3);
+        let mut grid = super::grid::Grid::new(8, 3);
         let chrome = Chrome {
             border: Some(Border::Single),
             title: Some("muchtoolong".into()),
@@ -952,7 +952,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 8, 3),
             &chrome,
-            &crate::theme::Theme::default(),
+            &super::theme::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(1, 0).symbol, 'm');

@@ -3,7 +3,7 @@
 //! `SpanCollector` is the in-memory builder for a `DisplayBlock`.
 //! Renderers (markdown, diff, syntax, transcript blocks, dialog
 //! previews) all write into one of these; the finished block is
-//! projected into a `ui::Buffer` by `to_buffer::render_into_buffer`.
+//! projected into a `crate::ui::Buffer` by `to_buffer::render_into_buffer`.
 
 use super::display::{ColorValue, DisplayBlock, DisplayLine, DisplaySpan, SpanMeta, SpanStyle};
 use unicode_width::UnicodeWidthStr;

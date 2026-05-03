@@ -150,10 +150,10 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
 /// Parse a plugin-facing key spec like `"enter"`, `"esc"`, `"tab"`,
 /// `"bs"`, `"space"`, `"up"`, `"c-j"` (ctrl-j), `"a-x"` / `"m-x"`
 /// (alt-x), `"s-tab"` (shift-tab), or a single printable char into a
-/// [`ui::KeyBind`]. Modifiers separate with `-`; the final token is
+/// [`crate::ui::KeyBind`]. Modifiers separate with `-`; the final token is
 /// the key name. Case-insensitive for names and modifiers. Returns
 /// `None` for unknown keys — the caller surfaces a Lua error.
-pub(crate) fn parse_keybind(spec: &str) -> Option<ui::KeyBind> {
+pub(crate) fn parse_keybind(spec: &str) -> Option<crate::ui::KeyBind> {
     use crossterm::event::{KeyCode, KeyModifiers};
     let raw = spec.trim();
     if raw.is_empty() {
@@ -178,7 +178,7 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<ui::KeyBind> {
         "bs" | "backspace" => KeyCode::Backspace,
         "tab" => {
             if mods.contains(KeyModifiers::SHIFT) {
-                return Some(ui::KeyBind::new(
+                return Some(crate::ui::KeyBind::new(
                     KeyCode::BackTab,
                     mods - KeyModifiers::SHIFT,
                 ));
@@ -200,7 +200,7 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<ui::KeyBind> {
         s if s.chars().count() == 1 => KeyCode::Char(name.chars().next().unwrap()),
         _ => return None,
     };
-    Some(ui::KeyBind::new(code, mods))
+    Some(crate::ui::KeyBind::new(code, mods))
 }
 
 /// Normalize a mode string from a Lua plugin into the canonical
@@ -239,21 +239,21 @@ pub(crate) fn canonicalize_chord(chord: &str) -> Option<String> {
     chord_string(KeyEvent::new(kb.code, kb.mods))
 }
 
-/// Parse a Lua-facing window-event name into a [`ui::WinEvent`]. Names
+/// Parse a Lua-facing window-event name into a [`crate::ui::WinEvent`]. Names
 /// match the Neovim-adjacent naming Lua plugins use for autocmd-style
 /// hooks. Returns `None` for unknown names so the caller surfaces a
 /// Lua error.
-pub(crate) fn parse_win_event(name: &str) -> Option<ui::WinEvent> {
+pub(crate) fn parse_win_event(name: &str) -> Option<crate::ui::WinEvent> {
     Some(match name {
-        "open" => ui::WinEvent::Open,
-        "close" => ui::WinEvent::Close,
-        "focus" | "focus_gained" => ui::WinEvent::FocusGained,
-        "blur" | "focus_lost" => ui::WinEvent::FocusLost,
-        "selection_changed" | "select_changed" => ui::WinEvent::SelectionChanged,
-        "submit" => ui::WinEvent::Submit,
-        "text_changed" | "change" => ui::WinEvent::TextChanged,
-        "dismiss" | "cancel" => ui::WinEvent::Dismiss,
-        "tick" => ui::WinEvent::Tick,
+        "open" => crate::ui::WinEvent::Open,
+        "close" => crate::ui::WinEvent::Close,
+        "focus" | "focus_gained" => crate::ui::WinEvent::FocusGained,
+        "blur" | "focus_lost" => crate::ui::WinEvent::FocusLost,
+        "selection_changed" | "select_changed" => crate::ui::WinEvent::SelectionChanged,
+        "submit" => crate::ui::WinEvent::Submit,
+        "text_changed" | "change" => crate::ui::WinEvent::TextChanged,
+        "dismiss" | "cancel" => crate::ui::WinEvent::Dismiss,
+        "tick" => crate::ui::WinEvent::Tick,
         _ => return None,
     })
 }
@@ -301,9 +301,9 @@ pub(crate) fn register_callback_handle(
 /// returns the callback that was just replaced or removed.
 pub(crate) fn drop_displaced_lua_handle(
     app: &mut crate::core::TuiApp,
-    displaced: Option<ui::Callback>,
+    displaced: Option<crate::ui::Callback>,
 ) {
-    if let Some(ui::Callback::Lua(ui::LuaHandle(old))) = displaced {
+    if let Some(crate::ui::Callback::Lua(crate::ui::LuaHandle(old))) = displaced {
         app.core.lua.remove_callback(old);
     }
 }
@@ -376,9 +376,9 @@ pub(crate) struct LuaShared {
 /// `&mut Ui` is held. Drained by the host TuiApp between ui calls so each
 /// Lua fn body runs with the TLS app pointer installed.
 pub(crate) struct PendingInvocation {
-    pub(crate) handle: ui::LuaHandle,
-    pub(crate) win: ui::WinId,
-    pub(crate) payload: ui::Payload,
+    pub(crate) handle: crate::ui::LuaHandle,
+    pub(crate) win: crate::ui::WinId,
+    pub(crate) payload: crate::ui::Payload,
 }
 
 /// Events that drive the Lua task runtime. After the D3 dialog + D2b
@@ -415,7 +415,7 @@ impl Default for LuaShared {
             tools: Mutex::new(HashMap::new()),
             callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            next_buf_id: AtomicU64::new(ui::LUA_BUF_ID_BASE),
+            next_buf_id: AtomicU64::new(crate::ui::LUA_BUF_ID_BASE),
             next_external_id: AtomicU64::new(1),
             tasks: Mutex::new(LuaTaskRuntime::new()),
             task_inbox: Mutex::new(Vec::new()),
@@ -1296,9 +1296,9 @@ mod tests {
         let func: mlua::Function = rt.lua.load("test_cb").eval().unwrap();
         let id = rt.register_callback(func).unwrap();
         rt.invoke_callback(
-            ui::LuaHandle(id),
-            ui::WinId(0),
-            &ui::Payload::Selection { index: 2 },
+            crate::ui::LuaHandle(id),
+            crate::ui::WinId(0),
+            &crate::ui::Payload::Selection { index: 2 },
         );
         let recorded: u64 = rt.lua.load("return _G.recorded").eval().unwrap();
         // Payload is 0-indexed; Lua gets 1-based.
@@ -1320,9 +1320,9 @@ mod tests {
         let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
         let id = rt.register_callback(func).unwrap();
         rt.invoke_callback(
-            ui::LuaHandle(id),
-            ui::WinId(0),
-            &ui::Payload::Text {
+            crate::ui::LuaHandle(id),
+            crate::ui::WinId(0),
+            &crate::ui::Payload::Text {
                 content: "hi".into(),
             },
         );
@@ -1334,7 +1334,11 @@ mod tests {
     fn invoke_callback_unknown_handle_is_noop() {
         let rt = LuaRuntime::new();
         // Nothing registered under id 9999 — should silently succeed.
-        rt.invoke_callback(ui::LuaHandle(9999), ui::WinId(0), &ui::Payload::None);
+        rt.invoke_callback(
+            crate::ui::LuaHandle(9999),
+            crate::ui::WinId(0),
+            &crate::ui::Payload::None,
+        );
     }
 
     /// Regression: every code path that drops a Lua-backed callback
@@ -1363,7 +1367,11 @@ mod tests {
         assert!(rt.shared.callbacks.lock().unwrap().is_empty());
 
         // Invoking the dropped handle must not resurrect the call.
-        rt.invoke_callback(ui::LuaHandle(id), ui::WinId(0), &ui::Payload::None);
+        rt.invoke_callback(
+            crate::ui::LuaHandle(id),
+            crate::ui::WinId(0),
+            &crate::ui::Payload::None,
+        );
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0);
     }
@@ -1372,24 +1380,27 @@ mod tests {
     fn parse_win_event_covers_common_names() {
         assert!(matches!(
             parse_win_event("submit"),
-            Some(ui::WinEvent::Submit)
+            Some(crate::ui::WinEvent::Submit)
         ));
         assert!(matches!(
             parse_win_event("text_changed"),
-            Some(ui::WinEvent::TextChanged)
+            Some(crate::ui::WinEvent::TextChanged)
         ));
         assert!(matches!(
             parse_win_event("change"),
-            Some(ui::WinEvent::TextChanged)
+            Some(crate::ui::WinEvent::TextChanged)
         ));
         assert!(matches!(
             parse_win_event("dismiss"),
-            Some(ui::WinEvent::Dismiss)
+            Some(crate::ui::WinEvent::Dismiss)
         ));
-        assert!(matches!(parse_win_event("tick"), Some(ui::WinEvent::Tick)));
+        assert!(matches!(
+            parse_win_event("tick"),
+            Some(crate::ui::WinEvent::Tick)
+        ));
         assert!(matches!(
             parse_win_event("focus"),
-            Some(ui::WinEvent::FocusGained)
+            Some(crate::ui::WinEvent::FocusGained)
         ));
         assert!(parse_win_event("bogus").is_none());
     }
@@ -1398,7 +1409,7 @@ mod tests {
     // `with_app` boundary — they read/write through `TuiApp.ui.theme()`.
     // The Lua-side wiring is exercised by integration scenarios; here
     // the role-mapping and error logic is covered directly in
-    // `lua::api::tests` against a local `ui::Theme`.
+    // `lua::api::tests` against a local `crate::ui::Theme`.
 
     #[test]
     fn runtime_exposes_api_version() {
@@ -1698,29 +1709,41 @@ mod tests {
         use crossterm::event::{KeyCode, KeyModifiers};
         assert_eq!(
             parse_keybind("enter"),
-            Some(ui::KeyBind::new(KeyCode::Enter, KeyModifiers::NONE))
+            Some(crate::ui::KeyBind::new(KeyCode::Enter, KeyModifiers::NONE))
         );
         assert_eq!(
             parse_keybind("esc"),
-            Some(ui::KeyBind::new(KeyCode::Esc, KeyModifiers::NONE))
+            Some(crate::ui::KeyBind::new(KeyCode::Esc, KeyModifiers::NONE))
         );
         assert_eq!(
             parse_keybind("c-j"),
-            Some(ui::KeyBind::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
+            Some(crate::ui::KeyBind::new(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL
+            ))
         );
         assert_eq!(
             parse_keybind("a-x"),
-            Some(ui::KeyBind::new(KeyCode::Char('x'), KeyModifiers::ALT))
+            Some(crate::ui::KeyBind::new(
+                KeyCode::Char('x'),
+                KeyModifiers::ALT
+            ))
         );
         // shift-tab collapses to BackTab without the SHIFT bit so
         // crossterm's event matches lookups done elsewhere.
         assert_eq!(
             parse_keybind("s-tab"),
-            Some(ui::KeyBind::new(KeyCode::BackTab, KeyModifiers::NONE))
+            Some(crate::ui::KeyBind::new(
+                KeyCode::BackTab,
+                KeyModifiers::NONE
+            ))
         );
         assert_eq!(
             parse_keybind("k"),
-            Some(ui::KeyBind::new(KeyCode::Char('k'), KeyModifiers::NONE))
+            Some(crate::ui::KeyBind::new(
+                KeyCode::Char('k'),
+                KeyModifiers::NONE
+            ))
         );
         assert_eq!(parse_keybind("bogus"), None);
         assert_eq!(parse_keybind("ctrl-nope"), None);

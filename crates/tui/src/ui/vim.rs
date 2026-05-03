@@ -1,17 +1,17 @@
-use crate::clipboard::Clipboard;
-use crate::motions::{
+use super::Clipboard;
+use super::motions::{
     advance_chars, clamp_normal, current_line_content_range, current_line_range, find_char,
     find_matching_bracket, first_non_blank, first_non_blank_at, goto_line, line_end_normal,
     move_down, move_down_col, move_left, move_right_inclusive, move_right_normal, move_up,
     move_up_col, repeat_find, retreat_chars, word_end_pos, FindKind,
 };
-use crate::text::{
+use super::text::{
     char_class, line_end, line_start, next_char_boundary, prev_char_boundary, word_backward_pos,
     word_forward_pos, CharClass,
 };
-use crate::text_objects::text_object;
-use crate::undo::{UndoEntry, UndoHistory};
-use crate::AttachmentId;
+use super::text_objects::text_object;
+use super::undo::{UndoEntry, UndoHistory};
+use super::AttachmentId;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -1863,7 +1863,7 @@ mod tests {
         writes: usize,
     }
     struct MemSink(std::rc::Rc<std::cell::RefCell<MemSinkInner>>);
-    impl crate::clipboard::Sink for MemSink {
+    impl super::clipboard::Sink for MemSink {
         fn read(&mut self) -> Option<String> {
             self.0.borrow().text.clone()
         }

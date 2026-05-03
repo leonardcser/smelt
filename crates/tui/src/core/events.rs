@@ -2,13 +2,13 @@ use super::working::TurnOutcome;
 use super::*;
 
 use crate::keymap::{self, KeyAction};
+use crate::ui::UiHost;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEvent},
     terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use std::time::{Duration, Instant};
-use ui::UiHost;
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -87,10 +87,14 @@ impl TuiApp {
                 }
                 let lua = &self.core.lua;
                 let mut lua_invoke =
-                    |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
+                    |handle: crate::ui::LuaHandle,
+                     win: crate::ui::WinId,
+                     payload: &crate::ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
-                let _ = self.ui.dispatch_event(ui::Event::Key(k), &mut lua_invoke);
+                let _ = self
+                    .ui
+                    .dispatch_event(crate::ui::Event::Key(k), &mut lua_invoke);
                 self.flush_lua_callbacks();
                 return false;
             }
@@ -247,11 +251,15 @@ impl TuiApp {
             if self.ui.focused_overlay().is_none() {
                 let lua = &self.core.lua;
                 let mut lua_invoke =
-                    |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
+                    |handle: crate::ui::LuaHandle,
+                     win: crate::ui::WinId,
+                     payload: &crate::ui::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
-                let result = self.ui.dispatch_event(ui::Event::Key(k), &mut lua_invoke);
-                if matches!(result, ui::Status::Consumed) {
+                let result = self
+                    .ui
+                    .dispatch_event(crate::ui::Event::Key(k), &mut lua_invoke);
+                if matches!(result, crate::ui::Status::Consumed) {
                     self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
                 }
@@ -283,7 +291,7 @@ impl TuiApp {
         {
             let in_insert = match self.app_focus {
                 crate::core::AppFocus::Prompt => {
-                    !self.input.vim_enabled() || self.vim_mode == ui::VimMode::Insert
+                    !self.input.vim_enabled() || self.vim_mode == crate::ui::VimMode::Insert
                 }
                 crate::core::AppFocus::Content => false,
             };
@@ -314,7 +322,8 @@ impl TuiApp {
                 ..
             })
         ) {
-            let in_normal = !self.input.vim_enabled() || self.vim_mode != ui::VimMode::Insert;
+            let in_normal =
+                !self.input.vim_enabled() || self.vim_mode != crate::ui::VimMode::Insert;
             if in_normal {
                 let double = t
                     .last_esc
@@ -330,9 +339,9 @@ impl TuiApp {
                             self.working.finish(TurnOutcome::Interrupted);
                         };
                         self.notify("compaction cancelled".into());
-                        if restore_mode == Some(ui::VimMode::Insert) {
+                        if restore_mode == Some(crate::ui::VimMode::Insert) {
                             self.input
-                                .set_vim_mode(&mut self.vim_mode, ui::VimMode::Insert);
+                                .set_vim_mode(&mut self.vim_mode, crate::ui::VimMode::Insert);
                         }
                         return EventOutcome::Noop;
                     }
@@ -340,7 +349,7 @@ impl TuiApp {
                     if self.user_turns().is_empty() {
                         return EventOutcome::Noop;
                     }
-                    let line = if restore_mode == Some(ui::VimMode::Insert) {
+                    let line = if restore_mode == Some(crate::ui::VimMode::Insert) {
                         "/rewind insert"
                     } else {
                         "/rewind"
@@ -362,7 +371,7 @@ impl TuiApp {
             } else {
                 // Vim insert mode — start double-Esc timer, fall through so
                 // handle_event processes the Esc and switches vim to normal.
-                t.esc_vim_mode = Some(ui::VimMode::Insert);
+                t.esc_vim_mode = Some(crate::ui::VimMode::Insert);
                 t.last_esc = Some(Instant::now());
             }
         } else {
@@ -673,7 +682,7 @@ impl TuiApp {
         self.last_height = h;
         let _ = self
             .ui
-            .dispatch_event(ui::Event::Resize(w, h), &mut |_, _, _| {});
+            .dispatch_event(crate::ui::Event::Resize(w, h), &mut |_, _, _| {});
         if width_changed {
             self.invalidate_for_width(w);
         }
@@ -751,7 +760,7 @@ impl TuiApp {
     /// overlay's open path (picker / cmdline / notification / dialog);
     /// `Ui::win_close` cascades to overlay close when the leaf belongs
     /// to one.
-    pub(crate) fn close_overlay_leaf(&mut self, win_id: ui::WinId) {
+    pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::ui::WinId) {
         crate::picker::forget(self, win_id);
         for id in self.win_close(win_id) {
             self.core.lua.remove_callback(id);
@@ -778,13 +787,14 @@ impl TuiApp {
             return;
         };
         let lua = &self.core.lua;
-        let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
-            lua.queue_invocation(handle, win, payload);
-        };
+        let mut lua_invoke =
+            |handle: crate::ui::LuaHandle, win: crate::ui::WinId, payload: &crate::ui::Payload| {
+                lua.queue_invocation(handle, win, payload);
+            };
         self.ui.fire_win_event(
             root,
-            ui::WinEvent::Dismiss,
-            ui::Payload::None,
+            crate::ui::WinEvent::Dismiss,
+            crate::ui::Payload::None,
             &mut lua_invoke,
         );
         self.flush_lua_callbacks();

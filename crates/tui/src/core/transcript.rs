@@ -1,6 +1,6 @@
 //! Transcript ownership on `TuiApp` — block history, streaming state
 //! (thinking / text / tools / exec), projection to a
-//! ui::Buffer, and the transcript-cursor glyph cache.
+//! crate::ui::Buffer, and the transcript-cursor glyph cache.
 
 use super::transcript_model::{Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState};
 use super::*;
@@ -19,7 +19,7 @@ pub(crate) struct TranscriptData {
     pub(crate) clamped_scroll: u16,
     pub(crate) total_rows: u16,
     pub(crate) scrollbar_col: u16,
-    pub(crate) viewport: ui::WindowViewport,
+    pub(crate) viewport: crate::ui::WindowViewport,
 }
 
 /// Soft cursor placement carried back from `compute_transcript_cursor`
@@ -535,12 +535,12 @@ impl TuiApp {
         let end = (start + viewport_rows as usize).min(buf.line_count());
         self.last_viewport_text = buf.get_lines(start, end).to_vec();
 
-        let viewport = ui::WindowViewport::new(
-            ui::Rect::new(0, 0, tw as u16, viewport_rows),
+        let viewport = crate::ui::WindowViewport::new(
+            crate::ui::Rect::new(0, 0, tw as u16, viewport_rows),
             tw as u16,
             total_rows,
             clamped_scroll,
-            ui::ScrollbarState::new(scrollbar_col, total_rows, viewport_rows),
+            crate::ui::ScrollbarState::new(scrollbar_col, total_rows, viewport_rows),
         );
 
         TranscriptData {
@@ -559,7 +559,7 @@ impl TuiApp {
         history_cursor_line: u16,
         history_cursor_col: u16,
         transcript_owns_cursor: bool,
-        viewport: Option<&ui::WindowViewport>,
+        viewport: Option<&crate::ui::WindowViewport>,
     ) -> TranscriptCursor {
         let gutters = crate::term::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
@@ -583,7 +583,7 @@ impl TuiApp {
             .last_viewport_text
             .get(line as usize)
             .map(|row| {
-                let byte = ui::text::cell_to_byte(row, col as usize);
+                let byte = crate::ui::text::cell_to_byte(row, col as usize);
                 row[byte..].chars().next()
             })
             .and_then(|c| c)
@@ -611,7 +611,10 @@ impl TuiApp {
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let vim_visual = self.transcript_window.vim_enabled
-            && matches!(self.vim_mode, ui::VimMode::Visual | ui::VimMode::VisualLine);
+            && matches!(
+                self.vim_mode,
+                crate::ui::VimMode::Visual | crate::ui::VimMode::VisualLine
+            );
         let anchor_set = self.transcript_window.selection_anchor.is_some();
         let yank_flash = self
             .core
@@ -631,12 +634,14 @@ impl TuiApp {
         let cpos = self.transcript_window.compute_cpos(&rows);
         let active_selection = if self.transcript_window.vim_enabled {
             match self.vim_mode {
-                ui::VimMode::Visual | ui::VimMode::VisualLine => ui::vim::visual_range(
-                    &self.transcript_window.vim_state,
-                    &buf,
-                    cpos,
-                    self.vim_mode,
-                ),
+                crate::ui::VimMode::Visual | crate::ui::VimMode::VisualLine => {
+                    crate::ui::vim::visual_range(
+                        &self.transcript_window.vim_state,
+                        &buf,
+                        cpos,
+                        self.vim_mode,
+                    )
+                }
                 _ => self.transcript_window.selection_range_at(cpos),
             }
         } else {
@@ -666,8 +671,8 @@ impl TuiApp {
             if e > line_start && s <= line_end {
                 let clip_s = s.saturating_sub(line_start).min(row.len());
                 let clip_e = e.saturating_sub(line_start).min(row.len());
-                let start_cell = ui::text::byte_to_cell(row, clip_s) as u16;
-                let end_cell = ui::text::byte_to_cell(row, clip_e) as u16;
+                let start_cell = crate::ui::text::byte_to_cell(row, clip_s) as u16;
+                let end_cell = crate::ui::text::byte_to_cell(row, clip_e) as u16;
                 if end_cell > start_cell {
                     out.push((idx, start_cell, end_cell));
                 } else if row.is_empty() && s <= line_start && e > line_start {

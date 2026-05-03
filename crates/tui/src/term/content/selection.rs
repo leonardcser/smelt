@@ -28,7 +28,7 @@ pub(crate) fn truncate_str(s: &str, max: usize) -> String {
     truncated
 }
 
-pub(crate) use ui::text::wrap_line;
+pub(crate) use crate::ui::text::wrap_line;
 
 pub(crate) fn wrap_and_locate_cursor(
     buf: &str,

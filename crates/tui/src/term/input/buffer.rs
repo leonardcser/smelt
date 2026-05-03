@@ -7,7 +7,7 @@
 
 use super::{PromptState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
 use crate::attachment::AttachmentId;
-use ui::VimMode;
+use crate::ui::VimMode;
 
 impl PromptState {
     /// Save undo state before an editing operation.
@@ -17,7 +17,7 @@ impl PromptState {
         if self.win.vim_enabled && mode == VimMode::Insert {
             return; // insert session groups all edits into one undo step
         }
-        self.win.history.save(ui::UndoEntry::snapshot(
+        self.win.history.save(crate::ui::UndoEntry::snapshot(
             &self.win.text,
             self.win.cpos,
             &self.win.attachment_ids,
@@ -91,8 +91,11 @@ impl PromptState {
         if self.win.cpos == 0 {
             return;
         }
-        let target =
-            ui::text::word_backward_pos(&self.win.text, self.win.cpos, ui::text::CharClass::Word);
+        let target = crate::ui::text::word_backward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
+        );
         if target == 0 {
             self.from_paste = false;
         }
@@ -120,14 +123,17 @@ impl PromptState {
         if self.win.cpos >= self.win.text.len() {
             return;
         }
-        let target =
-            ui::text::word_forward_pos(&self.win.text, self.win.cpos, ui::text::CharClass::Word);
+        let target = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
+        );
         self.remove_attachments_in_range(self.win.cpos, target);
         self.win.text.drain(self.win.cpos..target);
         self.recompute_completer();
     }
 
-    pub(super) fn kill_to_end_of_line(&mut self, clipboard: &mut ui::Clipboard) {
+    pub(super) fn kill_to_end_of_line(&mut self, clipboard: &mut crate::ui::Clipboard) {
         let end = self.win.text[self.win.cpos..]
             .find('\n')
             .map(|i| self.win.cpos + i)
@@ -139,7 +145,7 @@ impl PromptState {
         self.recompute_completer();
     }
 
-    pub(super) fn kill_to_start_of_line(&mut self, clipboard: &mut ui::Clipboard) {
+    pub(super) fn kill_to_start_of_line(&mut self, clipboard: &mut crate::ui::Clipboard) {
         let start = self.win.text[..self.win.cpos]
             .rfind('\n')
             .map(|i| i + 1)
@@ -164,8 +170,11 @@ impl PromptState {
     }
 
     pub(super) fn uppercase_word(&mut self) {
-        let end =
-            ui::text::word_forward_pos(&self.win.text, self.win.cpos, ui::text::CharClass::Word);
+        let end = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
+        );
         if end == self.win.cpos {
             return;
         }
@@ -176,8 +185,11 @@ impl PromptState {
     }
 
     pub(super) fn lowercase_word(&mut self) {
-        let end =
-            ui::text::word_forward_pos(&self.win.text, self.win.cpos, ui::text::CharClass::Word);
+        let end = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
+        );
         if end == self.win.cpos {
             return;
         }
@@ -188,8 +200,11 @@ impl PromptState {
     }
 
     pub(super) fn capitalize_word(&mut self) {
-        let end =
-            ui::text::word_forward_pos(&self.win.text, self.win.cpos, ui::text::CharClass::Word);
+        let end = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
+        );
         if end == self.win.cpos {
             return;
         }
@@ -211,7 +226,7 @@ impl PromptState {
 
     pub(super) fn undo(&mut self) {
         let current =
-            ui::UndoEntry::snapshot(&self.win.text, self.win.cpos, &self.win.attachment_ids);
+            crate::ui::UndoEntry::snapshot(&self.win.text, self.win.cpos, &self.win.attachment_ids);
         if let Some(entry) = self.win.history.undo(current) {
             self.win.text = entry.buf;
             self.win.cpos = entry.cpos;
@@ -224,8 +239,11 @@ impl PromptState {
         if self.win.cpos >= self.win.text.len() {
             return false;
         }
-        let target =
-            ui::text::word_forward_pos(&self.win.text, self.win.cpos, ui::text::CharClass::Word);
+        let target = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
+        );
         if target != self.win.cpos {
             self.win.cpos = target;
             self.recompute_completer();
@@ -239,8 +257,11 @@ impl PromptState {
         if self.win.cpos == 0 {
             return false;
         }
-        let target =
-            ui::text::word_backward_pos(&self.win.text, self.win.cpos, ui::text::CharClass::Word);
+        let target = crate::ui::text::word_backward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
+        );
         if target != self.win.cpos {
             self.win.cpos = target;
             self.recompute_completer();
@@ -350,7 +371,7 @@ impl PromptState {
     /// Records the clipboard write on the kill ring so subsequent
     /// pastes know this is *our* latest push (distinguished from an
     /// externally-updated clipboard).
-    pub(super) fn kill_and_copy(&mut self, text: String, clipboard: &mut ui::Clipboard) {
+    pub(super) fn kill_and_copy(&mut self, text: String, clipboard: &mut crate::ui::Clipboard) {
         if !text.is_empty() && clipboard.write(&text).is_ok() {
             clipboard.kill_ring.record_clipboard_write(text.clone());
         }

@@ -4,8 +4,8 @@ use super::selection::{
 };
 use super::status::BarSpan;
 use crate::term::input::PromptState;
-use ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, SpanStyle};
-use ui::grid::Style;
+use crate::ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, SpanStyle};
+use crate::ui::grid::Style;
 
 use crossterm::style::Color;
 
@@ -40,8 +40,8 @@ pub(crate) struct PromptInput<'a> {
     pub(crate) queued: &'a [String],
     pub(crate) stash: &'a Option<crate::term::input::InputSnapshot>,
     pub(crate) input: &'a PromptState,
-    pub(crate) vim_mode: ui::VimMode,
-    pub(crate) clipboard: &'a ui::Clipboard,
+    pub(crate) vim_mode: crate::ui::VimMode,
+    pub(crate) clipboard: &'a crate::ui::Clipboard,
     pub(crate) width: u16,
     pub(crate) height: u16,
     pub(crate) has_prompt_cursor: bool,
@@ -72,7 +72,7 @@ pub(crate) struct InputViewport {
     pub(crate) scroll_top: u16,
 }
 
-fn cursor_style(theme: &ui::Theme) -> (Color, Color) {
+fn cursor_style(theme: &crate::ui::Theme) -> (Color, Color) {
     if theme.is_light() {
         (Color::White, Color::Black)
     } else {
@@ -80,7 +80,7 @@ fn cursor_style(theme: &ui::Theme) -> (Color, Color) {
     }
 }
 
-fn theme_color(theme: &ui::Theme, group: &str) -> Color {
+fn theme_color(theme: &crate::ui::Theme, group: &str) -> Color {
     let style = theme.get(group);
     style.fg.or(style.bg).unwrap_or(Color::Reset)
 }
@@ -88,7 +88,7 @@ fn theme_color(theme: &ui::Theme, group: &str) -> Color {
 pub(crate) fn compute_prompt(
     input: &mut PromptInput<'_>,
     buf: &mut Buffer,
-    theme: &ui::Theme,
+    theme: &crate::ui::Theme,
 ) -> PromptOutput {
     let width = input.width as usize;
     let usable = width.saturating_sub(2);
@@ -231,7 +231,11 @@ fn window_row_to_buffer_line(row: &WindowRow) -> (String, Vec<(u16, u16, SpanSty
 
 // ── Queued messages ──
 
-fn queued_message_rows(queued: &[String], usable: usize, theme: &ui::Theme) -> Vec<WindowRow> {
+fn queued_message_rows(
+    queued: &[String],
+    usable: usize,
+    theme: &crate::ui::Theme,
+) -> Vec<WindowRow> {
     let indent = 1usize;
     let text_w = usable.saturating_sub(indent + 1).max(1);
     let mut rows = Vec::new();
@@ -300,7 +304,7 @@ fn user_highlight_segments(
     text: &str,
     is_command: bool,
     base_style: Style,
-    theme: &ui::Theme,
+    theme: &crate::ui::Theme,
 ) -> Vec<StyledSegment> {
     if is_command {
         return vec![StyledSegment {
@@ -323,7 +327,7 @@ fn user_highlight_segments(
 
 // ── Stash ──
 
-fn stash_row(_usable: usize, theme: &ui::Theme) -> WindowRow {
+fn stash_row(_usable: usize, theme: &crate::ui::Theme) -> WindowRow {
     let text = "› Stashed (ctrl+s to unstash)";
     let display: String = text.chars().take(_usable).collect();
     WindowRow::styled(vec![
@@ -348,7 +352,7 @@ fn bar_row(
     width: usize,
     left: Option<&[BarSpan]>,
     right: Option<&[BarSpan]>,
-    theme: &ui::Theme,
+    theme: &crate::ui::Theme,
 ) -> WindowRow {
     let dash = "\u{2500}";
     let bar_color = theme_color(theme, "SmeltBar");
@@ -477,7 +481,7 @@ fn bar_row(
     WindowRow::styled(segs)
 }
 
-fn build_top_bar_right(info: &BarInfo, theme: &ui::Theme) -> Vec<BarSpan> {
+fn build_top_bar_right(info: &BarInfo, theme: &crate::ui::Theme) -> Vec<BarSpan> {
     let muted = theme_color(theme, "Comment");
     let bar = theme_color(theme, "SmeltBar");
     let mut spans = Vec::new();
@@ -579,7 +583,7 @@ fn compute_input_area(
     input: &PromptInput<'_>,
     usable: usize,
     row_offset: u16,
-    theme: &ui::Theme,
+    theme: &crate::ui::Theme,
 ) -> InputArea {
     let height = input.height as usize;
     let state = input.input;
@@ -772,7 +776,7 @@ fn styled_char_segments(
     kinds: &[SpanKind],
     selection: Option<(usize, usize)>,
     cursor_pos: Option<usize>,
-    theme: &ui::Theme,
+    theme: &crate::ui::Theme,
 ) -> Vec<StyledSegment> {
     let mut segments: Vec<StyledSegment> = Vec::new();
     let mut current_text = String::new();
@@ -853,7 +857,7 @@ fn exec_bang_segments(
     kinds: &[SpanKind],
     selection: Option<(usize, usize)>,
     cursor_pos: Option<usize>,
-    theme: &ui::Theme,
+    theme: &crate::ui::Theme,
 ) -> Vec<StyledSegment> {
     let mut segs = Vec::new();
 
@@ -915,8 +919,8 @@ fn exec_bang_segments(
 mod tests {
     use super::*;
 
-    fn test_theme() -> ui::Theme {
-        let mut t = ui::Theme::new();
+    fn test_theme() -> crate::ui::Theme {
+        let mut t = crate::ui::Theme::new();
         crate::theme::populate_ui_theme(&mut t);
         t
     }
@@ -1005,12 +1009,12 @@ mod tests {
     #[test]
     fn compute_prompt_produces_bars_and_status() {
         let input_state = PromptState::default();
-        let test_clipboard = ui::Clipboard::null();
+        let test_clipboard = crate::ui::Clipboard::null();
         let mut prompt_input = PromptInput {
             queued: &[],
             stash: &None,
             input: &input_state,
-            vim_mode: ui::VimMode::Insert,
+            vim_mode: crate::ui::VimMode::Insert,
             clipboard: &test_clipboard,
             width: 80,
             height: 10,
@@ -1025,7 +1029,10 @@ mod tests {
                 session_cost_usd: 0.0,
             },
         };
-        let mut input_buf = Buffer::new(ui::BufId(0), ui::buffer::BufCreateOpts::default());
+        let mut input_buf = Buffer::new(
+            crate::ui::BufId(0),
+            crate::ui::buffer::BufCreateOpts::default(),
+        );
         let output = compute_prompt(&mut prompt_input, &mut input_buf, &test_theme());
         // Buffer carries chrome (top bar) + input area + bottom bar at least.
         assert!(input_buf.line_count() >= 3);

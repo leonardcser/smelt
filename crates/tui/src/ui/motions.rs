@@ -5,7 +5,7 @@
 //! (h/j/k/l, w/b/e, f/F/t/T, %, G, gg) — these primitives are
 //! frontend-agnostic.
 
-use crate::text::{
+use super::text::{
     char_class, line_end, line_start, next_char_boundary, prev_char_boundary, CharClass,
 };
 

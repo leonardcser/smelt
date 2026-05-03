@@ -1,6 +1,6 @@
-use crate::flush::flush_diff;
-use crate::grid::Grid;
-use crate::theme::Theme;
+use super::flush::flush_diff;
+use super::grid::Grid;
+use super::theme::Theme;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::QueueableCommand;
 use std::io::Write;
@@ -90,7 +90,7 @@ impl Compositor {
 }
 
 fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
-    use crate::grid::Style;
+    use super::grid::Style;
     use crossterm::cursor::MoveTo;
     use crossterm::style::{
         Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,

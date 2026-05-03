@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/engine", "crates/tui", "crates/ui"]
+members = ["crates/protocol", "crates/engine", "crates/tui"]
 
 [package]
 name = "smelt-agent"
