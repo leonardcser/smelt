@@ -156,7 +156,7 @@ impl crate::ui::UiHost for TuiApp {
     fn rows_for(&mut self, win: crate::ui::WinId) -> Option<Vec<String>> {
         if win == crate::ui::PROMPT_WIN {
             let usable = self.ui.win(win)?.viewport?.content_width as usize;
-            let wrap = crate::term::content::prompt_wrap::PromptWrap::build(&self.input, usable);
+            let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
             Some(wrap.rows)
         } else if win == crate::ui::TRANSCRIPT_WIN {
             let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
@@ -168,7 +168,7 @@ impl crate::ui::UiHost for TuiApp {
     fn breaks_for(&mut self, win: crate::ui::WinId) -> Option<(Vec<usize>, Vec<usize>)> {
         if win == crate::ui::PROMPT_WIN {
             let usable = self.ui.win(win)?.viewport?.content_width as usize;
-            let wrap = crate::term::content::prompt_wrap::PromptWrap::build(&self.input, usable);
+            let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
             Some((wrap.soft_breaks, wrap.hard_breaks))
         } else if win == crate::ui::TRANSCRIPT_WIN {
             Some(self.transcript_line_breaks(self.core.config.settings.show_thinking))

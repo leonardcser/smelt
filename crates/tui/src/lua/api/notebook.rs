@@ -11,10 +11,10 @@
 
 use crate::core::notebook;
 use crate::core::notebook::NotebookRenderData;
-use crate::term::content::display::{ColorRole, ColorValue};
-use crate::term::content::highlight::{print_inline_diff, print_syntax_file};
-use crate::term::content::layout_out::SpanCollector;
-use crate::term::content::wrap_line;
+use crate::core::content::display::{ColorRole, ColorValue};
+use crate::content::highlight::{print_inline_diff, print_syntax_file};
+use crate::content::layout_out::SpanCollector;
+use crate::content::selection::wrap_line;
 use crate::ui::BufId;
 use mlua::prelude::*;
 use std::collections::HashMap;
@@ -31,9 +31,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     return;
                 };
                 let theme_snap = app.ui.theme().clone();
-                let width = crate::term::content::term_width() as u16;
+                let width = crate::content::term_width() as u16;
                 if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
-                    crate::term::content::to_buffer::render_into_buffer(
+                    crate::content::to_buffer::render_into_buffer(
                         buf,
                         width,
                         &theme_snap,
@@ -188,7 +188,7 @@ fn render_notebook_preview(
     viewport: u16,
 ) {
     let title = data.title();
-    let title_lines = wrap_line(&title, crate::term::content::term_width().saturating_sub(4));
+    let title_lines = wrap_line(&title, crate::content::term_width().saturating_sub(4));
     let mut skipped = skip;
     let mut emitted = 0u16;
 

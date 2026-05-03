@@ -14,10 +14,10 @@
 //! what the prompt mouse adapter (Step 7b-C) uses to translate between
 //! `state.cpos` (source bytes) and `Window::cpos` (rows-joined bytes).
 
-use crate::term::content::selection::{
+use crate::content::selection::{
     build_char_kinds, build_display_spans, spans_to_string, wrap_and_locate_cursor, Span,
 };
-use crate::term::input::{PromptState, ATTACHMENT_MARKER};
+use crate::input::{PromptState, ATTACHMENT_MARKER};
 
 pub(crate) struct PromptWrap {
     pub(crate) rows: Vec<String>,
@@ -187,7 +187,7 @@ fn build_src_disp_byte_maps(spans: &[Span], src: &str, display: &str) -> (Vec<us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::term::input::PromptState;
+    use crate::input::PromptState;
 
     #[test]
     fn translates_plain_buffer_identity() {

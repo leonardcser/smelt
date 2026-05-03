@@ -6,7 +6,7 @@ pub(crate) fn render_markdown_inner(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&crate::term::content::BoxContext>,
+    bctx: Option<&crate::content::BoxContext>,
 ) -> u16 {
     let _perf = crate::perf::begin("render:markdown");
     let max_cols = if let Some(b) = bctx {
@@ -96,7 +96,7 @@ pub(crate) fn render_markdown_inner(
             }
             let trimmed = lines[i].trim_start();
             {
-                use crate::term::content::highlight::{
+                use crate::content::highlight::{
                     emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans,
                     InlineSpan, InlineStyle,
                 };
@@ -253,7 +253,7 @@ pub(super) fn is_horizontal_rule(line: &str) -> bool {
 /// only renders 3 of them to match the visual weight of list markers.
 fn render_horizontal_rule(
     out: &mut SpanCollector,
-    bctx: Option<&crate::term::content::BoxContext>,
+    bctx: Option<&crate::content::BoxContext>,
     indent: &str,
 ) -> u16 {
     // Use box-drawing character, render only 3 chars (like list markers)
@@ -268,7 +268,7 @@ fn render_horizontal_rule(
     out.push_dim();
     out.print_with_meta(
         &hr,
-        crate::term::content::display::SpanMeta {
+        crate::core::content::display::SpanMeta {
             selectable: true,
             copy_as: Some("---".into()),
         },
@@ -288,12 +288,12 @@ fn render_markdown_table_from_lines(
     out: &mut SpanCollector,
     lines: &[&str],
     dim: bool,
-    bctx: Option<&crate::term::content::BoxContext>,
+    bctx: Option<&crate::content::BoxContext>,
     indent: &str,
 ) -> u16 {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
-        if crate::term::content::is_table_separator(line) {
+        if crate::core::content::is_table_separator(line) {
             continue;
         }
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
@@ -315,7 +315,7 @@ fn render_markdown_table_from_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::term::content::layout_out::SpanCollector;
+    use crate::content::layout_out::SpanCollector;
 
     #[test]
     fn rendered_table_attaches_raw_source_to_first_row() {

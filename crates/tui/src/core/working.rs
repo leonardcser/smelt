@@ -8,7 +8,8 @@
 //! a frame-by-frame animation (which used to keep CPU pegged at
 //! 60 Hz after every completed turn).
 
-use crate::term::content::{BarSpan, SPINNER_FRAMES};
+use crate::content::status::BarSpan;
+use crate::core::content::SPINNER_FRAMES;
 use crate::utils::format_duration;
 use crossterm::style::Color;
 use protocol::TurnMeta;
@@ -222,7 +223,7 @@ impl WorkingState {
         if live.pause_started.is_some() {
             return None;
         }
-        Some(SPINNER_FRAMES[crate::term::content::spinner_frame_index(live.effective_elapsed())])
+        Some(SPINNER_FRAMES[crate::core::content::spinner_frame_index(live.effective_elapsed())])
     }
 
     pub(crate) fn throbber_spans(&self, show_tps: bool, muted: Color) -> Vec<BarSpan> {
@@ -269,7 +270,7 @@ fn tps_spans(avg_tps: Option<f64>, muted: Color) -> Vec<BarSpan> {
 
 fn live_spans(live: &LiveTurn, show_tps: bool, muted: Color) -> Vec<BarSpan> {
     let elapsed = live.effective_elapsed();
-    let idx = crate::term::content::spinner_frame_index(elapsed);
+    let idx = crate::core::content::spinner_frame_index(elapsed);
     match live.phase {
         TurnPhase::Compacting => vec![
             BarSpan {

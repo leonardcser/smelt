@@ -283,7 +283,7 @@ impl PromptState {
 
         let lines = data.lines().count();
         let char_threshold =
-            PASTE_LINE_THRESHOLD * (crate::term::content::term_width().saturating_sub(1));
+            PASTE_LINE_THRESHOLD * (crate::content::term_width().saturating_sub(1));
         // Mark as from_paste if inserting at the beginning of the current line.
         // This prevents pasted content starting with '!' from being treated as a shell escape.
         let line_start = self.win.text[..self.win.cpos]

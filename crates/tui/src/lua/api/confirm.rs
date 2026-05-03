@@ -26,10 +26,10 @@ use mlua::prelude::*;
 use crate::core::cells::ConfirmResolved;
 use crate::core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::core::TuiApp;
-use crate::term::content::display::{ColorRole, ColorValue};
-use crate::term::content::highlight::BashHighlighter;
-use crate::term::content::layout_out::SpanCollector;
-use crate::term::content::to_buffer::render_into_buffer;
+use crate::core::content::display::{ColorRole, ColorValue};
+use crate::content::highlight::BashHighlighter;
+use crate::content::layout_out::SpanCollector;
+use crate::content::to_buffer::render_into_buffer;
 use crate::ui::BufId;
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
@@ -213,7 +213,7 @@ fn outside_dir_string(req: &ConfirmRequest) -> String {
 /// desc needs span-level composition we don't expose to Lua yet.
 fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) {
     let theme_snap = app.ui.theme().clone();
-    let width = crate::term::content::term_width() as u16;
+    let width = crate::content::term_width() as u16;
     let is_bash = req.tool_name == "bash";
     let multi_line_bash = is_bash && req.desc.lines().count() > 1;
 

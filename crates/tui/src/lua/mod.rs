@@ -667,7 +667,7 @@ impl LuaRuntime {
     pub(crate) fn tick_statusline(
         &self,
     ) -> (
-        Vec<crate::term::content::StatusItem>,
+        Vec<crate::content::status::StatusItem>,
         Vec<(String, Option<String>)>,
     ) {
         let Ok(sources) = self.shared.statusline_sources.lock() else {
@@ -868,7 +868,7 @@ fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::styl
 fn collect_statusline_items(
     table: &mlua::Table,
     default_align_right: bool,
-    out: &mut Vec<crate::term::content::StatusItem>,
+    out: &mut Vec<crate::content::status::StatusItem>,
 ) {
     let looks_like_item = table.contains_key("text").unwrap_or(false);
     if looks_like_item {
@@ -888,7 +888,7 @@ fn collect_statusline_items(
 fn statusline_item_from(
     entry: &mlua::Table,
     default_align_right: bool,
-) -> Option<crate::term::content::StatusItem> {
+) -> Option<crate::content::status::StatusItem> {
     let text: String = entry.get("text").ok()?;
     if text.is_empty() {
         return None;
@@ -900,7 +900,7 @@ fn statusline_item_from(
     } else {
         default_align_right
     };
-    Some(crate::term::content::StatusItem {
+    Some(crate::content::status::StatusItem {
         text,
         fg: ansi_color_from_lua(entry, "fg"),
         bg: ansi_color_from_lua(entry, "bg"),

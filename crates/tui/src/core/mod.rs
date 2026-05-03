@@ -24,6 +24,8 @@ pub(crate) mod timers;
 pub(crate) mod tools;
 pub(crate) mod transcript_cache;
 pub(crate) mod transcript_model;
+pub(crate) mod content;
+pub(crate) mod history;
 pub(crate) mod transcript_present;
 pub(crate) mod working;
 
@@ -40,8 +42,8 @@ pub(crate) use crate::core::transcript_model::{
 };
 use crate::session::Session;
 use crate::state;
-use crate::term::content;
-use crate::term::input::{History, PromptState};
+use crate::core::history::History;
+use crate::input::PromptState;
 use engine::EngineHandle;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
@@ -70,11 +72,11 @@ pub struct TuiApp {
     /// access is `self.core.<field>.X`.
     pub core: core::Core,
     /// Block history, tool states, layout cache — the committed transcript.
-    pub(crate) transcript: crate::term::content::transcript::Transcript,
+    pub(crate) transcript: crate::core::content::transcript::Transcript,
     /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
-    pub(crate) parser: crate::term::content::stream_parser::StreamParser,
+    pub(crate) parser: crate::core::content::stream_parser::StreamParser,
     /// Buffer-backed projection of the transcript into a crate::ui::Buffer.
-    pub(crate) transcript_projection: crate::term::content::transcript_buf::TranscriptProjection,
+    pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
     /// Plain-text snapshot of each visible row (top to bottom) captured
     /// during `project_transcript_buffer`. Read by
     /// `compute_transcript_cursor` to look up the glyph under the soft
@@ -109,7 +111,7 @@ pub struct TuiApp {
     /// Items returned by Lua-registered statusline sources. Appended
     /// after the Rust-side built-in spans each frame; priority /
     /// align_right on each item controls layout.
-    pub(crate) custom_status_items: Vec<content::status::StatusItem>,
+    pub(crate) custom_status_items: Vec<crate::content::status::StatusItem>,
     /// Last error message reported per statusline source. Used to
     /// rate-limit notifications so a perpetually-broken source doesn't
     /// spam one toast per frame — only re-notify when the message
@@ -153,11 +155,11 @@ pub struct TuiApp {
     pub(crate) working: working::WorkingState,
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).
-    pub(crate) transcript_gutters: crate::term::window::WindowGutters,
+    pub(crate) transcript_gutters: crate::window::WindowGutters,
     /// Last-computed viewport layout (status / transcript / prompt
     /// rows). Updated each frame in `render_normal`; read by mouse
     /// hit-testing and viewport-rows estimation.
-    pub(crate) layout: content::layout::LayoutState,
+    pub(crate) layout: crate::content::layout::LayoutState,
 
     pub(crate) permissions: Arc<crate::core::permissions::Permissions>,
     /// The active turn's state, or `None` when the app is idle.
@@ -422,7 +424,7 @@ impl TuiApp {
             // namespace registered ahead so the painted layering wins.
             let transcript_display_buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
             if let Some(buf) = ui.buf_mut(transcript_display_buf) {
-                buf.create_namespace(crate::term::content::transcript_buf::NS_SELECTION);
+                buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
             }
             assert!(ui.win_open_split_at(
                 crate::ui::TRANSCRIPT_WIN,
@@ -468,8 +470,8 @@ impl TuiApp {
             // notifications targeting PROMPT_WIN) can resolve before
             // the first render frame publishes the real layout via
             // `Ui::set_layout`.
-            ui.set_layout(crate::term::content::layout::build_layout_tree(
-                &crate::term::content::layout::LayoutInput {
+            ui.set_layout(crate::content::layout::build_layout_tree(
+                &crate::content::layout::LayoutInput {
                     term_height: h,
                     prompt_height: 3,
                 },
@@ -493,9 +495,9 @@ impl TuiApp {
         let _ = core.lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
             core,
-            transcript: crate::term::content::transcript::Transcript::new(),
-            parser: crate::term::content::stream_parser::StreamParser::new(),
-            transcript_projection: crate::term::content::transcript_buf::TranscriptProjection::new(
+            transcript: crate::core::content::transcript::Transcript::new(),
+            parser: crate::core::content::stream_parser::StreamParser::new(),
+            transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(
             ),
             last_viewport_text: Vec::new(),
             input_history: History::load(),
@@ -520,10 +522,10 @@ impl TuiApp {
             picker_state: HashMap::new(),
             term_focused: true,
             working: working::WorkingState::new(),
-            transcript_gutters: crate::term::window::TRANSCRIPT_GUTTERS,
+            transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
             // The first frame's `render_normal` overwrites this via
             // `LayoutState::from_ui` after publishing the splits tree.
-            layout: content::layout::LayoutState::default(),
+            layout: crate::content::layout::LayoutState::default(),
 
             permissions,
             agent: None,
@@ -626,7 +628,7 @@ impl TuiApp {
             .working
             .elapsed()
             .filter(|_| self.working.is_animating())
-            .map(|e| crate::term::content::spinner_frame_index(e) as u8)
+            .map(|e| crate::core::content::spinner_frame_index(e) as u8)
             .unwrap_or(0);
         self.core.cells.publish_if_changed("spinner_frame", frame);
     }
@@ -681,7 +683,7 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.prompt)
             .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
+        let ns = buf.create_namespace(crate::content::prompt_data::COMPLETER_NS);
         buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
             if let crate::ui::buffer::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
                 Some(text.clone())
@@ -699,7 +701,7 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.prompt)
             .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
+        let ns = buf.create_namespace(crate::content::prompt_data::COMPLETER_NS);
         buf.clear_namespace(ns, 0, usize::MAX);
         buf.set_extmark(
             ns,
@@ -714,7 +716,7 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.prompt)
             .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(content::prompt_data::COMPLETER_NS);
+        let ns = buf.create_namespace(crate::content::prompt_data::COMPLETER_NS);
         buf.clear_namespace(ns, 0, usize::MAX);
     }
 

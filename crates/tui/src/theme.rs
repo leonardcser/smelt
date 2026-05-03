@@ -192,7 +192,7 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::ui::Theme) {
     use crate::ui::grid::Style;
 
     let is_light = theme.is_light();
-    crate::term::content::highlight::set_syntax_theme_light(is_light);
+    crate::content::highlight::set_syntax_theme_light(is_light);
 
     let muted = Color::AnsiValue(244);
     let user_bg = if is_light {

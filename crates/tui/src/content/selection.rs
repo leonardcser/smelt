@@ -6,7 +6,7 @@
 //! and painting those lines with selection + cursor highlighting.
 
 use crate::attachment::{AttachmentId, AttachmentStore};
-use crate::term::input::ATTACHMENT_MARKER;
+use crate::input::ATTACHMENT_MARKER;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) fn truncate_str(s: &str, max: usize) -> String {

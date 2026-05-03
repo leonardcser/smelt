@@ -3,7 +3,7 @@ use super::selection::{
     spans_to_string, wrap_and_locate_cursor, wrap_line, SpanKind,
 };
 use super::status::BarSpan;
-use crate::term::input::PromptState;
+use crate::input::PromptState;
 use crate::ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, SpanStyle};
 use crate::ui::grid::Style;
 
@@ -38,7 +38,7 @@ impl WindowRow {
 
 pub(crate) struct PromptInput<'a> {
     pub(crate) queued: &'a [String],
-    pub(crate) stash: &'a Option<crate::term::input::InputSnapshot>,
+    pub(crate) stash: &'a Option<crate::input::InputSnapshot>,
     pub(crate) input: &'a PromptState,
     pub(crate) vim_mode: crate::ui::VimMode,
     pub(crate) clipboard: &'a crate::ui::Clipboard,
@@ -595,8 +595,8 @@ fn compute_input_area(
     let display_selection = state
         .display_selection_range(input.vim_mode, input.clipboard)
         .map(|(start, end)| {
-            let raw_start_char = crate::term::input::char_pos(&state.win.text, start);
-            let raw_end_char = crate::term::input::char_pos(&state.win.text, end);
+            let raw_start_char = crate::input::char_pos(&state.win.text, start);
+            let raw_end_char = crate::input::char_pos(&state.win.text, end);
             let ds = map_cursor(raw_start_char, &state.win.text, &spans);
             let de = map_cursor(raw_end_char, &state.win.text, &spans);
             (ds, de)

@@ -4,11 +4,34 @@
 //! normal buffer → view → grid path and inherits scrollbar, selection,
 //! and vim motions.
 
-use super::display::{ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle};
+use crate::core::content::display::{ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
 use crate::ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 use crate::ui::Theme;
 use crossterm::style::Color;
+
+fn named_color_to_crossterm(n: crate::core::content::display::NamedColor) -> Color {
+    use crate::core::content::display::NamedColor;
+    match n {
+        NamedColor::Reset => Color::Reset,
+        NamedColor::Black => Color::Black,
+        NamedColor::DarkGrey => Color::DarkGrey,
+        NamedColor::Red => Color::Red,
+        NamedColor::DarkRed => Color::DarkRed,
+        NamedColor::Green => Color::Green,
+        NamedColor::DarkGreen => Color::DarkGreen,
+        NamedColor::Yellow => Color::Yellow,
+        NamedColor::DarkYellow => Color::DarkYellow,
+        NamedColor::Blue => Color::Blue,
+        NamedColor::DarkBlue => Color::DarkBlue,
+        NamedColor::Magenta => Color::Magenta,
+        NamedColor::DarkMagenta => Color::DarkMagenta,
+        NamedColor::Cyan => Color::Cyan,
+        NamedColor::DarkCyan => Color::DarkCyan,
+        NamedColor::White => Color::White,
+        NamedColor::Grey => Color::Grey,
+    }
+}
 
 /// Resolve a `ColorValue` against a theme registry. The theme is
 /// borrowed for the render so a single redraw is theme-consistent.
@@ -17,7 +40,7 @@ fn resolve(c: ColorValue, theme: &Theme) -> Color {
     match c {
         ColorValue::Rgb(r, g, b) => Color::Rgb { r, g, b },
         ColorValue::Ansi(v) => Color::AnsiValue(v),
-        ColorValue::Named(n) => Color::from(n),
+        ColorValue::Named(n) => named_color_to_crossterm(n),
         ColorValue::Role(role) => {
             let group = match role {
                 ColorRole::Accent => "SmeltAccent",
@@ -159,7 +182,7 @@ pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::term::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
+    use crate::core::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
     use crate::ui::buffer::BufCreateOpts;
     use crate::ui::BufId;
     use crossterm::style::Color;

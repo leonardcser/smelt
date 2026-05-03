@@ -9,7 +9,7 @@ use crate::core::*;
 
 impl TuiApp {
     pub(crate) fn refresh_status_bar(&mut self) {
-        use crate::term::content::status::{spans_to_buffer_line, StatusSpan};
+        use crate::content::status::{spans_to_buffer_line, StatusSpan};
         use crate::ui::buffer::SpanStyle;
         use crossterm::style::Color;
 

@@ -20,7 +20,7 @@ pub(crate) const VERSION: &str = "1";
 
 /// Buffer-level operations — text, attachments, whole-buffer replace.
 pub(crate) mod buf {
-    use crate::term::input::PromptState;
+    use crate::input::PromptState;
 
     /// Replace the prompt buffer's text wholesale. Snapshots undo,
     /// clears attachments + shift-selection anchor, resets paste

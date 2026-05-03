@@ -2,9 +2,9 @@
 //! `~~`), inline-span flattening + word-wrap, and the markdown table
 //! renderer that uses both.
 
-use crate::term::content::display::{ColorRole, ColorValue, NamedColor};
-use crate::term::content::layout_out::SpanCollector;
-use crate::term::content::term_width;
+use crate::core::content::display::{ColorRole, ColorValue, NamedColor};
+use crate::content::layout_out::SpanCollector;
+use crate::content::term_width;
 use unicode_width::UnicodeWidthStr;
 
 use super::util::{
@@ -500,7 +500,7 @@ pub(crate) struct InlineStyle {
     pub(crate) dim: bool,
     pub(crate) crossedout: bool,
     pub(crate) code: bool,
-    pub(crate) fg: Option<super::super::display::ColorValue>,
+    pub(crate) fg: Option<crate::core::content::display::ColorValue>,
 }
 
 #[derive(Clone, Debug)]
@@ -664,7 +664,7 @@ fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) 
 }
 
 pub(crate) fn emit_inline_spans(out: &mut SpanCollector, spans: &[InlineSpan]) {
-    use super::super::display::{ColorRole, ColorValue, SpanStyle};
+    use crate::core::content::display::{ColorRole, ColorValue, SpanStyle};
 
     for span in spans {
         let style = SpanStyle {
@@ -694,7 +694,7 @@ pub(crate) fn inline_spans_width(spans: &[InlineSpan]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::display::{ColorRole, ColorValue, SpanStyle};
+    use crate::core::content::display::{ColorRole, ColorValue, SpanStyle};
     use super::super::super::layout_out::SpanCollector;
     use super::super::syntax::render_code_block;
     use super::*;
