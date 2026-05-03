@@ -179,7 +179,7 @@ async fn main() {
     }
 
     if args.bench {
-        tui::perf::enable();
+        smelt_core::perf::enable();
         tui::alloc::enable();
     }
 
@@ -215,7 +215,8 @@ async fn main() {
         }
     });
 
-    let shared_session: Arc<Mutex<Option<tui::session::Session>>> = Arc::new(Mutex::new(None));
+    let shared_session: Arc<Mutex<Option<smelt_core::session::Session>>> =
+        Arc::new(Mutex::new(None));
     let headless_cancel = Arc::new(tokio::sync::Notify::new());
 
     // Signal handler for graceful shutdown
@@ -248,7 +249,7 @@ async fn main() {
             }
             let session_id = if let Ok(guard) = shared.lock() {
                 if let Some(ref s) = *guard {
-                    tui::session::save(s, &tui::attachment::AttachmentStore::new());
+                    smelt_core::session::save(s, &smelt_core::attachment::AttachmentStore::new());
                     if !s.messages.is_empty() {
                         Some(s.id.clone())
                     } else {
@@ -266,7 +267,7 @@ async fn main() {
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
             if let Some(id) = session_id {
-                tui::session::print_resume_hint(&id);
+                tui::print_resume_hint(&id);
             }
             std::process::exit(0);
         });
@@ -301,8 +302,8 @@ async fn main() {
     // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
     let mut permissions = match lua_permission_rules {
-        Some(raw) => tui::core::permissions::Permissions::from_raw(&raw),
-        None => tui::core::permissions::Permissions::load(),
+        Some(raw) => smelt_core::permissions::Permissions::from_raw(&raw),
+        None => smelt_core::permissions::Permissions::load(),
     };
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
@@ -313,9 +314,9 @@ async fn main() {
     // Create shared runtime approvals and load workspace rules.
     let runtime_approvals = {
         let cwd_str = cwd.to_string_lossy();
-        let rules = tui::core::permissions::store::load(&cwd_str);
-        let (ws_tools, ws_dirs) = tui::core::permissions::store::into_approvals(&rules);
-        let mut rt = tui::core::permissions::RuntimeApprovals::new();
+        let rules = smelt_core::permissions::store::load(&cwd_str);
+        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
+        let mut rt = smelt_core::permissions::RuntimeApprovals::new();
         rt.load_workspace(ws_tools, ws_dirs);
         Arc::new(std::sync::RwLock::new(rt))
     };
@@ -333,7 +334,7 @@ async fn main() {
     let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
-    let mcp_dispatcher = tui::mcp::dispatcher::McpDispatcher::start(
+    let mcp_dispatcher = smelt_core::mcp::dispatcher::McpDispatcher::start(
         &cfg.mcp,
         Arc::clone(&permissions),
         Arc::clone(&runtime_approvals),
@@ -397,15 +398,15 @@ async fn main() {
     };
 
     let color_mode = match args.color {
-        ColorMode::Auto => tui::core::ColorMode::Auto,
-        ColorMode::Always => tui::core::ColorMode::Always,
-        ColorMode::Never => tui::core::ColorMode::Never,
+        ColorMode::Auto => smelt_core::ColorMode::Auto,
+        ColorMode::Always => smelt_core::ColorMode::Always,
+        ColorMode::Never => smelt_core::ColorMode::Never,
     };
 
     if args.headless {
         let output_format = match args.format {
-            OutputFormat::Text => tui::core::OutputFormat::Text,
-            OutputFormat::Json => tui::core::OutputFormat::Json,
+            OutputFormat::Text => smelt_core::OutputFormat::Text,
+            OutputFormat::Json => smelt_core::OutputFormat::Json,
         };
         let app_config = build_headless_config(
             model,
@@ -424,11 +425,14 @@ async fn main() {
             settings,
             cfg.settings.context_window,
         );
-        let mut core =
-            tui::core::Core::new(app_config, engine_handle, tui::core::FrontendKind::Headless);
+        let mut core = smelt_core::Core::new(
+            app_config,
+            engine_handle,
+            smelt_core::FrontendKind::Headless,
+        );
         core.skills = Some(tui_skill_loader.clone());
-        let sink = tui::core::HeadlessSink::new(output_format, color_mode, args.verbose);
-        let mut headless = tui::core::HeadlessApp::new(core, sink);
+        let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
+        let mut headless = smelt_core::HeadlessApp::new(core, sink);
         headless
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
@@ -472,7 +476,7 @@ async fn main() {
                 // Open the resume dialog inside `run()` so dismissal goes
                 // through the normal dialog lifecycle (clear_dialog_area).
                 args.message = Some("/resume".to_string());
-            } else if let Some(loaded) = tui::session::load(resume_val) {
+            } else if let Some(loaded) = smelt_core::session::load(resume_val) {
                 app.load_session(loaded);
             } else {
                 eprintln!("error: session '{}' not found", resume_val);
@@ -487,10 +491,10 @@ async fn main() {
         println!();
         app.run(ctx_rx, args.message).await;
         if !app.core.session.messages.is_empty() {
-            tui::session::print_resume_hint(&app.core.session.id);
+            tui::print_resume_hint(&app.core.session.id);
         }
     }
-    tui::perf::print_summary();
+    smelt_core::perf::print_summary();
 }
 
 /// Assemble the `AppConfig` for a headless frontend from
@@ -503,7 +507,7 @@ fn build_headless_config(
     api_base: String,
     api_key_env: String,
     provider_type: String,
-    available_models: Vec<tui::config::ResolvedModel>,
+    available_models: Vec<smelt_core::config::ResolvedModel>,
     model_config: engine::ModelConfig,
     cli_model_override: bool,
     cli_api_base_override: bool,
@@ -512,15 +516,15 @@ fn build_headless_config(
     mode_cycle: Vec<protocol::AgentMode>,
     reasoning_effort: protocol::ReasoningEffort,
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
-    settings: tui::state::ResolvedSettings,
+    settings: smelt_core::state::ResolvedSettings,
     context_window: Option<u32>,
-) -> tui::core::AppConfig {
+) -> smelt_core::AppConfig {
     let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
     let mut mode_cycle = mode_cycle;
     if !mode_cycle.contains(&mode) {
         mode_cycle.push(mode);
     }
-    tui::core::AppConfig {
+    smelt_core::AppConfig {
         model,
         api_base,
         api_key_env,

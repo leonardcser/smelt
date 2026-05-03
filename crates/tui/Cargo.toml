@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 protocol = { path = "../protocol" }
 engine = { path = "../engine" }
+smelt-core = { path = "../core" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }

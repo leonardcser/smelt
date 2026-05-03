@@ -6,7 +6,7 @@ use crate::content::{layout, prompt_data};
 
 impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
-        let _perf = crate::perf::begin("app:tick_compositor");
+        let _perf = smelt_core::perf::begin("app:tick_compositor");
         self.update_spinner();
         // Re-populate the theme registry from the host atomics so any
         // Lua-driven mutation (`smelt.theme.set('accent', …)`) lands

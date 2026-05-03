@@ -1,5 +1,5 @@
-use crate::config;
 use serde::{Deserialize, Serialize};
+use smelt_core::config;
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -72,7 +72,7 @@ pub(crate) fn load() -> Vec<MetricsEntry> {
 // ── Aggregation ─────────────────────────────────────────────────────────────
 
 fn now_ms() -> u64 {
-    crate::session::now_ms()
+    smelt_core::session::now_ms()
 }
 
 fn day_key(ms: u64) -> u64 {

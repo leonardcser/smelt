@@ -326,7 +326,7 @@ checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
 dependencies = [
  "encode_unicode",
  "libc",
- "unicode-width",
+ "unicode-width 0.2.2",
  "windows-sys 0.61.2",
 ]
 
@@ -850,7 +850,7 @@ version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
 dependencies = [
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2497,10 +2497,45 @@ dependencies = [
  "protocol",
  "reqwest",
  "serde_json",
+ "smelt-core",
  "tempfile",
  "tokio",
  "tui",
  "wiremock",
+]
+
+[[package]]
+name = "smelt-core"
+version = "0.4.7"
+dependencies = [
+ "base64",
+ "dirs",
+ "ego-tree",
+ "engine",
+ "flate2",
+ "futures-core",
+ "glob",
+ "globset",
+ "ignore",
+ "libc",
+ "mlua",
+ "protocol",
+ "reqwest",
+ "rmcp",
+ "scraper",
+ "seahash",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "syntect",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "two-face",
+ "unicode-width 0.1.14",
+ "url",
+ "vt100",
 ]
 
 [[package]]
@@ -2875,12 +2910,13 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "similar",
+ "smelt-core",
  "syntect",
  "tempfile",
  "tokio",
  "tokio-util",
  "two-face",
- "unicode-width",
+ "unicode-width 0.2.2",
  "url",
  "vt100",
 ]
@@ -2919,6 +2955,12 @@ name = "unicode-segmentation"
 version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
+
+[[package]]
+name = "unicode-width"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode-width"
@@ -2981,7 +3023,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
 dependencies = [
  "itoa",
- "unicode-width",
+ "unicode-width 0.2.2",
  "vte",
 ]
 

@@ -113,22 +113,20 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
         working.set("spinner_char", c)?;
     }
     let muted = app.ui.theme().get("Comment").fg.unwrap_or(Color::Reset);
+    let muted_ansi = super::color_to_ansi(muted);
     let throbber_arr = lua.create_table()?;
     let show_tps = app.core.config.settings.show_tps;
-    for (i, span) in app
-        .working
-        .throbber_spans(show_tps, muted)
-        .iter()
-        .enumerate()
-    {
+    for (i, item) in app.working.throbber_data(show_tps).iter().enumerate() {
         let st = lua.create_table()?;
-        st.set("text", span.text.as_str())?;
-        if let Some(fg) = super::color_to_ansi(span.color) {
-            st.set("fg", fg)?;
+        st.set("text", item.text.as_str())?;
+        if item.is_muted {
+            if let Some(c) = muted_ansi {
+                st.set("fg", c)?;
+            }
         }
-        st.set("bold", span.bold)?;
-        st.set("dim", span.dim)?;
-        st.set("priority", span.priority)?;
+        st.set("bold", item.bold)?;
+        st.set("dim", item.dim)?;
+        st.set("priority", item.priority)?;
         throbber_arr.set(i + 1, st)?;
     }
     working.set("throbber", throbber_arr)?;

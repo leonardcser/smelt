@@ -23,7 +23,6 @@ pub type AttachmentId = u64;
 /// and the event payload.
 pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
 
-pub use crate::core::clipboard::Clipboard;
 pub use buffer::Buffer;
 use callback::Callbacks;
 pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
@@ -34,6 +33,7 @@ pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, Rect};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
+pub use smelt_core::clipboard::Clipboard;
 pub use theme::Theme;
 pub use undo::{UndoEntry, UndoHistory};
 pub use vim::VimMode;

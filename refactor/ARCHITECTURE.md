@@ -505,12 +505,17 @@ into a second application object model.
 
 ```rust
 trait Host {
+    fn config(&self)        -> &AppConfig;
     fn clipboard(&mut self) -> &mut Clipboard;
     fn cells(&mut self)     -> &mut Cells;
     fn timers(&mut self)    -> &mut Timers;
-    fn lua(&mut self)       -> &mut LuaRuntime;
     fn engine(&mut self)    -> &mut EngineClient;
     fn session(&mut self)   -> &mut Session;
+    fn files(&mut self)     -> &mut FileStateCache;
+    fn processes(&mut self) -> &mut ProcessRegistry;
+    fn skills(&self)        -> &Option<Arc<SkillLoader>>;
+    fn frontend(&self)      -> FrontendKind;
+    fn confirms(&mut self)  -> &mut Confirms;
     // … nothing that mentions Ui / Window / Buffer / Overlay
 }
 
@@ -544,8 +549,10 @@ Lua bindings divide by trait:
   `smelt.notebook`, `smelt.path`, `smelt.parse`, `smelt.grep`,
   `smelt.fuzzy`, `smelt.theme`, `smelt.process`,
   `smelt.frontend` (`.is_interactive()`, `.kind()`).
+  These live in `core/src/lua/api/` and resolve via `try_with_host`.
 - **UiHost bindings** (require a Ui — headless errors at call site):
   `smelt.ui`, `smelt.win`, `smelt.buf`, `smelt.statusline`.
+  These live in `tui/src/lua/api/` and resolve via `try_with_app`.
 
 No reducer, no serialization-through-data, no leaky return-value side
 effects like `Yank(String)`. Helix/nvim-shaped: handlers mutate via the
@@ -595,15 +602,21 @@ releases.
 
 ### Bindings layout
 
-One file per Lua namespace, all under `crates/tui/src/lua/api/<name>.rs`:
-`ui.rs`, `win.rs`, `buf.rs`, `statusline.rs` (UiHost-only),
-`parse.rs`, `theme.rs`, `timer.rs`, `cell.rs`, `clipboard.rs`, `cmd.rs`,
-`engine.rs`, `permissions.rs`, `confirm.rs`, `mode.rs` (AgentMode
-Plan/Apply/Yolo), `session.rs`, `tools.rs`, `os.rs`, `fs.rs`, `http.rs`,
-`html.rs`, `notebook.rs`, `path.rs`, `grep.rs`, `fuzzy.rs`,
-`process.rs`, `frontend.rs`, `au.rs` (Host-tier).
+Host-tier bindings live under `crates/core/src/lua/api/<name>.rs`:
+`au.rs`, `cell.rs`, `clipboard.rs`, `cmd.rs`, `frontend.rs`, `fuzzy.rs`,
+`grep.rs`, `mcp.rs`, `mode.rs`, `os.rs`, `parse.rs`, `path.rs`,
+`permissions.rs`, `provider.rs`, `reasoning.rs`, `shell.rs`, `skills.rs`,
+`spawn.rs`, `task.rs`, `timer.rs`, `tools.rs`.
 
-No "tool FFI" / "UI FFI" tier; every namespace is just a binding file.
+UiHost-tier bindings live under `crates/tui/src/lua/api/<name>.rs`:
+`buf.rs`, `win.rs`, `ui.rs`, `prompt.rs`, `statusline.rs`, `confirm.rs`,
+`notebook.rs`, `diff.rs`, `syntax.rs`, `theme.rs`, `bash.rs`.
+
+A few bindings remain in `tui/src/lua/api/` pending reclassification
+(`engine.rs`, `fs.rs`, `process.rs`, `session.rs`, `html.rs`, `http.rs`,
+`image.rs`, `model.rs`, `settings.rs`, `metrics.rs`, `transcript.rs`,
+`vim.rs`, `keymap.rs`, `history.rs`).
+
 Each binding declares whether it needs `Host` or `UiHost`; calling a
 UiHost binding from a `HeadlessApp` raises a runtime error in Lua.
 
@@ -912,12 +925,13 @@ We borrow only the cell-grid concept as the intermediate rendering surface.
 - `core` depends on `protocol` and `engine` only.  `tui` depends on
   `core` and `crossterm`.
 
-**Current state:** `core/` is a module inside `crates/tui` in the
-process of being extracted into `crates/core` (P8).  `ui/` is a separate
-crate (`crates/ui/`) in the process of absorbing into `tui` as
-`tui/src/ui/` (also P8).  `term/` is a transitional module that dissolves
-during P8: its headless-safe content model moves to `core/content/` and
-its terminal chrome moves to `tui/src/`.
+**Current state:** `core/` has been extracted into `crates/core` (P8.e).
+`ui/` has been absorbed into `tui` as `tui/src/ui/` (P8.a). `term/` was
+ dissolved during P8: its headless-safe content model moved to
+`core/content/` and its terminal chrome moved to `tui/src/`. Host-tier
+Lua bindings now live in `core/src/lua/api/` and resolve through
+`try_with_host`; UiHost-tier bindings stay in `tui/src/lua/api/` and
+resolve through `try_with_app`.
 
 ## Code rules — eternal
 

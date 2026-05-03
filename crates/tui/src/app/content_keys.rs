@@ -243,7 +243,7 @@ impl TuiApp {
             let prev_sink = self
                 .core
                 .clipboard
-                .swap_sink(Box::new(crate::core::NullSink));
+                .swap_sink(Box::new(smelt_core::NullSink));
             let ctx = crate::ui::EventCtx {
                 rows: &rows,
                 soft_breaks: &[],

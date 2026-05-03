@@ -11,16 +11,17 @@ pub(crate) mod pane_focus;
 pub(crate) mod render_loop;
 pub(crate) mod status_bar;
 pub(crate) mod transcript;
+pub(crate) mod ui_host;
 
-use crate::core::history::History;
-use crate::core::ConfirmRequest;
-use crate::core::FrontendKind;
-use crate::core::Host;
 use crate::input::PromptState;
-use crate::session::Session;
 use crate::state;
 use engine::EngineHandle;
 use protocol::Content;
+use smelt_core::history::History;
+use smelt_core::session::Session;
+use smelt_core::ConfirmRequest;
+use smelt_core::FrontendKind;
+use smelt_core::Host;
 
 use crossterm::{
     cursor,
@@ -45,11 +46,12 @@ pub struct TuiApp {
     /// is the compositor-bearing frontend; `HeadlessApp` is the
     /// JSON / text sink frontend over the same `Core`. Subsystem
     /// access is `self.core.<field>.X`.
-    pub core: crate::core::Core,
+    pub core: smelt_core::Core,
+    pub lua: crate::lua::LuaRuntime,
     /// Block history, tool states, layout cache — the committed transcript.
-    pub(crate) transcript: crate::core::content::transcript::Transcript,
+    pub(crate) transcript: smelt_core::content::transcript::Transcript,
     /// Streaming parser state (active text/thinking/tool/agent/exec blocks).
-    pub(crate) parser: crate::core::content::stream_parser::StreamParser,
+    pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
     /// Buffer-backed projection of the transcript into a crate::ui::Buffer.
     pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
     /// Plain-text snapshot of each visible row (top to bottom) captured
@@ -59,8 +61,7 @@ pub struct TuiApp {
     pub(crate) last_viewport_text: Vec<String>,
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
-    pub(crate) exec_rx:
-        Option<tokio::sync::mpsc::UnboundedReceiver<crate::core::commands::ExecEvent>>,
+    pub(crate) exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>>,
     pub(crate) exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Wakeup signal from cross-thread tokio tasks (streaming
     /// subprocess spawn, future async work) that pushed a
@@ -72,8 +73,7 @@ pub struct TuiApp {
     /// Runtime approvals shared with the engine. The engine checks these
     /// during `decide()` to auto-approve tools without sending
     /// `RequestPermission`. The TUI writes to them when the user approves.
-    pub(crate) runtime_approvals:
-        Arc<std::sync::RwLock<crate::core::permissions::RuntimeApprovals>>,
+    pub(crate) runtime_approvals: Arc<std::sync::RwLock<smelt_core::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
     pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
@@ -128,7 +128,7 @@ pub struct TuiApp {
     /// Live-turn + last-turn state driving the status bar spinner and
     /// result line. `begin(TurnPhase::...)` / `finish(TurnOutcome::...)`
     /// are the write paths, mirrored from engine lifecycle events.
-    pub(crate) working: crate::core::working::WorkingState,
+    pub(crate) working: smelt_core::working::WorkingState,
     /// Gutter reservation for the transcript window (left padding +
     /// right scrollbar column).
     pub(crate) transcript_gutters: crate::window::WindowGutters,
@@ -137,7 +137,7 @@ pub struct TuiApp {
     /// hit-testing and viewport-rows estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
 
-    pub(crate) permissions: Arc<crate::core::permissions::Permissions>,
+    pub(crate) permissions: Arc<smelt_core::permissions::Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `TuiApp` so reducer handlers (`apply_ops`) can mutate
     /// it directly rather than threading `&mut Option<TurnState>`
@@ -236,7 +236,7 @@ pub(crate) enum AppFocus {
 pub(crate) struct TurnState {
     pub(crate) turn_id: u64,
     pub(crate) pending: Vec<PendingTool>,
-    pub(crate) _perf: Option<crate::perf::Guard>,
+    pub(crate) _perf: Option<smelt_core::perf::Guard>,
 }
 
 pub(crate) enum EventOutcome {
@@ -252,7 +252,7 @@ pub(crate) enum EventOutcome {
         display: String,
     },
     Exec(
-        tokio::sync::mpsc::UnboundedReceiver<crate::core::commands::ExecEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
     ),
 }
@@ -260,7 +260,7 @@ pub(crate) enum EventOutcome {
 pub(crate) enum CommandAction {
     Continue,
     Exec(
-        tokio::sync::mpsc::UnboundedReceiver<crate::core::commands::ExecEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
     ),
 }
@@ -269,7 +269,7 @@ pub(crate) enum InputOutcome {
     Continue,
     StartAgent,
     Exec(
-        tokio::sync::mpsc::UnboundedReceiver<crate::core::commands::ExecEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>,
         std::sync::Arc<tokio::sync::Notify>,
     ),
 }
@@ -321,19 +321,19 @@ impl TuiApp {
         api_base: String,
         api_key_env: String,
         provider_type: String,
-        permissions: Arc<crate::core::permissions::Permissions>,
+        permissions: Arc<smelt_core::permissions::Permissions>,
         engine: EngineHandle,
         settings: state::ResolvedSettings,
         reasoning_effort: protocol::ReasoningEffort,
         reasoning_cycle: Vec<protocol::ReasoningEffort>,
         mode_cycle: Vec<protocol::AgentMode>,
         shared_session: Arc<Mutex<Option<Session>>>,
-        available_models: Vec<crate::config::ResolvedModel>,
+        available_models: Vec<smelt_core::config::ResolvedModel>,
         cli_model_override: bool,
         cli_api_base_override: bool,
         cli_api_key_env_override: bool,
         startup_auth_error: Option<String>,
-        runtime_approvals: Arc<std::sync::RwLock<crate::core::permissions::RuntimeApprovals>>,
+        runtime_approvals: Arc<std::sync::RwLock<smelt_core::permissions::RuntimeApprovals>>,
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
@@ -365,7 +365,7 @@ impl TuiApp {
         // frontend and engine see the same approvals state. Workspace
         // rules are loaded into the Arc at startup by the caller.
 
-        let app_config = crate::core::AppConfig {
+        let app_config = smelt_core::AppConfig {
             model,
             api_base,
             api_key_env,
@@ -466,13 +466,15 @@ impl TuiApp {
             )
         };
 
-        let core = crate::core::Core::new(app_config, engine, FrontendKind::Tui);
+        let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui);
+        let lua = crate::lua::LuaRuntime::new();
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _ = core.lua.shared().wakeup_tx.set(lua_wakeup_tx);
+        let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
             core,
-            transcript: crate::core::content::transcript::Transcript::new(),
-            parser: crate::core::content::stream_parser::StreamParser::new(),
+            lua,
+            transcript: smelt_core::content::transcript::Transcript::new(),
+            parser: smelt_core::content::stream_parser::StreamParser::new(),
             transcript_projection: crate::content::transcript_buf::TranscriptProjection::new(),
             last_viewport_text: Vec::new(),
             input_history: History::load(),
@@ -496,7 +498,7 @@ impl TuiApp {
             cmdline_completer: None,
             picker_state: HashMap::new(),
             term_focused: true,
-            working: crate::core::working::WorkingState::new(),
+            working: smelt_core::working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
             // The first frame's `render_normal` overwrites this via
             // `LayoutState::from_ui` after publishing the splits tree.
@@ -560,10 +562,10 @@ impl TuiApp {
     /// composes cleanly with the TLS app pointer.
     pub(crate) fn tick_timers(&mut self) {
         let now = std::time::Instant::now();
-        let due = self.core.timers.drain_due(now, &self.core.lua.lua);
+        let due = self.core.timers.drain_due(now, self.lua.lua());
         for func in due {
             if let Err(e) = func.call::<()>(()) {
-                self.core.lua.record_error(format!("timer: {e}"));
+                self.lua.record_error(format!("timer: {e}"));
             }
         }
     }
@@ -603,7 +605,7 @@ impl TuiApp {
             .working
             .elapsed()
             .filter(|_| self.working.is_animating())
-            .map(|e| crate::core::content::spinner_frame_index(e) as u8)
+            .map(|e| smelt_core::content::spinner_frame_index(e) as u8)
             .unwrap_or(0);
         self.core.cells.publish_if_changed("spinner_frame", frame);
     }
@@ -619,11 +621,11 @@ impl TuiApp {
             return;
         }
         let fires = self.core.cells.drain_pending();
-        let lua = &self.core.lua.lua;
+        let lua = self.lua.lua();
         for fire in fires {
             let value = self.core.cells.project_to_lua(&*fire.value, lua);
             for cb in &fire.callbacks {
-                let crate::core::cells::SubscriberKind::Lua(handle) = &cb.kind;
+                let smelt_core::cells::SubscriberKind::Lua(handle) = &cb.kind;
                 let func = match lua.registry_value::<mlua::Function>(&handle.key) {
                     Ok(f) => f,
                     Err(_) => continue,
@@ -634,9 +636,7 @@ impl TuiApp {
                     func.call::<()>(value.clone())
                 };
                 if let Err(e) = result {
-                    self.core
-                        .lua
-                        .record_error(format!("cell `{}`: {e}", fire.name));
+                    self.lua.record_error(format!("cell `{}`: {e}", fire.name));
                 }
             }
         }
@@ -860,21 +860,21 @@ impl TuiApp {
         // Lua runs at startup so those reads land on the real TuiApp.
         {
             let _guard = crate::lua::install_app_ptr(self);
-            self.lua().load_plugins();
+            self.lua.load_plugins();
             self.core.cells.set_dyn(
                 "session_started",
                 std::rc::Rc::new(self.core.session.id.clone()),
             );
             self.drain_cells_pending();
         }
-        if let Some(err) = self.core.lua.load_error.take() {
+        if let Some(err) = self.lua.take_load_error() {
             self.notify_error(format!("lua init: {err}"));
         }
         self.flush_lua_callbacks();
         // Plugins have now registered their commands — pull every
         // declared `args = {...}` list so the CommandArg picker opens
         // when the user types `/name ` (space).
-        self.input.command_arg_sources = self.core.lua.list_command_args();
+        self.input.command_arg_sources = self.lua.list_command_args();
 
         let mut term_events = EventStream::new();
 
@@ -896,7 +896,7 @@ impl TuiApp {
                     .split_whitespace()
                     .next()
                     .unwrap_or("");
-                if self.core.lua.command_startup_ok(name) == Some(true) {
+                if self.lua.command_startup_ok(name) == Some(true) {
                     self.apply_lua_command(trimmed);
                 } else {
                     self.notify_error(format!(
@@ -941,7 +941,7 @@ impl TuiApp {
             self.publish_diff_cells();
             self.drain_cells_pending();
             self.drive_lua_tasks();
-            let (items, tick_errors) = self.core.lua.tick_statusline();
+            let (items, tick_errors) = self.lua.tick_statusline();
             self.custom_status_items = items;
             for (name, msg) in tick_errors {
                 match msg {
@@ -957,17 +957,16 @@ impl TuiApp {
                 }
             }
             for _id in self.drain_finished_blocks() {
-                self.core.cells.set_dyn(
-                    "block_done",
-                    std::rc::Rc::new(crate::core::cells::EventStub),
-                );
+                self.core
+                    .cells
+                    .set_dyn("block_done", std::rc::Rc::new(smelt_core::cells::EventStub));
             }
             self.drain_cells_pending();
             self.flush_lua_callbacks();
             // Fire `WinEvent::Tick` on every window with a registered
             // Tick callback.
             {
-                let lua = &self.core.lua;
+                let lua = &self.lua;
                 let mut lua_invoke =
                     |handle: crate::ui::LuaHandle,
                      win: crate::ui::WinId,
@@ -1228,10 +1227,10 @@ impl TuiApp {
                     }
                 } => {
                     match ev {
-                        crate::core::commands::ExecEvent::Output(line) => {
+                        crate::commands::ExecEvent::Output(line) => {
                             self.append_exec_output(&line);
                         }
-                        crate::core::commands::ExecEvent::Done(code) => {
+                        crate::commands::ExecEvent::Done(code) => {
                             self.finish_exec(code);
                             self.finalize_exec();
                             self.exec_rx = None;
@@ -1280,7 +1279,7 @@ impl TuiApp {
         }
         self.core
             .cells
-            .set_dyn("shutdown", std::rc::Rc::new(crate::core::cells::EventStub));
+            .set_dyn("shutdown", std::rc::Rc::new(smelt_core::cells::EventStub));
         self.drain_cells_pending();
         self.save_session();
 

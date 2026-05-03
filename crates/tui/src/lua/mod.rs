@@ -25,65 +25,29 @@
 
 mod api;
 pub(crate) mod app_ref;
-mod task;
 mod tasks;
 pub(crate) mod ui_ops;
 
-pub(crate) use app_ref::{
-    install_app_ptr, try_with_app, try_with_host, try_with_ui_host, with_app, with_host,
-    with_ui_host,
+pub(crate) use app_ref::{install_app_ptr, try_with_app, try_with_ui_host, with_app, with_ui_host};
+
+pub(crate) use smelt_core::lua::{
+    LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult,
 };
 
-pub(crate) use task::{current_task_cancel, LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
-pub(crate) use tasks::ToolEnv;
-
-/// Outcome of invoking a plugin tool handler.
-pub(crate) enum ToolExecResult {
-    /// Handler returned without yielding — caller forwards this
-    /// content to the engine immediately.
-    Immediate { content: String, is_error: bool },
-    /// Handler yielded (called an API that suspends on the
-    /// `LuaTask` runtime). The result will arrive later via
-    /// `drive_tasks() -> TaskDriveOutput::ToolComplete`.
-    Pending,
-}
+pub(crate) use smelt_core::lua::StatusSource;
 
 use mlua::prelude::*;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 /// One Lua-registered `/command` entry. Lives in `LuaShared.commands`
 /// so completers (`list_commands`, `is_lua_command`) read the same
-/// map the dispatcher does — no parallel snapshot.
-pub(crate) struct RegisteredCommand {
-    pub(crate) handle: LuaHandle,
-    pub(crate) description: Option<String>,
-    pub(crate) args: Vec<String>,
-    /// May this command run while the agent is mid-turn? Defaults to
-    /// `true`. Plugins like `/compact` / `/fork` / `/resume` set
-    /// `while_busy = false` so the dispatcher rejects them with
-    /// `cannot run /name while agent is working` instead of queueing.
-    pub(crate) while_busy: bool,
-    /// Should this command queue as a regular message when invoked
-    /// while the agent is mid-turn? Defaults to `false`. User-defined
-    /// custom commands (which spawn their own turn) opt in so the
-    /// dispatcher silently defers them until the current turn ends
-    /// instead of erroring or running mid-turn.
-    pub(crate) queue_when_busy: bool,
-    /// May this command be invoked as a startup argument
-    /// (`smelt /name`)? Defaults to `false`; plugins that open a UI
-    /// useful at launch (`/resume`, `/settings`) opt in.
-    pub(crate) startup_ok: bool,
-}
-
 /// List all Lua-registered `/commands` as `(name, description)`.
 /// Sorted by name. Used by the `/` completer. Reads live via
 /// `try_with_app`; returns empty when no app pointer is installed
 /// (e.g. early startup).
 pub(crate) fn list_commands() -> Vec<(String, Option<String>)> {
-    try_with_app(|app| app.core.lua.list_commands_with_desc()).unwrap_or_default()
+    try_with_app(|app| app.lua.list_commands_with_desc()).unwrap_or_default()
 }
 
 /// True if `input` (e.g. `/pick-test` or `/pick-test arg`) matches a
@@ -96,7 +60,7 @@ pub(crate) fn is_lua_command(input: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    try_with_app(|app| app.core.lua.has_command(name)).unwrap_or(false)
+    try_with_app(|app| app.lua.has_command(name)).unwrap_or(false)
 }
 
 /// Format a `crossterm::KeyEvent` into an nvim-style chord string
@@ -260,24 +224,6 @@ pub(crate) fn parse_win_event(name: &str) -> Option<crate::ui::WinEvent> {
 
 /// A Lua callable registered via `smelt.cmd.register` / `smelt.keymap` /
 /// `smelt.on`. Stored as a mlua `RegistryKey` so references survive
-/// across GC cycles and can be invoked from Rust handlers.
-pub(crate) struct LuaHandle {
-    pub(crate) key: mlua::RegistryKey,
-}
-
-/// Per-plugin-tool callable handles. `execute` is mandatory; the rest
-/// are optional permission hooks the plugin opts in to via
-/// `smelt.tools.register{ needs_confirm = fn, approval_patterns = fn,
-/// preflight = fn }`. When at least one hook is set, the engine
-/// round-trips through `ToolHooksRequest` per call before
-/// dispatching the tool — same Allow / Deny / Ask flow core tools use.
-pub(crate) struct ToolHandles {
-    pub(crate) execute: LuaHandle,
-    pub(crate) needs_confirm: Option<LuaHandle>,
-    pub(crate) approval_patterns: Option<LuaHandle>,
-    pub(crate) preflight: Option<LuaHandle>,
-}
-
 /// Stash a Lua callable in `shared.callbacks` under a fresh u64 id.
 /// Used by every `smelt.win.*` binding that takes a callback — pulls
 /// the registry-value + atomic-id + insert dance out of the bindings.
@@ -291,7 +237,7 @@ pub(crate) fn register_callback_handle(
         .next_id
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut cbs) = shared.callbacks.lock() {
-        cbs.insert(id, LuaHandle { key });
+        cbs.insert(id, smelt_core::lua::LuaHandle { key });
     }
     Ok(id)
 }
@@ -304,72 +250,8 @@ pub(crate) fn drop_displaced_lua_handle(
     displaced: Option<crate::ui::Callback>,
 ) {
     if let Some(crate::ui::Callback::Lua(crate::ui::LuaHandle(old))) = displaced {
-        app.core.lua.remove_callback(old);
+        app.lua.remove_callback(old);
     }
-}
-
-/// One registered `smelt.statusline.register` entry. `default_align`
-/// applies to items the source returns without an explicit
-/// `align_right` field; items can still override per-item.
-pub(crate) struct StatusSource {
-    pub(crate) handle: LuaHandle,
-    pub(crate) default_align_right: bool,
-}
-
-/// All shared state between Lua closures and the app loop.
-/// One `Arc<LuaShared>` replaces N separate `Arc<Mutex<…>>` fields.
-pub(crate) struct LuaShared {
-    pub(crate) commands: Mutex<HashMap<String, RegisteredCommand>>,
-    pub(crate) keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
-    /// Statusline sources in registration order. A `Vec` (not a
-    /// `HashMap`) so the on-screen left-to-right order matches the
-    /// order plugins called `smelt.statusline.register`. Re-registering
-    /// an existing name updates in place without changing position.
-    pub(crate) statusline_sources: Mutex<Vec<(String, StatusSource)>>,
-    pub(crate) tools: Mutex<HashMap<String, ToolHandles>>,
-    pub(crate) callbacks: Mutex<HashMap<u64, LuaHandle>>,
-    pub(crate) next_id: AtomicU64,
-    /// Separate counter for buffer IDs minted by `smelt.buf.create`.
-    /// Starts at `1 << 32` so Lua-allocated `BufId`s never collide with
-    /// Rust-side buffers (prompt input, scratch, etc.) that are minted
-    /// by `ui.buf_create` from 1.
-    pub(crate) next_buf_id: AtomicU64,
-    /// Lock-free counter for `smelt.task.alloc`. Lives on the
-    /// shared arc (not in `LuaTaskRuntime`) so a Lua coroutine running
-    /// *inside* `drive_tasks` — which already holds the `tasks` lock —
-    /// can mint an id without re-entering the same mutex.
-    pub(crate) next_external_id: AtomicU64,
-    pub(crate) tasks: Mutex<LuaTaskRuntime>,
-    /// Task-runtime inbox. Dialog callbacks / other UI events that need
-    /// to *resume a Lua coroutine* push here instead of through `ops`.
-    /// Keeps the reducer's `AppOp` enum free of Lua-task variants; the
-    /// Lua module pumps its own inbox each tick.
-    pub(crate) task_inbox: Mutex<Vec<TaskEvent>>,
-    /// Pending Lua keymap / event callback invocations. Recorded during
-    /// `ui.dispatch_event` / `ui.fire_win_event` (where `&mut Ui` is held
-    /// and the Lua body therefore cannot call back into TuiApp state),
-    /// drained by TuiApp right after the ui call returns so each Lua body
-    /// runs with the TLS app pointer installed and sole access to TuiApp.
-    /// Without this deferral, a Lua callback that calls
-    /// `smelt.ui.dialog.open` would collide with the ui borrow.
-    pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
-    /// Cross-thread JSON inbox mirroring `task_inbox`. tokio tasks
-    /// push `(external_id, json)` tuples; the main loop drains
-    /// them into `task_inbox` (as `ExternalResolvedJson`) before
-    /// pumping. Wrapped in `Arc<Mutex<...>>` so the
-    /// `LuaResumeSink` clone the tokio task holds is `Send`.
-    pub(crate) json_inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
-    /// Sender that wakes the main loop when a tokio task pushes a
-    /// JSON resume payload from outside the main thread. The
-    /// receiver lives on `TuiApp`; its `select!` arm flushes the
-    /// inbox and renders. Optional so `LuaShared::default()` stays
-    /// trivially constructable.
-    pub(crate) wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
-    // ── Config registries (populated by init.lua before engine starts) ───────
-    pub(crate) providers: Mutex<Vec<crate::config::ProviderConfig>>,
-    pub(crate) permission_rules: Mutex<Option<crate::core::permissions::rules::RawPerms>>,
-    pub(crate) mcp_configs: Mutex<std::collections::HashMap<String, crate::mcp::McpServerConfig>>,
-    pub(crate) settings_overrides: Mutex<std::collections::HashMap<String, String>>,
 }
 
 /// A callback invocation recorded by the ui dispatch path while
@@ -381,99 +263,59 @@ pub(crate) struct PendingInvocation {
     pub(crate) payload: crate::ui::Payload,
 }
 
-/// Events that drive the Lua task runtime. After the D3 dialog + D2b
-/// picker ports both runtime files (`runtime/lua/smelt/dialog.lua`,
-/// `runtime/lua/smelt/picker.lua`) register `Callback::Lua` handlers
-/// directly via `smelt.win.set_keymap` / `on_event` and resolve
-/// themselves via `smelt.task.resume`, so the only remaining
-/// event is the externally-allocated resume itself.
-pub(crate) enum TaskEvent {
-    /// `smelt.task.resume(id, value)` posts this to route the
-    /// resume through the Lua pump. The pump looks up the parked task
-    /// by `id` and resumes it with the stored value on the next
-    /// `pump_task_events` drain.
-    ExternalResolved {
-        external_id: u64,
-        value: mlua::RegistryKey,
-    },
-    /// Cross-thread resume — pushed by tokio tasks (e.g. streaming
-    /// subprocess spawn) that need to resume a parked Lua coroutine
-    /// from outside the main thread. JSON is `Send`; the pump
-    /// converts it to an `mlua::Value` on the main thread.
-    ExternalResolvedJson {
-        external_id: u64,
-        value: serde_json::Value,
-    },
+/// TUI-specific extension of [`smelt_core::lua::LuaShared`] that adds
+/// the `pending_invocations` queue. `Deref`s to the core shared state
+/// so existing `self.shared.commands.lock()`-style call sites keep
+/// working via autoderef on method calls.
+pub(crate) struct LuaShared {
+    pub(crate) core: Arc<smelt_core::lua::LuaShared>,
+    pub(crate) pending_invocations: Mutex<Vec<PendingInvocation>>,
 }
 
 impl Default for LuaShared {
     fn default() -> Self {
         Self {
-            commands: Mutex::new(HashMap::new()),
-            keymaps: Mutex::new(HashMap::new()),
-            statusline_sources: Mutex::new(Vec::new()),
-            tools: Mutex::new(HashMap::new()),
-            callbacks: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
-            next_buf_id: AtomicU64::new(crate::ui::LUA_BUF_ID_BASE),
-            next_external_id: AtomicU64::new(1),
-            tasks: Mutex::new(LuaTaskRuntime::new()),
-            task_inbox: Mutex::new(Vec::new()),
+            core: Arc::new(smelt_core::lua::LuaShared::default()),
             pending_invocations: Mutex::new(Vec::new()),
-            json_inbox: Arc::new(Mutex::new(Vec::new())),
-            wakeup_tx: std::sync::OnceLock::new(),
-            providers: Mutex::new(Vec::new()),
-            permission_rules: Mutex::new(None),
-            mcp_configs: Mutex::new(std::collections::HashMap::new()),
-            settings_overrides: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+}
+
+impl std::ops::Deref for LuaShared {
+    type Target = smelt_core::lua::LuaShared;
+    fn deref(&self) -> &Self::Target {
+        &self.core
     }
 }
 
 impl LuaShared {
-    /// Build a `Send`-safe handle that lets a tokio task push a
-    /// JSON resume payload and wake the main loop. `Arc<LuaShared>`
-    /// itself is `!Send` (it owns `mlua::Thread`s inside `tasks`);
-    /// the resume sink is the narrowest cross-thread surface.
-    pub(crate) fn resume_sink(&self) -> LuaResumeSink {
-        LuaResumeSink {
-            inbox: Arc::clone(&self.json_inbox),
-            wakeup: self.wakeup_tx.get().cloned(),
-        }
-    }
-}
-
-/// Send-safe handle a tokio task uses to resume a parked Lua
-/// coroutine from outside the main thread. Stores into a
-/// `LuaShared.json_inbox` mirror; the main loop drains that into
-/// the runtime's `task_inbox` before pumping.
-#[derive(Clone)]
-pub(crate) struct LuaResumeSink {
-    inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
-    wakeup: Option<tokio::sync::mpsc::UnboundedSender<()>>,
-}
-
-impl LuaResumeSink {
-    /// Push a JSON resume payload. Wakes the main loop so the
-    /// runtime pumps the inbox on the next iteration.
-    pub(crate) fn resolve_json(&self, external_id: u64, value: serde_json::Value) {
-        if let Ok(mut inbox) = self.inbox.lock() {
-            inbox.push((external_id, value));
-        }
-        if let Some(ref tx) = self.wakeup {
-            let _ = tx.send(());
-        }
+    /// Clone the inner `Arc<smelt_core::lua::LuaShared>` so core-side
+    /// API modules (which take `Arc<core::LuaShared>`) can capture it
+    /// in `'static` Lua closures.
+    pub(crate) fn core_arc(&self) -> Arc<smelt_core::lua::LuaShared> {
+        Arc::clone(&self.core)
     }
 }
 
 /// User-scoped Lua state + any recorded startup error.
+/// Wraps [`smelt_core::lua::LuaRuntime`] and adds TUI-specific
+/// callback queues and statusline rendering.
 pub struct LuaRuntime {
-    pub(crate) lua: Lua,
-    pub(crate) load_error: Option<String>,
+    core: smelt_core::lua::LuaRuntime,
     shared: Arc<LuaShared>,
-    /// Optional override for the path to `init.lua`.
-    /// If `None`, the default `XDG_CONFIG_HOME/smelt/init.lua` is used.
-    init_lua_path: Option<std::path::PathBuf>,
+}
+
+impl std::ops::Deref for LuaRuntime {
+    type Target = smelt_core::lua::LuaRuntime;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl std::ops::DerefMut for LuaRuntime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
 }
 
 impl LuaRuntime {
@@ -485,32 +327,16 @@ impl LuaRuntime {
     /// at registration time (e.g. `/model` declaring `args = model_keys`)
     /// see real data.
     pub fn new() -> Self {
-        let lua = Lua::new();
-        // `Arc<LuaShared>` is single-threaded in practice (all Lua
-        // callbacks fire on the TUI thread). The task runtime holds
-        // `mlua::Thread` which is !Send, so the Arc is flagged by
-        // clippy. Allow explicitly — we never clone across threads.
-        #[allow(clippy::arc_with_non_send_sync)]
         let shared = Arc::new(LuaShared::default());
+        let mut core = smelt_core::lua::LuaRuntime::with_shared(shared.core_arc());
 
-        let load_error = Self::register_api(&lua, &shared)
-            .err()
-            .map(|e| e.to_string());
-
-        let mut rt = Self {
-            lua,
-            load_error,
-            shared,
-            init_lua_path: None,
-        };
-
-        if rt.load_error.is_none() {
-            if let Err(e) = register_embedded_searcher(&rt.lua) {
-                rt.load_error = Some(format!("embedded searcher: {e}"));
+        if core.load_error.is_none() {
+            if let Err(e) = Self::register_api(&core.lua, &shared) {
+                core.load_error = Some(e.to_string());
             }
         }
 
-        rt
+        Self { core, shared }
     }
 
     /// Borrow the shared state. Used to clone `Arc<LuaShared>` into
@@ -521,138 +347,37 @@ impl LuaRuntime {
         &self.shared
     }
 
-    /// Read the load error, if any. Returns `None` when init.lua and
-    /// all autoload modules loaded successfully.
-    pub fn load_error(&self) -> Option<&str> {
-        self.load_error.as_deref()
+    /// Access the underlying `mlua::Lua` state.
+    pub(crate) fn lua(&self) -> &Lua {
+        &self.core.lua
     }
 
-    /// Run `~/.config/smelt/init.lua` only. Safe to call before
-    /// `TuiApp` exists — config bindings write to `LuaShared` and
-    /// don't need `with_app`.
-    pub fn to_config(&self) -> crate::config::Config {
-        crate::config::Config::from_lua_shared(self.shared())
-    }
-
-    /// Take any permission rules registered by Lua config.
-    pub fn take_permission_rules(&self) -> Option<crate::core::permissions::rules::RawPerms> {
-        self.shared()
-            .permission_rules
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-    }
-
-    /// Set a custom path for `init.lua` (overrides the default
-    /// `XDG_CONFIG_HOME/smelt/init.lua`).
-    pub fn set_init_lua_path(&mut self, path: std::path::PathBuf) {
-        self.init_lua_path = Some(path);
-    }
-
-    pub fn load_user_config(&mut self) {
-        if self.load_error.is_some() {
-            return;
-        }
-        let path = self.init_lua_path.clone().or_else(init_lua_path);
-        if let Some(path) = path {
-            if path.exists() {
-                if let Err(e) = self.load_init(&path) {
-                    let label = self
-                        .init_lua_path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "~/.config/smelt/init.lua".to_string());
-                    self.load_error = Some(format!("{label}: {e}"));
-                }
-            }
-        }
-    }
-
-    /// Run embedded autoload plugins only. Call *after* installing
-    /// the TLS app pointer so plugins that read `with_app` work.
-    pub(crate) fn load_autoload(&mut self) {
-        if self.load_error.is_some() {
-            return;
-        }
-        for &name in AUTOLOAD_MODULES {
-            let code = format!("require('{name}')");
-            if let Err(e) = self.lua.load(&code).set_name(name).exec() {
-                self.load_error = Some(format!("autoload {name}: {e}"));
-                return;
-            }
-        }
+    /// Take the load error, if any.
+    pub(crate) fn take_load_error(&mut self) -> Option<String> {
+        self.core.load_error.take()
     }
 
     /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
     /// *after* pushing startup snapshots so plugins see populated
     /// `smelt.engine.models()` etc.
     pub(crate) fn load_plugins(&mut self) {
-        self.load_user_config();
+        self.core.load_user_config();
         self.load_autoload();
     }
 
-    fn load_init(&mut self, path: &std::path::Path) -> LuaResult<()> {
-        let src = std::fs::read_to_string(path)
-            .map_err(|e| LuaError::RuntimeError(format!("read init.lua: {e}")))?;
-        self.lua.load(&src).set_name("init.lua").exec()
-    }
-
-    /// Invoke a registered command by name. Returns `true` when the
-    /// command exists and was dispatched (regardless of whether the
-    /// handler succeeded); `false` when the name isn't bound.
-    pub(crate) fn run_command(&self, name: &str, arg: Option<String>) -> bool {
-        let func = {
-            let Ok(map) = self.shared.commands.lock() else {
-                return false;
-            };
-            let Some(entry) = map.get(name) else {
-                return false;
-            };
-            let Ok(f) = self.lua.registry_value::<mlua::Function>(&entry.handle.key) else {
-                return false;
-            };
-            f
-        };
-        let result: LuaResult<()> = match arg {
-            Some(a) => func.call::<()>(a),
-            None => func.call::<()>(()),
-        };
-        if let Err(e) = result {
-            self.record_error(format!("cmd `{name}`: {e}"));
+    /// Run embedded autoload plugins only. Call *after* installing
+    /// the TLS app pointer so plugins that read `with_app` work.
+    pub(crate) fn load_autoload(&mut self) {
+        if self.core.load_error.is_some() {
+            return;
         }
-        true
-    }
-
-    /// Dispatch a keymap chord to any Lua-registered handler. `current_mode`
-    /// is the vim mode name (e.g. "Normal", "Insert", "Visual") or `None`
-    /// when vim mode is disabled. A handler registered with mode `""` matches
-    /// any mode; `"n"` matches Normal, `"i"` Insert, `"v"` Visual.
-    pub(crate) fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> bool {
-        let func = {
-            let Ok(map) = self.shared.keymaps.lock() else {
-                return false;
-            };
-            let mode_char = current_mode.map(|m| match m {
-                "Normal" => "n",
-                "Insert" => "i",
-                "Visual" => "v",
-                _ => "n",
-            });
-            let handle = mode_char
-                .and_then(|mc| map.get(&(mc.to_string(), chord.to_string())))
-                .or_else(|| map.get(&(String::new(), chord.to_string())));
-            let Some(handle) = handle else {
-                return false;
-            };
-            let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-                return false;
-            };
-            f
-        };
-        if let Err(e) = func.call::<()>(()) {
-            self.record_error(format!("keymap `{chord}`: {e}"));
+        for &name in AUTOLOAD_MODULES {
+            let code = format!("require('{name}')");
+            if let Err(e) = self.core.lua.load(&code).set_name(name).exec() {
+                self.core.load_error = Some(format!("autoload {name}: {e}"));
+                return;
+            }
         }
-        true
     }
 
     /// Call every registered statusline source and return the combined
@@ -677,6 +402,7 @@ impl LuaRuntime {
         let mut tick_errors: Vec<(String, Option<String>)> = Vec::new();
         for (name, source) in sources.iter() {
             let Ok(func) = self
+                .core
                 .lua
                 .registry_value::<mlua::Function>(&source.handle.key)
             else {
@@ -710,7 +436,7 @@ impl LuaRuntime {
     /// method hands the handle to the Lua dialog runner.
     pub(crate) fn fire_confirm_open(&self, handle_id: u64) {
         let result: mlua::Result<()> = (|| {
-            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
+            let smelt: mlua::Table = self.core.lua.globals().get("smelt")?;
             let confirm: mlua::Table = smelt.get("confirm")?;
             let open: mlua::Function = confirm.get("open")?;
             open.call::<()>(handle_id)
@@ -718,143 +444,6 @@ impl LuaRuntime {
         if let Err(e) = result {
             self.record_error(format!("smelt.confirm.open: {e}"));
         }
-    }
-
-    /// Fire `smelt.mode.cycle()`. Used by the BackTab keymap and
-    /// the confirm dialog's mode-cycle button. The Lua side
-    /// (`runtime/lua/smelt/modes.lua`) reads the configured cycle
-    /// list, picks the next entry, and calls `smelt.mode.set` —
-    /// which routes back into Rust through `TuiApp::set_mode`.
-    pub(crate) fn cycle_mode(&self) {
-        let result: mlua::Result<()> = (|| {
-            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
-            let mode: mlua::Table = smelt.get("mode")?;
-            let cycle: mlua::Function = mode.get("cycle")?;
-            cycle.call::<()>(())
-        })();
-        if let Err(e) = result {
-            self.record_error(format!("smelt.mode.cycle: {e}"));
-        }
-    }
-
-    /// Fire `smelt.reasoning.cycle()`. Mirrors `cycle_mode` for the
-    /// Ctrl+T keymap.
-    pub(crate) fn cycle_reasoning(&self) {
-        let result: mlua::Result<()> = (|| {
-            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
-            let reasoning: mlua::Table = smelt.get("reasoning")?;
-            let cycle: mlua::Function = reasoning.get("cycle")?;
-            cycle.call::<()>(())
-        })();
-        if let Err(e) = result {
-            self.record_error(format!("smelt.reasoning.cycle: {e}"));
-        }
-    }
-
-    pub(crate) fn record_error(&self, msg: String) {
-        // Route through `smelt.notify_error` so tests that override
-        // it (`install_test_notify`) capture errors emitted by the
-        // runtime itself, not just user `smelt.notify_error(...)`
-        // calls. Production sees the same routing — Lua dispatches
-        // through `with_app` to `TuiApp::notify_error`.
-        if let Ok(smelt) = self.lua.globals().get::<mlua::Table>("smelt") {
-            if let Ok(func) = smelt.get::<mlua::Function>("notify_error") {
-                let _ = func.call::<()>(msg);
-            }
-        }
-    }
-
-    /// Whether a command with `name` is registered via Lua.
-    pub(crate) fn has_command(&self, name: &str) -> bool {
-        self.shared
-            .commands
-            .lock()
-            .map(|m| m.contains_key(name))
-            .unwrap_or(false)
-    }
-
-    /// `Some(true)` if the registered command opted out of running
-    /// while the agent is mid-turn (`while_busy = false`).
-    /// `Some(false)` if it's registered and allowed. `None` if no
-    /// command by that name is registered.
-    pub(crate) fn command_blocks_while_busy(&self, name: &str) -> Option<bool> {
-        self.shared
-            .commands
-            .lock()
-            .ok()?
-            .get(name)
-            .map(|c| !c.while_busy)
-    }
-
-    /// True if the registered command opted into `queue_when_busy`,
-    /// meaning the dispatcher should defer it to after the current
-    /// turn instead of running it mid-turn or erroring. False for
-    /// unregistered commands or commands without the opt-in.
-    pub(crate) fn command_queues_when_busy(&self, name: &str) -> bool {
-        self.shared
-            .commands
-            .lock()
-            .ok()
-            .and_then(|m| m.get(name).map(|c| c.queue_when_busy))
-            .unwrap_or(false)
-    }
-
-    /// Whether the registered command opted into `smelt /name` startup
-    /// invocation. `Some(true/false)` if registered, `None` otherwise.
-    pub(crate) fn command_startup_ok(&self, name: &str) -> Option<bool> {
-        self.shared
-            .commands
-            .lock()
-            .ok()?
-            .get(name)
-            .map(|c| c.startup_ok)
-    }
-
-    /// Names of all Lua-registered commands (for completion).
-    pub(crate) fn command_names(&self) -> Vec<String> {
-        self.shared
-            .commands
-            .lock()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// All Lua-registered `/commands` as `(name, description)`, sorted
-    /// by name. Backs the free-fn `list_commands` reader used by the
-    /// `/`-completer.
-    fn list_commands_with_desc(&self) -> Vec<(String, Option<String>)> {
-        let mut items: Vec<(String, Option<String>)> = self
-            .shared
-            .commands
-            .lock()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| (k.clone(), v.description.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
-        items
-    }
-
-    /// `("/cmd", [arg, ...])` pairs for every Lua-registered command that
-    /// declared an `args` list via `smelt.cmd.register("name", fn, {args = {...}})`.
-    /// Drives the secondary `CommandArg` picker that opens after
-    /// `/name <space>`.
-    pub(crate) fn list_command_args(&self) -> Vec<(String, Vec<String>)> {
-        let mut items: Vec<(String, Vec<String>)> = self
-            .shared
-            .commands
-            .lock()
-            .map(|m| {
-                m.iter()
-                    .filter(|(_, v)| !v.args.is_empty())
-                    .map(|(k, v)| (format!("/{k}"), v.args.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
-        items
     }
 }
 
@@ -912,238 +501,11 @@ fn statusline_item_from(
     })
 }
 
-/// Convert a `serde_json::Value` to a `mlua::Value`.
-pub(crate) fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {
-    match v {
-        serde_json::Value::Null => Ok(mlua::Value::Nil),
-        serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(mlua::Value::Integer(i))
-            } else {
-                Ok(mlua::Value::Number(n.as_f64().unwrap_or(0.0)))
-            }
-        }
-        serde_json::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let t = lua.create_table()?;
-            for (i, elem) in arr.iter().enumerate() {
-                t.set(i + 1, json_to_lua(lua, elem)?)?;
-            }
-            Ok(mlua::Value::Table(t))
-        }
-        serde_json::Value::Object(map) => {
-            let t = lua.create_table()?;
-            for (k, val) in map {
-                t.set(k.as_str(), json_to_lua(lua, val)?)?;
-            }
-            Ok(mlua::Value::Table(t))
-        }
-    }
-}
-
 impl Default for LuaRuntime {
     fn default() -> Self {
         Self::new()
     }
 }
-
-/// Bootstrap Lua chunks loaded at `register_api` time, after the
-/// `smelt` global is fully populated but before any plugin or user
-/// init.lua runs. Not `require`-able — they extend `smelt` directly
-/// (e.g. `smelt.sleep`, the thick `smelt.ui.dialog.open` /
-/// `smelt.ui.picker.open` wrappers around the Rust primitives).
-const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
-    (
-        "smelt/_bootstrap.lua",
-        include_str!("../../../../runtime/lua/smelt/_bootstrap.lua"),
-    ),
-    (
-        "smelt/dialog.lua",
-        include_str!("../../../../runtime/lua/smelt/dialog.lua"),
-    ),
-    (
-        "smelt/widgets/picker.lua",
-        include_str!("../../../../runtime/lua/smelt/widgets/picker.lua"),
-    ),
-    (
-        "smelt/widgets/prompt_picker.lua",
-        include_str!("../../../../runtime/lua/smelt/widgets/prompt_picker.lua"),
-    ),
-    (
-        "smelt/cmd.lua",
-        include_str!("../../../../runtime/lua/smelt/cmd.lua"),
-    ),
-    (
-        "smelt/dialogs/confirm.lua",
-        include_str!("../../../../runtime/lua/smelt/dialogs/confirm.lua"),
-    ),
-    (
-        "smelt/status.lua",
-        include_str!("../../../../runtime/lua/smelt/status.lua"),
-    ),
-    (
-        "smelt/modes.lua",
-        include_str!("../../../../runtime/lua/smelt/modes.lua"),
-    ),
-];
-
-/// Load all `BOOTSTRAP_CHUNKS` into the given Lua state. Called from
-/// `register_api` once the `smelt` global is in place.
-pub(super) fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    for (name, src) in BOOTSTRAP_CHUNKS {
-        lua.load(*src).set_name(*name).exec()?;
-    }
-    Ok(())
-}
-
-/// Modules embedded in the binary, available via `require("smelt.*")`.
-/// Bootstrap primitives (`_bootstrap.lua`, `dialog.lua`, `widgets/picker.lua`,
-/// `widgets/prompt_picker.lua`, `cmd.lua`, `dialogs/confirm.lua`) are
-/// loaded via `load_bootstrap_chunks`, not here — they don't need to be
-/// `require`-able.
-const EMBEDDED_MODULES: &[(&str, &str)] = &[
-    (
-        "smelt.plugins.plan_mode",
-        include_str!("../../../../runtime/lua/smelt/plugins/plan_mode.lua"),
-    ),
-    (
-        "smelt.commands.btw",
-        include_str!("../../../../runtime/lua/smelt/commands/btw.lua"),
-    ),
-    (
-        "smelt.plugins.predict",
-        include_str!("../../../../runtime/lua/smelt/plugins/predict.lua"),
-    ),
-    (
-        "smelt.tools.ask_user_question",
-        include_str!("../../../../runtime/lua/smelt/tools/ask_user_question.lua"),
-    ),
-    (
-        "smelt.commands.export",
-        include_str!("../../../../runtime/lua/smelt/commands/export.lua"),
-    ),
-    (
-        "smelt.dialogs.rewind",
-        include_str!("../../../../runtime/lua/smelt/dialogs/rewind.lua"),
-    ),
-    (
-        "smelt.plugins.background_commands",
-        include_str!("../../../../runtime/lua/smelt/plugins/background_commands.lua"),
-    ),
-    (
-        "smelt.commands.help",
-        include_str!("../../../../runtime/lua/smelt/commands/help.lua"),
-    ),
-    (
-        "smelt.plugins.yank_block",
-        include_str!("../../../../runtime/lua/smelt/plugins/yank_block.lua"),
-    ),
-    (
-        "smelt.dialogs.permissions",
-        include_str!("../../../../runtime/lua/smelt/dialogs/permissions.lua"),
-    ),
-    (
-        "smelt.dialogs.resume",
-        include_str!("../../../../runtime/lua/smelt/dialogs/resume.lua"),
-    ),
-    (
-        "smelt.commands.theme",
-        include_str!("../../../../runtime/lua/smelt/commands/theme.lua"),
-    ),
-    (
-        "smelt.commands.color",
-        include_str!("../../../../runtime/lua/smelt/commands/color.lua"),
-    ),
-    (
-        "smelt.commands.model",
-        include_str!("../../../../runtime/lua/smelt/commands/model.lua"),
-    ),
-    (
-        "smelt.commands.settings",
-        include_str!("../../../../runtime/lua/smelt/commands/settings.lua"),
-    ),
-    (
-        "smelt.commands.history_search",
-        include_str!("../../../../runtime/lua/smelt/commands/history_search.lua"),
-    ),
-    (
-        "smelt.commands.toggles",
-        include_str!("../../../../runtime/lua/smelt/commands/toggles.lua"),
-    ),
-    (
-        "smelt.commands.stats",
-        include_str!("../../../../runtime/lua/smelt/commands/stats.lua"),
-    ),
-    (
-        "smelt.commands.session",
-        include_str!("../../../../runtime/lua/smelt/commands/session.lua"),
-    ),
-    (
-        "smelt.commands.quit",
-        include_str!("../../../../runtime/lua/smelt/commands/quit.lua"),
-    ),
-    (
-        "smelt.commands.compact",
-        include_str!("../../../../runtime/lua/smelt/commands/compact.lua"),
-    ),
-    (
-        "smelt.commands.reflect",
-        include_str!("../../../../runtime/lua/smelt/commands/reflect.lua"),
-    ),
-    (
-        "smelt.commands.simplify",
-        include_str!("../../../../runtime/lua/smelt/commands/simplify.lua"),
-    ),
-    (
-        "smelt.commands.custom_commands",
-        include_str!("../../../../runtime/lua/smelt/commands/custom_commands.lua"),
-    ),
-    (
-        "smelt.colorschemes.default",
-        include_str!("../../../../runtime/lua/smelt/colorschemes/default.lua"),
-    ),
-    (
-        "smelt.tools.glob",
-        include_str!("../../../../runtime/lua/smelt/tools/glob.lua"),
-    ),
-    (
-        "smelt.tools.grep",
-        include_str!("../../../../runtime/lua/smelt/tools/grep.lua"),
-    ),
-    (
-        "smelt.tools.load_skill",
-        include_str!("../../../../runtime/lua/smelt/tools/load_skill.lua"),
-    ),
-    (
-        "smelt.tools.web_search",
-        include_str!("../../../../runtime/lua/smelt/tools/web_search.lua"),
-    ),
-    (
-        "smelt.tools.write_file",
-        include_str!("../../../../runtime/lua/smelt/tools/write_file.lua"),
-    ),
-    (
-        "smelt.tools.edit_file",
-        include_str!("../../../../runtime/lua/smelt/tools/edit_file.lua"),
-    ),
-    (
-        "smelt.tools.read_file",
-        include_str!("../../../../runtime/lua/smelt/tools/read_file.lua"),
-    ),
-    (
-        "smelt.tools.notebook_edit",
-        include_str!("../../../../runtime/lua/smelt/tools/notebook_edit.lua"),
-    ),
-    (
-        "smelt.tools.web_fetch",
-        include_str!("../../../../runtime/lua/smelt/tools/web_fetch.lua"),
-    ),
-    (
-        "smelt.tools.bash",
-        include_str!("../../../../runtime/lua/smelt/tools/bash.lua"),
-    ),
-];
 
 /// Plugins that must always be active (the user can't opt out via
 /// init.lua). These are former Rust built-ins migrated to Lua. Required
@@ -1182,43 +544,10 @@ const AUTOLOAD_MODULES: &[&str] = &[
     "smelt.plugins.background_commands",
 ];
 
-/// Register a custom Lua package searcher that resolves `require("smelt.…")`
-/// from modules embedded in the binary. Falls back to the default searchers
-/// for anything not in `EMBEDDED_MODULES`, so user files on disk win when
-/// they shadow an embedded module (the user searcher runs first).
-fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
-    let searcher = lua.create_function(|lua, module: String| {
-        for &(name, source) in EMBEDDED_MODULES {
-            if name == module {
-                let loader = lua.load(source).set_name(name).into_function()?;
-                return Ok(mlua::Value::Function(loader));
-            }
-        }
-        Ok(mlua::Value::String(lua.create_string(format!(
-            "\n\tno embedded module '{module}'"
-        ))?))
-    })?;
-
-    let package: mlua::Table = lua.globals().get("package")?;
-    let searchers: mlua::Table = package.get("searchers")?;
-    let len = searchers.raw_len();
-    // Insert at the end — filesystem searchers run first, so user overrides win.
-    searchers.raw_set(len + 1, searcher)?;
-    Ok(())
-}
-
-fn init_lua_path() -> Option<PathBuf> {
-    // Honour XDG_CONFIG_HOME, falling back to ~/.config.
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
-    Some(base.join("smelt").join("init.lua"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::lua::api::lua_table_to_json;
+    use smelt_core::lua::api::lua_table_to_json;
 
     /// Install a Lua-level `smelt.notify` / `smelt.notify_error` stub
     /// that pushes into `_G.test_log` instead of routing through `TuiApp`

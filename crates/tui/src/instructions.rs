@@ -1,4 +1,4 @@
-use crate::config;
+use smelt_core::config;
 use std::path::{Path, PathBuf};
 
 const FILENAME: &str = "AGENTS.md";

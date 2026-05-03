@@ -21,16 +21,16 @@ pub fn resolve_api_key(key_env: &str) -> Result<String, String> {
 /// Everything resolved from args + config + cached state before the engine
 /// starts. Produced by [`resolve`] and consumed by the mode dispatch in `main`.
 pub struct ResolvedStartup {
-    pub cfg: tui::config::Config,
-    pub available_models: Vec<tui::config::ResolvedModel>,
+    pub cfg: smelt_core::config::Config,
+    pub available_models: Vec<smelt_core::config::ResolvedModel>,
     pub auxiliary: engine::AuxiliaryModelConfig,
     pub api_base: String,
     pub api_key: String,
     pub api_key_env: String,
     pub provider_type: String,
     pub model: String,
-    pub model_config: tui::config::ModelConfig,
-    pub settings: tui::state::ResolvedSettings,
+    pub model_config: smelt_core::config::ModelConfig,
+    pub settings: smelt_core::state::ResolvedSettings,
     pub mode_override: Option<AgentMode>,
     pub mode_cycle: Vec<AgentMode>,
     pub reasoning_effort: ReasoningEffort,
@@ -46,16 +46,16 @@ pub struct ResolvedStartup {
 /// caller then falls back to `--api-base`-driven configuration).
 fn resolve_model_reference(
     args: &Args,
-    cfg: &tui::config::Config,
-    available_models: &[tui::config::ResolvedModel],
-    app_state: &tui::state::State,
-) -> Option<tui::config::ResolvedModel> {
-    let pick = |reference: &str, allow_not_found: bool| match tui::config::resolve_model_ref(
+    cfg: &smelt_core::config::Config,
+    available_models: &[smelt_core::config::ResolvedModel],
+    app_state: &smelt_core::state::State,
+) -> Option<smelt_core::config::ResolvedModel> {
+    let pick = |reference: &str, allow_not_found: bool| match smelt_core::config::resolve_model_ref(
         available_models,
         reference,
     ) {
         Ok(model) => Some(model.clone()),
-        Err(tui::config::ResolveModelRefError::NotFound { .. }) if allow_not_found => None,
+        Err(smelt_core::config::ResolveModelRefError::NotFound { .. }) if allow_not_found => None,
         Err(err) => {
             eprintln!("error: {err}");
             std::process::exit(1);
@@ -71,7 +71,7 @@ fn resolve_model_reference(
         pick(default, false)
     } else if let Some(ref cached) = app_state.selected_model {
         // No config default: prefer last-used, fall back to first if stale.
-        tui::config::resolve_model_ref(available_models, cached)
+        smelt_core::config::resolve_model_ref(available_models, cached)
             .ok()
             .cloned()
             .or_else(|| available_models.first().cloned())
@@ -83,7 +83,7 @@ fn resolve_model_reference(
 /// Build config from Lua registries (already populated by init.lua),
 /// honour `--set`, fetch dynamic model lists, resolve the active model,
 /// auxiliary routing, API keys, and all pure defaults merges.
-pub async fn resolve(args: &Args, cfg: tui::config::Config) -> ResolvedStartup {
+pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedStartup {
     let mut cfg = cfg;
 
     for pair in &args.set {
@@ -99,7 +99,7 @@ pub async fn resolve(args: &Args, cfg: tui::config::Config) -> ResolvedStartup {
 
     cfg.inject_oauth_providers();
 
-    let app_state = tui::state::State::load();
+    let app_state = smelt_core::state::State::load();
     let mut available_models = cfg.resolve_models();
 
     // For Codex providers, fetch models dynamically from the API (with cache).
@@ -166,13 +166,14 @@ pub async fn resolve(args: &Args, cfg: tui::config::Config) -> ResolvedStartup {
                 r.model_name.clone(),
                 r.config.clone(),
             )
-        } else if cfg.source == Some(tui::config::ConfigSource::NotFound) && args.api_base.is_none()
+        } else if cfg.source == Some(smelt_core::config::ConfigSource::NotFound)
+            && args.api_base.is_none()
         {
             // No config at all — run the interactive setup wizard.
             if !setup::run_initial_setup(&cfg.path).await {
                 std::process::exit(1);
             }
-            cfg = tui::config::Config::load_from(&cfg.path);
+            cfg = smelt_core::config::Config::load_from(&cfg.path);
             cfg.inject_oauth_providers();
             available_models = cfg.resolve_models();
             // Inject cached models for OAuth providers discovered after the wizard.
@@ -229,11 +230,11 @@ pub async fn resolve(args: &Args, cfg: tui::config::Config) -> ResolvedStartup {
                     .as_config_str()
                     .to_string(),
                 model,
-                tui::config::ModelConfig::default(),
+                smelt_core::config::ModelConfig::default(),
             )
         } else {
             match cfg.source {
-                Some(tui::config::ConfigSource::ParseError) => {
+                Some(smelt_core::config::ConfigSource::ParseError) => {
                     eprintln!(
                         "error: config file at {} failed to parse (see warning above)\n\
                          Fix the config or provide --api-base and --model.",
@@ -280,7 +281,7 @@ pub async fn resolve(args: &Args, cfg: tui::config::Config) -> ResolvedStartup {
     // here so interactive sessions can still render their "set your API key"
     // hint without aborting.
     let auxiliary = {
-        let mut build = |task: tui::config::AuxiliaryTask| {
+        let mut build = |task: smelt_core::config::AuxiliaryTask| {
             auxiliary_routing.model_for(task).map(|resolved| {
                 let key = resolve_api_key(&resolved.api_key_env).unwrap_or_else(|err| {
                     startup_auth_error.get_or_insert(err);
@@ -299,10 +300,10 @@ pub async fn resolve(args: &Args, cfg: tui::config::Config) -> ResolvedStartup {
             })
         };
         engine::AuxiliaryModelConfig {
-            title: build(tui::config::AuxiliaryTask::Title),
-            prediction: build(tui::config::AuxiliaryTask::Prediction),
-            compaction: build(tui::config::AuxiliaryTask::Compaction),
-            btw: build(tui::config::AuxiliaryTask::Btw),
+            title: build(smelt_core::config::AuxiliaryTask::Title),
+            prediction: build(smelt_core::config::AuxiliaryTask::Prediction),
+            compaction: build(smelt_core::config::AuxiliaryTask::Compaction),
+            btw: build(smelt_core::config::AuxiliaryTask::Btw),
         }
     };
 

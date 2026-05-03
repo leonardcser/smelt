@@ -5,15 +5,15 @@
 //! and vim motions.
 
 use super::layout_out::SpanCollector;
-use crate::core::content::display::{
-    ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle,
-};
 use crate::ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 use crate::ui::Theme;
 use crossterm::style::Color;
+use smelt_core::content::display::{
+    ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle,
+};
 
-fn named_color_to_crossterm(n: crate::core::content::display::NamedColor) -> Color {
-    use crate::core::content::display::NamedColor;
+fn named_color_to_crossterm(n: smelt_core::content::display::NamedColor) -> Color {
+    use smelt_core::content::display::NamedColor;
     match n {
         NamedColor::Reset => Color::Reset,
         NamedColor::Black => Color::Black,
@@ -184,10 +184,10 @@ pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
     use crate::ui::buffer::BufCreateOpts;
     use crate::ui::BufId;
     use crossterm::style::Color;
+    use smelt_core::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
 
     fn test_theme() -> Theme {
         let mut t = Theme::new();

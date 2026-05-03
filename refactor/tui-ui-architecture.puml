@@ -15,8 +15,9 @@ Decisions and rationale live in **ARCHITECTURE.md**; sequencing in **REFACTOR.md
 legend right
   **Target organization:** `core` and `tui` are separate crates.
   `core` has no terminal imports and no `crossterm` / `ui` dependency.
-  `tui` depends on `core`, `ui`, and `crossterm`.
-  `ui` is a terminal UI primitives crate; it depends on `crossterm`.
+  `tui` depends on `core` and `crossterm`.
+  `ui` is a terminal UI primitives module inside `tui` (`tui::ui`);
+  it depends on `crossterm`.
   A GUI or web frontend uses `core` directly and ignores `ui`.
 end legend
 
@@ -83,12 +84,14 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
     clipboard:     Clipboard
     timers:        Timers
     cells:         Cells
-    lua:           LuaRuntime
     engine:        EngineClient
     frontend:      FrontendKind
     skills:        Option<Arc<SkillLoader>>
     files:         FileStateCache
     processes:     ProcessRegistry
+    ' LuaRuntime lives in tui; core owns
+    ' the shared state (LuaShared) and
+    ' task runtime (LuaTaskRuntime).
     --
     runs the event loop
     impl Host (no Ui knowledge)
@@ -107,12 +110,17 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
   }
 
   interface Host <<ui-agnostic trait — core::host>> {
-    clipboard() : &mut dyn ClipboardWrite
-    cells() : &mut Cells
-    timers() : &mut Timers
-    lua()   : &mut LuaRuntime
-    engine(): &mut EngineClient
-    session(): &mut Session
+    config()    : &AppConfig
+    clipboard() : &mut Clipboard
+    cells()     : &mut Cells
+    timers()    : &mut Timers
+    engine()    : &mut EngineClient
+    session()   : &mut Session
+    files()     : &mut FileStateCache
+    processes() : &mut ProcessRegistry
+    skills()    : &Option<Arc<SkillLoader>>
+    frontend()  : FrontendKind
+    confirms()  : &mut Confirms
     ' Everything Lua bindings need
     ' that does NOT touch Ui:
     ' cell/timer/clipboard/cmd/
@@ -181,20 +189,19 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
                               ' Cell<()>.set(()).
       glob_subscribe(pattern, CbId)
     }
-    class LuaRuntime <<mlua>> {
-      plugin scripts
-      callback queue
+    class LuaShared <<shared state — lives in core>> {
+      commands, keymaps,
+      statusline_sources, tools,
+      callbacks, tasks,
+      task_inbox, json_inbox,
+      providers, permission_rules,
+      mcp_configs, settings_overrides
+    }
+
+    class LuaTaskRuntime <<task runtime — lives in core>> {
       coroutine tasks
-      TLS pointer to &mut Host
-      tool registry + dispatch
-      command registry
-      cancel: cooperative —
-        coroutine resumes with
-        Err(Canceled)
-      ' Autocmd subscriptions are
-      ' just `Cells::subscribe`
-      ' under the hood; smelt.au.*
-      ' is sugar over smelt.cell.*.
+      cancel tokens
+      tool env
     }
   }
 
@@ -227,6 +234,22 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
 ' crate: tui — terminal frontend (TuiApp + event loop + content rendering)
 ' =====================================================================
 package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
+
+  class LuaRuntime <<mlua — full runtime>> {
+    plugin scripts
+    callback queue
+    coroutine tasks
+    TLS pointer to &mut Host
+    tool registry + dispatch
+    command registry
+    cancel: cooperative —
+      coroutine resumes with
+      Err(Canceled)
+    ' Wraps LuaShared + LuaTaskRuntime
+    ' from core; adds tui-specific
+    ' methods (tick_statusline,
+    ' prepare_invocation, etc.).
+  }
 
   class TuiApp <<terminal frontend>> {
     core:       Core
@@ -323,7 +346,6 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
     interface UiHost <<TuiApp impl>> {
       ui()    : &mut Ui
       focus(win: WinId)
-      fire_win_event(win: WinId, ev: WinEvent)
       buf_create / buf_mut
       win_open / win_close / win_mut
       overlay_open / overlay_close
@@ -649,17 +671,22 @@ Core *--> Confirms
 Core *--> Clipboard
 Core *--> Timers
 Core *--> Cells
-Core *--> LuaRuntime
+Core *--> LuaShared
+Core *--> LuaTaskRuntime
 Core *--> EngineClient
 
 HeadlessApp *--> Core
 HeadlessApp ..|> Host         : impls (Ui-agnostic)
 
 TuiApp      *--> Core
+TuiApp      *--> LuaRuntime
 TuiApp      *--> WellKnown
 TuiApp      --> Ui            : drives compositor
 TuiApp      ..|> Host         : delegates to Core
 TuiApp      ..|> UiHost       : impls with Ui surface
+
+LuaRuntime  *--> LuaShared
+LuaRuntime  *--> LuaTaskRuntime
 
 WellKnown ..> Window  : refs by WinId
 Session   ..> Buffer  : transcript + prompt\nvia BufId on WellKnown
