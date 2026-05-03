@@ -87,1028 +87,115 @@ before it, nothing else has its target shape.
 
 ## Pre-P0 — Test baseline harness
 
-**Goal:** capture today's behaviour as goldens before demolition. The L2
-harness (HeadlessApp + wiremock'd LLM + persisted-session JSON snapshots) lands
-*now*, while the binary still works end-to-end, so each phase boundary can
-re-run the same scenarios and review the diff with `cargo insta review`.
-Intended changes get blessed; unintended ones block the phase. This converts
-`FEATURES.md` from a human-walked checklist into a CI gate.
-
-See `TESTING.md` for the three-layer model. Pre-P0 only ships L2.
-
-- Add dev-deps: `wiremock`, `insta`, `tempfile` (in `crates/tui/Cargo.toml`).
-- Scaffold `crates/tui/tests/{common,scenarios,snapshots}/`.
-- `common/harness.rs` — boots `HeadlessApp` against a wiremock URL, writes a
-  per-test `init.lua` to a tempdir, sets `XDG_CONFIG_HOME`, drives `UiCommand`s,
-  awaits `TurnComplete`, returns the persisted `Vec<Message>`.
-- 5–10 baseline scenarios covering: plain turn, single tool call (allow/deny
-  via plugin hook), retry, multi-turn, mid-block turn end, compact, fork.
-  These are the parity gate for everything below.
-
-**Determinism:** wiremock is deterministic; `insta` redaction filters strip
-timestamps / IDs / durations / paths. No real network, no real `tokio::sleep`
-in tests (use `tokio::time::pause` + `advance`). Clock injection itself lands
-in P2 (where the engine restructure happens) — until then, snapshots redact
-time-derived fields.
-
-End of pre-P0: `cargo nextest run -p tui --test scenarios` is green; goldens
-on disk under `crates/tui/tests/snapshots/`.
+Capture today's behaviour as goldens before demolition. L2 harness
+(HeadlessApp + wiremock'd LLM + JSON snapshots) lands now so each phase
+boundary can re-run scenarios and review diffs with `cargo insta review`.
+See `TESTING.md` § L2 and `P0.md` for detail.
 
 ---
 
 ## P0 — Clear the deck
 
-**Goal:** delete the noise that the target architecture removes, while
-the rest of the tree still compiles. Originally framed as "delete
-everything, leave the tree red"; the working reality is that the
-load-bearing structural items (BufferView, theme constants, PanelWidget
-multiplexing, Component trait, Placement enum) cannot be deleted without
-their P1 replacements existing — call sites have nothing to point at.
-
-P0 lands the orthogonal deletions that don't need a replacement. The
-structural deletions move to P1's opening sub-phase (P1.0) where each
-demolition is paired with the new primitive that replaces it, in the
-same commit.
-
-P0 deletions (orthogonal — green tree throughout):
-
-- Delete the per-widget `selection_style` fields on `TextInput`,
-  `NotificationStyle`, `DialogConfig`, `DrawContext`, `Compositor`,
-  and the `Ui::set_selection_bg` / `Ui::selection_style()` shim.
-  Selection paint disappears from these widgets entirely — re-added in
-  P1 via `theme.get("Visual")`.
-- Delete `Ui::handle_mouse_with_lua` / `Ui::handle_mouse_for` /
-  `classify_widget_action`. Mouse dispatch moves to App via `Host`
-  in P1.
-- Delete `MouseAction::Yank(String)` and `WidgetEvent::Yank(String)`.
-  Yank goes through `host.clipboard().write()` directly.
-- Delete `crates/ui/src/buffer_list.rs`. Any consumer that wants a
-  list-of-buffers view in the new model builds it as N Windows in an
-  Overlay during P4 — no separate widget type.
-
-Deferred to P1.0 (structural — paired with their replacements):
-
-- `crates/ui/src/buffer_view.rs` + every `BufferView::new(...)` call
-  site. Pairs with Window absorbing rendering responsibility.
-- `crates/tui/src/theme.rs` constants module. Pairs with the
-  `ui::Theme` registry (tracked task `20260426-083607`).
-- `PanelWidget` trait + panel-widget multiplexing in `dialog.rs`.
-  Pairs with the "Overlay + LayoutTree + N Windows" dialog rebuild.
-- `crates/ui/src/component.rs` (`Component` trait, `WidgetEvent`).
-  Pairs with Window becoming the only interactive unit.
-- 6-variant `Placement` enum + `add_layer` / `register_split` /
-  `set_layer_rect` / `focus_layer` plumbing. Pairs with `splits:
-  LayoutTree` + `overlays: Vec<Overlay>`.
-
-End of P0: tree still green. The 5 baseline scenarios still run. The
-noise that doesn't need a replacement is gone; the structural debt
-walks into P1 with its replacement next to it.
+Delete orthogonal noise that needs no replacement (per-widget
+selection-style shims, legacy mouse dispatch, buffer-list widget, etc.).
+Structural deletions (BufferView, Component, Placement, PanelWidget) move
+to P1.0 where each demolition is paired with its replacement in the same
+commit. See `P0.md`.
 
 ---
 
 ## P1 — UI primitives (the load-bearing phase)
 
-**Goal:** rebuild `crates/ui` around the target's two-primitive model
-(Buffer + Window) with two structures (splits + overlays) and a real
-theme registry. Everything downstream of `ui` rides on this.
+Rebuild `crates/ui` around `Buffer`, `Window`, `LayoutTree`, `Overlay`,
+`Theme`, and the `Ui` facade. Everything downstream rides on this.
+Sub-phases land independently; see `P1.md` for the full log.
 
-Sub-phases below can interleave but each must end at a coherent boundary.
+- **P1.0** ✅ — Theme registry + paired structural deletions (BufferView,
+  Component, Placement deferred to their replacement sub-phases).
+- **P1.a** ✅ — `Buffer` rewrite: lines, namespaces, extmarks, `BufferParser`,
+  soft-wrap keyed by `(changedtick, width)`. Tail (transcript pipeline
+  onto `BufferParser`) deferred to P9.b.
+- **P1.b** ✅ — `LayoutTree` (`Vbox`/`Hbox`/`Leaf`) with constraints + chrome.
+- **P1.c** ✅ — `Overlay` replaces `Float`; dialogs, cmdline, picker,
+  notifications all migrate to Overlay + Anchor.
+- **P1.d** ✅ — `Window` becomes the only interactive unit; Component /
+  BufferView / StatusBar / WindowView retire. Vim + completer decompose.
+- **P1.f** ✅ — `Ui` facade: `dispatch_event`, focus, capture, render.
 
-### P1.0 — Theme registry + paired structural deletions ✅ landed
-
-Each item below pairs a legacy primitive deletion with its target
-replacement in the same commit. Tree may flicker red mid-sub-phase
-but each commit ends green.
-
-Shipped:
-- `crates/tui/src/theme.rs` constants module deletion paired with
-  the `ui::Theme` registry landing. **Theme registry is P1.0**, not
-  a deferred sub-phase — it absorbed what an earlier plan called
-  "P1.e" (now folded here since the registry was already in motion
-  when P0 closed). `Theme { groups, links }` with `get`/`set`/`link`;
-  buffer extmarks reference highlight ids, never raw colors;
-  selection bg = `theme.get("Visual")`. One source of truth on
-  `ui::Ui`, threaded through `DrawContext`. Atomic state on
-  `tui::theme` collapsed onto `ui::Theme` itself; Lua mutations
-  flow through `with_app(|app| app.ui.theme())`.
-
-Still deferred from P0 (paired with their replacements in later P1
-sub-phases):
-- `BufferView` deletion paired with `Window::render(buf, grid)`
-  taking on rendering responsibility (P1.d).
-- `PanelWidget` trait + `dialog.rs` panel-widget multiplexing
-  deletion paired with the "Overlay + LayoutTree + N Windows"
-  dialog rebuild (P1.c).
-- `Component` trait + remaining `WidgetEvent` deletion paired with
-  Window becoming the only interactive unit (P1.d).
-- `Placement` enum + `add_layer` / `register_split` /
-  `set_layer_rect` / `focus_layer` plumbing deletion paired with
-  `splits: LayoutTree` (P1.b — landed) + `overlays: Vec<Overlay>`
-  (P1.c).
-
-### P1.a — `Buffer` rewrite (foundation ✅; tail deferred)
-
-Foundation shipped:
-- Lines + namespaces + extmarks. Mirrors `nvim_buf_set_extmark`.
-- `modifiable: bool` is the data-layer guard.
-- `Extmark` gains `yank: Option<YankSubst>` where
-  `enum YankSubst { Empty, Static(String) }`. `Empty` elides bytes
-  the extmark covers; `Static(s)` substitutes them.
-- `Buffer::yank_text_for_range(range)` is a pure helper that walks
-  extmarks intersecting the range and applies their `YankSubst`
-  (absent = literal source bytes).
-- Soft-wrap state on Buffer keyed by `(changedtick, width)`.
-  Multiple Windows on the same Buffer share the wrap result.
-- `BufferFormatter` trait → `BufferParser` (rename + `on_attach`
-  hook foundation for the deeper `Buffer::attach(spec)` system).
-
-Tail deferred (gated on transcript-pipeline migration onto
-`BufferParser`, itself a multi-session keystone):
-- `Buffer::attach(spec)` parser-hook system replacing `BufferFormatter`
-  trait + the `transcript_cache.rs` IR cache file.
-- Transcript renderers (`core/transcript_present/*.rs`) onto `BufferParser`
-  — each `Block` kind becomes its own parser; `BlockArtifact` becomes
-  per-block Buffer; `TranscriptSnapshot` composes from per-block
-  Buffers.
-- `transcript_cache.rs` deletion (per-parser IR caches replace it).
-  Parsed metadata lives as extmarks in dedicated namespaces.
-- ✅ `edit_buffer.rs` merge into `Buffer` (~250 refs). Landed `3cd35420`.
-- `YankSubst` + `Buffer::wrap_at` consumers — both come with the
-  transcript migration; original pick fits turned out wrong.
-
-### P1.b — `LayoutTree` ✅ landed
-
-- `Vbox { items, chrome } | Hbox { items, chrome } | Leaf(WinId)`.
-- `Item = (Constraint, LayoutTree)`. Constraints: `Length /
-  Percentage / Ratio / Min / Max / Fill / Fit` (`Fit` stubbed to
-  `Fill` until leaves expose natural size).
-- `Chrome { gap: u16, border: Option<Border>, title: Option<String>,
-  separator: SeparatorStyle }` shared by `Vbox`/`Hbox`.
-  `SeparatorStyle::{ None | Solid | Dashed }` (data shipped in
-  P1.c-tail; render-time wiring lands alongside the Overlay paint
-  loop in P1.f).
-- Type system allows chrome on any container; convention restricts
-  it to overlays.
-
-Builders: `LayoutTree::vbox(items)` / `hbox(items)` / `leaf(win)`
-plus `with_gap` / `with_border` / `with_title` / `with_separator`.
-`resolve_layout` returns `HashMap<WinId, Rect>` (not `String`-keyed).
-
-### P1.c — `Overlay` replacing `Float` (in progress)
-
-- `Overlay { layout: LayoutTree, anchor: Anchor, z: u16, modal: bool }`.
-- `Anchor::{ ScreenCenter | ScreenAt { row, col, corner } |
-  Cursor { corner, row_offset, col_offset } | Win { target, attach } |
-  ScreenBottom { above_rows } }`.
-- Drag = mutate the anchor.
-- `Float`/`FloatId` go away. Overlays have an `OverlayId` for chrome
-  hit-testing; `OverlayHitTarget::{ Window(WinId) | Chrome }` is
-  the per-overlay hit-test split.
-
-Data + resolution + focus/hit-test layer + paint pipeline + first
-float migrations + Buffer-backed list/options/input panels landed
-(C.0 → C.8). C.9 splits across three sessions:
-
-C.9 sub-phases (preparation → flip → demolition):
-
-- **C.9a** ✅ — `Anchor::ScreenBottom`; overlay-path `collapse_when_empty`; dead-branch deletion.
-- **C.9b** ✅ — flip `confirm.lua` to overlay path; `Overlay::blocks_agent`; list `SelectionChanged`.
-- **C.9c.1** ✅ — delete `dialog.rs` panel-multiplexing + `PanelWidget`/`ListWidget`/`Dialog` widget; `_open` returns parallel `leaves`.
-- **C.9c.2** ✅ — notification → Overlay + `Anchor::Win` row/col offsets; `Notification` widget retires.
-- **C.9c.3** ✅ — cmdline → Overlay + `Anchor::ScreenBottom`; `Ui::focused_overlay_cursor`; `paint_overlay` clears its rect.
-- **C.9c.4** ✅ — picker dropdown → Overlay; new `tui::picker` module.
-- **C.9c.5** ✅ — delete `FloatConfig` / `Placement` / `WinConfig::Float` + tui-side float renames.
-
-See `P1.md` for the sub-phase log.
-
-### P1.d — `Window` as the only interactive unit
-
-Folds today's three `Component` impls (`StatusBar`, `BufferView`,
-`WindowView`) into `Window::render(buf, slice, ctx)` — same path
-overlay leaves use via `paint_overlay`. `Component` /
-`WidgetEvent::{Dismiss, Select}` / `BufferView` / `StatusBar` /
-`WindowView` retire as their last consumers move. Vim and
-completer decompose alongside. Sub-phases land independently.
-
-- **D.1** ✅ — Buffer-backed status line via `painted_splits`.
-- **D.2a** ✅ — `Window::render` scrollbar + block cursor; `Ui::painted_split_focus`.
-- **D.2b** ✅ — prompt → painted-split Window over `input_display_buf`.
-- **D.3** ✅ — transcript → painted-split Window; selection in `NS_SELECTION`.
-- **D.4** ✅ — `Component` + `WidgetEvent::{Dismiss, Select}` + `KeyResult::{Action, Capture}` retire; `Compositor` slims to renderer-only.
-- **D.5** — vim state machine decomposes. ~3500 LOC across App / Buffer / Window / Clipboard. Splits:
-  - **5a** ✅ — `VimMode` → App.
-  - **5b** ✅ — kill ring → App-level `Clipboard`.
-  - **5c** ✅ — persistent per-Window vim state → `VimWindowState`.
-  - **5d** — registers / dot-repeat / undo → Buffer (`edit_buffer.rs` merge landed `3cd35420`; `undo.rs` helper module remains).
-  - **5e** ✅ — in-flight key state hoists onto `VimWindowState`; `Vim` collapses to ZST.
-  - **5f.1** ✅ — inline `WindowCursor` onto `Window`; delete `window_cursor.rs`.
-  - **5f.2a** ✅ — drop `Vim` ZST; methods → free fns; `vim_enabled: bool`.
-  - **5f.2b** ✅ — lift `motions` + `text_objects` to top-level primitives.
-  - **5f.2c** ✅ — collapse `vim/` dirs to flat modules.
-  - **5f.2d** — flatten dispatcher to recipe-style registrations (gated on Lua keymap registry from P3.b/P4).
-- **D.6** — completer state machine decomposes. Splits across sessions
-  because the "behaviour → keymap recipe" piece is gated on the Lua
-  keymap registry from P3.b/P4:
-  - **D.6a** ✅ — `Window::render` paints virt-text from extmarks;
-    `virtual_text_at` walks every namespace (NsId ascending, matches
-    the `highlights_at` precedent). Foundational primitive consumed by
-    D.6b's ghost-text storage migration.
-  - **D.6b** ✅ — ghost text storage moves from `App::input_prediction`
-    to a `"completer"`-namespace virt-text extmark on the prompt
-    Buffer; `compute_prompt` drops its prediction special-case.
-  - **D.6c** — picker dropdown sync (already an Overlay since C.9c.4)
-    folds into a Lua recipe (gated on P3.b/P4).
-  - **D.6d** — completer behaviour becomes a keymap recipe on the
-    prompt Window (gated on P3.b/P4).
-  - **D.6e** — `crates/tui/src/completer/` + `attachment.rs` collapse
-    along these axes.
-
-End state for `Window`: cursor, scroll, selection, keymap recipe id,
-focusable flag, gutters; `render(buf, grid)`,
-`handle(event, ctx, host) -> Status`. No multiple traits, no
-`Component`/`PanelWidget`.
-
-**Tests (L1):** vim unit tests port to Helix-style marker DSL
-`(input, keys, output)` with `#[primary|]#` selection markers as
-the state machine breaks open. See `TESTING.md` § L1.
-
-### P1.f — `Ui` facade
-
-End-state field set: `bufs: Map<BufId, Buffer>`, `wins: Map<WinId,
-Window>`, `splits: LayoutTree`, `overlays: Vec<Overlay>`,
-`focus: Option<WinId>`, `focus_history`, `capture: Option<HitTarget>`,
-`cursor_shape: CursorShape` (single global), `theme`. End-state API:
-`buf_create`/`buf_mut`, `win_open`/`win_close`/`win_mut`,
-`overlay_open`/`overlay_close`, `dispatch_event`, `render`,
-`focus`/`set_focus`/`focused_window`/`focused_overlay`/`active_modal`,
-`hit_test`, `focus_next`/`focus_prev` (modal-aware). Render is
-event-driven, diff-based, no dirty flag — resize/Ctrl-L zeros the
-previous-grid baseline so the diff becomes a full repaint by virtue
-of writing every cell.
-
-The whole rewrite is too big for one session; it splits into
-incremental sub-phases that each end green. Order is by what unblocks
-the rest.
-
-- **F.1** ✅ — collapse dual focus slots into a single `Ui::focus`.
-- **F.2** ✅ — `overlays: HashMap` → `Vec<(OverlayId, Overlay)>`.
-- **F.3** ✅ — `splits: LayoutTree` owned by `Ui`; `set_layout(tree)`.
-- **F.4** ✅ — `capture: Option<HitTarget>` for in-flight gestures.
-- **F.5** ✅ — `cursor_shape: CursorShape` global on `Ui`; `cursor_kind` retires from `Window`.
-- **F.7** ✅ — drop dead `current_win` field + accessors; `Ui::focus` is the single focused-window source of truth.
-
-#### P1.f.6 — `Ui::dispatch_event` consolidation
-
-Today key + mouse dispatch live in `handle_key_with_lua` and
-`core::mouse::dispatch_*`. Collapse into a single `Ui::dispatch_event`
-taking the unified `Event::{ Key | Mouse | Resize | Focus | Blur }`.
-
-Splits across two sessions because the WinEvent dispatcher already
-owns the `dispatch_event` slot:
-
-- **F.6a** ✅ — rename `Ui::dispatch_event(WinEvent)` →
-  `Ui::fire_win_event` (matches `UiHost::fire_win_event` from
-  ARCHITECTURE.md), freeing the name for the terminal-event entry.
-  Mechanical rename.
-- **F.6b** ✅ — `Ui::dispatch_event(Event, lua_invoke) -> DispatchOutcome`
-  over the unified terminal `Event`. Folds key dispatch (modal Esc +
-  focused-window keymap, replacing `handle_key_with_lua`) plus resize
-  (`set_terminal_size` becomes a side effect of `Event::Resize`) plus
-  the Ui-shaped slice of mouse routing (wheel-on-overlay absorb +
-  active-modal click-outside absorb). `KeyResult` retires for
-  `DispatchOutcome { Consumed, Ignored }`. The remainder of mouse
-  routing — soft-wrap translation, scrollbar drag, click-count
-  tracking, prompt/transcript cursor positioning — stays App-side
-  pre-P2 (Ui returns `Ignored` so tui's `handle_mouse` continues
-  routing); the full fold lands when P2's `Host` / `UiHost` traits
-  exist.
-
-End of P1: `ui` compiles in isolation. Has unit tests against fake
-grids. `tui` is still red — it consumes the new shapes in P2.
+End of P1: `ui` compiles in isolation. `tui` consumes the new shapes in P2.
 
 ---
 
 ## P2 — TUI App restructure
 
-**Goal:** split `App` into a headless-safe `Core` plus `TuiApp` /
-`HeadlessApp` frontends, carve subsystems out of the god-struct,
-install the `Host` + `UiHost` traits, introduce the engine-event
-bridge/reducer and `Cells` (which also
-subsumes the autocmd registry) + `Timers`. The 106-field god-struct
-goes away.
+Split `App` into headless-safe `Core` plus `TuiApp` / `HeadlessApp`
+frontends. Carve subsystems (`Cells`, `Timers`, `Confirms`, `Clipboard`,
+`Session`, `AppConfig`, `WellKnown`, `EngineClient`) out of the
+106-field god-struct. Install `Host` + `UiHost` traits. Collapse the
+event surface onto a single `select!` loop publishing through `Cells`.
+See `P2.md` for the full sub-phase log.
 
-Order within the phase: subsystem structs first (ownership boundaries),
-then `Core` aggregates them, then `TuiApp` and `HeadlessApp` wrap
-`Core`, then `Host` / `UiHost` impls, then the reactive layer (Cells +
-Timers), then the engine-event bridge/reducer. Tool dispatch can stay
-inside `LuaRuntime` unless a split-out runtime earns its keep.
+- **P2.a** ✅ — Subsystem carve-outs + `Core` aggregate + frontend split.
+- **P2.b** ✅ — `Host` / `UiHost` traits + `ui::Event` / `Status` / `WinEvent`
+  supporting types + `Window::handle` collapse.
+- **P2.c** ✅ — `Cells` reactive layer (subsumes autocmds).
+- **P2.d** ✅ — `EngineClient` event bridge.
+- **P2.e** ✅ — Single `select!` loop.
 
-Headless is a first-class consumer of this split — there is no
-"headless mode flag" inside the TUI; `HeadlessApp` is its own struct
-that composes the same `Core`. The TUI binary builds `TuiApp`; the
-headless binary entry point builds `HeadlessApp`. Sub-agent workers
-(spawned by the agent tool) build `HeadlessApp` too.
-
-### P2.a — `Core` + frontends + carve subsystems
-
-Land each subsystem as its own struct, then aggregate. Sub-phases
-land independently — each ends green and pushes one carve-out into
-its target shape. Order is by dependency: data-only carve-outs (no
-new behaviour) first, then the new reactive primitives, then the
-bridges, then the aggregate.
-
-- **a.1** ✅ — `WellKnown { transcript, prompt, statusline }` carves
-  the well-known `WinId`s off App. `Ui::win_buf{,_id,_mut}` helpers
-  resolve `WinId` → backing `Buffer`. Lives on the outer App today;
-  stays on `TuiApp` after the Core split.
-- **a.2** ✅ — `WellKnown` adds `cmdline: Option<WinId>` (today's
-  `App::cmdline_win`).
-- **a.3a** ✅ — `Confirms` data carve-out: `pending: HashMap<u64,
-  ConfirmEntry>` + `next_handle: u64` move off App into a typed
-  subsystem with `register / get / take`. `ConfirmEntry` relocates
-  from `dialogs/confirm.rs` to `core/confirms.rs`.
-- **a.3b** ✅ — `confirm_requested` cell carries a typed
-  `ConfirmRequested` snapshot (handle_id, tool / desc / args /
-  options / approval patterns / outside dir / cwd label);
-  `confirm.lua` reads it via `smelt.cell("confirm_requested"):get()`
-  and the `_get` Lua primitive retires. `Confirms::is_clear()` is
-  the canonical predicate the engine-drain gate consumes (P2.a.11
-  swaps the focused-overlay `blocks_agent` flag for it).
-- **a.4** ✅ — `Cells` registry (typed name → value + subscribers). New
-  primitive; built-in cells migrate from scattered App fields
-  (`vim_mode`, `agent_mode` via `mode`, …). Splits across three
-  sessions because the registry shape, the Lua surface, and the
-  built-in migrations are each natural single-session units:
-  - **a.4a** ✅ — `Cells` primitive type: typed name → value storage,
-    Rust-side subscribers, queue-then-drain so subscriber bodies
-    run after `&mut Cells` releases. `cells: Cells` field on `App`
-    (no consumers yet — drain wiring lands with a.4b's first Lua
-    subscriber). Tests cover declare / get / set / subscribe /
-    drain_pending.
-  - **a.4b** ✅ — `smelt.cell(name)` returns a `CellHandle` userdata
-    with `:get/:set/:subscribe/:unsubscribe`; `smelt.cell:glob_subscribe`
-    fires `fn(name, value)` for every match; `smelt.au.{on,fire}`
-    aliases `subscribe_kind` / `set_dyn`. Drain pump branches on a
-    `is_glob` flag per queued callback.
-  - **a.4c** — built-in cell migrations. Splits because the
-    machinery + simple-typed setters, the timer-driven cells, and
-    the event-shaped cells (some gated on EngineClient) are each
-    natural single-session units:
-    - **a.4c.1** ✅ — `LuaProjector` machinery on `Cells` (per-`TypeId`
-      converter from `&dyn Any` to `mlua::Value`); `LuaCellValue`
-      projector built in. `build_with_builtins(BuiltinSeeds)` declares
-      every built-in cell (12 stateful + 7 event-shaped) at startup
-      with primitive projectors for `String / bool / u32 / u64 / u8`
-      plus an `EventStub` placeholder projector for un-migrated
-      events. Stateful setter chokepoints publish: `agent_mode`
-      (`App::set_mode`), `model` (`apply_model`), `reasoning`
-      (`set_reasoning_effort`); `vim_mode` and `confirms_pending`
-      fan out from a per-tick `App::publish_diff_cells` so the
-      every-mutation-point of `vim_mode` and the register/take
-      pair on `Confirms` don't each need a publish call.
-      Remaining stateful migrations (`tokens_used`, `errors`, `cwd`,
-      `session_title`, `branch`) ride a.4c.2 / a.4c.3 alongside
-      their event handlers.
-    - **a.4c.2** ✅ — `now` (epoch seconds u64) + `spinner_frame` (u8)
-      ride per-tick `publish_diff_cells`; `tokens_used` publishes from
-      the `EngineEvent::TokenUsage` handler with a custom
-      `TokenUsage → Lua table` projector. Auxiliary (background)
-      requests are excluded so a subscriber sees only user-visible
-      context flow.
-    - **a.4c.3** ✅ — seven event-shaped cells (`history`,
-      `turn_complete`, `turn_error`, `confirm_requested`,
-      `confirm_resolved`, `session_started`, `session_ended`) wired
-      to their existing handlers; typed payload structs + projectors
-      live in `core/cells.rs`; `ConfirmChoice` projects to a stable
-      short label string. `turn_complete` / `turn_error` publishes
-      relocate alongside their handlers when EngineClient lands
-      (a.11).
-- **a.5** ✅ — `Timers { set, every, cancel }` carve-out: storage
-  lifts off `LuaShared.timers` onto `core::timers::Timers` on `App`;
-  `App::tick_timers` drains via `Timers::drain_due` (re-arms
-  recurring entries in place, drops one-shots); Lua bindings:
-  `smelt.timer.{set,every,cancel}` returning cancellable ids,
-  `smelt.defer` kept as a thin alias over `Timers::set`. Callbacks
-  re-entering `set` / `every` / `cancel` from inside their fire body
-  compose cleanly because `drain_due` releases `&mut Timers` before
-  the function calls happen.
-- **a.6** ✅ — `AppConfig` (provider triple, mode + reasoning cycles,
-  settings, model overrides, context window).
-  16 fields bundle off `App` into `core::app_config::AppConfig`; call
-  sites read through `self.config.*`. Keymap / theme path bindings
-  ride later phases (P3.b / P5.d).
-- **a.7a** ✅ — Session snapshots data lift: drop the App-side
-  `context_tokens` / `token_snapshots` / `cost_snapshots` /
-  `turn_metas` / `session_cost_usd` shadow fields, route through
-  `self.session.*`; the `save_snapshots_to_session` /
-  `restore_snapshots_from_session` sync helpers retire (Session
-  is now SoT for cost/token/turn-meta state).
-- **a.7b** ✅ — `App.history: Vec<Message>` collapses into
-  `self.session.messages`; ~25 call sites across
-  `core/{mod,agent,history,cmdline,commands,lua_handlers}.rs` +
-  `lua/api/state.rs` rerouted; `set_history` writes
-  `self.session.messages` directly and `sync_session_snapshot`
-  no longer copies messages. Session is the single source of truth
-  for in-session message history.
-  (Sub-agent state lives in Lua cells fed by `core::process`
-  background-registry events — see P5.b — not on `Session`.)
-- **a.8** ✅ — `Clipboard` formalised: every clipboard text I/O routes
-  through `core.clipboard.{read,write}`. The two bypass paths retire —
-  Lua `smelt.clipboard(text)` writes via `with_app(|a| a.clipboard.write(...))`
-  (matches `smelt.notify`); `KeyAction::ClipboardImage`'s text fallback
-  reads via `clipboard.read()`. `copy_to_clipboard` / `paste_from_clipboard`
-  helpers and `SystemSink` / `Osc52Sink` moved into `core/clipboard.rs`;
-  every clipboard touch in the runtime flows through the `Clipboard` subsystem.
-- **a.9** ✅ — parallel autocmd registry retires; every event flows
-  through `Cells`. 12 publisher callsites switch to
-  `cells.set_dyn(name, payload)`; `smelt.on` Lua binding deletes
-  in favour of `smelt.au.on`; built-in cell list extends with
-  `block_done` / `cmd_pre` / `cmd_post` / `shutdown` / `turn_start`
-  / `turn_end` / `tool_start` / `tool_end` / `input_submit`. mode
-  + model "change" events fold onto the `agent_mode` / `model`
-  cells (the new value is the payload); plugins update accordingly.
-- **a.10** — Tool dispatch landing spot. Default: keep the registry +
-  `engine::ToolDispatcher` impl on `LuaRuntime`, since that's where tool
-  registration, hooks, coroutine parking, and result delivery already
-  live. Only split out a `ToolRuntime` type if a later ownership or
-  execution boundary makes that materially cleaner.
-- **a.11** ✅ — initial engine-event bridge carve-out: `App.engine`
-  wrapped in `engine_client::EngineClient` over today's `EngineHandle`
-  (`send` / `recv` / `try_recv` / `drain_spawned()`); two `select!`
-  engine-drain gates swap from `focused_overlay_blocks_agent()` to
-  `confirms.is_clear()`. This wrapper is transitional: either P2.d/P5
-  turns it into the full event-to-buffer/cell bridge, or the thin
-  wrapper is deleted and the reducer stays as plain code.
-- **a.12** — Aggregate `Core` + `TuiApp` / `HeadlessApp`. Splits across
-  two sessions because the subsystem aggregation (~350 callsite renames)
-  and the frontend split (App → `TuiApp` + new `HeadlessApp` over the
-  existing headless coordinator) are each natural single-session units:
-  - **a.12a** ✅ — introduce `Core` struct; move the 8 subsystem fields
-    (`config`, `session`, `confirms`, `clipboard`, `timers`, `cells`,
-    `lua`, `engine`) off `App` into `Core`; add `pub core: Core` field
-    on `App`; rewrite every `self.<subsystem>.X` / `app.<subsystem>.X`
-    callsite to read through `self.core.<subsystem>.X` /
-    `app.core.<subsystem>.X`. `tools: ToolRuntime` slot stays vacant
-    because a.10 is gated on P5.a.
-  - **a.12b** — frontend split. Splits across two sessions because the
-    HeadlessApp carve (~600 LOC moved + new `Core::new` + sink
-    encapsulation + main.rs branch flip) and the `App` → `TuiApp`
-    rename (~300+ callsites) are each natural single-session units:
-    - **a.12b1** ✅ — carve `HeadlessApp { core, sink: HeadlessSink }`
-      over today's `App::run_headless` surface;
-      add `Core::new(config, engine)` so both frontends share the
-      headless-safe construction path; main.rs branches on
-      `args.headless` *before* `App::new`,
-      constructing `HeadlessApp` directly for that path.
-    - **a.12b2** ✅ — rename `App` → `TuiApp` throughout the codebase.
-
-Aggregate:
-
-```rust
-struct Core {
-    config:        AppConfig,
-    session:       Session,
-    confirms:      Confirms,
-    clipboard:     Clipboard,
-    timers:        Timers,
-    cells:         Cells,
-    lua:           LuaRuntime,
-    engine:        EngineClient,
-    frontend:      FrontendKind,
-    skills:        Option<Arc<SkillLoader>>,
-    files:         FileStateCache,
-    processes:     ProcessRegistry,
-}
-struct TuiApp      { core: Core, well_known: WellKnown, ui: ui::Ui }
-struct HeadlessApp { core: Core, sink: HeadlessSink }
-```
-
-The TUI `main` builds `TuiApp` and runs its event loop. A
-`smelt --headless` builds `HeadlessApp` and
-runs the same loop, sans terminal events and sans `Ui` rendering.
-
-### P2.b — `Host` + `UiHost` impls + supporting types
-
-Two traits, plus the supporting `Status` / `Event` / `WinEvent` types
-the unified `Window::handle(event, ctx, host) -> Status` consumes.
-Splits across sessions because the trait scaffolding, the `ui::Event`
-/ `Status` retypings, the `Window::handle` collapse, and the Lua
-binding TLS split are each natural single-session units:
-
-- **P2.b.1** ✅ — `Host` trait in `crates/tui/src/core/host.rs` with
-  Ui-agnostic accessors `clipboard / cells / timers / lua / engine /
-  session / confirms`; impls for `Core / TuiApp / HeadlessApp`
-  (frontends delegate to inner `Core`). `tools()` waits on a.10.
-  First consumers migrated (`self.confirms()`, `self.engine()`,
-  `self.cells()`, `self.lua()`, `self.session()`,
-  `self.clipboard()` in `core/{mod,lua_handlers}.rs`; `core.timers()`
-  in `lua/api/dispatch.rs`) so every method is reached from
-  production code.
-- **P2.b.2** ✅ — `UiHost` trait in `crates/ui/src/lib.rs` with the
-  compositor-bearing surface (`ui / set_focus / fire_win_event /
-  buf_create / buf_mut / win_open_split / win_close / win_mut /
-  overlay_open / overlay_close`). No `Host` supertrait — `ui`
-  cannot reference tui-defined `Host`. `Ui` impls directly;
-  `TuiApp` impls `UiHost` alongside its `Host` impl by delegating
-  to `self.ui.X()`. `HeadlessApp` does not impl `UiHost`. First
-  consumers migrated through `cmdline.rs::open_cmdline` +
-  `events.rs::close_overlay_leaf`.
-- **P2.b.3** ✅ — Supporting types in `ui`:
-  - `Event::{ Key | Mouse | Resize | FocusGained | FocusLost |
-    Paste }` lives in `crates/ui/src/event.rs`; variants carry
-    crossterm payloads and `From<crossterm::event::Event>` keeps
-    host-boundary conversion a one-liner. `Ui::dispatch_event`
-    consumes the new enum; tui's three call sites
-    (`events.rs::dispatch_terminal_event` key + resize,
-    `mouse.rs::handle_mouse` wheel/modal pre-flight) construct
-    `ui::Event::Key(_)` / `Mouse(_)` / `Resize(_)` directly.
-  - `Status::{ Consumed | Capture | Ignored }` replaces
-    `DispatchOutcome` (key/mouse pre-flight) and `MouseAction`
-    (`Window::handle_mouse` return). One outcome enum,
-    `Capture` is still meaningful only on the mouse path; the
-    host folds it into `Ui::set_capture`.
-  - `WinEvent` shape unchanged — payload-in-variant (`Select(idx)`)
-    deferred until a real consumer surfaces.
-  - `FocusTarget::Window(WinId)` lives as the semantic alias for
-    keyboard focus; `HitTarget::{ Window(WinId) | Scrollbar {
-    owner: WinId } | Chrome { owner: OverlayId } }` already
-    shipped in P1.c.
-- **P2.b.4** — `Window::handle_key` + `Window::handle_mouse`
-  collapse onto a single
-  `Window::handle(Event, ctx) -> Status`.
-  Pre-P2 mouse/key routing in tui (soft-wrap translation,
-  click-count tracking, scrollbar drag, prompt/transcript cursor
-  positioning) folds into Ui-side dispatch reaching through
-  `UiHost` for App state — the full mouse fold P1.f.6b deferred to
-  "when P2's Host / UiHost traits exist." Splits:
-  - **P2.b.4a** ✅ — `handle_key` returns `ui::Status`; kill-ring
-    inspection moves to the single caller (`handle_content_vim_key`).
-  - **P2.b.4b** ✅ — `Window::handle(ui::Event, EventCtx) -> Status`
-    as the public entry; per-event methods are now `pub(crate)`
-    helpers (= c.5c). No host arg: per-pane data flows through
-    `EventCtx`, host builds it via `UiHost::{rows_for, breaks_for,
-    viewport_for}` plus the App-owned `vim_mode` and clipboard.
-  - **P2.b.4c** — pre-P2 mouse/key routing folds into
-    `Ui::dispatch_event` through `UiHost`. Outside-in: **c.1** ✅ drop
-    viewport mirrors; **c.2** ✅ click-count onto `Ui`; **c.3** ✅
-    scrollbar drag into `Ui::dispatch_event`; **c.4** ✅ wheel scroll
-    via `Ui::hit_test`; **c.5a** ✅ Down/Drag/Up via
-    `resolve_split_mouse` + Window capture; **c.5b** ✅ per-pane data
-    via `UiHost`; **c.5c** ✅ unified `Window::handle` (= b.4b);
-    **c.6** ✅ drag autoscroll.
-- **P2.b.5** — Lua bindings TLS split: `crate::lua::with_host` /
-  `with_ui_host` exposes the right trait depending on the
-  binding's declaration. UiHost-only Lua bindings (`smelt.ui /
-  .win / .buf / .statusline`) raise a runtime error from a
-  `HeadlessApp`. Subsystem-scoped borrows compose. Splits:
-  - **P2.b.5a** — `with_host` / `with_ui_host` trait-typed
-    dispatchers over today's TLS pointer; `with_app` retained.
-  - **P2.b.5b** — TLS slot carries Tui or Headless; UiHost from
-    headless raises. Lands with first headless Lua driver (P2.c).
-  - **P2.b.5c** — bulk-migrate `with_app` callsites; drop alias.
-
-### P2.c — `Cells` reactive layer + event bus ✅ landed via P2.a.4 + P2.a.9
-
-Cells is a single registry that doubles as the autocmd-style event
-bus. Built-ins:
-
-- Stateful: `now`, `spinner_frame`, `agent_mode`, `vim_mode`, `model`,
-  `reasoning`, `confirms_pending`, `tokens_used`, `errors`, `cwd`,
-  `session_title`, `branch`.
-- Event-shaped (typed payload, no persistent state): `history`,
-  `turn_complete`, `turn_error`, `confirm_requested`,
-  `confirm_resolved`, `session_started`, `session_ended`.
-
-`Cell::set` wakes the loop (one `select!` branch on the cells
-channel) and notifies subscribers (spec bindings re-resolve next
-render; subscribed Lua callbacks queue and drain after `&mut`
-borrows release). No fixed-FPS tick.
-
-Engine bridges and subsystem setters publish through Cells:
-`SetAgentMode` → `cells.set("agent_mode", new)`;
-`EngineEvent::TurnComplete` → `cells.set("turn_complete", meta)`;
-etc. There is no separate `fire_au` path — it would do exactly the
-same thing.
-
-`smelt.au.on / smelt.au.fire` are thin Lua wrappers over
-`smelt.cell(name):subscribe / :set` for nvim-style ergonomics.
-
-### P2.d — `EngineClient` (was `EngineBridge`)
-
-Drains `engine.event_rx` in the `select!`. Translates events into
-direct host calls. Splits:
-
-- **P2.d.1** ✅ — engine event handlers relocate from `agent.rs` to
-  `app/engine_events.rs` as `impl TuiApp` methods (`handle_engine_event`,
-  `handle_idle_engine_event`). `engine_client.rs` is now a pure `EngineHandle`
-  wrapper with no `TuiApp` dependency.
-- **P2.d.2 (deferred)** — full target fold (`TextDelta` →
-  `Buffer::append`; `ToolStarted/Finished` / block-end →
-  `Buffer::attach`'s `on_block`; `RequestPermission` →
-  `Confirms::register`; `TurnComplete` / `TokenUsage` →
-  `cells.set`). Gated on P1.a tail (`Buffer::attach`).
-- **Tests (L2):** clock-injection seam deferred (no L2 harness);
-  manual walks + `cargo nextest` remain the parity gate.
-
-### P2.e — Single `select!` loop ✅ structurally landed
-
-Loop merges `terminal_rx` + `engine.event_rx` + `exec_rx` (for
-`/exec`) + `tokio::time::sleep` (animations + drag-autoscroll).
-Cells / timers / lua-callbacks queue from inside the loop and
-drain via `drain_cells_pending` / `tick_timers` /
-`flush_lua_callbacks`; render runs at top-of-loop. The "explicit
-per-arm render" polish moves to P6 with the streaming-pipeline
-tightening.
-
-End of P2: tree is green again. App is a thin coordinator over
-named subsystems. No god-struct, no inline engine drain, no
-parallel renderer state.
+End of P2: tree is green. App is a thin coordinator over named
+subsystems.
 
 ---
 
 ## P3 — Rust capabilities + Lua API split
 
-**Goal:** put the generic Rust capabilities behind named modules
-under `tui::`, and split the Lua bindings to one file per namespace.
-This phase is mechanical but unblocks P4 and P5.
+Put generic Rust capabilities behind named modules (`fs`, `http`,
+`grep`, `permissions`, `parse`, `process`, etc.) and split Lua
+bindings to one file per namespace. See `P3.md`.
 
-### P3.a — Capability modules
-
-Land each as `crates/tui/src/<name>.rs` (or a small folder if the
-unit warrants it):
-
-- `tui::parse` — markdown / diff / syntax (delegates to syntect, LCS).
-- `tui::process` — short-lived shell commands. ✅ `run` shipped
-  (this session); streaming `spawn -> Handle` rides P5.b.
-- `core::process` long-lived IPC — long-lived child with bidirectional event
-  channel (`spawn`, `send`, `on_event`, `wait`, `kill`). Future
-  primitive for MCP servers, long-running background commands, etc.
-  Wire format is opaque (stdio / socket); JSON framing is a convention
-  the consumer enforces.
-- `tui::fs` — read / write / edit / glob / lock. ✅ shell (`5de3054`).
-- `tui::http` — fetch / cache / redirects. ✅ shell (this session).
-- `tui::html` — html → markdown. ✅ shell (this session).
-- `tui::notebook` — Jupyter JSON ops. ✅ shell (this session).
-- `tui::grep` — ripgrep wrapper. ✅ shell (this session).
-- `tui::path` — normalize / canonical / relative / expand_home. ✅ (`de7fb87`).
-- `tui::fuzzy` — fuzzy matching / scoring (folds `tui/fuzzy.rs` +
-  `tui/completer/score.rs`). ✅ (`b537d1a`).
-- `core::permissions` — **all permission policy.** Absorbs every file
-  in `engine/permissions/` (bash AST, rules, workspace check,
-  RuntimeApprovals, 1617-line test suite) plus
-  `tui/workspace_permissions.rs` (workspace JSON store). No
-  `Permissions` aggregate type — Lua hooks compose the pieces.
-
-Each module is independent. No umbrella folder.
-
-**Engine "utility tool" files fold into the capabilities** — they're
-helpers for tools, not tools themselves, so they belong with the
-capability they serve:
-
-- `engine/tools/background.rs` (228 LOC) → `tui::process` (registry
-  + spawn/group/streaming/kill).
-- `engine/tools/file_state.rs` (340 LOC) → `tui::fs::file_state`
-  (mtime tracking for edit_file race detection).
-- `engine/tools/web_cache.rs` (51 LOC) → `tui::http::cache`.
-- `engine/tools/web_shared.rs` (436 LOC) → `tui::http` (fetch +
-  redirects, the bulk of `tui::http`).
-- `engine/tools/result_dedup.rs` (169 LOC) → `tui::tools::dedup`
-  (helper).
-- `engine/socket.rs` (345 LOC) + `engine/registry.rs` (262 LOC) —
-  deleted in P5.c; future `core::process` long-lived IPC may absorb the patterns.
-
-After this, `engine/tools/` retains only `ToolSchema` +
-`ToolDispatcher` + `ToolResult` + ctx — engine's tool surface is
-mechanically thin.
-
-### P3.b — Lua API per namespace
-
-Move `crates/tui/src/lua/api/{dispatch, state, widgets}.rs` to one
-file per namespace under `crates/tui/src/lua/api/<name>.rs`:
-
-UiHost-only (require a Ui — error in headless): `ui.rs`, `win.rs`,
-`buf.rs`, `statusline.rs`.
-
-Host-tier (work in tui and headless): `parse.rs`, `theme.rs`,
-`timer.rs`, `cell.rs`, `clipboard.rs`, `cmd.rs`, `engine.rs`,
-`permissions.rs`, `confirm.rs`, `mode.rs` (AgentMode Plan/Apply/Yolo),
-`session.rs`, `tools.rs`, `os.rs`, `fs.rs`, `http.rs`, `html.rs`,
-`notebook.rs`, `path.rs`, `grep.rs`, `fuzzy.rs`, `subprocess.rs`,
-`frontend.rs`, `au.rs`.
-
-### P3.c — Add the missing namespaces
-
-Newly bound Lua surface:
-
-- `smelt.cell` — `new(name, initial)`, `cell(name):get()`,
-  `cell(name):set(v)`, `cell(name):subscribe(fn)`,
-  `cell:glob_subscribe(pattern, fn)`. The single registry: stateful
-  cells and pure events both.
-- `smelt.timer` — `set(ms, fn)`, `every(ms, fn)`, `cancel(id)`.
-- `smelt.au` — `on(name, fn)`, `fire(name, payload)`. **Sugar over
-  `smelt.cell` — same registry underneath.** Kept for nvim
-  familiarity.
-- `smelt.clipboard` — read/write.
-- `smelt.permissions` — full FFI surface for Lua tool hooks:
-  `parse_bash`, `compile_pattern`, `match_ruleset`,
-  `rules_for(mode, kind)` (read accessor for the ruleset configured
-  via `set_rules`), `outside_workspace_paths`, `is_approved`,
-  `approve`, `load_workspace`, `save_workspace`, `set_rules`.
-- `smelt.process` long-lived IPC — deferred/YAGNI. `smelt.process.run` and
-  `smelt.process.run_streaming` cover the surface today.
-- `smelt.frontend` — `is_interactive()`, `kind()`. Tools branch on
-  this when they need the human-vs-headless distinction. ✅ (`e38572d`).
-- `smelt.mode` — `get / set / cycle` over AgentMode (Plan/Apply/Yolo).
-  Renamed from `smelt.agent.mode` to avoid collision with
-  future `smelt.process` long-lived IPC. ✅ (`ad9eccc`).
-- `smelt.path` — wraps `core::path`. ✅ (`de7fb87`).
-- `smelt.parse`, `smelt.fs`, `smelt.http`, `smelt.html`,
-  `smelt.notebook`, `smelt.os`, `smelt.fuzzy`, `smelt.grep` — wrap
-  their capability module.
-
-End of P3: every Lua-callable Rust thing has a binding file with the
-same name. Lua plugins can compose Rust capabilities directly.
+- **P3.a** ✅ — Capability modules land as `tui::<name>` or `core::<name>`.
+  Engine utility-tool files fold into their respective capabilities.
+- **P3.b** ✅ — Lua API reorganized to one file per namespace under
+  `lua/api/<name>.rs`.
+- **P3.c** ✅ — Missing namespaces bound: `smelt.cell`, `smelt.timer`,
+  `smelt.au`, `smelt.clipboard`, `smelt.permissions`, `smelt.frontend`,
+  `smelt.mode`, etc.
 
 ---
 
 ## P4 — Lua takes the UX
 
-**Goal:** move every "what does smelt look/behave like" decision out
-of `tui` into `runtime/lua/smelt/`. Rust shrinks to capability
-provision and pixel pushing. Order within the phase is by leverage —
-the highest-touched UI surfaces first.
+Move every "what does smelt look/behave like" decision out of `tui`
+into `runtime/lua/smelt/`. Rust shrinks to capability provision and
+pixel pushing. See `P4.md`.
 
-### P4.a — `runtime/lua/smelt/` layout ✅ landed
-
-`widgets/picker.lua` + `prompt_picker.lua`, full `dialogs/` set,
-`colorschemes/default.lua`, top-level `status.lua` / `modes.lua` /
-`cmd.lua` / `dialog.lua` / `_bootstrap.lua` all shipped. The remaining
-widget seed files (`input` / `options` / `list` / `cmdline` /
-`statusline` / `notification`) materialize alongside their Rust-shell
-rebuilds. `transcript.lua` / `diff.lua` ride P4.b.
-
-### P4.b — Transcript and diff parsers in Lua ⏸ deferred
-
-Deferred to the transcript-pipeline keystone (same multi-session work
-P1.a-tail names). Reopens when `Buffer::attach(spec)` lands. Final
-shape: `transcript.lua` / `diff.lua` call `buf.attach` with markdown /
-diff parsers; `on_block` writes extmarks via `smelt.buf.set_extmark`;
-Rust `core::parse` is the fast pure parse; `term/content/highlight/*` +
-`term/content/transcript_buf.rs` + `core/transcript_present/` retire (extmarks carry it).
-
-### P4.c — Reactive statusline ✅ landed
-
-`runtime/lua/smelt/status.lua` registers a `core` source through
-`smelt.statusline.register`; the handler reads
-`smelt.statusline.snapshot()` and returns the segment list. Rust's
-`spans_to_buffer_line` keeps the responsive layout. Declarative
-`{ bind = ... }` / `{ call = fn, deps = {...} }` spec evaluator
-remains a future option.
-
-### P4.d — Dialogs fully orchestrated in Lua
-
-Rust dialog files (`core/dialogs/confirm.rs`,
-`core/dialogs/confirm_preview.rs`, etc.) collapse to request-emit +
-resolution primitives on the appropriate namespace (`smelt.confirm.*`).
-Lua composes the panels via generic `buf` / `win` / `overlay` / `layout`
-primitives exposed through `smelt.ui.*`; no dialog-specific Rust
-framework or translator survives in the target shape.
-Multi-question flows are a Lua loop opening N dialogs in sequence —
-no tab-strip widget in the framework.
-
-### P4.e — Slash commands fully Lua
-
-Each builtin lives one-file-per-command under `runtime/lua/smelt/plugins/`
-(or `dialogs/` when it opens a dialog) and self-registers via
-`smelt.cmd.register`. Engine/`tui` no longer has a `RUST_COMMANDS` table.
-
-### P4.f — Modes registry in Lua ✅ landed (cycle scope)
-
-`modes.lua` (bootstrap chunk) owns `smelt.{mode,reasoning}.cycle`
-over new `cycle_list()` bindings; Rust `cycle_within` /
-`toggle_mode` / `cycle_reasoning` retire. See `P4.md`.
-
-**Tests (L3a):** as each widget reaches its final shape (transcript, diff,
-status, dialogs, picker), add `#[cfg(test)] mod tests` blocks rendering into
-a fake `Grid` and asserting via `assert_eq!(actual, Grid::with_lines([...]))`.
-`Grid: PartialEq` + `Grid::with_lines` are added to `crates/ui/src/grid.rs`
-in P1, then consumed here. See `TESTING.md` § L3a.
-
-End of P4: Rust dialog files are deleted (confirm, confirm_preview,
-text_modal, etc.).
-`crates/tui/src/builtin_commands` is gone. Statusline updates
-without polling. Transcript and diff have no Rust presentation
-code — only parsing + extmark population.
+- **P4.a** ✅ — `runtime/lua/smelt/` layout: widgets, dialogs,
+  colorschemes, statusline, modes, cmd bootstrap.
+- **P4.b** ⏸ — Transcript + diff parsers in Lua (deferred to P9.b
+  transcript-pipeline keystone).
+- **P4.c** ✅ — Reactive statusline via `smelt.statusline.register`.
+- **P4.d** ✅ — Dialogs orchestrated in Lua over generic `buf` / `win` /
+  `overlay` / `layout` primitives.
+- **P4.e** ✅ — Slash commands fully Lua via `smelt.cmd.register`.
+- **P4.f** ✅ — Modes registry in Lua.
 
 ---
 
 ## P5 — Tools to Lua
 
-**Goal:** the 15 Rust tool implementations in `engine/tools/` move into
-`runtime/lua/smelt/tools/` (plus reorganization of the few tools already
-in Lua: `ask_user_question`, `exit_plan_mode`, and the background-process
-helpers that sit beside, not inside, `bash`). Engine becomes schema +
-dispatcher only. Mode gating becomes a Lua-tool `hooks` concern. The 5
-utility files in `engine/tools/`
-(`background`, `file_state`, `web_cache`, `web_shared`, `result_dedup`)
-already moved to `tui::*` capabilities in P3.a.
+Migrate 15 Rust tool implementations from `engine/tools/` into
+`runtime/lua/smelt/tools/`. Engine becomes schema + dispatcher only.
+Mode gating becomes a Lua `hooks` concern. See `P5.md`.
 
-### P5.a — Tool dispatcher trait shape
-
-In `engine`:
-
-- `ToolSchema { name, description, parameters: JSONSchema }`. Drop
-  the `modes` field. Drop `Tool::needs_confirm`/`preflight`/
-  `approval_patterns` from the trait — those move to Lua hooks.
-- `trait ToolDispatcher { async fn dispatch(call_id, name, args, ctx)
-  -> ToolResult; async fn evaluate_hooks(name, args, mode, turn_ctx)
-  -> Hooks }`.
-- **Wiring:** engine takes a `Box<dyn ToolDispatcher>` at
-  `engine::start(config, dispatcher)`. The trait methods are `async`;
-  engine's task `.await`s them on the same tokio thread. No
-  cross-channel ping-pong.
-- Engine never executes tools itself. It calls the dispatcher.
-
-`LuaRuntime` impls `ToolDispatcher`, walking the tool registry
-populated from Lua at startup.
-
-### P5.b — Migrate core tools to Lua
-
-Land in `runtime/lua/smelt/tools/`:
-
-`bash.lua`, `read_file.lua`, `write_file.lua`, `edit_file.lua`,
-`glob.lua`, `grep.lua`, `web_fetch.lua`, `web_search.lua`,
-`notebook_edit.lua`, plus `load_skill.lua`. Optional workflows can ship as
-plugins over the same primitives; they do not need to be built into the core
-tool set.
-
-**Future: optional subprocess tools.** A future multi-agent plugin (if
-enabled) would compose `core::process` long-lived IPC and a thin Lua-side
-registry — no engine knowledge. The transcript would render these calls
-as ordinary tool calls (no special widget).
-
-Each tool:
-
-- Declares schema via `smelt.tools.register({ name, schema, run,
-  hooks })`.
-- `run` composes `core::process` / `core::fs` / `core::http` / etc. via
-  the Lua bindings landed in P3. Coroutine yields on async Rust calls.
-- `hooks(args, mode)` returns `"allow" | "needs_confirm" | "deny"`
-  based on `AgentMode`. This is where the Plan/Apply/Yolo policy
-  lives.
-
-**Intricate logic stays in Rust, called via FFI.** Tools never
-re-implement complicated parsing / safety logic in Lua. Specifically:
-
-- `bash.lua` calls `smelt.permissions.parse_bash(cmd)` to get a
-  structured AST, then walks the result in Lua to decide allow / deny
-  against workspace rules (also via `smelt.permissions.match_rule`).
-- `edit_file.lua` calls `smelt.fs.apply_edit_with_mtime_check(path,
-  old, new, expected_mtime)` for the read-compare-write-fsync atomic
-  step. The Lua side handles error formatting and confirmation; the
-  Rust side handles the race-free filesystem dance.
-- `notebook_edit.lua` calls `smelt.notebook.parse / apply_edit` —
-  Jupyter JSON validation stays in Rust.
-- `web_fetch.lua` calls `smelt.http.fetch` (cache + redirects) and
-  `smelt.html.to_markdown` for the Reader transform.
-- `grep.lua` calls `smelt.grep.run` (ripgrep wrapper).
-
-The principle: the tool body, schema, hooks, and output formatting are
-Lua; anything fragile or performance-sensitive is a one-line FFI call
-into a `tui::*` capability.
-
-**Foreground bash stays foreground-only.** `bash.lua` owns shell execution,
-streaming, and approval logic for normal commands. Background execution and
-process-management UX live in a separate plugin/tool surface over
-`smelt.process`, so `bash` itself does not grow process-registry semantics.
-
-### P5.c — Engine cleanup
-
-- Delete `crates/engine/src/tools/{bash, read_file, write_file,
-  edit_file, glob, grep, web_fetch, web_search, notebook}.rs` and
-  the supporting infrastructure they each carry.
-- **Pull `crates/engine/src/permissions/` out of engine entirely.**
-  All five files (`mod.rs`, `bash.rs`, `rules.rs`, `workspace.rs`,
-  `approvals.rs` + `tests.rs`) move into `core::permissions` (landed
-  in P3.a). Engine has zero `Permissions` references after this
-  step. The new permission flow:
-  1. Engine calls `dispatcher.evaluate_hooks(name, args)`.
-  2. tui's `LuaRuntime` invokes the Lua tool's `hooks(args, mode)`.
-  3. The hook composes `core::permissions.*` calls (parse bash,
-     check workspace, look up runtime approvals, consult workspace
-     store) and returns `"allow" | "needs_confirm" | "deny"`.
-  4. On `"needs_confirm"`, engine emits `RequestPermission`.
-     `Confirms` registers; the user answers; `PermissionDecision`
-     flows back. The Lua hook's earlier "approve always" branch
-     also writes to `core::permissions.approvals` and (if
-     workspace-scoped) the persistent store.
-- `agent.rs` loses its `permissions: Permissions` field and the
-  `permissions.decide(...)` call in the tool-launch path. The agent
-  asks the dispatcher for hooks, nothing more.
-- Per-turn permission overrides (`protocol::PermissionOverrides`)
-  become payload the Lua hook reads from the turn context the
-  dispatcher passes through (`hooks(args, mode, turn_ctx)`).
-  Engine forwards `PermissionOverrides` on `StartTurn` like any
-  other turn parameter; it doesn't apply them itself. Override
-  composition is a Lua-side concern.
-- Engine still owns: provider abstraction, single-agent loop, MCP,
-  cancel tokens, schema-aware streaming. Engine emits
-  `RequestPermission` and consumes `PermissionDecision` on its
-  protocol surface — that's the full engine permission surface.
-- **Drop `EngineConfig.interactive: bool`.** Engine doesn't
-  differentiate frontends; all today-`interactive` branches in
-  `agent.rs` / tool registration / `ToolCtx` go away. Tools that
-  need to know "is there a user to ask?" call
-  `smelt.frontend.is_interactive()` (Host-tier Lua binding that
-  reads which frontend type wraps the `Core`). Tools that only
-  make sense interactively (e.g. `ask_user_question`) deny in
-  their `hooks` when `is_interactive()` is false.
-- **`EngineHandle` becomes channels-only.** Drop the `processes`,
-  `permissions`, and `runtime_approvals` public fields. Frontends
-  reach those through `Core` / `tui::*` instead. The handle's
-  surface is exactly `cmd_tx: Sender<UiCommand>` +
-  `event_rx: Receiver<EngineEvent>`.
-- **Drop the multi-agent concept from engine entirely.** Specific
-  removals:
-  - `EngineConfig.multi_agent: Option<MultiAgentConfig>` and the
-    `MultiAgentConfig` struct.
-  - `EngineEvent::{AgentMessage, AgentExited, Spawned}`.
-  - `UiCommand::AgentMessage`.
-  - `engine::tools::AgentMessageNotification` broadcast channel +
-    every send/recv site in `agent.rs`.
-  - `engine/registry.rs` (262 LOC) — deleted in P5.c; patterns may
-    resurface in future `core::process` long-lived IPC.
-  - `engine/socket.rs` (345 LOC) — deleted in P5.c; patterns may
-    resurface in future `core::process` long-lived IPC.
-  - `protocol::Role::Agent` and `protocol::AgentBlockData`.
-  - The 5 dedicated agent tool files
-    (`spawn_agent.rs` / `stop_agent.rs` / `message_agent.rs` /
-    `peek_agent.rs` / `list_agents.rs`) deleted in P5.c.
-  - `agent.rs`'s multi-agent loop branch (~400 LOC of the 2129)
-    deleted in P5.c; `agent.rs` is single-agent only.
-
-  After this, engine has _no opinion on agents whatsoever_.
-  Any future multi-agent plugin would spawn children via
-  `core::process.spawn("smelt", …)` from a Lua tool; the parent's
-  LLM sees "tool call, tool result" like any other tool.
-- `workspace_permissions.rs` was folded into
-  `core::permissions::store` in P3.a. P5.b's `bash.lua` and
-  `edit_file.lua` call `core::permissions.*` for parsing, rule
-  matching, and approval lookup.
-
-### P5.d — Drop `config.yaml`, all config in `init.lua`
-
-Greenfield — no migration story. One config format only.
-
-- Delete `serde_yml` dependency and the YAML config loader. `Config`
-  no longer derives `Deserialize`; all config population is imperative
-  (Lua APIs write to `LuaShared` registries, `Config::from_lua_shared`
-  builds the Rust struct).
-- Delete the TOML keymap loader (if present) — keymaps are
-  `smelt.keymap.set(mode, key, fn)` calls in `init.lua` or plugins.
-- Bind every today-YAML setting through Lua:
-  - `smelt.provider.register(name, { api_key, default_model, base_url, … })`
-  - `smelt.permissions.set_rules { normal, plan, apply, yolo }`
-  - `smelt.mcp.register(name, { command, args, env })`
-  - `smelt.model.set(name)`, `smelt.reasoning.set(level)`
-  - `smelt.auxiliary.set(task, { model, api })`
-  - `smelt.redact_secrets(true)`, `smelt.auto_compact(true)`,
-    `smelt.context_window(N)`
-- `EngineConfig` becomes constructible only via Lua-driven population
-  at startup. `init.lua` runs first, registers everything, then
-  `Core::start()` materializes the engine config.
-- No settings registry, no "settings key" schema. A setting is a
-  binding argument. Validation is at the FFI boundary.
-- Update `runtime/lua/smelt/colorschemes/default.lua` and seed
-  `runtime/lua/smelt/init.lua` to be the example user config the
-  user copies and edits.
-
-End of P5.d: no YAML files anywhere except `Cargo.toml`. Single
-config language end to end.
-
-### P5.e — Protocol rename pass
-
-Align names with the diagram in one sweeping rename. Greenfield — no
-back-compat. Specific renames:
-
-- `protocol::Mode` → `protocol::AgentMode`.
-- `EngineEvent::ExecutePluginTool` → `ToolDispatch`.
-- `EngineEvent::EvaluatePluginToolHooks` → `ToolHooksRequest`.
-- `UiCommand::SetMode` → `SetAgentMode`.
-- `UiCommand::PluginToolResult` / `PluginToolHooksResult` → `ToolResult`
-  / `ToolHooksResponse`.
-- Drop the `Plugin` prefix from `PluginToolDef` / `PluginToolHookFlags`
-  / `PluginToolHooks` since "plugin tool" and "core tool" no longer
-  exist as a distinction (engine sees one registry).
-
-**Tests (L3b):** Lua dialogs orchestrate multi-step gestures crossing
-widgets. The Pilot harness (~80 LOC, Textual-style: `pilot.click(WinId,
-offset)` / `pilot.press(...)` / `pilot.drain()`) lands here under
-`crates/tui/tests/interaction/`. Asserts on cell state and widget queries
-after gestures — no rendered-grid snapshots. See `TESTING.md` § L3b.
-
-End of P5: `engine` has no opinion on Plan/Apply/Yolo. The same
-registry holds plugin and "core" tools — engine doesn't distinguish.
+- **P5.a** — Tool dispatcher trait shape (`ToolDispatcher` with `dispatch`
+  + `evaluate_hooks`).
+- **P5.b** ✅ — Core tools migrated to Lua; intricate logic stays in Rust
+  as `core::*` capabilities.
+- **P5.c** ✅ — Engine cleanup: `permissions/` → `core::permissions`,
+  multi-agent concept deleted, `EngineHandle` channels-only.
+- **P5.d** ✅ — Drop `config.yaml`; all config in `init.lua`.
+- **P5.e** ✅ — Protocol rename pass (`Mode` → `AgentMode`, drop `Plugin`
+  prefix, etc.).
 
 ---
 
@@ -1174,93 +261,33 @@ stacking).
 
 ## P8 — Crate extraction
 
-**Goal:** extract two modules into their final homes: `core` becomes
-`crates/core` and `ui` absorbs into `tui` as `tui/src/ui/`.  The result
-is a 4-crate architecture (`protocol ← engine ← core ← tui`).  This is
-**not deferred** — it lands in P8 regardless of whether a third frontend
-exists, because compiler-enforced boundaries are better than
-module-level conventions.
+Extract `core` into `crates/core` and absorb `ui` into `tui`. Result:
+4-crate architecture (`protocol ← engine ← core ← tui`). `core` has
+zero `crossterm` / `ui` imports. See `P8.md`.
 
-A second constraint: **`core` has zero `crossterm` and zero `ui`
-imports.** `tui::ui` keeps `crossterm` — it is a terminal UI primitives
-module (Buffer, Window, Grid, LayoutTree, VimMode), not a generic UI
-abstraction.
-A GUI or web frontend uses `core` directly and ignores `ui` entirely.
-
-### P8.a — Purge terminal dependencies from `core`
-
-- Move terminal-specific files (`events.rs`, `mouse.rs`, `render_loop.rs`,
-  `status_bar.rs`, `cmdline.rs`, `content_keys.rs`, `pane_focus.rs`) from
-  `core/` to `tui/src/app/`.  These are self-contained `impl TuiApp` blocks
-  with crossterm imports; moving them first avoids the `pub(super)` visibility
-  trap that blocked an earlier premature `TuiApp` extraction.
-  `core/mod.rs` still carries `run()` and its crossterm imports — those leave
-  when `TuiApp` is extracted in P8.a.4.
-- Replace crossterm color usage in `headless.rs` and `working.rs` with
-  ANSI strings or a tiny internal color enum.
-- Dissolve `term/content/`: headless-safe display model (`DisplayBlock`,
-  `LayoutContext`, `SpanCollector`, `stream_parser.rs`, `highlight/`)
-  moves to `core/content/`; terminal rendering adapters (`to_buffer.rs`,
-  `prompt_data.rs`, `status.rs`) stay in `tui`.
-- Dissolve `term/input/`: data-model pieces (`History`, `PromptState`)
-  move to `core`; terminal editing chrome (`completer_bridge.rs`,
-  `vim_bridge.rs`, crossterm dispatch) stays in `tui`.
-- `term/window.rs` moves to `tui/src/window.rs`.
-- Remove `#![allow(clippy::module_inception)]` from `core/mod.rs`
-  once the `core` submodule is renamed or flattened.
-
-### P8.b — Break the `core → ui` dependency
-
-- **Clipboard moves to `core`.** `Clipboard`, `KillRing`, and the `Sink`
-  trait relocate from `tui/src/ui/clipboard.rs` to
-  `crates/core/src/clipboard.rs`.  They are text-manipulation primitives,
-  not UI rendering primitives — `KillRing` is pure `std`, `Sink` is a
-  two-method platform abstraction, and `ui` (Buffer, Window, Grid) never
-  touches them.  `SystemSink` / `Osc52Sink` moved to `core/clipboard.rs`
-  and implement `core::Sink`.
-- **VimMode becomes a `tui`-only type.** `Core` seeds the `vim_mode` cell
-  with the plain string `"Insert"`.  `TuiApp` owns the typed
-  `tui::ui::VimMode` and publishes `format!("{:?}", vim_mode)` into the
-  cell.  Lua reads the cell string; it never sees the enum.
-
-### P8.c — Split Lua FFI by tier
-
-- Move ~40 Host-tier bindings (`fs`, `http`, `grep`, `engine`,
-  `session`, `process`, `permissions`, etc.) from `tui/src/lua/api/`
-  into `core/src/lua/api/`.
-- Retain only the ~7 UiHost-tier bindings (`ui`, `win`, `buf`,
-  `prompt`, `statusline`, `confirm`, `notebook`) in `tui/src/lua/api/`.
-- Update `LuaRuntime` construction so `core` registers Host bindings
-  and `tui` registers UiHost bindings on top.
-
-### P8.d — `with_app` returns `&mut dyn Host`
-
-- Change `with_app` (and the `Host` trait itself) so that headless
-  consumers receive `&mut dyn Host` rather than `&mut TuiApp`.  This
-  lets `HeadlessApp` drive the same Lua callbacks without pulling in
-  terminal-specific types.
-
-### P8.e — Physical crate split
-
-- Create `crates/core/Cargo.toml` depending on `protocol` and
-  `engine` only.
-- Move `crates/tui/src/core/` → `crates/core/src/`; update
-  `crates/tui/Cargo.toml` to depend on `core`.
-- Move `crates/tui/src/term/content/` → `crates/core/src/content/`.
-  The `term/` module is fully dissolved by this point.
-- Absorb `crates/ui/` into `tui/src/ui/`: move all `crates/ui/src/*.rs`
-  files into `tui/src/ui/`, update `crates/tui/Cargo.toml` to pull in
-  `ui`'s dependencies (`crossterm`), and delete `crates/ui/`.
-- Verify: `cargo check -p core` succeeds with zero `crossterm` or `ui`
-  imports.
+- **P8.a** — Purge terminal dependencies from `core`: move TUI-specific
+  files to `tui/src/app/`, dissolve `term/` module.
+- **P8.b** — Break `core → ui` dependency: Clipboard + KillRing move to
+  `core`; `VimMode` stays `tui`-only.
+- **P8.c** — Split Lua FFI by tier: Host-tier bindings → `core`,
+  UiHost-tier bindings stay in `tui`.
+- **P8.d** — `with_app` returns `&mut dyn Host` so `HeadlessApp` drives
+  Lua without terminal types.
+- **P8.e** — Physical crate split: create `crates/core/Cargo.toml`,
+  move modules, absorb `crates/ui/` into `tui/src/ui/`.
 
 
 ---
 
 ## P9 — Final cleanup
 
-**Goal:** purge remaining transitional abstractions and fix naming drift.
-Small, safe subtasks that each land green.
+**Goal:** purge remaining transitional abstractions, fix naming drift, and
+unify divergent paths that should share the `Buffer` / `BufferParser`
+abstractions. Subtasks are ordered by implementation dependency:
+transcript pipeline first (gives everything a proper `Buffer`), then prompt
+wrapping, then copy unification, then the remaining cleanups.
+
+Implementation order: a → b → c → d → e → f → g.
 
 ---
 
@@ -1297,7 +324,58 @@ owns the stable IDs. `next_win_id` starts at `0` and is collision-tolerant.
 
 ---
 
-### P9.b — Unify prompt wrapping via `BufferParser`
+### P9.b — Transcript pipeline migration
+
+**Goal:** replace the `SpanCollector` / `DisplayBlock` / `transcript_cache.rs`
+stack with direct `Buffer` extmark writes. This is the keystone that P1.a-tail
+and P4.b described but never landed. It is **not cleanup** — it is a structural
+rewrite of the rendering layer, and it comes first in P9 because every later
+subtask assumes both transcript and prompt live on `Buffer`.
+
+- **Delete `SpanCollector` and `DisplayBlock`.** Change transcript renderers
+  (markdown, diff, syntax, tool previews) to write directly into `&mut Buffer`
+  via `set_all_lines`, `add_highlight`, and `set_decoration`. This is a
+  mechanical refactor: every `out.print("...")` becomes a line append, every
+  `out.set_fg(red)` becomes a highlight extmark. `content/layout_out.rs` is
+  deleted.
+- **Migrate `transcript_present/` into `BufferParser` impls.** One parser per
+  block variant (`User`, `Thinking`, `Text`, `CodeLine`, `ToolCall`, `Exec`).
+  Each parser receives the block data + width and mutates a fresh `Buffer`.
+  Keep the parsers in Rust for now; the P4.b Lua migration is a follow-up.
+- **Delete `transcript_cache.rs`.** `Buffer::ensure_rendered_at(width)` caches
+  by `(changedtick, width)`. Per-block caching is handled by each block
+  buffer's own `last_render` slot; no separate `BlockArtifact` /
+  `PersistedLayoutCache` is needed.
+- **Shrink `transcript_buf.rs`.** It becomes a thin composition layer:
+  concatenate block buffer lines + insert gap rows between blocks + write the
+  result into the transcript display buffer. `TranscriptProjection` stays but
+  operates on `Buffer` lines instead of `DisplayBlock` spans.
+- **Fix width-dependent layout violations.** `transcript_present/`
+  (`layout_block`, `render_markdown_inner`, `render_code_block`,
+  `render_markdown_table`) pre-wrap content at layout/collection time. The
+  `BufferParser` model inverts this: width-independent computation (LCS, token
+  streams, markdown parsing) happens at block-ingest time; width-dependent
+  wrapping happens in `ensure_rendered_at(width)` at paint time. P9.b migrates
+  all transcript renderers to this model.
+- **Eliminate user-bubble rendering duplication.**
+  `transcript_present/mod.rs` (`render_block` for `Block::User`) and
+  `prompt_data.rs` (`queued_message_rows`) both use `UserBlockGeometry` +
+  `wrap_line` but emit through different pipelines (`SpanCollector` vs
+  `WindowRow`). After P9.b, user blocks render through the same `BufferParser`
+  as everything else; `queued_message_rows` can call the same parser with the
+  queued message text.
+- **Fix `INVENTORY.md` statuses.** The transcript files are marked "deleted /
+  done" but still exist. Update their status to **"landed in P9.b"** after
+  deletion.
+
+End of P9.b: `transcript_present/`, `transcript_cache.rs`,
+`content/layout_out.rs`, and `SpanCollector` are deleted. The transcript
+pipeline is `Block` → `BufferParser` → `Buffer` → `transcript_buf.rs`
+(composition) → `Window::render`.
+
+---
+
+### P9.c — Unify prompt wrapping via `BufferParser`
 
 The prompt runs wrapping logic in **three places** today:
 1. `compute_prompt` manually wraps the input area via `wrap_and_locate_cursor`.
@@ -1327,13 +405,57 @@ Unify them into a single `BufferParser` pass.
   insert/delete APIs; building them is not cleanup.
 - **Naming:** `prompt_data.rs` → `prompt_buf.rs` to match `transcript_buf.rs`.
 
-End of P9.b: one wrapping pass instead of three. `PromptWrap` is deleted or
+- **Selection highlight computation is duplicated** between
+  `app/transcript.rs` (`transcript_selection_highlights`) and
+  `content/prompt_data.rs` (`compute_input_area`). Both map a wrapped byte
+  range to per-line `(col_start, col_end)` highlight tuples. P9.c's
+  `PromptInputParser` gives the prompt a proper `Buffer` with extmarks; once
+  P9.b gives the transcript the same, both paths collapse to a single
+  `Buffer::highlight_range`-style primitive.
+
+End of P9.c: one wrapping pass instead of three. `PromptWrap` is deleted or
 shrunk to a thin utility. `compute_prompt` still exists as the frame composer.
 `Window::text` survives.
 
 ---
 
-### P9.c — Naming consistency
+### P9.d — Unify copy / yank / clipboard paths
+
+**Severity: High.** There are **eight divergent copy paths** today. They use
+different source text and different metadata awareness, causing real bugs
+(prompt copy leaks attachment markers; mouse yank ignores `SpanMeta` and
+soft-wraps; vim yank requires a null-sink workaround).
+
+| Path | File | Problem |
+|------|------|---------|
+| Transcript cell-walk | `core/content/transcript.rs` | The "correct" path: respects `SpanMeta.selectable`, `copy_as`, `source_text`, soft-wrap coalescing. |
+| Prompt keybind copy | `input/mod.rs` | Slices `Window::text` directly; no `SpanMeta`; attachments copy as raw `\u{FFFC}`. |
+| Prompt mouse yank | `ui/window.rs` | `mouse_yank_text` does naive `buf[start..end].to_string()`; ignores `SpanMeta`, `source_text`, soft-wraps entirely. |
+| Content vim yank | `app/content_keys.rs` | Mutes platform sink, stores raw bytes in vim register, then re-resolves via `copy_display_range`. Fragile. |
+| Vim internal yank | `ui/vim.rs` | Operates on `self.text` bytes, not buffer cells. |
+| Kill-ring editing | `input/buffer.rs` | `kill_and_copy` pushes editing kills to clipboard; not selection copy. |
+| Mouse clipboard | `app/mouse.rs` | `yank_to_clipboard` wraps `kill_ring.set_with_linewise`; no `SpanMeta`. |
+| Whole-block yank | `app/transcript.rs` | `block_text_at_row` uses `Block::raw_text()` for some blocks, cell-walking for others. |
+
+**Plan:** After P9.b and P9.c give both prompt and transcript a proper `Buffer`
+with `LineDecoration` extmarks, build a single
+`copy_range(buf: &Buffer, start_byte, end_byte) -> String` primitive that:
+- Reads `soft_wrapped` and `source_text` from buffer decorations.
+- Skips non-selectable cells via `SpanMeta` on highlight extmarks (or a
+dedicated copy namespace).
+- Applies `copy_as` substitutions.
+- Is used by mouse yank, keybind copy, vim yank, and transcript block copy.
+
+The primitive lives in `ui/buffer.rs` or `ui/window.rs`. Each consumer passes
+its `Buffer` + byte range; no per-surface copy logic remains.
+
+**Gating:** P9.d starts after P9.b (transcript has a real Buffer) and P9.c
+(prompt has a real Buffer) are both green. It can be landed in two halves:
+prompt copy first, transcript copy second.
+
+---
+
+### P9.e — Naming consistency
 
 The content modules grew different vocabularies because the two pipelines were
 built at different times under different assumptions. Align them:
@@ -1348,41 +470,102 @@ the rename was still cheaper than the confusion it prevented.
 
 ---
 
-## P10 — Transcript pipeline
+### P9.f — Merge responsive bar layout primitives
 
-**Goal:** replace the `SpanCollector` / `DisplayBlock` / `transcript_cache.rs`
-stack with direct `Buffer` extmark writes. This is the keystone that P1.a-tail
-and P4.b described but never landed. It is **not cleanup** — it is a structural
-rewrite of the rendering layer.
+**Severity: Medium.** `content/status.rs::spans_to_buffer_line` and
+`content/prompt_data.rs::bar_row` implement the same responsive layout
+algorithm: drop highest-priority spans first, truncate if possible, pad with
+filler. They emit different output types (`StatusLine` vs `WindowRow`) but the
+logic is identical.
 
-- **Delete `SpanCollector` and `DisplayBlock`.** Change transcript renderers
-  (markdown, diff, syntax, tool previews) to write directly into `&mut Buffer`
-  via `set_all_lines`, `add_highlight`, and `set_decoration`. This is a
-  mechanical refactor: every `out.print("...")` becomes a line append, every
-  `out.set_fg(red)` becomes a highlight extmark. `content/layout_out.rs` is
-  deleted.
-- **Migrate `transcript_present/` into `BufferParser` impls.** One parser per
-  block variant (`User`, `Thinking`, `Text`, `CodeLine`, `ToolCall`, `Exec`).
-  Each parser receives the block data + width and mutates a fresh `Buffer`.
-  Keep the parsers in Rust for P10; the P4.b Lua migration is a follow-up.
-- **Delete `transcript_cache.rs`.** `Buffer::ensure_rendered_at(width)` caches
-  by `(changedtick, width)`. Per-block caching is handled by each block
-  buffer's own `last_render` slot; no separate `BlockArtifact` /
-  `PersistedLayoutCache` is needed.
-- **Shrink `transcript_buf.rs`.** It becomes a thin composition layer:
-  concatenate block buffer lines + insert gap rows between blocks + write the
-  result into the transcript display buffer. `TranscriptProjection` stays but
-  operates on `Buffer` lines instead of `DisplayBlock` spans.
-- **Fix `INVENTORY.md` statuses.** The files above are marked "deleted / done"
-  but still exist. Update their status to **"landed in P10"** after deletion.
+**Plan:** Extract a shared `responsive_line(spans, width) -> ResponsiveLine`
+primitive that:
+- Takes priority-sorted, alignment-grouped spans.
+- Drops / truncates until `display_width <= width`.
+- Returns aligned left + right segments + filler segment.
 
-End of P10: `transcript_present/`, `transcript_cache.rs`,
-`content/layout_out.rs`, and `SpanCollector` are deleted. The transcript
-pipeline is `Block` → `BufferParser` → `Buffer` → `transcript_buf.rs`
-(composition) → `Window::render`.
+`spans_to_buffer_line` and `bar_row` become thin adapters that convert
+`ResponsiveLine` into their respective output types. This removes ~80 LOC of
+duplication and makes the priority-drop algorithm testable in one place.
 
-**Trigger condition:** start P10 only after P9 is fully green. Do not interleave
-P9 cleanup with P10 structural work.
+---
+
+### P9.g — Unify `buffer::SpanStyle` and `grid::Style`
+
+**Severity: Medium (with a real rendering bug).** Two resolved-terminal-style
+types exist at adjacent layers:
+
+| Type | Module | Fields | Color type |
+|------|--------|--------|------------|
+| `grid::Style` | `ui/grid.rs` | fg, bg, bold, dim, italic, **underline, crossedout** | `crossterm::Color` |
+| `buffer::SpanStyle` | `ui/buffer.rs` | fg, bg, bold, dim, italic | `crossterm::Color` |
+
+`buffer::SpanStyle` is missing `underline` and `crossedout`. This causes a
+**latent rendering bug**: these attributes are silently dropped at three
+conversion sites:
+- `content/to_buffer.rs:149` (`resolve_span_style`) — drops both when
+  projecting `DisplayBlock` into `Buffer`.
+- `content/prompt_data.rs:762` (`span_style`) — drops both when writing prompt
+  chrome into `Buffer`.
+- `ui/window.rs:1194-1195` (`merge_span_style`) — hardcodes both from the base
+  row style only; spans can never contribute them.
+
+The markdown inline parser (`content/highlight/inline.rs`) **does** emit
+`crossedout` for `~~strikethrough~~`, and `SpanCollector` / `DisplayBlock`
+carry it faithfully. But it vanishes at the Buffer boundary — strikethrough text
+renders as plain text.
+
+**Plan:**
+1. Replace `buffer::SpanStyle` with `grid::Style` in the Buffer extmark API.
+   Both types use `crossterm::Color` and represent the same concept (resolved
+   terminal-ready style). `grid::Style` is already `Copy` + `Default`.
+2. Update `content/to_buffer.rs::resolve_span_style` to return `grid::Style`
+   (or delete it if `display::SpanStyle` gets a `From` impl).
+3. Fix `ui/window.rs::merge_span_style` to OR-merge `underline` and
+   `crossedout` from the span, not just the base row.
+4. Delete `content/prompt_data.rs::span_style()` and the manual conversion in
+   `app/status_bar.rs`; replace with `.into()` or direct assignment.
+5. Verify `cargo nextest run --workspace`.
+
+This removes ~50 LOC of mechanical conversion and fixes the strikethrough
+rendering bug.
+
+---
+
+### What we investigated and chose not to consolidate
+
+**BashHighlighter vs. `print_user_highlights`** — These serve orthogonal
+domains: `BashHighlighter` is a full `syntect` shell grammar tokenizer with
+multi-color RGB output; `print_user_highlights` is a hand-written char scanner
+that accents `@path` refs, `[image]` labels, and slash commands with a single
+`ColorRole::Accent`. Merging them would add abstraction without reducing code.
+
+**The 5 wrapping implementations** — Each serves genuinely different
+constraints:
+- `wrap_line` = general word-splitting utility
+- `wrap_and_locate_cursor` = prompt editor (tab-stop aware + cursor tracking +
+  `SpanKind` metadata)
+- `PromptWrap::build` = bi-directional byte-coordinate translator (not a
+  wrapping algorithm)
+- `wrap_cell_words` = markdown-syntax-aware table cell wrapping
+- `wrap_inline_spans` = style-preserving span split (algorithmically identical
+  to `wrap_line` but with `InlineStyle` payloads; ~50 lines, not worth
+  genericizing)
+
+The only consolidation already planned is moving transcript_present's direct
+`wrap_line` calls onto `BufferParser` + `ensure_rendered_at` (P9.b).
+
+**`TranscriptSnapshot` parallel arrays** — `TranscriptSnapshot`
+(`row_cells`, `soft_wrapped`, `source_text`, `block_of_row`) could theoretically
+be replaced by Buffer extmark queries, but this requires two Buffer features
+that don't exist yet:
+1. A per-cell metadata helper to resolve `SpanMeta` at `(row, col)` from
+   highlight intervals.
+2. A block-to-row mapping (new extmark namespace or decoration field).
+
+Building these now would target the `TranscriptProjection` intermediate layer,
+which P9.b is about to rewrite. The plan explicitly sequences this: P9.b first,
+then P9.d transcript half.
 
 ---
 
