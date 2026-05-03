@@ -14,7 +14,8 @@
 
 use crate::core::transcript_model::{Block, ToolOutput, ToolStatus};
 use crate::core::working::{TurnOutcome, TurnPhase};
-use crate::core::{ConfirmRequest, PendingTool, SessionControl, TuiApp};
+use crate::core::{ConfirmRequest, TuiApp};
+use crate::core::{PendingTool, SessionControl};
 use engine::EngineHandle;
 use protocol::{EngineEvent, UiCommand};
 use std::sync::atomic::{AtomicBool, Ordering};

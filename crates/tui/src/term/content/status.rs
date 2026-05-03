@@ -11,7 +11,7 @@ use crossterm::style::Color;
 
 /// Foreground / background / attribute snapshot for a status-line
 /// span. The status bar is the only consumer; it converts to
-/// `ui::grid::Style` at paint time via `style_to_grid` below.
+/// `crate::ui::grid::Style` at paint time via `style_to_grid` below.
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct StyleState {
     pub(crate) fg: Option<Color>,
@@ -55,11 +55,11 @@ impl StatusItem {
     }
 }
 
-pub(crate) fn vim_mode_label(mode: Option<ui::VimMode>) -> Option<&'static str> {
+pub(crate) fn vim_mode_label(mode: Option<crate::ui::VimMode>) -> Option<&'static str> {
     match mode {
-        Some(ui::VimMode::Insert) => Some("INSERT"),
-        Some(ui::VimMode::Visual) => Some("VISUAL"),
-        Some(ui::VimMode::VisualLine) => Some("VISUAL LINE"),
+        Some(crate::ui::VimMode::Insert) => Some("INSERT"),
+        Some(crate::ui::VimMode::Visual) => Some("VISUAL"),
+        Some(crate::ui::VimMode::VisualLine) => Some("VISUAL LINE"),
         _ => None,
     }
 }
@@ -98,7 +98,7 @@ const STATUS_SEP_LEN: usize = 3;
 
 /// One styled run inside a baked status line. `col_start` /  `col_end`
 /// are display-cell offsets into [`StatusLine::text`]; `style` is the
-/// fully-merged `ui::grid::Style` (already includes `fill_bg` for
+/// fully-merged `crate::ui::grid::Style` (already includes `fill_bg` for
 /// segments that didn't override it). Non-overlapping; together with
 /// gap fills they cover the whole line width so every painted cell
 /// gets exactly one span.
@@ -106,7 +106,7 @@ const STATUS_SEP_LEN: usize = 3;
 pub(crate) struct StatusSpanOut {
     pub(crate) col_start: u16,
     pub(crate) col_end: u16,
-    pub(crate) style: ui::grid::Style,
+    pub(crate) style: crate::ui::grid::Style,
 }
 
 /// Materialised status line: a flat string padded to terminal width
@@ -166,18 +166,18 @@ pub(crate) fn spans_to_buffer_line(
         spans.retain(|s| s.priority != max_pri);
     }
 
-    let sep_style = ui::grid::Style {
+    let sep_style = crate::ui::grid::Style {
         fg: sep_fg,
         bg: Some(fill_bg),
         dim: true,
-        ..ui::grid::Style::default()
+        ..crate::ui::grid::Style::default()
     };
-    let fill_style = ui::grid::Style {
+    let fill_style = crate::ui::grid::Style {
         bg: Some(fill_bg),
-        ..ui::grid::Style::default()
+        ..crate::ui::grid::Style::default()
     };
-    let style_to_grid = |ss: &StyleState| -> ui::grid::Style {
-        ui::grid::Style {
+    let style_to_grid = |ss: &StyleState| -> crate::ui::grid::Style {
+        crate::ui::grid::Style {
             fg: ss.fg,
             bg: ss.bg.or(Some(fill_bg)),
             bold: ss.bold,
@@ -191,8 +191,8 @@ pub(crate) fn spans_to_buffer_line(
     // Emit (text, style) pairs for the left half (col 0 → ...) and
     // the right half (... → width). Right segments are concatenated
     // forward; we offset them to the right edge below.
-    let mut left_runs: Vec<(String, ui::grid::Style)> = Vec::new();
-    let mut right_runs: Vec<(String, ui::grid::Style)> = Vec::new();
+    let mut left_runs: Vec<(String, crate::ui::grid::Style)> = Vec::new();
+    let mut right_runs: Vec<(String, crate::ui::grid::Style)> = Vec::new();
 
     let mut first_left = true;
     for s in spans.iter().filter(|s| !s.align_right) {

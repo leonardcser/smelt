@@ -1,4 +1,4 @@
-use crate::grid::{CellUpdate, Style};
+use super::grid::{CellUpdate, Style};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
@@ -133,8 +133,8 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
 
 #[cfg(test)]
 mod tests {
+    use super::grid::Grid;
     use super::*;
-    use crate::grid::Grid;
     use crossterm::style::Color;
 
     #[test]

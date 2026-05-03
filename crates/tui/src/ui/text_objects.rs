@@ -3,7 +3,7 @@
 //! Pure helpers over `&str` buffers — no editor state. Used by the vim
 //! keymap and any other code that wants the same selection semantics.
 
-use crate::text::{char_class, line_end, line_start, CharClass};
+use super::text::{char_class, line_end, line_start, CharClass};
 
 pub(crate) fn text_object(
     buf: &str,

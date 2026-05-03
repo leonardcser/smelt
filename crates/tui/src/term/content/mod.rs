@@ -100,7 +100,10 @@ pub(crate) fn emit_newlines(out: &mut layout_out::SpanCollector, n: u16) {
     }
 }
 
-pub(super) fn reasoning_color(effort: protocol::ReasoningEffort, theme: &ui::Theme) -> Color {
+pub(super) fn reasoning_color(
+    effort: protocol::ReasoningEffort,
+    theme: &crate::ui::Theme,
+) -> Color {
     let group = match effort {
         protocol::ReasoningEffort::Off => "SmeltReasonOff",
         protocol::ReasoningEffort::Low => "SmeltReasonLow",

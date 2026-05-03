@@ -4,7 +4,7 @@
 //! window keymaps (nvim-style layering).
 
 use super::*;
-use crossterm::event::Event;
+use crossterm::event::{Event, KeyEvent};
 use std::time::Duration;
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.

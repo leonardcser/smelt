@@ -20,10 +20,10 @@ pub(super) static SYNTAX_SET: LazyLock<SyntaxSet> =
 pub(super) static THEME_SET: LazyLock<two_face::theme::EmbeddedLazyThemeSet> =
     LazyLock::new(two_face::theme::extra);
 
-/// Light/dark hint for `syntax_theme()`. Mirrored from `ui::Theme`'s
+/// Light/dark hint for `syntax_theme()`. Mirrored from `crate::ui::Theme`'s
 /// `is_light` flag by `crate::theme::populate_ui_theme()` each frame.
 /// Local to this module since syntect picks pre-loaded themes by index
-/// and the alternative — threading `&ui::Theme` through every
+/// and the alternative — threading `&crate::ui::Theme` through every
 /// `print_syntax_file` / `print_inline_diff` call site — touches 14+
 /// callers for one branch.
 static SYNTAX_THEME_LIGHT: std::sync::atomic::AtomicBool =

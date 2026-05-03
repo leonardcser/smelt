@@ -20,20 +20,20 @@ impl TuiApp {
         let cap_before = self.ui.capture();
         if matches!(
             self.ui
-                .dispatch_event(ui::Event::Mouse(me), &mut |_, _, _| {}),
-            ui::Status::Consumed
+                .dispatch_event(crate::ui::Event::Mouse(me), &mut |_, _, _| {}),
+            crate::ui::Status::Consumed
         ) {
             let scrollbar_owner = match (cap_before, self.ui.capture()) {
-                (Some(ui::HitTarget::Scrollbar { owner }), _)
-                | (_, Some(ui::HitTarget::Scrollbar { owner })) => Some(owner),
+                (Some(crate::ui::HitTarget::Scrollbar { owner }), _)
+                | (_, Some(crate::ui::HitTarget::Scrollbar { owner })) => Some(owner),
                 _ => None,
             };
             if let Some(owner) = scrollbar_owner {
                 self.propagate_scrollbar_scroll(owner);
                 if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
-                    if owner == ui::TRANSCRIPT_WIN {
+                    if owner == crate::ui::TRANSCRIPT_WIN {
                         self.app_focus = crate::core::AppFocus::Content;
-                    } else if owner == ui::PROMPT_WIN {
+                    } else if owner == crate::ui::PROMPT_WIN {
                         self.app_focus = crate::core::AppFocus::Prompt;
                     }
                 }
@@ -81,7 +81,7 @@ impl TuiApp {
         if let Some((win, count)) = self.ui.resolve_split_mouse(me) {
             let is_down = matches!(me.kind, MouseEventKind::Down(MouseButton::Left));
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
-            if win == ui::PROMPT_WIN {
+            if win == crate::ui::PROMPT_WIN {
                 if is_down {
                     self.app_focus = crate::core::AppFocus::Prompt;
                     if self.input.win.vim_enabled {
@@ -96,7 +96,7 @@ impl TuiApp {
                         }
                     }
                 }
-            } else if win == ui::TRANSCRIPT_WIN {
+            } else if win == crate::ui::TRANSCRIPT_WIN {
                 if is_down && !self.has_transcript_content(self.core.config.settings.show_thinking)
                 {
                     return EventOutcome::Noop;
@@ -159,7 +159,7 @@ impl TuiApp {
     pub(super) fn scroll_under_mouse(&mut self, row: u16, col: u16, delta: isize) {
         let on_prompt = matches!(
             self.ui.hit_test(row, col, None),
-            Some(ui::HitTarget::Window(w)) if w == ui::PROMPT_WIN
+            Some(crate::ui::HitTarget::Window(w)) if w == crate::ui::PROMPT_WIN
         );
         if on_prompt {
             self.app_focus = crate::core::AppFocus::Prompt;
@@ -169,7 +169,7 @@ impl TuiApp {
             // (Step 6) syncs `scroll_top` to keep the cursor visible.
             // Once 7b lands the row-space adapter, this collapses into
             // a shared `Window::scroll_by_lines` call with the rest.
-            let (new_pos, new_want) = ui::text::vertical_move(
+            let (new_pos, new_want) = crate::ui::text::vertical_move(
                 &self.input.win.text,
                 self.input.win.cpos,
                 delta,
@@ -204,7 +204,7 @@ impl TuiApp {
         let Some((win, delta)) = self.ui.poll_drag_autoscroll() else {
             return;
         };
-        if win == ui::TRANSCRIPT_WIN && self.app_focus == crate::core::AppFocus::Content {
+        if win == crate::ui::TRANSCRIPT_WIN && self.app_focus == crate::core::AppFocus::Content {
             self.move_content_cursor_by_lines(delta);
         }
     }
@@ -219,7 +219,7 @@ impl TuiApp {
     /// Prompt mouse yank is not implemented yet — the wrapped display
     /// text would need byte-range translation back to source bytes.
     fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let Some(vp) = ui::UiHost::viewport_for(self, ui::PROMPT_WIN) else {
+        let Some(vp) = crate::ui::UiHost::viewport_for(self, crate::ui::PROMPT_WIN) else {
             return;
         };
         let usable = vp.content_width as usize;
@@ -239,7 +239,7 @@ impl TuiApp {
             .input
             .win
             .vim_enabled
-            .then(|| ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .then(|| crate::ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
             .flatten();
 
         self.input.win.cpos = wrap.src_to_wrapped(saved_src_cpos);
@@ -252,13 +252,13 @@ impl TuiApp {
             if let Some(a) = saved_vim_visual_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    ui::VimMode::Visual,
+                    crate::ui::VimMode::Visual,
                     wrap.src_to_wrapped(a),
                 );
             }
         }
 
-        let mouse_ctx = ui::MouseCtx {
+        let mouse_ctx = crate::ui::MouseCtx {
             rows: &wrap.rows,
             soft_breaks: &wrap.soft_breaks,
             hard_breaks: &wrap.hard_breaks,
@@ -279,7 +279,7 @@ impl TuiApp {
             .input
             .win
             .vim_enabled
-            .then(|| ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
+            .then(|| crate::ui::vim::visual_anchor(&self.input.win.vim_state, self.vim_mode))
             .flatten();
 
         self.input.win.cpos = wrap.wrapped_to_src(new_w_cpos);
@@ -292,7 +292,7 @@ impl TuiApp {
             if let Some(a) = new_w_vim_anchor {
                 self.input.win.vim_state.begin_visual(
                     &mut self.vim_mode,
-                    ui::VimMode::Visual,
+                    crate::ui::VimMode::Visual,
                     wrap.wrapped_to_src(a),
                 );
             }
@@ -309,14 +309,14 @@ impl TuiApp {
     /// On `MouseUp`, returns the selected text so the host can yank
     /// it to the clipboard.
     fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) -> Option<String> {
-        let rows = ui::UiHost::rows_for(self, ui::TRANSCRIPT_WIN)?;
+        let rows = crate::ui::UiHost::rows_for(self, crate::ui::TRANSCRIPT_WIN)?;
         if rows.is_empty() {
             return None;
         }
-        let (soft, hard) = ui::UiHost::breaks_for(self, ui::TRANSCRIPT_WIN)?;
-        let viewport = ui::UiHost::viewport_for(self, ui::TRANSCRIPT_WIN)?;
+        let (soft, hard) = crate::ui::UiHost::breaks_for(self, crate::ui::TRANSCRIPT_WIN)?;
+        let viewport = crate::ui::UiHost::viewport_for(self, crate::ui::TRANSCRIPT_WIN)?;
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
-        let mouse_ctx = ui::MouseCtx {
+        let mouse_ctx = crate::ui::MouseCtx {
             rows: &rows,
             soft_breaks: &soft,
             hard_breaks: &hard,
@@ -337,7 +337,7 @@ impl TuiApp {
         &mut self,
         me: MouseEvent,
         rows: &[String],
-        vp: ui::WindowViewport,
+        vp: crate::ui::WindowViewport,
     ) -> MouseEvent {
         let rel_row = me.row.saturating_sub(vp.rect.top) as usize;
         let line_idx = (self.transcript_window.scroll_top as usize + rel_row)
@@ -359,11 +359,11 @@ impl TuiApp {
     /// the scroll resolved to. PROMPT_WIN only needs the raw
     /// `scroll_top` copy — the next render-loop pass clamps it
     /// against the prompt buffer's height.
-    fn propagate_scrollbar_scroll(&mut self, owner: ui::WinId) {
+    fn propagate_scrollbar_scroll(&mut self, owner: crate::ui::WinId) {
         let Some(scroll_top) = self.ui.win(owner).map(|w| w.scroll_top) else {
             return;
         };
-        if owner == ui::TRANSCRIPT_WIN {
+        if owner == crate::ui::TRANSCRIPT_WIN {
             self.transcript_window.scroll_top = scroll_top;
             let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             let viewport = self.viewport_rows_estimate();
@@ -371,7 +371,7 @@ impl TuiApp {
             self.transcript_window.follow_tail = self.transcript_window.scroll_top >= max_scroll;
             self.transcript_window
                 .reanchor_to_visible_row(&rows, viewport);
-        } else if owner == ui::PROMPT_WIN {
+        } else if owner == crate::ui::PROMPT_WIN {
             self.input.win.scroll_top = scroll_top;
         }
     }

@@ -5,12 +5,12 @@
 //! owned by `TuiApp`, the **single global** `Clipboard` (kill ring + platform
 //! sink) also owned by `TuiApp`, and the per-Window `curswant` +
 //! `VimWindowState` (Visual anchor, last `f`/`t`) carried on
-//! `ui::Window`. Vim itself holds only in-flight key-sequence state.
+//! `crate::ui::Window`. Vim itself holds only in-flight key-sequence state.
 
 use super::{Action, History, PromptState};
+use crate::ui::vim::{self, VimContext};
+use crate::ui::{Clipboard, VimMode};
 use crossterm::event::{Event, KeyEvent};
-use ui::vim::{self, VimContext};
-use ui::{Clipboard, VimMode};
 
 /// Outcome of the vim bridge for a single key event.
 pub(super) enum VimBridgeResult {

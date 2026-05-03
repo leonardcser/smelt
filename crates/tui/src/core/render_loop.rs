@@ -32,7 +32,7 @@ impl TuiApp {
         // to `Hardware` / `Block` if a focused surface owns the
         // caret. `Hidden` is the right baseline for unfocused frames
         // / cmdline-up / dialog-without-input cases.
-        self.ui.set_cursor_shape(ui::CursorShape::Hidden);
+        self.ui.set_cursor_shape(crate::ui::CursorShape::Hidden);
 
         // ── Layout ──
         let natural_prompt_height = self.measure_prompt_height(&self.input, width, queued);
@@ -77,10 +77,10 @@ impl TuiApp {
         // hit this branch. The transcript / prompt sync paths above
         // run unconditionally, so check this only when neither one
         // claimed the cursor.
-        if matches!(self.ui.cursor_shape(), ui::CursorShape::Hidden) {
+        if matches!(self.ui.cursor_shape(), crate::ui::CursorShape::Hidden) {
             if let Some(focus) = self.ui.focus() {
                 if self.ui.overlay_for_leaf(focus).is_some() {
-                    self.ui.set_cursor_shape(ui::CursorShape::Hardware);
+                    self.ui.set_cursor_shape(crate::ui::CursorShape::Hardware);
                 }
             }
         }
@@ -97,8 +97,11 @@ impl TuiApp {
     fn adjust_tail_scroll(&mut self) {
         let has_selection = self.transcript_window.selection_anchor.is_some();
         let in_vim_visual = self.transcript_window.vim_enabled
-            && matches!(self.vim_mode, ui::VimMode::Visual | ui::VimMode::VisualLine);
-        let mouse_drag_active = matches!(self.ui.capture(), Some(ui::HitTarget::Window(_)));
+            && matches!(
+                self.vim_mode,
+                crate::ui::VimMode::Visual | crate::ui::VimMode::VisualLine
+            );
+        let mouse_drag_active = matches!(self.ui.capture(), Some(crate::ui::HitTarget::Window(_)));
         let freeze = has_selection || in_vim_visual || mouse_drag_active;
         if !freeze && self.transcript_window.follow_tail {
             self.transcript_window.scroll_top = u16::MAX;
@@ -137,7 +140,8 @@ impl TuiApp {
         has_transcript_cursor: bool,
     ) {
         let t_pad = self.transcript_gutters.pad_left;
-        let transcript_rect = ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
+        let transcript_rect =
+            crate::ui::Rect::new(0, t_pad, term_w.saturating_sub(t_pad), viewport_rows);
         let tdata = self.project_transcript_buffer(
             width,
             viewport_rows,
@@ -157,18 +161,22 @@ impl TuiApp {
         self.transcript_window.cursor_line = tcursor.clamped_line;
         self.transcript_window.cursor_col = tcursor.clamped_col;
 
-        let transcript_viewport = ui::WindowViewport::new(
+        let transcript_viewport = crate::ui::WindowViewport::new(
             transcript_rect,
             self.transcript_gutters.content_width(term_w),
             tdata.total_rows,
             tdata.clamped_scroll,
-            ui::ScrollbarState::new(tdata.scrollbar_col + t_pad, tdata.total_rows, viewport_rows),
+            crate::ui::ScrollbarState::new(
+                tdata.scrollbar_col + t_pad,
+                tdata.total_rows,
+                viewport_rows,
+            ),
         );
 
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
         let visual = self.ui.theme().get("Visual");
-        let visual_span = ui::buffer::SpanStyle {
+        let visual_span = crate::ui::buffer::SpanStyle {
             fg: visual.fg,
             bg: visual.bg,
             ..Default::default()
@@ -187,10 +195,10 @@ impl TuiApp {
                     ns,
                     *line,
                     *col_start as usize,
-                    ui::buffer::ExtmarkOpts::highlight(
+                    crate::ui::buffer::ExtmarkOpts::highlight(
                         *col_end as usize,
                         visual_span.clone(),
-                        ui::buffer::SpanMeta::default(),
+                        crate::ui::buffer::SpanMeta::default(),
                     ),
                 );
             }
@@ -218,9 +226,9 @@ impl TuiApp {
                     crossterm::style::Color::White,
                 )
             };
-            self.ui.set_cursor_shape(ui::CursorShape::Block {
+            self.ui.set_cursor_shape(crate::ui::CursorShape::Block {
                 glyph: c.glyph,
-                style: ui::Style {
+                style: crate::ui::Style {
                     fg: Some(fg),
                     bg: Some(bg),
                     ..Default::default()
@@ -232,7 +240,7 @@ impl TuiApp {
             .as_ref()
             .map(|c| (c.col, c.row))
             .unwrap_or((0, 0));
-        if let Some(win) = self.ui.win_mut(ui::TRANSCRIPT_WIN) {
+        if let Some(win) = self.ui.win_mut(crate::ui::TRANSCRIPT_WIN) {
             win.cursor_col = cur_col;
             win.cursor_line = cur_line;
             win.scroll_top = tdata.clamped_scroll;
@@ -247,7 +255,7 @@ impl TuiApp {
     fn sync_prompt_layer(
         &mut self,
         term_w: u16,
-        prompt_rect: ui::Rect,
+        prompt_rect: crate::ui::Rect,
         prompt_height: u16,
         queued: &[String],
         has_prompt_cursor: bool,
@@ -295,18 +303,18 @@ impl TuiApp {
         self.input.win.last_render_cpos = Some(self.input.win.cpos);
 
         let prompt_viewport = if let Some(ref ivp) = prompt_output.input_viewport {
-            let input_rect = ui::Rect::new(
+            let input_rect = crate::ui::Rect::new(
                 prompt_rect.top + ivp.top_row,
                 0,
                 prompt_rect.width,
                 ivp.rows,
             );
-            Some(ui::WindowViewport::new(
+            Some(crate::ui::WindowViewport::new(
                 input_rect,
                 ivp.content_width,
                 ivp.total_rows,
                 ivp.scroll_top,
-                ui::ScrollbarState::new(
+                crate::ui::ScrollbarState::new(
                     prompt_rect.width.saturating_sub(1),
                     ivp.total_rows,
                     ivp.rows,
@@ -326,15 +334,15 @@ impl TuiApp {
         match (cursor, cursor_style) {
             (Some(_), Some((style, glyph))) => {
                 self.ui
-                    .set_cursor_shape(ui::CursorShape::Block { glyph, style });
+                    .set_cursor_shape(crate::ui::CursorShape::Block { glyph, style });
             }
             (Some(_), None) => {
-                self.ui.set_cursor_shape(ui::CursorShape::Hardware);
+                self.ui.set_cursor_shape(crate::ui::CursorShape::Hardware);
             }
             (None, _) => {}
         }
         let (cur_col, cur_line) = cursor.unwrap_or((0, 0));
-        if let Some(win) = self.ui.win_mut(ui::PROMPT_WIN) {
+        if let Some(win) = self.ui.win_mut(crate::ui::PROMPT_WIN) {
             win.cursor_col = cur_col;
             win.cursor_line = cur_line;
             win.viewport = prompt_viewport;
@@ -349,10 +357,10 @@ impl TuiApp {
         if self.ui.focused_overlay().is_none() {
             match self.app_focus {
                 crate::core::AppFocus::Prompt => {
-                    self.ui.set_focus(ui::PROMPT_WIN);
+                    self.ui.set_focus(crate::ui::PROMPT_WIN);
                 }
                 crate::core::AppFocus::Content => {
-                    self.ui.set_focus(ui::TRANSCRIPT_WIN);
+                    self.ui.set_focus(crate::ui::TRANSCRIPT_WIN);
                 }
             }
         }

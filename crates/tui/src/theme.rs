@@ -1,16 +1,16 @@
-//! Smelt-specific theme initialization for `ui::Theme`.
+//! Smelt-specific theme initialization for `crate::ui::Theme`.
 //!
 //! Atomic state (accent, slug, light/dark flag) lives directly on
-//! `ui::Theme` now. This module owns:
+//! `crate::ui::Theme` now. This module owns:
 //!   * `populate_ui_theme` — write the smelt highlight groups into a
-//!     `ui::Theme` registry, sourced from the Theme's own state.
+//!     `crate::ui::Theme` registry, sourced from the Theme's own state.
 //!   * `detect_background` — OSC 11 / `$COLORFGBG` light/dark probe.
 //!   * `PRESETS` — the picker list for `/theme` & `/color`.
 
 use crossterm::style::Color;
 
 /// Re-export so callers can refer to one canonical name.
-pub use ui::theme::DEFAULT_ACCENT;
+pub use crate::ui::theme::DEFAULT_ACCENT;
 
 /// Look up a preset by name. Returns the ansi value if found.
 pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
@@ -28,7 +28,7 @@ pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
 /// result on `theme`. Must be called *before* entering the TUI's
 /// raw-mode / alternate screen since we temporarily enable raw mode
 /// ourselves for the OSC query.
-pub(crate) fn detect_background(theme: &mut ui::Theme) {
+pub(crate) fn detect_background(theme: &mut crate::ui::Theme) {
     if let Some(light) = detect_light_background() {
         theme.set_light(light);
     }
@@ -188,8 +188,8 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 /// `Comment`, `ErrorMsg`) and use the `Smelt*` prefix for app-specific
 /// roles (`SmeltAccent`, `SmeltAgent`, `SmeltModePlan`, …). Code with
 /// a `DrawContext` reads these via `ctx.theme.get("Visual")` etc.
-pub(crate) fn populate_ui_theme(theme: &mut ui::Theme) {
-    use ui::grid::Style;
+pub(crate) fn populate_ui_theme(theme: &mut crate::ui::Theme) {
+    use crate::ui::grid::Style;
 
     let is_light = theme.is_light();
     crate::term::content::highlight::set_syntax_theme_light(is_light);
@@ -278,7 +278,7 @@ pub(crate) fn populate_ui_theme(theme: &mut ui::Theme) {
 
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[
-    ("ember", "default", ui::theme::DEFAULT_ACCENT),
+    ("ember", "default", crate::ui::theme::DEFAULT_ACCENT),
     ("coral", "salmon pink", 210),
     ("rose", "soft pink", 211),
     ("gold", "warm yellow", 220),
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn populate_writes_groups_for_default_theme() {
-        let mut t = ui::Theme::new();
+        let mut t = crate::ui::Theme::new();
         populate_ui_theme(&mut t);
         assert!(t.get("SmeltAccent").fg.is_some());
         assert!(t.get("SmeltSlug").bg.is_some());
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn populate_reflects_set_accent() {
-        let mut t = ui::Theme::new();
+        let mut t = crate::ui::Theme::new();
         t.set_accent(108); // sage
         populate_ui_theme(&mut t);
         assert_eq!(t.get("SmeltAccent").fg, Some(Color::AnsiValue(108)));
@@ -357,9 +357,9 @@ mod tests {
 
     #[test]
     fn populate_light_palette_differs_from_dark() {
-        let mut dark = ui::Theme::new();
+        let mut dark = crate::ui::Theme::new();
         populate_ui_theme(&mut dark);
-        let mut light = ui::Theme::new();
+        let mut light = crate::ui::Theme::new();
         light.set_light(true);
         populate_ui_theme(&mut light);
         assert_ne!(dark.get("Visual").bg, light.get("Visual").bg);

@@ -35,13 +35,14 @@ impl TuiApp {
         }
         self.last_prompt_text = current_text.clone();
         let lua = &self.core.lua;
-        let mut lua_invoke = |handle: ui::LuaHandle, win: ui::WinId, payload: &ui::Payload| {
-            lua.queue_invocation(handle, win, payload);
-        };
+        let mut lua_invoke =
+            |handle: crate::ui::LuaHandle, win: crate::ui::WinId, payload: &crate::ui::Payload| {
+                lua.queue_invocation(handle, win, payload);
+            };
         self.ui.fire_win_event(
-            ui::PROMPT_WIN,
-            ui::WinEvent::TextChanged,
-            ui::Payload::Text {
+            crate::ui::PROMPT_WIN,
+            crate::ui::WinEvent::TextChanged,
+            crate::ui::Payload::Text {
                 content: current_text,
             },
             &mut lua_invoke,

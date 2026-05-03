@@ -34,7 +34,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "close",
         lua.create_function(|_, id: u64| {
             crate::lua::with_app(|app| {
-                app.close_overlay_leaf(ui::WinId(id));
+                app.close_overlay_leaf(crate::ui::WinId(id));
             });
             Ok(())
         })?,
@@ -48,8 +48,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .and_then(|t| t.get::<String>("region").ok())
                     .unwrap_or_else(|| "lua_overlay".to_string());
                 let win = app.ui.win_open_split(
-                    ui::BufId(buf_id),
-                    ui::SplitConfig {
+                    crate::ui::BufId(buf_id),
+                    crate::ui::SplitConfig {
                         region,
                         gutters: Default::default(),
                     },
@@ -82,7 +82,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             crate::lua::with_app(|app| {
                 crate::lua::ui_ops::configure_list_leaf(
                     app,
-                    ui::WinId(win_id),
+                    crate::ui::WinId(win_id),
                     initial_cursor.unwrap_or(0).min(u16::MAX as u64) as u16,
                 );
             });
@@ -93,7 +93,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "configure_input",
         lua.create_function(|_, win_id: u64| {
             crate::lua::with_app(|app| {
-                crate::lua::ui_ops::configure_input_leaf(app, ui::WinId(win_id));
+                crate::lua::ui_ops::configure_input_leaf(app, crate::ui::WinId(win_id));
             });
             Ok(())
         })?,
@@ -105,9 +105,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     win_tbl.set(
         "buf",
         lua.create_function(|_, id: u64| {
-            let buf =
-                crate::lua::try_with_ui_host(|host| host.ui().win(ui::WinId(id)).map(|w| w.buf.0))
-                    .flatten();
+            let buf = crate::lua::try_with_ui_host(|host| {
+                host.ui().win(crate::ui::WinId(id)).map(|w| w.buf.0)
+            })
+            .flatten();
             Ok(buf)
         })?,
     )?;
@@ -119,7 +120,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "set_focus",
         lua.create_function(|_, id: u64| {
             crate::lua::with_app(|app| {
-                app.ui.set_focus(ui::WinId(id));
+                app.ui.set_focus(crate::ui::WinId(id));
             });
             Ok(())
         })?,
@@ -138,9 +139,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let id = crate::lua::register_callback_handle(&s, lua, func)?;
                     crate::lua::with_app(|app| {
                         let prev = app.ui.win_set_keymap(
-                            ui::WinId(win_id),
+                            crate::ui::WinId(win_id),
                             key,
-                            ui::Callback::Lua(ui::LuaHandle(id)),
+                            crate::ui::Callback::Lua(crate::ui::LuaHandle(id)),
                         );
                         crate::lua::drop_displaced_lua_handle(app, prev);
                     });
@@ -163,9 +164,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     let id = crate::lua::register_callback_handle(&s, lua, func)?;
                     crate::lua::with_app(|app| {
                         app.ui.win_on_event(
-                            ui::WinId(win_id),
+                            crate::ui::WinId(win_id),
                             event,
-                            ui::Callback::Lua(ui::LuaHandle(id)),
+                            crate::ui::Callback::Lua(crate::ui::LuaHandle(id)),
                         );
                     });
                     Ok(id)
@@ -182,7 +183,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 )));
             };
             crate::lua::with_app(|app| {
-                let prev = app.ui.win_clear_keymap(ui::WinId(win_id), key);
+                let prev = app.ui.win_clear_keymap(crate::ui::WinId(win_id), key);
                 crate::lua::drop_displaced_lua_handle(app, prev);
             });
             Ok(())
@@ -197,9 +198,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 )));
             };
             crate::lua::with_app(|app| {
-                let prev = app
-                    .ui
-                    .win_clear_event_by_id(ui::WinId(win_id), event, callback_id);
+                let prev =
+                    app.ui
+                        .win_clear_event_by_id(crate::ui::WinId(win_id), event, callback_id);
                 crate::lua::drop_displaced_lua_handle(app, prev);
             });
             Ok(())

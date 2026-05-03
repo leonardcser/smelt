@@ -108,7 +108,7 @@ pub(crate) enum ColorValue {
 }
 
 /// Theme-dependent semantic colors. Resolved by `to_buffer::resolve`
-/// against the active `ui::Theme` registry.
+/// against the active `crate::ui::Theme` registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ColorRole {
     Accent,

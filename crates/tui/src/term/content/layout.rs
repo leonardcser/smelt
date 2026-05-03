@@ -1,4 +1,4 @@
-pub(crate) use ui::Rect;
+pub(crate) use crate::ui::Rect;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LayoutState {
@@ -22,7 +22,10 @@ pub(crate) struct LayoutInput {
 /// holding the prompt and status leaves stacked tightly. The host
 /// publishes this tree to `Ui` via `Ui::set_layout` once per frame;
 /// `Ui` resolves rects against the current terminal area.
-pub(crate) fn build_layout_tree(input: &LayoutInput, status_win: ui::WinId) -> ui::LayoutTree {
+pub(crate) fn build_layout_tree(
+    input: &LayoutInput,
+    status_win: crate::ui::WinId,
+) -> crate::ui::LayoutTree {
     let LayoutInput {
         term_height,
         prompt_height,
@@ -32,19 +35,22 @@ pub(crate) fn build_layout_tree(input: &LayoutInput, status_win: ui::WinId) -> u
     let prompt_height = prompt_height.min(max_prompt).max(2);
     let prompt_leaf_height = prompt_height.saturating_sub(1).max(1);
 
-    ui::LayoutTree::vbox(vec![
+    crate::ui::LayoutTree::vbox(vec![
         (
-            ui::Constraint::Fill,
-            ui::LayoutTree::leaf(ui::TRANSCRIPT_WIN),
+            crate::ui::Constraint::Fill,
+            crate::ui::LayoutTree::leaf(crate::ui::TRANSCRIPT_WIN),
         ),
         (
-            ui::Constraint::Length(prompt_height),
-            ui::LayoutTree::vbox(vec![
+            crate::ui::Constraint::Length(prompt_height),
+            crate::ui::LayoutTree::vbox(vec![
                 (
-                    ui::Constraint::Length(prompt_leaf_height),
-                    ui::LayoutTree::leaf(ui::PROMPT_WIN),
+                    crate::ui::Constraint::Length(prompt_leaf_height),
+                    crate::ui::LayoutTree::leaf(crate::ui::PROMPT_WIN),
                 ),
-                (ui::Constraint::Length(1), ui::LayoutTree::leaf(status_win)),
+                (
+                    crate::ui::Constraint::Length(1),
+                    crate::ui::LayoutTree::leaf(status_win),
+                ),
             ]),
         ),
     ])
@@ -56,10 +62,10 @@ impl LayoutState {
     /// the splits tree via `Ui::set_layout`. Missing leaves fall back
     /// to `Rect::default` (zero-sized) — practically only happens
     /// before the first frame.
-    pub(crate) fn from_ui(ui: &ui::Ui, status_win: ui::WinId) -> Self {
+    pub(crate) fn from_ui(ui: &crate::ui::Ui, status_win: crate::ui::WinId) -> Self {
         Self {
-            transcript: ui.split_rect(ui::TRANSCRIPT_WIN).unwrap_or_default(),
-            prompt: ui.split_rect(ui::PROMPT_WIN).unwrap_or_default(),
+            transcript: ui.split_rect(crate::ui::TRANSCRIPT_WIN).unwrap_or_default(),
+            prompt: ui.split_rect(crate::ui::PROMPT_WIN).unwrap_or_default(),
             status: ui.split_rect(status_win).unwrap_or_default(),
         }
     }
@@ -93,32 +99,36 @@ pub(crate) enum HitRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ui::{Constraint, LayoutTree, WinId};
+    use crate::ui::{Constraint, LayoutTree, WinId};
 
-    fn open_split(ui: &mut ui::Ui, win: WinId, region: &str) {
-        let buf = ui.buf_create(ui::buffer::BufCreateOpts::default());
+    fn open_split(ui: &mut crate::ui::Ui, win: WinId, region: &str) {
+        let buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
         assert!(ui.win_open_split_at(
             win,
             buf,
-            ui::SplitConfig {
+            crate::ui::SplitConfig {
                 region: region.into(),
-                gutters: ui::Gutters::default(),
+                gutters: crate::ui::Gutters::default(),
             },
         ));
     }
 
-    fn set_up_layout(prompt_height: u16, term_width: u16, term_height: u16) -> (ui::Ui, WinId) {
-        let mut ui = ui::Ui::new();
+    fn set_up_layout(
+        prompt_height: u16,
+        term_width: u16,
+        term_height: u16,
+    ) -> (crate::ui::Ui, WinId) {
+        let mut ui = crate::ui::Ui::new();
         ui.set_terminal_size(term_width, term_height);
-        open_split(&mut ui, ui::TRANSCRIPT_WIN, "transcript");
-        open_split(&mut ui, ui::PROMPT_WIN, "prompt");
-        let status_buf = ui.buf_create(ui::buffer::BufCreateOpts::default());
+        open_split(&mut ui, crate::ui::TRANSCRIPT_WIN, "transcript");
+        open_split(&mut ui, crate::ui::PROMPT_WIN, "prompt");
+        let status_buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
         let status_win = ui
             .win_open_split(
                 status_buf,
-                ui::SplitConfig {
+                crate::ui::SplitConfig {
                     region: "status".into(),
-                    gutters: ui::Gutters::default(),
+                    gutters: crate::ui::Gutters::default(),
                 },
             )
             .unwrap();
@@ -191,7 +201,7 @@ mod tests {
         tree_leaves = tree.leaves_in_order();
         assert_eq!(
             tree_leaves,
-            vec![ui::TRANSCRIPT_WIN, ui::PROMPT_WIN, status]
+            vec![crate::ui::TRANSCRIPT_WIN, crate::ui::PROMPT_WIN, status]
         );
         let _ = Constraint::Fill;
     }

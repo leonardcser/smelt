@@ -8,11 +8,12 @@
 //! cycling, command execution, and dismissal.
 
 use super::*;
+use crate::core::CommandAction;
+use crate::ui::buffer::BufCreateOpts;
+use crate::ui::layout::Anchor;
+use crate::ui::UiHost;
+use crate::ui::{Constraint, LayoutTree, Overlay, SplitConfig};
 use crossterm::event::KeyEvent;
-use ui::buffer::BufCreateOpts;
-use ui::layout::Anchor;
-use ui::UiHost;
-use ui::{Constraint, LayoutTree, Overlay, SplitConfig};
 
 /// Visible prefix glyph rendered as the first cell of the cmdline
 /// buffer. Cursor positions and editing operations clamp to columns

@@ -1,8 +1,8 @@
 use super::display::DisplayLine;
 use super::to_buffer::{apply_to_buffer, project_display_line, ProjectedLine};
 use crate::core::transcript_model::{BlockHistory, LayoutKey, ViewState};
-use ui::buffer::Buffer;
-use ui::Theme;
+use crate::ui::buffer::Buffer;
+use crate::ui::Theme;
 
 /// Namespace name for transcript selection extmarks. Created on the
 /// transcript display buffer at startup; populated each frame from the

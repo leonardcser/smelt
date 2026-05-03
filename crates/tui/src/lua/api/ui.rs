@@ -59,7 +59,7 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
         lua.create_function(|_, (win_id, idx): (u64, i64)| {
             let index = if idx < 0 { 0 } else { idx as usize };
             crate::lua::with_app(|app| {
-                crate::picker::set_selected(app, ui::WinId(win_id), index);
+                crate::picker::set_selected(app, crate::ui::WinId(win_id), index);
             });
             Ok(())
         })?,
@@ -83,7 +83,7 @@ fn register_picker(lua: &Lua, smelt_ui: &mlua::Table) -> LuaResult<()> {
                 items.push(it);
             }
             crate::lua::with_app(|app| {
-                crate::picker::set_items(app, ui::WinId(win_id), items, 0);
+                crate::picker::set_items(app, crate::ui::WinId(win_id), items, 0);
             });
             Ok(())
         })?,

@@ -69,7 +69,7 @@ impl TuiApp {
             self.save_session();
         } else if restore_vim_insert {
             self.input
-                .set_vim_mode(&mut self.vim_mode, ui::VimMode::Insert);
+                .set_vim_mode(&mut self.vim_mode, crate::ui::VimMode::Insert);
         }
     }
 

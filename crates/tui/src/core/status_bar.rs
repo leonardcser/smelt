@@ -9,9 +9,9 @@ use super::*;
 
 impl TuiApp {
     pub(super) fn refresh_status_bar(&mut self) {
+        use crate::ui::buffer::SpanStyle;
         use content::status::{spans_to_buffer_line, StatusSpan};
         use crossterm::style::Color;
-        use ui::buffer::SpanStyle;
 
         let (term_w, _) = self.ui.terminal_size();
         let width = term_w as usize;

@@ -28,10 +28,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .next_buf_id
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::lua::with_app(|app| {
-                    match app
-                        .ui
-                        .buf_create_with_id(ui::BufId(id), ui::buffer::BufCreateOpts::default())
-                    {
+                    match app.ui.buf_create_with_id(
+                        crate::ui::BufId(id),
+                        crate::ui::buffer::BufCreateOpts::default(),
+                    ) {
                         Ok(bid) => {
                             if let Some(fmt) = format {
                                 if let Some(buf) = app.ui.buf_mut(bid) {
@@ -56,7 +56,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 .filter_map(|v| v.ok())
                 .collect();
             crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
                     buf.set_all_lines(lines);
                 }
             });
@@ -76,7 +76,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             };
             let text = crate::lua::with_app(|app| {
                 app.ui
-                    .buf(ui::BufId(id))
+                    .buf(crate::ui::BufId(id))
                     .and_then(|b| b.get_line(line0).map(|s| s.to_string()))
             });
             Ok(text)
@@ -86,7 +86,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "set_source",
         lua.create_function(|_, (id, source): (u64, String)| {
             crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
                     buf.set_source(source);
                 }
             });
@@ -135,13 +135,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     None => (None, false, false, false),
                 };
                 crate::lua::with_app(|app| {
-                    if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                    if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
                         if (line0 as usize) < buf.line_count() {
                             buf.add_highlight(
                                 line0 as usize,
                                 col_start.min(u16::MAX as u64) as u16,
                                 col_end.min(u16::MAX as u64) as u16,
-                                ui::buffer::SpanStyle {
+                                crate::ui::buffer::SpanStyle {
                                     fg,
                                     bg: None,
                                     bold,
@@ -166,13 +166,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 return Ok(());
             }
             crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(ui::BufId(id)) {
+                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
                     if (line0 as usize) < buf.line_count() {
                         buf.add_highlight(
                             line0 as usize,
                             col_start.min(u16::MAX as u64) as u16,
                             col_end.min(u16::MAX as u64) as u16,
-                            ui::buffer::SpanStyle {
+                            crate::ui::buffer::SpanStyle {
                                 fg: None,
                                 bg: None,
                                 bold: false,

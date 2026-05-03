@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::{CommandAction, EventOutcome, InputOutcome};
 use base64::Engine;
 
 pub(crate) enum ExecEvent {
@@ -363,12 +364,12 @@ fn paste_from_clipboard() -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
-/// `ui::Sink` impl backed by the platform subprocess helpers. Owned
-/// by the TuiApp-level `ui::Clipboard` so vim yank / paste sites push
+/// `crate::core::Sink` impl backed by the platform subprocess helpers. Owned
+/// by the TuiApp-level `crate::core::Clipboard` so vim yank / paste sites push
 /// through the same path the prompt and transcript already use.
 pub(crate) struct SystemSink;
 
-impl ui::Sink for SystemSink {
+impl crate::core::Sink for SystemSink {
     fn read(&mut self) -> Option<String> {
         paste_from_clipboard()
     }
@@ -384,7 +385,7 @@ impl ui::Sink for SystemSink {
 /// `set-clipboard on`, etc.). Read falls back to subprocess helpers.
 pub(crate) struct Osc52Sink;
 
-impl ui::Sink for Osc52Sink {
+impl crate::core::Sink for Osc52Sink {
     fn read(&mut self) -> Option<String> {
         paste_from_clipboard()
     }

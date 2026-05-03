@@ -3,7 +3,7 @@
 //! Enter runs a block-scoped keymap; Ctrl-C returns focus to the prompt.
 
 use super::*;
-use crossterm::event::Event;
+use crossterm::event::{Event, KeyEvent};
 
 impl TuiApp {
     pub(super) fn handle_event_app_history(&mut self, ev: &Event) -> EventOutcome {
@@ -138,39 +138,38 @@ impl TuiApp {
             }
             let buf = self.transcript_window.text.clone();
             let mv: Option<usize> = match action {
-                KeyAction::MoveLeft | KeyAction::SelectLeft => Some(ui::text::prev_char_boundary(
-                    &buf,
-                    self.transcript_window.cpos,
-                )),
-                KeyAction::MoveRight | KeyAction::SelectRight => Some(
-                    ui::text::next_char_boundary(&buf, self.transcript_window.cpos),
+                KeyAction::MoveLeft | KeyAction::SelectLeft => Some(
+                    crate::ui::text::prev_char_boundary(&buf, self.transcript_window.cpos),
                 ),
-                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
-                    Some(ui::text::line_start(&buf, self.transcript_window.cpos))
-                }
+                KeyAction::MoveRight | KeyAction::SelectRight => Some(
+                    crate::ui::text::next_char_boundary(&buf, self.transcript_window.cpos),
+                ),
+                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => Some(
+                    crate::ui::text::line_start(&buf, self.transcript_window.cpos),
+                ),
                 KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                    Some(ui::text::line_end(&buf, self.transcript_window.cpos))
+                    Some(crate::ui::text::line_end(&buf, self.transcript_window.cpos))
                 }
                 KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
-                    Some(ui::text::word_forward_pos(
+                    Some(crate::ui::text::word_forward_pos(
                         &buf,
                         self.transcript_window.cpos,
-                        ui::text::CharClass::Word,
+                        crate::ui::text::CharClass::Word,
                     ))
                 }
                 KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
-                    Some(ui::text::word_backward_pos(
+                    Some(crate::ui::text::word_backward_pos(
                         &buf,
                         self.transcript_window.cpos,
-                        ui::text::CharClass::Word,
+                        crate::ui::text::CharClass::Word,
                     ))
                 }
                 KeyAction::CopySelection => {
                     if let Some((s, e)) =
                         self.transcript_window.selection_range(&rows, self.vim_mode)
                     {
-                        let s = ui::text::snap(&buf, s);
-                        let e = ui::text::snap(&buf, e);
+                        let s = crate::ui::text::snap(&buf, s);
+                        let e = crate::ui::text::snap(&buf, e);
                         if s < e {
                             let copy = self.copy_display_range(
                                 s,
@@ -233,11 +232,16 @@ impl TuiApp {
         // from the layout's row count — `viewport_rows_estimate()`
         // returns the layout-derived height even before the transcript
         // has painted, where `UiHost::viewport_for` would still be `None`.
-        let viewport =
-            ui::WindowViewport::new(ui::Rect::new(0, 0, 0, viewport_rows), 0, 0, 0, None);
+        let viewport = crate::ui::WindowViewport::new(
+            crate::ui::Rect::new(0, 0, 0, viewport_rows),
+            0,
+            0,
+            0,
+            None,
+        );
         let status = {
-            let prev_sink = self.core.clipboard.swap_sink(Box::new(ui::NullSink));
-            let ctx = ui::EventCtx {
+            let prev_sink = self.core.clipboard.swap_sink(Box::new(crate::core::NullSink));
+            let ctx = crate::ui::EventCtx {
                 rows: &rows,
                 soft_breaks: &[],
                 hard_breaks: &[],
@@ -246,11 +250,11 @@ impl TuiApp {
                 vim_mode: &mut self.vim_mode,
                 clipboard: &mut self.core.clipboard,
             };
-            let r = self.transcript_window.handle(ui::Event::Key(k), ctx);
+            let r = self.transcript_window.handle(crate::ui::Event::Key(k), ctx);
             self.core.clipboard.swap_sink(prev_sink);
             r
         };
-        if matches!(status, ui::Status::Ignored) {
+        if matches!(status, crate::ui::Status::Ignored) {
             return false;
         }
         let raw = self.core.clipboard.kill_ring.current().to_string();

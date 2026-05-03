@@ -17,7 +17,8 @@ use std::sync::Arc;
 /// headless paths without touching `Ui`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontendKind {
-    /// Interactive terminal — `TuiApp` over a `ui::Ui`.
+    /// Interactive terminal — `TuiApp` over a `crate::ui::Ui`.
+    /// (TODO: move TuiApp out of core/ in P8.a)
     Tui,
     /// One-shot CLI — `smelt -p "..."` / `--headless`. No Ui, no human input.
     Headless,
@@ -58,7 +59,7 @@ pub struct Core {
     /// sink). Vim and emacs yank/paste sites borrow this directly so
     /// the prompt, the transcript, dialog inputs, and any future Lua
     /// tools share one kill ring backed by the same system clipboard.
-    pub(crate) clipboard: ui::Clipboard,
+    pub(crate) clipboard: crate::core::Clipboard,
     /// Scheduled Lua callbacks. `smelt.timer.set` /
     /// `smelt.timer.every` / `smelt.timer.cancel` (and the
     /// `smelt.defer` alias) all route here through `with_app`.
@@ -109,7 +110,7 @@ impl Core {
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_default();
         let cells = cells::build_with_builtins(cells::BuiltinSeeds {
-            vim_mode: format!("{:?}", ui::VimMode::Insert),
+            vim_mode: "Insert".to_string(),
             agent_mode: config.mode.as_str().to_string(),
             model: config.model.clone(),
             reasoning: config.reasoning_effort.label().to_string(),
@@ -123,7 +124,7 @@ impl Core {
             config,
             session: Session::new(),
             confirms,
-            clipboard: ui::Clipboard::new(match frontend {
+            clipboard: crate::core::Clipboard::new(match frontend {
                 FrontendKind::Tui => Box::new(commands::Osc52Sink),
                 FrontendKind::Headless => Box::new(commands::SystemSink),
             }),

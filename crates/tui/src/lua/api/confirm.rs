@@ -30,7 +30,7 @@ use crate::term::content::display::{ColorRole, ColorValue};
 use crate::term::content::highlight::BashHighlighter;
 use crate::term::content::layout_out::SpanCollector;
 use crate::term::content::to_buffer::render_into_buffer;
-use ui::BufId;
+use crate::ui::BufId;
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {

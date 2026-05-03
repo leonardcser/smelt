@@ -99,18 +99,18 @@ pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn crate::core::Host) -> R) 
     try_with_app(|app| f(app))
 }
 
-/// Borrow the installed frontend as `&mut dyn ui::UiHost` for the
+/// Borrow the installed frontend as `&mut dyn crate::ui::UiHost` for the
 /// duration of `f`. UiHost-only Lua bindings (`smelt.ui` / `.win` /
 /// `.buf` / `.statusline`) reach through here. Once `P2.b.5b` lets
 /// `HeadlessApp` install into the TLS slot, this dispatcher will
 /// surface a runtime error from headless contexts (today every
 /// installed frontend impls `UiHost`).
-pub(crate) fn with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> R {
+pub(crate) fn with_ui_host<R>(f: impl FnOnce(&mut dyn crate::ui::UiHost) -> R) -> R {
     with_app(|app| f(app))
 }
 
 /// `try_` variant of `with_ui_host` that returns `None` instead of
 /// panicking when no frontend is installed.
-pub(crate) fn try_with_ui_host<R>(f: impl FnOnce(&mut dyn ui::UiHost) -> R) -> Option<R> {
+pub(crate) fn try_with_ui_host<R>(f: impl FnOnce(&mut dyn crate::ui::UiHost) -> R) -> Option<R> {
     try_with_app(|app| f(app))
 }
