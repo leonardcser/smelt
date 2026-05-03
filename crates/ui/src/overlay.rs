@@ -56,9 +56,9 @@ pub struct Overlay {
     /// insertion order.
     pub z: u16,
     /// When `true`, focus + Tab cycling stay inside this overlay and
-    /// Esc on the focused leaf fires `WinEvent::Dismiss` on every
-    /// leaf before closing. Independent of [`Self::blocks_agent`] —
-    /// passive viewers (`/help`, `/btw`) are modal but do not pause
+    /// Esc or Ctrl-C on the focused leaf fires `WinEvent::Dismiss` on
+    /// every leaf before closing. Independent of [`Self::blocks_agent`]
+    /// — passive viewers (`/help`, `/btw`) are modal but do not pause
     /// the engine.
     pub modal: bool,
     /// When `true`, the host pauses engine-event drain and queues

@@ -382,6 +382,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
     // Catch-all key fallback for printable characters. Specific
     // keymaps win first; non-printable miss-throughs return
     // `Consumed` so the compositor doesn't re-route to transcript.
+    // Esc and Ctrl-C are passed so modal overlays can dismiss themselves.
     let fallback: Callback = Callback::Rust(Box::new(|ctx| {
         if let Payload::Key {
             code: KeyCode::Char(c),
@@ -391,6 +392,16 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
             if mods.is_empty() || *mods == KeyModifiers::SHIFT {
                 return insert_char(ctx, *c);
             }
+        }
+        if matches!(
+            &ctx.payload,
+            Payload::Key { code: KeyCode::Esc, .. }
+                | Payload::Key {
+                    code: KeyCode::Char('c'),
+                    mods: KeyModifiers::CONTROL,
+                }
+        ) {
+            return CallbackResult::Pass;
         }
         CallbackResult::Consumed
     }));

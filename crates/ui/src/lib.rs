@@ -1072,9 +1072,9 @@ impl Ui {
     /// variant:
     ///
     /// - [`Event::Key`] — routes through the focused window's keymap
-    ///   table (resolved via [`Ui::focus`]). Bare Esc on an active
-    ///   modal fires [`WinEvent::Dismiss`] on the modal's root leaf
-    ///   and closes the modal as a built-in; subsequent variants
+    ///   table (resolved via [`Ui::focus`]). Bare Esc or Ctrl-C on an
+    ///   active modal fires [`WinEvent::Dismiss`] on the modal's root
+    ///   leaf and closes the modal as a built-in; subsequent variants
     ///   route through the regular [`Callbacks`] registry so
     ///   `on_event("dismiss", …)` handlers can flush pending state.
     ///   `lua_invoke` is called for each `Callback::Lua` with
@@ -1262,13 +1262,15 @@ impl Ui {
             }
         }
 
-        // Esc chain: if the focused window ignored bare Esc, fall
-        // through to dismissing the active modal. This lets a leaf
-        // consume Esc first (e.g. clearing its own selection) before
-        // the overlay closes.
-        if result == Status::Ignored
-            && matches!(code, crossterm::event::KeyCode::Esc)
+        // Esc / Ctrl-C chain: if the focused window ignored bare
+        // Esc or Ctrl-C, fall through to dismissing the active modal.
+        // This lets a leaf consume Esc first (e.g. clearing its own
+        // selection) before the overlay closes.
+        let is_dismiss_chord = matches!(code, crossterm::event::KeyCode::Esc)
             && mods == crossterm::event::KeyModifiers::NONE
+            || matches!(code, crossterm::event::KeyCode::Char('c'))
+                && mods == crossterm::event::KeyModifiers::CONTROL;
+        if result == Status::Ignored && is_dismiss_chord
         {
             if let Some(modal) = self.active_modal() {
                 if let Some(root) = self
@@ -2603,6 +2605,47 @@ mod tests {
             &mut ui,
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(result, Status::Consumed);
+        assert_eq!(*count.lock().unwrap(), 1);
+        assert!(ui.overlay(id).is_none());
+    }
+
+    #[test]
+    fn dispatch_event_ctrl_c_closes_active_modal() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
+        assert_eq!(ui.active_modal(), Some(id));
+        let result = dispatch_key(
+            &mut ui,
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert_eq!(result, Status::Consumed);
+        assert_eq!(ui.active_modal(), None);
+    }
+
+    #[test]
+    fn modal_ctrl_c_fires_dismiss_once_on_overlay_root() {
+        let mut ui = make_ui();
+        let a = WinId(60);
+        let b = WinId(61);
+        let c = WinId(62);
+        let id = ui.overlay_open(modal_overlay_with_leaves(a, b, c));
+        let count = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let count_cb = count.clone();
+        ui.win_on_event(
+            a,
+            WinEvent::Dismiss,
+            Callback::Rust(Box::new(move |_| {
+                *count_cb.lock().unwrap() += 1;
+                CallbackResult::Consumed
+            })),
+        );
+        let result = dispatch_key(
+            &mut ui,
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
         );
         assert_eq!(result, Status::Consumed);
         assert_eq!(*count.lock().unwrap(), 1);
