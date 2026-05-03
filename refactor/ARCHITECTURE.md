@@ -39,29 +39,29 @@ Every change lands closer to all three, never farther from any.
 
 ## Crate map
 
-Five crates, dependency arrows go one way, no cycles:
+Four crates, dependency arrows go one way, no cycles:
 
 ```
-          ui
-            ↑
-protocol ← engine ← app ← tui
+protocol ← engine ← core ← tui
               ↑
        runtime/lua/smelt/
 ```
+
+(`tui` contains the `ui` module — Buffer, Window, Grid, LayoutTree,
+Theme, VimMode — internally.  It is not a separate crate.)
 
 | Crate                    | Role                                                                    |
 | ------------------------ | ----------------------------------------------------------------------- |
 | `protocol`               | Wire types, pure data, serde-serializable. Stable contract, no behavior. Includes `AgentMode`, `ReasoningEffort`, `PermissionOverrides`, `TurnMeta` |
 | `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept**. **Zero UI imports** |
-| `ui`                     | Generic terminal UI primitives. Buffer, Window, LayoutTree, Overlay, Theme, Grid/diff, `VimMode`. Zero internal dependencies. Could ship standalone — no smelt knowledge |
-| `app`                    | Headless-safe runtime. `Core` + `HeadlessApp`, subsystems, `Host` trait, `LuaRuntime`, `EngineClient`, Rust capabilities (`fs`/`http`/`permissions`/`process`/…). No terminal imports |
-| `tui`                    | Terminal frontend. `TuiApp`, event loop, content rendering (`content/`), input editing (`input/`), `UiHost` Lua bindings. Thin wrapper around `app::Core` + `ui::Ui`. **For now:** `app` and `tui` are modules inside the `tui` crate (`tui/src/core/` and `tui/src/term/`); they split into separate crates when a third frontend materializes |
+| `core`                   | Headless-safe runtime. `Core` + `HeadlessApp`, subsystems, `Host` trait, `LuaRuntime`, `EngineClient`, Rust capabilities (`fs`/`http`/`permissions`/`process`/…), `Clipboard`/`KillRing`. No terminal imports |
+| `tui`                    | Terminal frontend. `TuiApp`, event loop, terminal input editing, `UiHost` Lua bindings, rendering adapters (`to_buffer`, `prompt_data`, `status`), and the `ui` module (Buffer, Window, Grid, LayoutTree, Theme, VimMode). Depends on `core` and `crossterm` |
 | `runtime/lua/smelt/`     | The whole UX. Widgets, dialogs, commands, statusline, transcript/diff presentation, themes, tools |
 
 **Litmus test for placement.** Stable wire contract → `protocol`.
-Frontend-agnostic LLM/tool code → `engine`. Reusable TUI primitive any app
-could ship → `ui`. Headless runtime + capabilities + Lua → `app`.
-Terminal chrome + rendering → `tui`. How smelt looks/behaves → Lua.
+Frontend-agnostic LLM/tool code → `engine`. Headless runtime +
+capabilities + Lua → `core`. Terminal chrome + rendering + TUI primitives
+→ `tui`. How smelt looks/behaves → Lua.
 
 ## Surface model — two structures, two primitives
 
@@ -298,7 +298,7 @@ Built-in cells the runtime ships (stateful slots and pure events both):
 | `now`                 | `DateTime`                           | `Timers` (1 Hz)                            |
 | `spinner_frame`       | `u8`                                 | `Timers` (16 ms when something is animating) |
 | `agent_mode`          | `AgentMode`                          | `SetAgentMode` applied                     |
-| `vim_mode`            | `VimMode`                            | App's `vim_mode` flips                     |
+| `vim_mode`            | `String` (`"Insert"` / `"Normal"` / …) | `TuiApp` publishes formatted `ui::VimMode`  |
 | `model`               | `String`                             | `SetModel` applied                         |
 | `reasoning`           | `ReasoningEffort`                    | `SetReasoningEffort` applied               |
 | `confirms_pending`    | `bool`                               | `Confirms` registers / resolves            |
@@ -354,7 +354,7 @@ recovers pull's flexibility without its baseline cost.
 ## Input pipeline — three independent layers
 
 ```
-App::vim_mode  (global VimMode)         what's the user trying to do?
+TuiApp::vim_mode  (global VimMode)      what's the user trying to do?
        │
        ▼  routes key to focused Window's recipe
 Window::keymap  (recipe id)             what keys are bound here?
@@ -369,7 +369,9 @@ Each layer is independent and composes:
    Mode-specific keymaps live in the global keymap registry, indexed by
    `(mode, key)`. Two enums in the system:
    - `VimMode` — `Normal / Insert / Visual / VisualLine`. Defined in `ui`,
-     owned by App. Not a wire type — the engine never sees it.
+     owned by `TuiApp`. Not a wire type — the engine never sees it. `Core`
+     stores `vim_mode` as a plain `String` cell; `TuiApp` publishes the
+     formatted enum value.
    - `AgentMode` — `Normal / Plan / Apply / Yolo`. Permission-gating policy.
      Lives in protocol. Lua: `smelt.mode` (renamed from
      `smelt.agent.mode` to avoid collision with future `smelt.process`).
@@ -381,8 +383,8 @@ Each layer is independent and composes:
 
 There is **no `Vim` or `Completer` state-machine type in `ui`**. Per-buffer edit
 history (registers, dot-repeat, undo) lives on Buffer. Per-Window cursor +
-selection + Visual anchor stay on Window. Clipboard/kill-ring state lives on
-the host. Completer decomposes into a ghost-text extmark in a "completer"
+selection + Visual anchor stay on Window. Clipboard/kill-ring lives in
+`Core` (it is a text-manipulation primitive, not a UI primitive). Completer decomposes into a ghost-text extmark in a "completer"
 namespace + an Overlay for the picker dropdown + a keymap on the prompt
 Window.
 
@@ -464,13 +466,13 @@ struct TuiApp { core: Core, well_known: WellKnown, ui: ui::Ui }
 struct HeadlessApp { core: Core, sink: HeadlessSink }
 ```
 
-`Core` (in `app`) runs the event loop and holds everything that doesn't
+`Core` (in `core`) runs the event loop and holds everything that doesn't
 need the compositor: engine bridge, cells, timers, autocmd-style
 subscriptions, Lua runtime, session state, confirms, clipboard,
 file cache, and process registry.
 `TuiApp` (in `tui`) wraps `Core` and adds `well_known` (the `WinId`s of
 transcript / prompt / statusline / cmdline) plus a `ui::Ui`.
-`HeadlessApp` (in `app`) wraps the same `Core` with a `HeadlessSink`
+`HeadlessApp` (in `core`) wraps the same `Core` with a `HeadlessSink`
 that emits JSON / text instead of pixels.
 
 This split lets `smelt -p "..."` (one-shot CLI) use the same
@@ -503,7 +505,7 @@ into a second application object model.
 
 ```rust
 trait Host {
-    fn clipboard(&mut self) -> &mut dyn ClipboardWrite;
+    fn clipboard(&mut self) -> &mut Clipboard;
     fn cells(&mut self)     -> &mut Cells;
     fn timers(&mut self)    -> &mut Timers;
     fn lua(&mut self)       -> &mut LuaRuntime;
@@ -526,12 +528,12 @@ trait UiHost {
 }
 ```
 
-`Core` (in `app`) impls `Host`. `TuiApp` (in `tui`) impls both `Host`
-(by delegating to its `Core`) and `UiHost`. `HeadlessApp` (in `app`)
+`Core` (in `core`) impls `Host`. `TuiApp` (in `tui`) impls both `Host`
+(by delegating to its `Core`) and `UiHost`. `HeadlessApp` (in `core`)
 impls only `Host`. `Window::handle(Event, EventCtx)` reads per-pane
 data from `EventCtx`; the current `viewport_for` / `rows_for` /
 `breaks_for` helpers are transitional escape hatches while
-prompt/transcript still have app-owned projections.
+prompt/transcript still have tui-owned projections.
 Lua bindings divide by trait:
 
 - **Host-only bindings** (work in headless and tui):
@@ -599,7 +601,7 @@ One file per Lua namespace, all under `crates/tui/src/lua/api/<name>.rs`:
 `engine.rs`, `permissions.rs`, `confirm.rs`, `mode.rs` (AgentMode
 Plan/Apply/Yolo), `session.rs`, `tools.rs`, `os.rs`, `fs.rs`, `http.rs`,
 `html.rs`, `notebook.rs`, `path.rs`, `grep.rs`, `fuzzy.rs`,
-`subprocess.rs`, `frontend.rs`, `au.rs` (Host-tier).
+`process.rs`, `frontend.rs`, `au.rs` (Host-tier).
 
 No "tool FFI" / "UI FFI" tier; every namespace is just a binding file.
 Each binding declares whether it needs `Host` or `UiHost`; calling a
@@ -651,10 +653,10 @@ Plugins create their own cells under a namespaced name
 - `event_rx: Receiver<EngineEvent>` — engine → frontend
 
 No trait impls, no callbacks, no UI types crossing the boundary. **No
-engine-side state leaks** — today's `processes`, `permissions`, and
-`runtime_approvals` fields on `EngineHandle` go away in P5 when their
-owners move into `app::*`. The same channel-only shape powers headless
-frontends without cherry-picking engine internals.
+engine-side state leaks** — the `processes`, `permissions`, and
+`runtime_approvals` fields that used to live on `EngineHandle` moved to
+`core::*` in P5. The channel-only shape powers headless frontends
+without cherry-picking engine internals.
 
 The engine/event bridge drains `event_rx` and updates buffers, cells,
 and session state. Lua/UI actions send `UiCommand`s back across the
@@ -772,37 +774,38 @@ formatting — is Lua. Anything that's gnarly enough to want a Rust
 implementation is exposed as a capability function the Lua tool calls,
 not as a Rust tool. Concrete cases:
 
-- **Bash command parsing.** `app::permissions.parse_bash(cmd)` returns a
+- **Bash command parsing.** `core::permissions.parse_bash(cmd)` returns a
   structured AST (commands, redirects, pipes, substitutions, env
   assignments, heredocs) the Lua `bash` tool walks to decide allow/deny.
-  This is the 515-line bash splitter that lives in `engine` today;
-  parsing in Lua would be slow and bug-prone.
-- **Pattern + ruleset matching.** `app::permissions.compile_pattern(s)` /
-  `app::permissions.match_ruleset(rules, value)` — pure glob logic.
+  This is the 515-line bash splitter that lives in
+  `core::permissions::bash` today; parsing in Lua would be slow and
+  bug-prone.
+- **Pattern + ruleset matching.** `core::permissions.compile_pattern(s)` /
+  `core::permissions.match_ruleset(rules, value)` — pure glob logic.
 - **Workspace boundary check.**
-  `app::permissions.outside_workspace_paths(tool, args, workspace)` —
+  `core::permissions.outside_workspace_paths(tool, args, workspace)` —
   extracts paths from a tool call and returns those outside the
   workspace. Used by Lua tool hooks to escalate to `needs_confirm`.
-- **Runtime approvals.** `app::permissions.is_approved(tool, args)` and
+- **Runtime approvals.** `core::permissions.is_approved(tool, args)` and
   `.approve(tool, args, scope = "session" | "workspace")` — query and
   update the in-memory `RuntimeApprovals` table that records the user's
   "always allow" answers. Workspace-scoped approvals also persist
   through the workspace store.
-- **Workspace store.** `app::permissions.load_workspace(cwd)` /
+- **Workspace store.** `core::permissions.load_workspace(cwd)` /
   `.save_workspace(cwd, rules)` — JSON I/O for
   `~/.local/state/smelt/workspaces/<encoded-cwd>/permissions.json`.
-- **Edit-with-mtime-check.** `app::fs.apply_edit_with_mtime_check(path,
+- **Edit-with-mtime-check.** `core::fs.apply_edit_with_mtime_check(path,
   old, new, expected_mtime)` does the read-compare-write-fsync dance
   atomically and returns a typed error on conflict. The Lua `edit_file`
   tool calls it once; no race, no half-written file.
-- **Notebook AST.** `app::notebook.parse(json)` /
-  `app::notebook.apply_edit(nb, edit)` keeps Jupyter JSON validation in
+- **Notebook AST.** `core::notebook.parse(json)` /
+  `core::notebook.apply_edit(nb, edit)` keeps Jupyter JSON validation in
   Rust where it belongs.
 - **Glob, ripgrep, html→markdown, http fetching with cache** — already
-  in the `app::*` capabilities list.
+  in the `core::*` capabilities list.
 
 The litmus: if implementing X in Lua would be slow, fragile, or
-duplicate carefully-tested Rust logic, expose X as an `app::<cap>`
+duplicate carefully-tested Rust logic, expose X as an `core::<cap>`
 function. Never split a tool into "half Rust impl, half Lua wrapper."
 
 Why this shape:
@@ -812,7 +815,7 @@ Why this shape:
   Plugin-vs-Core split anywhere in the protocol or events.
 - **All permission policy is UX-side.** Engine has no `Permissions`
   struct, no per-mode rule plumbing, no `RuntimeApprovals`. The Lua
-  tool's `hooks(args, mode)` consults `app::permissions.*` (bash AST,
+  tool's `hooks(args, mode)` consults `core::permissions.*` (bash AST,
   workspace check, runtime approvals, workspace store) and returns
   `"allow" | "needs_confirm" | "deny"`. AgentMode (Plan/Apply/Yolo) is
   one input the hook reads from; engine has no opinion on it. When the
@@ -824,19 +827,19 @@ Why this shape:
 
 ## Rust capabilities — parse-then-present pattern
 
-`app::process`, `app::fs`,
-`app::http`, `app::html`, `app::notebook`, `app::grep`, `app::path`,
-`app::fuzzy`, `app::permissions` — generic primitives, _not_
+`core::process`, `core::fs`,
+`core::http`, `core::html`, `core::notebook`, `core::grep`, `core::path`,
+`core::fuzzy`, `core::permissions` — generic primitives, _not_
 tool-specific. Any Lua plugin composes from them. A statusline source
-reads git state via `app::fs`. A custom command shells out via
-`app::process`. A theme finds files via `app::fs::glob`. A picker
-ranks candidates via `app::fuzzy`. The `bash` tool checks command
-shape via `app::permissions.parse_bash`. Tools are just
+reads git state via `core::fs`. A custom command shells out via
+`core::process`. A theme finds files via `core::fs::glob`. A picker
+ranks candidates via `core::fuzzy`. The `bash` tool checks command
+shape via `core::permissions.parse_bash`. Tools are just
 one consumer.
 
-`app::process` (foreground process spawning, used by short-lived
+`core::process` (foreground process spawning, used by short-lived
 shell commands) is the primitive; background-process registry and
-long-lived child IPC are extensions of the same surface. `app::process`
+long-lived child IPC are extensions of the same surface. `core::process`
 carries its
 own ergonomic shape (output capture, exit code, timeout) so it
 stands as its own module.
@@ -863,15 +866,15 @@ binding.
 | Theme groups, highlight resolution                        | `ui::Theme`                                 |
 | Engine handle, agent loop, providers, MCP                 | `engine::`                                  |
 | Wire types (UiCommand, EngineEvent, AgentMode, ReasoningEffort, …) | `protocol::`                          |
-| Permission policy (rules, modes, runtime approvals, workspace store, bash AST) | `app::permissions` capability        |
-| Generic capabilities (process / fs / http / permissions / …) | `app::` (one module each)            |
-| App subsystems (Session, Confirms, Clipboard, Timers, Cells) | `app::Core`                              |
-| Headless frontend (HeadlessApp)                           | `app::`                                     |
-| Terminal frontend (TuiApp, event loop, content rendering) | `term::`                                    |
-| Lua bridge — Host tier (TLS pointer + Host bindings)      | `app::lua::api/<name>.rs`                   |
-| Lua bridge — UiHost tier (buf / win / ui / statusline)    | `term::lua::api/<name>.rs`                  |
-| Engine ↔ Lua bridge (RequestPermission, queue_event)      | `app` engine-event bridge / reducer         |
-| Tool dispatch (ToolDispatcher impl)                       | `app` Lua runtime                           |
+| Permission policy (rules, modes, runtime approvals, workspace store, bash AST) | `core::permissions` capability        |
+| Generic capabilities (process / fs / http / permissions / …) | `core::` (one module each)            |
+| App subsystems (Session, Confirms, Clipboard, Timers, Cells) | `core::Core`                              |
+| Headless frontend (HeadlessApp)                           | `core::`                                     |
+| Terminal frontend (TuiApp, event loop, content rendering) | `tui::`                                     |
+| Lua bridge — Host tier (TLS pointer + Host bindings)      | `core::lua::api/<name>.rs`                   |
+| Lua bridge — UiHost tier (buf / win / ui / statusline)    | `tui::lua::api/<name>.rs`                   |
+| Engine ↔ Lua bridge (RequestPermission, queue_event)      | `core` engine-event bridge / reducer         |
+| Tool dispatch (ToolDispatcher impl)                       | `core` Lua runtime                           |
 | Slash commands (`/model`, `/theme`, `/resume`, …)         | Lua                                         |
 | Dialogs (confirm, permissions, agents, rewind, …)         | Lua                                         |
 | Tools (bash, read, write, edit, glob, grep, …)            | Lua (compose Rust capabilities)             |
@@ -890,26 +893,31 @@ this exact code? Yes → Rust primitive. No → Lua feature.
 
 We borrow only the cell-grid concept as the intermediate rendering surface.
 
-## Why `ui` is a separate crate
+## Why `ui` is a distinct module inside `tui`
 
-- Forces clean boundaries — `ui` cannot import `engine` or `app`.
+- Forces clean boundaries — `tui::ui` cannot import `engine` or `core`.
+  It only sees `protocol` types (via `tui` re-exports) and `crossterm`.
 - Testable in isolation: buffer/window/layout/grid logic uses fake grids and
   writers. Terminal raw-mode and crossterm event adaptation stay in `tui`.
-- The public API surface _is_ the API. `pub` items in `ui` are the contract.
+- The public API surface _is_ the API. `pub` items in `tui::ui` are the
+  contract; `tui` code outside the module uses them, headless code never
+  sees them.
 
-## Why `app` is a separate crate (target)
+## Why `core` is a separate crate
 
-- Headless frontends (one-shot CLI, server, GUI) can depend on `app` without
+- Headless frontends (one-shot CLI, server, GUI) can depend on `core` without
   compiling `crossterm`, `syntect`, or grid diffing.
-- `app` owns everything that is not terminal-specific: session, tool dispatch,
+- `core` owns everything that is not terminal-specific: session, tool dispatch,
   capabilities, cells, timers, the Lua runtime. `tui` owns only the chrome.
-- `ui` has zero internal dependencies. `app` depends on `protocol`,
-  `engine`, and external crates (`mlua`, `tokio`, `reqwest`). `tui` depends on
-  `app`, `ui`, and `protocol`.
+- `core` depends on `protocol` and `engine` only.  `tui` depends on
+  `core` and `crossterm`.
 
-**Current state:** `app` and `tui` are organized as `core/` and `term/`
-modules inside the `tui` crate. They become separate crates when a third
-frontend (web, daemon, GUI) materializes.
+**Current state:** `core/` is a module inside `crates/tui` in the
+process of being extracted into `crates/core` (P8).  `ui/` is a separate
+crate (`crates/ui/`) in the process of absorbing into `tui` as
+`tui/src/ui/` (also P8).  `term/` is a transitional module that dissolves
+during P8: its headless-safe content model moves to `core/content/` and
+its terminal chrome moves to `tui/src/`.
 
 ## Code rules — eternal
 
@@ -977,10 +985,10 @@ Engine has no notion of "agents." There is no `Role::Agent`, no
 `AgentBlockData`, no `AgentMessage` event, no `EngineConfig.multi_agent`,
 no agent registry inside engine. Any future multi-agent feature would be
 implemented as optional Lua plugins composing one generic capability —
-`app::process` (long-lived child IPC).
+`core::process` (long-lived child IPC).
 
 ```rust
-// app::process — generic IPC primitive for any long-running child.
+// core::process — generic IPC primitive for any long-running child.
 pub struct Handle { /* opaque */ }
 
 pub fn spawn(cmd: &str, args: &[&str], env: &HashMap<...>) -> Handle;
@@ -1000,7 +1008,7 @@ primitive.
 
 A future optional multi-agent plugin under this model would:
 
-- `spawn_agent.lua` calls `app::process.spawn("smelt", {"--agent", id})`,
+- `spawn_agent.lua` calls `core::process.spawn("smelt", {"--agent", id})`,
   registers an `on_event` handler that fires a Lua-side cell (e.g.
   `agent:<id>:status`), returns the handle id as the tool result.
 - `message_agent.lua` finds the handle, sends a JSON message, blocks
@@ -1022,14 +1030,14 @@ mid-turn if a plugin chooses to inject something). No
 `AgentMessageNotification` broadcast in engine — it's tui-side
 plumbing built on a primitive that's useful for any subprocess.
 
-**What dies:** `protocol::Role::Agent`, `protocol::AgentBlockData`,
-`EngineEvent::{AgentMessage, AgentExited, Spawned}`,
-`UiCommand::AgentMessage`, `engine::tools::AgentMessageNotification`,
-`EngineConfig.multi_agent`, `MultiAgentConfig`, the engine-side
-registry/socket modules (or they relocate behind `app::process`),
-`Session.agents` / `agent_snapshots`, `transcript_present/agent.rs`.
+**What died** (all removed in earlier phases): `protocol::Role::Agent`,
+`protocol::AgentBlockData`, `EngineEvent::{AgentMessage, AgentExited,
+Spawned}`, `UiCommand::AgentMessage`,
+`engine::tools::AgentMessageNotification`, `EngineConfig.multi_agent`,
+`MultiAgentConfig`, the engine-side registry/socket modules,
+`Session.agents` / `agent_snapshots`.
 
-**What's added:** `app::process` long-lived IPC surface + Lua bindings
+**What's added:** `core::process` long-lived IPC surface + Lua bindings
 under `smelt.process` (`spawn`, `send`, `on_event`, `wait`, `kill`).
 
 ## Configuration — one format, one entry point
@@ -1076,7 +1084,7 @@ binding's argument.
   thread state); cross-thread state crosses through `Arc<Mutex<…>>`
   boundaries (engine sender, agent registries, process registry,
   agent_snapshots).
-- The TLS app pointer is sound because Rust never touches its `&mut App`
+- The TLS app pointer is sound because Rust never touches its `&mut dyn Host`
   borrow while Lua is executing — the FFI call is synchronous on a single
   thread, so the reborrow inside `with_app` is sole.
 - Embedded Lua modules under `runtime/lua/smelt/` are the source of truth

@@ -36,7 +36,7 @@ buf_test(("hello#[|]#",       "Aworld<esc>", "helloworld#[|]#"));
 ```
 
 Lives in `#[cfg(test)] mod tests` next to the code under test:
-- `crates/ui/src/buffer.rs`, `window.rs`, `layout.rs`, `cells.rs`, `theme.rs`
+- `crates/tui/src/ui/buffer.rs`, `window.rs`, `layout.rs`, `cells.rs`, `theme.rs`
 - vim recipe tests once it lands as keymaps over Window (P1.d)
 
 No event loop, no rendering. Pure data round-trip.
@@ -116,7 +116,7 @@ the right thing to the model." Two surfaces, two assertions.
 
 - **Fixed terminal size** per L3 test (e.g. 100×40). Coordinates become stable.
 - **Freeze time** — mock `Instant::now` / `SystemTime::now`. Cleanest place:
-  introduce clock-injection seam in P2 alongside `EngineBridge`.
+  introduce clock-injection seam in P2 alongside `EngineClient`.
 - **Pin spinner phase** — drive `now` / `spinner_frame` cells to known values.
 - **`tokio::time::pause` + `advance`** — never real `sleep` in tests.
 - **`insta` filters** — strip dynamic IDs, durations, paths, timestamps.
@@ -128,7 +128,7 @@ the right thing to the model." Two surfaces, two assertions.
 | -------------------- | ----------------------------------------------------------------------------------------------------- |
 | **Pre-P0**           | L2 harness + 5–10 baseline scenarios on today's binary. Locks behaviour before demolition.            |
 | **P1.d** (vim decomposes) | L1 marker DSL parser; existing vim tests ported to 3-tuple form.                                  |
-| **P2** (EngineBridge) | L2 re-pointed at refactored engine; clock injection lands. Goldens reviewed with `cargo insta review`. |
+| **P2** (EngineClient) | L2 re-pointed at refactored engine; clock injection lands. Goldens reviewed with `cargo insta review`. |
 | **P4** (widgets stabilise) | L3a per widget. L2 snapshots reviewed at boundary.                                              |
 | **P5** (Lua dialogs/tools) | L3b Pilot for dialog interactions.                                                              |
 | **P7**               | Full suite is the parity gate; FEATURES.md walked against green tests.                                |

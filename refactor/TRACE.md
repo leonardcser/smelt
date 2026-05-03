@@ -15,7 +15,7 @@ fix.
 > emits a closing turn message.
 
 That single gesture exercises: keymap dispatch, `WinEvent::Submit`, the
-prompt → engine boundary, streaming through `EngineBridge`,
+prompt → engine boundary, streaming through `EngineClient`,
 `Buffer::attach` block callbacks, syntect highlighting via
 `tui::parse::syntax`, the tool dispatcher trait, the Lua hook returning
 `needs_confirm`, the `Confirms` gate, `RequestPermission` ↔
@@ -156,7 +156,7 @@ The engine knows nothing about who's listening. It just streams.
 
 ## Stage 3 — TextDelta arrives, transcript updates
 
-1. `select!` fires on `engine.event_rx`. `EngineBridge::handle_event`:
+1. `select!` fires on `engine.event_rx`. `EngineClient::handle_event`:
    ```rust
    match ev {
      EngineEvent::TextDelta { delta } => {
@@ -340,11 +340,11 @@ ARCH § Streaming.)
 
 1. Engine sees `decision = "needs_confirm"`. Emits
    `EngineEvent::RequestPermission { handle_id, tool: "bash", args, reason }`.
-2. **Engine pauses generation.** `EngineBridge` checks
+2. **Engine pauses generation.** `EngineClient` checks
    `Confirms::is_clear()` before pulling the next event from
    `event_rx`. With a pending request, the next event sits in the
    channel until clear.
-3. `EngineBridge` handles `RequestPermission`:
+3. `EngineClient` handles `RequestPermission`:
    - Calls `host.confirms().register(handle_id) -> oneshot::Receiver<Decision>`.
      The receiver is stashed; engine's reply will resolve it.
    - Sets `cells.set("confirm_requested", { handle_id, tool: "bash",
@@ -409,7 +409,7 @@ ARCH § Streaming.)
    `ToolResult` and returns to engine.
 4. Engine receives ToolResult, emits
    `EngineEvent::ToolFinished { call_id, result }`.
-5. `EngineBridge` handles ToolFinished:
+5. `EngineClient` handles ToolFinished:
    - The transcript buffer's markdown parser tracks tool blocks too.
      `on_block` fires with `{ kind: "tool", tool: "bash", call_id,
      result }`. `transcript.lua` renders it (truncated stdout, exit
@@ -425,7 +425,7 @@ ARCH § Streaming.)
 
 1. Provider stream ends. Engine emits `EngineEvent::TurnComplete { meta }`
    where `meta: TurnMeta` carries token usage, agent blocks, timing.
-2. `EngineBridge`:
+2. `EngineClient`:
    ```rust
    EngineEvent::TurnComplete { meta } => {
        host.session_mut().push_turn_meta(meta.clone());
