@@ -156,7 +156,7 @@ The engine knows nothing about who's listening. It just streams.
 
 ## Stage 3 — TextDelta arrives, transcript updates
 
-1. `select!` fires on `engine.event_rx`. `EngineClient::handle_event`:
+1. `select!` fires on `engine.event_rx`. `TuiApp::handle_engine_event`:
    ```rust
    match ev {
      EngineEvent::TextDelta { delta } => {
