@@ -79,7 +79,7 @@ pub struct ToolEntry {
 ///
 /// The trait carries no permission policy — the engine returns the
 /// unfiltered tool list from `definitions` and applies no mode or
-/// permission filtering. That concern moved to `tui::permissions` and
+/// permission filtering. That concern moved to `app::permissions` and
 /// Lua-tool hooks in P5.c.
 pub trait ToolDispatcher: Send + Sync {
     /// All tool definitions registered with this dispatcher.

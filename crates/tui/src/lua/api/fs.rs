@@ -1,4 +1,4 @@
-//! `smelt.fs` bindings — sync filesystem primitives over `tui::fs`.
+//! `smelt.fs` bindings — sync filesystem primitives over `app::fs`.
 //! Host-tier (works in tui and headless) — no Ui touch.
 //!
 //! Errors flow through the `(value, err)` Lua convention: success
@@ -6,7 +6,7 @@
 //! lets plugin code do `local data, err = smelt.fs.read(p)` without
 //! `pcall`.
 
-use crate::fs::FlockGuard;
+use crate::core::fs::FlockGuard;
 use mlua::prelude::*;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "read",
-        lua.create_function(|_, p: String| match crate::fs::read_to_string(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::read_to_string(&p) {
             Ok(s) => Ok((Some(s), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         })?,
@@ -24,32 +24,35 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "write",
-        lua.create_function(|_, (p, contents): (String, mlua::String)| {
-            match crate::fs::write(&p, contents.as_bytes()) {
+        lua.create_function(
+            |_, (p, contents): (String, mlua::String)| match crate::core::fs::write(
+                &p,
+                contents.as_bytes(),
+            ) {
                 Ok(()) => Ok((true, None)),
                 Err(err) => Ok((false, Some(err.to_string()))),
-            }
-        })?,
+            },
+        )?,
     )?;
 
     fs.set(
         "exists",
-        lua.create_function(|_, p: String| Ok(crate::fs::exists(&p)))?,
+        lua.create_function(|_, p: String| Ok(crate::core::fs::exists(&p)))?,
     )?;
 
     fs.set(
         "is_file",
-        lua.create_function(|_, p: String| Ok(crate::fs::is_file(&p)))?,
+        lua.create_function(|_, p: String| Ok(crate::core::fs::is_file(&p)))?,
     )?;
 
     fs.set(
         "is_dir",
-        lua.create_function(|_, p: String| Ok(crate::fs::is_dir(&p)))?,
+        lua.create_function(|_, p: String| Ok(crate::core::fs::is_dir(&p)))?,
     )?;
 
     fs.set(
         "read_dir",
-        lua.create_function(|_, p: String| match crate::fs::read_dir(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::read_dir(&p) {
             Ok(entries) => Ok((Some(paths_to_strings(entries)), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         })?,
@@ -57,7 +60,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "mkdir",
-        lua.create_function(|_, p: String| match crate::fs::mkdir(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::mkdir(&p) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         })?,
@@ -65,7 +68,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "mkdir_all",
-        lua.create_function(|_, p: String| match crate::fs::mkdir_all(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::mkdir_all(&p) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         })?,
@@ -73,7 +76,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "remove_file",
-        lua.create_function(|_, p: String| match crate::fs::remove_file(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::remove_file(&p) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         })?,
@@ -81,7 +84,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "remove_dir",
-        lua.create_function(|_, p: String| match crate::fs::remove_dir(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::remove_dir(&p) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         })?,
@@ -89,7 +92,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "remove_dir_all",
-        lua.create_function(|_, p: String| match crate::fs::remove_dir_all(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::remove_dir_all(&p) {
             Ok(()) => Ok((true, None)),
             Err(err) => Ok((false, Some(err.to_string()))),
         })?,
@@ -98,7 +101,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     fs.set(
         "rename",
         lua.create_function(|_, (from, to): (String, String)| {
-            match crate::fs::rename(&from, &to) {
+            match crate::core::fs::rename(&from, &to) {
                 Ok(()) => Ok((true, None)),
                 Err(err) => Ok((false, Some(err.to_string()))),
             }
@@ -107,17 +110,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "copy",
-        lua.create_function(
-            |_, (from, to): (String, String)| match crate::fs::copy(&from, &to) {
+        lua.create_function(|_, (from, to): (String, String)| {
+            match crate::core::fs::copy(&from, &to) {
                 Ok(n) => Ok((Some(n), None)),
                 Err(err) => Ok((None, Some(err.to_string()))),
-            },
-        )?,
+            }
+        })?,
     )?;
 
     fs.set(
         "mtime",
-        lua.create_function(|_, p: String| match crate::fs::mtime_secs(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::mtime_secs(&p) {
             Ok(value) => Ok((value, None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         })?,
@@ -125,7 +128,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "size",
-        lua.create_function(|_, p: String| match crate::fs::size(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::size(&p) {
             Ok(n) => Ok((Some(n), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         })?,
@@ -141,7 +144,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .and_then(|t| t.get::<Option<u64>>("max").ok().flatten())
                 .map(|n| n as usize)
                 .unwrap_or(200);
-            match crate::fs::glob(&pattern, &dir, max) {
+            match crate::core::fs::glob(&pattern, &dir, max) {
                 Ok(mut matches) => {
                     matches.sort_by_key(|m| std::cmp::Reverse(m.mtime));
                     let paths: Vec<String> = matches.into_iter().map(|m| m.path).collect();
@@ -156,7 +159,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "try_flock",
-        lua.create_function(|_, p: String| match crate::fs::try_flock(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::try_flock(&p) {
             Ok(guard) => Ok((Some(FlockHandle::new(guard)), None)),
             Err(err) => Ok((None, Some(err))),
         })?,
@@ -167,7 +170,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 }
 
 /// Userdata wrapper for an exclusive advisory lock acquired via
-/// `crate::fs::try_flock`. Released on `:release()` or when garbage
+/// `crate::core::fs::try_flock`. Released on `:release()` or when garbage
 /// collected. Lua tools that mutate a file under a flock acquire one of
 /// these and let it drop when the write completes.
 struct FlockHandle(RefCell<Option<FlockGuard>>);
@@ -190,7 +193,7 @@ impl LuaUserData for FlockHandle {
 /// `smelt.fs.file_state` — shared mtime + content + read-range cache.
 /// Read by Lua `read_file` / `write_file` / `edit_file` / `notebook_edit`
 /// during their migration off the engine impls. Backed by the same
-/// `crate::fs::FileStateCache` engine-side tools see, parked on
+/// `crate::core::fs::FileStateCache` engine-side tools see, parked on
 /// `Core.files`.
 fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
@@ -254,7 +257,7 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
         lua.create_function(|_, (p, noun): (String, Option<String>)| {
             let noun = noun.unwrap_or_else(|| "file".into());
             Ok(crate::lua::try_with_app(|app| {
-                crate::fs::staleness_error(&app.core.files, &p, &noun)
+                crate::core::fs::staleness_error(&app.core.files, &p, &noun)
             })
             .flatten())
         })?,
@@ -262,7 +265,7 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
 
     t.set(
         "mtime_ms",
-        lua.create_function(|_, p: String| match crate::fs::file_mtime_ms(&p) {
+        lua.create_function(|_, p: String| match crate::core::fs::file_mtime_ms(&p) {
             Ok(ms) => Ok((Some(ms), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         })?,

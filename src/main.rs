@@ -186,7 +186,7 @@ async fn main() {
     // Eager-load syntect's syntax and theme sets in the background so the
     // first tool render doesn't pay the ~30ms lazy-init cost mid-frame.
     // Runs in parallel with session loading and is done well before first paint.
-    std::thread::spawn(tui::content::warm_up_syntect);
+    std::thread::spawn(tui::term::content::warm_up_syntect);
 
     if args.headless && args.message.is_none() {
         eprintln!("error: --headless requires a message argument");
@@ -301,8 +301,8 @@ async fn main() {
     // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
     let mut permissions = match lua_permission_rules {
-        Some(raw) => tui::permissions::Permissions::from_raw(&raw),
-        None => tui::permissions::Permissions::load(),
+        Some(raw) => tui::core::permissions::Permissions::from_raw(&raw),
+        None => tui::core::permissions::Permissions::load(),
     };
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
@@ -313,9 +313,9 @@ async fn main() {
     // Create shared runtime approvals and load workspace rules.
     let runtime_approvals = {
         let cwd_str = cwd.to_string_lossy();
-        let rules = tui::permissions::store::load(&cwd_str);
-        let (ws_tools, ws_dirs) = tui::permissions::store::into_approvals(&rules);
-        let mut rt = tui::permissions::RuntimeApprovals::new();
+        let rules = tui::core::permissions::store::load(&cwd_str);
+        let (ws_tools, ws_dirs) = tui::core::permissions::store::into_approvals(&rules);
+        let mut rt = tui::core::permissions::RuntimeApprovals::new();
         rt.load_workspace(ws_tools, ws_dirs);
         Arc::new(std::sync::RwLock::new(rt))
     };
@@ -397,15 +397,15 @@ async fn main() {
     };
 
     let color_mode = match args.color {
-        ColorMode::Auto => tui::app::ColorMode::Auto,
-        ColorMode::Always => tui::app::ColorMode::Always,
-        ColorMode::Never => tui::app::ColorMode::Never,
+        ColorMode::Auto => tui::core::ColorMode::Auto,
+        ColorMode::Always => tui::core::ColorMode::Always,
+        ColorMode::Never => tui::core::ColorMode::Never,
     };
 
     if args.headless {
         let output_format = match args.format {
-            OutputFormat::Text => tui::app::OutputFormat::Text,
-            OutputFormat::Json => tui::app::OutputFormat::Json,
+            OutputFormat::Text => tui::core::OutputFormat::Text,
+            OutputFormat::Json => tui::core::OutputFormat::Json,
         };
         let app_config = build_headless_config(
             model,
@@ -425,16 +425,16 @@ async fn main() {
             cfg.settings.context_window,
         );
         let mut core =
-            tui::app::Core::new(app_config, engine_handle, tui::app::FrontendKind::Headless);
+            tui::core::Core::new(app_config, engine_handle, tui::core::FrontendKind::Headless);
         core.skills = Some(tui_skill_loader.clone());
-        let sink = tui::app::HeadlessSink::new(output_format, color_mode, args.verbose);
-        let mut headless = tui::app::HeadlessApp::new(core, sink);
+        let sink = tui::core::HeadlessSink::new(output_format, color_mode, args.verbose);
+        let mut headless = tui::core::HeadlessApp::new(core, sink);
         headless
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;
     } else {
         // Build the TUI app.
-        let mut app = tui::app::TuiApp::new(
+        let mut app = tui::core::TuiApp::new(
             model,
             initial_api_base,
             api_key_env,
@@ -514,13 +514,13 @@ fn build_headless_config(
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
     settings: tui::state::ResolvedSettings,
     context_window: Option<u32>,
-) -> tui::app::AppConfig {
+) -> tui::core::AppConfig {
     let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
     let mut mode_cycle = mode_cycle;
     if !mode_cycle.contains(&mode) {
         mode_cycle.push(mode);
     }
-    tui::app::AppConfig {
+    tui::core::AppConfig {
         model,
         api_base,
         api_key_env,

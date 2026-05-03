@@ -26,7 +26,7 @@
 use std::cell::Cell;
 use std::ptr::NonNull;
 
-use crate::app::TuiApp;
+use crate::core::TuiApp;
 
 thread_local! {
     static APP: Cell<Option<NonNull<TuiApp>>> = const { Cell::new(None) };
@@ -89,13 +89,13 @@ pub(crate) fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
 ///
 /// `pub(crate)` because `Host` itself is `pub(crate)` — neither leaks
 /// outside the crate.
-pub(crate) fn with_host<R>(f: impl FnOnce(&mut dyn crate::app::Host) -> R) -> R {
+pub(crate) fn with_host<R>(f: impl FnOnce(&mut dyn crate::core::Host) -> R) -> R {
     with_app(|app| f(app))
 }
 
 /// `try_` variant of `with_host` that returns `None` instead of
 /// panicking when no frontend is installed.
-pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn crate::app::Host) -> R) -> Option<R> {
+pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn crate::core::Host) -> R) -> Option<R> {
     try_with_app(|app| f(app))
 }
 

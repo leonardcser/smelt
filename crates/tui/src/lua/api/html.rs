@@ -1,9 +1,9 @@
-//! `smelt.html` bindings — read-only HTML parsing over `tui::html`.
+//! `smelt.html` bindings — read-only HTML parsing over `app::html`.
 //! Host-tier (works in tui and headless) — no Ui touch.
 
 use mlua::prelude::*;
 
-use crate::html;
+use crate::core::html;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let html_tbl = lua.create_table()?;

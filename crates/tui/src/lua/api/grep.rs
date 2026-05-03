@@ -1,4 +1,4 @@
-//! `smelt.grep` bindings — ripgrep wrapper over `tui::grep`. Host-tier
+//! `smelt.grep` bindings — ripgrep wrapper over `app::grep`. Host-tier
 //! (works in tui and headless) — no Ui touch.
 //!
 //! Lua surface: `smelt.grep.run(pattern, path, opts)` returns
@@ -10,7 +10,7 @@
 use mlua::prelude::*;
 use std::time::Duration;
 
-use crate::grep;
+use crate::core::grep;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let grep_tbl = lua.create_table()?;

@@ -1,6 +1,6 @@
 //! `smelt.mode` — `get / set / cycle / cycle_list` over `protocol::AgentMode`
 //! (Plan / Apply / Yolo / Normal). Lives at top-level so it does
-//! not collide with the future `smelt.subprocess`.
+//! not collide with the future `smelt.process` long-lived IPC.
 //!
 //! `cycle` is seeded as a no-op stub here so callers always see a
 //! function; `runtime/lua/smelt/modes.lua` overrides it with the

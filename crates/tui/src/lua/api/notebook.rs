@@ -1,20 +1,20 @@
 //! `smelt.notebook` bindings.
 //!
 //! - `render(buf_id, args)` paints an `edit_notebook` preview into a
-//!   Buffer the caller owns (UiHost-only). It asks `tui::notebook`
+//!   Buffer the caller owns (UiHost-only). It asks `app::notebook`
 //!   for typed `NotebookRenderData` from the tool args (insert /
 //!   delete / replace cell), then prints it via the same syntax /
 //!   inline-diff helpers the transcript renderer uses.
 //! - `parse / is_notebook_path` are Host-tier read shapes over
-//!   `tui::notebook` for plugins that want to introspect a
+//!   `app::notebook` for plugins that want to introspect a
 //!   notebook's structure.
 
-use crate::content::display::{ColorRole, ColorValue};
-use crate::content::highlight::{print_inline_diff, print_syntax_file};
-use crate::content::layout_out::SpanCollector;
-use crate::content::wrap_line;
-use crate::notebook;
-use crate::notebook::NotebookRenderData;
+use crate::core::notebook;
+use crate::core::notebook::NotebookRenderData;
+use crate::term::content::display::{ColorRole, ColorValue};
+use crate::term::content::highlight::{print_inline_diff, print_syntax_file};
+use crate::term::content::layout_out::SpanCollector;
+use crate::term::content::wrap_line;
 use mlua::prelude::*;
 use std::collections::HashMap;
 use ui::BufId;
@@ -27,13 +27,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let args = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.render: {e}")))?;
             crate::lua::with_app(|app| {
-                let Some(data) = crate::notebook::preview_render_data(&args) else {
+                let Some(data) = crate::core::notebook::preview_render_data(&args) else {
                     return;
                 };
                 let theme_snap = app.ui.theme().clone();
-                let width = crate::content::term_width() as u16;
+                let width = crate::term::content::term_width() as u16;
                 if let Some(buf) = app.ui.buf_mut(BufId(buf_id)) {
-                    crate::content::to_buffer::render_into_buffer(
+                    crate::term::content::to_buffer::render_into_buffer(
                         buf,
                         width,
                         &theme_snap,
@@ -46,7 +46,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     notebook.set(
         "is_notebook_path",
-        lua.create_function(|_, p: String| Ok(crate::notebook::is_notebook_path(&p)))?,
+        lua.create_function(|_, p: String| Ok(crate::core::notebook::is_notebook_path(&p)))?,
     )?;
 
     notebook.set(
@@ -64,7 +64,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     notebook.set(
         "read",
         lua.create_function(|_, (path, offset, limit): (String, u64, u64)| {
-            match crate::notebook::render_notebook_text(&path, offset as usize, limit as usize) {
+            match crate::core::notebook::render_notebook_text(
+                &path,
+                offset as usize,
+                limit as usize,
+            ) {
                 Ok(s) => Ok((Some(s), None)),
                 Err(err) => Ok((None, Some(err))),
             }
@@ -83,7 +87,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let args_map = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.apply_edit: {e}")))?;
             let result = crate::lua::try_with_app(|app| {
-                crate::notebook::apply_edit(&args_map, &app.core.files)
+                crate::core::notebook::apply_edit(&args_map, &app.core.files)
             });
             match result {
                 Some(Ok(outcome)) => {
@@ -184,7 +188,7 @@ fn render_notebook_preview(
     viewport: u16,
 ) {
     let title = data.title();
-    let title_lines = wrap_line(&title, crate::content::term_width().saturating_sub(4));
+    let title_lines = wrap_line(&title, crate::term::content::term_width().saturating_sub(4));
     let mut skipped = skip;
     let mut emitted = 0u16;
 

@@ -1,4 +1,4 @@
-//! `smelt.http` bindings — synchronous HTTP fetch over `tui::http`.
+//! `smelt.http` bindings — synchronous HTTP fetch over `app::http`.
 //! Host-tier (works in tui and headless) — no Ui touch.
 //!
 //! Errors flow through the `(value, err)` Lua convention.
@@ -7,7 +7,7 @@ use mlua::prelude::*;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::http;
+use crate::core::http;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let http_tbl = lua.create_table()?;

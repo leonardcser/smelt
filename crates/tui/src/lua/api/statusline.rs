@@ -70,7 +70,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 /// Build the full snapshot the Lua composer consumes once per refresh.
 /// Mirrors the inputs the retired Rust composition read off `TuiApp`;
 /// see `runtime/lua/smelt/status.lua` for the segment shape.
-fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
+fn build_snapshot(app: &mut crate::core::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
     use crossterm::style::Color;
     use ui::text::byte_to_cell;
 
@@ -150,11 +150,11 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
         (false, None)
     } else {
         match app.app_focus {
-            crate::app::AppFocus::Content => {
+            crate::core::AppFocus::Content => {
                 let has = app.transcript_window.vim_enabled;
                 (has, has.then_some(app.vim_mode))
             }
-            crate::app::AppFocus::Prompt => {
+            crate::core::AppFocus::Prompt => {
                 let mut mode = app.input.vim_enabled().then_some(app.vim_mode);
                 let drag = matches!(app.ui.capture(), Some(ui::HitTarget::Window(_)));
                 if drag {
@@ -166,7 +166,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     };
     vim_tbl.set("enabled", vim_enabled)?;
     if vim_enabled {
-        let label = crate::content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
+        let label = crate::term::content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
         vim_tbl.set("label", label)?;
         let kind = match vim_mode {
             Some(ui::VimMode::Insert) => "insert",
@@ -208,7 +208,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     // Position — mirrors the retired `compute_status_position` for
     // both prompt and content focus. `nil` for an empty transcript.
     let position = match app.app_focus {
-        crate::app::AppFocus::Prompt => {
+        crate::core::AppFocus::Prompt => {
             let buf = &app.input.win.text;
             let cpos = app.input.win.cpos.min(buf.len());
             let line_idx = buf[..cpos].bytes().filter(|&b| b == b'\n').count();
@@ -222,7 +222,7 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
             };
             Some(((line_idx as u32) + 1, col_cells as u32 + 1, pct.min(100)))
         }
-        crate::app::AppFocus::Content => {
+        crate::core::AppFocus::Content => {
             let total = app
                 .full_transcript_display_text(app.core.config.settings.show_thinking)
                 .len();

@@ -20,7 +20,7 @@ pub(crate) const VERSION: &str = "1";
 
 /// Buffer-level operations — text, attachments, whole-buffer replace.
 pub(crate) mod buf {
-    use crate::input::PromptState;
+    use crate::term::input::PromptState;
 
     /// Replace the prompt buffer's text wholesale. Snapshots undo,
     /// clears attachments + shift-selection anchor, resets paste
@@ -46,7 +46,7 @@ pub(crate) mod buf {
 /// register here; keybindings resolve to names that route through
 /// `run`. Modelled on nvim's `nvim_command` / `user_command` split.
 pub(crate) mod cmd {
-    use crate::app::{CommandAction, TuiApp};
+    use crate::core::{CommandAction, TuiApp};
 
     /// Run a command line. Accepts `/name args...` or `:name args...`
     /// or a bare `name`. Parses the name, looks it up in the registry,
@@ -56,6 +56,6 @@ pub(crate) mod cmd {
     /// pressed a keybind that resolved to `Action::Cmd(name)`, or a
     /// plugin invoked it programmatically.
     pub(crate) fn run(app: &mut TuiApp, line: &str) -> CommandAction {
-        crate::app::commands::run_command(app, line)
+        crate::core::commands::run_command(app, line)
     }
 }

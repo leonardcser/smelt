@@ -2,7 +2,7 @@
 //! Rust side: overlay placement parsing, picker construction, and a
 //! few reusable window recipes (`list` / `input`).
 
-use crate::app::TuiApp;
+use crate::core::TuiApp;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ui::layout::Anchor;
 use ui::{
@@ -395,11 +395,13 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId) {
         }
         if matches!(
             &ctx.payload,
-            Payload::Key { code: KeyCode::Esc, .. }
-                | Payload::Key {
-                    code: KeyCode::Char('c'),
-                    mods: KeyModifiers::CONTROL,
-                }
+            Payload::Key {
+                code: KeyCode::Esc,
+                ..
+            } | Payload::Key {
+                code: KeyCode::Char('c'),
+                mods: KeyModifiers::CONTROL,
+            }
         ) {
             return CallbackResult::Pass;
         }

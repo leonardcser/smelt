@@ -18,9 +18,9 @@
 use std::sync::Arc;
 use ui::buffer::{Buffer, BufferParser};
 
-use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
-use crate::content::layout_out::SpanCollector;
-use crate::content::to_buffer::render_into_buffer;
+use crate::term::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
+use crate::term::content::layout_out::SpanCollector;
+use crate::term::content::to_buffer::render_into_buffer;
 
 /// Content kind a parser-backed buffer renders. Constructed from a
 /// Lua `mode` string or chosen by a Rust caller, handed to
@@ -107,7 +107,7 @@ impl BufferParser for ModeParser {
             }
             BufFormat::Markdown => {
                 render_into_buffer(buf, width, &theme, |sink| {
-                    crate::app::transcript_present::render_markdown_inner(
+                    crate::core::transcript_present::render_markdown_inner(
                         sink,
                         source,
                         width as usize,

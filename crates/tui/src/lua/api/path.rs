@@ -1,4 +1,4 @@
-//! `smelt.path` bindings — pure path arithmetic over `tui::path`.
+//! `smelt.path` bindings — pure path arithmetic over `app::path`.
 //! Host-tier (works in tui and headless) — no Ui touch.
 
 use mlua::prelude::*;
@@ -9,12 +9,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     path_tbl.set(
         "normalize",
-        lua.create_function(|_, p: String| Ok(to_string(crate::path::normalize(&p))))?,
+        lua.create_function(|_, p: String| Ok(to_string(crate::core::path::normalize(&p))))?,
     )?;
 
     path_tbl.set(
         "canonical",
-        lua.create_function(|_, p: String| match crate::path::canonical(&p) {
+        lua.create_function(|_, p: String| match crate::core::path::canonical(&p) {
             Ok(resolved) => Ok((Some(to_string(resolved)), None)),
             Err(err) => Ok((None, Some(err.to_string()))),
         })?,
@@ -23,13 +23,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     path_tbl.set(
         "relative",
         lua.create_function(|_, (base, target): (String, String)| {
-            Ok(to_string(crate::path::relative(&base, &target)))
+            Ok(to_string(crate::core::path::relative(&base, &target)))
         })?,
     )?;
 
     path_tbl.set(
         "expand",
-        lua.create_function(|_, p: String| Ok(to_string(crate::path::expand_home(&p))))?,
+        lua.create_function(|_, p: String| Ok(to_string(crate::core::path::expand_home(&p))))?,
     )?;
 
     path_tbl.set(
@@ -78,7 +78,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     // absolute otherwise. `"."` for cwd itself.
     path_tbl.set(
         "display",
-        lua.create_function(|_, p: String| Ok(crate::tools::display_path(&p)))?,
+        lua.create_function(|_, p: String| Ok(crate::core::tools::display_path(&p)))?,
     )?;
 
     // `smelt.path.config_dir()` — `~/.config/smelt` (or the
