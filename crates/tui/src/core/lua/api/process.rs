@@ -124,7 +124,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         "process.run_streaming: app unavailable",
                     ));
                 };
-                let cancel = crate::lua::task::current_task_cancel();
+                let cancel = crate::lua::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
                 tokio::spawn(async move {
                     let on_line = |line: String| {

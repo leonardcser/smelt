@@ -18,6 +18,7 @@ pub(crate) mod host;
 pub(crate) mod html;
 pub(crate) mod http;
 pub(crate) mod kill_ring;
+pub(crate) mod lua;
 pub(crate) mod notebook;
 pub(crate) mod path;
 pub mod permissions;
