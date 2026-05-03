@@ -1257,6 +1257,135 @@ A GUI or web frontend uses `core` directly and ignores `ui` entirely.
 
 ---
 
+## P9 — Final cleanup
+
+**Goal:** purge remaining transitional abstractions and fix naming drift.
+Small, safe subtasks that each land green.
+
+---
+
+### P9.a — Well-known window IDs out of `ui`
+
+Remove the last application semantics from the generic `ui` layer.
+`ui` should not know that `WinId(0)` means "prompt" or `WinId(1)` means
+"transcript"; those are `TuiApp` / `WellKnown` concerns.
+
+- **Move `PROMPT_WIN` and `TRANSCRIPT_WIN`** from `ui/mod.rs` to
+  `app/well_known.rs` (or `app.rs`). Also name the prompt editing buffer
+  `PROMPT_EDIT_BUF: BufId = BufId(0)` there so the magic number is explicit.
+- **Make `win_open_split` collision-tolerant.** Skip occupied win IDs:
+  ```rust
+  while self.wins.contains_key(&WinId(self.next_win_id)) {
+      self.next_win_id += 1;
+  }
+  ```
+  `Ui::new()` starts `next_win_id` at `0`.
+- **Leave `buf_create` alone for now.** `PromptState::new()` creates a
+  standalone `Window` with `BufId(0)` before `Ui` exists. Making `buf_create`
+  collision-tolerant starting at `0` would silently allocate `BufId(0)` for the
+  display buffer, colliding with the editing buffer's conceptual ID. Fix the
+  BufId duality in P9.b, not here.
+- **Update callers** in `app/`, `content/`, `input/` to reference the constants
+  through `crate::app::*` instead of `crate::ui::*`.
+- **Fix the sequential-ID test** in `ui/mod.rs`
+  (`buf_create_with_id_lua_range_does_not_advance_rust_allocator`). It assumes
+  the first auto-allocated ID is `0`; update it to not depend on the starting
+  value.
+
+End of P9.a: `ui` has zero knowledge of prompt or transcript. `WellKnown`
+owns the stable IDs. `next_win_id` starts at `0` and is collision-tolerant.
+
+---
+
+### P9.b — Unify prompt wrapping via `BufferParser`
+
+The prompt runs wrapping logic in **three places** today:
+1. `compute_prompt` manually wraps the input area via `wrap_and_locate_cursor`.
+2. `PromptWrap::build` calls the **same** wrap function for mouse translation.
+3. `core/host.rs` builds a third `PromptWrap` for `rows_for` / `breaks_for`.
+
+Unify them into a single `BufferParser` pass.
+
+- **Create `PromptInputParser` (a `BufferParser`).** It reads `Buffer::source`
+  (with `\u{FFFC}` attachment markers), expands them via `build_display_spans`,
+  soft-wraps at the given width, and writes display lines + decorations
+  (`source_text` on first row, `soft_wrapped` on continuations, highlight
+  extmarks for attachment labels). `format.rs` + `BufFormat::Plain` is the
+  template.
+- **`compute_prompt` uses the parser for the input area.** It still composes
+  chrome rows (queued / stash / bar) and emits `PromptOutput` (cursor,
+  viewport, cursor style) — a `BufferParser` cannot do this because it only
+  sees `(buf, source, width)`. But the input area no longer manually wraps.
+- **`PromptWrap` shrinks to a byte-map only.** It no longer recomputes
+  `rows` / `soft_breaks` / `hard_breaks`. Instead it reads the wrapped output
+  from the `Buffer` that the parser already produced. If the parser can emit
+  the source↔display byte map as metadata, delete `PromptWrap` entirely.
+- **`core/host.rs` reads `rows_for` / `breaks_for` from the `Buffer`** directly
+  instead of constructing a `PromptWrap`.
+- **Do NOT move editing onto `Buffer`.** `Window::text`, `Window::cpos`, and
+  `input/buffer.rs` editing primitives stay as-is. `Buffer` has no byte-level
+  insert/delete APIs; building them is not cleanup.
+- **Naming:** `prompt_data.rs` → `prompt_buf.rs` to match `transcript_buf.rs`.
+
+End of P9.b: one wrapping pass instead of three. `PromptWrap` is deleted or
+shrunk to a thin utility. `compute_prompt` still exists as the frame composer.
+`Window::text` survives.
+
+---
+
+### P9.c — Naming consistency
+
+The content modules grew different vocabularies because the two pipelines were
+built at different times under different assumptions. Align them:
+
+| Current | Target | Rationale |
+|---------|--------|-----------|
+| `content/prompt_data.rs` | `content/prompt_buf.rs` | Matches `transcript_buf.rs`; both project into `Buffer`. |
+| `content/layout_out.rs` | `content/span_builder.rs` or `display_builder.rs` | "layout" means `LayoutTree` in this codebase (Vbox/Hbox/Leaf), not text wrapping. The file builds a styled span tree, not a layout tree. |
+
+Low-cost, immediate clarity. If the file is deleted before the rename happens,
+the rename was still cheaper than the confusion it prevented.
+
+---
+
+## P10 — Transcript pipeline
+
+**Goal:** replace the `SpanCollector` / `DisplayBlock` / `transcript_cache.rs`
+stack with direct `Buffer` extmark writes. This is the keystone that P1.a-tail
+and P4.b described but never landed. It is **not cleanup** — it is a structural
+rewrite of the rendering layer.
+
+- **Delete `SpanCollector` and `DisplayBlock`.** Change transcript renderers
+  (markdown, diff, syntax, tool previews) to write directly into `&mut Buffer`
+  via `set_all_lines`, `add_highlight`, and `set_decoration`. This is a
+  mechanical refactor: every `out.print("...")` becomes a line append, every
+  `out.set_fg(red)` becomes a highlight extmark. `content/layout_out.rs` is
+  deleted.
+- **Migrate `transcript_present/` into `BufferParser` impls.** One parser per
+  block variant (`User`, `Thinking`, `Text`, `CodeLine`, `ToolCall`, `Exec`).
+  Each parser receives the block data + width and mutates a fresh `Buffer`.
+  Keep the parsers in Rust for P10; the P4.b Lua migration is a follow-up.
+- **Delete `transcript_cache.rs`.** `Buffer::ensure_rendered_at(width)` caches
+  by `(changedtick, width)`. Per-block caching is handled by each block
+  buffer's own `last_render` slot; no separate `BlockArtifact` /
+  `PersistedLayoutCache` is needed.
+- **Shrink `transcript_buf.rs`.** It becomes a thin composition layer:
+  concatenate block buffer lines + insert gap rows between blocks + write the
+  result into the transcript display buffer. `TranscriptProjection` stays but
+  operates on `Buffer` lines instead of `DisplayBlock` spans.
+- **Fix `INVENTORY.md` statuses.** The files above are marked "deleted / done"
+  but still exist. Update their status to **"landed in P10"** after deletion.
+
+End of P10: `transcript_present/`, `transcript_cache.rs`,
+`content/layout_out.rs`, and `SpanCollector` are deleted. The transcript
+pipeline is `Block` → `BufferParser` → `Buffer` → `transcript_buf.rs`
+(composition) → `Window::render`.
+
+**Trigger condition:** start P10 only after P9 is fully green. Do not interleave
+P9 cleanup with P10 structural work.
+
+---
+
 ## What we are deliberately not solving here
 
 - **Theme content.** A pretty default theme is its own task once the

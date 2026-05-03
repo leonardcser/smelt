@@ -34,7 +34,7 @@ pub(crate) use app_ref::{
     with_ui_host,
 };
 
-pub(crate) use task::{LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
+pub(crate) use task::{current_task_cancel, LuaTaskRuntime, TaskCompletion, TaskDriveOutput};
 pub(crate) use tasks::ToolEnv;
 
 /// Outcome of invoking a plugin tool handler.
@@ -1217,8 +1217,8 @@ fn init_lua_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::api::lua_table_to_json;
     use super::*;
+    use crate::core::lua::api::lua_table_to_json;
 
     /// Install a Lua-level `smelt.notify` / `smelt.notify_error` stub
     /// that pushes into `_G.test_log` instead of routing through `TuiApp`
