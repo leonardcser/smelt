@@ -1,0 +1,6 @@
+---
+source: tests/scenarios.rs
+assertion_line: 66
+expression: out.events
+---
+[]

@@ -1,5 +1,5 @@
 use crate::app::{CommandAction, EventOutcome, InputOutcome, Timers, TuiApp};
-use crate::core::working::TurnOutcome;
+use smelt_core::working::TurnOutcome;
 
 use crate::input::{resolve_agent_esc, Action, EscAction};
 use crate::keymap::{self, KeyAction};
@@ -45,11 +45,11 @@ impl TuiApp {
                     .key_context(self.agent.is_some(), false, self.vim_mode);
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
-                        self.core.lua.cycle_mode();
+                        self.lua.cycle_mode();
                         return false;
                     }
                     Some(KeyAction::CycleReasoning) => {
-                        self.core.lua.cycle_reasoning();
+                        self.lua.cycle_reasoning();
                         return false;
                     }
                     Some(KeyAction::Redraw) => {
@@ -89,7 +89,7 @@ impl TuiApp {
                     // open cmdline.
                     return false;
                 }
-                let lua = &self.core.lua;
+                let lua = &self.lua;
                 let mut lua_invoke =
                     |handle: crate::ui::LuaHandle,
                      win: crate::ui::WinId,
@@ -253,7 +253,7 @@ impl TuiApp {
         // owns focus — overlay-leaf dispatch happens upstream.
         if let Event::Key(k) = *ev {
             if self.ui.focused_overlay().is_none() {
-                let lua = &self.core.lua;
+                let lua = &self.lua;
                 let mut lua_invoke =
                     |handle: crate::ui::LuaHandle,
                      win: crate::ui::WinId,
@@ -276,7 +276,7 @@ impl TuiApp {
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
                 let vim_mode = self.current_vim_mode_label();
-                let handled = self.core.lua.run_keymap(&chord, vim_mode.as_deref());
+                let handled = self.lua.run_keymap(&chord, vim_mode.as_deref());
                 if handled {
                     self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
@@ -358,7 +358,7 @@ impl TuiApp {
                     } else {
                         "/rewind"
                     };
-                    crate::core::commands::run_command(self, line);
+                    crate::commands::run_command(self, line);
                     return EventOutcome::Redraw;
                 }
                 // Single Esc in normal mode — start timer.
@@ -431,7 +431,7 @@ impl TuiApp {
                         return EventOutcome::Redraw;
                     }
                     KeyAction::OpenHelp => {
-                        crate::core::commands::run_command(self, "/help");
+                        crate::commands::run_command(self, "/help");
                         return EventOutcome::Redraw;
                     }
                     _ => {
@@ -570,11 +570,11 @@ impl TuiApp {
                 }
             }
             Action::ToggleMode => {
-                self.core.lua.cycle_mode();
+                self.lua.cycle_mode();
             }
             Action::Redraw => {}
             Action::CycleReasoning => {
-                self.core.lua.cycle_reasoning();
+                self.lua.cycle_reasoning();
             }
             Action::EditInEditor => {
                 self.edit_in_editor();
@@ -598,11 +598,11 @@ impl TuiApp {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
             Action::SubmitEmpty => EventOutcome::Noop,
             Action::ToggleMode => {
-                self.core.lua.cycle_mode();
+                self.lua.cycle_mode();
                 EventOutcome::Redraw
             }
             Action::CycleReasoning => {
-                self.core.lua.cycle_reasoning();
+                self.lua.cycle_reasoning();
                 EventOutcome::Redraw
             }
             Action::EditInEditor => {
@@ -725,7 +725,7 @@ impl TuiApp {
             trimmed.to_string()
         };
 
-        match crate::core::commands::run_command(self, &dispatch_input) {
+        match crate::commands::run_command(self, &dispatch_input) {
             CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
             CommandAction::Continue => {}
         }
@@ -767,7 +767,7 @@ impl TuiApp {
     pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::ui::WinId) {
         crate::picker::forget(self, win_id);
         for id in self.win_close(win_id) {
-            self.core.lua.remove_callback(id);
+            self.lua.remove_callback(id);
         }
     }
 
@@ -790,7 +790,7 @@ impl TuiApp {
         let Some(root) = overlay.layout.leaves_in_order().into_iter().next() else {
             return;
         };
-        let lua = &self.core.lua;
+        let lua = &self.lua;
         let mut lua_invoke =
             |handle: crate::ui::LuaHandle, win: crate::ui::WinId, payload: &crate::ui::Payload| {
                 lua.queue_invocation(handle, win, payload);

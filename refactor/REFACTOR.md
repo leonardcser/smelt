@@ -265,16 +265,19 @@ Extract `core` into `crates/core` and absorb `ui` into `tui`. Result:
 4-crate architecture (`protocol ← engine ← core ← tui`). `core` has
 zero `crossterm` / `ui` imports. See `P8.md`.
 
-- **P8.a** — Purge terminal dependencies from `core`: move TUI-specific
+- **P8.a** ✅ — Purge terminal dependencies from `core`: move TUI-specific
   files to `tui/src/app/`, dissolve `term/` module.
-- **P8.b** — Break `core → ui` dependency: Clipboard + KillRing move to
+- **P8.b** ✅ — Break `core → ui` dependency: Clipboard + KillRing move to
   `core`; `VimMode` stays `tui`-only.
-- **P8.c** — Split Lua FFI by tier: Host-tier bindings → `core`,
+- **P8.c** ✅ — Split Lua FFI by tier: Host-tier bindings → `core`,
   UiHost-tier bindings stay in `tui`.
-- **P8.d** — `with_app` returns `&mut dyn Host` so `HeadlessApp` drives
+- **P8.d** ✅ — `with_app` returns `&mut dyn Host` so `HeadlessApp` drives
   Lua without terminal types.
-- **P8.e** — Physical crate split: create `crates/core/Cargo.toml`,
+- **P8.e** ✅ — Physical crate split: create `crates/core/Cargo.toml`,
   move modules, absorb `crates/ui/` into `tui/src/ui/`.
+- **P8.f** ✅ — Move LuaRuntime/LuaShared core pieces and Host-tier API
+  modules into `smelt-core`. Tui's `LuaShared` wraps `Arc<core::LuaShared>`;
+  `host_read!` macro and `try_with_host` TLS dispatch land in `core::host`.
 
 
 ---

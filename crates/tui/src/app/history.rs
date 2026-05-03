@@ -1,7 +1,7 @@
 use crate::app::TuiApp;
-use crate::core::working::{TurnOutcome, TurnPhase};
-use crate::core::{Block, ToolOutput, ToolState, ToolStatus};
-use crate::session;
+use smelt_core::session;
+use smelt_core::working::{TurnOutcome, TurnPhase};
+use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
 
 use protocol::{AgentMode, Content, Message, Role, UiCommand};
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ impl TuiApp {
         let count = self.core.session.messages.len();
         self.core.cells.set_dyn(
             "history",
-            std::rc::Rc::new(crate::core::cells::HistoryDelta {
+            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
                 kind: "set".into(),
                 count,
             }),
@@ -96,7 +96,7 @@ impl TuiApp {
         );
         self.core.cells.set_dyn(
             "history",
-            std::rc::Rc::new(crate::core::cells::HistoryDelta {
+            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
                 kind: "forked".into(),
                 count: self.core.session.messages.len(),
             }),
@@ -141,7 +141,7 @@ impl TuiApp {
         );
         self.core.cells.set_dyn(
             "history",
-            std::rc::Rc::new(crate::core::cells::HistoryDelta {
+            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
                 kind: "cleared".into(),
                 count: 0,
             }),
@@ -172,10 +172,12 @@ impl TuiApp {
                 // Prefer an exact key match so the original provider/auth method
                 // is restored. Fall back to a unique bare model name for
                 // sessions saved before the key was persisted.
-                let resolved_key =
-                    crate::config::resolve_model_ref(&self.core.config.available_models, model_key)
-                        .ok()
-                        .map(|resolved| resolved.key.clone());
+                let resolved_key = smelt_core::config::resolve_model_ref(
+                    &self.core.config.available_models,
+                    model_key,
+                )
+                .ok()
+                .map(|resolved| resolved.key.clone());
                 if let Some(key) = resolved_key {
                     self.apply_model(&key);
                 }
@@ -220,7 +222,7 @@ impl TuiApp {
         );
         self.core.cells.set_dyn(
             "history",
-            std::rc::Rc::new(crate::core::cells::HistoryDelta {
+            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
                 kind: "loaded".into(),
                 count: self.core.session.messages.len(),
             }),
@@ -350,7 +352,7 @@ impl TuiApp {
                             let elapsed = tool_elapsed
                                 .get(&tc.id)
                                 .map(|ms| Duration::from_millis(*ms));
-                            let summary = self.core.lua.tool_summary(&tc.function.name, &args);
+                            let summary = self.lua.tool_summary(&tc.function.name, &args);
                             self.push_tool_call(
                                 Block::ToolCall {
                                     call_id: tc.id.clone(),
@@ -386,7 +388,7 @@ impl TuiApp {
     }
 
     pub(crate) fn save_session(&mut self) {
-        let _perf = crate::perf::begin("session:save");
+        let _perf = smelt_core::perf::begin("session:save");
         if self.core.session.messages.is_empty() {
             return;
         }

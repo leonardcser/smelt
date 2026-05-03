@@ -6,8 +6,8 @@
 //! has already been set up by the caller (the dispatcher).
 
 use super::{PromptState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
-use crate::attachment::AttachmentId;
 use crate::ui::VimMode;
+use smelt_core::attachment::AttachmentId;
 
 impl PromptState {
     /// Save undo state before an editing operation.

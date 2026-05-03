@@ -4,8 +4,8 @@
 //! window keymaps (nvim-style layering).
 
 use crate::app::{EventOutcome, Timers, TuiApp};
-use crate::core::{Block, BlockId, ViewState};
 use crossterm::event::{Event, KeyCode, KeyEvent};
+use smelt_core::{Block, BlockId, ViewState};
 use std::time::{Duration, Instant};
 
 /// Max inter-key gap between `Ctrl-W` and its follow-up key.

@@ -34,7 +34,7 @@ impl TuiApp {
             return;
         }
         self.last_prompt_text = current_text.clone();
-        let lua = &self.core.lua;
+        let lua = &self.lua;
         let mut lua_invoke =
             |handle: crate::ui::LuaHandle, win: crate::ui::WinId, payload: &crate::ui::Payload| {
                 lua.queue_invocation(handle, win, payload);
@@ -54,7 +54,7 @@ impl TuiApp {
     /// inbox. Call after any Lua handler dispatch.
     pub(crate) fn flush_lua_callbacks(&mut self) {
         self.drain_lua_invocations();
-        self.core.lua.pump_task_events();
+        self.lua.pump_task_events();
     }
 
     /// Drain the pending-invocation queue built up during
@@ -73,18 +73,17 @@ impl TuiApp {
     /// TuiApp` reborrow.
     pub(crate) fn drain_lua_invocations(&mut self) {
         loop {
-            let pending = self.core.lua.drain_invocations();
+            let pending = self.lua.drain_invocations();
             if pending.is_empty() {
                 return;
             }
             // Phase 1: collect (func, payload_table, handle_id) tuples.
-            // Uses the `&mut self` borrow on self.core.lua.
+            // Uses the `&mut self` borrow on self.lua.
             let prepared: Vec<(mlua::Function, mlua::Table, u64)> = pending
                 .into_iter()
                 .filter_map(|inv| {
                     let (func, payload) =
-                        self.core
-                            .lua
+                        self.lua
                             .prepare_invocation(inv.handle, inv.win, &inv.payload)?;
                     Some((func, payload, inv.handle.0))
                 })
@@ -97,7 +96,7 @@ impl TuiApp {
             for (func, payload, handle_id) in prepared {
                 if let Err(e) = func.call::<()>(payload) {
                     crate::lua::try_with_app(|app| {
-                        app.core.lua.record_callback_error(handle_id, e);
+                        app.lua.record_callback_error(handle_id, e);
                     });
                 }
             }
@@ -114,7 +113,7 @@ impl TuiApp {
     /// resolved inside `apply_ui_op`.
     pub(crate) fn drive_lua_tasks(&mut self) {
         self.flush_lua_callbacks();
-        let outs = self.core.lua.drive_tasks();
+        let outs = self.lua.drive_tasks();
         // Drain the ops pushed by the coroutine *before* it yielded —
         // a task that calls `buf.create` + `buf.set_lines` right
         // before `dialog.open` needs those ops applied now so the

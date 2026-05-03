@@ -27,10 +27,10 @@ use crate::app::TuiApp;
 use crate::content::highlight::BashHighlighter;
 use crate::content::layout_out::SpanCollector;
 use crate::content::to_buffer::render_into_buffer;
-use crate::core::cells::ConfirmResolved;
-use crate::core::content::display::{ColorRole, ColorValue};
-use crate::core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::ui::BufId;
+use smelt_core::cells::ConfirmResolved;
+use smelt_core::content::display::{ColorRole, ColorValue};
+use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -98,7 +98,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 {
                     app.set_active_status(
                         &call_id,
-                        crate::core::transcript_model::ToolStatus::Pending,
+                        smelt_core::transcript_model::ToolStatus::Pending,
                     );
                     app.send_permission_decision(request_id, true, None);
                     app.core.confirms.take(handle_id);

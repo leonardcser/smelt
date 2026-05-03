@@ -107,7 +107,7 @@ impl BufferParser for ModeParser {
             }
             BufFormat::Markdown => {
                 render_into_buffer(buf, width, &theme, |sink| {
-                    crate::core::transcript_present::render_markdown_inner(
+                    smelt_core::transcript_present::render_markdown_inner(
                         sink,
                         source,
                         width as usize,

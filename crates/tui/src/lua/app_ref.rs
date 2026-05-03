@@ -39,13 +39,15 @@ thread_local! {
 pub(crate) fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
     let ptr = NonNull::from(&mut *app);
     let old = APP.with(|cell| cell.replace(Some(ptr)));
-    AppPtrGuard { old }
+    let core_guard = smelt_core::host::install_core_ptr(&mut app.core);
+    AppPtrGuard { old, core_guard }
 }
 
 /// Drop guard returned by [`install_app_ptr`]. Restores the previous
 /// slot (usually `None`, but nested installs are supported).
 pub(crate) struct AppPtrGuard {
     old: Option<NonNull<TuiApp>>,
+    core_guard: smelt_core::host::CorePtrGuard,
 }
 
 impl Drop for AppPtrGuard {
@@ -89,13 +91,13 @@ pub(crate) fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
 ///
 /// `pub(crate)` because `Host` itself is `pub(crate)` — neither leaks
 /// outside the crate.
-pub(crate) fn with_host<R>(f: impl FnOnce(&mut dyn crate::core::Host) -> R) -> R {
+pub(crate) fn with_host<R>(f: impl FnOnce(&mut dyn smelt_core::Host) -> R) -> R {
     with_app(|app| f(app))
 }
 
 /// `try_` variant of `with_host` that returns `None` instead of
 /// panicking when no frontend is installed.
-pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn crate::core::Host) -> R) -> Option<R> {
+pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn smelt_core::Host) -> R) -> Option<R> {
     try_with_app(|app| f(app))
 }
 

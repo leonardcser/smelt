@@ -2,15 +2,15 @@ mod buffer;
 mod completer_bridge;
 mod vim_bridge;
 
-pub(crate) use crate::core::history::History;
+pub(crate) use smelt_core::history::History;
 
-use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::CompleterSession;
 use crate::content;
 use crate::keymap::{self, KeyAction, KeyContext};
 use crate::ui::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;
+use smelt_core::attachment::{Attachment, AttachmentId, AttachmentStore};
 use vim_bridge::VimBridgeResult;
 
 pub(crate) const ATTACHMENT_MARKER: char = '\u{FFFC}';

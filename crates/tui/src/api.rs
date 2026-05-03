@@ -57,6 +57,6 @@ pub(crate) mod cmd {
     /// pressed a keybind that resolved to `Action::Cmd(name)`, or a
     /// plugin invoked it programmatically.
     pub(crate) fn run(app: &mut TuiApp, line: &str) -> CommandAction {
-        crate::core::commands::run_command(app, line)
+        crate::commands::run_command(app, line)
     }
 }

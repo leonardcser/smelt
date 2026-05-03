@@ -1,9 +1,9 @@
 use crate::app::{
     DeferredDialog, LoopAction, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
 };
-use crate::core::working::{TurnOutcome, TurnPhase};
-use crate::core::*;
 use protocol::{Content, Decision, Message, UiCommand};
+use smelt_core::working::{TurnOutcome, TurnPhase};
+use smelt_core::*;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -56,7 +56,7 @@ impl TuiApp {
             return TurnState {
                 turn_id: 0,
                 pending: Vec::new(),
-                _perf: crate::perf::begin("agent:turn"),
+                _perf: smelt_core::perf::begin("agent:turn"),
             };
         };
 
@@ -64,15 +64,14 @@ impl TuiApp {
             self.working.begin(TurnPhase::Working);
         };
 
-        self.core.cells.set_dyn(
-            "turn_start",
-            std::rc::Rc::new(crate::core::cells::EventStub),
-        );
+        self.core
+            .cells
+            .set_dyn("turn_start", std::rc::Rc::new(smelt_core::cells::EventStub));
         self.drain_cells_pending();
         self.flush_lua_callbacks();
 
         let system_prompt = self.rebuild_system_prompt();
-        let tools = self.core.lua.tool_defs(self.core.config.mode);
+        let tools = self.lua.tool_defs(self.core.config.mode);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -87,7 +86,7 @@ impl TuiApp {
             api_base: Some(self.core.config.api_base.clone()),
             api_key: Some(api_key),
             session_id: self.core.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.core.session),
+            session_dir: smelt_core::session::dir_for(&self.core.session),
             model_config_overrides: None,
             permission_overrides: None,
             system_prompt: Some(system_prompt),
@@ -97,13 +96,13 @@ impl TuiApp {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            _perf: crate::perf::begin("agent:turn"),
+            _perf: smelt_core::perf::begin("agent:turn"),
         }
     }
 
     pub(crate) fn begin_custom_command_turn(
         &mut self,
-        cmd: crate::custom_commands::CustomCommand,
+        cmd: smelt_core::custom_commands::CustomCommand,
     ) -> TurnState {
         // Body comes pre-rendered from Lua (frontmatter stripped, exec
         // blocks evaluated, extra args appended). Apply redaction
@@ -130,7 +129,7 @@ impl TuiApp {
             let target_provider = cmd.overrides.provider.as_deref();
             let resolved = match (target_model, target_provider) {
                 (Some(reference), provider) => {
-                    match crate::config::resolve_model_ref_with_provider(
+                    match smelt_core::config::resolve_model_ref_with_provider(
                         &self.core.config.available_models,
                         reference,
                         provider,
@@ -143,7 +142,7 @@ impl TuiApp {
                     }
                 }
                 (None, Some(provider)) => {
-                    match crate::config::resolve_provider_ref(
+                    match smelt_core::config::resolve_provider_ref(
                         &self.core.config.available_models,
                         provider,
                     ) {
@@ -259,7 +258,7 @@ impl TuiApp {
             api_base: Some(api_base),
             api_key: Some(api_key),
             session_id: self.core.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.core.session),
+            session_dir: smelt_core::session::dir_for(&self.core.session),
             model_config_overrides,
             permission_overrides,
             system_prompt: None,
@@ -269,7 +268,7 @@ impl TuiApp {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            _perf: crate::perf::begin("agent:turn"),
+            _perf: smelt_core::perf::begin("agent:turn"),
         }
     }
 
@@ -279,7 +278,7 @@ impl TuiApp {
     pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
-        self.core.lua.cancel_tasks();
+        self.lua.cancel_tasks();
         {
             self.working.finish(TurnOutcome::Interrupted);
         };
@@ -303,7 +302,7 @@ impl TuiApp {
         }
         self.core.cells.set_dyn(
             "turn_end",
-            std::rc::Rc::new(crate::core::cells::TurnEnd { cancelled }),
+            std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled }),
         );
         self.drain_cells_pending();
         self.flush_lua_callbacks();
@@ -374,8 +373,8 @@ impl TuiApp {
     ) {
         let mode = self.core.config.mode;
         let session_id = self.core.session.id.clone();
-        let session_dir = crate::session::dir_for(&self.core.session);
-        match self.core.lua.execute_tool(
+        let session_dir = smelt_core::session::dir_for(&self.core.session);
+        match self.lua.execute_tool(
             &tool_name,
             &args,
             request_id,
@@ -502,7 +501,7 @@ impl TuiApp {
     pub(crate) fn sync_permissions(
         &mut self,
         session_entries: Vec<PermissionEntry>,
-        workspace_rules: Vec<crate::core::permissions::store::Rule>,
+        workspace_rules: Vec<smelt_core::permissions::store::Rule>,
     ) {
         // Rebuild session approvals from flattened entries.
         let mut session_tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
@@ -518,16 +517,16 @@ impl TuiApp {
         }
 
         // Persist and reload workspace rules.
-        crate::core::permissions::store::save(&self.cwd, &workspace_rules);
-        let (ws_tools, ws_dirs) = crate::core::permissions::store::into_approvals(&workspace_rules);
+        smelt_core::permissions::store::save(&self.cwd, &workspace_rules);
+        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&workspace_rules);
         let mut rt = self.runtime_approvals.write().unwrap();
         rt.set_session(session_tools, session_dirs);
         rt.load_workspace(ws_tools, ws_dirs);
     }
 
     fn reload_workspace_permissions(&mut self) {
-        let rules = crate::core::permissions::store::load(&self.cwd);
-        let (ws_tools, ws_dirs) = crate::core::permissions::store::into_approvals(&rules);
+        let rules = smelt_core::permissions::store::load(&self.cwd);
+        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
         self.runtime_approvals
             .write()
             .unwrap()
@@ -574,7 +573,7 @@ impl TuiApp {
                             .add_session_tool(tool_name, vec![]);
                     }
                     ApprovalScope::Workspace => {
-                        crate::core::permissions::store::add_tool(&self.cwd, tool_name, vec![]);
+                        smelt_core::permissions::store::add_tool(&self.cwd, tool_name, vec![]);
                         self.reload_workspace_permissions();
                     }
                 }
@@ -595,7 +594,7 @@ impl TuiApp {
                             .add_session_tool(tool_name, compiled);
                     }
                     ApprovalScope::Workspace => {
-                        crate::core::permissions::store::add_tool(
+                        smelt_core::permissions::store::add_tool(
                             &self.cwd,
                             tool_name,
                             patterns.clone(),
@@ -616,7 +615,7 @@ impl TuiApp {
                             .add_session_dir(std::path::PathBuf::from(dir));
                     }
                     ApprovalScope::Workspace => {
-                        crate::core::permissions::store::add_dir(&self.cwd, dir);
+                        smelt_core::permissions::store::add_dir(&self.cwd, dir);
                         self.reload_workspace_permissions();
                     }
                 }
@@ -753,7 +752,7 @@ impl TuiApp {
                 // `approval_patterns`, and resolves through
                 // `smelt.confirm._resolve(handle_id, decision, message)`
                 // on submit / dismiss.
-                let snapshot = crate::core::cells::ConfirmRequested {
+                let snapshot = smelt_core::cells::ConfirmRequested {
                     handle_id: 0,
                     tool_name: req.tool_name.clone(),
                     desc: req.desc.clone(),
@@ -768,12 +767,12 @@ impl TuiApp {
                 let handle_id = self.core.confirms.register(*req);
                 self.core.cells.set_dyn(
                     "confirm_requested",
-                    std::rc::Rc::new(crate::core::cells::ConfirmRequested {
+                    std::rc::Rc::new(smelt_core::cells::ConfirmRequested {
                         handle_id,
                         ..snapshot
                     }),
                 );
-                self.core.lua.fire_confirm_open(handle_id);
+                self.lua.fire_confirm_open(handle_id);
                 LoopAction::Continue
             }
         }

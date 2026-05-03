@@ -1,4 +1,4 @@
-use tui::config::{
+use smelt_core::config::{
     resolve_model_ref, AuxiliaryConfig, AuxiliaryTask, AuxiliaryUseForConfig, Config, ModelConfig,
     ProviderConfig, ResolveModelRefError,
 };

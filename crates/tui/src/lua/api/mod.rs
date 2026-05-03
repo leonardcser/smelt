@@ -1,6 +1,6 @@
 //! UiHost-tier Lua API bindings — require a terminal UI context.
 //!
-//! Host-tier bindings live in `crate::core::lua::api` and are registered
+//! Host-tier bindings live in `smelt_core::lua::api` and are registered
 //! first via `register_host_api`; this module registers the UiHost-tier
 //! namespaces on top.
 
@@ -20,10 +20,20 @@ use super::{LuaRuntime, LuaShared};
 use mlua::prelude::*;
 use std::sync::Arc;
 
-// Re-export shared helpers from the Host-tier module so UiHost binding
-// files can keep `use super::...`.
-pub(crate) use crate::core::lua::api::app_read;
-pub(crate) use crate::core::lua::api::json_to_lua_value;
+/// Register a 0-arg getter that reads live state from `TuiApp` via
+/// `try_with_app`. Returns a Lua function that, when called, invokes
+/// `try_with_app` and returns the closure result (or `Default`).
+macro_rules! app_read {
+    ($lua:expr, |$app:ident| $body:expr) => {{
+        $lua.create_function(
+            |_, ()| Ok(crate::lua::try_with_app(|$app| $body).unwrap_or_default()),
+        )?
+    }};
+}
+pub(crate) use app_read;
+
+pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
+
 
 impl LuaRuntime {
     pub(super) fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
@@ -34,7 +44,7 @@ impl LuaRuntime {
         smelt.set("version", crate::api::VERSION)?;
 
         // Host-tier bindings (registered by core)
-        crate::core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, shared)?;
+        smelt_core::lua::api::register_host_api(lua, &smelt, &smelt_keymap, &shared.core)?;
 
         // UiHost-tier bindings
         buf::register(lua, &smelt, shared)?;
@@ -53,6 +63,36 @@ impl LuaRuntime {
         smelt.set("keymap", smelt_keymap)?;
 
         // Cross-cutting bindings that need TuiApp
+        let cmd_tbl: mlua::Table = smelt.get("cmd")?;
+        cmd_tbl.set(
+            "run",
+            lua.create_function(|_, line: String| {
+                crate::lua::with_app(|app| app.apply_lua_command(&line));
+                Ok(())
+            })?,
+        )?;
+        let mode_tbl: mlua::Table = smelt.get("mode")?;
+        mode_tbl.set(
+            "set",
+            lua.create_function(|_, v: String| {
+                crate::lua::with_app(|app| match protocol::AgentMode::parse(&v) {
+                    Some(mode) => app.set_mode(mode),
+                    None => app.notify_error(format!("unknown mode: {v}")),
+                });
+                Ok(())
+            })?,
+        )?;
+        let reasoning_tbl: mlua::Table = smelt.get("reasoning")?;
+        reasoning_tbl.set(
+            "set",
+            lua.create_function(|_, v: String| {
+                crate::lua::with_app(|app| match protocol::ReasoningEffort::parse(&v) {
+                    Some(effort) => app.set_reasoning_effort(effort),
+                    None => app.notify_error(format!("unknown reasoning effort: {v}")),
+                });
+                Ok(())
+            })?,
+        )?;
         smelt.set(
             "notify",
             lua.create_function(|_, msg: String| {
@@ -77,7 +117,7 @@ impl LuaRuntime {
 
         lua.globals().set("smelt", smelt)?;
 
-        super::load_bootstrap_chunks(lua)?;
+        smelt_core::lua::runtime::load_bootstrap_chunks(lua)?;
 
         Ok(())
     }

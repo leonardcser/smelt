@@ -5,30 +5,11 @@
 //! wrapping text into visual lines while tracking the cursor column,
 //! and painting those lines with selection + cursor highlighting.
 
-use crate::attachment::{AttachmentId, AttachmentStore};
 use crate::input::ATTACHMENT_MARKER;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-pub(crate) fn truncate_str(s: &str, max: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max {
-        return s.to_string();
-    }
-    let target = max.saturating_sub(1);
-    let mut truncated = String::new();
-    let mut col = 0;
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if col + w > target {
-            break;
-        }
-        truncated.push(ch);
-        col += w;
-    }
-    truncated.push('…');
-    truncated
-}
-
+use smelt_core::attachment::{AttachmentId, AttachmentStore};
+pub(crate) use smelt_core::content::selection::{scan_at_token, truncate_str, try_at_ref};
 pub(crate) use crate::ui::text::wrap_line;
+use unicode_width::UnicodeWidthChar;
 
 pub(crate) fn wrap_and_locate_cursor(
     buf: &str,
@@ -36,7 +17,7 @@ pub(crate) fn wrap_and_locate_cursor(
     cursor_char: usize,
     usable: usize,
 ) -> (Vec<(String, Vec<SpanKind>)>, usize, usize, usize) {
-    let _perf = crate::perf::begin("render:wrap_cursor");
+    let _perf = smelt_core::perf::begin("render:wrap_cursor");
     let mut visual_lines: Vec<(String, Vec<SpanKind>)> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
@@ -272,70 +253,12 @@ pub(super) fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
     kinds
 }
 
-/// Scan an `@path` or `@"path with spaces"` token starting at position `i`.
-/// Returns `(token_string, path_str, end_index)`.
-fn scan_at_token(chars: &[char], i: usize) -> Option<(String, String, usize)> {
-    if chars[i] != '@' {
-        return None;
-    }
-    if i > 0 && !chars[i - 1].is_whitespace() && chars[i - 1] != '(' {
-        return None;
-    }
-
-    let quoted = i + 1 < chars.len() && chars[i + 1] == '"';
-    let end = if quoted {
-        let mut e = i + 2;
-        while e < chars.len() && chars[e] != '"' {
-            e += 1;
-        }
-        if e >= chars.len() || e == i + 2 {
-            return None;
-        }
-        e + 1
-    } else {
-        let mut e = i + 1;
-        while e < chars.len() && !chars[e].is_whitespace() {
-            e += 1;
-        }
-        if e <= i + 1 {
-            return None;
-        }
-        e
-    };
-
-    let token: String = chars[i..end].iter().collect();
-    let path = if quoted {
-        token[2..token.len() - 1].to_string()
-    } else {
-        token[1..].to_string()
-    };
-    Some((token, path, end))
-}
-
-/// Check if position `i` in `chars` starts a valid `@path` reference.
-/// Returns `Some((token, end_index))` if the path after `@` exists on disk.
-pub(crate) fn try_at_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
-    let (token, path, end) = scan_at_token(chars, i)?;
-    if std::path::Path::new(&path).exists() {
-        return Some((token, end));
-    }
-    // Strip trailing punctuation and retry
-    let trimmed = path.trim_end_matches([',', '.', ')', ';', ':', '!', '?']);
-    if trimmed.len() < path.len() && !trimmed.is_empty() && std::path::Path::new(trimmed).exists() {
-        let stripped = path.len() - trimmed.len();
-        let short_token = token[..token.len() - stripped].to_string();
-        Some((short_token, end - stripped))
-    } else {
-        None
-    }
-}
-
 pub(crate) fn build_display_spans(
     buf: &str,
     att_ids: &[AttachmentId],
     store: &AttachmentStore,
 ) -> Vec<Span> {
-    let _perf = crate::perf::begin("render:display_spans");
+    let _perf = smelt_core::perf::begin("render:display_spans");
     let mut spans = Vec::new();
     let mut plain = String::new();
     let mut att_idx = 0;

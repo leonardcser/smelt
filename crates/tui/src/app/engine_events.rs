@@ -1,8 +1,8 @@
 use crate::app::{PendingTool, SessionControl, TuiApp};
-use crate::core::transcript_model::{Block, ToolOutput, ToolStatus};
-use crate::core::working::{TurnOutcome, TurnPhase};
-use crate::core::ConfirmRequest;
 use protocol::EngineEvent;
+use smelt_core::transcript_model::{Block, ToolOutput, ToolStatus};
+use smelt_core::working::{TurnOutcome, TurnPhase};
+use smelt_core::ConfirmRequest;
 use std::time::Duration;
 
 impl TuiApp {
@@ -100,11 +100,11 @@ impl TuiApp {
             } => {
                 self.flush_streaming_thinking();
                 self.flush_streaming_text();
-                let summary = self.core.lua.tool_summary(&tool_name, &args);
+                let summary = self.lua.tool_summary(&tool_name, &args);
                 self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
                 self.core.cells.set_dyn(
                     "tool_start",
-                    std::rc::Rc::new(crate::core::cells::ToolStart {
+                    std::rc::Rc::new(smelt_core::cells::ToolStart {
                         tool: tool_name.clone(),
                         args: args.clone(),
                     }),
@@ -136,7 +136,7 @@ impl TuiApp {
                             ToolStatus::Ok
                         };
                         let render_cache =
-                            crate::core::transcript_cache::build_tool_output_render_cache(
+                            smelt_core::transcript_cache::build_tool_output_render_cache(
                                 &removed.name,
                                 &removed.args,
                                 &result.content,
@@ -156,7 +156,7 @@ impl TuiApp {
                 if let Some(tool_name) = finished_tool_name {
                     self.core.cells.set_dyn(
                         "tool_end",
-                        std::rc::Rc::new(crate::core::cells::ToolEnd {
+                        std::rc::Rc::new(smelt_core::cells::ToolEnd {
                             tool: tool_name,
                             is_error: finished_is_error,
                             elapsed_ms,
@@ -221,7 +221,7 @@ impl TuiApp {
                 SessionControl::Continue
             }
             EngineEvent::EngineAskResponse { id, content } => {
-                self.core.lua.fire_callback(id, &content);
+                self.lua.fire_callback(id, &content);
                 SessionControl::Continue
             }
             EngineEvent::Messages {
@@ -260,7 +260,7 @@ impl TuiApp {
                 };
                 self.core.cells.set_dyn(
                     "turn_error",
-                    std::rc::Rc::new(crate::core::cells::TurnError {
+                    std::rc::Rc::new(smelt_core::cells::TurnError {
                         message: message.clone(),
                     }),
                 );
@@ -288,7 +288,7 @@ impl TuiApp {
                 mode,
             } => {
                 let _guard = crate::lua::install_app_ptr(self);
-                let mut hooks = self.core.lua.evaluate_hooks(&tool_name, &args);
+                let mut hooks = self.lua.evaluate_hooks(&tool_name, &args);
                 drop(_guard);
                 // Apply permission policy on the TUI side.
                 if !matches!(hooks.decision, protocol::Decision::Error(_)) {
@@ -317,8 +317,7 @@ impl TuiApp {
                 is_error,
                 metadata,
             } => {
-                self.core
-                    .lua
+                self.lua
                     .resolve_core_tool_call(request_id, content, is_error, metadata);
                 SessionControl::Continue
             }
@@ -359,7 +358,7 @@ impl TuiApp {
             self.handle_input_prediction(text);
         }
         EngineEvent::EngineAskResponse { id, content } => {
-            self.core.lua.fire_callback(id, &content);
+            self.lua.fire_callback(id, &content);
         }
         EngineEvent::ProcessCompleted { id, exit_code } => {
             self.handle_process_completed(id, exit_code);

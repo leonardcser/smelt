@@ -5,12 +5,12 @@
 use crate::app::TuiApp;
 use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_and_locate_cursor;
-use crate::core::transcript_cache::{PersistedLayoutCache, RenderCache};
-use crate::core::transcript_model::{
+use smelt_core::transcript_cache::{PersistedLayoutCache, RenderCache};
+use smelt_core::transcript_model::{
     Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
-use crate::core::transcript_present as blocks;
-use crate::core::transcript_present::{
+use smelt_core::transcript_present as blocks;
+use smelt_core::transcript_present::{
     gap_between, render_thinking_summary, thinking_summary, Element,
 };
 use std::collections::HashMap;
@@ -314,7 +314,7 @@ impl TuiApp {
     }
 
     pub(crate) fn finish_transcript_turn(&mut self) {
-        let _perf = crate::perf::begin("render:finish_turn");
+        let _perf = smelt_core::perf::begin("render:finish_turn");
         self.parser
             .finalize_active_tools(&mut self.transcript.history);
     }
@@ -405,9 +405,9 @@ impl TuiApp {
         if cache.blocks.is_empty() {
             return None;
         }
-        crate::perf::record_value("layout_cache:artifacts", cache.blocks.len() as u64);
+        smelt_core::perf::record_value("layout_cache:artifacts", cache.blocks.len() as u64);
         let total_layouts: usize = cache.blocks.values().map(|a| a.layouts.len()).sum();
-        crate::perf::record_value("layout_cache:layouts", total_layouts as u64);
+        smelt_core::perf::record_value("layout_cache:layouts", total_layouts as u64);
         Some(cache)
     }
 
@@ -479,7 +479,7 @@ impl TuiApp {
         if let (Some(elapsed), Some(prev_frame)) =
             (self.working.elapsed(), self.working.last_spinner_frame())
         {
-            let frame = crate::core::content::spinner_frame_index(elapsed);
+            let frame = smelt_core::content::spinner_frame_index(elapsed);
             if frame != prev_frame {
                 self.working.set_last_spinner_frame(frame);
                 changed = true;
@@ -502,7 +502,7 @@ impl TuiApp {
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = self.ui.theme().clone();
 
-        let ephemeral_lines: Vec<crate::core::content::display::DisplayLine> =
+        let ephemeral_lines: Vec<smelt_core::content::display::DisplayLine> =
             if self.has_ephemeral(show_thinking) {
                 let mut col = SpanCollector::new(tw as u16);
                 self.render_ephemeral_into(&mut col, tw, show_thinking);

@@ -365,7 +365,7 @@ impl TuiApp {
         if line.is_empty() {
             return false;
         }
-        let action = crate::core::commands::run_command(self, &format!(":{line}"));
+        let action = crate::commands::run_command(self, &format!(":{line}"));
         match action {
             CommandAction::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);
@@ -384,7 +384,7 @@ impl TuiApp {
         if self.cmdline_completer.is_none() {
             let typed = self.cmdline_text();
             let mut comp = Completer::commands(0);
-            let lua_cmds = self.core.lua.command_names();
+            let lua_cmds = self.lua.command_names();
             if !lua_cmds.is_empty() {
                 let mut items: Vec<CompletionItem> = comp.all_items().to_vec();
                 for name in lua_cmds {

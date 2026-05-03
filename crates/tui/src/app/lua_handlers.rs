@@ -4,8 +4,8 @@
 //! settings toggle, transcript yank, and so on.
 
 use crate::app::TuiApp;
-use crate::core::transcript_model::ConfirmChoice;
-use crate::core::Host;
+use smelt_core::transcript_model::ConfirmChoice;
+use smelt_core::Host;
 
 impl TuiApp {
     /// Run a slash command. Mirrors the user typing `:<line>` into
@@ -77,7 +77,7 @@ impl TuiApp {
     /// Load a saved session by id. Refreshes screen and scrolls to
     /// bottom on success; silent no-op on missing id.
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
-        if let Some(loaded) = crate::session::load(id) {
+        if let Some(loaded) = smelt_core::session::load(id) {
             self.load_session(loaded);
             self.restore_screen();
             self.finish_transcript_turn();

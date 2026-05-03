@@ -1,4 +1,4 @@
-use crate::core::fuzzy::score::{query_match_score, split_words};
+use crate::fuzzy::score::{query_match_score, split_words};
 
 pub(crate) mod command;
 pub(crate) mod file;
@@ -108,7 +108,7 @@ impl Completer {
     }
 
     fn filter_inner(&mut self, preserve_selection: bool) {
-        let _perf = crate::perf::begin("completer:filter");
+        let _perf = smelt_core::perf::begin("completer:filter");
         if preserve_selection {
             self.remember_selected_key();
         }

@@ -12,11 +12,11 @@
 use crate::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_line;
-use crate::core::content::display::{ColorRole, ColorValue};
-use crate::core::notebook;
-use crate::core::notebook::NotebookRenderData;
 use crate::ui::BufId;
 use mlua::prelude::*;
+use smelt_core::content::display::{ColorRole, ColorValue};
+use smelt_core::notebook;
+use smelt_core::notebook::NotebookRenderData;
 use std::collections::HashMap;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -27,7 +27,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let args = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.render: {e}")))?;
             crate::lua::with_app(|app| {
-                let Some(data) = crate::core::notebook::preview_render_data(&args) else {
+                let Some(data) = smelt_core::notebook::preview_render_data(&args) else {
                     return;
                 };
                 let theme_snap = app.ui.theme().clone();
@@ -46,7 +46,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     notebook.set(
         "is_notebook_path",
-        lua.create_function(|_, p: String| Ok(crate::core::notebook::is_notebook_path(&p)))?,
+        lua.create_function(|_, p: String| Ok(smelt_core::notebook::is_notebook_path(&p)))?,
     )?;
 
     notebook.set(
@@ -64,11 +64,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     notebook.set(
         "read",
         lua.create_function(|_, (path, offset, limit): (String, u64, u64)| {
-            match crate::core::notebook::render_notebook_text(
-                &path,
-                offset as usize,
-                limit as usize,
-            ) {
+            match smelt_core::notebook::render_notebook_text(&path, offset as usize, limit as usize)
+            {
                 Ok(s) => Ok((Some(s), None)),
                 Err(err) => Ok((None, Some(err))),
             }
@@ -87,7 +84,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let args_map = lua_table_to_json_map(&args)
                 .map_err(|e| LuaError::RuntimeError(format!("notebook.apply_edit: {e}")))?;
             let result = crate::lua::try_with_app(|app| {
-                crate::core::notebook::apply_edit(&args_map, &app.core.files)
+                smelt_core::notebook::apply_edit(&args_map, &app.core.files)
             });
             match result {
                 Some(Ok(outcome)) => {
