@@ -4,7 +4,7 @@
 //! snapshot. Streaming input parsing lives in `StreamParser` (owned
 //! by `TuiApp`).
 
-use super::display::SpanMeta;
+use crate::core::content::display::SpanMeta;
 use crate::core::transcript_model::{
     Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState,
 };
@@ -387,7 +387,7 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::term::content::display::SpanMeta;
+    use crate::core::content::display::SpanMeta;
 
     fn cell(ch: char) -> SnapshotCell {
         SnapshotCell {

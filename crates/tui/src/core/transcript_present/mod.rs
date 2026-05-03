@@ -8,15 +8,16 @@
 
 use super::transcript_model::{Block, ToolOutput, ToolState, ToolStatus, ViewState};
 use crate::core::notebook::NotebookRenderData;
-use crate::term::content::display::{
+use crate::core::content::display::{
     ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
 };
-use crate::term::content::highlight::{
+use crate::content::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, BashHighlighter,
 };
-use crate::term::content::layout_out::{display_width, SpanCollector};
-use crate::term::content::{truncate_str, wrap_line, LayoutContext};
+use crate::content::layout_out::{display_width, SpanCollector};
+use crate::core::content::LayoutContext;
+use crate::content::selection::{truncate_str, wrap_line};
 use crate::utils::format_duration;
 use std::collections::HashMap;
 
@@ -104,8 +105,8 @@ pub(crate) fn layout_block(
 
 /// Truncate / collapse the laid-out block according to its view state.
 /// Runs post-layout so every block variant gets the same treatment.
-fn apply_view_state(display: &mut crate::term::content::display::DisplayBlock, state: ViewState) {
-    use crate::term::content::display::{
+fn apply_view_state(display: &mut crate::core::content::display::DisplayBlock, state: ViewState) {
+    use crate::core::content::display::{
         ColorRole, ColorValue, DisplayLine, DisplaySpan, SpanStyle,
     };
     let total = display.lines.len();
@@ -475,7 +476,7 @@ pub(super) fn print_user_highlights(
         }
 
         // @path references validated against the filesystem.
-        if let Some((token, end)) = crate::term::content::try_at_ref(&chars, i) {
+        if let Some((token, end)) = crate::content::selection::try_at_ref(&chars, i) {
             flush(out, &mut plain);
             accent(out, token);
             i = end;

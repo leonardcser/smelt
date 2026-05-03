@@ -166,7 +166,7 @@ fn build_snapshot(app: &mut crate::core::TuiApp, lua: &Lua) -> LuaResult<mlua::T
     };
     vim_tbl.set("enabled", vim_enabled)?;
     if vim_enabled {
-        let label = crate::term::content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
+        let label = crate::content::status::vim_mode_label(vim_mode).unwrap_or("NORMAL");
         vim_tbl.set("label", label)?;
         let kind = match vim_mode {
             Some(crate::ui::VimMode::Insert) => "insert",

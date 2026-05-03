@@ -16,7 +16,7 @@
 //! (resize prunes layouts but not the underlying diff IR).
 use super::transcript_model::BlockArtifact;
 use crate::core::notebook::NotebookRenderData;
-use crate::term::content::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
+use crate::content::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

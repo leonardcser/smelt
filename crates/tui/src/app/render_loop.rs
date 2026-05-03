@@ -2,7 +2,7 @@
 //! compositor layers and syncs the prompt-docked completer overlay.
 
 use crate::core::*;
-use crate::term::content::{layout, prompt_data};
+use crate::content::{layout, prompt_data};
 
 impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
@@ -189,7 +189,7 @@ impl TuiApp {
         // after `ns_highlights` in `TuiApp::new`, so its spans paint
         // after projection highlights and override their bg/fg.
         if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
-            let ns = buf.create_namespace(crate::term::content::transcript_buf::NS_SELECTION);
+            let ns = buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
             buf.clear_namespace(ns, 0, usize::MAX);
             for (line, col_start, col_end) in &transcript_selection {
                 buf.set_extmark(

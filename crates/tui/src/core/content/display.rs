@@ -7,7 +7,6 @@
 //! paint time, so cached layouts survive theme changes without
 //! invalidation.
 
-use crossterm::style::Color;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -168,52 +167,4 @@ impl DisplayBlock {
     }
 }
 
-impl From<Color> for ColorValue {
-    fn from(c: Color) -> Self {
-        match c {
-            Color::Reset => ColorValue::Named(NamedColor::Reset),
-            Color::Black => ColorValue::Named(NamedColor::Black),
-            Color::DarkGrey => ColorValue::Named(NamedColor::DarkGrey),
-            Color::Red => ColorValue::Named(NamedColor::Red),
-            Color::DarkRed => ColorValue::Named(NamedColor::DarkRed),
-            Color::Green => ColorValue::Named(NamedColor::Green),
-            Color::DarkGreen => ColorValue::Named(NamedColor::DarkGreen),
-            Color::Yellow => ColorValue::Named(NamedColor::Yellow),
-            Color::DarkYellow => ColorValue::Named(NamedColor::DarkYellow),
-            Color::Blue => ColorValue::Named(NamedColor::Blue),
-            Color::DarkBlue => ColorValue::Named(NamedColor::DarkBlue),
-            Color::Magenta => ColorValue::Named(NamedColor::Magenta),
-            Color::DarkMagenta => ColorValue::Named(NamedColor::DarkMagenta),
-            Color::Cyan => ColorValue::Named(NamedColor::Cyan),
-            Color::DarkCyan => ColorValue::Named(NamedColor::DarkCyan),
-            Color::White => ColorValue::Named(NamedColor::White),
-            Color::Grey => ColorValue::Named(NamedColor::Grey),
-            Color::Rgb { r, g, b } => ColorValue::Rgb(r, g, b),
-            Color::AnsiValue(v) => ColorValue::Ansi(v),
-        }
-    }
-}
 
-impl From<NamedColor> for Color {
-    fn from(n: NamedColor) -> Self {
-        match n {
-            NamedColor::Reset => Color::Reset,
-            NamedColor::Black => Color::Black,
-            NamedColor::DarkGrey => Color::DarkGrey,
-            NamedColor::Red => Color::Red,
-            NamedColor::DarkRed => Color::DarkRed,
-            NamedColor::Green => Color::Green,
-            NamedColor::DarkGreen => Color::DarkGreen,
-            NamedColor::Yellow => Color::Yellow,
-            NamedColor::DarkYellow => Color::DarkYellow,
-            NamedColor::Blue => Color::Blue,
-            NamedColor::DarkBlue => Color::DarkBlue,
-            NamedColor::Magenta => Color::Magenta,
-            NamedColor::DarkMagenta => Color::DarkMagenta,
-            NamedColor::Cyan => Color::Cyan,
-            NamedColor::DarkCyan => Color::DarkCyan,
-            NamedColor::White => Color::White,
-            NamedColor::Grey => Color::Grey,
-        }
-    }
-}

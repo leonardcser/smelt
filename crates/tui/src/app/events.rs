@@ -2,7 +2,7 @@ use crate::core::working::TurnOutcome;
 use crate::core::*;
 
 use crate::keymap::{self, KeyAction};
-use crate::term::input::{resolve_agent_esc, Action, EscAction};
+use crate::input::{resolve_agent_esc, Action, EscAction};
 use crate::ui::UiHost;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{

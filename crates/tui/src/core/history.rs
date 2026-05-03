@@ -55,7 +55,7 @@ impl History {
         self.draft.clear();
     }
 
-    pub(super) fn up(&mut self, current_buf: &str) -> Option<&str> {
+    pub(crate) fn up(&mut self, current_buf: &str) -> Option<&str> {
         if self.entries.is_empty() {
             return None;
         }
@@ -70,7 +70,7 @@ impl History {
         }
     }
 
-    pub(super) fn down(&mut self) -> Option<&str> {
+    pub(crate) fn down(&mut self) -> Option<&str> {
         if self.cursor >= self.entries.len() {
             return None;
         }

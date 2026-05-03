@@ -8,9 +8,9 @@ use std::path::Path;
 use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, SYNTAX_SET};
-use crate::term::content::display::{ColorValue, NamedColor};
-use crate::term::content::layout_out::SpanCollector;
-use crate::term::content::term_width;
+use crate::core::content::display::{ColorValue, NamedColor};
+use crate::content::layout_out::SpanCollector;
+use crate::content::term_width;
 
 struct DiffChange {
     tag: ChangeTag,

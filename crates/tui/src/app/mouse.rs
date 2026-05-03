@@ -1,7 +1,7 @@
 //! Mouse event handling: wheel scrolling, drag-select, scrollbar drag, cell-click hit-testing.
 
 use crate::core::*;
-use crate::term::content::HitRegion;
+use crate::content::layout::HitRegion;
 use crossterm::event::{MouseEvent, MouseEventKind};
 
 impl TuiApp {
@@ -224,7 +224,7 @@ impl TuiApp {
             return;
         };
         let usable = vp.content_width as usize;
-        let wrap = crate::term::content::prompt_wrap::PromptWrap::build(&self.input, usable);
+        let wrap = crate::content::prompt_wrap::PromptWrap::build(&self.input, usable);
         if wrap.rows.is_empty() {
             return;
         }

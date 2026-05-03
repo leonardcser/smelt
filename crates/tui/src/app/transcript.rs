@@ -11,8 +11,8 @@ use crate::core::transcript_present::{
     gap_between, render_thinking_summary, thinking_summary, Element,
 };
 use crate::core::*;
-use crate::term::content::layout_out::SpanCollector;
-use crate::term::content::selection::wrap_and_locate_cursor;
+use crate::content::layout_out::SpanCollector;
+use crate::content::selection::wrap_and_locate_cursor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -479,7 +479,7 @@ impl TuiApp {
         if let (Some(elapsed), Some(prev_frame)) =
             (self.working.elapsed(), self.working.last_spinner_frame())
         {
-            let frame = crate::term::content::spinner_frame_index(elapsed);
+            let frame = crate::core::content::spinner_frame_index(elapsed);
             if frame != prev_frame {
                 self.working.set_last_spinner_frame(frame);
                 changed = true;
@@ -498,11 +498,11 @@ impl TuiApp {
         scroll_top: u16,
         show_thinking: bool,
     ) -> TranscriptData {
-        let gutters = crate::term::window::TRANSCRIPT_GUTTERS;
+        let gutters = crate::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = self.ui.theme().clone();
 
-        let ephemeral_lines: Vec<crate::term::content::display::DisplayLine> =
+        let ephemeral_lines: Vec<crate::core::content::display::DisplayLine> =
             if self.has_ephemeral(show_thinking) {
                 let mut col = SpanCollector::new(tw as u16);
                 self.render_ephemeral_into(&mut col, tw, show_thinking);
@@ -563,7 +563,7 @@ impl TuiApp {
         transcript_owns_cursor: bool,
         viewport: Option<&crate::ui::WindowViewport>,
     ) -> TranscriptCursor {
-        let gutters = crate::term::window::TRANSCRIPT_GUTTERS;
+        let gutters = crate::window::TRANSCRIPT_GUTTERS;
         let tw = (gutters.content_width(width as u16) as usize).max(1);
 
         if !transcript_owns_cursor || viewport_rows == 0 {
@@ -710,14 +710,14 @@ impl TuiApp {
         }
         if !combined.is_empty() {
             let (label, line_count) = thinking_summary(&combined);
-            crate::term::content::emit_newlines(out, self.thinking_summary_gap());
+            crate::content::emit_newlines(out, self.thinking_summary_gap());
             render_thinking_summary(out, width, &label, line_count, true);
         }
     }
 
     pub(crate) fn measure_prompt_height(
         &self,
-        state: &crate::term::input::PromptState,
+        state: &crate::input::PromptState,
         width: usize,
         queued: &[String],
     ) -> u16 {
@@ -730,7 +730,7 @@ impl TuiApp {
         for msg in queued {
             let geom = blocks::UserBlockGeometry::new(msg, text_w);
             for line in &geom.lines {
-                let w = crate::term::content::layout_out::display_width(line);
+                let w = crate::content::layout_out::display_width(line);
                 queued_rows += if w == 0 { 1 } else { w.div_ceil(text_w) as u16 };
             }
         }

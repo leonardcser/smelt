@@ -123,7 +123,7 @@ pub(super) fn render_plan_output(
     rows += 1;
 
     // Body: markdown rendering inside the plan box.
-    let bctx = crate::term::content::BoxContext {
+    let bctx = crate::content::BoxContext {
         left: "  \u{2502} ",
         right: " \u{2502}",
         color: ColorValue::Role(ColorRole::Plan),
