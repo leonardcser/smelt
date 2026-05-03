@@ -1,6 +1,7 @@
 pub(crate) mod agent;
 pub(crate) mod cmdline;
 pub(crate) mod content_keys;
+pub(crate) mod engine_events;
 pub(crate) mod events;
 pub(crate) mod history;
 pub(crate) mod lua_bridge;
@@ -1005,15 +1006,10 @@ impl TuiApp {
                     }
                 };
                 // Take the TurnState out for the duration of the
-                // dispatch so `crate::core::engine_client::handle_event` can
+                // dispatch so `handle_engine_event` can
                 // borrow its fields while we still hold `&mut self`.
                 let action = if let Some(mut ag) = self.agent.take() {
-                    let ctrl = crate::core::engine_client::handle_event(
-                        self,
-                        ev,
-                        ag.turn_id,
-                        &mut ag.pending,
-                    );
+                    let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                     let action = self.dispatch_control(
                         ctrl,
                         &ag.pending,
@@ -1024,7 +1020,7 @@ impl TuiApp {
                     action
                 } else {
                     // No active turn — handle out-of-band events.
-                    crate::core::engine_client::handle_idle_event(self, ev);
+                    self.handle_idle_engine_event(ev);
                     LoopAction::Continue
                 };
                 match action {
@@ -1193,7 +1189,7 @@ impl TuiApp {
                 Some(ev) = self.core.engine.recv() => {
                     if let Some(mut ag) = self.agent.take() {
                         let ctrl =
-                            crate::core::engine_client::handle_event(self, ev, ag.turn_id, &mut ag.pending);
+                            self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
                         let action = self.dispatch_control(
                             ctrl,
                             &ag.pending,
@@ -1206,7 +1202,7 @@ impl TuiApp {
                         }
                     } else {
                         // No active turn — handle out-of-band events.
-                        crate::core::engine_client::handle_idle_event(self, ev);
+                        self.handle_idle_engine_event(ev);
                     }
                     // Don't render here — deferred to the frame timer or
                     // top-of-loop render to batch rapid engine events into

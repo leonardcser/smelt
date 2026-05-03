@@ -139,7 +139,7 @@ impl WorkingState {
         )
     }
 
-    pub(super) fn record_tokens_per_sec(&mut self, tps: f64) {
+    pub(crate) fn record_tokens_per_sec(&mut self, tps: f64) {
         if let Some(live) = self.live.as_mut() {
             live.tps_samples.push(tps);
         }

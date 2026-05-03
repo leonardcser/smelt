@@ -516,10 +516,9 @@ bridges, then the aggregate.
   through `core.clipboard.{read,write}`. The two bypass paths retire —
   Lua `smelt.clipboard(text)` writes via `with_app(|a| a.clipboard.write(...))`
   (matches `smelt.notify`); `KeyAction::ClipboardImage`'s text fallback
-  reads via `clipboard.read()`. `commands::{copy_to_clipboard,
-  paste_from_clipboard}` drop `pub(crate)` — `SystemSink` is their only
-  caller, every other clipboard touch in the runtime flows through the
-  App-level subsystem.
+  reads via `clipboard.read()`. `copy_to_clipboard` / `paste_from_clipboard`
+  helpers and `SystemSink` / `Osc52Sink` moved into `core/clipboard.rs`;
+  every clipboard touch in the runtime flows through the `Clipboard` subsystem.
 - **a.9** ✅ — parallel autocmd registry retires; every event flows
   through `Cells`. 12 publisher callsites switch to
   `cells.set_dyn(name, payload)`; `smelt.on` Lua binding deletes
@@ -700,7 +699,9 @@ Drains `engine.event_rx` in the `select!`. Translates events into
 direct host calls. Splits:
 
 - **P2.d.1** ✅ — engine event handlers relocate from `agent.rs` to
-  `engine_client.rs` as free functions over `&mut TuiApp`.
+  `app/engine_events.rs` as `impl TuiApp` methods (`handle_engine_event`,
+  `handle_idle_engine_event`). `engine_client.rs` is now a pure `EngineHandle`
+  wrapper with no `TuiApp` dependency.
 - **P2.d.2 (deferred)** — full target fold (`TextDelta` →
   `Buffer::append`; `ToolStarted/Finished` / block-end →
   `Buffer::attach`'s `on_block`; `RequestPermission` →
@@ -1215,8 +1216,8 @@ A GUI or web frontend uses `core` directly and ignores `ui` entirely.
   `crates/core/src/clipboard.rs`.  They are text-manipulation primitives,
   not UI rendering primitives — `KillRing` is pure `std`, `Sink` is a
   two-method platform abstraction, and `ui` (Buffer, Window, Grid) never
-  touches them.  `SystemSink` / `Osc52Sink` stay in `tui` and implement
-  `core::Sink`.
+  touches them.  `SystemSink` / `Osc52Sink` moved to `core/clipboard.rs`
+  and implement `core::Sink`.
 - **VimMode becomes a `tui`-only type.** `Core` seeds the `vim_mode` cell
   with the plain string `"Insert"`.  `TuiApp` owns the typed
   `tui::ui::VimMode` and publishes `format!("{:?}", vim_mode)` into the
