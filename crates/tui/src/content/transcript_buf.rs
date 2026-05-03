@@ -1,5 +1,5 @@
-use crate::core::content::display::DisplayLine;
 use super::to_buffer::{apply_to_buffer, project_display_line, ProjectedLine};
+use crate::core::content::display::DisplayLine;
 use crate::core::transcript_model::{BlockHistory, LayoutKey, ViewState};
 use crate::ui::buffer::Buffer;
 use crate::ui::Theme;

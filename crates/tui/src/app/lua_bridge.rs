@@ -2,7 +2,7 @@
 //! Lua callback invocations + the task-runtime inbox so dispatched
 //! handlers see a consistent state.
 
-use crate::core::*;
+use crate::app::TuiApp;
 
 impl TuiApp {
     /// Vim-mode label for the currently focused buffer Window. Reads
@@ -16,8 +16,8 @@ impl TuiApp {
             }
         }
         let has_vim = match self.app_focus {
-            crate::core::AppFocus::Content => self.transcript_window.vim_enabled,
-            crate::core::AppFocus::Prompt => self.input.vim_enabled(),
+            crate::app::AppFocus::Content => self.transcript_window.vim_enabled,
+            crate::app::AppFocus::Prompt => self.input.vim_enabled(),
         };
         has_vim.then(|| format!("{:?}", self.vim_mode))
     }

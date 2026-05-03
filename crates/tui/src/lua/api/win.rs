@@ -12,16 +12,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     win_tbl.set(
         "focus",
         app_read!(lua, |app| match app.app_focus {
-            crate::core::AppFocus::Content => "transcript".to_string(),
-            crate::core::AppFocus::Prompt => "prompt".to_string(),
+            crate::app::AppFocus::Content => "transcript".to_string(),
+            crate::app::AppFocus::Prompt => "prompt".to_string(),
         }),
     )?;
     win_tbl.set(
         "mode",
         app_read!(lua, |app| {
             let has_vim = match app.app_focus {
-                crate::core::AppFocus::Content => app.transcript_window.vim_enabled,
-                crate::core::AppFocus::Prompt => app.input.vim_enabled(),
+                crate::app::AppFocus::Content => app.transcript_window.vim_enabled,
+                crate::app::AppFocus::Prompt => app.input.vim_enabled(),
             };
             if has_vim {
                 format!("{:?}", app.vim_mode)

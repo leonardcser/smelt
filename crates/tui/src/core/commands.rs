@@ -1,6 +1,7 @@
-use super::*;
-use crate::core::{CommandAction, EventOutcome, InputOutcome};
+use crate::app::{CommandAction, EventOutcome, InputOutcome, TuiApp};
+use crate::state;
 use base64::Engine;
+use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
 pub(crate) enum ExecEvent {
     Output(String),
@@ -133,7 +134,7 @@ impl TuiApp {
 
     /// Spawn a shell command asynchronously. Returns a receiver for output
     /// lines and the child process handle (for killing on Ctrl+C).
-    pub(super) fn start_shell_escape(
+    pub(crate) fn start_shell_escape(
         &mut self,
         raw: &str,
     ) -> Option<(

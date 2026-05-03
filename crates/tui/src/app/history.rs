@@ -1,5 +1,6 @@
+use crate::app::TuiApp;
 use crate::core::working::{TurnOutcome, TurnPhase};
-use crate::core::*;
+use crate::core::{Block, ToolOutput, ToolState, ToolStatus};
 use crate::session;
 
 use protocol::{AgentMode, Content, Message, Role, UiCommand};
@@ -121,7 +122,7 @@ impl TuiApp {
             w.viewport = None;
         }
         self.clear_transcript();
-        self.app_focus = crate::core::AppFocus::Prompt;
+        self.app_focus = crate::app::AppFocus::Prompt;
         self.input.clear();
         self.input.store.clear();
         self.core.processes.clear();

@@ -30,7 +30,7 @@ use super::core::Core;
 use super::engine_client::EngineClient;
 use super::headless_app::HeadlessApp;
 use super::timers::Timers;
-use super::TuiApp;
+use crate::app::TuiApp;
 use crate::lua::LuaRuntime;
 use crate::session::Session;
 

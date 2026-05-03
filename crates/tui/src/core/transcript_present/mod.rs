@@ -7,17 +7,17 @@
 //! further knowledge of `Block` variants.
 
 use super::transcript_model::{Block, ToolOutput, ToolState, ToolStatus, ViewState};
-use crate::core::notebook::NotebookRenderData;
-use crate::core::content::display::{
-    ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
-};
 use crate::content::highlight::{
     print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
     render_code_block, render_markdown_table, BashHighlighter,
 };
 use crate::content::layout_out::{display_width, SpanCollector};
-use crate::core::content::LayoutContext;
 use crate::content::selection::{truncate_str, wrap_line};
+use crate::core::content::display::{
+    ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
+};
+use crate::core::content::LayoutContext;
+use crate::core::notebook::NotebookRenderData;
 use crate::utils::format_duration;
 use std::collections::HashMap;
 

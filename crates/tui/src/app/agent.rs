@@ -1,8 +1,8 @@
+use crate::app::{
+    DeferredDialog, LoopAction, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
+};
 use crate::core::working::{TurnOutcome, TurnPhase};
 use crate::core::*;
-use crate::core::{
-    DeferredDialog, LoopAction, PendingTool, SessionControl, TurnState, CONFIRM_DEFER_MS,
-};
 use protocol::{Content, Decision, Message, UiCommand};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;

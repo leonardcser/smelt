@@ -23,13 +23,13 @@
 
 use mlua::prelude::*;
 
-use crate::core::cells::ConfirmResolved;
-use crate::core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
-use crate::core::TuiApp;
-use crate::core::content::display::{ColorRole, ColorValue};
+use crate::app::TuiApp;
 use crate::content::highlight::BashHighlighter;
 use crate::content::layout_out::SpanCollector;
 use crate::content::to_buffer::render_into_buffer;
+use crate::core::cells::ConfirmResolved;
+use crate::core::content::display::{ColorRole, ColorValue};
+use crate::core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 use crate::ui::BufId;
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.

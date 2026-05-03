@@ -5,7 +5,7 @@
 //! the resulting list, and writes the styled line into the
 //! `well_known.statusline` buffer.
 
-use crate::core::*;
+use crate::app::TuiApp;
 
 impl TuiApp {
     pub(crate) fn refresh_status_bar(&mut self) {

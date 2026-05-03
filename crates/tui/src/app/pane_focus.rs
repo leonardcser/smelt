@@ -3,7 +3,8 @@
 //! `dispatch_block_key` gets first crack at a key before buffer /
 //! window keymaps (nvim-style layering).
 
-use crate::core::*;
+use crate::app::{EventOutcome, Timers, TuiApp};
+use crate::core::{Block, BlockId, ViewState};
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use std::time::{Duration, Instant};
 
@@ -44,16 +45,16 @@ impl TuiApp {
 
     fn toggle_pane_focus(&mut self) {
         let target = match self.app_focus {
-            crate::core::AppFocus::Prompt => crate::core::AppFocus::Content,
-            crate::core::AppFocus::Content => crate::core::AppFocus::Prompt,
+            crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
+            crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
         };
-        if target == crate::core::AppFocus::Content
+        if target == crate::app::AppFocus::Content
             && !self.has_transcript_content(self.core.config.settings.show_thinking)
         {
             return;
         }
         self.app_focus = target;
-        if self.app_focus == crate::core::AppFocus::Content {
+        if self.app_focus == crate::app::AppFocus::Content {
             self.refocus_content();
         }
     }

@@ -12,10 +12,10 @@
 //!    via Buffer::attach) is gated on P1.a tail; today these
 //!    drive today's transcript model directly.
 
+use crate::app::{PendingTool, SessionControl, TuiApp};
 use crate::core::transcript_model::{Block, ToolOutput, ToolStatus};
 use crate::core::working::{TurnOutcome, TurnPhase};
-use crate::core::{ConfirmRequest, TuiApp};
-use crate::core::{PendingTool, SessionControl};
+use crate::core::ConfirmRequest;
 use engine::EngineHandle;
 use protocol::{EngineEvent, UiCommand};
 use std::sync::atomic::{AtomicBool, Ordering};

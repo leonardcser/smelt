@@ -26,7 +26,7 @@
 use std::cell::Cell;
 use std::ptr::NonNull;
 
-use crate::core::TuiApp;
+use crate::app::TuiApp;
 
 thread_local! {
     static APP: Cell<Option<NonNull<TuiApp>>> = const { Cell::new(None) };

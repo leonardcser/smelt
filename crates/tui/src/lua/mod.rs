@@ -300,7 +300,7 @@ pub(crate) fn register_callback_handle(
 /// the option is one. Used wherever a `win_set_keymap` / `win_clear_*`
 /// returns the callback that was just replaced or removed.
 pub(crate) fn drop_displaced_lua_handle(
-    app: &mut crate::core::TuiApp,
+    app: &mut crate::app::TuiApp,
     displaced: Option<crate::ui::Callback>,
 ) {
     if let Some(crate::ui::Callback::Lua(crate::ui::LuaHandle(old))) = displaced {

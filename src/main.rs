@@ -434,7 +434,7 @@ async fn main() {
             .await;
     } else {
         // Build the TUI app.
-        let mut app = tui::core::TuiApp::new(
+        let mut app = tui::app::TuiApp::new(
             model,
             initial_api_base,
             api_key_env,

@@ -76,7 +76,7 @@ pub(crate) struct WorkingState {
 }
 
 impl WorkingState {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 

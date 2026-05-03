@@ -2,7 +2,7 @@
 //! Rust side: overlay placement parsing, picker construction, and a
 //! few reusable window recipes (`list` / `input`).
 
-use crate::core::TuiApp;
+use crate::app::TuiApp;
 use crate::ui::layout::Anchor;
 use crate::ui::{
     Border, Callback, CallbackResult, Constraint, KeyBind, LayoutTree, Overlay, Payload, WinEvent,

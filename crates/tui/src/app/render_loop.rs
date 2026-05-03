@@ -1,7 +1,7 @@
 //! Per-frame render loop: projects transcript/prompt/status into the
 //! compositor layers and syncs the prompt-docked completer overlay.
 
-use crate::core::*;
+use crate::app::TuiApp;
 use crate::content::{layout, prompt_data};
 
 impl TuiApp {
@@ -119,10 +119,10 @@ impl TuiApp {
         let suppress = cmdline_active || overlay_owns_cursor;
         let has_prompt_cursor = !suppress
             && self.term_focused
-            && matches!(self.app_focus, crate::core::AppFocus::Prompt);
+            && matches!(self.app_focus, crate::app::AppFocus::Prompt);
         let has_transcript_cursor = !suppress
             && self.term_focused
-            && matches!(self.app_focus, crate::core::AppFocus::Content);
+            && matches!(self.app_focus, crate::app::AppFocus::Content);
         (has_prompt_cursor, has_transcript_cursor)
     }
 
@@ -357,10 +357,10 @@ impl TuiApp {
         // up so app-pane focus tracks the user's intent.
         if self.ui.focused_overlay().is_none() {
             match self.app_focus {
-                crate::core::AppFocus::Prompt => {
+                crate::app::AppFocus::Prompt => {
                     self.ui.set_focus(crate::ui::PROMPT_WIN);
                 }
-                crate::core::AppFocus::Content => {
+                crate::app::AppFocus::Content => {
                     self.ui.set_focus(crate::ui::TRANSCRIPT_WIN);
                 }
             }

@@ -1,8 +1,8 @@
+use crate::app::{CommandAction, EventOutcome, InputOutcome, Timers, TuiApp};
 use crate::core::working::TurnOutcome;
-use crate::core::*;
 
-use crate::keymap::{self, KeyAction};
 use crate::input::{resolve_agent_esc, Action, EscAction};
+use crate::keymap::{self, KeyAction};
 use crate::ui::UiHost;
 use crossterm::event::{KeyCode, KeyModifiers};
 use crossterm::{
@@ -294,17 +294,17 @@ impl TuiApp {
         }) = ev
         {
             let in_insert = match self.app_focus {
-                crate::core::AppFocus::Prompt => {
+                crate::app::AppFocus::Prompt => {
                     !self.input.vim_enabled() || self.vim_mode == crate::ui::VimMode::Insert
                 }
-                crate::core::AppFocus::Content => false,
+                crate::app::AppFocus::Content => false,
             };
             if !in_insert {
                 self.open_cmdline();
                 return Some(EventOutcome::Noop);
             }
         }
-        if self.app_focus == crate::core::AppFocus::Content {
+        if self.app_focus == crate::app::AppFocus::Content {
             return Some(self.handle_event_app_history(ev));
         }
         if let Some(outcome) = self.handle_overlay_keys(ev) {
