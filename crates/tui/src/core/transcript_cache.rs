@@ -15,8 +15,8 @@
 //! freshly each frame). The IR cache survives layout invalidation
 //! (resize prunes layouts but not the underlying diff IR).
 use super::transcript_model::BlockArtifact;
-use crate::core::notebook::NotebookRenderData;
 use crate::content::highlight::{build_inline_diff_cache_ext, CachedInlineDiff};
+use crate::core::notebook::NotebookRenderData;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

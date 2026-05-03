@@ -2,9 +2,9 @@
 //! `~~`), inline-span flattening + word-wrap, and the markdown table
 //! renderer that uses both.
 
-use crate::core::content::display::{ColorRole, ColorValue, NamedColor};
 use crate::content::layout_out::SpanCollector;
 use crate::content::term_width;
+use crate::core::content::display::{ColorRole, ColorValue, NamedColor};
 use unicode_width::UnicodeWidthStr;
 
 use super::util::{
@@ -694,10 +694,10 @@ pub(crate) fn inline_spans_width(spans: &[InlineSpan]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::content::display::{ColorRole, ColorValue, SpanStyle};
     use super::super::super::layout_out::SpanCollector;
     use super::super::syntax::render_code_block;
     use super::*;
+    use crate::core::content::display::{ColorRole, ColorValue, SpanStyle};
 
     /// Render `text` through `print_inline_styled` (dim=false) and return
     /// a compact `Vec<(tag, text)>` representation of the span tree.

@@ -2,7 +2,7 @@
 //! transcript buffer. Routes arrow keys, page keys, and vim motions;
 //! Enter runs a block-scoped keymap; Ctrl-C returns focus to the prompt.
 
-use crate::core::*;
+use crate::app::{EventOutcome, TuiApp};
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
 impl TuiApp {
@@ -15,7 +15,7 @@ impl TuiApp {
 
         // Ctrl-C from a non-prompt pane returns focus to the prompt.
         if k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
-            self.app_focus = crate::core::AppFocus::Prompt;
+            self.app_focus = crate::app::AppFocus::Prompt;
             return EventOutcome::Redraw;
         }
 

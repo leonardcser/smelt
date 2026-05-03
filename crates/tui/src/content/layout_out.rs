@@ -5,7 +5,9 @@
 //! previews) all write into one of these; the finished block is
 //! projected into a `crate::ui::Buffer` by `to_buffer::render_into_buffer`.
 
-use crate::core::content::display::{ColorValue, DisplayBlock, DisplayLine, DisplaySpan, SpanMeta, SpanStyle};
+use crate::core::content::display::{
+    ColorValue, DisplayBlock, DisplayLine, DisplaySpan, SpanMeta, SpanStyle,
+};
 use unicode_width::UnicodeWidthStr;
 
 /// Display-column width of a string slice. Used for visible-width

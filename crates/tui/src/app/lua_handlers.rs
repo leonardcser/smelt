@@ -3,8 +3,9 @@
 //! invokes as a single semantic action — `/<command>` dispatch,
 //! settings toggle, transcript yank, and so on.
 
+use crate::app::TuiApp;
 use crate::core::transcript_model::ConfirmChoice;
-use crate::core::{Host, TuiApp};
+use crate::core::Host;
 
 impl TuiApp {
     /// Run a slash command. Mirrors the user typing `:<line>` into
@@ -13,11 +14,11 @@ impl TuiApp {
     /// for shell escapes (`! cmd`).
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
         match crate::api::cmd::run(self, line) {
-            crate::core::CommandAction::Exec(rx, kill) => {
+            crate::app::CommandAction::Exec(rx, kill) => {
                 self.exec_rx = Some(rx);
                 self.exec_kill = Some(kill);
             }
-            crate::core::CommandAction::Continue => {}
+            crate::app::CommandAction::Continue => {}
         }
     }
 

@@ -4,8 +4,10 @@
 //! normal buffer → view → grid path and inherits scrollbar, selection,
 //! and vim motions.
 
-use crate::core::content::display::{ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle};
 use super::layout_out::SpanCollector;
+use crate::core::content::display::{
+    ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle,
+};
 use crate::ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 use crate::ui::Theme;
 use crossterm::style::Color;

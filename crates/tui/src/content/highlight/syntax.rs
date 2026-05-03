@@ -6,9 +6,9 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::Style;
 
 use super::{syntax_theme, SYNTAX_SET};
-use crate::core::content::display::{ColorRole, ColorValue, NamedColor};
 use crate::content::layout_out::SpanCollector;
 use crate::content::term_width;
+use crate::core::content::display::{ColorRole, ColorValue, NamedColor};
 
 /// Render a code block. When `fence` is true, the rendered output
 /// stays unchanged but each code line's `source_text` carries its raw

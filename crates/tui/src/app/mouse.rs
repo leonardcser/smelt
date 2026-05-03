@@ -1,6 +1,6 @@
 //! Mouse event handling: wheel scrolling, drag-select, scrollbar drag, cell-click hit-testing.
 
-use crate::core::*;
+use crate::app::{EventOutcome, TuiApp};
 use crate::content::layout::HitRegion;
 use crossterm::event::{MouseEvent, MouseEventKind};
 
@@ -33,9 +33,9 @@ impl TuiApp {
                 self.propagate_scrollbar_scroll(owner);
                 if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
                     if owner == crate::ui::TRANSCRIPT_WIN {
-                        self.app_focus = crate::core::AppFocus::Content;
+                        self.app_focus = crate::app::AppFocus::Content;
                     } else if owner == crate::ui::PROMPT_WIN {
-                        self.app_focus = crate::core::AppFocus::Prompt;
+                        self.app_focus = crate::app::AppFocus::Prompt;
                     }
                 }
                 return EventOutcome::Redraw;
@@ -84,7 +84,7 @@ impl TuiApp {
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
             if win == crate::ui::PROMPT_WIN {
                 if is_down {
-                    self.app_focus = crate::core::AppFocus::Prompt;
+                    self.app_focus = crate::app::AppFocus::Prompt;
                     if self.input.win.vim_enabled {
                         self.prompt_drag_return_vim_mode = Some(self.vim_mode);
                     }
@@ -103,7 +103,7 @@ impl TuiApp {
                     return EventOutcome::Noop;
                 }
                 if is_down {
-                    self.app_focus = crate::core::AppFocus::Content;
+                    self.app_focus = crate::app::AppFocus::Content;
                 }
                 let yank = self.handle_content_mouse(me, count);
                 if is_up {
@@ -125,8 +125,8 @@ impl TuiApp {
                 HitRegion::Prompt | HitRegion::Status
             )
         {
-            if self.app_focus != crate::core::AppFocus::Prompt {
-                self.app_focus = crate::core::AppFocus::Prompt;
+            if self.app_focus != crate::app::AppFocus::Prompt {
+                self.app_focus = crate::app::AppFocus::Prompt;
                 return EventOutcome::Redraw;
             }
             return EventOutcome::Noop;
@@ -163,7 +163,7 @@ impl TuiApp {
             Some(crate::ui::HitTarget::Window(w)) if w == crate::ui::PROMPT_WIN
         );
         if on_prompt {
-            self.app_focus = crate::core::AppFocus::Prompt;
+            self.app_focus = crate::app::AppFocus::Prompt;
             // Prompt's `win.text` is the source buffer (≠ wrapped
             // display rows). The vertical-motion helper operates on
             // source rows; the renderer's `ensure_cursor_visible`
@@ -185,7 +185,7 @@ impl TuiApp {
         if !self.has_transcript_content(self.core.config.settings.show_thinking) {
             return;
         }
-        self.app_focus = crate::core::AppFocus::Content;
+        self.app_focus = crate::app::AppFocus::Content;
         let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
         let viewport = self.viewport_rows_estimate();
         self.transcript_window
@@ -205,7 +205,7 @@ impl TuiApp {
         let Some((win, delta)) = self.ui.poll_drag_autoscroll() else {
             return;
         };
-        if win == crate::ui::TRANSCRIPT_WIN && self.app_focus == crate::core::AppFocus::Content {
+        if win == crate::ui::TRANSCRIPT_WIN && self.app_focus == crate::app::AppFocus::Content {
             self.move_content_cursor_by_lines(delta);
         }
     }

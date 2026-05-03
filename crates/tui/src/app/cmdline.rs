@@ -7,8 +7,8 @@
 //! directly, including text editing, history navigation, completer
 //! cycling, command execution, and dismissal.
 
-use crate::core::CommandAction;
-use crate::core::*;
+use crate::app::{CommandAction, TuiApp};
+
 use crate::ui::buffer::BufCreateOpts;
 use crate::ui::layout::Anchor;
 use crate::ui::UiHost;

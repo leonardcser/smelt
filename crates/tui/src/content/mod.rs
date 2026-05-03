@@ -8,8 +8,8 @@ pub(crate) mod status;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 
-use crossterm::{style::Color, terminal};
 use crate::core::content::display::ColorValue;
+use crossterm::{style::Color, terminal};
 
 /// Context for rendering content inside a bordered box.
 /// When passed to `render_markdown` and its sub-renderers, each output line

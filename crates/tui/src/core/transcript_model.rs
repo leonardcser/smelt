@@ -5,9 +5,9 @@
 //! owned by `TuiApp`. Held inside `app::transcript::Transcript`, which
 //! adds projection / streaming / paint orchestration on top.
 
+use crate::core::content::{DisplayBlock, LayoutContext};
 use crate::core::transcript_cache::ToolOutputRenderCache;
 use crate::core::transcript_present::{gap_between, layout_block, Element};
-use crate::core::content::{DisplayBlock, LayoutContext};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 

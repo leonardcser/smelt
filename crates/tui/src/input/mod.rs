@@ -6,8 +6,8 @@ pub(crate) use crate::core::history::History;
 
 use crate::attachment::{Attachment, AttachmentId, AttachmentStore};
 use crate::completer::CompleterSession;
-use crate::keymap::{self, KeyAction, KeyContext};
 use crate::content;
+use crate::keymap::{self, KeyAction, KeyContext};
 use crate::ui::VimMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use protocol::Content;

@@ -9,12 +9,12 @@
 //!   `app::notebook` for plugins that want to introspect a
 //!   notebook's structure.
 
-use crate::core::notebook;
-use crate::core::notebook::NotebookRenderData;
-use crate::core::content::display::{ColorRole, ColorValue};
 use crate::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_line;
+use crate::core::content::display::{ColorRole, ColorValue};
+use crate::core::notebook;
+use crate::core::notebook::NotebookRenderData;
 use crate::ui::BufId;
 use mlua::prelude::*;
 use std::collections::HashMap;

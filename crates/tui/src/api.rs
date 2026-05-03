@@ -46,8 +46,8 @@ pub(crate) mod buf {
 /// register here; keybindings resolve to names that route through
 /// `run`. Modelled on nvim's `nvim_command` / `user_command` split.
 pub(crate) mod cmd {
-    use crate::core::CommandAction;
-    use crate::core::TuiApp;
+    use crate::app::CommandAction;
+    use crate::app::TuiApp;
 
     /// Run a command line. Accepts `/name args...` or `:name args...`
     /// or a bare `name`. Parses the name, looks it up in the registry,
