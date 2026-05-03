@@ -49,7 +49,7 @@ Then ten architectural decisions landed across REFACTOR / ARCHITECTURE
    Rust ships no YAML/TOML config parser. Lands as P5.d.
 6. **All 6 engine "utility tool" files move to tui capabilities.**
    `engine/tools/{background,file_state,web_cache,web_shared,result_dedup}.rs`
-   → `tui::process / tui::fs / tui::http / tui::tools::dedup`.
+   → `app::process / app::fs / app::http / app::tools::dedup`.
    `engine/tools/` shrinks to `ToolSchema + ToolDispatcher +
    ToolResult`. The Unclear row is closed.
 7. **One binary, two entry points.** `smelt` and `smelt -p`
@@ -63,8 +63,8 @@ Then ten architectural decisions landed across REFACTOR / ARCHITECTURE
 9. **Multi-agent → plugin pattern (Option B).** Engine drops the
    multi-agent concept entirely. Any future multi-agent feature would
    be implemented as optional Lua plugins through a future
-   `tui::subprocess` capability (spawn / send / on_event / wait /
-   kill). Removed: `protocol::Role::Agent`, `protocol::AgentBlockData`,
+   `app::process` long-lived IPC capability (spawn / send / on_event /
+   wait / kill). Removed: `protocol::Role::Agent`, `protocol::AgentBlockData`,
    `EngineEvent::{AgentMessage, AgentExited, Spawned}`,
    `UiCommand::AgentMessage`, `EngineConfig.multi_agent`,
    `engine::tools::AgentMessageNotification`, `engine/registry.rs`,
@@ -72,7 +72,7 @@ Then ten architectural decisions landed across REFACTOR / ARCHITECTURE
    `transcript_present/agent.rs`. Multi-agent loop branch in
    `engine/agent.rs` (~400 LOC) deleted; `agent.rs` is single-agent
    only. `smelt.agent.mode` Lua API renamed to `smelt.mode` to avoid
-   collision with future `smelt.subprocess`.
+   collision with future `smelt.process` long-lived IPC.
 10. **Drift-prevention check script (manual, not pre-commit).**
     `refactor/check.sh` runs invariants over the synced docs (P\<n\>
     headers exist, INVENTORY paths exist, puml validates, etc.).

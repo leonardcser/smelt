@@ -12,6 +12,12 @@ hide empty methods
 title smelt — target architecture (structure)\n\
 Decisions and rationale live in **ARCHITECTURE.md**; sequencing in **REFACTOR.md**.
 
+legend right
+  **Current organization:** `app` and `tui` are modules inside the
+  `tui` crate (`tui/src/core/` and `tui/src/term/`). They become
+  separate crates when a third frontend materializes.
+end legend
+
 ' =====================================================================
 ' LUA — entire UX
 ' =====================================================================
@@ -64,9 +70,9 @@ package "runtime/lua/smelt/  (UX layer — the whole user-facing surface)" as LU
 }
 
 ' =====================================================================
-' crate: tui — smelt's TUI binary (App + perf + Lua + state machines)
+' crate: app — headless-safe runtime (Core + Host + capabilities)
 ' =====================================================================
-package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
+package "crate: app  (headless-safe runtime)" as APP #FFF6E0 {
 
   class Core <<headless-safe coordinator>> {
     config:        AppConfig
@@ -76,21 +82,17 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
     timers:        Timers
     cells:         Cells
     lua:           LuaRuntime
-    engine:        EngineHandle
+    engine:        EngineClient
+    frontend:      FrontendKind
+    skills:        Option<Arc<SkillLoader>>
+    files:         FileStateCache
+    processes:     ProcessRegistry
     --
     runs the event loop
     impl Host (no Ui knowledge)
     ' Shared by TuiApp + HeadlessApp.
-    ' Anything that doesn't need
-    ' Ui lives here.
   }
-  class TuiApp <<terminal frontend>> {
-    core:       Core
-    well_known: WellKnown
-    ui:         ui::Ui
-    --
-    impl Host + UiHost
-  }
+
   class HeadlessApp <<no-Ui frontend>> {
     core: Core
     sink: HeadlessSink     ' JSON / text out
@@ -102,28 +104,40 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
     ' timers, autocmds all work.
   }
 
-  package "subsystems  (owned by Core unless noted)" as SUB #FFF1C8 {
+  interface Host <<ui-agnostic trait — app::host>> {
+    clipboard() : &mut dyn ClipboardWrite
+    cells() : &mut Cells
+    timers() : &mut Timers
+    lua()   : &mut LuaRuntime
+    engine(): &mut EngineClient
+    session(): &mut Session
+    ' Everything Lua bindings need
+    ' that does NOT touch Ui:
+    ' cell/timer/clipboard/cmd/
+    ' engine/permissions/confirm/
+    ' agent/session/tools/os/fs/
+    ' http/html/notebook/path/
+    ' parse/grep/fuzzy/au/theme.
+    ' Headless impls only this.
+  }
+
+  package "subsystems  (owned by Core)" as SUB #FFF1C8 {
     class AppConfig
-    class WellKnown <<well-known WinIds — TuiApp only>> {
-      transcript: WinId
-      prompt:     WinId
-      statusline: WinId
-      cmdline:    Option<WinId>
-    }
     class Session {
       history:    Vec<Message>
       costs:      CostTracker
       turn_metas: Vec<TurnMeta>
       ' Sub-agent state lives in Lua
-      ' (cells driven by tui::subprocess
-      ' on_event callbacks), not here.
+      ' (cells driven by app::process
+      ' background-registry events),
+      ' not here.
     }
     class Confirms {
       requests:    Map<HandleId,
         oneshot::Sender<Decision>>
       next_handle: HandleId
       ' Gates engine generation:
-      ' EngineBridge checks
+      ' EngineClient checks
       ' is_clear() before pulling
       ' next request from queue.
     }
@@ -146,7 +160,7 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
         history (Cell<HistoryDelta>),
         turn_complete (Cell<TurnMeta>),
         turn_error (Cell<TurnError>),
-        confirm_requested (Cell<HandleId>),
+        confirm_requested (Cell<ConfirmRequested>),
         confirm_resolved (Cell<…>),
         session_started/ended,
         branch
@@ -171,6 +185,7 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
       coroutine tasks
       TLS pointer to &mut Host
       tool registry + dispatch
+      command registry
       cancel: cooperative —
         coroutine resumes with
         Err(Canceled)
@@ -182,7 +197,9 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
   }
 
   package "engine bridge" as EB #FFE9B5 {
-    class EngineEventBridge {
+    class EngineClient {
+      owns EngineHandle + confirms gate
+      recv() gates on Confirms::is_clear()
       drains event_rx → reducer/host calls
       TextDelta → Buffer.append
         (Rust-only; no Lua per chunk)
@@ -192,30 +209,43 @@ package "crate: tui  (smelt's TUI binary)" as TUI #FFF6E0 {
   }
 
   package "Rust capabilities  (generic, Lua-callable — FFI for intricate logic)" as BIND #FFE9B5 {
-    class "tui::parse"        as TPARSE     <<markdown / diff / syntax>>
-    class "tui::process"      as TPROC      <<short-lived spawn /\ngroup / streaming / kill>>
-    class "tui::subprocess"   as TSUB       <<long-lived child:\nspawn · send · on_event ·\nwait · kill — future primitive\nfor mcp / bg cmd / etc.>>
-    class "tui::fs"           as TFS        <<read / write / edit (mtime-checked) / glob / lock>>
-    class "tui::http"         as THTTP      <<fetch / cache / redirects>>
-    class "tui::html"         as THTML      <<html → markdown>>
-    class "tui::notebook"     as TNB        <<Jupyter JSON ops>>
-    class "tui::grep"         as TGREP      <<ripgrep wrapper>>
-    class "tui::path"         as TPATH      <<normalize / canonical / relative>>
-    class "tui::fuzzy"        as TFUZZY     <<fuzzy matching / scoring>>
-    class "tui::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)>>
+    class "app::process"      as TPROC      <<foreground spawn /\nstreaming / background\nregistry / kill — covers\nshort-lived + long-lived>>
+    class "app::fs"           as TFS        <<read / write / edit (mtime-checked) / glob / lock>>
+    class "app::http"         as THTTP      <<fetch / cache / redirects>>
+    class "app::html"         as THTML      <<html → markdown>>
+    class "app::notebook"     as TNB        <<Jupyter JSON ops>>
+    class "app::grep"         as TGREP      <<ripgrep wrapper>>
+    class "app::path"         as TPATH      <<normalize / canonical / relative>>
+    class "app::fuzzy"        as TFUZZY     <<fuzzy matching / scoring>>
+    class "app::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)>>
+  }
+}
+
+' =====================================================================
+' crate: tui — terminal frontend (TuiApp + event loop + content rendering)
+' =====================================================================
+package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
+
+  class TuiApp <<terminal frontend>> {
+    core:       Core
+    well_known: WellKnown
+    ui:         ui::Ui
+    --
+    impl Host (delegates to Core)
+    impl UiHost
   }
 
-  enum VimMode {
-    Normal / Insert / Visual
-    / VisualLine
-    ' Lives on App as a single
-    ' global field. Lua:
-    ' smelt.vim.mode.
+  class WellKnown <<well-known WinIds — TuiApp only>> {
+    transcript: WinId
+    prompt:     WinId
+    statusline: WinId
+    cmdline:    Option<WinId>
   }
 
-  package "smelt registries  (UI-side)" as REG #FFE9B5 {
-    class CommandRegistry
-  }
+  ' Terminal-specific modules live here:
+  ' content/  — transcript projection, prompt buffer, layout
+  ' input/    — vim motions, prompt editing, completer
+  ' events, render_loop, mouse, cmdline, status_bar
 }
 
 ' =====================================================================
@@ -288,23 +318,6 @@ package "crate: ui  (generic terminal UI primitives)" as UI #E6F1FF {
   }
 
   package "interaction contracts" as IX #F4F8FF {
-    interface Host <<ui-agnostic trait — Core impl>> {
-      clipboard() : &mut dyn ClipboardWrite
-      cells() : &mut Cells
-      timers() : &mut Timers
-      lua()   : &mut LuaRuntime
-      engine(): &mut EngineHandle
-      session(): &mut Session
-      confirms(): &mut Confirms
-      ' Everything Lua bindings need
-      ' that does NOT touch Ui:
-      ' cell/timer/clipboard/cmd/
-      ' engine/permissions/confirm/
-      ' agent/session/tools/os/fs/
-      ' http/html/notebook/path/
-      ' parse/grep/fuzzy/au/theme.
-      ' Headless impls only this.
-    }
     interface UiHost <<TuiApp impl>> {
       ui()    : &mut Ui
       focus(win: WinId)
@@ -352,6 +365,13 @@ package "crate: ui  (generic terminal UI primitives)" as UI #E6F1FF {
       Window(WinId)
       Scrollbar(owner: WinId)
       Chrome(owner: OverlayId)
+    }
+    enum VimMode {
+      Normal / Insert / Visual
+      / VisualLine
+      ' UI-local text-editing mode.
+      ' Owned by App, defined in ui.
+      ' Never crosses engine boundary.
     }
   }
 
@@ -468,7 +488,7 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
     (no `processes`, no
     `runtime_approvals`, no
     `permissions`) — all that
-    lives in tui::* now.
+    lives in app::* now.
   }
   class EngineConfig
   class EventInjector
@@ -493,7 +513,7 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
         -> Hooks (needs_confirm,
                   approval_patterns,
                   preflight)
-      ' Implemented by tui's
+      ' Implemented by app's
       ' Lua runtime — engine never
       ' executes tools itself.
     }
@@ -519,7 +539,7 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
     ' No multi-agent registry, no
     ' inter-agent socket here.
     ' Any future multi-agent feature is
-    ' a Lua plugin through tui::subprocess.
+    ' a Lua plugin through app::process.
   }
 }
 
@@ -569,7 +589,7 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
       ToolResult / ToolHooksResponse
       Cancel
       ' No AgentMessage — any future parent/child
-      ' IPC goes through tui::subprocess, not
+      ' IPC goes through app::process, not
       ' through engine UiCommands.
       …
     }
@@ -597,10 +617,14 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
 ' Cross-crate dependency direction (one-way, no cycles)
 ' =====================================================================
 ENG   -[#888,dashed]-> PROTO : uses wire types
+APP   -[#888,dashed]-> PROTO : uses wire types
+APP   -[#888,dashed]-> ENG   : EngineHandle\n(channels only)
 TUI   -[#888,dashed]-> PROTO : uses wire types
-TUI   -[#888,dashed]-> ENG   : EngineHandle\n(channels only)
+TUI   -[#888,dashed]-> APP   : Core + Host\n+ capabilities
 TUI   -[#888,dashed]-> UI    : ui primitives
-LUA   -[#888,dashed]-> TUI   : smelt.* Lua API
+' UI has zero internal dependencies
+LUA   -[#888,dashed]-> APP   : Host-tier smelt.* API
+LUA   -[#888,dashed]-> TUI   : UiHost-tier smelt.* API
 
 ' =====================================================================
 ' Engine internals
@@ -624,32 +648,29 @@ Core *--> Clipboard
 Core *--> Timers
 Core *--> Cells
 Core *--> LuaRuntime
-Core *--> EngineHandle
+Core *--> EngineClient
+
+HeadlessApp *--> Core
+HeadlessApp ..|> Host         : impls (Ui-agnostic)
 
 TuiApp      *--> Core
 TuiApp      *--> WellKnown
 TuiApp      --> Ui            : drives compositor
-HeadlessApp *--> Core
-
-Core        ..|> Host         : impls (Ui-agnostic)
+TuiApp      ..|> Host         : delegates to Core
 TuiApp      ..|> UiHost       : impls with Ui surface
-HeadlessApp ..|> Host         : impls only Host\n(no UiHost)
 
 WellKnown ..> Window  : refs by WinId
 Session   ..> Buffer  : transcript + prompt\nvia BufId on WellKnown
 
-EngineEventBridge --> EngineHandle : reads event stream
-EngineEventBridge ..> Confirms        : registers requests
-EngineEventBridge ..> Session         : update history,\ncosts, snapshots
-EngineEventBridge ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage), …
+EngineClient --> EngineHandle : owns handle\nreads event stream
+EngineClient ..> Confirms        : gates on is_clear()
+EngineClient ..> Session         : update history,\ncosts, snapshots
+EngineClient ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage), …
 Confirms ..> EngineHandle        : PermissionDecision
-
-LuaRuntime *--> CommandRegistry
 
 Window ..> UiHost           : direct mutation\nvia &mut dyn UiHost
 
 ' Lua → tui Rust API
-LCMD     -[#aa6,dashed]-> CommandRegistry : registers
 LDLG     -[#aa6,dashed]-> LDLGHELP        : composes via dialog.lua
 LDLGHELP -[#aa6,dashed]-> Ui              : splices into splits\nor opens an Overlay
 LDLGHELP -[#aa6,dashed]-> LWID            : composes widgets
@@ -671,7 +692,7 @@ LTOOLS   -[#aa6,dashed]-> THTML           : html → markdown
 LTOOLS   -[#aa6,dashed]-> TNB             : Jupyter ops
 LTOOLS   -[#aa6,dashed]-> TGREP           : ripgrep
 LTOOLS   -[#aa6,dashed]-> TPERM           : bash AST parse\n(intricate logic\nbehind FFI)
-LTOOLS   -[#aa6,dashed]-> TSUB            : any child process
+
 LPLG     -[#aa6,dashed]-> BIND            : any plugin can\ncompose Rust capabilities
 
 ' =====================================================================
