@@ -273,8 +273,8 @@ to invoke_ the feature.
 | `smelt.grep` (`run(pattern, path, opts)` over ripgrep — content / files_with_matches / count modes; case / multiline / context / glob / type / timeout) | `lua/api/grep.rs` + `tui/grep.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.http` (`get / post / random_user_agent / cache.{get,put}` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` + `tui/http/cache.rs` | P3.a + P3.c + P5.b (POST + UA rotator + cache) | working |
 | `smelt.html` (`title / links / to_text / to_markdown / parse_ddg_results` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c + P5.b (DDG parser + `to_markdown`) | working |
-| `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `tui::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.notebook.parse` (Jupyter `.ipynb` parse over `tui::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `app::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.notebook.parse` (Jupyter `.ipynb` parse over `app::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.parse.frontmatter` (YAML frontmatter splitter)   | `lua/api/parse.rs`                  | P3.c/P4.e (custom-commands plugin)         | working        |
 
 ## Headless / non-TUI modes

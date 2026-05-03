@@ -8,32 +8,33 @@ to the letter; see `README.md`.**
 
 ## State of the gap (one paragraph)
 
-`engine` and `protocol` are basically aligned with target — they need core
-tools moved out (to Lua), `Mode` gating relocated (to Lua tool hooks), and
-the entire `engine/permissions/` module pulled out to `tui::permissions`
-(engine becomes policy-free; it emits `RequestPermission` and consumes
-`PermissionDecision` and that's it).
-`ui` needs a primitive rebuild: `Buffer` gains namespaces/extmarks/attach,
-`BufferView`/`Component`/`PanelWidget`/`Surface` die, `Placement(6)` becomes
-`splits` + `overlays`, `LayoutTree` becomes a real Vbox/Hbox/Leaf with
-chrome, `Float` becomes `Overlay`, a `Theme` registry replaces constants.
-`tui` needs `App` split into a headless-safe `Core` plus `TuiApp` /
-`HeadlessApp` frontends, with subsystems carved out and a `Host` /
-`UiHost` trait pair (`Host` for everything Ui-agnostic, `UiHost` for the
-compositor-touching surface). It needs `Cells` as the unified reactive +
-event-bus primitive (autocmds become subscriptions over the same
-registry), real `Timers`, an `EngineBridge` struct, capability modules
-(`parse`/`process`/`subprocess`/`fs`/`http`/`html`/`notebook`/`grep`/
-`path`/`fuzzy`/`permissions`), and a Lua binding layout that's one
-file per namespace. The Lua runtime needs the missing namespaces
-(`cell`, `timer`, `au` sugar, `clipboard`, `parse`, `os`, `fs`,
-`http`, `html`, `path`, `permissions`, `fuzzy`, `grep`, `subprocess`,
-`frontend`, `mode` — renamed from `agent.mode`), the missing dirs
-(`widgets/`,
-`dialogs/`, `tools/`, `colorschemes/`), and the 15 Rust-side core tool
-impls moved in from engine (with intricate logic — bash AST parsing,
-mtime-checked edits, workspace rule matching — exposed via the
-capability modules as FFI for the Lua tools to call).
+`engine` is policy-free: core tools live in Lua, `Mode` gating is a Lua
+tool-hook concern, and `engine/permissions/` has moved to `app::permissions`.
+Engine emits `RequestPermission` and consumes `PermissionDecision` —
+that's its full permission surface. `protocol` holds the stable wire
+contract and shared types (`AgentMode`, `ReasoningEffort`, `PermissionOverrides`).
+`VimMode` stays in `ui` — it is a UI-local text-editing state, not a
+wire type.
+`ui` has been rebuilt around `Buffer` (namespaces, extmarks, attach),
+`Window`, `LayoutTree` (Vbox/Hbox/Leaf), `Overlay`, and `Theme`.
+`BufferView`/`Component`/`PanelWidget`/`Surface` and the 6-variant
+`Placement` enum are gone.
+`app` is the headless-safe runtime layer: `Core`, `HeadlessApp`,
+`Host`, subsystems, `LuaRuntime`, `EngineClient`, and all Rust
+capabilities (`fs`, `http`, `permissions`, `process`, …). It has no
+terminal imports.
+`tui` is the terminal frontend layer: `TuiApp`, event loop, content
+rendering (`content/`), input editing (`input/`), and `UiHost` Lua
+bindings. It is a thin wrapper around `app::Core` + `ui::Ui`.
+**For now** `app` and `tui` are modules inside the `tui` crate
+(`tui/src/core/` and `tui/src/term/`); they split into separate crates
+when a third frontend materializes.
+`Host` (Ui-agnostic, in `app::host`) and `UiHost` (compositor-bearing,
+in `ui`) are the trait pair. `Cells` subsumes autocmds. `EngineClient`
+owns the engine channel and gates on `Confirms`. The Lua UX layer
+(`runtime/lua/smelt/`) owns widgets, dialogs, tools, statusline, and
+colorschemes. All 15 core tools migrated from Rust to Lua, with
+intricate logic exposed via `app::*` capabilities as FFI.
 
 Everything else is downstream of those.
 
@@ -53,7 +54,7 @@ P1  ui primitives                  ── Buffer, LayoutTree, Overlay, Window,
 P2  tui app restructure            ── Core / TuiApp / HeadlessApp,
         │                              Host + UiHost, subsystems, Cells
         │                              (subsumes autocmds), Timers,
-        │                              EngineBridge, WellKnown, ToolRuntime
+        │                              EngineClient, WellKnown, ToolRuntime (deferred)
         ▼
 P3  rust capabilities + lua api    ── tui::parse/process/fs/http/...
         │                              /permissions, one file per smelt.*
@@ -446,7 +447,7 @@ bridges, then the aggregate.
     `is_glob` flag per queued callback.
   - **a.4c** — built-in cell migrations. Splits because the
     machinery + simple-typed setters, the timer-driven cells, and
-    the event-shaped cells (some gated on EngineBridge) are each
+    the event-shaped cells (some gated on EngineClient) are each
     natural single-session units:
     - **a.4c.1** ✅ — `LuaProjector` machinery on `Cells` (per-`TypeId`
       converter from `&dyn Any` to `mlua::Value`); `LuaCellValue`
@@ -475,7 +476,7 @@ bridges, then the aggregate.
       to their existing handlers; typed payload structs + projectors
       live in `app/cells.rs`; `ConfirmChoice` projects to a stable
       short label string. `turn_complete` / `turn_error` publishes
-      relocate alongside their handlers when EngineBridge lands
+      relocate alongside their handlers when EngineClient lands
       (a.11).
 - **a.5** ✅ — `Timers { set, every, cancel }` carve-out: storage
   lifts off `LuaShared.timers` onto `app::timers::Timers` on `App`;
@@ -504,8 +505,8 @@ bridges, then the aggregate.
   `self.session.messages` directly and `sync_session_snapshot`
   no longer copies messages. Session is the single source of truth
   for in-session message history.
-  (Sub-agent state lives in Lua cells fed by `tui::subprocess`
-  `on_event` callbacks — see P5.b — not on `Session`.)
+  (Sub-agent state lives in Lua cells fed by `app::process`
+  background-registry events — see P5.b — not on `Session`.)
 - **a.8** ✅ — `Clipboard` formalised: every clipboard text I/O routes
   through `app.clipboard.{read,write}`. The two bypass paths retire —
   Lua `smelt.clipboard(text)` writes via `with_app(|a| a.clipboard.write(...))`
@@ -568,8 +569,11 @@ struct Core {
     timers:        Timers,
     cells:         Cells,
     lua:           LuaRuntime,
-    tools:         ToolRuntime,
-    engine_bridge: EngineBridge,
+    engine:        EngineClient,
+    frontend:      FrontendKind,
+    skills:        Option<Arc<SkillLoader>>,
+    files:         FileStateCache,
+    processes:     ProcessRegistry,
 }
 struct TuiApp      { core: Core, well_known: WellKnown, ui: ui::Ui }
 struct HeadlessApp { core: Core, sink: HeadlessSink }
@@ -685,7 +689,7 @@ same thing.
 `smelt.au.on / smelt.au.fire` are thin Lua wrappers over
 `smelt.cell(name):subscribe / :set` for nvim-style ergonomics.
 
-### P2.d — `EngineBridge`
+### P2.d — `EngineClient` (was `EngineBridge`)
 
 Drains `engine.event_rx` in the `select!`. Translates events into
 direct host calls. Splits:
@@ -765,7 +769,7 @@ capability they serve:
 - `engine/tools/result_dedup.rs` (169 LOC) → `tui::tools::dedup`
   (helper).
 - `engine/socket.rs` (345 LOC) + `engine/registry.rs` (262 LOC) —
-  deleted in P5.c; future `tui::subprocess` may absorb the patterns.
+  deleted in P5.c; future `app::process` long-lived IPC may absorb the patterns.
 
 After this, `engine/tools/` retains only `ToolSchema` +
 `ToolDispatcher` + `ToolResult` + ctx — engine's tool surface is
@@ -804,8 +808,8 @@ Newly bound Lua surface:
   `rules_for(mode, kind)` (read accessor for the ruleset configured
   via `set_rules`), `outside_workspace_paths`, `is_approved`,
   `approve`, `load_workspace`, `save_workspace`, `set_rules`.
-- `smelt.subprocess` — `spawn`, `send`, `on_event`, `wait`, `kill`.
-  Long-lived child IPC; future primitive for any long-running child.
+- `smelt.subprocess` — deferred/YAGNI. `smelt.process.run` and
+  `smelt.process.run_streaming` cover the surface today.
 - `smelt.frontend` — `is_interactive()`, `kind()`. Tools branch on
   this when they need the human-vs-headless distinction. ✅ (`e38572d`).
 - `smelt.mode` — `get / set / cycle` over AgentMode (Plan/Apply/Yolo).
@@ -918,7 +922,7 @@ In `engine`:
   cross-channel ping-pong.
 - Engine never executes tools itself. It calls the dispatcher.
 
-`tui::ToolRuntime` impls `ToolDispatcher`, walking the registry
+`LuaRuntime` impls `ToolDispatcher`, walking the tool registry
 populated from Lua at startup.
 
 ### P5.b — Migrate core tools to Lua
@@ -932,15 +936,15 @@ plugins over the same primitives; they do not need to be built into the core
 tool set.
 
 **Future: optional subprocess tools.** A future multi-agent plugin (if
-enabled) would compose `tui::subprocess` and a thin Lua-side registry —
-no engine knowledge. The transcript would render these calls as ordinary
-tool calls (no special widget).
+enabled) would compose `app::process` long-lived IPC and a thin Lua-side
+registry — no engine knowledge. The transcript would render these calls
+as ordinary tool calls (no special widget).
 
 Each tool:
 
 - Declares schema via `smelt.tools.register({ name, schema, run,
   hooks })`.
-- `run` composes `tui::process` / `tui::fs` / `tui::http` / etc. via
+- `run` composes `app::process` / `app::fs` / `app::http` / etc. via
   the Lua bindings landed in P3. Coroutine yields on async Rust calls.
 - `hooks(args, mode)` returns `"allow" | "needs_confirm" | "deny"`
   based on `AgentMode`. This is where the Plan/Apply/Yolo policy
@@ -982,7 +986,7 @@ process-management UX live in a separate plugin/tool surface over
   in P3.a). Engine has zero `Permissions` references after this
   step. The new permission flow:
   1. Engine calls `dispatcher.evaluate_hooks(name, args)`.
-  2. tui's `ToolRuntime` invokes the Lua tool's `hooks(args, mode)`.
+  2. tui's `LuaRuntime` invokes the Lua tool's `hooks(args, mode)`.
   3. The hook composes `tui::permissions.*` calls (parse bash,
      check workspace, look up runtime approvals, consult workspace
      store) and returns `"allow" | "needs_confirm" | "deny"`.
@@ -1025,10 +1029,10 @@ process-management UX live in a separate plugin/tool surface over
   - `UiCommand::AgentMessage`.
   - `engine::tools::AgentMessageNotification` broadcast channel +
     every send/recv site in `agent.rs`.
-  - `engine/registry.rs` (262 LOC) — moved to
-    `tui::subprocess::registry` in P3.a.
-  - `engine/socket.rs` (345 LOC) — moved to
-    `tui::subprocess::socket` in P3.a.
+  - `engine/registry.rs` (262 LOC) — deleted in P5.c; patterns may
+    resurface in future `app::process` long-lived IPC.
+  - `engine/socket.rs` (345 LOC) — deleted in P5.c; patterns may
+    resurface in future `app::process` long-lived IPC.
   - `protocol::Role::Agent` and `protocol::AgentBlockData`.
   - The 5 dedicated agent tool files
     (`spawn_agent.rs` / `stop_agent.rs` / `message_agent.rs` /
@@ -1038,7 +1042,7 @@ process-management UX live in a separate plugin/tool surface over
 
   After this, engine has _no opinion on agents whatsoever_.
   Any future multi-agent plugin would spawn children via
-  `tui::subprocess.spawn("smelt", …)` from a Lua tool; the parent's
+  `app::process.spawn("smelt", …)` from a Lua tool; the parent's
   LLM sees "tool call, tool result" like any other tool.
 - `crates/tui/src/workspace_permissions.rs` is folded into
   `tui::permissions::store` in P3.a. P5.b's `bash.lua` and
@@ -1108,10 +1112,10 @@ lifecycle gates (confirms gate, cooperative cancel, dialog
 stacking).
 
 - **Streaming pipeline.** `EngineEvent::TextDelta { delta }` →
-  `EngineBridge` → `Buffer::append` (Rust-only). Lua never runs per
+  `EngineClient` → `Buffer::append` (Rust-only). Lua never runs per
   chunk. Buffer's `on_block` callback fires at markdown-block end /
   tool start/stop / turn end. Verify via `parse_marker` traces.
-- **Confirms gate.** `EngineBridge` checks `Confirms::is_clear()`
+- **Confirms gate.** `EngineClient` checks `Confirms::is_clear()`
   before pulling the next request from `engine.event_rx`. Resumes
   when the dialog closes. One gate.
 - **Cooperative cancel.** Each Lua coroutine task carries a
@@ -1168,9 +1172,8 @@ stacking).
 - **Plugin marketplace / install / discovery.** Plugins are
   Lua under `runtime/lua/smelt/plugins/` plus the user's
   `~/.config/smelt/init.lua`. Anything fancier comes after.
-- **A second backend.** `ui` is shaped to be backend-agnostic at
-  the data layer, but the only backend is crossterm. We do not
-  introduce a second one in this refactor.
+- **A second backend.** The `app` / `tui` / `ui` split enables a GUI
+  or server frontend, but no second backend is implemented yet.
 - **Per-buffer / per-window options registry.** Nice-to-have but
   out of scope; revisit only if a real consumer shows up.
 
