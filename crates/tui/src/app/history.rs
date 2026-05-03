@@ -1,7 +1,10 @@
-use super::working::{TurnOutcome, TurnPhase};
-use super::*;
+use crate::core::working::{TurnOutcome, TurnPhase};
+use crate::core::*;
+use crate::session;
 
+use protocol::{AgentMode, Content, Message, Role, UiCommand};
 use std::collections::HashMap;
+use std::time::Duration;
 
 impl TuiApp {
     /// Redact secrets from user-submitted text before it lands on screen or
@@ -15,7 +18,7 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn set_history(&mut self, messages: Vec<Message>) {
+    pub(crate) fn set_history(&mut self, messages: Vec<Message>) {
         self.core.session.messages = messages;
         self.sync_session_snapshot();
         let count = self.core.session.messages.len();
@@ -28,7 +31,7 @@ impl TuiApp {
         );
     }
 
-    pub(super) fn sync_session_snapshot(&mut self) {
+    pub(crate) fn sync_session_snapshot(&mut self) {
         self.core.session.updated_at_ms = session::now_ms();
         self.core.session.mode = Some(self.core.config.mode.as_str().to_string());
         self.core.session.reasoning_effort = Some(self.core.config.reasoning_effort);
@@ -57,7 +60,7 @@ impl TuiApp {
     }
 
     /// Record current token count and cost so they can be restored on rewind.
-    pub(super) fn snapshot_tokens(&mut self) {
+    pub(crate) fn snapshot_tokens(&mut self) {
         if let Some(tokens) = self.core.session.context_tokens {
             self.core
                 .session
@@ -416,11 +419,11 @@ impl TuiApp {
 
     /// Block until all queued persist writes have completed. Call before
     /// code paths that read session files off disk (load, fork, shutdown).
-    pub(super) fn flush_persist(&self) {
+    pub(crate) fn flush_persist(&self) {
         self.persister.flush();
     }
 
-    pub(super) fn maybe_generate_title(&mut self, current_message: Option<&str>) {
+    pub(crate) fn maybe_generate_title(&mut self, current_message: Option<&str>) {
         if self.pending_title {
             engine::log::entry(
                 engine::log::Level::Debug,
@@ -500,7 +503,7 @@ impl TuiApp {
         });
     }
 
-    pub(super) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
+    pub(crate) fn apply_compaction(&mut self, messages: Vec<protocol::Message>) {
         if messages.is_empty() {
             {
                 self.working.finish(TurnOutcome::Done);
@@ -525,7 +528,7 @@ impl TuiApp {
         self.transcript_window.scroll_to_bottom();
     }
 
-    pub(super) fn maybe_auto_compact(&mut self) {
+    pub(crate) fn maybe_auto_compact(&mut self) {
         if !self.core.config.settings.auto_compact {
             return;
         }

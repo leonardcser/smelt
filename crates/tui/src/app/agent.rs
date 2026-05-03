@@ -1,9 +1,11 @@
-use super::working::{TurnOutcome, TurnPhase};
-use super::*;
+use crate::core::working::{TurnOutcome, TurnPhase};
+use crate::core::*;
 use crate::core::{
     DeferredDialog, LoopAction, PendingTool, SessionControl, TurnState, CONFIRM_DEFER_MS,
 };
-use protocol::Decision;
+use protocol::{Content, Decision, Message, UiCommand};
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 impl TuiApp {
@@ -23,7 +25,7 @@ impl TuiApp {
 
     // ── Agent lifecycle ──────────────────────────────────────────────────
 
-    pub(super) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
+    pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         self.sleep_inhibit.acquire();
         self.clear_prompt_completer();
         self.begin_turn();
@@ -363,7 +365,7 @@ impl TuiApp {
     /// completes synchronously and the result is forwarded right away.
     /// A handler that yields (e.g. via `smelt.ui.dialog.open`) parks;
     /// its result arrives later through `drive_tasks()`.
-    pub(super) fn handle_tool_call(
+    pub(crate) fn handle_tool_call(
         &mut self,
         request_id: u64,
         call_id: String,
@@ -398,7 +400,7 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn handle_title_generated(&mut self, title: String, slug: String) {
+    pub(crate) fn handle_title_generated(&mut self, title: String, slug: String) {
         if !self.pending_title {
             return;
         }
@@ -409,13 +411,13 @@ impl TuiApp {
         self.save_session();
     }
 
-    pub(super) fn handle_input_prediction(&mut self, text: String) {
+    pub(crate) fn handle_input_prediction(&mut self, text: String) {
         if self.input.win.text.is_empty() {
             self.set_prompt_completer(text);
         }
     }
 
-    pub(super) fn resolve_api_key(&mut self) -> Option<String> {
+    pub(crate) fn resolve_api_key(&mut self) -> Option<String> {
         if self.core.config.api_key_env.is_empty() {
             return Some(String::new());
         }
@@ -438,7 +440,7 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn resolve_api_key_for_env(&mut self, key_env: &str) -> Option<String> {
+    pub(crate) fn resolve_api_key_for_env(&mut self, key_env: &str) -> Option<String> {
         if key_env.is_empty() {
             return Some(String::new());
         }
@@ -461,7 +463,7 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
+    pub(crate) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
         let msg = match exit_code {
             Some(0) => format!("Background process {id} has finished."),
             Some(c) => format!("Background process {id} exited with code {c}."),
@@ -532,7 +534,7 @@ impl TuiApp {
             .load_workspace(ws_tools, ws_dirs);
     }
 
-    pub(super) fn reset_session_permissions(&mut self) {
+    pub(crate) fn reset_session_permissions(&mut self) {
         self.runtime_approvals.write().unwrap().clear_session();
     }
 
@@ -651,7 +653,7 @@ impl TuiApp {
 
     // ── Control dispatch ─────────────────────────────────────────────────
 
-    pub(super) fn dispatch_control(
+    pub(crate) fn dispatch_control(
         &mut self,
         ctrl: SessionControl,
         pending: &[PendingTool],

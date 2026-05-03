@@ -3,8 +3,8 @@
 //! invokes as a single semantic action — `/<command>` dispatch,
 //! settings toggle, transcript yank, and so on.
 
-use super::transcript_model::ConfirmChoice;
-use super::{Host, TuiApp};
+use crate::core::transcript_model::ConfirmChoice;
+use crate::core::{Host, TuiApp};
 
 impl TuiApp {
     /// Run a slash command. Mirrors the user typing `:<line>` into
