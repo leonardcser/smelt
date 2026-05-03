@@ -157,7 +157,7 @@ commit whose entire diff is one bullet in `P<n>.md`.
 | File                              | What it is                                       |
 | --------------------------------- | ------------------------------------------------ |
 | `README.md` (this)                | Meta rules + index.                              |
-| `REFACTOR.md`                     | Sequencing — phases P0..P7 and their content.    |
+| `REFACTOR.md`                     | Sequencing — phases P0..P8 and their content.    |
 | `ARCHITECTURE.md`                 | Target intent — decisions, rationale.            |
 | `tui-ui-architecture.puml` | Canonical structure diagram.                     |
 | `INVENTORY.md`                    | Per-file ledger: every source file → its fate.   |

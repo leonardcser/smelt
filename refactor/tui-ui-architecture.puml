@@ -13,9 +13,11 @@ title smelt — target architecture (structure)\n\
 Decisions and rationale live in **ARCHITECTURE.md**; sequencing in **REFACTOR.md**.
 
 legend right
-  **Current organization:** `app` and `tui` are modules inside the
-  `tui` crate (`tui/src/core/` and `tui/src/term/`). They become
-  separate crates when a third frontend materializes.
+  **Target organization:** `core` and `tui` are separate crates.
+  `core` has no terminal imports and no `crossterm` / `ui` dependency.
+  `tui` depends on `core`, `ui`, and `crossterm`.
+  `ui` is a terminal UI primitives crate; it depends on `crossterm`.
+  A GUI or web frontend uses `core` directly and ignores `ui`.
 end legend
 
 ' =====================================================================
@@ -70,9 +72,9 @@ package "runtime/lua/smelt/  (UX layer — the whole user-facing surface)" as LU
 }
 
 ' =====================================================================
-' crate: app — headless-safe runtime (Core + Host + capabilities)
+' crate: core — headless-safe runtime (Core + Host + capabilities)
 ' =====================================================================
-package "crate: app  (headless-safe runtime)" as APP #FFF6E0 {
+package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
 
   class Core <<headless-safe coordinator>> {
     config:        AppConfig
@@ -104,7 +106,7 @@ package "crate: app  (headless-safe runtime)" as APP #FFF6E0 {
     ' timers, autocmds all work.
   }
 
-  interface Host <<ui-agnostic trait — app::host>> {
+  interface Host <<ui-agnostic trait — core::host>> {
     clipboard() : &mut dyn ClipboardWrite
     cells() : &mut Cells
     timers() : &mut Timers
@@ -128,7 +130,7 @@ package "crate: app  (headless-safe runtime)" as APP #FFF6E0 {
       costs:      CostTracker
       turn_metas: Vec<TurnMeta>
       ' Sub-agent state lives in Lua
-      ' (cells driven by app::process
+      ' (cells driven by core::process
       ' background-registry events),
       ' not here.
     }
@@ -209,15 +211,15 @@ package "crate: app  (headless-safe runtime)" as APP #FFF6E0 {
   }
 
   package "Rust capabilities  (generic, Lua-callable — FFI for intricate logic)" as BIND #FFE9B5 {
-    class "app::process"      as TPROC      <<foreground spawn /\nstreaming / background\nregistry / kill — covers\nshort-lived + long-lived>>
-    class "app::fs"           as TFS        <<read / write / edit (mtime-checked) / glob / lock>>
-    class "app::http"         as THTTP      <<fetch / cache / redirects>>
-    class "app::html"         as THTML      <<html → markdown>>
-    class "app::notebook"     as TNB        <<Jupyter JSON ops>>
-    class "app::grep"         as TGREP      <<ripgrep wrapper>>
-    class "app::path"         as TPATH      <<normalize / canonical / relative>>
-    class "app::fuzzy"        as TFUZZY     <<fuzzy matching / scoring>>
-    class "app::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)>>
+    class "core::process"      as TPROC      <<foreground spawn /\nstreaming / background\nregistry / kill — covers\nshort-lived + long-lived>>
+    class "core::fs"           as TFS        <<read / write / edit (mtime-checked) / glob / lock>>
+    class "core::http"         as THTTP      <<fetch / cache / redirects>>
+    class "core::html"         as THTML      <<html → markdown>>
+    class "core::notebook"     as TNB        <<Jupyter JSON ops>>
+    class "core::grep"         as TGREP      <<ripgrep wrapper>>
+    class "core::path"         as TPATH      <<normalize / canonical / relative>>
+    class "core::fuzzy"        as TFUZZY     <<fuzzy matching / scoring>>
+    class "core::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)>>
   }
 }
 
@@ -249,9 +251,9 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
 }
 
 ' =====================================================================
-' crate: ui — generic terminal UI primitives, no smelt knowledge
+' tui::ui module — terminal UI primitives inside the tui crate
 ' =====================================================================
-package "crate: ui  (generic terminal UI primitives)" as UI #E6F1FF {
+package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
 
   package "primitives" as P #F4F8FF {
     class Style
@@ -328,7 +330,7 @@ package "crate: ui  (generic terminal UI primitives)" as UI #E6F1FF {
       ' viewport_for / rows_for /
       ' breaks_for are transitional
       ' escape hatches while prompt /
-      ' transcript still have app-owned
+      ' transcript still have core-owned
       ' projections. Target is to
       ' shrink or delete them.
       ' Ui-shaped surface only.
@@ -488,7 +490,7 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
     (no `processes`, no
     `runtime_approvals`, no
     `permissions`) — all that
-    lives in app::* now.
+    lives in core::* now.
   }
   class EngineConfig
   class EventInjector
@@ -513,7 +515,7 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
         -> Hooks (needs_confirm,
                   approval_patterns,
                   preflight)
-      ' Implemented by app's
+      ' Implemented by core's
       ' Lua runtime — engine never
       ' executes tools itself.
     }
@@ -539,7 +541,7 @@ package "crate: engine  (LLM core — frontend-agnostic, zero UI imports)" as EN
     ' No multi-agent registry, no
     ' inter-agent socket here.
     ' Any future multi-agent feature is
-    ' a Lua plugin through app::process.
+    ' a Lua plugin through core::process.
   }
 }
 
@@ -589,7 +591,7 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
       ToolResult / ToolHooksResponse
       Cancel
       ' No AgentMessage — any future parent/child
-      ' IPC goes through app::process, not
+      ' IPC goes through core::process, not
       ' through engine UiCommands.
       …
     }
@@ -617,13 +619,13 @@ package "crate: protocol  (wire types — pure data, serde)" as PROTO #F0FFF0 {
 ' Cross-crate dependency direction (one-way, no cycles)
 ' =====================================================================
 ENG   -[#888,dashed]-> PROTO : uses wire types
-APP   -[#888,dashed]-> PROTO : uses wire types
-APP   -[#888,dashed]-> ENG   : EngineHandle\n(channels only)
+CORE  -[#888,dashed]-> PROTO : uses wire types
+CORE  -[#888,dashed]-> ENG   : EngineHandle\n(channels only)
 TUI   -[#888,dashed]-> PROTO : uses wire types
-TUI   -[#888,dashed]-> APP   : Core + Host\n+ capabilities
+TUI   -[#888,dashed]-> CORE  : Core + Host\n+ capabilities
 TUI   -[#888,dashed]-> UI    : ui primitives
 ' UI has zero internal dependencies
-LUA   -[#888,dashed]-> APP   : Host-tier smelt.* API
+LUA   -[#888,dashed]-> CORE  : Host-tier smelt.* API
 LUA   -[#888,dashed]-> TUI   : UiHost-tier smelt.* API
 
 ' =====================================================================

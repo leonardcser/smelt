@@ -32,7 +32,7 @@ to invoke_ the feature.
 
 | Feature                                                       | Source today                                              | Restored by                   | Status  |
 | ------------------------------------------------------------- | --------------------------------------------------------- | ----------------------------- | ------- |
-| LLM session (start, stream, complete)                         | `engine/agent.rs`, `engine/provider/*`                    | P2 (EngineBridge wired)       | working |
+| LLM session (start, stream, complete)                         | `engine/agent.rs`, `engine/provider/*`                    | P2 (EngineClient wired)       | working |
 | Model selection (`/model`)                                    | `runtime/lua/smelt/plugins/model.lua`                     | P4.e                          | working |
 | Provider: Anthropic                                           | `engine/provider/anthropic.rs`                            | n/a (kept)                    | working |
 | Provider: OpenAI                                              | `engine/provider/openai.rs`                               | n/a                           | working |
@@ -41,18 +41,18 @@ to invoke_ the feature.
 | Provider: OpenAI-compatible (Ollama, vLLM, llama.cpp, Gemini) | `engine/provider/mod.rs` (Local)                          | n/a                           | working |
 | Reasoning effort cycle (Off/Low/Med/High/Max)                 | `--reasoning-effort` + Ctrl+T + `plugins/toggles.lua`     | P2.c (cell), P4.f (modes)     | working |
 | Agent modes (Normal/Plan/Apply/Yolo)                          | `--mode` + Shift+Tab + `protocol/mode.rs`                 | P5 (mode gating to Lua hooks) | working |
-| Turn streaming                                                | `engine/agent.rs` → `EngineEvent::TextDelta` → transcript | P2.d (EngineBridge)           | working |
-| Steer / Unsteer (queue messages mid-turn) | `protocol/event.rs::Steered` + `UiCommand::{Steer,Unsteer}` + `app/events.rs` | P2.d | working |
-| Auto-retry on transient errors (`Retrying`) | `engine/agent.rs` → `EngineEvent::Retrying` + `app/working.rs` spinner | P2.d (EngineBridge fires) | working |
+| Turn streaming                                                | `engine/agent.rs` → `EngineEvent::TextDelta` → transcript | P2.d (EngineClient)           | working |
+| Steer / Unsteer (queue messages mid-turn) | `protocol/event.rs::Steered` + `UiCommand::{Steer,Unsteer}` + `core/events.rs` | P2.d | working |
+| Auto-retry on transient errors (`Retrying`) | `engine/agent.rs` → `EngineEvent::Retrying` + `core/working.rs` spinner | P2.d (EngineClient fires) | working |
 | Auxiliary model routing (title, prediction, btw, compaction) | `engine/agent.rs` + `protocol/usage.rs::AuxiliaryTask` + auxiliary-model config | P2 (kept), P4 (predict/btw plugins) | working |
-| Per-turn message snapshot (`Messages` event for transcript sync) | `protocol/event.rs::Messages` + `app/transcript_model.rs` | P2.d | working |
+| Per-turn message snapshot (`Messages` event for transcript sync) | `protocol/event.rs::Messages` + `core/transcript_model.rs` | P2.d | working |
 | Plugin tool hook flow (`needs_confirm` / `preflight` / `approval_patterns`) | `protocol/event.rs::ToolHooksRequest` + `lua/tasks.rs` PluginToolEnv | P5.b (Lua hook fn returns "allow"/"needs_confirm"/"deny") | working |
-| Tool call lifecycle states (`ToolStarted` / `ToolOutput` / `ToolFinished` / `ToolStatus::Denied`) | `protocol/event.rs` + `app/transcript_present/tools.rs` | P4.b (Lua presentation) | working |
+| Tool call lifecycle states (`ToolStarted` / `ToolOutput` / `ToolFinished` / `ToolStatus::Denied`) | `protocol/event.rs` + `core/transcript_present/tools.rs` | P4.b (Lua presentation) | working |
 | Per-turn telemetry (`TurnMeta`) | `protocol/usage.rs` + `session.rs` | P2.a (Session). `AgentBlockData` deleted in P5.c. | working |
-| Cost tracking                                                 | `app/working.rs` + `session.rs` cost fields               | P2.a (Session)                | working |
+| Cost tracking                                                 | `core/working.rs` + `session.rs` cost fields               | P2.a (Session)                | working |
 | Token usage display                                           | `protocol/usage.rs` + status bar                          | P2.c (`tokens_used` cell)     | working |
 | Tokens/sec readout                                            | `show_tps` setting + status bar                           | P4.c                          | working |
-| History compaction (`/compact`)                               | `app/commands.rs::cmd_compact` + `engine/compact.rs`      | P4.e                          | working |
+| History compaction (`/compact`)                               | `core/commands.rs::cmd_compact` + `engine/compact.rs`      | P4.e                          | working |
 | Title generation                                              | `EngineEvent::TitleGenerated` + `working.rs`              | P2.c (`session_title` cell)   | working |
 | `/btw` side question                                          | `runtime/lua/smelt/plugins/btw.lua`                       | P4.e                          | working |
 | File attachment (`@path`)                                     | `attachment.rs` + `input/completer_bridge.rs`             | P1/P4 (extmark + recipe)      | working |
@@ -115,7 +115,7 @@ to invoke_ the feature.
 | `/reflect`                                        | `runtime/lua/smelt/plugins/reflect.lua`                              | P4.e | working — fully Lua: body inlined; submits via `smelt.engine.submit_command` |
 | `/simplify`                                       | `runtime/lua/smelt/plugins/simplify.lua`                             | P4.e | working — fully Lua: body inlined; submits via `smelt.engine.submit_command` |
 | Custom commands (`~/.config/smelt/commands/*.md`) | `runtime/lua/smelt/plugins/custom_commands.lua` | P4.e            | working — fully Lua: scans dir at startup, parses YAML frontmatter via `smelt.parse.frontmatter`, evaluates exec blocks via `smelt.process.run`, submits via `smelt.engine.submit_command(name, body, overrides)` |
-| `! <shell>` (shell escape)                        | `app/cmdline.rs`                  | P4 (cmdline widget)              | working |
+| `! <shell>` (shell escape)                        | `core/cmdline.rs`                  | P4 (cmdline widget)              | working |
 
 ## Dialogs / interactive surfaces
 
@@ -137,8 +137,8 @@ to invoke_ the feature.
 | `/btw` streaming-answer dialog                     | `plugins/btw.lua` (`smelt.ui.dialog.open` + spinner-driven content buf) | P4.e                  | working — Overlay (P1.c C.6); Esc dismisses |
 | Process picker (`/ps`)                             | `plugins/background_commands.lua`                               | P4.e                            | working |
 | History search picker (Ctrl+R)                     | `plugins/history_search.lua`                                    | P4.e                            | working |
-| Cmdline (`:` prompt) with completer                | `app/cmdline.rs` + `completer/*`                                | P4 → `widgets/cmdline.lua`      | working |
-| Notification toast                                 | `app/mod.rs` notification overlay + `smelt.notify`              | P4 overlay path landed          | working |
+| Cmdline (`:` prompt) with completer                | `core/cmdline.rs` + `completer/*`                                | P4 → `widgets/cmdline.lua`      | working |
+| Notification toast                                 | `core/mod.rs` notification overlay + `smelt.notify`              | P4 overlay path landed          | working |
 
 ## Keyboard / mouse interactions
 
@@ -166,22 +166,22 @@ to invoke_ the feature.
 | Cursor by character (Ctrl+F/B, arrows)          | `ui/window.rs`                          | P1.d                                             | working |
 | Cursor by word (Alt+F/B, Ctrl+arrows)           | `ui/window.rs`                          | P1.d                                             | working |
 | Buffer start/end (Cmd+Up/Down)                  | `ui/window.rs`                          | P1.d                                             | working |
-| Mode cycle (Shift+Tab)                          | `keymap.rs` + `app/commands.rs`         | P4.f                                             | working |
+| Mode cycle (Shift+Tab)                          | `keymap.rs` + `core/commands.rs`         | P4.f                                             | working |
 | Reasoning cycle (Ctrl+T)                        | `keymap.rs`                             | P4.f                                             | working |
 | Ghost-text accept (Tab)                         | `completer/mod.rs` + `predict.lua`      | P1.d (extmark)                                   | working |
 | Submit (Shift+Enter for multiline)              | `input/mod.rs`                          | P4 (input widget)                                | working |
-| Cancel (Ctrl+C)                                 | `app/events.rs` + `engine/cancel.rs`    | P6                                               | working |
-| Double-Esc (cancel + drain queue)               | `app/events.rs`                         | P6 (Esc chain)                                   | working |
-| Mouse wheel scroll                              | `app/mouse.rs`                          | P1/P2                                            | working |
-| Mouse click focus                               | `app/mouse.rs` + `ui::Ui::resolve_split_mouse` | P2.b (HitTarget + Host)                  | working |
-| Mouse click position cursor                     | `app/mouse.rs` + `ui/window.rs`         | P1.d                                             | working |
-| Drag-extend selection (auto-copy on release)    | `ui/window.rs` + `app/mouse.rs`         | this session                                     | working |
+| Cancel (Ctrl+C)                                 | `core/events.rs` + `engine/cancel.rs`    | P6                                               | working |
+| Double-Esc (cancel + drain queue)               | `core/events.rs`                         | P6 (Esc chain)                                   | working |
+| Mouse wheel scroll                              | `core/mouse.rs`                          | P1/P2                                            | working |
+| Mouse click focus                               | `core/mouse.rs` + `ui::Ui::resolve_split_mouse` | P2.b (HitTarget + Host)                  | working |
+| Mouse click position cursor                     | `core/mouse.rs` + `ui/window.rs`         | P1.d                                             | working |
+| Drag-extend selection (auto-copy on release)    | `ui/window.rs` + `core/mouse.rs`         | this session                                     | working |
 | Double-click WORD yank (vim W: whitespace-delimited, punctuation in) | `ui/window.rs` (`select_big_word_at_transparent`) | this session                                     | working |
 | Triple-click line yank                          | `ui/window.rs` (`select_line_at`)       | this session                                     | working |
-| Scrollbar drag                                  | `app/mouse.rs` + `content/scrollbar.rs` | P2.b (HitTarget::Scrollbar)                      | working |
-| Edge autoscroll on drag                         | `app/mouse.rs`                          | P2 (Timers)                                      | working |
-| Tab cycles focus (modal-aware)                  | `app/pane_focus.rs`                     | P1.f (`focus_next` modal-aware)                  | working |
-| Esc chain (clear sel → dismiss → cancel)        | `app/events.rs` + overlay/dialog state  | P6                                               | working |
+| Scrollbar drag                                  | `core/mouse.rs` + `ui/window.rs`         | P2.b (HitTarget::Scrollbar)                      | working |
+| Edge autoscroll on drag                         | `core/mouse.rs`                          | P2 (Timers)                                      | working |
+| Tab cycles focus (modal-aware)                  | `core/pane_focus.rs`                     | P1.f (`focus_next` modal-aware)                  | working |
+| Esc chain (clear sel → dismiss → cancel)        | `core/events.rs` + overlay/dialog state  | P6                                               | working |
 | Picker navigation (↑/↓/j/k/Ctrl+P/N, PgUp/PgDn) | `ui/picker.rs` + `option_list.rs`       | P4 (`widgets/picker.lua`, `widgets/options.lua`) | working |
 | Picker filter typing                            | `ui/picker.rs`                          | P4                                               | working |
 | Custom keymaps (Lua `smelt.keymap.set`)         | `lua/api/dispatch.rs`                   | P3.b                                             | working |
@@ -213,18 +213,18 @@ to invoke_ the feature.
 | --------------------------------------------------- | ------------------------------------------------------------------ | ----------- | ------- |
 | Auto-save every turn                                | `persist.rs` + `session.rs`                                        | P2.a        | working |
 | Resume (`-r` / `/resume`)                           | `persist.rs` + `dialogs/resume.lua`                                | P2.a + P4.d | working |
-| Session branching / fork (`/fork`)                  | `plugins/session.lua` + `app/history.rs::fork_session` | P2.a + P4.e | working |
-| Rewind to turn (`/rewind`, Esc Esc)                 | `app/history.rs` + `dialogs/rewind.lua`                            | P2.a + P4.d | working |
+| Session branching / fork (`/fork`)                  | `plugins/session.lua` + `core/history.rs::fork_session` | P2.a + P4.e | working |
+| Rewind to turn (`/rewind`, Esc Esc)                 | `core/history.rs` + `dialogs/rewind.lua`                            | P2.a + P4.d | working |
 | Conversation export (markdown → clip/file)          | `plugins/export.lua`                                               | P4.e        | working |
-| Message queuing (queue while running, pop on Enter) | `app/events.rs` + `app/working.rs`                                 | P2          | working |
+| Message queuing (queue while running, pop on Enter) | `core/events.rs` + `core/working.rs`                                 | P2          | working |
 | Per-workspace permissions                           | `engine/permissions/workspace.rs` + `tui/permissions/store.rs` | P5.c        | working |
 | Session-scoped permissions                          | `engine/permissions/approvals.rs`                                  | P5.c        | working |
 | Last-model cache                                    | `state.rs` + cache                                                 | P2.a        | working |
 | XDG dir support                                     | `engine/paths.rs`                                                  | n/a         | working |
 | OAuth keyring                                       | `engine/auth.rs` + `provider/auth_storage.rs`                      | n/a         | working |
 | Sleep inhibit during long turns                     | `sleep_inhibit.rs`                                                 | P2          | working |
-| Terminal focus tracking (term_focused)              | `app/events.rs`                                                    | P2          | working |
-| Graceful shutdown (Shutdown event)                  | `engine/agent.rs` + `app/events.rs`                                | P2.d        | working |
+| Terminal focus tracking (term_focused)              | `core/events.rs`                                                    | P2          | working |
+| Graceful shutdown (Shutdown event)                  | `engine/agent.rs` + `core/events.rs`                                | P2.d        | working |
 
 ## Plugin / scripting surface
 
@@ -234,8 +234,8 @@ to invoke_ the feature.
 | `smelt.cmd.register`                                    | `cmd.lua` + `lua/api/cmd.rs`        | P3.b → `lua/api/cmd.rs`                    | working        |
 | `smelt.cmd.picker`                                      | `cmd.lua`                           | P3.b                                       | working        |
 | `smelt.tools.register`                                  | `lua/tasks.rs` (PluginToolEnv)      | P3.b → `lua/api/tools.rs`                  | working        |
-| `smelt.au.on` / `smelt.au.fire` namespace               | `lua/api/au.rs` + `app/cells.rs` | P2.a.4b (landed; thin alias over `Cells::{subscribe_kind, set_dyn}`); P2.a.9 made it the only event-subscribe surface (the legacy `smelt.on` retired with the parallel autocmd registry) | working |
-| Built-in event cells: `turn_start`, `turn_end`, `tool_start`, `tool_end`, `block_done`, `cmd_pre`, `cmd_post`, `session_started`, `session_ended`, `input_submit`, `shutdown`, `confirm_requested`, `confirm_resolved`, `turn_complete`, `turn_error`, `history`; stateful: `agent_mode`, `vim_mode`, `model`, `reasoning`, `confirms_pending`, `tokens_used`, `errors`, `cwd`, `session_title`, `branch`, `now`, `spinner_frame` | `app/cells.rs::build_with_builtins` | P2.a.9 (autocmd registry collapsed into cells; mode_change / model_change fold into `agent_mode` / `model` whose payload is the new value) | working |
+| `smelt.au.on` / `smelt.au.fire` namespace               | `lua/api/au.rs` + `core/cells.rs` | P2.a.4b (landed; thin alias over `Cells::{subscribe_kind, set_dyn}`); P2.a.9 made it the only event-subscribe surface (the legacy `smelt.on` retired with the parallel autocmd registry) | working |
+| Built-in event cells: `turn_start`, `turn_end`, `tool_start`, `tool_end`, `block_done`, `cmd_pre`, `cmd_post`, `session_started`, `session_ended`, `input_submit`, `shutdown`, `confirm_requested`, `confirm_resolved`, `turn_complete`, `turn_error`, `history`; stateful: `agent_mode`, `vim_mode`, `model`, `reasoning`, `confirms_pending`, `tokens_used`, `errors`, `cwd`, `session_title`, `branch`, `now`, `spinner_frame` | `core/cells.rs::build_with_builtins` | P2.a.9 (autocmd registry collapsed into cells; mode_change / model_change fold into `agent_mode` / `model` whose payload is the new value) | working |
 | `smelt.keymap.set`                                      | `lua/api/keymap.rs`                 | P3.b                                       | working        |
 | `smelt.keymap.help`                                     | `plugins/help.lua` reads            | P3.b                                       | working        |
 | `smelt.spawn` (async task)                              | `_bootstrap.lua` + `lua/task.rs`    | P2                                         | working        |
@@ -264,27 +264,27 @@ to invoke_ the feature.
 | `smelt.buf.*` (create/lines/text/extmark)               | `lua/api/buf.rs`                    | P3.b → `lua/api/buf.rs` (extmarks!)        | working        |
 | `smelt.win.*`                                           | `lua/api/win.rs`                    | P3.b → `lua/api/win.rs`                    | working        |
 | `smelt.statusline.{register,unregister,snapshot}`       | `lua/api/statusline.rs`             | P4.c (composer fully Lua)                  | working        |
-| `smelt.cell.new/get/set/subscribe`                      | `lua/api/cell.rs` + `app/cells.rs` | P2.a.4b (landed; `smelt.cell(name)` handle + `:glob_subscribe` shipped); a.4c migrates built-ins | working |
+| `smelt.cell.new/get/set/subscribe`                      | `lua/api/cell.rs` + `core/cells.rs` | P2.a.4b (landed; `smelt.cell(name)` handle + `:glob_subscribe` shipped); a.4c migrates built-ins | working |
 | `smelt.defer(ms, fn)` (one-shot timer)                  | `lua/api/timer.rs`                 | thin alias over `smelt.timer.set`          | working        |
-| `smelt.timer.set/every/cancel` namespace                | `lua/api/timer.rs` + `app/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |
+| `smelt.timer.set/every/cancel` namespace                | `lua/api/timer.rs` + `core/timers.rs` | P2.a.5 (landed; cancellable handles)   | working        |
 | `smelt.path` (`normalize / canonical / relative / expand / join / parent / basename / extension / is_absolute`) | `lua/api/path.rs` + `tui/path.rs` | P3.a + P3.c (landed `de7fb87`) | working |
 | `smelt.fs` (`read / write / exists / is_file / is_dir / read_dir / mkdir{_all} / remove_* / rename / copy / mtime / size / glob`) | `lua/api/fs.rs` + `tui/fs.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.os` (`getenv / setenv / unsetenv / platform / arch / tempdir / home / cwd / set_cwd / pid`) | `lua/api/os.rs` | P3.c (landed this session) | working |
 | `smelt.grep` (`run(pattern, path, opts)` over ripgrep — content / files_with_matches / count modes; case / multiline / context / glob / type / timeout) | `lua/api/grep.rs` + `tui/grep.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.http` (`get / post / random_user_agent / cache.{get,put}` over `reqwest::blocking` — timeout / max_redirects / headers; returns `{ status, final_url, headers, body }`) | `lua/api/http.rs` + `tui/http.rs` + `tui/http/cache.rs` | P3.a + P3.c + P5.b (POST + UA rotator + cache) | working |
 | `smelt.html` (`title / links / to_text / to_markdown / parse_ddg_results` over `scraper`) | `lua/api/html.rs` + `tui/html.rs` | P3.a + P3.c + P5.b (DDG parser + `to_markdown`) | working |
-| `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `app::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
-| `smelt.notebook.parse` (Jupyter `.ipynb` parse over `app::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.process.run` (`run(cmd, args, opts)` short-lived spawn over `core::process` — cwd / env / stdin / timeout) | `lua/api/process.rs` + `tui/process.rs` | P3.a + P3.c (landed this session) | working |
+| `smelt.notebook.parse` (Jupyter `.ipynb` parse over `core::notebook`) | `lua/api/notebook.rs` + `tui/notebook.rs` | P3.a + P3.c (landed this session) | working |
 | `smelt.parse.frontmatter` (YAML frontmatter splitter)   | `lua/api/parse.rs`                  | P3.c/P4.e (custom-commands plugin)         | working        |
 
 ## Headless / non-TUI modes
 
 | Feature                                         | Source today                           | Restored by            | Status  |
 | ----------------------------------------------- | -------------------------------------- | ---------------------- | ------- |
-| Headless run (`--headless`)                     | `app/headless.rs` + `src/main.rs`      | P2 (no-Ui coordinator) | working |
+| Headless run (`--headless`)                     | `core/headless.rs` + `src/main.rs`      | P2 (no-Ui coordinator) | working |
 | Inline message arg (auto-submit)                | `src/main.rs::message: Option<String>` | n/a                    | working |
-| Text output (final on stdout, tools on stderr)  | `app/headless.rs`                      | P2                     | working |
-| JSON output (`--format json` JSONL events)      | `app/headless.rs`                      | P2                     | working |
+| Text output (final on stdout, tools on stderr)  | `core/headless.rs`                      | P2                     | working |
+| JSON output (`--format json` JSONL events)      | `core/headless.rs`                      | P2                     | working |
 | Verbose tool output (`-v`)                      | `src/main.rs`                          | n/a                    | working |
 | Subagent mode (`--subagent`) | `src/main.rs` + `engine/socket.rs`     | Removed in P5.c | deleted |
 
@@ -310,7 +310,7 @@ to invoke_ the feature.
 | Config: theme           | `accent` (preset or 0-255)                                                                                                                 | config + `theme.rs`                       | P1.0        | working |
 | Config: mcp             | `command`, `env`, `timeout`, `enabled`                                                                                                     | `tui::mcp/` + `lua/api/mcp.rs`            | P5.c/P5.d   | working |
 | Config: skills          | `paths`                                                                                                                                    | `engine/skills.rs`                        | n/a         | working |
-| Config: permissions     | per-tool/per-mode allow/ask/deny                                                                                                           | `tui::permissions/`                       | P5.c        | working |
+| Config: permissions     | per-tool/per-mode allow/ask/deny                                                                                                           | `core::permissions/`                       | P5.c        | working |
 | Config: model sampling overrides | `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty` | `protocol/usage.rs::ModelConfigOverrides` | n/a | working |
 | Config: model `tool_calling` flag | per-model toggle for native tool-calling | `protocol/usage.rs::ModelConfig` (not in `ModelConfigOverrides`) | n/a | working |
 | Config: model `pricing` overrides | per-model input/output token costs | `engine/pricing.rs::ModelPricing` (resolved at config load) | n/a | working |
