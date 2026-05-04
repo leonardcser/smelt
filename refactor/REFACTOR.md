@@ -295,8 +295,11 @@ Implementation order: a → b → c → d → e → f → g.
 - **P9.a** ✅ — Well-known window IDs moved from `ui` to `app`;
   `win_open_split` collision-tolerant; `prompt_data.rs` renamed to
   `prompt_buf.rs`.
-- **P9.b** ⏸ — Transcript pipeline migration (deferred; keystone sub-task,
-  unblocks c–e).
+- **P9.b** 🚧 — Transcript pipeline migration (in progress).
+  Persisted cache layer (`transcript_cache.rs`) deleted; `ToolOutputRenderCache`
+  relocated to `tool_output_cache.rs`. Remaining: move renderers from `core`
+  to `tui` as `BufferParser` impls, delete `SpanCollector`/`DisplayBlock`,
+  shrink `transcript_buf.rs` to thin composition.
 - **P9.c** ⏸ — Unify prompt wrapping via `BufferParser` (gated on P9.b).
 - **P9.d** ⏸ — Unify copy / yank / clipboard paths (gated on P9.b + P9.c).
 - **P9.e** ⏸ — Naming consistency (`prompt_data.rs` rename already done in P9.a).

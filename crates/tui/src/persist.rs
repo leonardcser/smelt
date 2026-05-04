@@ -12,7 +12,6 @@
 //! fork, shutdown) call [`Persister::flush`] to drain the queue first.
 
 use smelt_core::session::{self, Session};
-use smelt_core::transcript_cache::{PersistedLayoutCache, RenderCache};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -26,8 +25,6 @@ pub(crate) struct Blob {
 pub(crate) struct PersistRequest {
     pub(crate) session: Session,
     pub(crate) blobs: Vec<Blob>,
-    pub(crate) render_cache: Option<RenderCache>,
-    pub(crate) layout_cache: Option<PersistedLayoutCache>,
 }
 
 enum Cmd {
@@ -124,12 +121,6 @@ fn write(req: &PersistRequest) {
     let blob_dir = session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs);
     session::save_with_blobs(&req.session, &url_to_blob);
-    if let Some(cache) = &req.render_cache {
-        session::save_render_cache(&req.session, cache);
-    }
-    if let Some(cache) = &req.layout_cache {
-        session::save_layout_cache(&req.session, cache);
-    }
 }
 
 fn write_blobs(

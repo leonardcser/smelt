@@ -5,7 +5,7 @@
 use crate::app::TuiApp;
 use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_and_locate_cursor;
-use smelt_core::transcript_cache::{PersistedLayoutCache, RenderCache};
+
 use smelt_core::transcript_model::{
     Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
@@ -343,123 +343,6 @@ impl TuiApp {
     pub(crate) fn clear_transcript(&mut self) {
         self.transcript.history.clear();
         self.parser.clear();
-    }
-
-    pub(crate) fn export_render_cache(&self) -> Option<RenderCache> {
-        let mut cache = RenderCache::new(String::new());
-        for id in &self.transcript.history.order {
-            if let Some(Block::ToolCall { call_id, .. }) = self.transcript.history.blocks.get(id) {
-                if let Some(state) = self.transcript.history.tool_states.get(call_id) {
-                    if let Some(out) = state.output.as_deref() {
-                        if let Some(ir) = &out.render_cache {
-                            cache.insert_tool_output(call_id.clone(), ir.clone());
-                        }
-                    }
-                }
-            }
-        }
-        if cache.tool_outputs.is_empty() {
-            None
-        } else {
-            Some(cache)
-        }
-    }
-
-    pub(crate) fn layout_cache_dirty(&self) -> bool {
-        self.transcript.history.cache_dirty
-    }
-
-    pub(crate) fn export_layout_cache(&mut self) -> Option<PersistedLayoutCache> {
-        if self.transcript.history.is_empty() {
-            return None;
-        }
-        let mut cache = PersistedLayoutCache::new(self.ui.theme().is_light());
-        for id in &self.transcript.history.order {
-            let Some(block) = self.transcript.history.blocks.get(id) else {
-                continue;
-            };
-            let persist = match block {
-                Block::ToolCall { call_id, .. } => self
-                    .transcript
-                    .history
-                    .tool_states
-                    .get(call_id)
-                    .map(|s| s.is_terminal())
-                    .unwrap_or(false),
-                _ => true,
-            };
-            if !persist {
-                continue;
-            }
-            let hash = self.transcript.history.content_hash(*id);
-            if cache.blocks.contains_key(&hash) {
-                continue;
-            }
-            if let Some(artifact) = self.transcript.history.artifacts.get(id) {
-                if !artifact.is_empty() {
-                    cache.blocks.insert(hash, artifact.clone());
-                }
-            }
-        }
-        self.transcript.history.cache_dirty = false;
-        if cache.blocks.is_empty() {
-            return None;
-        }
-        smelt_core::perf::record_value("layout_cache:artifacts", cache.blocks.len() as u64);
-        let total_layouts: usize = cache.blocks.values().map(|a| a.layouts.len()).sum();
-        smelt_core::perf::record_value("layout_cache:layouts", total_layouts as u64);
-        Some(cache)
-    }
-
-    pub(crate) fn import_layout_cache(&mut self, cache: PersistedLayoutCache) {
-        if !cache.is_compatible(self.ui.theme().is_light()) {
-            return;
-        }
-        let nw = self.ui.terminal_size().0;
-        let mut by_hash: HashMap<u64, BlockId> = HashMap::new();
-        for id in &self.transcript.history.order {
-            let hash = self.transcript.history.content_hash(*id);
-            by_hash.entry(hash).or_insert(*id);
-        }
-        for (hash, mut artifact) in cache.blocks {
-            let Some(id) = by_hash.get(&hash).copied() else {
-                continue;
-            };
-            let Some(block) = self.transcript.history.blocks.get(&id) else {
-                continue;
-            };
-            let allow = match block {
-                Block::ToolCall { call_id, .. } => self
-                    .transcript
-                    .history
-                    .tool_states
-                    .get(call_id)
-                    .map(|s| s.is_terminal())
-                    .unwrap_or(false),
-                _ => true,
-            };
-            if !allow {
-                continue;
-            }
-            artifact
-                .layouts
-                .retain(|(k, b)| k.width == nw || b.is_valid_at(nw));
-            if artifact.is_empty() {
-                continue;
-            }
-            self.transcript
-                .history
-                .artifacts
-                .entry(id)
-                .and_modify(|a| {
-                    for (k, b) in &artifact.layouts {
-                        a.insert(*k, b.clone());
-                    }
-                })
-                .or_insert(artifact);
-        }
-        self.transcript.history.cache_width = nw as usize;
-        self.transcript.history.cache_dirty = false;
     }
 
     pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
