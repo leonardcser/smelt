@@ -26,84 +26,18 @@ file fates (`INVENTORY.md`), parity (`FEATURES.md`), test strategy
      defer the dependent sub-phases. Move on to independent ones in the
      phase (or earlier in the next phase if nothing in the active phase is
      unblocked). Record the open question in `P<n>.md` "Open questions"
-     so the user can resolve it later. Do not block the loop on it.
+     so the user can resolve it later. Do not block on it.
 
 ## Granularity
 
-**Sub-phase is the planning unit; the session is the execution unit.**
-A session lands **multiple** consecutive sub-phases — three to five
-is typical, one is a failure mode. Don't split one across sessions,
-don't merge two into a single commit, don't swallow whole phases in
-one go.
-
-**Don't pre-split.** Attempt the sub-phase as written. Only split it
-*mid-attempt*, after you've already landed the part that fits
-(`C.8` → `C.8a` / `C.8b`, land `C.8a`, continue with the next
-independent sub-phase). Splitting before writing any code — the
-single most common micro-session anti-pattern — turns the session
-into a planning exercise that produces a docs-only commit and exits.
-If the listed scope looks big, that's the session's work, not a
-signal to subdivide.
-
-**Cap nesting at 3 levels.** `P2.b.4c` is the floor. A fourth level
-(`P2.b.4c.5b`) means the splitter is running away — land the work
-instead of subdividing further.
-
-**Bundle adjacent sub-phases that share seams.** If the next
-sub-phase touches the same files, types, or borrow shapes as the
-one you just landed, do them together. The sub-phase ID is a label;
-the commit boundary is yours to choose.
+Sub-phase is the planning unit. Don't pre-split: attempt the sub-phase as
+written. Cap nesting at 3 levels (`P2.b.4c` is the floor).
 
 ## Greenness
 
-- **Each sub-phase + its docs commit must end green.** Intermediate
-  commits within a sub-phase can be red.
-- **Red commits inside a session are encouraged when they avoid scaffolding.**
-  If a final-shape commit can only land by leaving the tree red until the
-  next commit lands the matching change, do that. The alternative — migration
-  shims, parallel "kept for now" implementations, "removed in next commit"
-  comments — is exactly the noise this refactor exists to delete.
-- **No throwaway scaffolding.** When a step rewrites a thing, the old thing
-  goes in the same sub-phase.
-
-## Stopping rule
-
-After a sub-phase lands green (HEAD, `cargo nextest`, `refactor/check.sh`,
-`P<n>.md`, `REFACTOR.md` all in sync), **the default is to continue.**
-Check the next un-landed sub-phase:
-
-1. **Independent and unblocked** — keep going. This is the common
-   case; expect to hit it 2-4 times per session.
-2. **Active phase closes** — exit; the next session opens `P<n+1>`.
-3. **Needs a decision you don't have** — defer dependents, log the
-   question in `P<n>.md`, then **look earlier in the phase or one
-   phase back for independent work**. Only exit when nothing in any
-   open phase is unblocked.
-
-A session that lands one sub-phase and exits on case 3 without
-checking for independent work elsewhere is the failure mode this
-rule is shaped against.
-
-Hard stops (exit immediately, regardless of remaining work):
-
-- **Real external blocker** — missing credentials, broken environment,
-  action that genuinely requires the user (e.g. interactive
-  `gh auth login`). Record in `P<n>.md` "Open questions" and exit.
-- **Two consecutive failed attempts** to land a sub-phase. Exit, human
-  looks.
-
-**Don't commit deferrals as standalone work.** "Recording a design
-question" is one bullet in `P<n>.md` "Open questions" — bundle it
-into the next real commit, never its own `docs(refactor): record <X>`
-commit. If the only thing your session produced is a deferral commit,
-you've exited too early; go back to step 1.
-
-**Ambiguity is not a stop reason** — see "The plan is not final" above. A
-clear better option means you pick it; a rippling unresolved decision means
-you defer the dependent sub-phases and move on to independent ones.
-
-Do **not** stop just because a single commit landed — keep going within
-the sub-phase, and keep going across sub-phases when the next is unblocked.
+- Each sub-phase must end green.
+- No throwaway scaffolding. When a step rewrites a thing, the old thing goes
+  in the same sub-phase.
 
 ## Code stays phase-agnostic
 
@@ -135,10 +69,10 @@ need attention.
 A phase isn't landed until `P<n>.md` is written and companion files reflect
 what happened.
 
-**Commit docs with the code, not separately.** The commit message carries
-the detail. Only split docs into their own commit when the docs change is
-large enough to stand alone (e.g. FEATURES.md refresh after multiple
-features land together). Never produce a `docs(refactor): record <X>`
+**Only commit when the user gives you the green flag.** Bundle docs with the
+code they describe in the same commit. Only split docs into their own commit
+when the docs change is large enough to stand alone (e.g. FEATURES.md refresh
+after multiple features land together). Never produce a `docs(refactor): record <X>`
 commit whose entire diff is one bullet in `P<n>.md`.
 
 ## Verify when it makes sense
@@ -167,8 +101,9 @@ commit whose entire diff is one bullet in `P<n>.md`.
 | `TRACE.md`                        | One vertical slice end-to-end through target.    |
 | `TESTING.md`                      | Three-layer testing strategy.                    |
 | `check.sh`                        | Drift-detection invariants.                      |
-| `PROMPT.md`                       | RALPH loop entry prompt — what each session does.|
-| `ralph.sh`                        | RALPH loop driver. Spawns a tmux window running `claude -p` per iteration. |
+| `PROMPT.md`                       | Agent session entry prompt — orient, land one sub-phase. |
+| `PROMPT_RALPH.md`                 | Legacy RALPH self-driving loop prompt (multi-sub-phase, auto-commit). |
+| `ralph.sh`                        | Legacy loop driver. Spawns a tmux window running `claude -p` per iteration. |
 | `hooks/post_doc_edit.sh`          | PostToolUse hook. Yells when a `refactor/*.md` file exceeds its line cap. |
 | `hooks/stop_gate.sh`              | Stop hook. Blocks "done" if `refactor/check.sh` is red. |
 
@@ -182,8 +117,9 @@ commit whose entire diff is one bullet in `P<n>.md`.
 ## Decisions made
 
 One bullet per non-obvious choice: `**<title>** (\`<sha>\`) — <one line>.`
-If you'd re-litigate this in `P<n+2>`, write it down here. The body of
-the reasoning lives in the commit message, not here.
+Omit the sha if the commit hasn't landed yet. If you'd re-litigate this in
+`P<n+2>`, write it down here. The body of the reasoning lives in the commit
+message, not here.
 
 ## Deferrals
 
