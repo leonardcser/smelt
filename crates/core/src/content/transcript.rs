@@ -198,6 +198,12 @@ pub struct Transcript {
     cached_snapshot: Option<TranscriptSnapshot>,
 }
 
+impl Default for Transcript {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transcript {
     pub fn new() -> Self {
         Self {

@@ -348,7 +348,7 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
       focus(win: WinId)
       buf_create / buf_mut
       win_open / win_close / win_mut
-      overlay_open / overlay_close
+      overlay_open
       ' viewport_for / rows_for /
       ' breaks_for are transitional
       ' escape hatches while prompt /

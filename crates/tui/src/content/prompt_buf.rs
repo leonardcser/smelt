@@ -1030,7 +1030,7 @@ mod tests {
             },
         };
         let mut input_buf = Buffer::new(
-            crate::ui::BufId(0),
+            crate::app::PROMPT_EDIT_BUF,
             crate::ui::buffer::BufCreateOpts::default(),
         );
         let output = compute_prompt(&mut prompt_input, &mut input_buf, &test_theme());

@@ -23,6 +23,8 @@
 //!   errors append to `lua_errors` and the app surfaces the first as a
 //!   notification on the next tick.
 
+#![allow(clippy::arc_with_non_send_sync)]
+
 mod api;
 pub(crate) mod app_ref;
 mod tasks;

@@ -2,7 +2,7 @@
 //! compositor layers and syncs the prompt-docked completer overlay.
 
 use crate::app::TuiApp;
-use crate::content::{layout, prompt_data};
+use crate::content::{layout, prompt_buf};
 
 impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
@@ -241,7 +241,7 @@ impl TuiApp {
             .as_ref()
             .map(|c| (c.col, c.row))
             .unwrap_or((0, 0));
-        if let Some(win) = self.ui.win_mut(crate::ui::TRANSCRIPT_WIN) {
+        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
             win.cursor_col = cur_col;
             win.cursor_line = cur_line;
             win.scroll_top = tdata.clamped_scroll;
@@ -261,7 +261,7 @@ impl TuiApp {
         queued: &[String],
         has_prompt_cursor: bool,
     ) {
-        let bar_info = prompt_data::BarInfo {
+        let bar_info = prompt_buf::BarInfo {
             model_label: Some(self.core.config.model.clone()),
             reasoning_effort: self.core.config.reasoning_effort,
             show_tokens: self.core.config.settings.show_tokens,
@@ -272,7 +272,7 @@ impl TuiApp {
         };
 
         let prompt_output = {
-            let mut prompt_input = prompt_data::PromptInput {
+            let mut prompt_input = prompt_buf::PromptInput {
                 queued,
                 stash: &self.input.stash,
                 input: &self.input,
@@ -288,7 +288,7 @@ impl TuiApp {
                 .ui
                 .win_buf_mut(self.well_known.prompt)
                 .expect("prompt window must be registered at startup");
-            prompt_data::compute_prompt(&mut prompt_input, input_buf, &theme)
+            prompt_buf::compute_prompt(&mut prompt_input, input_buf, &theme)
         };
 
         let cursor = prompt_output.cursor;
@@ -343,7 +343,7 @@ impl TuiApp {
             (None, _) => {}
         }
         let (cur_col, cur_line) = cursor.unwrap_or((0, 0));
-        if let Some(win) = self.ui.win_mut(crate::ui::PROMPT_WIN) {
+        if let Some(win) = self.ui.win_mut(crate::app::PROMPT_WIN) {
             win.cursor_col = cur_col;
             win.cursor_line = cur_line;
             win.viewport = prompt_viewport;
@@ -358,10 +358,10 @@ impl TuiApp {
         if self.ui.focused_overlay().is_none() {
             match self.app_focus {
                 crate::app::AppFocus::Prompt => {
-                    self.ui.set_focus(crate::ui::PROMPT_WIN);
+                    self.ui.set_focus(crate::app::PROMPT_WIN);
                 }
                 crate::app::AppFocus::Content => {
-                    self.ui.set_focus(crate::ui::TRANSCRIPT_WIN);
+                    self.ui.set_focus(crate::app::TRANSCRIPT_WIN);
                 }
             }
         }

@@ -40,7 +40,7 @@ impl TuiApp {
                 lua.queue_invocation(handle, win, payload);
             };
         self.ui.fire_win_event(
-            crate::ui::PROMPT_WIN,
+            crate::app::PROMPT_WIN,
             crate::ui::WinEvent::TextChanged,
             crate::ui::Payload::Text {
                 content: current_text,

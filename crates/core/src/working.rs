@@ -344,7 +344,7 @@ impl WorkingState {
 
 /// A single item in the throbber row.  Colours are applied by the tui
 /// composer because `core` must not depend on crossterm.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ThrobberItem {
     pub text: String,
     pub bold: bool,
@@ -353,18 +353,6 @@ pub struct ThrobberItem {
     /// When true the tui composer paints this item with the muted theme
     /// colour; when false it uses the default (Reset) colour.
     pub is_muted: bool,
-}
-
-impl Default for ThrobberItem {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            bold: false,
-            dim: false,
-            priority: 0,
-            is_muted: false,
-        }
-    }
 }
 
 fn avg(samples: &[f64]) -> Option<f64> {
