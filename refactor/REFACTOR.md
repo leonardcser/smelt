@@ -296,8 +296,8 @@ Implementation order: a → b → c → d → e → f → g.
   `win_open_split` collision-tolerant; `prompt_data.rs` renamed to
   `prompt_buf.rs`.
 - **P9.b** 🚧 — Transcript pipeline migration (in progress).
-  Persisted cache layer (`transcript_cache.rs`) deleted; `ToolOutputRenderCache`
-  relocated to `tool_output_cache.rs`. Remaining: move renderers from `core`
+  Persisted cache layer (`transcript_cache.rs`) deleted; tool rendering moved
+  to Lua `render` hook with `RenderCtx`. Remaining: move renderers from `core`
   to `tui` as `BufferParser` impls, delete `SpanCollector`/`DisplayBlock`,
   shrink `transcript_buf.rs` to thin composition.
 - **P9.c** ⏸ — Unify prompt wrapping via `BufferParser` (gated on P9.b).

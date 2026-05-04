@@ -88,6 +88,18 @@ smelt.tools.register({
   needs_confirm = function(args)
     return smelt.path.display(args.file_path or "")
   end,
+  render = function(args, output, width, ctx)
+    local content = output.content or ""
+    local n = 0
+    if content ~= "" then
+      local _, newlines = content:gsub("\n", "\n")
+      n = newlines
+      if content:sub(-1) ~= "\n" then
+        n = n + 1
+      end
+    end
+    ctx:text(n .. " lines")
+  end,
   execute = function(args)
     local path = args.file_path or ""
     if path == "" then

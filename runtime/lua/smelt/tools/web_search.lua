@@ -29,6 +29,9 @@ smelt.tools.register({
   needs_confirm = function(args)
     return args.query or ""
   end,
+  render = function(args, output, width, ctx)
+    ctx:text(output.content, output.is_error)
+  end,
   execute = function(args)
     local query = args.query or ""
     if query == "" then

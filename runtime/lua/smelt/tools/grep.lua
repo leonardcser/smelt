@@ -139,6 +139,18 @@ smelt.tools.register({
     if path == "" then return pattern end
     return pattern .. " in " .. path
   end,
+  render = function(args, output, width, ctx)
+    local content = output.content or ""
+    local n = 0
+    if content ~= "" then
+      local _, newlines = content:gsub("\n", "\n")
+      n = newlines
+      if content:sub(-1) ~= "\n" then
+        n = n + 1
+      end
+    end
+    ctx:text(n .. " matches")
+  end,
   execute = function(args)
     local offset = pick_int(args.offset, 0)
     local head_limit = pick_int(args.head_limit, 0)

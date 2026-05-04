@@ -52,6 +52,18 @@ smelt.tools.register({
     end
     return smelt.fs.file_state.staleness_error(path, "notebook")
   end,
+  render = function(args, output, width, ctx)
+    if output.is_error then
+      ctx:text(output.content, true)
+      return
+    end
+    local meta = output.metadata or {}
+    if meta.edit_mode == "insert" then
+      ctx:file(meta.new_source or "", (meta.path or "") .. ".py")
+    else
+      ctx:diff(meta.old_source or "", meta.new_source or "", meta.path or "")
+    end
+  end,
   execute = function(args)
     local path = args.notebook_path or ""
     if path == "" then

@@ -114,7 +114,6 @@ impl TuiApp {
                 pending.push(PendingTool {
                     call_id,
                     name: tool_name,
-                    args,
                 });
                 SessionControl::Continue
             }
@@ -135,19 +134,10 @@ impl TuiApp {
                         } else {
                             ToolStatus::Ok
                         };
-                        let render_cache =
-                            smelt_core::tool_output_cache::build_tool_output_render_cache(
-                                &removed.name,
-                                &removed.args,
-                                &result.content,
-                                result.is_error,
-                                result.metadata.as_ref(),
-                            );
                         let output = Some(Box::new(ToolOutput {
                             content: result.content,
                             is_error: result.is_error,
                             metadata: result.metadata,
-                            render_cache,
                         }));
                         let elapsed = elapsed_ms.map(Duration::from_millis);
                         self.finish_tool(&call_id, status, output, elapsed);
