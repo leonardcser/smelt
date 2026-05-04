@@ -35,6 +35,7 @@ impl TuiApp {
                     bold: span.style.bold,
                     dim: span.style.dim,
                     italic: span.style.italic,
+                    ..Default::default()
                 };
                 buf.add_highlight(0, span.col_start, span.col_end, style);
             }

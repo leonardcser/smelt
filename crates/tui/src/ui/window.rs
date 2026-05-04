@@ -1191,8 +1191,8 @@ fn merge_span_style(base: Style, span: &crate::ui::buffer::SpanStyle) -> Style {
         bold: base.bold || span.bold,
         dim: base.dim || span.dim,
         italic: base.italic || span.italic,
-        underline: base.underline,
-        crossedout: base.crossedout,
+        underline: base.underline || span.underline,
+        crossedout: base.crossedout || span.crossedout,
     }
 }
 

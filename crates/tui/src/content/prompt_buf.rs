@@ -4,7 +4,7 @@ use super::selection::{
 };
 use super::status::BarSpan;
 use crate::input::PromptState;
-use crate::ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, SpanStyle};
+use crate::ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload};
 use crate::ui::grid::Style;
 
 use crossterm::style::Color;
@@ -134,7 +134,7 @@ pub(crate) fn compute_prompt(
     // ── Compose unified buffer (chrome + input slice + bottom bar) ──
     let mut all_lines: Vec<String> =
         Vec::with_capacity(chrome_rows.len() + input_area.lines.len() + 1);
-    let mut all_highlights: Vec<(usize, u16, u16, SpanStyle)> = Vec::new();
+    let mut all_highlights: Vec<(usize, u16, u16, Style)> = Vec::new();
 
     for (i, row) in chrome_rows.iter().enumerate() {
         let (text, hls) = window_row_to_buffer_line(row);
@@ -148,7 +148,7 @@ pub(crate) fn compute_prompt(
         all_lines.push(line.clone());
     }
     for &(rel_li, s, e, ref style) in &input_area.highlights {
-        all_highlights.push((input_offset + rel_li, s, e, style.clone()));
+        all_highlights.push((input_offset + rel_li, s, e, *style));
     }
     let bottom_idx = all_lines.len();
     let (bb_text, bb_hls) = window_row_to_buffer_line(&bottom_bar);
@@ -212,7 +212,7 @@ pub(crate) fn compute_prompt(
 /// their text to the line but no highlight extmark — `Window::render`
 /// paints those cells with the row's base style. Mirrors the
 /// non-overlapping-spans pattern the status line uses.
-fn window_row_to_buffer_line(row: &WindowRow) -> (String, Vec<(u16, u16, SpanStyle)>) {
+fn window_row_to_buffer_line(row: &WindowRow) -> (String, Vec<(u16, u16, Style)>) {
     let mut text = String::new();
     let mut highlights = Vec::new();
     let mut col: u16 = 0;
@@ -223,7 +223,7 @@ fn window_row_to_buffer_line(row: &WindowRow) -> (String, Vec<(u16, u16, SpanSty
             col = col.saturating_add(1);
         }
         if col > start && seg.style != Style::default() {
-            highlights.push((start, col, span_style(seg.style)));
+            highlights.push((start, col, seg.style));
         }
     }
     (text, highlights)
@@ -571,7 +571,7 @@ struct InputArea {
     /// `(visible_line_idx, col_start, col_end, style)` for each
     /// styled span over the visible slice. Indices are
     /// 0-relative to `lines`; the caller adds the chrome offset.
-    highlights: Vec<(usize, u16, u16, SpanStyle)>,
+    highlights: Vec<(usize, u16, u16, Style)>,
     cursor_pos: Option<(u16, u16)>,
     cursor_style: Option<(Style, char)>,
     scroll_offset: usize,
@@ -644,7 +644,7 @@ fn compute_input_area(
 
     let mut cursor_pos: Option<(u16, u16)> = None;
     let mut cursor_style_out: Option<(Style, char)> = None;
-    let mut highlights: Vec<(usize, u16, u16, SpanStyle)> = Vec::new();
+    let mut highlights: Vec<(usize, u16, u16, Style)> = Vec::new();
 
     let mut lines: Vec<String> = visual_lines
         .iter()
@@ -742,7 +742,7 @@ fn compute_input_area(
 /// `add_segments_to_buffer`'s 1-column leading offset (the input
 /// area's lines start with a literal space).
 fn push_segment_highlights(
-    out: &mut Vec<(usize, u16, u16, SpanStyle)>,
+    out: &mut Vec<(usize, u16, u16, Style)>,
     line_idx: usize,
     segments: &[StyledSegment],
 ) {
@@ -752,20 +752,10 @@ fn push_segment_highlights(
         if len > 0 {
             let end = col + len;
             if seg.style != Style::default() {
-                out.push((line_idx, col, end, span_style(seg.style)));
+                out.push((line_idx, col, end, seg.style));
             }
             col = end;
         }
-    }
-}
-
-fn span_style(style: Style) -> SpanStyle {
-    SpanStyle {
-        fg: style.fg,
-        bg: style.bg,
-        bold: style.bold,
-        dim: style.dim,
-        italic: style.italic,
     }
 }
 

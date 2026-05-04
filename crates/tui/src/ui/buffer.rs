@@ -74,44 +74,7 @@ pub struct LineDecoration {
     pub source_text: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SpanStyle {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-}
-
-impl SpanStyle {
-    pub fn fg(color: Color) -> Self {
-        Self {
-            fg: Some(color),
-            ..Default::default()
-        }
-    }
-
-    pub fn dim() -> Self {
-        Self {
-            dim: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn bold() -> Self {
-        Self {
-            bold: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn bg(color: Color) -> Self {
-        Self {
-            bg: Some(color),
-            ..Default::default()
-        }
-    }
-}
+pub type SpanStyle = super::grid::Style;
 
 /// Materialized highlight span for one line. Derived on demand from
 /// extmarks in `NS_HIGHLIGHTS` (or any namespace whose payload is
@@ -543,7 +506,7 @@ impl Buffer {
                     out.push(Span {
                         col_start: mark.start_col as u16,
                         col_end: mark.end_col as u16,
-                        style: style.clone(),
+                        style: *style,
                         meta: meta.clone(),
                     });
                 }

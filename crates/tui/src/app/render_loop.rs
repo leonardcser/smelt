@@ -198,7 +198,7 @@ impl TuiApp {
                     *col_start as usize,
                     crate::ui::buffer::ExtmarkOpts::highlight(
                         *col_end as usize,
-                        visual_span.clone(),
+                        visual_span,
                         crate::ui::buffer::SpanMeta::default(),
                     ),
                 );
