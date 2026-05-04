@@ -136,7 +136,7 @@ impl TuiApp {
                             ToolStatus::Ok
                         };
                         let render_cache =
-                            smelt_core::transcript_cache::build_tool_output_render_cache(
+                            smelt_core::tool_output_cache::build_tool_output_render_cache(
                                 &removed.name,
                                 &removed.args,
                                 &result.content,

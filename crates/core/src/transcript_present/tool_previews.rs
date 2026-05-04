@@ -18,7 +18,7 @@ pub(super) fn render_edit_output(
     let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     if new.is_empty() {
         print_dim_count(out, old.lines().count(), "line deleted", "lines deleted")
-    } else if let Some(crate::transcript_cache::ToolOutputRenderCache::InlineDiff(cache)) =
+    } else if let Some(crate::tool_output_cache::ToolOutputRenderCache::InlineDiff(cache)) =
         output.render_cache.as_ref()
     {
         print_cached_inline_diff(out, cache, 0, 0)
@@ -62,7 +62,7 @@ pub(super) fn render_notebook_output(
             0,
             0,
         );
-    } else if let Some(crate::transcript_cache::ToolOutputRenderCache::NotebookEdit(ref nb)) =
+    } else if let Some(crate::tool_output_cache::ToolOutputRenderCache::NotebookEdit(ref nb)) =
         output.render_cache
     {
         if let Some(ref cache) = nb.diff {

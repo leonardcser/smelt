@@ -250,7 +250,6 @@ impl TuiApp {
 
         let mut tool_outputs: HashMap<String, ToolOutput> = HashMap::new();
         let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
-        let render_cache = session::load_render_cache(&self.core.session);
         for msg in &self.core.session.messages {
             if matches!(msg.role, Role::Tool) {
                 if let Some(ref id) = msg.tool_call_id {
@@ -269,11 +268,6 @@ impl TuiApp {
                         },
                     );
                 }
-            }
-        }
-        if let Some(cache) = render_cache.as_ref() {
-            for (call_id, output) in &mut tool_outputs {
-                output.render_cache = cache.get_tool_output(call_id).cloned();
             }
         }
 
@@ -329,12 +323,7 @@ impl TuiApp {
                         for tc in calls {
                             let args: HashMap<String, serde_json::Value> =
                                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-                            let output = tool_outputs.get(&tc.id).cloned().map(|mut out| {
-                                out.render_cache = render_cache
-                                    .as_ref()
-                                    .and_then(|cache| cache.get_tool_output(&tc.id).cloned());
-                                out
-                            });
+                            let output = tool_outputs.get(&tc.id).cloned();
 
                             let status = if let Some(ref out) = output {
                                 if out.content.contains("denied this tool call")
@@ -378,13 +367,6 @@ impl TuiApp {
         if let Some((_, meta)) = self.core.session.turn_metas.last() {
             self.working.restore_from_turn_meta(meta);
         }
-
-        // Reattach the persisted layout cache, if any. Must happen *after*
-        // every block has been pushed so the cache vector lengths match.
-        // Per-block width validity is enforced inside `import_layout_cache`.
-        if let Some(layout_cache) = session::load_layout_cache(&self.core.session) {
-            self.import_layout_cache(layout_cache);
-        }
     }
 
     pub(crate) fn save_session(&mut self) {
@@ -393,18 +375,6 @@ impl TuiApp {
             return;
         }
         self.sync_session_snapshot();
-        // Skip persisting render/layout caches when redaction is enabled —
-        // they contain raw source text from tool output that would leak secrets.
-        let (render_cache, layout_cache) = if self.core.config.settings.redact_secrets {
-            (None, None)
-        } else {
-            (
-                self.export_render_cache(),
-                self.layout_cache_dirty()
-                    .then(|| self.export_layout_cache())
-                    .flatten(),
-            )
-        };
         let blobs = self
             .input
             .store
@@ -415,8 +385,6 @@ impl TuiApp {
         self.persister.save(crate::persist::PersistRequest {
             session: self.core.session.clone(),
             blobs,
-            render_cache,
-            layout_cache,
         });
     }
 

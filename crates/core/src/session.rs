@@ -226,63 +226,6 @@ fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
     }
 }
 
-/// Save the render cache alongside the session.
-pub fn save_render_cache(session: &Session, cache: &crate::transcript_cache::RenderCache) {
-    let session_dir = dir_for(session);
-    let _ = fs::create_dir_all(&session_dir);
-    let path = render_cache_path(&session_dir);
-    let _ = fs::write(path, cache.serialize());
-}
-
-/// Load the render cache for a session. Returns `None` if the file is
-/// missing, corrupt, or built by an incompatible version.
-pub fn load_render_cache(session: &Session) -> Option<crate::transcript_cache::RenderCache> {
-    let session_dir = dir_for(session);
-    let path = render_cache_path(&session_dir);
-    let data = fs::read(path).ok()?;
-    let cache = crate::transcript_cache::RenderCache::deserialize(&data)?;
-    if cache.version != crate::transcript_cache::RENDER_CACHE_VERSION {
-        return None;
-    }
-    Some(cache)
-}
-
-/// Save the persisted layout cache (per-block laid-out output) alongside
-/// the session.
-pub fn save_layout_cache(session: &Session, cache: &crate::transcript_cache::PersistedLayoutCache) {
-    let _perf = crate::perf::begin("session:write_layout");
-    let session_dir = dir_for(session);
-    let _ = fs::create_dir_all(&session_dir);
-    let path = layout_cache_path(&session_dir);
-    let bytes = cache.serialize();
-    crate::perf::record_value("layout_cache:bytes", bytes.len() as u64);
-    let _ = fs::write(path, bytes);
-}
-
-/// Load the persisted layout cache for a session. Returns `None` if the
-/// file is missing, corrupt, or built by an incompatible version.
-pub fn load_layout_cache(
-    session: &Session,
-) -> Option<crate::transcript_cache::PersistedLayoutCache> {
-    let _perf = crate::perf::begin("session:read_layout");
-    let session_dir = dir_for(session);
-    let path = layout_cache_path(&session_dir);
-    let data = fs::read(path).ok()?;
-    let cache = crate::transcript_cache::PersistedLayoutCache::deserialize(&data)?;
-    if cache.version != crate::transcript_cache::LAYOUT_CACHE_VERSION {
-        return None;
-    }
-    Some(cache)
-}
-
-fn render_cache_path(session_dir: &std::path::Path) -> PathBuf {
-    session_dir.join("render_cache.ir.bin")
-}
-
-fn layout_cache_path(session_dir: &std::path::Path) -> PathBuf {
-    session_dir.join("render_cache.layout.bin")
-}
-
 /// Load a session by exact ID or unique prefix (git-style).
 pub fn load(id_or_prefix: &str) -> Option<Session> {
     let id = resolve_prefix(id_or_prefix)?;

@@ -6,7 +6,7 @@
 //! adds projection / streaming / paint orchestration on top.
 
 use crate::content::{DisplayBlock, LayoutContext};
-use crate::transcript_cache::ToolOutputRenderCache;
+use crate::tool_output_cache::ToolOutputRenderCache;
 use crate::transcript_present::{gap_between, layout_block, Element};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
