@@ -120,6 +120,13 @@ local function register_exit_plan_mode()
       required = { "plan_summary" },
     },
     summary = function(_) return "plan ready" end,
+    render = function(args, output, width, ctx)
+      if output.is_error then
+        ctx:text(output.content, true)
+        return
+      end
+      ctx:markdown(args.plan_summary or "")
+    end,
     execute = function(args)
       local summary = args.plan_summary or ""
 

@@ -23,6 +23,7 @@ use smelt_core::session::Session;
 use smelt_core::ConfirmRequest;
 use smelt_core::FrontendKind;
 use smelt_core::Host;
+use std::sync::Arc;
 
 use crossterm::{
     cursor,
@@ -37,7 +38,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 // ── TuiApp ──────────────────────────────────────────────────────────────────────
@@ -312,7 +313,6 @@ pub(crate) enum LoopAction {
 pub(crate) struct PendingTool {
     pub(crate) call_id: String,
     pub(crate) name: String,
-    pub(crate) args: HashMap<String, serde_json::Value>,
 }
 
 // ── TuiApp impl ─────────────────────────────────────────────────────────────────
@@ -473,7 +473,7 @@ impl TuiApp {
         let lua = crate::lua::LuaRuntime::new();
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
-        Self {
+        let mut app = Self {
             core,
             lua,
             transcript: smelt_core::content::transcript::Transcript::new(),
@@ -503,10 +503,7 @@ impl TuiApp {
             term_focused: true,
             working: smelt_core::working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
-            // The first frame's `render_normal` overwrites this via
-            // `LayoutState::from_ui` after publishing the splits tree.
             layout: crate::content::layout::LayoutState::default(),
-
             permissions,
             agent: None,
             predict_generation: 0,
@@ -519,7 +516,6 @@ impl TuiApp {
             compact_epoch: 0,
             pending_compact_epoch: 0,
             pending_turn_meta: None,
-
             startup_auth_error,
             app_focus: AppFocus::Prompt,
             transcript_window: {
@@ -542,7 +538,10 @@ impl TuiApp {
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
-        }
+        };
+        app.transcript.history.body_renderer =
+            Some(Arc::new(crate::app::transcript::LuaRenderRenderer));
+        app
     }
 
     /// Rebuild prompt sections from current app state (mode, instructions, etc.)

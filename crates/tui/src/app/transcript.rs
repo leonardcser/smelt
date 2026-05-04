@@ -7,15 +7,44 @@ use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_and_locate_cursor;
 
 use smelt_core::transcript_model::{
-    Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
 use smelt_core::transcript_present as blocks;
 use smelt_core::transcript_present::{
-    gap_between, render_thinking_summary, thinking_summary, Element,
+    gap_between, render_thinking_summary, thinking_summary, Element, ToolBodyRenderer,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Renders tool output bodies by calling the tool's Lua `render` hook
+/// with a `RenderCtx` userdata. Falls back to plain wrapped text when
+/// no hook is registered or Lua is unavailable.
+pub(crate) struct LuaRenderRenderer;
+
+impl ToolBodyRenderer for LuaRenderRenderer {
+    fn render(
+        &self,
+        name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        output: Option<&ToolOutput>,
+        width: usize,
+        out: &mut SpanCollector,
+    ) -> u16 {
+        let Some(tool_out) = output else { return 0 };
+        crate::lua::app_ref::try_with_app(|app| {
+            app.lua.render_tool_body(name, args, tool_out, width, out)
+        })
+        .unwrap_or_else(|| {
+            smelt_core::transcript_present::render_default_output(
+                out,
+                &tool_out.content,
+                tool_out.is_error,
+                width,
+            )
+        })
+    }
+}
 
 pub(crate) struct TranscriptData {
     pub(crate) clamped_scroll: u16,

@@ -6,8 +6,7 @@
 //! adds projection / streaming / paint orchestration on top.
 
 use crate::content::{DisplayBlock, LayoutContext};
-use crate::tool_output_cache::ToolOutputRenderCache;
-use crate::transcript_present::{gap_between, layout_block, Element};
+use crate::transcript_present::{gap_between, layout_block, Element, ToolBodyRenderer};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -65,7 +64,6 @@ pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
     pub metadata: Option<serde_json::Value>,
-    pub render_cache: Option<ToolOutputRenderCache>,
 }
 
 pub type ToolOutputRef = Box<ToolOutput>;
@@ -331,6 +329,9 @@ pub struct BlockHistory {
     /// (push, rewrite, status change, view state change, truncate,
     /// clear). Used by `TranscriptSnapshot` to detect staleness.
     generation: u64,
+    /// Optional renderer for tool output bodies. Injected by `tui` so
+    /// Lua-registered tools can supply custom rendering.
+    pub body_renderer: Option<std::sync::Arc<dyn ToolBodyRenderer>>,
 }
 
 impl BlockHistory {
@@ -348,6 +349,7 @@ impl BlockHistory {
             cache_dirty: false,
             finished_blocks: Vec::new(),
             generation: 0,
+            body_renderer: None,
         }
     }
 
@@ -604,7 +606,7 @@ impl BlockHistory {
             show_thinking: key.show_thinking,
             view_state: key.view_state,
         };
-        let display = layout_block(block, tool_state, &lctx);
+        let display = layout_block(block, tool_state, &lctx, self.body_renderer.as_deref());
         let rows = display.rows();
         let artifact = self.artifacts.get_mut(&id).unwrap();
         artifact.insert(key, display);

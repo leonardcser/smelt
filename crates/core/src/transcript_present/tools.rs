@@ -1,6 +1,3 @@
-use super::tool_previews::{
-    render_edit_output, render_notebook_output, render_plan_output, render_write_output,
-};
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -15,6 +12,7 @@ pub(super) fn render_tool(
     output: Option<&ToolOutput>,
     user_message: Option<&str>,
     width: usize,
+    renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
     let color: ColorValue = match status {
         ToolStatus::Ok => ColorValue::Role(ColorRole::Success),
@@ -63,7 +61,11 @@ pub(super) fn render_tool(
     if status != ToolStatus::Denied {
         if let Some(out_data) = output {
             if !out_data.content.is_empty() {
-                rows += print_tool_output(out, name, out_data, args, width);
+                if let Some(r) = renderer {
+                    rows += r.render(name, args, Some(out_data), width, out);
+                } else {
+                    rows += print_tool_output(out, name, out_data, args, width);
+                }
             }
         }
     }
@@ -169,53 +171,12 @@ fn print_tool_line(
 
 pub(super) fn print_tool_output(
     out: &mut SpanCollector,
-    name: &str,
+    _name: &str,
     output: &ToolOutput,
-    args: &HashMap<String, serde_json::Value>,
+    _args: &HashMap<String, serde_json::Value>,
     width: usize,
 ) -> u16 {
-    let content = &output.content;
-    let is_error = output.is_error;
-    match name {
-        "web_search" if !is_error => {
-            let mut count = 0u16;
-            for line in content.lines() {
-                if let Some(pos) = line.find(". ") {
-                    let prefix = &line[..pos];
-                    if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
-                        let title = &line[pos + 2..];
-                        print_dim(out, &format!("  {title}"));
-                        out.newline();
-                        count += 1;
-                    }
-                }
-            }
-            if count == 0 {
-                print_dim(out, "  No results found");
-                out.newline();
-                return 1;
-            }
-            count
-        }
-        "read_file" | "glob" | "grep" if !is_error => {
-            let (s, p) = match name {
-                "glob" => ("file", "files"),
-                "grep" => ("match", "matches"),
-                _ => ("line", "lines"),
-            };
-            print_dim_count(out, content.lines().count(), s, p)
-        }
-        "web_fetch" if !is_error => print_dim_count(out, content.lines().count(), "line", "lines"),
-        "edit_file" if !is_error => render_edit_output(out, output, args),
-        "write_file" if !is_error => render_write_output(out, args),
-        "edit_notebook" if !is_error => render_notebook_output(out, output, width),
-        "exit_plan_mode" if !is_error => render_plan_output(out, args, width),
-        "bash" | "read_process_output" | "stop_process" => {
-            render_wrapped_output(out, content, is_error, width)
-        }
-
-        _ => render_default_output(out, content, is_error, width),
-    }
+    render_wrapped_output(out, &output.content, output.is_error, width)
 }
 
 pub(super) fn print_dim(out: &mut SpanCollector, text: &str) {
@@ -241,17 +202,7 @@ fn print_dim_non_selectable(out: &mut SpanCollector, time_str: &str, timeout_str
     }
 }
 
-pub(super) fn print_dim_count(
-    out: &mut SpanCollector,
-    count: usize,
-    singular: &str,
-    plural: &str,
-) -> u16 {
-    print_dim(out, &format!("  {}", pluralize(count, singular, plural)));
-    out.newline();
-    1
-}
-pub(super) fn render_wrapped_output(
+pub fn render_wrapped_output(
     out: &mut SpanCollector,
     content: &str,
     is_error: bool,
@@ -299,7 +250,7 @@ pub(super) fn render_wrapped_output(
     rows
 }
 
-pub(super) fn render_default_output(
+pub fn render_default_output(
     out: &mut SpanCollector,
     content: &str,
     is_error: bool,

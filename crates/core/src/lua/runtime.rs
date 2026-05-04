@@ -772,6 +772,107 @@ impl LuaRuntime {
         out
     }
 
+    /// Call a tool's Lua `render` hook, if registered.
+    /// Receives the tool args, the `ToolOutput`, and a `RenderCtx` userdata.
+    /// Returns the number of rows added to `out`.
+    pub fn render_tool_body(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        output: &crate::transcript_model::ToolOutput,
+        width: usize,
+        out: &mut crate::content::layout_out::SpanCollector,
+    ) -> u16 {
+        let render_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return crate::transcript_present::render_default_output(
+                    out,
+                    &output.content,
+                    output.is_error,
+                    width,
+                );
+            };
+            let Some(rh) = h.render.as_ref() else {
+                return crate::transcript_present::render_default_output(
+                    out,
+                    &output.content,
+                    output.is_error,
+                    width,
+                );
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => {
+                    return crate::transcript_present::render_default_output(
+                        out,
+                        &output.content,
+                        output.is_error,
+                        width,
+                    );
+                }
+            }
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool render: build args: {e}"));
+                return crate::transcript_present::render_default_output(
+                    out,
+                    &output.content,
+                    output.is_error,
+                    width,
+                );
+            }
+        };
+
+        let output_table = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool render: build output table: {e}"));
+                return crate::transcript_present::render_default_output(
+                    out,
+                    &output.content,
+                    output.is_error,
+                    width,
+                );
+            }
+        };
+        let _ = output_table.set("content", output.content.clone());
+        let _ = output_table.set("is_error", output.is_error);
+        if let Some(meta) = &output.metadata {
+            match json_to_lua(&self.lua, meta) {
+                Ok(v) => {
+                    let _ = output_table.set("metadata", v);
+                }
+                Err(e) => self.record_error(format!("tool render: metadata: {e}")),
+            }
+        }
+
+        let before = out.line_count();
+        let ctx = super::render_ctx::RenderCtx::new(out, width);
+        let ctx_ud = match self.lua.create_userdata(ctx) {
+            Ok(ud) => ud,
+            Err(e) => {
+                self.record_error(format!("tool render: create ctx: {e}"));
+                return crate::transcript_present::render_default_output(
+                    out,
+                    &output.content,
+                    output.is_error,
+                    width,
+                );
+            }
+        };
+
+        if let Err(e) = render_fn.call::<()>((args_table, output_table, width, ctx_ud)) {
+            self.record_error(format!("tool render `{tool_name}`: {e}"));
+        }
+
+        let after = out.line_count();
+        (after - before) as u16
+    }
+
     fn args_to_lua_table(
         &self,
         args: &HashMap<String, serde_json::Value>,

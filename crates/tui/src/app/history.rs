@@ -264,7 +264,6 @@ impl TuiApp {
                             content: text,
                             is_error: msg.is_error,
                             metadata: None,
-                            render_cache: None,
                         },
                     );
                 }

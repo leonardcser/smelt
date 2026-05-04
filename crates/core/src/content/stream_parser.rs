@@ -437,7 +437,6 @@ impl StreamParser {
                     content: chunk,
                     is_error: false,
                     metadata: None,
-                    render_cache: None,
                 }));
             }
         });

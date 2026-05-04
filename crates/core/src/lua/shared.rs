@@ -45,6 +45,7 @@ pub struct ToolHandles {
     pub needs_confirm: Option<LuaHandle>,
     pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
+    pub render: Option<LuaHandle>,
 }
 
 /// All shared state between Lua closures and the app loop.

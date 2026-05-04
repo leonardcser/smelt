@@ -29,7 +29,6 @@ pub mod runtime;
 pub mod session;
 pub mod state;
 pub mod timers;
-pub mod tool_output_cache;
 pub mod tools;
 pub mod transcript_model;
 pub mod transcript_present;

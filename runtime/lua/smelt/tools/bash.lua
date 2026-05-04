@@ -77,6 +77,9 @@ smelt.tools.register({
   },
   needs_confirm = function(args) return args.command or "" end,
   approval_patterns = M.approval_patterns,
+  render = function(args, output, width, ctx)
+    ctx:text(output.content, output.is_error)
+  end,
   execute = M.execute,
 })
 

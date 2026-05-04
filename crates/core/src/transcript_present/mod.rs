@@ -10,28 +10,38 @@ use super::transcript_model::{Block, ToolOutput, ToolState, ToolStatus, ViewStat
 use crate::content::display::{
     ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
 };
-use crate::content::highlight::{
-    print_cached_inline_diff, print_inline_diff, print_syntax_file, print_syntax_file_ext,
-    render_code_block, render_markdown_table, BashHighlighter,
-};
+use crate::content::highlight::{render_code_block, render_markdown_table, BashHighlighter};
 use crate::content::layout_out::{display_width, SpanCollector};
 use crate::content::selection::truncate_str;
 use crate::content::wrap::wrap_line;
 use crate::content::LayoutContext;
-use crate::notebook::NotebookRenderData;
+
 use crate::utils::format_duration;
 use std::collections::HashMap;
 
 pub mod markdown;
-mod tool_previews;
 mod tools;
 
 #[cfg(test)]
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
-use tools::{pluralize, render_tool, render_wrapped_output};
+use tools::{pluralize, render_tool};
+pub use tools::{render_default_output, render_wrapped_output};
 
 use std::time::Duration;
+
+/// Callback trait for tool-specific body rendering. Implemented in `tui`
+/// by a Lua caller that receives a mode-spec from the tool's `render` hook.
+pub trait ToolBodyRenderer: Send + Sync {
+    fn render(
+        &self,
+        name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        output: Option<&ToolOutput>,
+        width: usize,
+        out: &mut SpanCollector,
+    ) -> u16;
+}
 
 /// Simple heuristic: does this look like a `/command` line?
 /// (In core we don't have the Lua command registry, so we treat any
@@ -105,11 +115,12 @@ pub(crate) fn layout_block(
     block: &Block,
     state: Option<&ToolState>,
     ctx: &LayoutContext,
+    renderer: Option<&dyn ToolBodyRenderer>,
 ) -> DisplayBlock {
     let width = ctx.width as usize;
     let show_thinking = ctx.show_thinking;
     let mut col = SpanCollector::new(ctx.width);
-    render_block(&mut col, block, state, width, show_thinking);
+    render_block(&mut col, block, state, width, show_thinking, renderer);
     let mut display = col.finish();
     apply_view_state(&mut display, ctx.view_state);
     display
@@ -295,6 +306,7 @@ pub(super) fn render_block(
     state: Option<&ToolState>,
     width: usize,
     show_thinking: bool,
+    renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
     let _perf = match block {
         Block::User { .. } => crate::perf::begin("render:user"),
@@ -395,6 +407,7 @@ pub(super) fn render_block(
                 state.output.as_deref(),
                 state.user_message.as_deref(),
                 width,
+                renderer,
             )
         }
         Block::Compacted { summary } => {
@@ -559,7 +572,7 @@ mod tests {
     fn block_rows(block: &Block) -> u16 {
         let mut out = SpanCollector::new(W as u16);
         let st = state_for(block);
-        render_block(&mut out, block, st.as_ref(), W, true)
+        render_block(&mut out, block, st.as_ref(), W, true, None)
     }
 
     /// Compute total gap rows between the last history block and an active tool.
@@ -584,7 +597,7 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
             };
             total += gap + rows;
         }
@@ -603,7 +616,7 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
             };
             block_rows_total += gap + rows;
         }
@@ -642,7 +655,7 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
             };
             cumulative += gap + rows;
         }
@@ -828,7 +841,7 @@ mod tests {
                 };
                 let rows = {
                     let st = state_for(&blocks[i]);
-                    render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                    render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
                 };
                 frame_block_rows += gap + rows;
             }
@@ -1019,7 +1032,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block(&block, Some(&state), &ctx);
+        let display = layout_block(&block, Some(&state), &ctx, None);
 
         assert!(
             display.lines.len() >= 2,
@@ -1069,7 +1082,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block(&block, Some(&state), &ctx);
+        let display = layout_block(&block, Some(&state), &ctx, None);
 
         assert!(display.lines.len() >= 2);
         assert!(!display.lines[0].soft_wrapped);
@@ -1100,7 +1113,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block(&block, Some(&state), &ctx);
+        let display = layout_block(&block, Some(&state), &ctx, None);
         let first_line = &display.lines[0];
 
         // The time suffix "  3s" should be in a non-selectable span

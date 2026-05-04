@@ -7,6 +7,7 @@
 //! Lua callbacks without depending on the terminal frontend.
 
 pub mod api;
+mod render_ctx;
 pub mod runtime;
 mod shared;
 mod task;

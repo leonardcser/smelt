@@ -62,6 +62,20 @@ impl SpanCollector {
         self.block
     }
 
+    /// Number of logical display lines accumulated so far, including the
+    /// current incomplete line if it has any content.
+    pub fn line_count(&self) -> usize {
+        self.block.lines.len()
+            + if !self.cur_line.spans.is_empty()
+                || self.cur_line.fill_bg.is_some()
+                || self.cur_visible_cols > 0
+            {
+                1
+            } else {
+                0
+            }
+    }
+
     // ── Text emission ───────────────────────────────────────────────
 
     pub fn print(&mut self, text: &str) {

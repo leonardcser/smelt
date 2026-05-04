@@ -80,6 +80,14 @@ smelt.tools.register({
     end
     return smelt.fs.file_state.staleness_error(path, "file")
   end,
+  render = function(args, output, width, ctx)
+    if output.is_error then
+      ctx:text(output.content, true)
+      return
+    end
+    ctx:diff(args.old_string or "", args.new_string or "", args.file_path or "")
+  end,
+
   execute = function(args)
     local path = args.file_path or ""
     local old_string = args.old_string or ""

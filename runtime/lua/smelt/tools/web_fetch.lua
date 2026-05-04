@@ -234,6 +234,9 @@ smelt.tools.register({
     if pat then return { pat } end
     return {}
   end,
+  render = function(args, output, width, ctx)
+    ctx:text(output.content, output.is_error)
+  end,
   execute = function(args)
     local raw = fetch_raw(args)
     if type(raw) == "table" and raw.is_error then return raw end
