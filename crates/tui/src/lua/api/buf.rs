@@ -147,6 +147,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                     bold,
                                     dim,
                                     italic,
+                                    ..Default::default()
                                 },
                             );
                         }
@@ -178,6 +179,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 bold: false,
                                 dim: true,
                                 italic: false,
+                                ..Default::default()
                             },
                         );
                     }

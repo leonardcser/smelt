@@ -292,6 +292,18 @@ wrapping, then copy unification, then the remaining cleanups.
 
 Implementation order: a → b → c → d → e → f → g.
 
+- **P9.a** ✅ — Well-known window IDs moved from `ui` to `app`;
+  `win_open_split` collision-tolerant; `prompt_data.rs` renamed to
+  `prompt_buf.rs`.
+- **P9.b** ⏸ — Transcript pipeline migration (deferred; keystone sub-task,
+  unblocks c–e).
+- **P9.c** ⏸ — Unify prompt wrapping via `BufferParser` (gated on P9.b).
+- **P9.d** ⏸ — Unify copy / yank / clipboard paths (gated on P9.b + P9.c).
+- **P9.e** ⏸ — Naming consistency (`prompt_data.rs` rename already done in P9.a).
+- **P9.f** ⏸ — Merge responsive bar layout primitives.
+- **P9.g** ✅ — Unify `buffer::SpanStyle` and `grid::Style`; fixes strikethrough
+  rendering bug.
+
 ---
 
 ### P9.a — Well-known window IDs out of `ui`

@@ -153,11 +153,19 @@ fn resolve_span_style(span: &DisplaySpanStyle, theme: &Theme) -> SpanStyle {
         bold: span.bold,
         dim: span.dim,
         italic: span.italic,
+        underline: span.underline,
+        crossedout: span.crossedout,
     }
 }
 
 fn style_is_default(s: &SpanStyle) -> bool {
-    s.fg.is_none() && s.bg.is_none() && !s.bold && !s.dim && !s.italic
+    s.fg.is_none()
+        && s.bg.is_none()
+        && !s.bold
+        && !s.dim
+        && !s.italic
+        && !s.underline
+        && !s.crossedout
 }
 
 pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
@@ -166,7 +174,7 @@ pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
 
     for (i, pline) in lines.iter().enumerate() {
         for (col_start, col_end, style, meta) in &pline.highlights {
-            buf.add_highlight_with_meta(i, *col_start, *col_end, style.clone(), meta.clone());
+            buf.add_highlight_with_meta(i, *col_start, *col_end, *style, meta.clone());
         }
 
         let dec = &pline.decoration;
