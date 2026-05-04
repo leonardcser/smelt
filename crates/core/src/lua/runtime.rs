@@ -15,8 +15,7 @@ use std::time::Instant;
 use mlua::prelude::*;
 
 use crate::lua::{
-    json_to_lua, LuaHandle, LuaShared, LuaTaskRuntime, TaskCompletion, TaskDriveOutput, TaskEvent,
-    ToolEnv, ToolExecResult,
+    json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
 };
 
 /// Modules embedded in the binary, available via `require("smelt.*")`.
@@ -42,8 +41,124 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
         include_str!("../../../../runtime/lua/smelt/commands/export.lua"),
     ),
     (
+        "smelt.dialogs.rewind",
+        include_str!("../../../../runtime/lua/smelt/dialogs/rewind.lua"),
+    ),
+    (
+        "smelt.plugins.background_commands",
+        include_str!("../../../../runtime/lua/smelt/plugins/background_commands.lua"),
+    ),
+    (
+        "smelt.commands.help",
+        include_str!("../../../../runtime/lua/smelt/commands/help.lua"),
+    ),
+    (
         "smelt.plugins.yank_block",
         include_str!("../../../../runtime/lua/smelt/plugins/yank_block.lua"),
+    ),
+    (
+        "smelt.dialogs.permissions",
+        include_str!("../../../../runtime/lua/smelt/dialogs/permissions.lua"),
+    ),
+    (
+        "smelt.dialogs.resume",
+        include_str!("../../../../runtime/lua/smelt/dialogs/resume.lua"),
+    ),
+    (
+        "smelt.commands.theme",
+        include_str!("../../../../runtime/lua/smelt/commands/theme.lua"),
+    ),
+    (
+        "smelt.commands.color",
+        include_str!("../../../../runtime/lua/smelt/commands/color.lua"),
+    ),
+    (
+        "smelt.commands.model",
+        include_str!("../../../../runtime/lua/smelt/commands/model.lua"),
+    ),
+    (
+        "smelt.commands.settings",
+        include_str!("../../../../runtime/lua/smelt/commands/settings.lua"),
+    ),
+    (
+        "smelt.commands.history_search",
+        include_str!("../../../../runtime/lua/smelt/commands/history_search.lua"),
+    ),
+    (
+        "smelt.commands.toggles",
+        include_str!("../../../../runtime/lua/smelt/commands/toggles.lua"),
+    ),
+    (
+        "smelt.commands.stats",
+        include_str!("../../../../runtime/lua/smelt/commands/stats.lua"),
+    ),
+    (
+        "smelt.commands.session",
+        include_str!("../../../../runtime/lua/smelt/commands/session.lua"),
+    ),
+    (
+        "smelt.commands.quit",
+        include_str!("../../../../runtime/lua/smelt/commands/quit.lua"),
+    ),
+    (
+        "smelt.commands.compact",
+        include_str!("../../../../runtime/lua/smelt/commands/compact.lua"),
+    ),
+    (
+        "smelt.commands.reflect",
+        include_str!("../../../../runtime/lua/smelt/commands/reflect.lua"),
+    ),
+    (
+        "smelt.commands.simplify",
+        include_str!("../../../../runtime/lua/smelt/commands/simplify.lua"),
+    ),
+    (
+        "smelt.commands.custom_commands",
+        include_str!("../../../../runtime/lua/smelt/commands/custom_commands.lua"),
+    ),
+    (
+        "smelt.colorschemes.default",
+        include_str!("../../../../runtime/lua/smelt/colorschemes/default.lua"),
+    ),
+    (
+        "smelt.tools.glob",
+        include_str!("../../../../runtime/lua/smelt/tools/glob.lua"),
+    ),
+    (
+        "smelt.tools.grep",
+        include_str!("../../../../runtime/lua/smelt/tools/grep.lua"),
+    ),
+    (
+        "smelt.tools.load_skill",
+        include_str!("../../../../runtime/lua/smelt/tools/load_skill.lua"),
+    ),
+    (
+        "smelt.tools.web_search",
+        include_str!("../../../../runtime/lua/smelt/tools/web_search.lua"),
+    ),
+    (
+        "smelt.tools.write_file",
+        include_str!("../../../../runtime/lua/smelt/tools/write_file.lua"),
+    ),
+    (
+        "smelt.tools.edit_file",
+        include_str!("../../../../runtime/lua/smelt/tools/edit_file.lua"),
+    ),
+    (
+        "smelt.tools.read_file",
+        include_str!("../../../../runtime/lua/smelt/tools/read_file.lua"),
+    ),
+    (
+        "smelt.tools.notebook_edit",
+        include_str!("../../../../runtime/lua/smelt/tools/notebook_edit.lua"),
+    ),
+    (
+        "smelt.tools.web_fetch",
+        include_str!("../../../../runtime/lua/smelt/tools/web_fetch.lua"),
+    ),
+    (
+        "smelt.tools.bash",
+        include_str!("../../../../runtime/lua/smelt/tools/bash.lua"),
     ),
 ];
 

@@ -8,12 +8,22 @@ mod bash;
 mod buf;
 mod confirm;
 mod diff;
+mod engine;
+mod history;
+mod keymap;
+mod metrics;
+mod model;
 mod notebook;
+mod permissions;
 mod prompt;
+mod session;
+mod settings;
 mod statusline;
 mod syntax;
 mod theme;
+mod transcript;
 mod ui;
+mod vim;
 mod win;
 
 use super::{LuaRuntime, LuaShared};
@@ -33,7 +43,6 @@ macro_rules! app_read {
 pub(crate) use app_read;
 
 pub(crate) use smelt_core::lua::json_to_lua as json_to_lua_value;
-
 
 impl LuaRuntime {
     pub(super) fn register_api(lua: &Lua, shared: &Arc<LuaShared>) -> LuaResult<()> {
@@ -58,6 +67,16 @@ impl LuaRuntime {
         diff::register(lua, &smelt)?;
         syntax::register(lua, &smelt)?;
         bash::register(lua, &smelt)?;
+        engine::register(lua, &smelt, shared)?;
+        history::register(lua, &smelt)?;
+        keymap::register(lua, &smelt_keymap, shared)?;
+        metrics::register(lua, &smelt)?;
+        model::register(lua, &smelt)?;
+        permissions::register(lua, &smelt, shared)?;
+        session::register(lua, &smelt)?;
+        settings::register(lua, &smelt, shared)?;
+        transcript::register(lua, &smelt)?;
+        vim::register(lua, &smelt)?;
 
         smelt.set("ui", smelt_ui)?;
         smelt.set("keymap", smelt_keymap)?;

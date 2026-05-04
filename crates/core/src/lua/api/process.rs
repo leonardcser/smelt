@@ -14,11 +14,7 @@ use std::time::Duration;
 use crate::lua::LuaShared;
 use crate::process;
 
-pub(super) fn register(
-    lua: &Lua,
-    smelt: &mlua::Table,
-    shared: &Arc<LuaShared>,
-) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let process_tbl = lua.create_table()?;
     process_tbl.set(
         "list",

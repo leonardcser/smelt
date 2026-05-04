@@ -12,9 +12,7 @@ mod shared;
 mod task;
 
 pub use runtime::LuaRuntime;
-pub use shared::{
-    LuaResumeSink, LuaShared, RegisteredCommand, StatusSource, ToolHandles,
-};
+pub use shared::{LuaResumeSink, LuaShared, RegisteredCommand, StatusSource, ToolHandles};
 pub use task::{
     current_task_cancel, with_task_cancel, LuaTaskRuntime, TaskCompletion, TaskDriveOutput,
     TaskEvent, ToolEnv,

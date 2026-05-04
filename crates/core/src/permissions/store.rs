@@ -7,10 +7,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     /// Tool name (e.g. "bash") or "directory" for dir-based approvals.
-    pub(crate) tool: String,
+    pub tool: String,
     /// Glob patterns — empty means "allow all" for this tool.
     #[serde(default)]
-    pub(crate) patterns: Vec<String>,
+    pub patterns: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

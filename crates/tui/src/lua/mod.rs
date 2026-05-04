@@ -28,16 +28,16 @@ pub(crate) mod app_ref;
 mod tasks;
 pub(crate) mod ui_ops;
 
-pub(crate) use app_ref::{install_app_ptr, try_with_app, try_with_ui_host, with_app, with_ui_host};
-
-pub(crate) use smelt_core::lua::{
-    LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult,
+pub(crate) use app_ref::{
+    install_app_ptr, try_with_app, try_with_host, try_with_ui_host, with_app, with_ui_host,
 };
+
+pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};
 
 pub(crate) use smelt_core::lua::StatusSource;
 
 use mlua::prelude::*;
-use std::path::PathBuf;
+
 use std::sync::{Arc, Mutex};
 
 /// One Lua-registered `/command` entry. Lives in `LuaShared.commands`

@@ -6,9 +6,9 @@
 //! and painting those lines with selection + cursor highlighting.
 
 use crate::input::ATTACHMENT_MARKER;
+pub(crate) use crate::ui::text::wrap_line;
 use smelt_core::attachment::{AttachmentId, AttachmentStore};
 pub(crate) use smelt_core::content::selection::{scan_at_token, truncate_str, try_at_ref};
-pub(crate) use crate::ui::text::wrap_line;
 use unicode_width::UnicodeWidthChar;
 
 pub(crate) fn wrap_and_locate_cursor(
