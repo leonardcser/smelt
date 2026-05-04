@@ -79,8 +79,8 @@ impl Default for PromptState {
 impl PromptState {
     pub(crate) fn new() -> Self {
         let mut win = crate::ui::Window::new(
-            crate::ui::PROMPT_WIN,
-            crate::ui::BufId(0),
+            crate::app::PROMPT_WIN,
+            crate::app::PROMPT_EDIT_BUF,
             crate::ui::SplitConfig {
                 region: "prompt".into(),
                 gutters: crate::ui::Gutters::default(),

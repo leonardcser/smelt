@@ -115,10 +115,10 @@ impl TuiApp {
         self.task_label = None;
         self.working.clear();
         self.input.win.scroll_top = 0;
-        if let Some(w) = self.ui.win_mut(crate::ui::PROMPT_WIN) {
+        if let Some(w) = self.ui.win_mut(crate::app::PROMPT_WIN) {
             w.viewport = None;
         }
-        if let Some(w) = self.ui.win_mut(crate::ui::TRANSCRIPT_WIN) {
+        if let Some(w) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
             w.viewport = None;
         }
         self.clear_transcript();

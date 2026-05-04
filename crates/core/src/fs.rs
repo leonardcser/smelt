@@ -361,6 +361,10 @@ impl FileStateCache {
     pub fn len(&self) -> usize {
         self.0.lock().map(|m| m.entries.len()).unwrap_or(0)
     }
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Error string when the cache has no prior observation or the file drifted

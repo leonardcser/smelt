@@ -5,7 +5,7 @@ pub(crate) mod selection;
 
 // Tui-specific submodules
 pub(crate) mod layout;
-pub(crate) mod prompt_data;
+pub(crate) mod prompt_buf;
 pub(crate) mod prompt_wrap;
 pub(crate) mod status;
 pub(crate) mod to_buffer;

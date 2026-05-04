@@ -38,14 +38,14 @@ pub(crate) fn build_layout_tree(
     crate::ui::LayoutTree::vbox(vec![
         (
             crate::ui::Constraint::Fill,
-            crate::ui::LayoutTree::leaf(crate::ui::TRANSCRIPT_WIN),
+            crate::ui::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
         ),
         (
             crate::ui::Constraint::Length(prompt_height),
             crate::ui::LayoutTree::vbox(vec![
                 (
                     crate::ui::Constraint::Length(prompt_leaf_height),
-                    crate::ui::LayoutTree::leaf(crate::ui::PROMPT_WIN),
+                    crate::ui::LayoutTree::leaf(crate::app::PROMPT_WIN),
                 ),
                 (
                     crate::ui::Constraint::Length(1),
@@ -64,8 +64,10 @@ impl LayoutState {
     /// before the first frame.
     pub(crate) fn from_ui(ui: &crate::ui::Ui, status_win: crate::ui::WinId) -> Self {
         Self {
-            transcript: ui.split_rect(crate::ui::TRANSCRIPT_WIN).unwrap_or_default(),
-            prompt: ui.split_rect(crate::ui::PROMPT_WIN).unwrap_or_default(),
+            transcript: ui
+                .split_rect(crate::app::TRANSCRIPT_WIN)
+                .unwrap_or_default(),
+            prompt: ui.split_rect(crate::app::PROMPT_WIN).unwrap_or_default(),
             status: ui.split_rect(status_win).unwrap_or_default(),
         }
     }
@@ -120,8 +122,8 @@ mod tests {
     ) -> (crate::ui::Ui, WinId) {
         let mut ui = crate::ui::Ui::new();
         ui.set_terminal_size(term_width, term_height);
-        open_split(&mut ui, crate::ui::TRANSCRIPT_WIN, "transcript");
-        open_split(&mut ui, crate::ui::PROMPT_WIN, "prompt");
+        open_split(&mut ui, crate::app::TRANSCRIPT_WIN, "transcript");
+        open_split(&mut ui, crate::app::PROMPT_WIN, "prompt");
         let status_buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
         let status_win = ui
             .win_open_split(
@@ -201,7 +203,7 @@ mod tests {
         tree_leaves = tree.leaves_in_order();
         assert_eq!(
             tree_leaves,
-            vec![crate::ui::TRANSCRIPT_WIN, crate::ui::PROMPT_WIN, status]
+            vec![crate::app::TRANSCRIPT_WIN, crate::app::PROMPT_WIN, status]
         );
         let _ = Constraint::Fill;
     }

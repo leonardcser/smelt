@@ -241,6 +241,12 @@ pub struct BashHighlighter<'a> {
     h: HighlightLines<'a>,
 }
 
+impl<'a> Default for BashHighlighter<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> BashHighlighter<'a> {
     pub fn new() -> Self {
         let syntax = SYNTAX_SET

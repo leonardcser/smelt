@@ -187,7 +187,7 @@ Migrate 15 Rust tool implementations from `engine/tools/` into
 `runtime/lua/smelt/tools/`. Engine becomes schema + dispatcher only.
 Mode gating becomes a Lua `hooks` concern. See `P5.md`.
 
-- **P5.a** — Tool dispatcher trait shape (`ToolDispatcher` with `dispatch`
+- **P5.a** ✅ — Tool dispatcher trait shape (`ToolDispatcher` with `dispatch`
   + `evaluate_hooks`).
 - **P5.b** ✅ — Core tools migrated to Lua; intricate logic stays in Rust
   as `core::*` capabilities.
@@ -321,6 +321,10 @@ Remove the last application semantics from the generic `ui` layer.
   (`buf_create_with_id_lua_range_does_not_advance_rust_allocator`). It assumes
   the first auto-allocated ID is `0`; update it to not depend on the starting
   value.
+- **Rename `content/prompt_data.rs` → `content/prompt_buf.rs`.** Do this in the
+  first P9 commit so P9.c rewrites the file under its final name. After P9.b
+  deletes `layout_out.rs`, the `prompt_buf.rs` / `transcript_buf.rs` pair is
+  the only consistent vocabulary left.
 
 End of P9.a: `ui` has zero knowledge of prompt or transcript. `WellKnown`
 owns the stable IDs. `next_win_id` starts at `0` and is collision-tolerant.
@@ -339,8 +343,8 @@ subtask assumes both transcript and prompt live on `Buffer`.
   (markdown, diff, syntax, tool previews) to write directly into `&mut Buffer`
   via `set_all_lines`, `add_highlight`, and `set_decoration`. This is a
   mechanical refactor: every `out.print("...")` becomes a line append, every
-  `out.set_fg(red)` becomes a highlight extmark. `content/layout_out.rs` is
-  deleted.
+  `out.set_fg(red)` becomes a highlight extmark. `crates/core/src/content/layout_out.rs`
+  is deleted.
 - **Migrate `transcript_present/` into `BufferParser` impls.** One parser per
   block variant (`User`, `Thinking`, `Text`, `CodeLine`, `ToolCall`, `Exec`).
   Each parser receives the block data + width and mutates a fresh `Buffer`.
@@ -362,7 +366,7 @@ subtask assumes both transcript and prompt live on `Buffer`.
   all transcript renderers to this model.
 - **Eliminate user-bubble rendering duplication.**
   `transcript_present/mod.rs` (`render_block` for `Block::User`) and
-  `prompt_data.rs` (`queued_message_rows`) both use `UserBlockGeometry` +
+  `prompt_buf.rs` (`queued_message_rows`) both use `UserBlockGeometry` +
   `wrap_line` but emit through different pipelines (`SpanCollector` vs
   `WindowRow`). After P9.b, user blocks render through the same `BufferParser`
   as everything else; `queued_message_rows` can call the same parser with the
@@ -406,11 +410,10 @@ Unify them into a single `BufferParser` pass.
 - **Do NOT move editing onto `Buffer`.** `Window::text`, `Window::cpos`, and
   `input/buffer.rs` editing primitives stay as-is. `Buffer` has no byte-level
   insert/delete APIs; building them is not cleanup.
-- **Naming:** `prompt_data.rs` → `prompt_buf.rs` to match `transcript_buf.rs`.
 
 - **Selection highlight computation is duplicated** between
   `app/transcript.rs` (`transcript_selection_highlights`) and
-  `content/prompt_data.rs` (`compute_input_area`). Both map a wrapped byte
+  `content/prompt_buf.rs` (`compute_input_area`). Both map a wrapped byte
   range to per-line `(col_start, col_end)` highlight tuples. P9.c's
   `PromptInputParser` gives the prompt a proper `Buffer` with extmarks; once
   P9.b gives the transcript the same, both paths collapse to a single
@@ -465,18 +468,16 @@ built at different times under different assumptions. Align them:
 
 | Current | Target | Rationale |
 |---------|--------|-----------|
-| `content/prompt_data.rs` | `content/prompt_buf.rs` | Matches `transcript_buf.rs`; both project into `Buffer`. |
-| `content/layout_out.rs` | `content/span_builder.rs` or `display_builder.rs` | "layout" means `LayoutTree` in this codebase (Vbox/Hbox/Leaf), not text wrapping. The file builds a styled span tree, not a layout tree. |
+| `content/prompt_data.rs` | `content/prompt_buf.rs` | Matches `transcript_buf.rs`; both project into `Buffer`. Moved to P9.a so the file is rewritten under its final name. |
 
-Low-cost, immediate clarity. If the file is deleted before the rename happens,
-the rename was still cheaper than the confusion it prevented.
+Low-cost, immediate clarity.
 
 ---
 
 ### P9.f — Merge responsive bar layout primitives
 
 **Severity: Medium.** `content/status.rs::spans_to_buffer_line` and
-`content/prompt_data.rs::bar_row` implement the same responsive layout
+`content/prompt_buf.rs::bar_row` implement the same responsive layout
 algorithm: drop highest-priority spans first, truncate if possible, pad with
 filler. They emit different output types (`StatusLine` vs `WindowRow`) but the
 logic is identical.
@@ -508,7 +509,7 @@ types exist at adjacent layers:
 conversion sites:
 - `content/to_buffer.rs:149` (`resolve_span_style`) — drops both when
   projecting `DisplayBlock` into `Buffer`.
-- `content/prompt_data.rs:762` (`span_style`) — drops both when writing prompt
+- `content/prompt_buf.rs:762` (`span_style`) — drops both when writing prompt
   chrome into `Buffer`.
 - `ui/window.rs:1194-1195` (`merge_span_style`) — hardcodes both from the base
   row style only; spans can never contribute them.
@@ -526,7 +527,7 @@ renders as plain text.
    (or delete it if `display::SpanStyle` gets a `From` impl).
 3. Fix `ui/window.rs::merge_span_style` to OR-merge `underline` and
    `crossedout` from the span, not just the base row.
-4. Delete `content/prompt_data.rs::span_style()` and the manual conversion in
+4. Delete `content/prompt_buf.rs::span_style()` and the manual conversion in
    `app/status_bar.rs`; replace with `.into()` or direct assignment.
 5. Verify `cargo nextest run --workspace`.
 

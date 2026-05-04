@@ -114,23 +114,13 @@ pub struct Ui {
     drag_autoscroll_since: Option<std::time::Instant>,
 }
 
-/// Reserved `WinId` for the main prompt input window. Stable id so Lua
-/// can `smelt.win.on_event(prompt, …)` and `smelt.win.set_keymap(prompt, …)`
-/// like any other window.
-pub const PROMPT_WIN: WinId = WinId(0);
-
-/// Reserved `WinId` for the transcript (scroll-back) window. Same
-/// rationale as [`PROMPT_WIN`] — stable id for callback registration.
-pub const TRANSCRIPT_WIN: WinId = WinId(1);
-
 impl Ui {
     pub fn new() -> Self {
         Self {
             bufs: HashMap::new(),
             wins: HashMap::new(),
             next_buf_id: 1,
-            // 0 is reserved for PROMPT_WIN, 1 for TRANSCRIPT_WIN.
-            next_win_id: 2,
+            next_win_id: 0,
             terminal_size: (80, 24),
             compositor: Compositor::new(80, 24),
             callbacks: Callbacks::new(),
@@ -529,6 +519,9 @@ impl Ui {
         if !self.bufs.contains_key(&buf) {
             return None;
         }
+        while self.wins.contains_key(&WinId(self.next_win_id)) {
+            self.next_win_id += 1;
+        }
         let id = WinId(self.next_win_id);
         self.next_win_id += 1;
         let win = Window::new(id, buf, config);
@@ -536,13 +529,12 @@ impl Ui {
         Some(id)
     }
 
-    /// Open a window at a pre-reserved `WinId` (e.g. [`PROMPT_WIN`],
-    /// [`TRANSCRIPT_WIN`]). Returns `false` when the id is already
-    /// occupied or the buffer doesn't exist. Used by frontends that
-    /// want a Window with a stable id callers can register Lua
-    /// callbacks against — the reserved-id machinery skips fresh
-    /// allocation, so this is the only path that lands a Window at
-    /// id 0/1.
+    /// Open a window at a pre-reserved `WinId`. Returns `false` when
+    /// the id is already occupied or the buffer doesn't exist. Used by
+    /// frontends that want a Window with a stable id callers can
+    /// register Lua callbacks against — the reserved-id machinery
+    /// skips fresh allocation, so this is the only path that lands a
+    /// Window at a caller-chosen id.
     pub fn win_open_split_at(&mut self, id: WinId, buf: BufId, config: SplitConfig) -> bool {
         if self.wins.contains_key(&id) || !self.bufs.contains_key(&buf) {
             return false;
@@ -1371,8 +1363,8 @@ pub trait UiHost {
     /// [`MouseCtx::rows`] carries. The default implementation reads the
     /// backing buffer's lines (one row per source line, no soft wrap).
     /// Hosts override for windows whose painted rows differ from the
-    /// source: `TuiApp::PROMPT_WIN` returns wrapped rows;
-    /// `TuiApp::TRANSCRIPT_WIN` returns the projected display rows that
+    /// source: the prompt window returns wrapped rows;
+    /// the transcript window returns the projected display rows that
     /// include ephemeral content. Returns `None` when the window or its
     /// buffer is missing.
     fn rows_for(&mut self, win: WinId) -> Option<Vec<String>>;

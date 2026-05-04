@@ -522,14 +522,12 @@ trait Host {
 trait UiHost {
     fn ui(&mut self) -> &mut Ui;
     fn focus(&mut self, win: WinId);
-    fn fire_win_event(&mut self, win: WinId, ev: WinEvent);
     fn buf_create(&mut self, …) -> BufId;
     fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer>;
     fn win_open(&mut self, …) -> WinId;
     fn win_close(&mut self, id: WinId);
     fn win_mut(&mut self, id: WinId) -> Option<&mut Window>;
     fn overlay_open(&mut self, ov: Overlay) -> OverlayId;
-    fn overlay_close(&mut self, id: OverlayId);
 }
 ```
 

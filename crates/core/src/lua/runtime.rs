@@ -208,6 +208,12 @@ pub struct LuaRuntime {
     init_lua_path: Option<PathBuf>,
 }
 
+impl Default for LuaRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LuaRuntime {
     /// Build a fresh runtime and register the `smelt` global with
     /// Host-tier APIs only.

@@ -12,6 +12,7 @@ pub(crate) mod render_loop;
 pub(crate) mod status_bar;
 pub(crate) mod transcript;
 pub(crate) mod ui_host;
+pub(crate) mod well_known;
 
 use crate::input::PromptState;
 use crate::state;
@@ -194,17 +195,19 @@ pub struct TuiApp {
     pub(crate) well_known: WellKnown,
 }
 
+pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
+
 /// The well-known split-tree windows that smelt always carries:
 /// the prompt, the transcript, and the statusline, plus the
 /// transient cmdline overlay leaf. Buffers are reached through
 /// `Ui::win_buf_mut(WinId)` — there's exactly one `Buffer` per
 /// well-known `Window`.
 pub(crate) struct WellKnown {
-    /// Prompt input window. Stable id `crate::ui::PROMPT_WIN`. Its buffer
+    /// Prompt input window. Stable id [`PROMPT_WIN`]. Its buffer
     /// is rewritten each frame by `compute_prompt` (chrome rows +
     /// visible input slice + bottom bar + completer extmark).
     pub(crate) prompt: crate::ui::WinId,
-    /// Transcript window. Stable id `crate::ui::TRANSCRIPT_WIN`. Its
+    /// Transcript window. Stable id [`TRANSCRIPT_WIN`]. Its
     /// buffer is rewritten each frame by
     /// `project_transcript_buffer`; selection bg lands as extmarks
     /// in the `NS_SELECTION` namespace.
@@ -403,7 +406,7 @@ impl TuiApp {
                 buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
             }
             assert!(ui.win_open_split_at(
-                crate::ui::TRANSCRIPT_WIN,
+                crate::app::TRANSCRIPT_WIN,
                 transcript_display_buf,
                 crate::ui::SplitConfig {
                     region: "transcript".into(),
@@ -417,7 +420,7 @@ impl TuiApp {
             // highlight extmarks each frame, and the painted-split
             // path consumes it via `Window::render`.
             assert!(ui.win_open_split_at(
-                crate::ui::PROMPT_WIN,
+                crate::app::PROMPT_WIN,
                 input_display_buf,
                 crate::ui::SplitConfig {
                     region: "prompt".into(),
@@ -453,13 +456,13 @@ impl TuiApp {
                 },
                 status_win,
             ));
-            ui.set_focus(crate::ui::PROMPT_WIN);
+            ui.set_focus(crate::app::PROMPT_WIN);
             (
                 ui,
                 transcript_display_buf,
                 WellKnown {
-                    prompt: crate::ui::PROMPT_WIN,
-                    transcript: crate::ui::TRANSCRIPT_WIN,
+                    prompt: crate::app::PROMPT_WIN,
+                    transcript: crate::app::TRANSCRIPT_WIN,
                     statusline: status_win,
                     cmdline: None,
                 },
@@ -521,7 +524,7 @@ impl TuiApp {
             app_focus: AppFocus::Prompt,
             transcript_window: {
                 let mut w = crate::ui::Window::new(
-                    crate::ui::TRANSCRIPT_WIN,
+                    crate::app::TRANSCRIPT_WIN,
                     transcript_display_buf,
                     crate::ui::SplitConfig {
                         region: "transcript".into(),
@@ -658,7 +661,7 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.prompt)
             .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(crate::content::prompt_data::COMPLETER_NS);
+        let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
         buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
             if let crate::ui::buffer::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
                 Some(text.clone())
@@ -676,7 +679,7 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.prompt)
             .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(crate::content::prompt_data::COMPLETER_NS);
+        let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
         buf.clear_namespace(ns, 0, usize::MAX);
         buf.set_extmark(
             ns,
@@ -691,7 +694,7 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.prompt)
             .expect("prompt window registered at startup");
-        let ns = buf.create_namespace(crate::content::prompt_data::COMPLETER_NS);
+        let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
         buf.clear_namespace(ns, 0, usize::MAX);
     }
 
@@ -794,7 +797,7 @@ impl TuiApp {
             crate::ui::Overlay::new(
                 layout,
                 crate::ui::layout::Anchor::Win {
-                    target: crate::ui::PROMPT_WIN,
+                    target: crate::app::PROMPT_WIN,
                     attach: crate::ui::Corner::NW,
                     row_offset: -1,
                     col_offset: 0,

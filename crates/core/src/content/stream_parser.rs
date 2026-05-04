@@ -24,6 +24,12 @@ pub struct StreamParser {
     active_tools: Vec<ActiveTool>,
 }
 
+impl Default for StreamParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamParser {
     pub fn new() -> Self {
         Self {
