@@ -16,8 +16,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     mode_tbl.set(
         "get",
         lua.create_function(|_, ()| {
-            Ok(crate::host::try_with_host(|host| host.config().mode.as_str().to_string())
-                .unwrap_or_default())
+            Ok(
+                crate::host::try_with_host(|host| host.config().mode.as_str().to_string())
+                    .unwrap_or_default(),
+            )
         })?,
     )?;
 

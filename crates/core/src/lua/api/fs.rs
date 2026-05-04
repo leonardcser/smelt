@@ -24,15 +24,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "write",
-        lua.create_function(
-            |_, (p, contents): (String, mlua::String)| match crate::fs::write(
-                &p,
-                contents.as_bytes(),
-            ) {
+        lua.create_function(|_, (p, contents): (String, mlua::String)| {
+            match crate::fs::write(&p, contents.as_bytes()) {
                 Ok(()) => Ok((true, None)),
                 Err(err) => Ok((false, Some(err.to_string()))),
-            },
-        )?,
+            }
+        })?,
     )?;
 
     fs.set(
@@ -110,12 +107,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     fs.set(
         "copy",
-        lua.create_function(|_, (from, to): (String, String)| {
-            match crate::fs::copy(&from, &to) {
+        lua.create_function(
+            |_, (from, to): (String, String)| match crate::fs::copy(&from, &to) {
                 Ok(n) => Ok((Some(n), None)),
                 Err(err) => Ok((None, Some(err.to_string()))),
-            }
-        })?,
+            },
+        )?,
     )?;
 
     fs.set(

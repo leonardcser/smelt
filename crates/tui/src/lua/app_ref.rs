@@ -47,6 +47,7 @@ pub(crate) fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
 /// slot (usually `None`, but nested installs are supported).
 pub(crate) struct AppPtrGuard {
     old: Option<NonNull<TuiApp>>,
+    #[allow(dead_code)]
     core_guard: smelt_core::host::CorePtrGuard,
 }
 
@@ -91,6 +92,7 @@ pub(crate) fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
 ///
 /// `pub(crate)` because `Host` itself is `pub(crate)` — neither leaks
 /// outside the crate.
+#[allow(dead_code)]
 pub(crate) fn with_host<R>(f: impl FnOnce(&mut dyn smelt_core::Host) -> R) -> R {
     with_app(|app| f(app))
 }

@@ -82,7 +82,7 @@ impl History {
         }
     }
 
-    pub(crate) fn entries(&self) -> &[String] {
+    pub fn entries(&self) -> &[String] {
         &self.entries
     }
 }

@@ -7,10 +7,7 @@
 use mlua::prelude::*;
 use std::sync::Arc;
 
-fn parse_ruleset(
-    _lua: &Lua,
-    t: &mlua::Table,
-) -> LuaResult<crate::permissions::rules::RawRuleSet> {
+fn parse_ruleset(_lua: &Lua, t: &mlua::Table) -> LuaResult<crate::permissions::rules::RawRuleSet> {
     let mut allow = Vec::new();
     let mut ask = Vec::new();
     let mut deny = Vec::new();
@@ -120,14 +117,12 @@ pub(super) fn register(
     permissions_tbl.set(
         "sync",
         lua.create_function(|_, spec: mlua::Table| {
-            let mut session_entries: Vec<crate::transcript_model::PermissionEntry> =
-                Vec::new();
+            let mut session_entries: Vec<smelt_core::PermissionEntry> = Vec::new();
             if let Ok(arr) = spec.get::<mlua::Table>("session") {
                 for row in arr.sequence_values::<mlua::Table>().flatten() {
                     let tool: String = row.get("tool").unwrap_or_default();
                     let pattern: String = row.get("pattern").unwrap_or_default();
-                    session_entries
-                        .push(crate::transcript_model::PermissionEntry { tool, pattern });
+                    session_entries.push(smelt_core::PermissionEntry { tool, pattern });
                 }
             }
             let mut workspace_rules: Vec<crate::permissions::store::Rule> = Vec::new();

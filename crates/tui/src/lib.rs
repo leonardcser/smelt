@@ -10,6 +10,7 @@ pub mod instructions;
 pub(crate) mod keymap;
 pub mod lua;
 pub use smelt_core::mcp;
+pub use smelt_core::permissions;
 pub(crate) mod metrics;
 pub use smelt_core::perf;
 pub(crate) mod persist;

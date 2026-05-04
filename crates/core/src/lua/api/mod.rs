@@ -10,9 +10,9 @@
 #[macro_export]
 macro_rules! host_read {
     ($lua:expr, |$host:ident| $body:expr) => {{
-        $lua.create_function(
-            |_, ()| Ok($crate::host::try_with_host(|$host| $body).unwrap_or_default()),
-        )?
+        $lua.create_function(|_, ()| {
+            Ok($crate::host::try_with_host(|$host| $body).unwrap_or_default())
+        })?
     }};
 }
 
@@ -32,11 +32,11 @@ mod mode;
 mod os;
 mod parse;
 mod path;
+mod process;
 mod provider;
 mod reasoning;
 mod shell;
 mod skills;
-mod process;
 mod spawn;
 mod task;
 mod timer;

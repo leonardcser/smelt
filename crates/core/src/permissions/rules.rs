@@ -15,28 +15,28 @@ use std::collections::HashMap;
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct RawRuleSet {
-    pub(crate) allow: Vec<String>,
-    pub(crate) ask: Vec<String>,
-    pub(crate) deny: Vec<String>,
+    pub allow: Vec<String>,
+    pub ask: Vec<String>,
+    pub deny: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct RawModePerms {
-    pub(crate) tools: RawRuleSet,
-    pub(crate) bash: RawRuleSet,
-    pub(crate) web_fetch: RawRuleSet,
-    pub(crate) mcp: RawRuleSet,
+    pub tools: RawRuleSet,
+    pub bash: RawRuleSet,
+    pub web_fetch: RawRuleSet,
+    pub mcp: RawRuleSet,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct RawPerms {
-    pub(crate) default: RawModePerms,
-    pub(crate) normal: RawModePerms,
-    pub(crate) plan: RawModePerms,
-    pub(crate) apply: RawModePerms,
-    pub(crate) yolo: RawModePerms,
+    pub default: RawModePerms,
+    pub normal: RawModePerms,
+    pub plan: RawModePerms,
+    pub apply: RawModePerms,
+    pub yolo: RawModePerms,
 }
 
 fn merge_ruleset(default: &RawRuleSet, mode: &RawRuleSet) -> RawRuleSet {

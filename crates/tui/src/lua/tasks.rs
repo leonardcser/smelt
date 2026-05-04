@@ -8,7 +8,7 @@
 //! this file only holds TUI-specific callback queueing.
 
 use super::LuaRuntime;
-use mlua::prelude::*;
+
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
@@ -21,9 +21,7 @@ impl LuaRuntime {
     #[cfg(test)]
     pub(super) fn register_callback(&self, func: mlua::Function) -> mlua::Result<u64> {
         let key = self.lua.create_registry_value(func)?;
-        let id = self.shared
-            .next_id
-            .fetch_add(1, Ordering::Relaxed);
+        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut cbs) = self.shared.callbacks.lock() {
             cbs.insert(id, smelt_core::lua::LuaHandle { key });
         }

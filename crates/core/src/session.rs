@@ -9,9 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static SESSION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Minimum prefix length shown in resume hints.
-const MIN_PREFIX_LEN: usize = 4;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -56,8 +53,8 @@ pub struct Session {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SessionMeta {
-    pub(crate) id: String,
+pub struct SessionMeta {
+    pub id: String,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -65,9 +62,9 @@ pub(crate) struct SessionMeta {
     #[serde(default)]
     pub first_user_message: Option<String>,
     #[serde(default)]
-    pub(crate) created_at_ms: u64,
+    pub created_at_ms: u64,
     #[serde(default)]
-    pub(crate) updated_at_ms: u64,
+    pub updated_at_ms: u64,
     #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
@@ -75,16 +72,16 @@ pub(crate) struct SessionMeta {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub(crate) cwd: Option<String>,
+    pub cwd: Option<String>,
     #[serde(default)]
-    pub(crate) parent_id: Option<String>,
+    pub parent_id: Option<String>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
     /// Approximate byte size of the session's text content (message bodies,
     /// reasoning, tool-call args). Used to show session size in the resume
     /// dialog without loading full session.json.
     #[serde(default)]
-    pub(crate) text_bytes: Option<u64>,
+    pub text_bytes: Option<u64>,
 }
 
 impl Default for Session {
@@ -341,14 +338,14 @@ fn resolve_prefix(prefix: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn delete(id: &str) {
+pub fn delete(id: &str) {
     let session_dir = sessions_dir().join(id);
     if session_dir.is_dir() {
         let _ = fs::remove_dir_all(&session_dir);
     }
 }
 
-pub(crate) fn list_sessions() -> Vec<SessionMeta> {
+pub fn list_sessions() -> Vec<SessionMeta> {
     let _perf = crate::perf::begin("session:list");
     let dir = sessions_dir();
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -502,34 +499,6 @@ fn sessions_dir() -> PathBuf {
     config::state_dir().join("sessions")
 }
 
-/// Find the shortest prefix of `id` that uniquely identifies it among all sessions.
-fn shortest_unique_prefix(id: &str) -> &str {
-    let dir = sessions_dir();
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return &id[..id.len().min(MIN_PREFIX_LEN)];
-    };
-
-    let others: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
-            if !e.path().is_dir() {
-                return None;
-            }
-            let name = e.file_name();
-            let s = name.to_str()?.to_string();
-            (s != id).then_some(s)
-        })
-        .collect();
-
-    for len in MIN_PREFIX_LEN..=id.len() {
-        let prefix = &id[..len];
-        if others.iter().all(|o| !o.starts_with(prefix)) {
-            return prefix;
-        }
-    }
-    id
-}
-
 fn new_session_id(now_ms: u64) -> String {
     let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -563,9 +532,9 @@ mod tests {
 
     #[test]
     fn shortest_prefix_with_no_others() {
-        // When the sessions dir doesn't exist or is empty, returns MIN_PREFIX_LEN.
+        // When the sessions dir doesn't exist or is empty, returns 4.
         let id = "abcdef1234567890";
-        let prefix = &id[..id.len().min(MIN_PREFIX_LEN)];
+        let prefix = &id[..id.len().min(4)];
         assert_eq!(prefix, "abcd");
     }
 }
