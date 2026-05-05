@@ -1144,13 +1144,13 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
         thumb
             .bg
             .or(thumb.fg)
-            .unwrap_or(crossterm::style::Color::Reset),
+            .unwrap_or(smelt_core::style::Color::Reset),
     );
     let track_style = Style::bg(
         track
             .bg
             .or(track.fg)
-            .unwrap_or(crossterm::style::Color::Reset),
+            .unwrap_or(smelt_core::style::Color::Reset),
     );
     let avail = height.saturating_sub(row_offset);
     let rows = bar.viewport_rows.min(avail);
@@ -1398,7 +1398,7 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 1; // second visible row
         let mut theme = Theme::default();
-        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(smelt_core::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1428,7 +1428,7 @@ mod tests {
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
         let w = make_win();
         let mut theme = Theme::default();
-        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(smelt_core::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1485,7 +1485,7 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 0;
         let mut theme = Theme::default();
-        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(smelt_core::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1515,7 +1515,7 @@ mod tests {
         let mut w = make_win();
         w.cursor_line_highlight = true;
         let mut theme = Theme::default();
-        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(smelt_core::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         let ctx = DrawContext {
             terminal_width: 40,
@@ -1630,7 +1630,7 @@ mod tests {
         w.cursor_line_highlight = true;
         w.cursor_line = 0;
         let mut theme = Theme::default();
-        let bg = crate::ui::grid::Style::bg(crossterm::style::Color::AnsiValue(238));
+        let bg = crate::ui::grid::Style::bg(smelt_core::style::Color::AnsiValue(238));
         theme.set("CursorLine", bg);
         // Ghost group only sets `dim`, not bg/fg.
         theme.set("Ghost", crate::ui::grid::Style::dim());
@@ -1656,7 +1656,7 @@ mod tests {
         let mut w = make_win();
         w.cursor_line = 0;
         w.cursor_col = 1;
-        let cursor_style = crate::ui::grid::Style::bg(crossterm::style::Color::White);
+        let cursor_style = crate::ui::grid::Style::bg(smelt_core::style::Color::White);
         let mut ctx = ctx();
         ctx.focused = true;
         ctx.cursor_shape = CursorShape::Block {
@@ -1751,8 +1751,8 @@ mod tests {
             ScrollbarState::new(19, 40, 10),
         ));
         let mut theme = Theme::default();
-        let thumb_bg = crossterm::style::Color::AnsiValue(220);
-        let track_bg = crossterm::style::Color::AnsiValue(238);
+        let thumb_bg = smelt_core::style::Color::AnsiValue(220);
+        let track_bg = smelt_core::style::Color::AnsiValue(238);
         theme.set("SmeltScrollbarThumb", crate::ui::grid::Style::bg(thumb_bg));
         theme.set("SmeltScrollbarTrack", crate::ui::grid::Style::bg(track_bg));
         let ctx = DrawContext {
@@ -1784,7 +1784,7 @@ mod tests {
             ScrollbarState::new(19, 5, 10),
         ));
         let mut theme = Theme::default();
-        let track_bg = crossterm::style::Color::AnsiValue(238);
+        let track_bg = smelt_core::style::Color::AnsiValue(238);
         theme.set("SmeltScrollbarTrack", crate::ui::grid::Style::bg(track_bg));
         let ctx = DrawContext {
             terminal_width: 20,

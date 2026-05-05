@@ -177,7 +177,9 @@ Vim-style: lines + extmarks in named namespaces, plus a `modifiable` flag.
   clear-by-namespace. Mirrors `nvim_buf_set_extmark`.
 - **Theme references are highlight ids, not raw colors.** Buffers store
   highlight group ids/extmark highlight ids. Theme changes should not require
-  rewriting buffer contents or spans.
+  rewriting buffer contents or spans. *(End-state — see `P9.md` § P9.e.
+  P9.b kept extmark `Highlight` payloads carrying `Style` for the move;
+  P9.e replaces them with `HlGroup(u32)`.)*
 - **`modifiable: bool`** is the data-layer read-only guard. Source of truth
   for "can this content be edited?" Same Buffer viewed by N Windows shares
   one `modifiable` flag. Defaults: `false` for transcript / diff preview /

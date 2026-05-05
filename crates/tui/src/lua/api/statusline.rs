@@ -72,7 +72,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 /// see `runtime/lua/smelt/status.lua` for the segment shape.
 fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Table> {
     use crate::ui::text::byte_to_cell;
-    use crossterm::style::Color;
+    use smelt_core::style::Color;
 
     let t = lua.create_table()?;
 

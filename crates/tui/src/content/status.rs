@@ -7,7 +7,7 @@
 //! highest-priority (least-important) spans first.
 
 use super::{layout_out::display_width, selection::truncate_str};
-use crossterm::style::Color;
+use smelt_core::style::Color;
 
 /// Foreground / background / attribute snapshot for a status-line
 /// span. The status bar is the only consumer; it converts to

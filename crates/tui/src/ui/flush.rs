@@ -1,4 +1,4 @@
-use super::grid::{CellUpdate, Style};
+use super::grid::{to_crossterm_color, CellUpdate, Style};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
@@ -55,10 +55,10 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
         w.queue(ResetColor)?;
 
         if let Some(fg) = to.fg {
-            w.queue(SetForegroundColor(fg))?;
+            w.queue(SetForegroundColor(to_crossterm_color(fg)))?;
         }
         if let Some(bg) = to.bg {
-            w.queue(SetBackgroundColor(bg))?;
+            w.queue(SetBackgroundColor(to_crossterm_color(bg)))?;
         }
         if to.bold {
             w.queue(SetAttribute(Attribute::Bold))?;
@@ -115,14 +115,14 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
 
     if from.fg != to.fg {
         if let Some(fg) = to.fg {
-            w.queue(SetForegroundColor(fg))?;
+            w.queue(SetForegroundColor(to_crossterm_color(fg)))?;
         } else {
             w.queue(SetForegroundColor(Color::Reset))?;
         }
     }
     if from.bg != to.bg {
         if let Some(bg) = to.bg {
-            w.queue(SetBackgroundColor(bg))?;
+            w.queue(SetBackgroundColor(to_crossterm_color(bg)))?;
         } else {
             w.queue(SetBackgroundColor(Color::Reset))?;
         }
@@ -135,7 +135,7 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
 mod tests {
     use super::*;
     use crate::ui::grid::Grid;
-    use crossterm::style::Color;
+    use smelt_core::style::Color;
 
     #[test]
     fn flush_empty_diff_produces_no_output() {

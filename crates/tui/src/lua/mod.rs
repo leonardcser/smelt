@@ -449,9 +449,9 @@ impl LuaRuntime {
     }
 }
 
-fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<crossterm::style::Color> {
+fn ansi_color_from_lua(table: &mlua::Table, key: &str) -> Option<smelt_core::style::Color> {
     let val: u8 = table.get(key).ok()?;
-    Some(crossterm::style::Color::AnsiValue(val))
+    Some(smelt_core::style::Color::AnsiValue(val))
 }
 
 /// Parse a single-item or list-of-items Lua table into `StatusItem`s

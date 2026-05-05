@@ -13,7 +13,8 @@ pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 pub(crate) mod transcript_snapshot;
 
-use crossterm::{style::Color, terminal};
+use crossterm::terminal;
+use smelt_core::style::Color;
 
 /// Emit `n` blank rows.
 pub(crate) fn emit_newlines(out: &mut layout_out::SpanCollector, n: u16) {

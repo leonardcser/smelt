@@ -7,7 +7,7 @@
 //!   * `detect_background` — OSC 11 / `$COLORFGBG` light/dark probe.
 //!   * `PRESETS` — the picker list for `/theme` & `/color`.
 
-use crossterm::style::Color;
+use smelt_core::style::Color;
 
 /// Re-export so callers can refer to one canonical name.
 pub use crate::ui::theme::DEFAULT_ACCENT;

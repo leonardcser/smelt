@@ -16,7 +16,7 @@ pub(crate) mod window;
 
 mod id;
 
-pub type AttachmentId = u64;
+pub use smelt_core::attachment::AttachmentId;
 
 /// Callback shape for routing `Callback::Lua` handles out of Ui into
 /// the host's Lua runtime. Receives the handle, the focused window,

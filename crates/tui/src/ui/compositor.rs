@@ -128,10 +128,10 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
                 w.queue(SetAttribute(Attribute::Reset))?;
                 w.queue(ResetColor)?;
                 if let Some(fg) = cell.style.fg {
-                    w.queue(SetForegroundColor(fg))?;
+                    w.queue(SetForegroundColor(super::grid::to_crossterm_color(fg)))?;
                 }
                 if let Some(bg) = cell.style.bg {
-                    w.queue(SetBackgroundColor(bg))?;
+                    w.queue(SetBackgroundColor(super::grid::to_crossterm_color(bg)))?;
                 }
                 if cell.style.bold {
                     w.queue(SetAttribute(Attribute::Bold))?;

@@ -23,7 +23,7 @@ use crate::app::PROMPT_WIN;
 use crate::ui::buffer::{BufCreateOpts, SpanStyle};
 use crate::ui::layout::Anchor;
 use crate::ui::{BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId};
-use crossterm::style::Color;
+use smelt_core::style::Color;
 
 /// One row in a picker. Prefix sits left of the label; description (if
 /// any) prints in a column-aligned dim block to the right of the
