@@ -339,7 +339,10 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   `hl_eol`, `hl_mode`, `conceal`, `id`, `virt_text_pos`, `virt_lines`.
   Lua surface collapses to `smelt.api.create_namespace(name)` +
   `smelt.buf.set_extmark(buf, ns, row, col, opts)`. `add_highlight`
-  / `add_dim` retire. EmmyLua stubs deferred post-P10.
+  / `add_dim` retire. Folds in the lone structural cycle fix: extract
+  `Rect` from `tui/src/ui/layout.rs` into `tui/src/ui/geometry.rs`
+  so `grid.rs` no longer imports from `layout.rs`. EmmyLua stubs
+  deferred post-P10.
 - **P9.g** ✅ — **Plugin auto-discovery + project-local config.**
   Plugins are the only user-facing concept: `<config>/init.lua` +
   `<config>/plugins/*.lua` + `<cwd>/.smelt/{init.lua,plugins/*.lua}`
@@ -377,6 +380,27 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   and autoload come from directory walks (`tools/`, `commands/`,
   `plugins/`, `dialogs/`). Adding a built-in `.lua` under one of
   those dirs now requires zero Rust edits.
+- **P9.m** ⏸ — **Single LuaRuntime instance.** `main.rs` builds a
+  throwaway `LuaRuntime` to parse config-time `init.lua`; `TuiApp::new`
+  builds another, so `init.lua` runs twice against two `LuaShared`
+  instances. Build the runtime once in `main.rs`, hand it (already
+  loaded with user config) to `TuiApp::new` / `HeadlessApp::new`.
+  Eliminates a second Lua VM at startup and the implicit "things
+  registered at config time vanish" surprise.
+- **P9.n** ⏸ — **Vim becomes Lua-extensible.** `ui/vim.rs` keymap
+  dispatch (~30 free functions) is the only interactive surface
+  whose bindings aren't Lua-registerable. Move per-buffer state
+  (registers / dot-repeat / undo) onto `Buffer` (P1.d.5d), then
+  flatten the dispatch table behind `smelt.keymap.set("normal", …)`
+  / `smelt.keymap.set("visual", …)` so plugins can rebind motions
+  and operators (P1.d.5f.2d). The state machine stays in Rust;
+  recipes become Lua.
+- **P9.o** ⏸ — **Prompt is a Window.** `tui::input::PromptState`
+  (~1170 LOC) is the last interactive surface that isn't a
+  `Window` over a `Buffer` with a Lua keymap recipe. Collapse it
+  onto the same shape: prompt buffer + prompt Window + a
+  `widgets/prompt.lua` recipe. Aligns with everything else and
+  removes the bespoke completion / wrap / submit path.
 
 ---
 
