@@ -28,12 +28,6 @@ pub use rules::DEFAULT_BASH_ALLOW;
 
 use bash::{has_output_redirection, is_cd_command};
 
-fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
 use protocol::AgentMode;
 #[cfg(test)]
 use rules::compile_patterns;
@@ -51,6 +45,16 @@ use workspace::{any_outside_workspace, is_in_workspace};
 /// check short-circuits to "in".
 pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send + Sync;
 
+/// Tool-decision override: `Some(decision)` skips Rust's generic
+/// `check_tool` path. Wired from each Lua tool's `decide(args, mode)`
+/// callback at startup; tools without one fall through to the generic
+/// path. The bash + web_fetch tools register decide callbacks that
+/// compose `check_tool` + `check_bash` / `check_tool_pattern` from Lua,
+/// so the historical "if name == bash / web_fetch" branches in Rust
+/// retire.
+pub type DecideFn =
+    dyn Fn(&str, &HashMap<String, Value>, AgentMode) -> Option<Decision> + Send + Sync;
+
 #[derive(Clone)]
 pub struct Permissions {
     normal: ModePerms,
@@ -60,6 +64,7 @@ pub struct Permissions {
     restrict_to_workspace: bool,
     workspace: PathBuf,
     paths_fn: Option<Arc<PathsFn>>,
+    decide_hook_fn: Option<Arc<DecideFn>>,
 }
 
 impl std::fmt::Debug for Permissions {
@@ -72,6 +77,10 @@ impl std::fmt::Debug for Permissions {
             .field("restrict_to_workspace", &self.restrict_to_workspace)
             .field("workspace", &self.workspace)
             .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
+            .field(
+                "decide_hook_fn",
+                &self.decide_hook_fn.as_ref().map(|_| "<fn>"),
+            )
             .finish()
     }
 }
@@ -88,6 +97,7 @@ impl Permissions {
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
             paths_fn: None,
+            decide_hook_fn: None,
         }
     }
 
@@ -103,6 +113,7 @@ impl Permissions {
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
             paths_fn: None,
+            decide_hook_fn: None,
         }
     }
 
@@ -178,6 +189,24 @@ impl Permissions {
         }
     }
 
+    /// Install the per-tool decide-hook callback. When set, a tool's
+    /// `decide(args, mode)` Lua callback returning `Some(decision)`
+    /// short-circuits the generic `check_tool` path. See [`DecideFn`].
+    pub fn set_decide_hook_fn(&mut self, f: Arc<DecideFn>) {
+        self.decide_hook_fn = Some(f);
+    }
+
+    fn decide_hook(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        mode: AgentMode,
+    ) -> Option<Decision> {
+        self.decide_hook_fn
+            .as_ref()
+            .and_then(|f| f(tool_name, args, mode))
+    }
+
     fn mode_perms(&self, mode: AgentMode) -> &ModePerms {
         match mode {
             AgentMode::Normal => &self.normal,
@@ -187,7 +216,7 @@ impl Permissions {
         }
     }
 
-    pub(crate) fn check_tool(&self, mode: AgentMode, tool_name: &str) -> Decision {
+    pub fn check_tool(&self, mode: AgentMode, tool_name: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let default = if mode == AgentMode::Yolo {
             Decision::Allow
@@ -197,24 +226,17 @@ impl Permissions {
         perms.tools.get(tool_name).cloned().unwrap_or(default)
     }
 
-    pub(crate) fn check_tool_pattern(
-        &self,
-        mode: AgentMode,
-        tool_name: &str,
-        pattern: &str,
-    ) -> Decision {
-        let perms = self.mode_perms(mode);
-        let ruleset = match tool_name {
-            "web_fetch" => &perms.web_fetch,
-            _ => return Decision::Ask,
-        };
-        check_ruleset(ruleset, pattern)
+    /// Check a URL against the `web_fetch` ruleset of `mode`. Owned by
+    /// the tool's `decide` Lua callback (`tools/web_fetch.lua`); the
+    /// engine never reaches this directly.
+    pub fn check_web_fetch(&self, mode: AgentMode, url: &str) -> Decision {
+        check_ruleset(&self.mode_perms(mode).web_fetch, url)
     }
 
     /// Check permission for an MCP tool call. Matches the qualified tool name
     /// (e.g. `filesystem_read_file`) against glob patterns in the `mcp` ruleset.
     /// Defaults to Allow in yolo mode, Ask otherwise, if no pattern matches.
-    pub(crate) fn check_mcp(&self, mode: AgentMode, qualified_name: &str) -> Decision {
+    pub fn check_mcp(&self, mode: AgentMode, qualified_name: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let decision = check_ruleset(&perms.mcp, qualified_name);
         if decision == Decision::Ask && mode == AgentMode::Yolo {
@@ -224,7 +246,7 @@ impl Permissions {
         }
     }
 
-    pub(crate) fn check_bash(&self, mode: AgentMode, command: &str) -> Decision {
+    pub fn check_bash(&self, mode: AgentMode, command: &str) -> Decision {
         let perms = self.mode_perms(mode);
         let command = command.trim();
         // Escalate output redirection only in Normal/Plan modes.
@@ -334,32 +356,8 @@ fn decide_base(
     tool_name: &str,
     args: &HashMap<String, Value>,
 ) -> Decision {
-    if tool_name == "bash" {
-        let cmd = str_arg(args, "command");
-        let tool_decision = permissions.check_tool(mode, "bash");
-        if tool_decision == Decision::Deny {
-            return Decision::Deny;
-        }
-        let bash_decision = permissions.check_bash(mode, &cmd);
-        match (&tool_decision, &bash_decision) {
-            (_, Decision::Deny) => Decision::Deny,
-            (Decision::Allow, Decision::Ask) => Decision::Ask,
-            _ => bash_decision,
-        }
-    } else if tool_name == "web_fetch" {
-        let url = str_arg(args, "url");
-        let tool_decision = permissions.check_tool(mode, "web_fetch");
-        if tool_decision == Decision::Deny {
-            return Decision::Deny;
-        }
-        let pattern_decision = permissions.check_tool_pattern(mode, "web_fetch", &url);
-        match (&tool_decision, &pattern_decision) {
-            (_, Decision::Deny) => Decision::Deny,
-            (_, Decision::Allow) => Decision::Allow,
-            (Decision::Allow, Decision::Ask) => Decision::Ask,
-            _ => pattern_decision,
-        }
-    } else {
-        permissions.check_tool(mode, tool_name)
+    if let Some(d) = permissions.decide_hook(tool_name, args, mode) {
+        return d;
     }
+    permissions.check_tool(mode, tool_name)
 }

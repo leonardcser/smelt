@@ -198,6 +198,65 @@ pub(super) fn register(
             }
         })?,
     )?;
+    // Decision-shaped primitives consumed by tool `decide` Lua
+    // callbacks. Each parses an `AgentMode` label and routes to the
+    // matching `Permissions::check_*` method on the live app's
+    // permission store. Returns "allow" / "ask" / "deny" strings;
+    // unknown mode labels collapse to "ask".
+    permissions_tbl.set(
+        "check_tool",
+        lua.create_function(|_, (mode_str, name): (String, String)| {
+            Ok(crate::lua::try_with_app(|app| {
+                let mode = parse_mode(&mode_str);
+                decision_label(app.permissions.check_tool(mode, &name)).to_string()
+            })
+            .unwrap_or_else(|| "ask".to_string()))
+        })?,
+    )?;
+    permissions_tbl.set(
+        "check_bash",
+        lua.create_function(|_, (mode_str, cmd): (String, String)| {
+            Ok(crate::lua::try_with_app(|app| {
+                let mode = parse_mode(&mode_str);
+                decision_label(app.permissions.check_bash(mode, &cmd)).to_string()
+            })
+            .unwrap_or_else(|| "ask".to_string()))
+        })?,
+    )?;
+    permissions_tbl.set(
+        "check_web_fetch",
+        lua.create_function(|_, (mode_str, url): (String, String)| {
+            Ok(crate::lua::try_with_app(|app| {
+                let mode = parse_mode(&mode_str);
+                decision_label(app.permissions.check_web_fetch(mode, &url)).to_string()
+            })
+            .unwrap_or_else(|| "ask".to_string()))
+        })?,
+    )?;
+    permissions_tbl.set(
+        "check_mcp",
+        lua.create_function(|_, (mode_str, qualified_name): (String, String)| {
+            Ok(crate::lua::try_with_app(|app| {
+                let mode = parse_mode(&mode_str);
+                decision_label(app.permissions.check_mcp(mode, &qualified_name)).to_string()
+            })
+            .unwrap_or_else(|| "ask".to_string()))
+        })?,
+    )?;
+
     smelt.set("permissions", permissions_tbl)?;
     Ok(())
+}
+
+fn parse_mode(s: &str) -> protocol::AgentMode {
+    protocol::AgentMode::parse(s).unwrap_or(protocol::AgentMode::Normal)
+}
+
+fn decision_label(d: protocol::Decision) -> &'static str {
+    match d {
+        protocol::Decision::Allow => "allow",
+        protocol::Decision::Ask => "ask",
+        protocol::Decision::Deny => "deny",
+        protocol::Decision::Error(_) => "ask",
+    }
 }

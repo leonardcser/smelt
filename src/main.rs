@@ -322,6 +322,13 @@ async fn main() {
         tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
             .unwrap_or_default()
     }));
+    // Wire the per-tool decision override to each Lua tool's
+    // `decide(args, mode)` callback. Tools without one (everything but
+    // bash and web_fetch today) return `None` and the generic
+    // `check_tool` path runs.
+    permissions.set_decide_hook_fn(std::sync::Arc::new(|name, args, mode| {
+        tui::lua::try_with_app(|app| app.lua.tool_decide(name, args, mode)).flatten()
+    }));
     let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();

@@ -109,6 +109,17 @@ smelt.tools.register({
   paths_for_workspace = function(args)
     return smelt.shell.extract_paths(args.command or "")
   end,
+  decide = function(args, mode)
+    -- Compose the bash decision: tool-level + per-subcommand. Deny
+    -- dominates; an Allow tool decision with an Ask bash decision
+    -- collapses to Ask; otherwise the bash decision wins.
+    local tool = smelt.permissions.check_tool(mode, "bash")
+    if tool == "deny" then return "deny" end
+    local sub = smelt.permissions.check_bash(mode, args.command or "")
+    if sub == "deny" then return "deny" end
+    if tool == "allow" and sub == "ask" then return "ask" end
+    return sub
+  end,
   preview = function(buf, args)
     local cmd = args.command or ""
     if cmd:find("\n") then

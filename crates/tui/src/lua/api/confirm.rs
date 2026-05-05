@@ -132,10 +132,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 Some(r) => r,
                 None => return Ok(false),
             };
-            Ok(crate::lua::try_with_app(|app| {
-                app.lua.render_tool_preview(&req.0, &req.1, buf_id)
-            })
-            .unwrap_or(false))
+            Ok(
+                crate::lua::try_with_app(|app| app.lua.render_tool_preview(&req.0, &req.1, buf_id))
+                    .unwrap_or(false),
+            )
         })?,
     )?;
 

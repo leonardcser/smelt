@@ -30,10 +30,10 @@ pub mod app_ref;
 mod tasks;
 pub(crate) mod ui_ops;
 
+pub use app_ref::try_with_app;
 pub(crate) use app_ref::{
     install_app_ptr, try_with_host, try_with_ui_host, with_app, with_ui_host,
 };
-pub use app_ref::try_with_app;
 
 pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};
 

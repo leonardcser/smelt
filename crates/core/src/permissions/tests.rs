@@ -41,7 +41,58 @@ fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
         restrict_to_workspace: false,
         workspace: PathBuf::new(),
         paths_fn: None,
+        decide_hook_fn: None,
     }
+}
+
+/// Install a stub `decide_hook_fn` on `perms` matching the production
+/// wiring of the built-in tools' `decide(args, mode)` callbacks. Bash
+/// and web_fetch are the only tools that override the generic
+/// `check_tool` path; every other tool returns `None` and falls through.
+/// The closure captures a clone of `perms` (with the hook cleared so
+/// it doesn't recurse) so it can call `check_tool` / `check_bash` /
+/// `check_web_fetch` the same way the Lua hooks do in production.
+fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
+    let mut perms_for_hook = perms.clone();
+    // Sever the hook on the captured copy so calls inside the closure
+    // don't recurse.
+    perms_for_hook.set_decide_hook_fn(std::sync::Arc::new(|_, _, _| None));
+    perms.set_decide_hook_fn(std::sync::Arc::new(move |name, args, mode| match name {
+        "bash" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let tool = perms_for_hook.check_tool(mode, "bash");
+            if tool == protocol::Decision::Deny {
+                return Some(protocol::Decision::Deny);
+            }
+            let sub = perms_for_hook.check_bash(mode, cmd);
+            if sub == protocol::Decision::Deny {
+                return Some(protocol::Decision::Deny);
+            }
+            if tool == protocol::Decision::Allow && sub == protocol::Decision::Ask {
+                return Some(protocol::Decision::Ask);
+            }
+            Some(sub)
+        }
+        "web_fetch" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let tool = perms_for_hook.check_tool(mode, "web_fetch");
+            if tool == protocol::Decision::Deny {
+                return Some(protocol::Decision::Deny);
+            }
+            let pat = perms_for_hook.check_web_fetch(mode, url);
+            if pat == protocol::Decision::Deny {
+                return Some(protocol::Decision::Deny);
+            }
+            if pat == protocol::Decision::Allow {
+                return Some(protocol::Decision::Allow);
+            }
+            if tool == protocol::Decision::Allow && pat == protocol::Decision::Ask {
+                return Some(protocol::Decision::Ask);
+            }
+            Some(pat)
+        }
+        _ => None,
+    }));
 }
 
 /// Stub `paths_fn` matching the production wiring of the built-in
@@ -796,8 +847,10 @@ fn perms_with_workspace(workspace: &str) -> Permissions {
         restrict_to_workspace: true,
         workspace: PathBuf::from(workspace),
         paths_fn: None,
+        decide_hook_fn: None,
     };
     p.set_paths_fn(stub_paths_fn());
+    install_stub_decide_hook(&mut p);
     p
 }
 
@@ -1255,7 +1308,7 @@ fn bash_tool_allow_pattern_ask() {
         web_fetch: empty_ruleset(),
         mcp: empty_ruleset(),
     };
-    let perms = Permissions {
+    let mut perms = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
         apply: mode.clone(),
@@ -1263,7 +1316,9 @@ fn bash_tool_allow_pattern_ask() {
         restrict_to_workspace: false,
         workspace: PathBuf::new(),
         paths_fn: None,
+        decide_hook_fn: None,
     };
+    install_stub_decide_hook(&mut perms);
     let args = args_with("command", "git push origin main");
     assert_eq!(
         decide_base(&perms, AgentMode::Yolo, "bash", &args),
@@ -1285,7 +1340,7 @@ fn override_tightens_allow_to_ask() {
         web_fetch: empty_ruleset(),
         mcp: empty_ruleset(),
     };
-    let perms = Permissions {
+    let mut perms = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
         apply: mode.clone(),
@@ -1293,7 +1348,9 @@ fn override_tightens_allow_to_ask() {
         restrict_to_workspace: false,
         workspace: PathBuf::new(),
         paths_fn: None,
+        decide_hook_fn: None,
     };
+    install_stub_decide_hook(&mut perms);
     let overrides = protocol::PermissionOverrides {
         tools: Some(protocol::RuleSetOverride {
             allow: vec![],
@@ -1566,8 +1623,10 @@ fn perms_with_workspace_default_bash(workspace: &str) -> Permissions {
         restrict_to_workspace: true,
         workspace: PathBuf::from(workspace),
         paths_fn: None,
+        decide_hook_fn: None,
     };
     p.set_paths_fn(stub_paths_fn());
+    install_stub_decide_hook(&mut p);
     p
 }
 
