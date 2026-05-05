@@ -63,17 +63,12 @@ Frontend-agnostic LLM/tool code → `engine`. Headless runtime +
 capabilities + Lua + content data types → `core`. Terminal chrome +
 rendering + TUI primitives → `tui`. How smelt looks/behaves → Lua.
 
-**Why `Buffer` is in `core`, not `tui`.** `Buffer` is pure data: lines,
-extmarks in named namespaces, undo, modifiable flag, soft-wrap cache.
-Zero terminal dependencies. Putting it in `tui` forced cross-crate code
-(the Lua `render` hook, `core::transcript_present` renderers,
-`HeadlessApp` transcript reads) to use a `DisplayBlock` intermediate
-that survived seven phases of trying to delete it. With `Buffer` in
-`core`, `RenderCtx` collapses, `DisplayBlock` deletes, and headless
-mode reads transcript content through the same surface as tui.
-Parser *implementations* (markdown, diff, syntax, bash) stay in `tui`
-because they pull from tui-only crates (syntect, etc.) — but the
-trait + the data type they write into live in `core`.
+**`Buffer` lives in `core`, parser impls in `tui`.** Buffer is pure
+data — zero terminal deps. Headless reads through the same surface
+as tui. Parser impls (markdown / diff / syntax / bash) stay in tui
+because they pull from `syntect`, inline-md, diff-LCS — tui-only
+crates. The `BufferParser` trait + the data type they write into
+live in core.
 
 ## Surface model — two structures, two primitives
 
@@ -163,73 +158,43 @@ claims space") and removes the implication that there's a Window subtype.
 
 ## Buffer model
 
-`Buffer` lives in `core` (not `tui`) — it's pure data with no terminal
-dependencies. `tui` owns parser implementations (markdown / diff / syntax)
-and rendering (`Window::render`, theme resolution, grid diff). Headless
-mode reads transcript content through the same `Buffer` surface as the
-TUI does.
+`Buffer` lives in `core` — pure data, no terminal deps. Tui owns
+parser impls (markdown / diff / syntax) + rendering (`Window::render`,
+theme resolve, grid diff). Headless reads through the same surface.
 
-Vim-style: lines + extmarks in named namespaces, plus a `modifiable` flag.
+Vim-style: lines + extmarks in named namespaces + `modifiable` flag.
 
-- **All decoration is extmarks** in named namespaces. Highlights, virtual
-  text, conceals, signs, source-byte mapping for markdown/diff, click
-  metadata, line backgrounds, folds, diagnostics — one store,
-  clear-by-namespace. Mirrors `nvim_buf_set_extmark`.
-- **Theme references are highlight ids, not raw colors.** Buffers store
-  highlight group ids/extmark highlight ids. Theme changes should not require
-  rewriting buffer contents or spans. *(End-state — see `P9.md` § P9.e.
-  P9.b kept extmark `Highlight` payloads carrying `Style` for the move;
-  P9.e replaces them with `HlGroup(u32)`.)*
-- **`modifiable: bool`** is the data-layer read-only guard. Source of truth
-  for "can this content be edited?" Same Buffer viewed by N Windows shares
-  one `modifiable` flag. Defaults: `false` for transcript / diff preview /
-  notification / picker results / markdown render. `true` for prompt /
-  cmdline / fuzzy-finder query / any input field.
-- **Yank substitution is extmark-level.** Each `Extmark` carries an
-  optional `yank: Option<YankSubst>` where
+- **All decoration is extmarks** in named namespaces (highlights,
+  virt-text, signs, conceals, source-byte mapping, click metadata,
+  folds). One store, clear-by-namespace. Mirrors `nvim_buf_set_extmark`.
+  P9.f: namespaces become integer handles minted by
+  `smelt.api.create_namespace(name)`; the keyset takes nvim's option
+  set verbatim plus smelt extensions (`yank`, `on_click`).
+- **Theme references are highlight ids, not raw colors.** P9.e:
+  extmark `Highlight` payload carries `HlGroup(u32)`; theme is the
+  paint-time resolver.
+- **`modifiable: bool`** is the data-layer edit guard, shared by all
+  Windows over a Buffer. False for transcript / diff / notification /
+  picker; true for prompt / cmdline / inputs.
+- **Yank substitution per extmark.** `yank: Option<YankSubst>`
+  (`Empty` elides, `Static(s)` substitutes, absent = literal source).
+  Default — yank source bytes verbatim — is right for rendered
+  markdown (`**bold**` copies as `**bold**`).
+- **Per-buffer undo/marks** live on Buffer. Window owns no parallel
+  edit buffer.
+- **`Buffer::attach(spec)`** wires parsers. Spec carries parser kind,
+  decoration namespaces, and optional `on_block` callback at semantic
+  boundaries (block end, tool start/stop, turn end) — never per delta.
+  No `on_lines` / `on_bytes` / `decoration_provider`.
 
-  ```rust
-  enum YankSubst {
-      Empty,           // elide bytes covered by this extmark
-      Static(String),  // replace bytes with this string
-  }
-  ```
+`Buffer ≠ Grid`. Buffer persists across frames; Grid is the terminal
+frame rebuilt each render. Compositor renders Buffers through Windows
+into Grid.
 
-  `buffer.yank_text_for_range(range)` is a pure helper: it walks extmarks
-  intersecting the range and applies each one's substitution
-  (`Empty` skips, `Static` substitutes; absent = literal source bytes).
-  Hidden thinking blocks attach `YankSubst::Empty` extmarks; prompt
-  attachment sigils (e.g. `@file`) attach `YankSubst::Static(expanded_path)`.
-  No buffer-level strategy hook, no App-side translator.
-
-  The default — yank source bytes verbatim — is the right behaviour for
-  rendered markdown: copying a line of `**bold**` yields `**bold**`, not
-  the rendered glyphs. Substitution is opt-in per extmark.
-- **Per-buffer edit history lives on Buffer.** Undo/redo, marks, attachment
-  metadata, and stable anchors are buffer data, represented through undo state
-  and extmarks. Window does not own a parallel edit buffer.
-- **`Buffer::attach(spec)`** is the only way to wire parsers. `spec` carries
-  parser kind (`markdown`/`diff`/`syntax`), decoration namespaces, and an
-  optional `on_block` callback fired at high-level boundaries — _not_ per
-  delta. No `on_lines` / `on_bytes` / `decoration_provider`. Hot-path
-  callbacks aren't shipped at all.
-
-`Buffer ≠ Grid`. Buffer is a content store (persists across frames). Grid is
-the terminal frame (rebuilt every frame, differential flush). The compositor
-renders Buffers through Windows into the Grid.
-
-### Parsed metadata lives on the Buffer
-
-Expensive upstream computation — LCS results for diff blocks, syntect token
-streams for code blocks — attaches to the Buffer as **extmarks in dedicated
-namespaces** (`ns: "diff"`, `ns: "syntax"`). It's computed once when the
-content arrives, persists with the Buffer (so session resume doesn't redo
-it), and invalidates naturally on edit.
-
-There is no separate persisted IR cache file, no separate persisted layout
-cache. Width-dependent layout (line wrapping) runs at paint time; with a
-diff renderer that's cheap. Width-independent computation (the LCS, the
-token stream) lives on the Buffer.
+Parsed metadata (diff LCS, syntect tokens) attaches as extmarks in
+dedicated namespaces — computed once at ingest, persists with the
+Buffer, invalidates on edit. No persisted IR cache file. Width-dep
+layout runs at paint time.
 
 ## Rendering model — event-driven, diff-based, no dirty flag
 
@@ -275,41 +240,10 @@ A `Cell<T>` is a typed, named slot that:
 3. Notifies all subscribers, in registration order, queued and drained
    after the current `&mut` borrows release.
 
-```lua
--- read/bind a stateful cell (statusline)
-smelt.statusline.set({
-  { bind = "now", fmt = "%H:%M:%S" },
-  " · ",
-  { bind = "agent_mode" },
-  " · ",
-  { bind = "model" },
-})
-
--- subscribe to changes
-smelt.cell("agent_mode"):subscribe(function(new, old)
-  -- runs after every set
-end)
-
--- glob subscription (autocmd-style pattern)
-smelt.cell:glob_subscribe("*_changed", function(name, payload)
-  -- ...
-end)
-
--- plugin-defined cell + timer
-local pending = smelt.cell.new("my_plugin:pending", "0")
-smelt.timer.every(2000, function()
-  pending:set(tostring(count_pending()))
-end)
-
--- pure event (no state, just a notification)
-local evt = smelt.cell.new("my_plugin:thing_happened", nil)
-evt:set(payload)            -- fires subscribers
-```
-
-`smelt.au.on(name, fn)` and `smelt.au.fire(name, payload)` exist as a
-thin alias over `smelt.cell(name):subscribe(fn)` and
-`smelt.cell(name):set(payload)`. They are sugar; the underlying
-mechanism is one registry.
+Lua surface: `smelt.cell(name):subscribe(fn)`,
+`smelt.cell.new(name, init):set(value)`, and a glob form
+`smelt.cell:glob_subscribe("*_changed", fn)`. `smelt.au.{on,fire}` is
+a thin alias kept for nvim familiarity.
 
 Built-in cells the runtime ships (stateful slots and pure events both):
 
@@ -338,38 +272,12 @@ Built-in cells the runtime ships (stateful slots and pure events both):
 Plugins create cells under their own namespace (`my_plugin:pending`,
 `my_plugin:thing_happened`) to avoid collisions with built-ins.
 
-### Why one primitive instead of two
-
-Cells already wake the loop, queue subscriber drains, and integrate with
-the spec hot path. An autocmd registry is the same machinery —
-`Map<Name, Vec<Subscriber>>` plus a fire path that queues callbacks. Two
-primitives doing the same job at different ergonomic surfaces forces
-plugin authors to learn both. One primitive with sugar (`smelt.au.*`
-and `smelt.cell.*` over the same registry) keeps the surface familiar
-without doubling the implementation.
-
-The trade-off — stringly-typed cell names — is the same as nvim's
-autocmds and is checked at registration via a known-name list warning.
-
 ### Spec escape hatch
 
-The default segment is `{ bind = cell, fmt = … }` — pure data. For ad-hoc
-computation, the spec accepts:
-
-```lua
-{ call = function() return git_branch() end, deps = { "cwd", "now" } }
-```
-
-`call` runs only when one of `deps`' cells changes — never per-frame. This
-keeps mlua's no-JIT cost off the hot path while preserving the "drop in a
-custom function" capability.
-
-### Why push (cells), not pull (lualine-style re-eval)
-
-Pull recomputes every segment on every redraw — fine for LuaJIT (Neovim),
-expensive for mlua. Push pays only for segments whose inputs changed: zero
-work when idle, one segment per frame typically. The `deps` escape hatch
-recovers pull's flexibility without its baseline cost.
+Default segment is `{ bind = cell, fmt = … }`. For ad-hoc computation:
+`{ call = fn, deps = { "cwd", "now" } }` — `call` runs only when a
+dep cell changes, not per-frame. Push (cells) over pull (lualine
+re-eval) keeps mlua off the hot path; idle CPU stays at zero.
 
 ## Input pipeline — three independent layers
 
@@ -410,179 +318,57 @@ Window.
 
 ## Focus, hit-testing, and capture
 
-Focus and pointer hit-testing are related but not the same thing.
+Focus is semantic; hit/capture is geometric — separate enums.
 
-- **FocusTarget** is semantic and keyboard-addressable: `Window(WinId)` only.
-  A focused Window owns cursor, selection, mode label, keymap dispatch, and
-  statusline context.
-- **HitTarget** is geometric and mouse-addressable:
-  `Window(WinId) | Scrollbar { owner: WinId } | Chrome { owner: OverlayId }`.
-- **CaptureTarget** reuses `HitTarget` for in-flight gestures. A scrollbar can
-  capture a drag, but it never becomes focused.
+- **FocusTarget** = `Window(WinId)`. Keyboard-addressable. Owns
+  cursor / selection / mode label / keymap dispatch.
+- **HitTarget** = `Window | Scrollbar { owner } | Chrome { owner }`.
+  Mouse-addressable; can include non-focusable elements.
+- **CaptureTarget** = `HitTarget` for in-flight gestures. Scrollbar
+  can capture a drag without becoming focused.
 
-Scrollbar behaviour:
-
-- Clicking or dragging a scrollbar routes mouse events to
-  `HitTarget::Scrollbar { owner }`.
-- Focus stays on, or moves to, the owning Window when appropriate.
-- Keyboard events, Esc chain, statusline mode, cursor shape, and selection all
-  continue to read from `FocusTarget::Window(owner)`, never from the
-  scrollbar.
-
-This split avoids overloading one `TargetId` enum with two meanings. Focus is
-semantic; hit/capture is geometric.
-
-Rules:
-
-- **`Ui::focus: Option<WinId>`** is the source of truth for keyboard focus.
-  Public API is explicit: `focus() -> Option<WinId>` reads it,
-  `set_focus(win) -> bool` changes it. `set_focus` pushes the prior
-  focus onto `focus_history`. **`overlay_close` pops `focus_history`**
-  back to the most recent still-existing focusable Window — handles
-  the dialog-close case automatically.
-- **Focused Window access is a convenience over `focus`.**
-  `focused_window()` / `focused_window_mut()` return the focused Window, if the
-  id still exists. There is no target `focused_buffer_window()` API because every
-  focusable surface is already a Window over a Buffer.
-- **Overlay focus is derived, not stored.** `focused_overlay()` returns the
-  overlay containing the focused Window. `active_modal()` returns the topmost
-  modal overlay, independent of focus.
-- **Mouse routing uses `hit_test(row, col) -> Option<HitTarget>`.** Hit-testing
-  applies modal filtering and can return scrollbars/chrome that are not
-  focusable.
-- **Click promotes focus** only when the hit target resolves to a focusable
-  Window and no modal Overlay above absorbs the hit. Clicking a scrollbar may
-  focus its owner, never the scrollbar.
-- **Tab cycles are modal-aware.** Inside a modal Overlay → cycle the overlay's
-  focusable Windows. Otherwise → walk all focusable Windows in z-order.
-- **Esc chain.** Focused Window's `handle_key` first; if `Ignored`,
-  `WinEvent::Dismiss` fires on the enclosing Overlay (Lua handles via
-  `smelt.win.on_event`). No `on_dismiss` field.
-- **Cursor shape is global on `Ui`** — single field, nvim-style. Not
-  per-Window.
+Rules: `Ui::focus` is the SoT (read via `focus()`, write via
+`set_focus(win)` which pushes prior onto `focus_history`).
+`overlay_close` pops history back to the topmost still-existing
+focusable Window. Click promotes focus only when hit resolves to a
+focusable Window and no modal absorbs. Tab cycles are modal-aware.
+Esc chain: focused Window first; if `Ignored`, `WinEvent::Dismiss`
+fires on the enclosing Overlay. Cursor shape is global on `Ui`,
+nvim-style.
 
 ## Frontends — Core, TuiApp, HeadlessApp
 
-The runtime is split along the only axis that matters: does this code
-need a Ui?
+Split on the only axis that matters: does this code need a Ui?
 
-```rust
-struct Core {
-    config:        AppConfig,
-    session:       Session,
-    confirms:      Confirms,
-    clipboard:     Clipboard,
-    timers:        Timers,
-    cells:         Cells,
-    lua:           LuaRuntime,
-    engine:        EngineClient,
-    frontend:      FrontendKind,
-    skills:        Option<Arc<SkillLoader>>,
-    files:         FileStateCache,
-    processes:     ProcessRegistry,
-}
+- `Core` (in `core`) — `config / session / confirms / clipboard /
+  timers / cells / lua / engine / files / processes / skills /
+  frontend`. Event loop lives here. Zero terminal deps.
+- `TuiApp { core, well_known, ui }` (in `tui`) — adds `well_known`
+  WinIds + `ui::Ui`.
+- `HeadlessApp { core, sink }` (in `core`) — adds JSON/text sink.
 
-struct TuiApp { core: Core, well_known: WellKnown, ui: ui::Ui }
-struct HeadlessApp { core: Core, sink: HeadlessSink }
-```
-
-`Core` (in `core`) runs the event loop and holds everything that doesn't
-need the compositor: engine bridge, cells, timers, autocmd-style
-subscriptions, Lua runtime, session state, confirms, clipboard,
-file cache, and process registry.
-`TuiApp` (in `tui`) wraps `Core` and adds `well_known` (the `WinId`s of
-transcript / prompt / statusline / cmdline) plus a `ui::Ui`.
-`HeadlessApp` (in `core`) wraps the same `Core` with a `HeadlessSink`
-that emits JSON / text instead of pixels.
-
-This split lets `smelt -p "..."` (one-shot CLI) use the same
-`Core`/`EngineClient`/`LuaRuntime` as the TUI without loading `ui::Ui`.
-
-**One binary, two entry points.** A single `smelt` binary; `main`
-inspects argv:
-
-```
-smelt                       → TuiApp (interactive terminal)
-smelt -p "..."              → HeadlessApp + JSON/text sink
-
-```
-
-There is no `smelt-worker` second binary, no `EngineConfig.interactive`
-flag inside the engine, and no `if interactive { … } else { … }`
-branches scattered through `tui` code. Each entry point constructs the
-right frontend type up-front and the borrow checker keeps them apart.
-`HeadlessApp` differs from `TuiApp` only by which trait surface it
-exposes and what kind of sink it carries — the event loop, Cells,
-Timers, Lua runtime, and engine channel boundary are identical.
+One binary, two entry points: `smelt` → `TuiApp`, `smelt -p "..."` →
+`HeadlessApp`. No `EngineConfig.interactive` flag, no `if interactive`
+branches. Borrow checker enforces the split.
 
 ### Side effects — `Host` and `UiHost`, no Effect enum
 
-Side effects are direct method calls on host traits. Keep the traits
-small: `Host` covers Ui-agnostic subsystems; `UiHost` covers the
-compositor-bearing surface only. **`UiHost` does not extend `Host`.**
-That keeps `ui` free of tui-defined types and avoids turning the traits
-into a second application object model.
+Two small traits, side effects are direct method calls. **`UiHost`
+does not extend `Host`** — keeps `ui` free of tui-defined types.
 
-```rust
-trait Host {
-    fn config(&self)        -> &AppConfig;
-    fn clipboard(&mut self) -> &mut Clipboard;
-    fn cells(&mut self)     -> &mut Cells;
-    fn timers(&mut self)    -> &mut Timers;
-    fn engine(&mut self)    -> &mut EngineClient;
-    fn session(&mut self)   -> &mut Session;
-    fn files(&mut self)     -> &mut FileStateCache;
-    fn processes(&mut self) -> &mut ProcessRegistry;
-    fn skills(&self)        -> &Option<Arc<SkillLoader>>;
-    fn frontend(&self)      -> FrontendKind;
-    fn confirms(&mut self)  -> &mut Confirms;
-    // … nothing that mentions Ui / Window / Buffer / Overlay
-}
+`Host` exposes the 11 Ui-agnostic accessors (`config`, `clipboard`,
+`cells`, `timers`, `engine`, `session`, `files`, `processes`,
+`skills`, `frontend`, `confirms`). `UiHost` exposes `ui`, `focus`,
+`buf_*`, `win_*`, `overlay_open`. `Core` impls `Host`; `TuiApp`
+impls both (delegating Host); `HeadlessApp` impls only `Host`.
 
-trait UiHost {
-    fn ui(&mut self) -> &mut Ui;
-    fn focus(&mut self, win: WinId);
-    fn buf_create(&mut self, …) -> BufId;
-    fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer>;
-    fn win_open(&mut self, …) -> WinId;
-    fn win_close(&mut self, id: WinId);
-    fn win_mut(&mut self, id: WinId) -> Option<&mut Window>;
-    fn overlay_open(&mut self, ov: Overlay) -> OverlayId;
-}
-```
+Lua bindings divide by trait. Host-tier (works in headless + tui)
+lives in `core/src/lua/api/`; UiHost-tier (errors in headless) lives
+in `tui/src/lua/api/`. Two cross-runtime cases keep typed forms
+because they cross channels: engine boundary (`UiCommand`) and Lua
+coroutine resumption (`host.lua().resume_task`).
 
-`Core` (in `core`) impls `Host`. `TuiApp` (in `tui`) impls both `Host`
-(by delegating to its `Core`) and `UiHost`. `HeadlessApp` (in `core`)
-impls only `Host`. `Window::handle(Event, EventCtx)` reads per-pane
-data from `EventCtx`; the current `viewport_for` / `rows_for` /
-`breaks_for` helpers are transitional escape hatches while
-prompt/transcript still have tui-owned projections.
-Lua bindings divide by trait:
-
-- **Host-only bindings** (work in headless and tui):
-  `smelt.cell`, `smelt.timer`, `smelt.au`, `smelt.clipboard`,
-  `smelt.cmd`, `smelt.engine`, `smelt.permissions`,
-  `smelt.confirm`, `smelt.mode`, `smelt.session`, `smelt.tools`,
-  `smelt.os`, `smelt.fs`, `smelt.http`, `smelt.html`,
-  `smelt.notebook`, `smelt.path`, `smelt.parse`, `smelt.grep`,
-  `smelt.fuzzy`, `smelt.theme`, `smelt.process`,
-  `smelt.frontend` (`.is_interactive()`, `.kind()`).
-  These live in `core/src/lua/api/` and resolve via `try_with_host`.
-- **UiHost bindings** (require a Ui — headless errors at call site):
-  `smelt.ui`, `smelt.win`, `smelt.buf`, `smelt.statusline`.
-  These live in `tui/src/lua/api/` and resolve via `try_with_app`.
-
-No reducer, no serialization-through-data, no leaky return-value side
-effects like `Yank(String)`. Helix/nvim-shaped: handlers mutate via the
-appropriate trait.
-
-Two cross-runtime cases keep their typed forms because they cross channels:
-
-- **Engine boundary** — typed via `UiCommand` in `protocol`.
-- **Lua coroutine resumption** — `host.lua().resume_task(id, payload)`.
-  Direct method call, not an enum variant.
-
-Observability is `tracing::trace!` inside subsystem methods. No effect log.
+No reducer, no Effect log. Observability via `tracing::trace!`.
 
 ## Lua surface contract
 
@@ -637,44 +423,6 @@ A few bindings remain in `tui/src/lua/api/` pending reclassification
 
 Each binding declares whether it needs `Host` or `UiHost`; calling a
 UiHost binding from a `HeadlessApp` raises a runtime error in Lua.
-
-## App-level events — folded into Cells
-
-There is no separate event registry. Window-scoped events still use
-`WinEvent` (Submit, Dismiss, TextChanged, …) on the `Window` /
-`Overlay` surface; everything else — mode flips, model swaps, history
-growth, turn boundaries, confirm lifecycle — flows through `Cells`
-(see "Reactive cells" above). State-changes are stateful cells with
-typed values; pure events (e.g. `turn_complete`) are `Cell<TurnMeta>`
-that subsystems set and listeners subscribe to.
-
-`smelt.au.on / smelt.au.fire` exist as a thin alias over
-`smelt.cell(name):subscribe` / `smelt.cell(name):set`, kept for nvim
-familiarity.
-
-### Built-in cell-events
-
-The same payloads listed in "Reactive cells" above. PascalCase
-autocmd-style aliases for the major ones:
-
-| Autocmd alias          | Underlying cell                      |
-| ---------------------- | ------------------------------------ |
-| `AgentModeChanged`     | `agent_mode`                         |
-| `VimModeChanged`       | `vim_mode`                           |
-| `ModelChanged`         | `model`                              |
-| `ReasoningChanged`     | `reasoning`                          |
-| `BranchChanged`        | `branch`                             |
-| `HistoryChanged`       | `history`                            |
-| `TokenUsageUpdated`    | `tokens_used`                        |
-| `TurnComplete`         | `turn_complete`                      |
-| `TurnError`            | `turn_error`                         |
-| `SessionStarted`       | `session_started`                    |
-| `SessionEnded`         | `session_ended`                      |
-| `ConfirmRequested`     | `confirm_requested`                  |
-| `ConfirmResolved`      | `confirm_resolved`                   |
-
-Plugins create their own cells under a namespaced name
-(`my_plugin:thing_happened`) instead of registering autocmds.
 
 ## Engine boundary — channels only
 
@@ -784,126 +532,43 @@ Three small invariants the runtime enforces.
 
 ## Tools — Lua-owned, Rust-composed (FFI for intricate logic)
 
-All tools live in `runtime/lua/smelt/tools/*.lua`. Bash, read, write, edit,
-glob, grep, web_fetch, web_search, notebook, agent — every one. Engine
-holds only the schema + dispatcher trait, no Rust impls.
+All tools live in `runtime/lua/smelt/tools/*.lua`. Engine holds only
+schema + dispatcher trait. **Engine asks the dispatcher → Lua runtime
+finds the impl → runs as a coroutine → returns the result.**
+Coroutines yield on async Rust calls (process spawn, HTTP, FS).
 
-**Engine asks the dispatcher → tui's Lua runtime finds the impl →
-runs it as a coroutine → returns the result.** The coroutine yields on
-async Rust calls (process spawn, HTTP fetch, FS read), resumes when they
-complete.
+Principle: **everything in Lua; FFI for intricate logic**. Anything
+that's slow, fragile, or carefully-tested in Rust is exposed as a
+`core::<cap>` function (`permissions` bash AST + workspace store,
+`fs` atomic edit-with-mtime-check, `notebook` JSON munging, `grep`,
+`html`, `http` with cache). Never split a tool "half Rust, half Lua".
 
-`ToolRuntime` is a conceptual role, not a required runtime object. If the
-Lua runtime already owns tool registration, hook evaluation, coroutine
-parking, and result delivery, keep it there. Add a separate
-`ToolRuntime` type only if it buys a materially cleaner ownership or
-execution boundary.
+Plugin parity: built-in and plugin tools land in the same registry;
+no Plugin-vs-Core split. All permission policy is UX-side: engine has
+no `Permissions` struct; the Lua hook returns `"allow" |
+"needs_confirm" | "deny"`; `RequestPermission` ↔ `PermissionDecision`
+is engine's full permission surface.
 
-The principle is **everything in Lua; FFI for intricate logic**. The
-tool body — schema, hooks, control flow, error handling, output
-formatting — is Lua. Anything that's gnarly enough to want a Rust
-implementation is exposed as a capability function the Lua tool calls,
-not as a Rust tool. Concrete cases:
+### Tool registration table
 
-- **`core::permissions`.** Bash AST parser (`parse_bash`), pattern /
-  ruleset matching, workspace boundary check, runtime approvals,
-  workspace JSON store. The Lua `bash` tool walks the AST; other tools
-  call workspace check + approvals.
-- **`core::fs`.** Atomic edit-with-mtime-check
-  (`apply_edit_with_mtime_check`) — the Lua `edit_file` tool calls it
-  once; no race, no half-written file.
-- **`core::notebook`.** Jupyter JSON parse + apply_edit. JSON cell
-  munging stays Rust; the Lua tool owns schema, hooks, locking.
-- **Glob, ripgrep, html→markdown, http with cache** — `core::{grep, fs,
-  html, http}`, listed in the capabilities section.
+A Lua tool registers one table; Rust calls callbacks generically. No
+callback's existence depends on the name. Fields: `name`, `schema`,
+`hooks(args, mode, ctx)`, `run(call_id, args, ctx)`, optional
+`summary(args)`, `render(buf, args, output, width)`,
+`paths_for_workspace(args)`, `elapsed_visible: bool`.
 
-The litmus: if implementing X in Lua would be slow, fragile, or
-duplicate carefully-tested Rust logic, expose X as an `core::<cap>`
-function. Never split a tool into "half Rust impl, half Lua wrapper."
-
-Why this shape:
-
-- **Plugin parity.** Built-in tools and plugin-authored tools land in the
-  same registry. The engine doesn't distinguish — there's no
-  Plugin-vs-Core split anywhere in the protocol or events.
-- **All permission policy is UX-side.** Engine has no `Permissions`
-  struct, no per-mode rule plumbing, no `RuntimeApprovals`. The Lua
-  tool's `hooks(args, mode)` consults `core::permissions.*` (bash AST,
-  workspace check, runtime approvals, workspace store) and returns
-  `"allow" | "needs_confirm" | "deny"`. AgentMode (Plan/Apply/Yolo) is
-  one input the hook reads from; engine has no opinion on it. When the
-  hook returns `"needs_confirm"`, engine emits `RequestPermission`;
-  the user's answer flows back as `PermissionDecision`. That's the full
-  engine surface for permissions.
-- **Schema is data.** `ToolSchema` is name + description + JSON Schema for
-  parameters. Generated from the Lua registration call.
-
-### The tool registration table — full Rust surface for a Lua tool
-
-A Lua tool registers a single table; Rust calls into its callbacks
-generically. **No callback's existence depends on the tool's name.**
-Rust never matches `name == "bash"` to decide which callback to fire.
-
-```lua
-smelt.tools.register({
-  name = "bash",
-  schema = { … },                          -- JSON schema for params
-
-  hooks = function(args, mode, ctx)        -- decide allow / needs_confirm / deny
-    …
-  end,
-
-  run = function(call_id, args, ctx)       -- the tool body (coroutine)
-    …
-  end,
-
-  -- Display callbacks — called by Rust to compose the transcript / dialogs.
-  -- Optional; Rust's default implementations show plain text.
-
-  summary = function(args)                 -- one-line label for the tool block
-    return args.description or args.command
-  end,
-
-  render = function(buf, args, output, width)
-    -- Full drawing access. `buf` is a `Buffer` userdata: set_lines,
-    -- add_highlight, set_extmark, attach decorations, all available.
-    -- The shipped helpers (smelt.bash.render, smelt.diff.render,
-    -- smelt.syntax.render, smelt.notebook.render) are convenience
-    -- primitives any plugin can call into; nothing is forced through
-    -- them.
-  end,
-
-  paths_for_workspace = function(args)     -- which arg values are paths
-    return { args.file_path }              -- used by workspace boundary check
-  end,
-
-  elapsed_visible = true,                  -- show running time in tool block
-})
-```
-
-**The eternal rule:** Rust must not match on a Lua-registered identifier
-(tool name, command name, dialog name, mode name). If a `match name {
-"bash" => … }` or `if name == "bash"` shows up over a Lua-registered
-identifier, that's a bug. The registration table carries the metadata;
-Rust calls through it.
+**Eternal rule:** no tool/command/dialog/mode name matching in Rust
+over a Lua-registered identifier.
 
 ### Drawing context is full, not partial
 
-The Lua `render` hook receives a `Buffer` userdata. The full Buffer API
-(`set_lines`, `add_highlight`, `set_extmark`, `attach`, namespaces,
-extmarks, virtual text) is available. There is no `RenderCtx`-style
-limited "you can call `text()` / `diff()` / `code()`" enum-of-methods.
-Plugins compose any layout — tree views, histograms, custom diff modes
-— from the same primitives the built-in renderers use.
-
-The shipped Rust renderers (`smelt.bash.render`, `smelt.diff.render`,
-`smelt.syntax.render`, `smelt.notebook.render`) are convenience helpers
-that paint into a Buffer at a position. They are not the API; they sit
-*on top of* it.
-
-This applies symmetrically to dialogs, statusline segments, and
-transcript blocks. Wherever Lua paints, it paints into a Buffer with
-the full Buffer API.
+`render(buf, ...)` receives a `Buffer` userdata with the full API
+(`set_lines`, `set_extmark` keyset, `attach`, namespaces, virt-text).
+No `RenderCtx`-style enum-of-allowed-methods. Shipped renderers
+(`smelt.bash.render`, `smelt.diff.render`, `smelt.syntax.render`,
+`smelt.notebook.render`) sit *on top of* the Buffer API as
+conveniences, not in front of it. Applies symmetrically to dialogs,
+statusline, transcript blocks.
 
 ## Rust capabilities — parse-then-present pattern
 
@@ -994,13 +659,13 @@ We borrow only the cell-grid concept as the intermediate rendering surface.
 - `core` depends on `protocol` and `engine` only.  `tui` depends on
   `core` and `crossterm`.
 
-**Current state:** `core/` has been extracted into `crates/core` (P8.e).
-`ui/` has been absorbed into `tui` as `tui/src/ui/` (P8.a). `term/` was
- dissolved during P8: its headless-safe content model moved to
-`core/content/` and its terminal chrome moved to `tui/src/`. Host-tier
-Lua bindings now live in `core/src/lua/api/` and resolve through
-`try_with_host`; UiHost-tier bindings stay in `tui/src/lua/api/` and
-resolve through `try_with_app`.
+**Current state:** `crates/core` extracted (P8.e). `ui/` absorbed
+into `tui::ui` (P8.a). `term/` dissolved (P8). `Buffer` + `Style` +
+`UndoHistory` + `BufferParser` moved to `core` (P9.b);
+`tui::ui::{buffer,undo,id}` are re-export shims. Host-tier Lua
+bindings in `core/src/lua/api/` resolve via `try_with_host`;
+UiHost-tier in `tui/src/lua/api/` via `try_with_app`. Theme registry
+landed (P1.0): `set(name, style)`, `link(from, to)`, `get(name)`.
 
 ## Code rules — eternal
 
@@ -1077,121 +742,33 @@ the `eprintln!`s before committing.
 - Selection = fg-accent on the cursor row. No bg fill, no cursor glyph, no
   layout shift.
 
-## Future multi-agent — an optional plugin pattern, not an engine concept
+## Future multi-agent — optional plugin pattern, not engine concept
 
-Engine has no notion of "agents." There is no `Role::Agent`, no
-`AgentBlockData`, no `AgentMessage` event, no `EngineConfig.multi_agent`,
-no agent registry inside engine. Any future multi-agent feature would be
-implemented as optional Lua plugins composing one generic capability —
-`core::process` (long-lived child IPC).
-
-```rust
-// core::process — generic IPC primitive for any long-running child.
-pub struct Handle { /* opaque */ }
-
-pub fn spawn(cmd: &str, args: &[&str], env: &HashMap<...>) -> Handle;
-
-impl Handle {
-    pub fn send(&self, msg: &[u8]);                   // → child stdin / socket
-    pub fn on_event(&self, cb: LuaFn);                // event from child
-    pub fn wait(&self) -> ExitStatus;                 // block on exit
-    pub fn kill(&self);
-}
-```
-
-The child can be anything — a long-running bash command, an MCP server.
-The parent receives structured events through `on_event` and decides
-what to do with them. This generalizes past agents into a single
-primitive.
-
-A future optional multi-agent plugin under this model would:
-
-- `spawn_agent.lua` calls `core::process.spawn("smelt", {"--agent", id})`,
-  registers an `on_event` handler that fires a Lua-side cell (e.g.
-  `agent:<id>:status`), returns the handle id as the tool result.
-- `message_agent.lua` finds the handle, sends a JSON message, blocks
-  the coroutine until the child responds, returns the response as the
-  tool result.
-- `peek_agent.lua` reads the latest event payload from the cell.
-
-The transcript would render these tool calls _the same way it renders any
-other tool call_ — no special widget. A plugin that wants fancy agent
-UI (live token streaming, dedicated panel, etc.) builds it on top of
-the cell + a custom Buffer attach. That's a plugin author's choice,
-not a built-in.
-
-**Bidirectional async: solved by the event channel.** A child process
-finishing a task while the parent is mid-turn fires events into the
-parent via `on_event`. Those events update Lua-side cells; subscribers
-react. The parent's LLM sees the updates next turn (or is woken
-mid-turn if a plugin chooses to inject something). No
-`AgentMessageNotification` broadcast in engine — it's tui-side
-plumbing built on a primitive that's useful for any subprocess.
-
-**What died** (all removed in earlier phases): `protocol::Role::Agent`,
-`protocol::AgentBlockData`, `EngineEvent::{AgentMessage, AgentExited,
-Spawned}`, `UiCommand::AgentMessage`,
-`engine::tools::AgentMessageNotification`, `EngineConfig.multi_agent`,
-`MultiAgentConfig`, the engine-side registry/socket modules,
-`Session.agents` / `agent_snapshots`.
-
-**What's added:** `core::process` long-lived IPC surface + Lua bindings
-under `smelt.process` (`spawn`, `send`, `on_event`, `wait`, `kill`).
+Engine has no agent concept. Any future multi-agent feature is an
+optional Lua plugin over `core::process` long-lived IPC (`spawn`,
+`send`, `on_event`, `wait`, `kill`). Child process can be anything —
+agent, MCP server, long-running bash. Transcript renders these tool
+calls the same way as any other tool call; fancier UI rides on a
+custom Buffer attach + cells. Bidirectional async happens through
+`on_event` updating Lua-side cells.
 
 ## Configuration — one format, one entry point
 
-User configuration lives in **one place, one language**:
-`~/.config/smelt/init.lua`. No `config.yaml`, no separate keymap TOML,
-no parallel format. The Lua-everywhere principle extends end to end:
-permissions, providers, MCP servers, theme, keymap, model defaults,
-auxiliary tasks, redaction — every option a user might set is a Lua
-call.
+User config: `~/.config/smelt/init.lua`. Plugins:
+`~/.config/smelt/plugins/*.lua`. Tools:
+`~/.config/smelt/tools/*.lua` (P9.g auto-register). Project-local
+(P9.g): `<cwd>/.smelt/{init.lua, plugins/*.lua, tools/*.lua,
+commands/*.md}` — autoloaded after globals, gated by a first-load
+trust prompt. Embedded autoloads under `runtime/lua/smelt/` are the
+SoT for default UX; init.lua runs after and overrides.
 
-```lua
--- ~/.config/smelt/init.lua
-
-smelt.provider.register("anthropic", {
-  api_key = os.getenv("ANTHROPIC_API_KEY"),
-  default_model = "claude-opus-4-7",
-})
-
-smelt.permissions.set_rules {
-  normal = { allow = { "bash:git status", "bash:ls" }, ask = { "bash:rm" } },
-  apply  = { allow = { "edit_file:*" } },
-}
-
-smelt.mcp.register("filesystem", { command = "mcp-filesystem", args = { "/" } })
-
-smelt.theme.use("default")
-smelt.keymap.set("normal", "<C-p>", function() smelt.cmd.run("picker") end)
-```
-
-Embedded autoloads under `runtime/lua/smelt/` are the source of truth
-for the default UX (statusline, dialogs, built-in tools, default
-theme). `init.lua` runs after autoloads and can override anything.
-Plugins go in `~/.config/smelt/plugins/*.lua`, autoloaded after
-`init.lua`.
-
-The Rust side ships no YAML/TOML parser for config and no schema for
-"settings keys" — there is no settings registry. A setting *is* a Lua
-binding's argument.
+No YAML/TOML, no settings registry. Every option is a Lua binding
+argument: providers, permissions, MCP, theme, keymap, model defaults.
 
 ## Assumptions
 
-- Single-threaded TUI loop. The Lua runtime is `!Send` (mlua holds Lua
-  thread state); cross-thread state crosses through `Arc<Mutex<…>>`
-  boundaries (engine sender, agent registries, process registry,
-  agent_snapshots).
-- The TLS app pointer is sound because Rust never touches its `&mut dyn Host`
-  borrow while Lua is executing — the FFI call is synchronous on a single
-  thread, so the reborrow inside `with_app` is sole.
-- Embedded Lua modules under `runtime/lua/smelt/` are the source of truth
-  for autoloaded plugins. User `~/.config/smelt/init.lua` runs after
-  autoloads and can override anything. There is no second config format
-  (no YAML, no TOML keymap).
+- Single-threaded TUI loop; Lua runtime is `!Send`.
+  `Arc<Mutex<…>>` boundaries for cross-thread state.
+- TLS app pointer is sound: Rust never holds its `&mut dyn Host`
+  borrow while Lua runs (synchronous, single-threaded FFI).
 
-## Out-of-scope tasks
-
-- **Theme registry.** Standalone task (not a refactor step). Replaces the
-  old `crate::theme` constants module. Tracked in the `task` CLI as
-  `20260426-083607`.

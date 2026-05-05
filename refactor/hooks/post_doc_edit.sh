@@ -28,15 +28,18 @@ lines=$(wc -l < "$file" | tr -d ' ')
 # Per-file caps. The narrative-prone files (P<n>, INVENTORY) get tighter caps;
 # spec docs (REFACTOR, ARCHITECTURE) are larger by design.
 case "$(basename "$file")" in
-  PROMPT.md)                          cap=100 ;;
-  README.md)                          cap=250 ;;
+  PROMPT.md)                          cap=50 ;;
+  PROMPT_RALPH.md)                    cap=100 ;;
+  README.md)                          cap=150 ;;
   INVENTORY.md)                       cap=400 ;;
-  P[0-9].md|P[0-9][0-9].md)           cap=300 ;;
-  REFACTOR.md|ARCHITECTURE.md)        cap=1200 ;;
-  FEATURES.md)                        cap=500 ;;
-  TRACE.md)                           cap=600 ;;
-  TESTING.md|DECISIONS.md)            cap=250 ;;
-  *)                                  cap=600 ;;
+  P[0-9].md|P[0-9][0-9].md)           cap=250 ;;
+  REFACTOR.md)                        cap=400 ;;
+  ARCHITECTURE.md)                    cap=800 ;;
+  FEATURES.md)                        cap=350 ;;
+  TRACE.md)                           cap=400 ;;
+  TESTING.md)                         cap=200 ;;
+  DECISIONS.md)                       cap=150 ;;
+  *)                                  cap=300 ;;
 esac
 
 if (( lines > cap )); then

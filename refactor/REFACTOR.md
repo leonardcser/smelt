@@ -327,6 +327,19 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   `HlGroup(u32)` instead of raw `Style` / `Color`. Theme is the
   paint-time resolver. Theme switches stop rewriting buffers. `Color`
   / `Style` survive only at the paint boundary.
+- **P9.f** ⏸ — **Plugin API ergonomics (nvim parity).** Integer
+  namespace handles (`smelt.api.create_namespace`); unified
+  `set_extmark` keyset mirroring nvim verbatim; gravity on extmarks;
+  hand-written `_meta/smelt.lua` EmmyLua stubs.
+- **P9.g** ⏸ — **Convention-based discovery + project-local plugins.**
+  `tools/*.lua` auto-register on require; autoload
+  `<cwd>/.smelt/{init,plugins,tools,commands}` after globals; trust
+  gate on first load.
+- **P9.h** ⏸ — **Hook surface expansion.** Event cells
+  (`session_before_compact|fork`, `message_start|end`,
+  `tool_execution_start|end`, `input_submit`); prompt composition via
+  `smelt.prompt.register_section`; stale-task invalidation by session
+  tag.
 
 ---
 
