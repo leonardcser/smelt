@@ -577,23 +577,70 @@ is engine's full permission surface.
 ### Tool registration table
 
 A Lua tool registers one table; Rust calls callbacks generically. No
-callback's existence depends on the name. Fields: `name`, `schema`,
-`hooks(args, mode, ctx)`, `run(call_id, args, ctx)`, optional
-`summary(args)`, `render(buf, args, output, width)`,
-`paths_for_workspace(args)`, `elapsed_visible: bool`.
+callback's existence depends on the name. Required: `name`, `schema`,
+`execute(args, ctx)`. Optional: `decide(args, mode)` /
+`needs_confirm(args)` / `approval_patterns(args)` for permissions,
+`summary(args)` for the one-line header label,
+`paths_for_workspace(args)` for workspace boundary checks,
+`render(args, output, ctx) -> LayoutTree<BufId>` for transcript
+display, `preview(args) -> LayoutTree<BufId>` for the confirm dialog.
 
 **Eternal rule:** no tool/command/dialog/mode name matching in Rust
 over a Lua-registered identifier.
 
+### Tool render returns a layout tree
+
+A tool's `render` callback returns a `LayoutTree<BufId>` — same
+primitive `LayoutTree` dialogs and overlays use, with a `Leaf(BufId)`
+variant for "place this Buffer's content here." The tool composes its
+own block layout (header buffer, body buffer, side-by-side, nested,
+collapsible — whatever it wants). Rust composer walks the tree and
+replays leaves into the transcript display Buffer.
+
+Slot vocabulary lives in the tool, not in Rust. There is no fixed
+"summary slot" / "subhead slot" / "body slot" the composer
+dispatches to. Tools that want a summary line + body create two
+buffers and arrange them in a `vbox`; tools that want side-by-side
+output create an `hbox`; plugin tools can produce any shape.
+
+Live updates (elapsed ticks, status changes) flow via cell
+subscriptions inside the tool's render coroutine. The tool subscribes
+to a per-block cell (`tool_status:<call_id>`) and updates extmarks on
+the relevant Buffer when the cell fires. Standard cell pattern, no
+callback-per-frame.
+
+`preview` is a separate callback for the confirm dialog (different
+surface, different lifecycle) but returns the same shape:
+`LayoutTree<BufId>`.
+
 ### Drawing context is full, not partial
 
-`render(buf, ...)` receives a `Buffer` userdata with the full API
-(`set_lines`, `set_extmark` keyset, `attach`, namespaces, virt-text).
-No `RenderCtx`-style enum-of-allowed-methods. Shipped renderers
-(`smelt.bash.render`, `smelt.diff.render`, `smelt.syntax.render`,
-`smelt.notebook.render`) sit *on top of* the Buffer API as
-conveniences, not in front of it. Applies symmetrically to dialogs,
-statusline, transcript blocks.
+Lua callbacks that paint receive a `Buffer` userdata with the full
+API (`set_lines`, `set_extmark` keyset, `attach`, namespaces,
+virt-text). No `RenderCtx`-style enum-of-allowed-methods. Shipped
+renderers (`smelt.bash.render`, `smelt.diff.render`,
+`smelt.syntax.render`, `smelt.notebook.render`) sit *on top of* the
+Buffer API as conveniences, not in front of it. Applies symmetrically
+to dialogs, statusline, transcript blocks, plugin windows.
+
+### The Lua component pattern
+
+Plugins compose UI by creating Buffers, arranging them in a
+`LayoutTree`, opening Windows over them, and attaching keymaps —
+the same primitives `dialog.lua` uses. Snake game, file finder,
+collapsible tool block, custom slash command dialog — all the same
+shape:
+
+1. `smelt.buf.create()` — make Buffers, populate with lines + extmarks.
+2. `smelt.layout.{vbox,hbox,leaf}` — compose into a tree.
+3. `smelt.win.open(buf, opts)` — display, focusable if interactive.
+4. `smelt.win.set_keymap(win, key, fn)` — input.
+5. `smelt.cell.subscribe(name, fn)` / `smelt.timer.every(ms, fn)` —
+   live updates.
+6. `smelt.spawn(fn)` / `smelt.task.wait(id)` — coroutine flows.
+
+`runtime/lua/smelt/dialog.lua` is the canonical example. Tool
+`render` callbacks ride the same primitive set.
 
 ## Rust capabilities — parse-then-present pattern
 

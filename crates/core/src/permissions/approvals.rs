@@ -86,19 +86,21 @@ impl RuntimeApprovals {
     /// Check whether a tool call that the config-based rules said "Ask" for
     /// should be auto-approved based on runtime patterns.
     ///
-    /// For bash: splits the command into subcommands and checks each against
-    /// runtime patterns AND the config's allow list (so that default-allowed
-    /// commands like `head`, `cat`, etc. don't block auto-approval).
+    /// For tools with shell-aware syntax (`bash`): splits the command into
+    /// subcommands and checks each against runtime patterns AND the
+    /// tool's config-allow list (so that default-allowed commands like
+    /// `head`, `cat`, etc. don't block auto-approval).
     ///
-    /// For other tools with patterns (e.g. web_fetch URLs): checks the
-    /// description against patterns.
+    /// For other tools with subpatterns (e.g. web_fetch URLs): checks the
+    /// description against runtime patterns; falls back to the config
+    /// ruleset's allow patterns if registered.
     ///
     /// Returns `true` if the tool call should be auto-approved.
     pub(crate) fn is_approved(
         &self,
         tool_name: &str,
         desc: &str,
-        config_bash: Option<&RuleSet>,
+        config_subpatterns: Option<&RuleSet>,
     ) -> bool {
         let session = self.session_tools.get(tool_name);
         let workspace = self.workspace_tools.get(tool_name);
@@ -125,11 +127,11 @@ impl RuntimeApprovals {
         subcmds.iter().all(|sc| {
             // Check runtime approval patterns.
             all_pats.iter().any(|p| p.matches(sc))
-            // For bash: also check if the config already allows this subcommand
-            // (e.g. DEFAULT_BASH_ALLOW patterns like "head *", "cat *").
-            // The full compound command was Ask because of OTHER subcommands,
-            // not this one.
-                || config_bash.is_some_and(|rs| check_ruleset(rs, sc) == Decision::Allow)
+            // Also consult the tool's config ruleset (e.g. bash's
+            // DEFAULT_BASH_ALLOW like "head *"); the full compound was Ask
+            // because of OTHER subcommands, not this one.
+                || config_subpatterns
+                    .is_some_and(|rs| check_ruleset(rs, sc) == Decision::Allow)
         })
     }
 
@@ -146,12 +148,8 @@ impl RuntimeApprovals {
         args: &HashMap<String, Value>,
         desc: &str,
     ) -> bool {
-        let config_bash = if tool_name == "bash" {
-            Some(permissions.bash_ruleset(mode))
-        } else {
-            None
-        };
-        let tool_approved = self.is_approved(tool_name, desc, config_bash);
+        let config_subpatterns = permissions.subcommand_ruleset(mode, tool_name);
+        let tool_approved = self.is_approved(tool_name, desc, config_subpatterns);
         let outside = permissions.outside_workspace_paths(tool_name, args);
         if outside.is_empty() {
             return tool_approved;

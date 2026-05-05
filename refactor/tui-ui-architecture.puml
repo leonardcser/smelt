@@ -304,7 +304,7 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
     class "core::grep"         as TGREP      <<ripgrep wrapper>>
     class "core::path"         as TPATH      <<normalize / canonical / relative>>
     class "core::fuzzy"        as TFUZZY     <<fuzzy matching / scoring>>
-    class "core::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)>>
+    class "core::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)\n· generic subcommands\n  HashMap<String, RuleSet>>>
   }
 
   package "content data types  (pure data — zero terminal deps)" as CDATA #FFE9B5 {
@@ -540,7 +540,11 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
              border, title, items }
       Hbox { gap, separator,
              border, title, items }
-      Leaf(WinId)
+      Leaf(WinId)         ' splits / overlays
+      Leaf(BufId)         ' inline composition
+                          ' (tool render returns
+                          '  this; transcript
+                          '  composer replays it)
       Item = (Constraint, LayoutTree)
       ' Any container can carry chrome
       ' (border + title). Convention
@@ -845,17 +849,21 @@ LTOOLS   -[#aa6,dashed]-> THTML           : html → markdown
 LTOOLS   -[#aa6,dashed]-> TNB             : Jupyter ops
 LTOOLS   -[#aa6,dashed]-> TGREP           : ripgrep
 LTOOLS   -[#aa6,dashed]-> TPERM           : bash AST parse\n(intricate logic\nbehind FFI)
-LTOOLS   -[#aa6,dashed]-> Buffer          : `render(buf, args, output, width)`\nwrites directly into a Buffer\n(full API — no RenderCtx subset)
+LTOOLS   -[#aa6,dashed]-> LayoutTree      : `render(args, output, ctx)`\nreturns LayoutTree<BufId>;\ntool composes its own block\nlayout out of Buffers
+LTOOLS   -[#aa6,dashed]-> Buffer          : `preview(args)` returns\nLayoutTree<BufId> for confirm\ndialog (separate surface)
 
 LPLG     -[#aa6,dashed]-> BIND            : any plugin can\ncompose Rust capabilities
 
 ' Engine calls Lua tool callbacks generically (no name matching in Rust).
 ' Each registered tool exposes:
-'   summary(args)              ' → pill label, called from agent loop
-'   render(buf, args, output)  ' → tool-block presentation
-'   paths_for_workspace(args)  ' → workspace-restriction inputs
-'   hooks(args, mode, ctx)     ' → allow / needs_confirm / deny
-'   run(call_id, args, ctx)    ' → tool body (coroutine)
+'   summary(args)            ' → pill label, called from agent loop
+'   render(args, output, ctx)' → returns LayoutTree<BufId>
+'   preview(args)            ' → confirm dialog body, LayoutTree<BufId>
+'   paths_for_workspace(args)' → workspace-restriction inputs
+'   decide(args, mode)       ' → "allow" / "ask" / "deny"
+'   needs_confirm(args)      ' → description text shown in dialog
+'   approval_patterns(args)  ' → "always allow" pattern suggestions
+'   execute(args, ctx)       ' → tool body (coroutine)
 ToolDispatcher ..> LTOOLS : calls callbacks generically\nby field name, never by tool name
 
 ' =====================================================================

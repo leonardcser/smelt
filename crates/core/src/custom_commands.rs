@@ -6,6 +6,8 @@
 //! `smelt.engine.submit_command`, which builds these structs and calls
 //! `TuiApp::begin_custom_command_turn`.
 
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, Default)]
 pub struct RuleOverride {
     pub allow: Vec<String>,
@@ -23,9 +25,11 @@ pub struct CommandOverrides {
     pub min_p: Option<f64>,
     pub repeat_penalty: Option<f64>,
     pub reasoning_effort: Option<String>,
+    /// Tool-name decision overrides (allow/ask/deny lists of names).
     pub tools: Option<RuleOverride>,
-    pub bash: Option<RuleOverride>,
-    pub web_fetch: Option<RuleOverride>,
+    /// Per-tool subpattern overrides keyed by tool name (`bash`,
+    /// `web_fetch`, `mcp`, or any tool that registers a bucket).
+    pub subcommands: HashMap<String, RuleOverride>,
 }
 
 #[derive(Debug, Clone)]

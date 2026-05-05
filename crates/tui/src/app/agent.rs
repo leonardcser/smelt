@@ -211,23 +211,20 @@ impl TuiApp {
 
         let permission_overrides = {
             let o = &cmd.overrides;
-            if o.tools.is_some() || o.bash.is_some() || o.web_fetch.is_some() {
+            if o.tools.is_some() || !o.subcommands.is_empty() {
+                let to_override =
+                    |r: &smelt_core::custom_commands::RuleOverride| protocol::RuleSetOverride {
+                        allow: r.allow.clone(),
+                        ask: r.ask.clone(),
+                        deny: r.deny.clone(),
+                    };
                 Some(protocol::PermissionOverrides {
-                    tools: o.tools.as_ref().map(|r| protocol::RuleSetOverride {
-                        allow: r.allow.clone(),
-                        ask: r.ask.clone(),
-                        deny: r.deny.clone(),
-                    }),
-                    bash: o.bash.as_ref().map(|r| protocol::RuleSetOverride {
-                        allow: r.allow.clone(),
-                        ask: r.ask.clone(),
-                        deny: r.deny.clone(),
-                    }),
-                    web_fetch: o.web_fetch.as_ref().map(|r| protocol::RuleSetOverride {
-                        allow: r.allow.clone(),
-                        ask: r.ask.clone(),
-                        deny: r.deny.clone(),
-                    }),
+                    tools: o.tools.as_ref().map(to_override),
+                    subcommands: o
+                        .subcommands
+                        .iter()
+                        .map(|(k, v)| (k.clone(), to_override(v)))
+                        .collect(),
                 })
             } else {
                 None
