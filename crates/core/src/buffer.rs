@@ -16,6 +16,7 @@
 
 use crate::attachment::AttachmentId;
 use crate::style::{Color, Style};
+use crate::theme::{intern_anonymous_style, HlGroup};
 use crate::undo::UndoHistory;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -116,11 +117,16 @@ pub type SpanStyle = Style;
 /// `ExtmarkPayload::Highlight`). Returned by `Buffer::highlights_at`.
 /// Always single-row at the moment — parsers emit one per row when an
 /// extmark spans multiple rows.
+///
+/// Carries an interned [`HlGroup`] id, not a resolved `Style` — the
+/// theme resolves the id at paint time. Theme switches mutate the
+/// shared theme, not the buffer; existing spans pick up the new
+/// colors automatically.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     pub col_start: u16,
     pub col_end: u16,
-    pub style: SpanStyle,
+    pub hl: HlGroup,
     pub meta: SpanMeta,
 }
 
@@ -196,7 +202,7 @@ pub struct Extmark {
 #[derive(Clone, Debug)]
 pub enum ExtmarkPayload {
     Highlight {
-        style: SpanStyle,
+        hl: HlGroup,
         meta: SpanMeta,
         /// Extend the highlight to end-of-line, even if `end_col` is
         /// shorter than the line. Mirrors nvim's `hl_eol`.
@@ -233,12 +239,21 @@ pub struct ExtmarkOpts {
 }
 
 impl ExtmarkOpts {
+    /// Anonymous-style convenience: interns the given Style as a
+    /// content-hashed [`HlGroup`] so legacy call sites that carry
+    /// resolved colors slot into the HlGroup-keyed extmark payload
+    /// without naming a group. Prefer [`Self::highlight_group`] for
+    /// new call sites that resolve through the theme.
     pub fn highlight(end_col: usize, style: SpanStyle, meta: SpanMeta) -> Self {
+        Self::highlight_group(end_col, intern_anonymous_style(style), meta)
+    }
+
+    pub fn highlight_group(end_col: usize, hl: HlGroup, meta: SpanMeta) -> Self {
         Self {
             end_row: None,
             end_col: Some(end_col),
             payload: ExtmarkPayload::Highlight {
-                style,
+                hl,
                 meta,
                 hl_eol: false,
                 hl_mode: HlMode::Replace,
@@ -651,6 +666,25 @@ impl Buffer {
         );
     }
 
+    /// HlGroup-keyed counterpart to [`Self::add_highlight_with_meta`].
+    /// Use this when copying spans from one buffer to another so the
+    /// id stays interned (theme switches stay live across the copy).
+    pub fn add_highlight_group_with_meta(
+        &mut self,
+        line: usize,
+        col_start: u16,
+        col_end: u16,
+        hl: HlGroup,
+        meta: SpanMeta,
+    ) {
+        self.set_extmark(
+            self.ns_highlights,
+            line,
+            col_start as usize,
+            ExtmarkOpts::highlight_group(col_end as usize, hl, meta),
+        );
+    }
+
     pub fn clear_highlights(&mut self, start_line: usize, end_line: usize) {
         let ns = self.ns_highlights;
         self.clear_namespace(ns, start_line, end_line);
@@ -678,7 +712,7 @@ impl Buffer {
                 if mark.start_row != line {
                     continue;
                 }
-                if let ExtmarkPayload::Highlight { style, meta, .. } = &mark.payload {
+                if let ExtmarkPayload::Highlight { hl, meta, .. } = &mark.payload {
                     entries.push((
                         mark.priority,
                         ns.0,
@@ -686,7 +720,7 @@ impl Buffer {
                         Span {
                             col_start: mark.start_col as u16,
                             col_end: mark.end_col as u16,
-                            style: *style,
+                            hl: *hl,
                             meta: meta.clone(),
                         },
                     ));
@@ -786,7 +820,12 @@ impl Buffer {
                 if mark.start_row != line {
                     continue;
                 }
-                if let ExtmarkPayload::VirtText { text, hl_group, pos } = &mark.payload {
+                if let ExtmarkPayload::VirtText {
+                    text,
+                    hl_group,
+                    pos,
+                } = &mark.payload
+                {
                     entries.push((
                         mark.priority,
                         ns.0,
@@ -899,7 +938,8 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].col_start, 0);
         assert_eq!(spans[0].col_end, 5);
-        assert!(spans[0].style.bold);
+        let resolved = crate::theme::Theme::default().resolve(spans[0].hl);
+        assert!(resolved.bold);
     }
 
     #[test]

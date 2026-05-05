@@ -2,7 +2,6 @@ use super::block_buffers::BlockBufferCache;
 use crate::ui::Buffer;
 use crate::ui::Theme;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
-use smelt_core::style::Style;
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};
 use smelt_core::transcript_present::ToolBodyRenderer;
 
@@ -147,8 +146,7 @@ impl TranscriptProjection {
 
 fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {
     for span in highlights {
-        let style: Style = span.style;
         let meta: SpanMeta = span.meta;
-        buf.add_highlight_with_meta(row, span.col_start, span.col_end, style, meta);
+        buf.add_highlight_group_with_meta(row, span.col_start, span.col_end, span.hl, meta);
     }
 }

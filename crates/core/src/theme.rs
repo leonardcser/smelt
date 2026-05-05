@@ -8,9 +8,107 @@
 //! Replaces the host-side `super::theme::*` flat module of color
 //! constants and the `Ui::set_selection_bg` / `selection_style()` shim
 //! that fanned out one slot to every widget.
+//!
+//! P9.e: highlight groups are interned to a small u32 id (`HlGroup`)
+//! so extmarks can store the id instead of a resolved `Style`. The
+//! resolution happens at paint time via [`Theme::resolve`]; theme
+//! switches mutate the same Theme and update existing ids' styles —
+//! buffers don't need rebuilding. The interner is a singleton
+//! `HlGroupRegistry` shared by every Theme so ids stay stable across
+//! tests and across switches.
 
 use crate::style::{Color, Style};
 use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+
+/// Interned highlight-group id. Minted by [`HlGroupRegistry::intern`];
+/// stable for the process lifetime. Theme stores `HlGroup → Style`;
+/// extmark Highlight payloads carry the id (P9.e).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HlGroup(pub u32);
+
+/// Process-global name → id interner. Decoupled from `Theme` so ids
+/// stay stable across theme switches and across multiple Theme
+/// instances (tests, headless harness). The actual `Style` for each id
+/// lives on whichever `Theme` is queried at paint time — different
+/// themes can give the same id different styles.
+struct HlGroupRegistry {
+    name_to_id: HashMap<String, HlGroup>,
+    id_to_name: Vec<String>,
+}
+
+impl HlGroupRegistry {
+    fn new() -> Self {
+        Self {
+            name_to_id: HashMap::new(),
+            id_to_name: Vec::new(),
+        }
+    }
+
+    fn intern(&mut self, name: &str) -> HlGroup {
+        if let Some(id) = self.name_to_id.get(name) {
+            return *id;
+        }
+        let id = HlGroup(self.id_to_name.len() as u32);
+        self.name_to_id.insert(name.to_string(), id);
+        self.id_to_name.push(name.to_string());
+        id
+    }
+}
+
+fn registry() -> &'static RwLock<HlGroupRegistry> {
+    static REG: OnceLock<RwLock<HlGroupRegistry>> = OnceLock::new();
+    REG.get_or_init(|| RwLock::new(HlGroupRegistry::new()))
+}
+
+/// Get-or-mint the [`HlGroup`] id for `name`. Stable across the whole
+/// process; the same name always interns to the same id.
+pub fn intern(name: &str) -> HlGroup {
+    if let Some(id) = registry().read().unwrap().name_to_id.get(name).copied() {
+        return id;
+    }
+    registry().write().unwrap().intern(name)
+}
+
+/// Reverse the interner: id → name. `None` for an id from a different
+/// process or never minted (shouldn't happen in practice).
+pub fn name_of(g: HlGroup) -> Option<String> {
+    registry()
+        .read()
+        .unwrap()
+        .id_to_name
+        .get(g.0 as usize)
+        .cloned()
+}
+
+/// Intern a Style as an anonymous group keyed by its content hash.
+/// Used during the P9.e migration to store legacy inline-Style call
+/// sites in the new HlGroup-keyed extmark payload without forcing a
+/// name on every site. Future commits convert call sites to named
+/// groups (`intern("My.Name")`); anonymous groups are bypassed by
+/// theme switches because there's no name to override.
+pub fn intern_anonymous_style(style: Style) -> HlGroup {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    style.hash(&mut h);
+    let key = format!("__anon__/{:016x}", h.finish());
+    let id = intern(&key);
+    // Make sure the ANON Theme entry has this style so resolve() works
+    // even if no Theme called set() with this id. We stash the style
+    // in a parallel global map keyed by HlGroup.
+    anon_styles().write().unwrap().insert(id, style);
+    id
+}
+
+fn anon_styles() -> &'static RwLock<HashMap<HlGroup, Style>> {
+    static MAP: OnceLock<RwLock<HashMap<HlGroup, Style>>> = OnceLock::new();
+    MAP.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn anon_resolve(id: HlGroup) -> Option<Style> {
+    anon_styles().read().unwrap().get(&id).copied()
+}
 
 /// Default accent palette index — `Color::AnsiValue(208)`,
 /// the warm orange "ember" preset.
@@ -18,8 +116,13 @@ pub const DEFAULT_ACCENT: u8 = 208;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
-    groups: HashMap<String, Style>,
-    links: HashMap<String, String>,
+    /// Resolved styles, keyed by interned HlGroup id (P9.e). Sparse
+    /// — `get`/`resolve` fall back to `Style::default()` for ids that
+    /// were never set through this Theme.
+    styles: HashMap<HlGroup, Style>,
+    /// Group links: source HlGroup → target HlGroup. Resolved at
+    /// `resolve()` time, max chain depth 16 (cycle defense).
+    links: HashMap<HlGroup, HlGroup>,
     /// Whether the host terminal has a light background. Read by the
     /// host's default-theme builder to choose the correct palette.
     /// Detected once at startup via OSC 11 query.
@@ -37,7 +140,7 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            groups: HashMap::new(),
+            styles: HashMap::new(),
             links: HashMap::new(),
             is_light: false,
             accent: DEFAULT_ACCENT,
@@ -52,28 +155,49 @@ impl Theme {
     }
 
     pub fn set(&mut self, name: impl Into<String>, style: Style) {
-        let name = name.into();
-        self.links.remove(&name);
-        self.groups.insert(name, style);
+        let id = intern(&name.into());
+        self.links.remove(&id);
+        self.styles.insert(id, style);
     }
 
     pub fn link(&mut self, from: impl Into<String>, to: impl Into<String>) {
-        let from = from.into();
-        self.groups.remove(&from);
-        self.links.insert(from, to.into());
+        let from_id = intern(&from.into());
+        let to_id = intern(&to.into());
+        self.styles.remove(&from_id);
+        self.links.insert(from_id, to_id);
     }
 
+    /// Resolve a name to its current Style, following links. Always
+    /// returns a value — unknown names get `Style::default()` (nvim
+    /// policy: typos don't panic).
     pub fn get(&self, name: &str) -> Style {
+        self.resolve(intern(name))
+    }
+
+    /// Resolve a HlGroup id to its current Style. Follows up to 16
+    /// link hops; cycles fall back to default. Anonymous ids
+    /// (`intern_anonymous_style`) bypass `Theme.styles` and read the
+    /// global anon-style map.
+    pub fn resolve(&self, hl: HlGroup) -> Style {
+        let mut cur = hl;
         let mut visited: usize = 0;
-        let mut cur = name;
-        while let Some(target) = self.links.get(cur) {
+        while let Some(target) = self.links.get(&cur) {
             visited += 1;
             if visited > 16 {
                 return Style::default();
             }
-            cur = target;
+            cur = *target;
         }
-        self.groups.get(cur).copied().unwrap_or_default()
+        if let Some(style) = self.styles.get(&cur).copied() {
+            return style;
+        }
+        anon_resolve(cur).unwrap_or_default()
+    }
+
+    /// Get-or-mint the HlGroup id for `name`. Convenience wrapper
+    /// around the module-level `intern`.
+    pub fn id_for(&self, name: &str) -> HlGroup {
+        intern(name)
     }
 
     pub fn is_light(&self) -> bool {

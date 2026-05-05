@@ -1070,7 +1070,8 @@ impl Window {
             // already-painted line glyphs; only attributes change.
             let line_chars: Vec<char> = line.chars().take(width as usize).collect();
             for span in buf.highlights_at(idx) {
-                let style = merge_span_style(row_style, &span.style);
+                let span_style = ctx.theme.resolve(span.hl);
+                let style = merge_span_style(row_style, &span_style);
                 let start = span.col_start.min(width);
                 let end = span.col_end.min(width);
                 for col in start..end {
