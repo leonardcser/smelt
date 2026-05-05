@@ -327,25 +327,30 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   `HlGroup(u32)` instead of raw `Style` / `Color`. Theme is the
   paint-time resolver. Theme switches stop rewriting buffers. `Color`
   / `Style` survive only at the paint boundary.
-- **P9.f** ⏸ — **Plugin API ergonomics (nvim parity).** Integer
-  namespace handles (`smelt.api.create_namespace`); unified
-  `set_extmark` keyset mirroring nvim verbatim; gravity on extmarks;
-  hand-written `_meta/smelt.lua` EmmyLua stubs.
-- **P9.g** ⏸ — **Convention-based discovery + project-local plugins.**
-  `tools/*.lua` auto-register on require; autoload
-  `<cwd>/.smelt/{init,plugins,tools,commands}` after globals; trust
-  gate on first load.
-- **P9.h** ⏸ — **Cells + hook surface.** `(new, old)` payloads to
-  subscribers; built-in cell names typed (Rust enum); event cells
-  (`session_before_compact|fork`, `message_start|end`,
-  `tool_execution_start|end`, `input_submit`); prompt composition via
-  `smelt.prompt.register_section`; stale-task invalidation by session
-  tag.
+- **P9.f** ⏸ — **Unified extmark keyset (nvim parity).** Extend
+  `core::buffer::ExtmarkOpts` with `priority`, gravity, `sign_text`,
+  `hl_eol`, `hl_mode`, `conceal`, `id`, `virt_text_pos`, `virt_lines`.
+  Lua surface collapses to `smelt.api.create_namespace(name)` +
+  `smelt.buf.set_extmark(buf, ns, row, col, opts)`. `add_highlight`
+  / `add_dim` retire. EmmyLua stubs deferred post-P10.
+- **P9.g** ⏸ — **Plugin auto-discovery + project-local config.**
+  Plugins are the only user-facing concept: `<config>/init.lua` +
+  `<config>/plugins/*.lua` + `<cwd>/.smelt/{init.lua,plugins/*.lua}`
+  (project content trust-gated, hash-based). A plugin file may
+  register tools/commands/keymaps/anything — no separate `tools/`
+  user folder. Existing `commands/*.md` markdown commands keep
+  loading via the autoloaded `custom_commands.lua` plugin (extended
+  to scan project-local once trust clears).
+- **P9.h** ⏸ — **Cell `(new, old)` payload.** Cells store `prev`;
+  subscribers fire `fn(new, old)`. ~40 LOC. Other hook-surface
+  ideas (typed names, more event cells, prompt-section deps,
+  stale-task tagging) deferred until a real consumer needs them.
 - **P9.i** ⏸ — **Provider middleware.** Neutral `ProviderRequest` /
   `ProviderResponse` between `EngineClient` and the kind-specific
   serializers; `EngineClient` carries `Vec<Box<dyn ProviderMiddleware>>`
-  with `before_request` + `after_response`. Plugin-extensibility seam
-  for redaction / prompt rewriting / A/B swaps. ~500 LOC.
+  with return-payload `before_request(req) -> req` +
+  `after_response(resp) -> resp`. Plugin-extensibility seam for
+  redaction / prompt rewriting / A/B swaps. ~500 LOC.
 - **P9.j** ✅ — **Loader override search path.** mlua `require`
   searches `<cwd>/.smelt/runtime/?.lua` →
   `<XDG_DATA_HOME>/smelt/runtime/?.lua` → `include_str!`'d embedded.

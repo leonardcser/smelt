@@ -776,10 +776,20 @@ plugin over `core::process` long-lived IPC (`spawn / send / on_event
 ## Configuration — one format, one entry point
 
 User config: `~/.config/smelt/init.lua`. Plugins:
-`~/.config/smelt/plugins/*.lua`. Tools: `~/.config/smelt/tools/*.lua`
-(P9.g auto-register). Project-local (P9.g):
-`<cwd>/.smelt/{init.lua, plugins/*.lua, tools/*.lua, commands/*.md}`
-— autoloaded after globals, gated by a first-load trust prompt.
+`~/.config/smelt/plugins/*.lua` (P9.g auto-loaded). Project-local
+(P9.g): `<cwd>/.smelt/{init.lua, plugins/*.lua, commands/*.md}` —
+autoloaded after globals, gated by a hash-based first-load trust
+prompt.
+
+A plugin is the only user-facing extension unit. A `.lua` file in
+`plugins/` may register tools, commands, keymaps, cells,
+statusline sources — anything. There is no separate user `tools/`
+folder; users ship a tool by shipping a plugin that registers it.
+Built-in tools and commands live as embedded Lua under
+`runtime/lua/smelt/{tools,commands}/` — that's *internal*
+organization, not a user contract. The existing `commands/*.md`
+markdown-frontmatter format is kept (one file = one slash command,
+no Lua) and loaded by the autoloaded `custom_commands.lua` plugin.
 
 **Runtime override search path.** Default UX modules stay
 `include_str!`'d in the binary — `cargo install smelt` works with no
