@@ -200,6 +200,17 @@ impl Theme {
         intern(name)
     }
 
+    /// Whether this Theme has a Style or link registered for `hl`.
+    /// Distinguishes "named group resolves through this Theme"
+    /// (returns true) from "id exists in the global interner but
+    /// this Theme doesn't know about it" (false; resolve falls back
+    /// to `Style::default()`). Lets renderers decide whether to flow
+    /// a named group id through the data layer or anonymously
+    /// intern the resolved style for a one-off paint.
+    pub fn contains(&self, hl: HlGroup) -> bool {
+        self.styles.contains_key(&hl) || self.links.contains_key(&hl)
+    }
+
     pub fn is_light(&self) -> bool {
         self.is_light
     }
