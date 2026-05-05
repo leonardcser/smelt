@@ -56,13 +56,13 @@ pub struct ProviderConfig {
 
 #[derive(Debug, Default)]
 pub struct SettingsConfig {
-    pub vim_mode: Option<bool>,
+    pub vim: Option<bool>,
     pub auto_compact: Option<bool>,
     pub show_tps: Option<bool>,
     pub show_tokens: Option<bool>,
     pub show_cost: Option<bool>,
-    pub input_prediction: Option<bool>,
-    pub task_slug: Option<bool>,
+    pub show_prediction: Option<bool>,
+    pub show_slug: Option<bool>,
     pub show_thinking: Option<bool>,
     pub restrict_to_workspace: Option<bool>,
     pub redact_secrets: Option<bool>,
@@ -71,25 +71,38 @@ pub struct SettingsConfig {
     pub context_window: Option<u32>,
 }
 
+/// The set of boolean settings exposed to Lua. Keeping this as a single
+/// table is what lets `smelt.settings` use a metatable that rejects
+/// unknown keys at the access site.
+pub const SETTINGS_KEYS: &[&str] = &[
+    "vim",
+    "auto_compact",
+    "show_tps",
+    "show_tokens",
+    "show_cost",
+    "show_prediction",
+    "show_slug",
+    "show_thinking",
+    "restrict_to_workspace",
+    "redact_secrets",
+];
+
 impl SettingsConfig {
-    /// Apply a `key=value` override. Returns an error message for unknown keys or bad values.
-    pub fn apply(&mut self, key: &str, value: &str) -> Result<(), String> {
-        let b = || match value {
-            "true" => Ok(Some(true)),
-            "false" => Ok(Some(false)),
-            _ => Err(format!("invalid bool value '{value}' for {key}")),
-        };
+    /// Apply a boolean override by key. Returns an error message for unknown
+    /// keys.
+    pub fn set_bool(&mut self, key: &str, value: bool) -> Result<(), String> {
+        let v = Some(value);
         match key {
-            "vim_mode" => self.vim_mode = b()?,
-            "auto_compact" => self.auto_compact = b()?,
-            "show_tps" => self.show_tps = b()?,
-            "show_tokens" => self.show_tokens = b()?,
-            "show_cost" => self.show_cost = b()?,
-            "input_prediction" => self.input_prediction = b()?,
-            "task_slug" => self.task_slug = b()?,
-            "show_thinking" => self.show_thinking = b()?,
-            "restrict_to_workspace" => self.restrict_to_workspace = b()?,
-            "redact_secrets" => self.redact_secrets = b()?,
+            "vim" => self.vim = v,
+            "auto_compact" => self.auto_compact = v,
+            "show_tps" => self.show_tps = v,
+            "show_tokens" => self.show_tokens = v,
+            "show_cost" => self.show_cost = v,
+            "show_prediction" => self.show_prediction = v,
+            "show_slug" => self.show_slug = v,
+            "show_thinking" => self.show_thinking = v,
+            "restrict_to_workspace" => self.restrict_to_workspace = v,
+            "redact_secrets" => self.redact_secrets = v,
             _ => return Err(format!("unknown setting '{key}'")),
         }
         Ok(())

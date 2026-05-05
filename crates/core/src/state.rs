@@ -33,16 +33,16 @@ impl PersistedSettings {
     /// Resolve against config defaults: state wins, then config, then hardcoded default.
     pub fn resolve(&self, cfg: &crate::config::SettingsConfig) -> ResolvedSettings {
         ResolvedSettings {
-            vim: self.vim_mode.or(cfg.vim_mode).unwrap_or(false),
+            vim: self.vim_mode.or(cfg.vim).unwrap_or(false),
             auto_compact: self.auto_compact.or(cfg.auto_compact).unwrap_or(false),
             show_tps: self.show_tps.or(cfg.show_tps).unwrap_or(true),
             show_tokens: self.show_tokens.or(cfg.show_tokens).unwrap_or(true),
             show_cost: self.show_cost.or(cfg.show_cost).unwrap_or(true),
             show_prediction: self
                 .input_prediction
-                .or(cfg.input_prediction)
+                .or(cfg.show_prediction)
                 .unwrap_or(true),
-            show_slug: self.task_slug.or(cfg.task_slug).unwrap_or(true),
+            show_slug: self.task_slug.or(cfg.show_slug).unwrap_or(true),
             show_thinking: self.show_thinking.or(cfg.show_thinking).unwrap_or(true),
             restrict_to_workspace: self
                 .restrict_to_workspace

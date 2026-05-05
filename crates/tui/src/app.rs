@@ -651,12 +651,6 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn settings_state(&self) -> state::ResolvedSettings {
-        let mut s = self.core.config.settings.clone();
-        s.vim = self.input.vim_enabled();
-        s
-    }
-
     /// Read the prompt buffer's `"completer"`-namespace virt-text
     /// extmark. The extmark IS the storage for input prediction
     /// (ghost text); `compute_prompt` re-anchors it at the input

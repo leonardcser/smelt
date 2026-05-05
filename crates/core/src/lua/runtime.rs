@@ -228,7 +228,9 @@ impl LuaRuntime {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         for (key, value) in overrides.iter() {
-            let _ = settings.apply(key, value);
+            if let Err(e) = settings.set_bool(key, *value) {
+                eprintln!("settings override: {e}");
+            }
         }
         crate::config::Config {
             providers,

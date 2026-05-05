@@ -5,9 +5,9 @@
 -- single-keystroke aliases users reach for during a session.
 
 smelt.cmd.register("vim", function()
-  smelt.settings.toggle("vim")
+  smelt.settings.vim = not smelt.settings.vim
 end, { desc = "toggle vim mode" })
 
 smelt.cmd.register("thinking", function()
-  smelt.settings.toggle("show_thinking")
+  smelt.settings.show_thinking = not smelt.settings.show_thinking
 end, { desc = "toggle thinking blocks" })
