@@ -11,7 +11,7 @@ pub mod runtime;
 mod shared;
 mod task;
 
-pub use runtime::LuaRuntime;
+pub use runtime::{autoload_modules, LuaRuntime};
 pub use shared::{LuaResumeSink, LuaShared, RegisteredCommand, StatusSource, ToolHandles};
 pub use task::{
     current_task_cancel, with_task_cancel, LuaTaskRuntime, TaskCompletion, TaskDriveOutput,
