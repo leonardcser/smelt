@@ -54,14 +54,26 @@ Theme, VimMode — internally.  It is not a separate crate.)
 | ------------------------ | ----------------------------------------------------------------------- |
 | `protocol`               | Wire types, pure data, serde-serializable. Stable contract, no behavior. Includes `AgentMode`, `ReasoningEffort`, `PermissionOverrides`, `TurnMeta` |
 | `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept**. **Zero UI imports** |
-| `core`                   | Headless-safe runtime. `Core` + `HeadlessApp`, subsystems, `Host` trait, `LuaRuntime`, `EngineClient`, Rust capabilities (`fs`/`http`/`permissions`/`process`/…), `Clipboard`/`KillRing`. No terminal imports |
-| `tui`                    | Terminal frontend. `TuiApp`, event loop, terminal input editing, `UiHost` Lua bindings, rendering adapters (`to_buffer`, `prompt_data`, `status`), and the `ui` module (Buffer, Window, Grid, LayoutTree, Theme, VimMode). Depends on `core` and `crossterm` |
+| `core`                   | Headless-safe runtime. `Core` + `HeadlessApp`, subsystems, `Host` trait, `LuaRuntime`, `EngineClient`, Rust capabilities (`fs`/`http`/`permissions`/`process`/…), `Clipboard`/`KillRing`, and **`Buffer` + `BufferParser` (the content data type)**. No terminal imports |
+| `tui`                    | Terminal frontend. `TuiApp`, event loop, terminal input editing, `UiHost` Lua bindings, rendering adapters (`to_buffer`, `prompt_buf`, `status`), `BufferParser` impls (markdown / diff / syntax / bash) under `tui::content::transcript_parsers/`, and the `ui` module (Window, Grid, LayoutTree, Theme, VimMode). Depends on `core` and `crossterm` |
 | `runtime/lua/smelt/`     | The whole UX. Widgets, dialogs, commands, statusline, transcript/diff presentation, themes, tools |
 
 **Litmus test for placement.** Stable wire contract → `protocol`.
 Frontend-agnostic LLM/tool code → `engine`. Headless runtime +
-capabilities + Lua → `core`. Terminal chrome + rendering + TUI primitives
-→ `tui`. How smelt looks/behaves → Lua.
+capabilities + Lua + content data types → `core`. Terminal chrome +
+rendering + TUI primitives → `tui`. How smelt looks/behaves → Lua.
+
+**Why `Buffer` is in `core`, not `tui`.** `Buffer` is pure data: lines,
+extmarks in named namespaces, undo, modifiable flag, soft-wrap cache.
+Zero terminal dependencies. Putting it in `tui` forced cross-crate code
+(the Lua `render` hook, `core::transcript_present` renderers,
+`HeadlessApp` transcript reads) to use a `DisplayBlock` intermediate
+that survived seven phases of trying to delete it. With `Buffer` in
+`core`, `RenderCtx` collapses, `DisplayBlock` deletes, and headless
+mode reads transcript content through the same surface as tui.
+Parser *implementations* (markdown, diff, syntax, bash) stay in `tui`
+because they pull from tui-only crates (syntect, etc.) — but the
+trait + the data type they write into live in `core`.
 
 ## Surface model — two structures, two primitives
 
@@ -150,6 +162,12 @@ placement+modality wrapper that points at Windows via a LayoutTree.
 claims space") and removes the implication that there's a Window subtype.
 
 ## Buffer model
+
+`Buffer` lives in `core` (not `tui`) — it's pure data with no terminal
+dependencies. `tui` owns parser implementations (markdown / diff / syntax)
+and rendering (`Window::render`, theme resolution, grid diff). Headless
+mode reads transcript content through the same `Buffer` surface as the
+TUI does.
 
 Vim-style: lines + extmarks in named namespaces, plus a `modifiable` flag.
 
@@ -785,35 +803,17 @@ formatting — is Lua. Anything that's gnarly enough to want a Rust
 implementation is exposed as a capability function the Lua tool calls,
 not as a Rust tool. Concrete cases:
 
-- **Bash command parsing.** `core::permissions.parse_bash(cmd)` returns a
-  structured AST (commands, redirects, pipes, substitutions, env
-  assignments, heredocs) the Lua `bash` tool walks to decide allow/deny.
-  This is the 515-line bash splitter that lives in
-  `core::permissions::bash` today; parsing in Lua would be slow and
-  bug-prone.
-- **Pattern + ruleset matching.** `core::permissions.compile_pattern(s)` /
-  `core::permissions.match_ruleset(rules, value)` — pure glob logic.
-- **Workspace boundary check.**
-  `core::permissions.outside_workspace_paths(tool, args, workspace)` —
-  extracts paths from a tool call and returns those outside the
-  workspace. Used by Lua tool hooks to escalate to `needs_confirm`.
-- **Runtime approvals.** `core::permissions.is_approved(tool, args)` and
-  `.approve(tool, args, scope = "session" | "workspace")` — query and
-  update the in-memory `RuntimeApprovals` table that records the user's
-  "always allow" answers. Workspace-scoped approvals also persist
-  through the workspace store.
-- **Workspace store.** `core::permissions.load_workspace(cwd)` /
-  `.save_workspace(cwd, rules)` — JSON I/O for
-  `~/.local/state/smelt/workspaces/<encoded-cwd>/permissions.json`.
-- **Edit-with-mtime-check.** `core::fs.apply_edit_with_mtime_check(path,
-  old, new, expected_mtime)` does the read-compare-write-fsync dance
-  atomically and returns a typed error on conflict. The Lua `edit_file`
-  tool calls it once; no race, no half-written file.
-- **Notebook AST.** `core::notebook.parse(json)` /
-  `core::notebook.apply_edit(nb, edit)` keeps Jupyter JSON validation in
-  Rust where it belongs.
-- **Glob, ripgrep, html→markdown, http fetching with cache** — already
-  in the `core::*` capabilities list.
+- **`core::permissions`.** Bash AST parser (`parse_bash`), pattern /
+  ruleset matching, workspace boundary check, runtime approvals,
+  workspace JSON store. The Lua `bash` tool walks the AST; other tools
+  call workspace check + approvals.
+- **`core::fs`.** Atomic edit-with-mtime-check
+  (`apply_edit_with_mtime_check`) — the Lua `edit_file` tool calls it
+  once; no race, no half-written file.
+- **`core::notebook`.** Jupyter JSON parse + apply_edit. JSON cell
+  munging stays Rust; the Lua tool owns schema, hooks, locking.
+- **Glob, ripgrep, html→markdown, http with cache** — `core::{grep, fs,
+  html, http}`, listed in the capabilities section.
 
 The litmus: if implementing X in Lua would be slow, fragile, or
 duplicate carefully-tested Rust logic, expose X as an `core::<cap>`
@@ -835,6 +835,73 @@ Why this shape:
   engine surface for permissions.
 - **Schema is data.** `ToolSchema` is name + description + JSON Schema for
   parameters. Generated from the Lua registration call.
+
+### The tool registration table — full Rust surface for a Lua tool
+
+A Lua tool registers a single table; Rust calls into its callbacks
+generically. **No callback's existence depends on the tool's name.**
+Rust never matches `name == "bash"` to decide which callback to fire.
+
+```lua
+smelt.tools.register({
+  name = "bash",
+  schema = { … },                          -- JSON schema for params
+
+  hooks = function(args, mode, ctx)        -- decide allow / needs_confirm / deny
+    …
+  end,
+
+  run = function(call_id, args, ctx)       -- the tool body (coroutine)
+    …
+  end,
+
+  -- Display callbacks — called by Rust to compose the transcript / dialogs.
+  -- Optional; Rust's default implementations show plain text.
+
+  summary = function(args)                 -- one-line label for the tool block
+    return args.description or args.command
+  end,
+
+  render = function(buf, args, output, width)
+    -- Full drawing access. `buf` is a `Buffer` userdata: set_lines,
+    -- add_highlight, set_extmark, attach decorations, all available.
+    -- The shipped helpers (smelt.bash.render, smelt.diff.render,
+    -- smelt.syntax.render, smelt.notebook.render) are convenience
+    -- primitives any plugin can call into; nothing is forced through
+    -- them.
+  end,
+
+  paths_for_workspace = function(args)     -- which arg values are paths
+    return { args.file_path }              -- used by workspace boundary check
+  end,
+
+  elapsed_visible = true,                  -- show running time in tool block
+})
+```
+
+**The eternal rule:** Rust must not match on a Lua-registered identifier
+(tool name, command name, dialog name, mode name). If a `match name {
+"bash" => … }` or `if name == "bash"` shows up over a Lua-registered
+identifier, that's a bug. The registration table carries the metadata;
+Rust calls through it.
+
+### Drawing context is full, not partial
+
+The Lua `render` hook receives a `Buffer` userdata. The full Buffer API
+(`set_lines`, `add_highlight`, `set_extmark`, `attach`, namespaces,
+extmarks, virtual text) is available. There is no `RenderCtx`-style
+limited "you can call `text()` / `diff()` / `code()`" enum-of-methods.
+Plugins compose any layout — tree views, histograms, custom diff modes
+— from the same primitives the built-in renderers use.
+
+The shipped Rust renderers (`smelt.bash.render`, `smelt.diff.render`,
+`smelt.syntax.render`, `smelt.notebook.render`) are convenience helpers
+that paint into a Buffer at a position. They are not the API; they sit
+*on top of* it.
+
+This applies symmetrically to dialogs, statusline segments, and
+transcript blocks. Wherever Lua paints, it paints into a Buffer with
+the full Buffer API.
 
 ## Rust capabilities — parse-then-present pattern
 
@@ -870,11 +937,13 @@ binding.
 
 | Concern                                                   | Owner                                       |
 | --------------------------------------------------------- | ------------------------------------------- |
-| Pixel pushing (grid, diff, SGR)                           | `ui::`                                      |
-| Buffer / Window primitives                                | `ui::`                                      |
-| LayoutTree / Overlay / Border / Anchor / Constraint       | `ui::`                                      |
-| Compositor event routing (focus-driven keys, hit-tested mouse) | `ui::Ui`                                  |
-| Theme groups, highlight resolution                        | `ui::Theme`                                 |
+| Pixel pushing (grid, diff, SGR)                           | `tui::ui`                                   |
+| Buffer (content data type) + `BufferParser` trait         | `core`                                      |
+| BufferParser impls (markdown / diff / syntax / bash)      | `tui::content::transcript_parsers`          |
+| Window / cursor / scroll / selection / viewport           | `tui::ui`                                   |
+| LayoutTree / Overlay / Border / Anchor / Constraint       | `tui::ui`                                   |
+| Compositor event routing (focus-driven keys, hit-tested mouse) | `tui::ui::Ui`                          |
+| Theme groups, highlight resolution                        | `tui::ui::Theme`                            |
 | Engine handle, agent loop, providers, MCP                 | `engine::`                                  |
 | Wire types (UiCommand, EngineEvent, AgentMode, ReasoningEffort, …) | `protocol::`                          |
 | Permission policy (rules, modes, runtime approvals, workspace store, bash AST) | `core::permissions` capability        |
@@ -941,6 +1010,21 @@ These describe the *target* codebase. Refactor-process rules
   only if it improves the outcome, and say why.
 - **No `#[allow(dead_code)]`.** Use it, remove it, or leave the warning as a
   tracking marker.
+- **No tool/command/dialog/mode name matching in Rust.** A `match name {
+  "bash" => … }` or `if name == "bash"` over a Lua-registered identifier
+  is a bug. The registration table (tool / command / dialog / mode)
+  carries the metadata; Rust calls through it generically. Counterexample
+  to this rule is treated as a regression, not a special case.
+- **Drawing context is full, not partial.** Lua callbacks that paint
+  receive a `Buffer` userdata with the full Buffer API
+  (`set_lines` / `add_highlight` / `set_extmark` / `attach` / namespaces
+  / virtual text). No `RenderCtx`-style enum-of-allowed-methods. The
+  shipped Rust renderers (`smelt.bash.render`, `smelt.diff.render`,
+  `smelt.syntax.render`, `smelt.notebook.render`) sit on top of the
+  Buffer API as conveniences, not in front of it.
+- **No deferral on size.** A change that improves the codebase is worth
+  doing, regardless of how big the refactor is. Implementation size is
+  not a con. Only defer changes that don't improve the codebase.
 - **No stringly-typed dispatch.** `Callback::Lua` / `Callback::Rust` are the
   behaviour mechanism. `KeyResult::Action(String)` survives inside `ui` only
   as the widget→container internal protocol.

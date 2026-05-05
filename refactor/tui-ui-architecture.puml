@@ -19,6 +19,25 @@ legend right
   `ui` is a terminal UI primitives module inside `tui` (`tui::ui`);
   it depends on `crossterm`.
   A GUI or web frontend uses `core` directly and ignores `ui`.
+
+  **`Buffer` lives in `core`.** It is pure data — lines, extmarks,
+  namespaces, undo. Zero terminal deps. Headless reads transcript
+  content through the same surface as the TUI does. Parser
+  *implementations* (markdown / diff / syntax / bash) stay in `tui`
+  because they pull from `tui::content::highlight::*` (syntect,
+  inline markdown, diff LCS).
+
+  **Lua's drawing context is full, not partial.** Tool / dialog /
+  statusline `render` callbacks receive a `Buffer` userdata with the
+  full Buffer API (set_lines / add_highlight / set_extmark / attach /
+  namespaces / virt-text). No `RenderCtx`-style enum-of-allowed-methods.
+  Shipped Rust renderers (smelt.bash.render, smelt.diff.render,
+  smelt.syntax.render, smelt.notebook.render) sit on top of the Buffer
+  API as conveniences, not in front of it.
+
+  **No tool/command/dialog/mode name matching in Rust.** A `match name {
+  "bash" => … }` over a Lua-registered identifier is a bug. The
+  registration table carries the metadata; Rust calls through it.
 end legend
 
 ' =====================================================================
@@ -228,6 +247,49 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
     class "core::fuzzy"        as TFUZZY     <<fuzzy matching / scoring>>
     class "core::permissions"  as TPERM      <<all permission policy:\nbash AST · pattern match ·\nworkspace path extract ·\nruntime approvals ·\nworkspace store (JSON)>>
   }
+
+  package "content data types  (pure data — zero terminal deps)" as CDATA #FFE9B5 {
+    class Buffer <<lines + extmarks — core>> {
+      lines, undo
+      modifiable: bool        ' data-layer guard
+      namespaces, extmarks
+      ' Pure data. Theme refs are
+      ' highlight ids, not raw colors.
+      ' Parsed metadata (LCS results,
+      ' syntect tokens) lives in
+      ' dedicated namespaces — no
+      ' separate IR cache file.
+      --
+      attach(spec)            ' parser + on_block cb
+                              ' (semantic boundaries,
+                              ' not per-chunk)
+      yank_text_for_range(r)  ' walks extmark
+                              ' YankSubst values
+    }
+    class Namespace
+    class Extmark {
+      pos, hl_id              ' → tui::ui::Theme
+      virt_text, sign, conceal
+      right_gravity
+      on_click: Option<WinEvent>
+      yank: Option<YankSubst>
+    }
+    enum YankSubst {
+      Empty                   ' elide (hidden thinking)
+      Static(String)          ' substitute (attachment
+                              '   sigils → expanded path)
+    }
+    interface BufferParser {
+      parse(buf, input, width)
+      ' Trait lives in core.
+      ' Impls (markdown / diff /
+      ' syntax / bash / block-variant)
+      ' live in tui::content::
+      ' transcript_parsers — they
+      ' pull from tui-only
+      ' highlight crates (syntect, …).
+    }
+  }
 }
 
 ' =====================================================================
@@ -294,52 +356,19 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
     }
   }
 
-  package "content" as C #F4F8FF {
-    class Buffer <<lines + extmarks>> {
-      lines, undo
-      modifiable: bool        ' data-layer guard
-      namespaces, extmarks
-      ' Theme refs are highlight ids,
-      ' not raw colors.
-      ' Parsed/computed metadata
-      ' (LCS diff results, syntect
-      ' tokens) lives in dedicated
-      ' namespaces — no separate
-      ' IR cache file. Persisted
-      ' with the Buffer.
-      --
-      attach(spec)            ' parser + decorations
-                              ' + on_block callback
-                              ' fired at semantic
-                              ' boundaries, NOT
-                              ' per chunk
-      yank_text_for_range(r)  ' pure helper:
-                              ' walks extmarks in
-                              ' range, applies
-                              ' each extmark's
-                              ' YankSubst (Empty
-                              ' skips, Static
-                              ' substitutes); no
-                              ' buffer-level hook
+  package "parser impls  (tui-side BufferParsers)" as C #F4F8FF {
+    class "MarkdownParser"        as PARSEMD <<BufferParser>> {
+      Parser **trait** + Buffer
+      type live in core. These
+      impls live in tui because
+      they pull from
+      tui::content::highlight::*
+      (syntect, inline markdown,
+      diff LCS — heavy crates).
     }
-    class Namespace
-    class Extmark {
-      pos, hl_id              ' → Theme
-      virt_text, sign, conceal
-      right_gravity           ' stable under append
-      on_click: Option<WinEvent>
-      yank: Option<YankSubst>  ' yank-time policy
-                                ' for bytes covered
-                                ' by this extmark
-    }
-    enum YankSubst {
-      Empty                   ' elide (e.g. hidden
-                              '   thinking blocks)
-      Static(String)          ' replace with text
-                              '   (e.g. prompt
-                              '   attachment sigils
-                              '   → expanded path)
-    }
+    class "DiffParser"            as PARSEDF <<BufferParser>>
+    class "SyntaxParser"          as PARSESY <<BufferParser>>
+    class "block-variant parsers" as PARSEBL <<User / Thinking / Text /\nCodeLine / ToolCall / Exec\n→ writes per-block Buffer>>
   }
 
   package "interaction contracts" as IX #F4F8FF {
@@ -721,8 +750,18 @@ LTOOLS   -[#aa6,dashed]-> THTML           : html → markdown
 LTOOLS   -[#aa6,dashed]-> TNB             : Jupyter ops
 LTOOLS   -[#aa6,dashed]-> TGREP           : ripgrep
 LTOOLS   -[#aa6,dashed]-> TPERM           : bash AST parse\n(intricate logic\nbehind FFI)
+LTOOLS   -[#aa6,dashed]-> Buffer          : `render(buf, args, output, width)`\nwrites directly into a Buffer\n(full API — no RenderCtx subset)
 
 LPLG     -[#aa6,dashed]-> BIND            : any plugin can\ncompose Rust capabilities
+
+' Engine calls Lua tool callbacks generically (no name matching in Rust).
+' Each registered tool exposes:
+'   summary(args)              ' → pill label, called from agent loop
+'   render(buf, args, output)  ' → tool-block presentation
+'   paths_for_workspace(args)  ' → workspace-restriction inputs
+'   hooks(args, mode, ctx)     ' → allow / needs_confirm / deny
+'   run(call_id, args, ctx)    ' → tool body (coroutine)
+ToolDispatcher ..> LTOOLS : calls callbacks generically\nby field name, never by tool name
 
 ' =====================================================================
 ' ui internals
@@ -742,13 +781,23 @@ Buffer   o--> "*" Extmark
 Extmark  --> Theme : hl_id
 Extmark  --> YankSubst : optional
 
-Ui o--> "*" Buffer    : owns
+Ui o--> "*" Buffer    : owns (type from core)
 Ui o--> "*" Window    : owns
 Ui *--> LayoutTree    : splits
 Ui o--> "*" Overlay   : overlays (z-ordered)
 Ui --> Grid
 Ui --> Flush
 Ui *--> Theme
+
+' Tui-side BufferParser impls write into core's Buffer
+PARSEMD ..|> BufferParser
+PARSEDF ..|> BufferParser
+PARSESY ..|> BufferParser
+PARSEBL ..|> BufferParser
+PARSEMD ..> Buffer : writes lines + extmarks
+PARSEDF ..> Buffer : writes lines + extmarks
+PARSESY ..> Buffer : writes lines + extmarks
+PARSEBL ..> Buffer : writes per-block buffers
 
 ' =====================================================================
 ' The single note kept inline — Buffer vs Window split is a visual

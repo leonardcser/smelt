@@ -73,11 +73,18 @@ P6  streaming + lifecycle polish ✅ ── per-block callbacks, cooperative
         │                              fan-out
         ▼
 P7  finalize ✅                    ── docs, examples, dead-code sweep
-        │
+        │                              (parity walk deferred to P10)
         ▼
-P8  crate extraction               ── extract `core` module into `crates/core`,
-                                      split Lua FFI by tier, eliminate `ui`
-                                      and `crossterm` deps from `core`
+P8  crate extraction ✅            ── extract `core` module into `crates/core`,
+        │                              split Lua FFI by tier, eliminate `ui`
+        │                              and `crossterm` deps from `core`
+        ▼
+P9  make architecture true 🚧      ── Buffer to core, transcript pipeline as
+        │                              BufferParser impls, de-Rustify Lua
+        │                              concerns (no name matching in Rust)
+        ▼
+P10 ship it                        ── saved-state cleanup, parity walk in tmux,
+                                      final lint gate, doc-sync close-out
 ```
 
 P1 is the load-bearing one. After it, P2/P3/P4 can interleave somewhat;
@@ -282,311 +289,77 @@ zero `crossterm` / `ui` imports. See `P8.md`.
 
 ---
 
-## P9 — Final cleanup
+## P9 — Make the architecture true
 
-**Goal:** purge remaining transitional abstractions, fix naming drift, and
-unify divergent paths that should share the `Buffer` / `BufferParser`
-abstractions. Subtasks are ordered by implementation dependency:
-transcript pipeline first (gives everything a proper `Buffer`), then prompt
-wrapping, then copy unification, then the remaining cleanups.
-
-Implementation order: a → b → c → d → e → f → g.
+**Goal:** close the deferral chain (`P1.a-tail → P4.b → old P9.b`) and
+purge every place where Rust still encodes a Lua-shaped decision. Three
+fat sub-phases sequenced by dependency. Full detail in `P9.md`.
 
 - **P9.a** ✅ — Well-known window IDs moved from `ui` to `app`;
   `win_open_split` collision-tolerant; `prompt_data.rs` renamed to
   `prompt_buf.rs`.
-- **P9.b** 🚧 — Transcript pipeline migration (in progress).
-  Persisted cache layer (`transcript_cache.rs`) deleted; tool rendering moved
-  to Lua `render` hook with `RenderCtx`. Remaining: move renderers from `core`
-  to `tui` as `BufferParser` impls, delete `SpanCollector`/`DisplayBlock`,
-  shrink `transcript_buf.rs` to thin composition.
-- **P9.c** ⏸ — Unify prompt wrapping via `BufferParser` (gated on P9.b).
-- **P9.d** ⏸ — Unify copy / yank / clipboard paths (gated on P9.b + P9.c).
-- **P9.e** ⏸ — Naming consistency (`prompt_data.rs` rename already done in P9.a).
-- **P9.f** ⏸ — Merge responsive bar layout primitives.
-- **P9.g** ✅ — Unify `buffer::SpanStyle` and `grid::Style`; fixes strikethrough
-  rendering bug.
+- **P9.g** ✅ — `buffer::SpanStyle` unified with `grid::Style`; fixes
+  strikethrough rendering bug.
+- **P9.b.0/b.1** ✅ — Dead `cache_dirty` field deleted; persisted layout
+  cache deleted; `TranscriptSnapshot` moved from `core` to `tui`; Lua
+  `render` hook + `RenderCtx` introduced for tool output.
+- **P9.b** 🚧 — **`Buffer` to `core` (Path A).** The keystone. Move
+  `Buffer` + `BufferParser` trait + extmark types to `core`; `Theme`
+  stays in `tui`. Eliminates the `DisplayBlock` cross-crate
+  intermediate. Lua's `render` hook then writes to `&mut Buffer`
+  directly; `RenderCtx` retires.
+- **P9.c** ⏸ — **Transcript pipeline as `BufferParser` impls.** One
+  parser per `Block` variant in `tui::content::transcript_parsers/`.
+  `transcript_present/`, `SpanCollector`, `DisplayBlock`,
+  `layout_out.rs`, `BlockHistory.artifacts` all delete. Width-independent
+  parsing moves to ingest time as namespaced extmarks. Pulls in: prompt
+  wrap unification, copy/yank unification, responsive-bar dedup.
+- **P9.d** ⏸ — **De-Rustify Lua concerns.** Tool registration grows
+  `summary(args)`, `render(buf, args, output, width)`,
+  `paths_for_workspace(args)`, `elapsed_visible` callbacks. Engine
+  drops `if name == "bash"` cmd_summary; permission-workspace path
+  extraction queries Lua tools; mode icons / labels move to
+  `modes.lua`; confirm title composes in Lua. Eternal rule: **no
+  tool/command/dialog name matching in Rust.**
 
 ---
 
-### P9.a — Well-known window IDs out of `ui`
+## P10 — Ship it
 
-Remove the last application semantics from the generic `ui` layer.
-`ui` should not know that `WinId(0)` means "prompt" or `WinId(1)` means
-"transcript"; those are `TuiApp` / `WellKnown` concerns.
+Final hygiene pass after P9 lands. Small, mostly mechanical. Closes
+the refactor. See `P10.md`.
 
-- **Move `PROMPT_WIN` and `TRANSCRIPT_WIN`** from `ui/mod.rs` to
-  `app/well_known.rs` (or `app.rs`). Also name the prompt editing buffer
-  `PROMPT_EDIT_BUF: BufId = BufId(0)` there so the magic number is explicit.
-- **Make `win_open_split` collision-tolerant.** Skip occupied win IDs:
-  ```rust
-  while self.wins.contains_key(&WinId(self.next_win_id)) {
-      self.next_win_id += 1;
-  }
-  ```
-  `Ui::new()` starts `next_win_id` at `0`.
-- **Leave `buf_create` alone for now.** `PromptState::new()` creates a
-  standalone `Window` with `BufId(0)` before `Ui` exists. Making `buf_create`
-  collision-tolerant starting at `0` would silently allocate `BufId(0)` for the
-  display buffer, colliding with the editing buffer's conceptual ID. Fix the
-  BufId duality in P9.b, not here.
-- **Update callers** in `app/`, `content/`, `input/` to reference the constants
-  through `crate::app::*` instead of `crate::ui::*`.
-- **Fix the sequential-ID test** in `ui/mod.rs`
-  (`buf_create_with_id_lua_range_does_not_advance_rust_allocator`). It assumes
-  the first auto-allocated ID is `0`; update it to not depend on the starting
-  value.
-- **Rename `content/prompt_data.rs` → `content/prompt_buf.rs`.** Do this in the
-  first P9 commit so P9.c rewrites the file under its final name. After P9.b
-  deletes `layout_out.rs`, the `prompt_buf.rs` / `transcript_buf.rs` pair is
-  the only consistent vocabulary left.
-
-End of P9.a: `ui` has zero knowledge of prompt or transcript. `WellKnown`
-owns the stable IDs. `next_win_id` starts at `0` and is collision-tolerant.
+- **Saved-state cleanup.** `core::state::ResolvedSettings` and the
+  surrounding JSON loader survived P5.d's "all config in `init.lua`"
+  claim. Either drop persisted settings entirely (cache-shaped state
+  becomes a small typed `SessionCache`) or move persistence behind a
+  Lua API. Decide during P10.
+- **INVENTORY drift sweep.** Walk every row marked `done` and verify
+  reality matches; fix every `refactor/check.sh` red `✗`.
+- **Parity walk in tmux.** Drive the binary by hand against a local
+  endpoint and walk the visual matrix from `ARCHITECTURE.md § Testing
+  TUI changes`. Visual behaviour is not test-covered — the human walk
+  is the gate.
+- **Final lint gate.** One `cargo fmt && cargo clippy --workspace
+  --all-targets -- -D warnings && cargo nextest run --workspace`. Green
+  is the ship condition.
+- **Doc-sync close-out.** Decide whether `refactor/` archives or
+  `ARCHITECTURE.md` + the puml stay as living docs outside the folder.
 
 ---
 
-### P9.b — Transcript pipeline migration
+## A note on deferral discipline
 
-**Goal:** replace the `SpanCollector` / `DisplayBlock` / `transcript_cache.rs`
-stack with direct `Buffer` extmark writes. This is the keystone that P1.a-tail
-and P4.b described but never landed. It is **not cleanup** — it is a structural
-rewrite of the rendering layer, and it comes first in P9 because every later
-subtask assumes both transcript and prompt live on `Buffer`.
+Through P9 we tighten the deferral rule. Earlier phases postponed work
+because it was *big* (transcript pipeline, three times). The new rule:
 
-- **Delete `SpanCollector` and `DisplayBlock`.** Change transcript renderers
-  (markdown, diff, syntax, tool previews) to write directly into `&mut Buffer`
-  via `set_all_lines`, `add_highlight`, and `set_decoration`. This is a
-  mechanical refactor: every `out.print("...")` becomes a line append, every
-  `out.set_fg(red)` becomes a highlight extmark. `crates/core/src/content/layout_out.rs`
-  is deleted.
-- **Migrate `transcript_present/` into `BufferParser` impls.** One parser per
-  block variant (`User`, `Thinking`, `Text`, `CodeLine`, `ToolCall`, `Exec`).
-  Each parser receives the block data + width and mutates a fresh `Buffer`.
-  Keep the parsers in Rust for now; the P4.b Lua migration is a follow-up.
-- **Delete `transcript_cache.rs`.** `Buffer::ensure_rendered_at(width)` caches
-  by `(changedtick, width)`. Per-block caching is handled by each block
-  buffer's own `last_render` slot; no separate `BlockArtifact` /
-  `PersistedLayoutCache` is needed.
-- **Shrink `transcript_buf.rs`.** It becomes a thin composition layer:
-  concatenate block buffer lines + insert gap rows between blocks + write the
-  result into the transcript display buffer. `TranscriptProjection` stays but
-  operates on `Buffer` lines instead of `DisplayBlock` spans.
-- **Fix width-dependent layout violations.** `transcript_present/`
-  (`layout_block`, `render_markdown_inner`, `render_code_block`,
-  `render_markdown_table`) pre-wrap content at layout/collection time. The
-  `BufferParser` model inverts this: width-independent computation (LCS, token
-  streams, markdown parsing) happens at block-ingest time; width-dependent
-  wrapping happens in `ensure_rendered_at(width)` at paint time. P9.b migrates
-  all transcript renderers to this model.
-- **Eliminate user-bubble rendering duplication.**
-  `transcript_present/mod.rs` (`render_block` for `Block::User`) and
-  `prompt_buf.rs` (`queued_message_rows`) both use `UserBlockGeometry` +
-  `wrap_line` but emit through different pipelines (`SpanCollector` vs
-  `WindowRow`). After P9.b, user blocks render through the same `BufferParser`
-  as everything else; `queued_message_rows` can call the same parser with the
-  queued message text.
-- **Fix `INVENTORY.md` statuses.** The transcript files are marked "deleted /
-  done" but still exist. Update their status to **"landed in P9.b"** after
-  deletion.
+> **Implementation size is not a reason to defer.** If a change improves
+> the codebase, do it now. Defer only when the change *does not improve
+> the codebase* — a hypothetical optimization with no real consumer, a
+> rewrite that competes with another in-flight migration, etc.
 
-End of P9.b: `transcript_present/`, `transcript_cache.rs`,
-`content/layout_out.rs`, and `SpanCollector` are deleted. The transcript
-pipeline is `Block` → `BufferParser` → `Buffer` → `transcript_buf.rs`
-(composition) → `Window::render`.
-
----
-
-### P9.c — Unify prompt wrapping via `BufferParser`
-
-The prompt runs wrapping logic in **three places** today:
-1. `compute_prompt` manually wraps the input area via `wrap_and_locate_cursor`.
-2. `PromptWrap::build` calls the **same** wrap function for mouse translation.
-3. `core/host.rs` builds a third `PromptWrap` for `rows_for` / `breaks_for`.
-
-Unify them into a single `BufferParser` pass.
-
-- **Create `PromptInputParser` (a `BufferParser`).** It reads `Buffer::source`
-  (with `\u{FFFC}` attachment markers), expands them via `build_display_spans`,
-  soft-wraps at the given width, and writes display lines + decorations
-  (`source_text` on first row, `soft_wrapped` on continuations, highlight
-  extmarks for attachment labels). `format.rs` + `BufFormat::Plain` is the
-  template.
-- **`compute_prompt` uses the parser for the input area.** It still composes
-  chrome rows (queued / stash / bar) and emits `PromptOutput` (cursor,
-  viewport, cursor style) — a `BufferParser` cannot do this because it only
-  sees `(buf, source, width)`. But the input area no longer manually wraps.
-- **`PromptWrap` shrinks to a byte-map only.** It no longer recomputes
-  `rows` / `soft_breaks` / `hard_breaks`. Instead it reads the wrapped output
-  from the `Buffer` that the parser already produced. If the parser can emit
-  the source↔display byte map as metadata, delete `PromptWrap` entirely.
-- **`core/host.rs` reads `rows_for` / `breaks_for` from the `Buffer`** directly
-  instead of constructing a `PromptWrap`.
-- **Do NOT move editing onto `Buffer`.** `Window::text`, `Window::cpos`, and
-  `input/buffer.rs` editing primitives stay as-is. `Buffer` has no byte-level
-  insert/delete APIs; building them is not cleanup.
-
-- **Selection highlight computation is duplicated** between
-  `app/transcript.rs` (`transcript_selection_highlights`) and
-  `content/prompt_buf.rs` (`compute_input_area`). Both map a wrapped byte
-  range to per-line `(col_start, col_end)` highlight tuples. P9.c's
-  `PromptInputParser` gives the prompt a proper `Buffer` with extmarks; once
-  P9.b gives the transcript the same, both paths collapse to a single
-  `Buffer::highlight_range`-style primitive.
-
-End of P9.c: one wrapping pass instead of three. `PromptWrap` is deleted or
-shrunk to a thin utility. `compute_prompt` still exists as the frame composer.
-`Window::text` survives.
-
----
-
-### P9.d — Unify copy / yank / clipboard paths
-
-**Severity: High.** There are **eight divergent copy paths** today. They use
-different source text and different metadata awareness, causing real bugs
-(prompt copy leaks attachment markers; mouse yank ignores `SpanMeta` and
-soft-wraps; vim yank requires a null-sink workaround).
-
-| Path | File | Problem |
-|------|------|---------|
-| Transcript cell-walk | `core/content/transcript.rs` | The "correct" path: respects `SpanMeta.selectable`, `copy_as`, `source_text`, soft-wrap coalescing. |
-| Prompt keybind copy | `input/mod.rs` | Slices `Window::text` directly; no `SpanMeta`; attachments copy as raw `\u{FFFC}`. |
-| Prompt mouse yank | `ui/window.rs` | `mouse_yank_text` does naive `buf[start..end].to_string()`; ignores `SpanMeta`, `source_text`, soft-wraps entirely. |
-| Content vim yank | `app/content_keys.rs` | Mutes platform sink, stores raw bytes in vim register, then re-resolves via `copy_display_range`. Fragile. |
-| Vim internal yank | `ui/vim.rs` | Operates on `self.text` bytes, not buffer cells. |
-| Kill-ring editing | `input/buffer.rs` | `kill_and_copy` pushes editing kills to clipboard; not selection copy. |
-| Mouse clipboard | `app/mouse.rs` | `yank_to_clipboard` wraps `kill_ring.set_with_linewise`; no `SpanMeta`. |
-| Whole-block yank | `app/transcript.rs` | `block_text_at_row` uses `Block::raw_text()` for some blocks, cell-walking for others. |
-
-**Plan:** After P9.b and P9.c give both prompt and transcript a proper `Buffer`
-with `LineDecoration` extmarks, build a single
-`copy_range(buf: &Buffer, start_byte, end_byte) -> String` primitive that:
-- Reads `soft_wrapped` and `source_text` from buffer decorations.
-- Skips non-selectable cells via `SpanMeta` on highlight extmarks (or a
-dedicated copy namespace).
-- Applies `copy_as` substitutions.
-- Is used by mouse yank, keybind copy, vim yank, and transcript block copy.
-
-The primitive lives in `ui/buffer.rs` or `ui/window.rs`. Each consumer passes
-its `Buffer` + byte range; no per-surface copy logic remains.
-
-**Gating:** P9.d starts after P9.b (transcript has a real Buffer) and P9.c
-(prompt has a real Buffer) are both green. It can be landed in two halves:
-prompt copy first, transcript copy second.
-
----
-
-### P9.e — Naming consistency
-
-The content modules grew different vocabularies because the two pipelines were
-built at different times under different assumptions. Align them:
-
-| Current | Target | Rationale |
-|---------|--------|-----------|
-| `content/prompt_data.rs` | `content/prompt_buf.rs` | Matches `transcript_buf.rs`; both project into `Buffer`. Moved to P9.a so the file is rewritten under its final name. |
-
-Low-cost, immediate clarity.
-
----
-
-### P9.f — Merge responsive bar layout primitives
-
-**Severity: Medium.** `content/status.rs::spans_to_buffer_line` and
-`content/prompt_buf.rs::bar_row` implement the same responsive layout
-algorithm: drop highest-priority spans first, truncate if possible, pad with
-filler. They emit different output types (`StatusLine` vs `WindowRow`) but the
-logic is identical.
-
-**Plan:** Extract a shared `responsive_line(spans, width) -> ResponsiveLine`
-primitive that:
-- Takes priority-sorted, alignment-grouped spans.
-- Drops / truncates until `display_width <= width`.
-- Returns aligned left + right segments + filler segment.
-
-`spans_to_buffer_line` and `bar_row` become thin adapters that convert
-`ResponsiveLine` into their respective output types. This removes ~80 LOC of
-duplication and makes the priority-drop algorithm testable in one place.
-
----
-
-### P9.g — Unify `buffer::SpanStyle` and `grid::Style`
-
-**Severity: Medium (with a real rendering bug).** Two resolved-terminal-style
-types exist at adjacent layers:
-
-| Type | Module | Fields | Color type |
-|------|--------|--------|------------|
-| `grid::Style` | `ui/grid.rs` | fg, bg, bold, dim, italic, **underline, crossedout** | `crossterm::Color` |
-| `buffer::SpanStyle` | `ui/buffer.rs` | fg, bg, bold, dim, italic | `crossterm::Color` |
-
-`buffer::SpanStyle` is missing `underline` and `crossedout`. This causes a
-**latent rendering bug**: these attributes are silently dropped at three
-conversion sites:
-- `content/to_buffer.rs:149` (`resolve_span_style`) — drops both when
-  projecting `DisplayBlock` into `Buffer`.
-- `content/prompt_buf.rs:762` (`span_style`) — drops both when writing prompt
-  chrome into `Buffer`.
-- `ui/window.rs:1194-1195` (`merge_span_style`) — hardcodes both from the base
-  row style only; spans can never contribute them.
-
-The markdown inline parser (`content/highlight/inline.rs`) **does** emit
-`crossedout` for `~~strikethrough~~`, and `SpanCollector` / `DisplayBlock`
-carry it faithfully. But it vanishes at the Buffer boundary — strikethrough text
-renders as plain text.
-
-**Plan:**
-1. Replace `buffer::SpanStyle` with `grid::Style` in the Buffer extmark API.
-   Both types use `crossterm::Color` and represent the same concept (resolved
-   terminal-ready style). `grid::Style` is already `Copy` + `Default`.
-2. Update `content/to_buffer.rs::resolve_span_style` to return `grid::Style`
-   (or delete it if `display::SpanStyle` gets a `From` impl).
-3. Fix `ui/window.rs::merge_span_style` to OR-merge `underline` and
-   `crossedout` from the span, not just the base row.
-4. Delete `content/prompt_buf.rs::span_style()` and the manual conversion in
-   `app/status_bar.rs`; replace with `.into()` or direct assignment.
-5. Verify `cargo nextest run --workspace`.
-
-This removes ~50 LOC of mechanical conversion and fixes the strikethrough
-rendering bug.
-
----
-
-### What we investigated and chose not to consolidate
-
-**BashHighlighter vs. `print_user_highlights`** — These serve orthogonal
-domains: `BashHighlighter` is a full `syntect` shell grammar tokenizer with
-multi-color RGB output; `print_user_highlights` is a hand-written char scanner
-that accents `@path` refs, `[image]` labels, and slash commands with a single
-`ColorRole::Accent`. Merging them would add abstraction without reducing code.
-
-**The 5 wrapping implementations** — Each serves genuinely different
-constraints:
-- `wrap_line` = general word-splitting utility
-- `wrap_and_locate_cursor` = prompt editor (tab-stop aware + cursor tracking +
-  `SpanKind` metadata)
-- `PromptWrap::build` = bi-directional byte-coordinate translator (not a
-  wrapping algorithm)
-- `wrap_cell_words` = markdown-syntax-aware table cell wrapping
-- `wrap_inline_spans` = style-preserving span split (algorithmically identical
-  to `wrap_line` but with `InlineStyle` payloads; ~50 lines, not worth
-  genericizing)
-
-The only consolidation already planned is moving transcript_present's direct
-`wrap_line` calls onto `BufferParser` + `ensure_rendered_at` (P9.b).
-
-**`TranscriptSnapshot` parallel arrays** — `TranscriptSnapshot`
-(`row_cells`, `soft_wrapped`, `source_text`, `block_of_row`) could theoretically
-be replaced by Buffer extmark queries, but this requires two Buffer features
-that don't exist yet:
-1. A per-cell metadata helper to resolve `SpanMeta` at `(row, col)` from
-   highlight intervals.
-2. A block-to-row mapping (new extmark namespace or decoration field).
-
-Building these now would target the `TranscriptProjection` intermediate layer,
-which P9.b is about to rewrite. The plan explicitly sequences this: P9.b first,
-then P9.d transcript half.
-
----
+The P9 replanning folds in everything earlier phases dropped under
+"too big." `P9.md` records the deferral chain and how it closes.
 
 ## What we are deliberately not solving here
 
