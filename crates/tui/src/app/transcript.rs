@@ -68,6 +68,31 @@ impl ToolBodyRenderer for LuaRenderRenderer {
     fn elapsed_visible(&self, name: &str) -> bool {
         crate::lua::app_ref::try_with_app(|app| app.lua.tool_elapsed_visible(name)).unwrap_or(false)
     }
+
+    fn render_summary_line(
+        &self,
+        name: &str,
+        line: &str,
+        args: &HashMap<String, serde_json::Value>,
+        out: &mut SpanCollector,
+    ) -> bool {
+        crate::lua::app_ref::try_with_app(|app| {
+            if !app.lua.tool_has_render_summary(name) {
+                return false;
+            }
+            let buf_id = app.ui.buf_create(crate::ui::BufCreateOpts::default());
+            let ok = app.lua.render_tool_summary_line(name, line, args, buf_id.0);
+            if !ok {
+                let _ = app.ui.buf_destroy(buf_id);
+                return false;
+            }
+            if let Some(buf) = app.ui.buf_destroy(buf_id) {
+                crate::content::to_buffer::replay_buffer_row_into(&buf, 0, out);
+            }
+            true
+        })
+        .unwrap_or(false)
+    }
 }
 
 pub(crate) struct TranscriptData {

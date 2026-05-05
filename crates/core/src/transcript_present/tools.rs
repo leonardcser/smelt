@@ -36,7 +36,17 @@ pub(super) fn render_tool(
     } else {
         None
     };
-    let mut rows = print_tool_line(out, name, summary, color, time, tl.as_deref(), width);
+    let mut rows = print_tool_line(
+        out,
+        name,
+        summary,
+        args,
+        color,
+        time,
+        tl.as_deref(),
+        width,
+        renderer,
+    );
     if name == "web_fetch" {
         if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
             let segs = wrap_line(prompt, width.saturating_sub(3));
@@ -84,14 +94,17 @@ fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayo
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_tool_line(
     out: &mut SpanCollector,
     name: &str,
     summary: &str,
+    args: &HashMap<String, serde_json::Value>,
     pill_color: ColorValue,
     elapsed: Option<Duration>,
     timeout_label: Option<&str>,
     width: usize,
+    renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
     out.push_fg(pill_color);
     out.print("\u{23fa}");
@@ -108,62 +121,65 @@ fn print_tool_line(
 
     print_dim(out, &format!(" {} ", name));
 
-    if name == "bash" {
-        let raw_lines: Vec<&str> = summary.lines().collect();
-        let mut wrapped: Vec<String> = Vec::new();
-        let mut is_soft_wrap = Vec::new();
-        for line in &raw_lines {
-            let segs = wrap_line(line, ly.max_summary.max(1));
-            if segs.len() > 1 {
-                out.mark_wrapped();
-            }
-            for (si, seg) in segs.into_iter().enumerate() {
-                is_soft_wrap.push(si > 0);
-                wrapped.push(seg);
-            }
+    // Wrap the summary, then paint each line. Tools that registered a
+    // `render_summary` callback own per-line styling (e.g. `bash`
+    // highlighter); the rest fall back to plain print.
+    let raw_lines: Vec<&str> = summary.lines().collect();
+    let mut wrapped: Vec<String> = Vec::new();
+    let mut is_soft_wrap = Vec::new();
+    for line in &raw_lines {
+        let segs = wrap_line(line, ly.max_summary.max(1));
+        if segs.len() > 1 {
+            out.mark_wrapped();
         }
-        let total = wrapped.len();
-        let show = total.min(MAX_TOOL_BLOCK_ROWS);
-        let mut line_num = 0;
-        let mut bh = BashHighlighter::new();
-
-        for (idx, seg) in wrapped[..show].iter().enumerate() {
-            if idx > 0 {
-                out.print_gutter(&" ".repeat(ly.prefix_len));
-                if is_soft_wrap[idx] {
-                    out.mark_soft_wrap_continuation();
-                }
-            }
-            if idx == 0 {
-                out.set_source_text(summary);
-            }
-            bh.print_line(out, seg);
-            if idx == 0 {
-                print_dim_non_selectable(out, &time_str, &timeout_str);
-            }
-            out.newline();
-            line_num += 1;
+        for (si, seg) in segs.into_iter().enumerate() {
+            is_soft_wrap.push(si > 0);
+            wrapped.push(seg);
         }
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+        is_soft_wrap.push(false);
+    }
+    let total = wrapped.len();
+    let show = total.min(MAX_TOOL_BLOCK_ROWS);
+    let mut rows = 0u16;
 
-        if total > MAX_TOOL_BLOCK_ROWS {
-            let skipped = total - MAX_TOOL_BLOCK_ROWS;
+    for (idx, seg) in wrapped[..show].iter().enumerate() {
+        if idx > 0 {
             out.print_gutter(&" ".repeat(ly.prefix_len));
-            print_dim(
-                out,
-                &format!("... {} below", pluralize(skipped, "line", "lines")),
-            );
-            out.newline();
-            line_num += 1;
+            if is_soft_wrap[idx] {
+                out.mark_soft_wrap_continuation();
+            }
         }
-
-        return line_num as u16;
+        if idx == 0 {
+            out.set_source_text(summary);
+        }
+        let painted = renderer
+            .map(|r| r.render_summary_line(name, seg, args, out))
+            .unwrap_or(false);
+        if !painted {
+            out.print(seg);
+        }
+        if idx == 0 {
+            print_dim_non_selectable(out, &time_str, &timeout_str);
+        }
+        out.newline();
+        rows += 1;
     }
 
-    let truncated = truncate_str(summary, ly.max_summary);
-    out.print(&truncated);
-    print_dim_non_selectable(out, &time_str, &timeout_str);
-    out.newline();
-    1
+    if total > MAX_TOOL_BLOCK_ROWS {
+        let skipped = total - MAX_TOOL_BLOCK_ROWS;
+        out.print_gutter(&" ".repeat(ly.prefix_len));
+        print_dim(
+            out,
+            &format!("... {} below", pluralize(skipped, "line", "lines")),
+        );
+        out.newline();
+        rows += 1;
+    }
+
+    rows
 }
 
 pub(super) fn print_tool_output(

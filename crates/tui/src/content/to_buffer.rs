@@ -7,4 +7,6 @@
 //! re-exports the headless-safe entry points so callers don't have to
 //! reach into `smelt_core::content::layout_out` for the common case.
 
-pub use smelt_core::content::layout_out::{render_into as render_into_buffer, replay_buffer_into};
+pub use smelt_core::content::layout_out::{
+    render_into as render_into_buffer, replay_buffer_into, replay_buffer_row_into,
+};

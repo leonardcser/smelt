@@ -85,6 +85,9 @@ smelt.tools.register({
   render = function(args, output, width, buf)
     smelt.text.render(buf, output.content, { is_error = output.is_error })
   end,
+  render_summary = function(buf, line, args)
+    smelt.bash.render_line(buf, line)
+  end,
   execute = M.execute,
 })
 

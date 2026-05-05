@@ -594,6 +594,57 @@ impl LuaRuntime {
         meta.get::<bool>("elapsed_visible").unwrap_or(false)
     }
 
+    /// Whether the tool registered a `render_summary` callback. The
+    /// caller mints an ephemeral Buffer, runs the callback through
+    /// [`render_tool_summary_line`], and replays row 0 into the
+    /// transcript / confirm-dialog title.
+    pub fn tool_has_render_summary(&self, tool_name: &str) -> bool {
+        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+        handlers
+            .get(tool_name)
+            .is_some_and(|h| h.render_summary.is_some())
+    }
+
+    /// Run a tool's `render_summary` callback against the buffer named
+    /// by `buf_id`. Mirrors [`render_tool_body`] but for a single
+    /// summary line (transcript header / confirm title). Returns `true`
+    /// iff the callback ran successfully.
+    pub fn render_tool_summary_line(
+        &self,
+        tool_name: &str,
+        line: &str,
+        args: &HashMap<String, serde_json::Value>,
+        buf_id: u64,
+    ) -> bool {
+        let render_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return false;
+            };
+            let Some(rh) = h.render_summary.as_ref() else {
+                return false;
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return false,
+            }
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool render_summary: build args: {e}"));
+                return false;
+            }
+        };
+
+        if let Err(e) = render_fn.call::<()>((buf_id, line.to_string(), args_table)) {
+            self.record_error(format!("tool render_summary `{tool_name}`: {e}"));
+            return false;
+        }
+        true
+    }
+
     pub fn tool_summary(
         &self,
         tool_name: &str,

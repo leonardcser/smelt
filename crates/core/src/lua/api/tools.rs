@@ -38,6 +38,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             .ok()
             .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
             .transpose()?;
+        let render_summary_handle = def
+            .get::<mlua::Function>("render_summary")
+            .ok()
+            .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
+            .transpose()?;
         let summary_fn = def.get::<mlua::Function>("summary").ok();
 
         let meta = lua.create_table()?;
@@ -61,6 +66,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
         meta.set("hook_preflight", preflight_handle.is_some())?;
         meta.set("hook_render", render_handle.is_some())?;
+        meta.set("hook_render_summary", render_summary_handle.is_some())?;
         // override_core: explicit signal that this plugin shadows a
         // core Rust tool of the same name. The engine drops the
         // colliding core definition from the LLM schema and routes
@@ -83,6 +89,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     approval_patterns: approval_patterns_handle,
                     preflight: preflight_handle,
                     render: render_handle,
+                    render_summary: render_summary_handle,
                 },
             );
         }

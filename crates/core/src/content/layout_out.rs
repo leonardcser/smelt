@@ -537,38 +537,7 @@ pub fn render_into(
 pub fn replay_buffer_into(buf: &Buffer, out: &mut SpanCollector) {
     let n = buf.line_count();
     for i in 0..n {
-        let text = buf.get_line(i).unwrap_or("");
-        let mut highlights = buf.highlights_at(i);
-        highlights.sort_by_key(|h| h.col_start);
-
-        let chars: Vec<char> = text.chars().collect();
-        let mut col_idx: u16 = 0;
-        for h in &highlights {
-            if h.col_end <= col_idx {
-                continue;
-            }
-            if h.col_start > col_idx {
-                let plain: String = chars[col_idx as usize..h.col_start as usize]
-                    .iter()
-                    .collect();
-                out.print(&plain);
-                col_idx = h.col_start;
-            }
-            let end = h.col_end.min(chars.len() as u16);
-            if end <= col_idx {
-                continue;
-            }
-            let segment: String = chars[col_idx as usize..end as usize].iter().collect();
-            // Use the resolved style directly via the helper below; we
-            // can't push a SpanStyle here because the highlight's
-            // colors are already resolved.
-            out.append_resolved_span(&segment, h.style, h.meta.clone());
-            col_idx = end;
-        }
-        if (col_idx as usize) < chars.len() {
-            let tail: String = chars[col_idx as usize..].iter().collect();
-            out.print(&tail);
-        }
+        replay_buffer_row_into(buf, i as u16, out);
         out.newline();
     }
 
@@ -578,6 +547,42 @@ pub fn replay_buffer_into(buf: &Buffer, out: &mut SpanCollector) {
     // address those from outside, so we set decorations as we go via
     // a small internal helper.
     let _ = buf; // suppress unused after the loop
+}
+
+/// Replay one row of `buf` into `out` as styled spans, without emitting
+/// a trailing newline. Used by `render_summary` Lua hooks: the caller
+/// mints an ephemeral Buffer, runs the Lua callback against it, then
+/// projects row 0 inline into the transcript / confirm-title sink.
+pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut SpanCollector) {
+    let text = buf.get_line(row as usize).unwrap_or("");
+    let mut highlights = buf.highlights_at(row as usize);
+    highlights.sort_by_key(|h| h.col_start);
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut col_idx: u16 = 0;
+    for h in &highlights {
+        if h.col_end <= col_idx {
+            continue;
+        }
+        if h.col_start > col_idx {
+            let plain: String = chars[col_idx as usize..h.col_start as usize]
+                .iter()
+                .collect();
+            out.print(&plain);
+            col_idx = h.col_start;
+        }
+        let end = h.col_end.min(chars.len() as u16);
+        if end <= col_idx {
+            continue;
+        }
+        let segment: String = chars[col_idx as usize..end as usize].iter().collect();
+        out.append_resolved_span(&segment, h.style, h.meta.clone());
+        col_idx = end;
+    }
+    if (col_idx as usize) < chars.len() {
+        let tail: String = chars[col_idx as usize..].iter().collect();
+        out.print(&tail);
+    }
 }
 
 impl<'a> SpanCollector<'a> {
