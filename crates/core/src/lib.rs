@@ -1,6 +1,7 @@
 pub mod alloc;
 pub mod app_config;
 pub mod attachment;
+pub mod buffer;
 pub mod cells;
 pub mod clipboard;
 pub mod config;
@@ -28,10 +29,12 @@ pub mod process;
 pub mod runtime;
 pub mod session;
 pub mod state;
+pub mod style;
 pub mod timers;
 pub mod tools;
 pub mod transcript_model;
 pub mod transcript_present;
+pub mod undo;
 pub mod utils;
 pub mod working;
 

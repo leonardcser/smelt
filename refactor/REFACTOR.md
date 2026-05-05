@@ -303,17 +303,19 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
 - **P9.b.0/b.1** ✅ — Dead `cache_dirty` field deleted; persisted layout
   cache deleted; `TranscriptSnapshot` moved from `core` to `tui`; Lua
   `render` hook + `RenderCtx` introduced for tool output.
-- **P9.b** 🚧 — **`Buffer` to `core` (Path A).** The keystone. Move
-  `Buffer` + `BufferParser` trait + extmark types to `core`; `Theme`
-  stays in `tui`. Eliminates the `DisplayBlock` cross-crate
-  intermediate. Lua's `render` hook then writes to `&mut Buffer`
-  directly; `RenderCtx` retires.
+- **P9.b** 🚧 — **`Buffer` to `core`.** The keystone. `Buffer` +
+  `BufferParser` + extmark types + `BufId` / `LUA_BUF_ID_BASE` +
+  `UndoHistory` live in `core`. `core::style::{Color, Style}` is a
+  frontend-neutral mirror of crossterm's enum; tui converts at the
+  SGR-emit boundary. Core has zero terminal deps. `Theme` stays in
+  `tui`. Lua `render` hook + `render_tool_body` migrate to write `&mut
+  Buffer`; `RenderCtx`, `DisplayBlock`, `DisplayLine`, `SpanCollector`,
+  `layout_out.rs`, `transcript_present/` rendering glue all delete.
 - **P9.c** ⏸ — **Transcript pipeline as `BufferParser` impls.** One
   parser per `Block` variant in `tui::content::transcript_parsers/`.
-  `transcript_present/`, `SpanCollector`, `DisplayBlock`,
-  `layout_out.rs`, `BlockHistory.artifacts` all delete. Width-independent
-  parsing moves to ingest time as namespaced extmarks. Pulls in: prompt
-  wrap unification, copy/yank unification, responsive-bar dedup.
+  `BlockHistory.artifacts` deletes. Width-independent parsing moves to
+  ingest time as namespaced extmarks. Pulls in: prompt wrap
+  unification, copy/yank unification, responsive-bar dedup.
 - **P9.d** ⏸ — **De-Rustify Lua concerns.** Tool registration grows
   `summary(args)`, `render(buf, args, output, width)`,
   `paths_for_workspace(args)`, `elapsed_visible` callbacks. Engine
@@ -321,6 +323,10 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   extraction queries Lua tools; mode icons / labels move to
   `modes.lua`; confirm title composes in Lua. Eternal rule: **no
   tool/command/dialog name matching in Rust.**
+- **P9.e** ⏸ — **HlGroup-id model.** Buffer extmarks carry semantic
+  `HlGroup(u32)` instead of raw `Style` / `Color`. Theme is the
+  paint-time resolver. Theme switches stop rewriting buffers. `Color`
+  / `Style` survive only at the paint boundary.
 
 ---
 

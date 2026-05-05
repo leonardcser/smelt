@@ -1,44 +1,32 @@
 use super::layout::Rect;
-use crossterm::style::Color;
+pub use smelt_core::style::{Color, Style};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Style {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub crossedout: bool,
-}
-
-impl Style {
-    pub fn fg(color: Color) -> Self {
-        Self {
-            fg: Some(color),
-            ..Default::default()
-        }
-    }
-
-    pub fn bg(color: Color) -> Self {
-        Self {
-            bg: Some(color),
-            ..Default::default()
-        }
-    }
-
-    pub fn bold() -> Self {
-        Self {
-            bold: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn dim() -> Self {
-        Self {
-            dim: true,
-            ..Default::default()
-        }
+/// Convert core's frontend-neutral `Color` to crossterm's terminal
+/// `Color` at the SGR-emit boundary. 1:1 enum mapping; the trait
+/// orphan rule prevents `From<core::Color> for crossterm::Color`,
+/// so this is a free function.
+pub fn to_crossterm_color(c: Color) -> crossterm::style::Color {
+    use crossterm::style::Color as X;
+    match c {
+        Color::Reset => X::Reset,
+        Color::Black => X::Black,
+        Color::DarkGrey => X::DarkGrey,
+        Color::Red => X::Red,
+        Color::DarkRed => X::DarkRed,
+        Color::Green => X::Green,
+        Color::DarkGreen => X::DarkGreen,
+        Color::Yellow => X::Yellow,
+        Color::DarkYellow => X::DarkYellow,
+        Color::Blue => X::Blue,
+        Color::DarkBlue => X::DarkBlue,
+        Color::Magenta => X::Magenta,
+        Color::DarkMagenta => X::DarkMagenta,
+        Color::Cyan => X::Cyan,
+        Color::DarkCyan => X::DarkCyan,
+        Color::White => X::White,
+        Color::Grey => X::Grey,
+        Color::Rgb { r, g, b } => X::Rgb { r, g, b },
+        Color::AnsiValue(v) => X::AnsiValue(v),
     }
 }
 

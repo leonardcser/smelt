@@ -218,13 +218,13 @@ impl TuiApp {
             let theme = self.ui.theme();
             let (fg, bg) = if theme.is_light() {
                 (
-                    crossterm::style::Color::White,
-                    crossterm::style::Color::Black,
+                    smelt_core::style::Color::White,
+                    smelt_core::style::Color::Black,
                 )
             } else {
                 (
-                    crossterm::style::Color::Black,
-                    crossterm::style::Color::White,
+                    smelt_core::style::Color::Black,
+                    smelt_core::style::Color::White,
                 )
             };
             self.ui.set_cursor_shape(crate::ui::CursorShape::Block {
@@ -407,7 +407,7 @@ impl TuiApp {
                             it = it.with_description(desc);
                         }
                         if let Some(c) = r.ansi_color {
-                            it = it.with_accent(crossterm::style::Color::AnsiValue(c));
+                            it = it.with_accent(smelt_core::style::Color::AnsiValue(c));
                         }
                         it
                     })

@@ -144,12 +144,12 @@ impl LuaRuntime {
 
 // ── theme + color helpers ──────────────────────────────────────────────
 
-/// Encode a `crossterm::style::Color` as a Lua table.
+/// Encode a `smelt_core::style::Color` as a Lua table.
 ///
 /// Shapes: `{ ansi = u8 }` for palette colors, `{ rgb = { r, g, b } }`
 /// for truecolor, `{ named = "red" }` for the 16 legacy names.
-pub(super) fn color_to_lua(lua: &Lua, color: crossterm::style::Color) -> LuaResult<mlua::Table> {
-    use crossterm::style::Color;
+pub(super) fn color_to_lua(lua: &Lua, color: smelt_core::style::Color) -> LuaResult<mlua::Table> {
+    use smelt_core::style::Color;
     let t = lua.create_table()?;
     match color {
         Color::AnsiValue(v) => t.set("ansi", v)?,
@@ -181,12 +181,12 @@ pub(super) fn color_to_lua(lua: &Lua, color: crossterm::style::Color) -> LuaResu
     Ok(t)
 }
 
-/// Project a `crossterm::style::Color` to an ANSI palette index for
+/// Project a `smelt_core::style::Color` to an ANSI palette index for
 /// the `statusline_item_from` decoder, which only reads `u8` fg/bg.
 /// `Color::Reset` returns `None` (no override). Named legacy colors
 /// map to the canonical 0..15 ANSI slots.
-pub(super) fn color_to_ansi(color: crossterm::style::Color) -> Option<u8> {
-    use crossterm::style::Color;
+pub(super) fn color_to_ansi(color: smelt_core::style::Color) -> Option<u8> {
+    use smelt_core::style::Color;
     match color {
         Color::AnsiValue(v) => Some(v),
         Color::Reset => None,
@@ -288,19 +288,19 @@ fn role_to_group(role: &str) -> Option<&'static str> {
 /// Resolved color for a `crate::ui::Theme` highlight group: prefer fg, then
 /// bg, then `Color::Reset`. Matches the convention used by
 /// `to_buffer::resolve` for `ColorRole` lookups.
-fn group_color(theme: &crate::ui::Theme, group: &str) -> crossterm::style::Color {
+fn group_color(theme: &crate::ui::Theme, group: &str) -> smelt_core::style::Color {
     let style = theme.get(group);
     style
         .fg
         .or(style.bg)
-        .unwrap_or(crossterm::style::Color::Reset)
+        .unwrap_or(smelt_core::style::Color::Reset)
 }
 
 /// Read a named theme role from `theme`. Returns `None` for unknown names.
 pub(super) fn theme_role_get(
     theme: &crate::ui::Theme,
     role: &str,
-) -> Option<crossterm::style::Color> {
+) -> Option<smelt_core::style::Color> {
     role_to_group(role).map(|g| group_color(theme, g))
 }
 
@@ -329,7 +329,7 @@ pub(super) fn theme_role_set(theme: &mut crate::ui::Theme, role: &str, ansi: u8)
 /// List of (role_name, current_color) pairs for `theme.snapshot()`.
 pub(super) fn theme_snapshot_pairs(
     theme: &crate::ui::Theme,
-) -> Vec<(&'static str, crossterm::style::Color)> {
+) -> Vec<(&'static str, smelt_core::style::Color)> {
     [
         "accent",
         "slug",
@@ -392,7 +392,7 @@ mod tests {
         // The SmeltAccent group is rebuilt on set.
         assert_eq!(
             t.get("SmeltAccent").fg,
-            Some(crossterm::style::Color::AnsiValue(42))
+            Some(smelt_core::style::Color::AnsiValue(42))
         );
     }
 

@@ -7,10 +7,10 @@
 use super::layout_out::SpanCollector;
 use crate::ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 use crate::ui::Theme;
-use crossterm::style::Color;
 use smelt_core::content::display::{
     ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle,
 };
+use smelt_core::style::Color;
 
 fn named_color_to_crossterm(n: smelt_core::content::display::NamedColor) -> Color {
     use smelt_core::content::display::NamedColor;
@@ -194,8 +194,8 @@ mod tests {
     use super::*;
     use crate::ui::buffer::BufCreateOpts;
     use crate::ui::BufId;
-    use crossterm::style::Color;
     use smelt_core::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
+    use smelt_core::style::Color;
 
     fn test_theme() -> Theme {
         let mut t = Theme::new();

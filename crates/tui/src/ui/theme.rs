@@ -10,10 +10,10 @@
 //! that fanned out one slot to every widget.
 
 use super::grid::Style;
-use crossterm::style::Color;
+use smelt_core::style::Color;
 use std::collections::HashMap;
 
-/// Default accent palette index — `crossterm::style::Color::AnsiValue(208)`,
+/// Default accent palette index — `Color::AnsiValue(208)`,
 /// the warm orange "ember" preset.
 pub const DEFAULT_ACCENT: u8 = 208;
 
@@ -118,7 +118,7 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::style::Color;
+    use smelt_core::style::Color;
 
     #[test]
     fn unknown_name_returns_default() {

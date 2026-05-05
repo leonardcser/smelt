@@ -7,7 +7,7 @@ use crate::input::PromptState;
 use crate::ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload};
 use crate::ui::grid::Style;
 
-use crossterm::style::Color;
+use smelt_core::style::Color;
 
 /// Namespace name for the prompt buffer's input-prediction (ghost text)
 /// extmark. `compute_prompt` reads-and-re-anchors this each frame so
@@ -932,7 +932,7 @@ mod tests {
     fn bar_row_with_right_spans() {
         let right = vec![BarSpan {
             text: " model".into(),
-            color: crossterm::style::Color::White,
+            color: smelt_core::style::Color::White,
             bg: None,
             bold: false,
             dim: false,
@@ -992,7 +992,7 @@ mod tests {
         let kinds = vec![SpanKind::Plain; 4];
         let segs = exec_bang_segments("!ls", &kinds, None, None, &test_theme());
         assert_eq!(segs[0].text, "!");
-        assert_eq!(segs[0].style.fg, Some(crossterm::style::Color::Red));
+        assert_eq!(segs[0].style.fg, Some(smelt_core::style::Color::Red));
         assert!(segs[0].style.bold);
     }
 
