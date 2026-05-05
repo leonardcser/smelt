@@ -5,8 +5,8 @@
 //! and vim motions.
 
 use super::layout_out::SpanCollector;
-use crate::ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 use crate::ui::Theme;
+use crate::ui::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 use smelt_core::content::display::{
     ColorRole, ColorValue, DisplayLine, NamedColor, SpanStyle as DisplaySpanStyle,
 };
@@ -276,7 +276,7 @@ pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::buffer::BufCreateOpts;
+    use crate::ui::BufCreateOpts;
     use crate::ui::BufId;
     use smelt_core::content::display::{ColorValue, DisplaySpan, SpanStyle as DSpanStyle};
     use smelt_core::style::Color;

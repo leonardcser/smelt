@@ -50,7 +50,7 @@ impl crate::ui::UiHost for TuiApp {
     fn set_focus(&mut self, win: crate::ui::WinId) -> bool {
         self.ui.set_focus(win)
     }
-    fn buf_create(&mut self, opts: crate::ui::buffer::BufCreateOpts) -> crate::ui::BufId {
+    fn buf_create(&mut self, opts: crate::ui::BufCreateOpts) -> crate::ui::BufId {
         self.ui.buf_create(opts)
     }
     fn buf_mut(&mut self, id: crate::ui::BufId) -> Option<&mut crate::ui::Buffer> {

@@ -15,7 +15,7 @@
 //! parser via `crate::ui::BufferParser` and reuse the same wrap-aware,
 //! copy-friendly rendering the transcript uses.
 
-use crate::ui::buffer::{Buffer, BufferParser};
+use crate::ui::{Buffer, BufferParser};
 use std::sync::Arc;
 
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
@@ -180,8 +180,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::buffer::{BufCreateOpts, Buffer};
     use crate::ui::BufId;
+    use crate::ui::{BufCreateOpts, Buffer};
 
     fn new_buf() -> Buffer {
         Buffer::new(BufId(1), BufCreateOpts::default())

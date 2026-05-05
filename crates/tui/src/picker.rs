@@ -20,8 +20,8 @@
 
 use crate::app::TuiApp;
 use crate::app::PROMPT_WIN;
-use crate::ui::buffer::{BufCreateOpts, SpanStyle};
 use crate::ui::layout::Anchor;
+use crate::ui::{BufCreateOpts, SpanStyle};
 use crate::ui::{BufId, Constraint, Corner, LayoutTree, Overlay, OverlayId, SplitConfig, WinId};
 use smelt_core::style::Color;
 

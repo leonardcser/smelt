@@ -38,9 +38,7 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         let Some(tool_out) = output else { return 0 };
         let before = out.line_count();
         let ran = crate::lua::app_ref::try_with_app(|app| {
-            let buf_id = app
-                .ui
-                .buf_create(crate::ui::buffer::BufCreateOpts::default());
+            let buf_id = app.ui.buf_create(crate::ui::BufCreateOpts::default());
             let ok = app
                 .lua
                 .render_tool_body(name, args, tool_out, width, buf_id.0);

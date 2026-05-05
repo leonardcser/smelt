@@ -4,8 +4,8 @@ use super::selection::{
 };
 use super::status::BarSpan;
 use crate::input::PromptState;
-use crate::ui::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload};
 use crate::ui::grid::Style;
+use crate::ui::{Buffer, ExtmarkOpts, ExtmarkPayload};
 
 use smelt_core::style::Color;
 
@@ -1021,7 +1021,7 @@ mod tests {
         };
         let mut input_buf = Buffer::new(
             crate::app::PROMPT_EDIT_BUF,
-            crate::ui::buffer::BufCreateOpts::default(),
+            crate::ui::BufCreateOpts::default(),
         );
         let output = compute_prompt(&mut prompt_input, &mut input_buf, &test_theme());
         // Buffer carries chrome (top bar) + input area + bottom bar at least.

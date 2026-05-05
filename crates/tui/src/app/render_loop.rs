@@ -177,7 +177,7 @@ impl TuiApp {
         let transcript_selection =
             self.transcript_selection_highlights(tdata.clamped_scroll, viewport_rows);
         let visual = self.ui.theme().get("Visual");
-        let visual_span = crate::ui::buffer::SpanStyle {
+        let visual_span = crate::ui::SpanStyle {
             fg: visual.fg,
             bg: visual.bg,
             ..Default::default()
@@ -196,10 +196,10 @@ impl TuiApp {
                     ns,
                     *line,
                     *col_start as usize,
-                    crate::ui::buffer::ExtmarkOpts::highlight(
+                    crate::ui::ExtmarkOpts::highlight(
                         *col_end as usize,
                         visual_span,
-                        crate::ui::buffer::SpanMeta::default(),
+                        crate::ui::SpanMeta::default(),
                     ),
                 );
             }

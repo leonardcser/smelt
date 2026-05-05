@@ -1,9 +1,9 @@
-use super::buffer::Buffer;
 use super::event::Status;
 use super::grid::{GridSlice, Style};
 use super::layout::{Gutters, Rect};
 use super::text::{self, byte_to_cell, cell_to_byte};
 use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
+use super::Buffer;
 use super::Clipboard;
 use super::{BufId, WinId};
 use crate::ui::theme::Theme;
@@ -278,7 +278,7 @@ pub struct Window {
     pub attachment_ids: Vec<super::AttachmentId>,
     /// Undo/redo stack. `None` capacity disables undo (used for readonly
     /// buffers).
-    pub history: super::undo::UndoHistory,
+    pub history: super::UndoHistory,
     /// Whether this window's text can be edited.
     pub readonly: bool,
     pub cpos: usize,
@@ -339,7 +339,7 @@ impl Window {
             viewport: None,
             text: String::new(),
             attachment_ids: Vec::new(),
-            history: super::undo::UndoHistory::default(),
+            history: super::UndoHistory::default(),
             readonly: true,
             cpos: 0,
             vim_enabled: false,
@@ -1184,7 +1184,7 @@ fn merge_styles(base: Style, top: Style) -> Style {
 /// (row default). `Some` fields on the span override; `None` keeps
 /// the base. Boolean attributes OR together so `bold` / `dim` /
 /// `italic` accumulate across layers.
-fn merge_span_style(base: Style, span: &crate::ui::buffer::SpanStyle) -> Style {
+fn merge_span_style(base: Style, span: &crate::ui::SpanStyle) -> Style {
     Style {
         fg: span.fg.or(base.fg),
         bg: span.bg.or(base.bg),
@@ -1200,9 +1200,9 @@ fn merge_span_style(base: Style, span: &crate::ui::buffer::SpanStyle) -> Style {
 mod tests {
     use super::BufId;
     use super::*;
-    use crate::ui::buffer::BufCreateOpts;
     use crate::ui::grid::Grid;
     use crate::ui::theme::Theme;
+    use crate::ui::BufCreateOpts;
 
     fn make_win() -> Window {
         Window::new(
@@ -1451,7 +1451,7 @@ mod tests {
         // that range have `dim = true`; cells outside don't.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abcdefgh".into()]);
-        buf.add_highlight(0, 2, 5, crate::ui::buffer::SpanStyle::dim());
+        buf.add_highlight(0, 2, 5, crate::ui::SpanStyle::dim());
         let w = make_win();
         let theme = Theme::default();
         let ctx = DrawContext {
@@ -1480,7 +1480,7 @@ mod tests {
         // up bg=cursor and bold=true.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["hello".into()]);
-        buf.add_highlight(0, 0, 3, crate::ui::buffer::SpanStyle::bold());
+        buf.add_highlight(0, 0, 3, crate::ui::SpanStyle::bold());
         let mut w = make_win();
         w.cursor_line_highlight = true;
         w.cursor_line = 0;
@@ -1546,7 +1546,7 @@ mod tests {
             ns,
             0,
             3,
-            crate::ui::buffer::ExtmarkOpts::virt_text("xy".into(), None),
+            crate::ui::ExtmarkOpts::virt_text("xy".into(), None),
         );
         let w = make_win();
         let theme = Theme::default();

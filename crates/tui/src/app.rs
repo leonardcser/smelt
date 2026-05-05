@@ -393,7 +393,7 @@ impl TuiApp {
             if let Some(accent) = saved.accent_color {
                 ui.theme_mut().set_accent(accent);
             }
-            let input_display_buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
+            let input_display_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
             // Transcript: a Buffer-backed Window painted via `Ui::render`
             // from the post-layer closure. No compositor `Component`
             // layer — `project_transcript_buffer` writes the projected
@@ -401,7 +401,7 @@ impl TuiApp {
             // split path consumes them via `Window::render`. Selection
             // bg lands as extmarks in a dedicated `selection`
             // namespace registered ahead so the painted layering wins.
-            let transcript_display_buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
+            let transcript_display_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
             if let Some(buf) = ui.buf_mut(transcript_display_buf) {
                 buf.create_namespace(crate::content::transcript_buf::NS_SELECTION);
             }
@@ -432,7 +432,7 @@ impl TuiApp {
             // No compositor `Component` layer — the buffer carries the
             // text + highlight extmarks `refresh_status_bar` writes
             // each frame.
-            let status_buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
+            let status_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
             let status_win = ui
                 .win_open_split(
                     status_buf,
@@ -663,7 +663,7 @@ impl TuiApp {
             .expect("prompt window registered at startup");
         let ns = buf.create_namespace(crate::content::prompt_buf::COMPLETER_NS);
         buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
-            if let crate::ui::buffer::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
+            if let crate::ui::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
                 Some(text.clone())
             } else {
                 None
@@ -685,7 +685,7 @@ impl TuiApp {
             ns,
             0,
             0,
-            crate::ui::buffer::ExtmarkOpts::virt_text(text, Some("GhostText".into())),
+            crate::ui::ExtmarkOpts::virt_text(text, Some("GhostText".into())),
         );
     }
 
@@ -733,9 +733,7 @@ impl TuiApp {
         let gap = "  ";
         let line = format!("{indent}{label}{gap}{message}");
 
-        let buf = self
-            .ui
-            .buf_create(crate::ui::buffer::BufCreateOpts::default());
+        let buf = self.ui.buf_create(crate::ui::BufCreateOpts::default());
 
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;
@@ -753,7 +751,7 @@ impl TuiApp {
                 0,
                 label_start,
                 label_end,
-                crate::ui::buffer::SpanStyle {
+                crate::ui::SpanStyle {
                     fg: label_color,
                     bold: true,
                     ..Default::default()
@@ -763,7 +761,7 @@ impl TuiApp {
                 0,
                 msg_start,
                 msg_end,
-                crate::ui::buffer::SpanStyle {
+                crate::ui::SpanStyle {
                     dim: true,
                     ..Default::default()
                 },
