@@ -132,12 +132,44 @@ pub struct VirtualText {
     pub col: usize,
     pub text: String,
     pub hl_group: Option<String>,
+    pub pos: VirtTextPos,
 }
 
 #[derive(Default)]
 pub struct BufCreateOpts {}
 
 // ─── Extmark model ─────────────────────────────────────────────────
+
+/// How a Highlight extmark blends with its row's existing background
+/// when the mark covers the cursor row or another bg-painting layer.
+/// Matches `nvim_buf_set_extmark`'s `hl_mode` keyset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HlMode {
+    /// Replace the existing bg outright (default — today's behavior).
+    #[default]
+    Replace,
+    /// Combine fg/bg attributes from this mark over the existing
+    /// row paint without dropping the existing bg.
+    Combine,
+    /// Blend (alpha) — currently treated as Combine; reserved for
+    /// future TUI implementations.
+    Blend,
+}
+
+/// Where inline virtual text places relative to the mark's column.
+/// Mirrors `nvim_buf_set_extmark`'s `virt_text_pos` keyset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VirtTextPos {
+    /// Append at end of the line content. Default for plain virt_text.
+    #[default]
+    Eol,
+    /// Insert at `start_col` shifting real content right.
+    Inline,
+    /// Overlay starting at `start_col`, replacing real content cells.
+    Overlay,
+    /// Right-align: paint at `width - virt_text_width` end of row.
+    RightAlign,
+}
 
 /// One extmark — a positional anchor with a payload. Lives in a
 /// namespace; addressable by `(NsId, ExtmarkId)`.
@@ -148,6 +180,14 @@ pub struct Extmark {
     pub end_row: usize,
     pub end_col: usize,
     pub payload: ExtmarkPayload,
+    /// Paint priority. Higher priority paints on top; equal priorities
+    /// fall back to namespace-id ascending then insertion order. Default 0.
+    pub priority: u32,
+    /// Whether the mark's start anchor sticks to the right of an
+    /// inserted character at its column. Default `true` matches nvim.
+    pub right_gravity: bool,
+    /// Same for the end anchor. Default `false` matches nvim.
+    pub end_right_gravity: bool,
 }
 
 /// Payload carried by an extmark. Each variant maps onto one of the
@@ -158,21 +198,38 @@ pub enum ExtmarkPayload {
     Highlight {
         style: SpanStyle,
         meta: SpanMeta,
+        /// Extend the highlight to end-of-line, even if `end_col` is
+        /// shorter than the line. Mirrors nvim's `hl_eol`.
+        hl_eol: bool,
+        /// How this highlight blends with the row's existing paint.
+        hl_mode: HlMode,
+        /// When set, replace each visible cell in the range with this
+        /// string (single grapheme expected). Mirrors nvim's `conceal`.
+        conceal: Option<String>,
     },
     Decoration(LineDecoration),
     VirtText {
         text: String,
         hl_group: Option<String>,
+        pos: VirtTextPos,
     },
 }
 
 /// `set_extmark` opts. `end_row`/`end_col` default to the start
-/// position (a point mark); supply both to span a range.
+/// position (a point mark); supply both to span a range. The remaining
+/// fields default to nvim's defaults; constructors below set them
+/// from the ergonomic shortcuts.
 #[derive(Clone, Debug)]
 pub struct ExtmarkOpts {
     pub end_row: Option<usize>,
     pub end_col: Option<usize>,
     pub payload: ExtmarkPayload,
+    pub priority: u32,
+    pub right_gravity: bool,
+    pub end_right_gravity: bool,
+    /// When set, replace the mark with this id instead of allocating a
+    /// new one. Lets a parser update the same mark across re-runs.
+    pub id: Option<ExtmarkId>,
 }
 
 impl ExtmarkOpts {
@@ -180,7 +237,17 @@ impl ExtmarkOpts {
         Self {
             end_row: None,
             end_col: Some(end_col),
-            payload: ExtmarkPayload::Highlight { style, meta },
+            payload: ExtmarkPayload::Highlight {
+                style,
+                meta,
+                hl_eol: false,
+                hl_mode: HlMode::Replace,
+                conceal: None,
+            },
+            priority: 0,
+            right_gravity: true,
+            end_right_gravity: false,
+            id: None,
         }
     }
 
@@ -189,6 +256,10 @@ impl ExtmarkOpts {
             end_row: None,
             end_col: None,
             payload: ExtmarkPayload::Decoration(dec),
+            priority: 0,
+            right_gravity: true,
+            end_right_gravity: false,
+            id: None,
         }
     }
 
@@ -196,8 +267,48 @@ impl ExtmarkOpts {
         Self {
             end_row: None,
             end_col: None,
-            payload: ExtmarkPayload::VirtText { text, hl_group },
+            payload: ExtmarkPayload::VirtText {
+                text,
+                hl_group,
+                pos: VirtTextPos::Eol,
+            },
+            priority: 0,
+            right_gravity: true,
+            end_right_gravity: false,
+            id: None,
         }
+    }
+
+    /// Builder: paint priority. Higher prints on top.
+    pub fn with_priority(mut self, priority: u32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Builder: re-target an existing extmark id instead of minting one.
+    pub fn with_id(mut self, id: ExtmarkId) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// Builder: extend the highlight to end-of-line. No-op for non-
+    /// Highlight payloads.
+    pub fn with_hl_eol(mut self, hl_eol: bool) -> Self {
+        if let ExtmarkPayload::Highlight {
+            hl_eol: ref mut e, ..
+        } = &mut self.payload
+        {
+            *e = hl_eol;
+        }
+        self
+    }
+
+    /// Builder: place virt_text. No-op for non-VirtText payloads.
+    pub fn with_virt_pos(mut self, pos: VirtTextPos) -> Self {
+        if let ExtmarkPayload::VirtText { pos: ref mut p, .. } = &mut self.payload {
+            *p = pos;
+        }
+        self
     }
 }
 
@@ -240,6 +351,15 @@ impl ExtmarkStore {
         state.next_id += 1;
         state.extmarks.insert(id, mark);
         id
+    }
+
+    fn replace_extmark(&mut self, ns: NsId, id: ExtmarkId, mark: Extmark) {
+        let state = self.ns_mut(ns);
+        state.extmarks.insert(id, mark);
+        // Bump next_id past id so subsequent allocations don't collide.
+        if id.0 >= state.next_id {
+            state.next_id = id.0 + 1;
+        }
     }
 
     fn del_extmark(&mut self, ns: NsId, id: ExtmarkId) -> Option<Extmark> {
@@ -465,7 +585,9 @@ impl Buffer {
         self.extmarks.create_namespace(name)
     }
 
-    /// Place an extmark in `ns`. Returns the new mark's id.
+    /// Place an extmark in `ns`. Returns the mark's id (a fresh one, or
+    /// the one passed via `opts.id` when re-targeting an existing
+    /// mark).
     pub fn set_extmark(
         &mut self,
         ns: NsId,
@@ -479,8 +601,17 @@ impl Buffer {
             end_row: opts.end_row.unwrap_or(line),
             end_col: opts.end_col.unwrap_or(col),
             payload: opts.payload,
+            priority: opts.priority,
+            right_gravity: opts.right_gravity,
+            end_right_gravity: opts.end_right_gravity,
         };
-        self.extmarks.set_extmark(ns, mark)
+        match opts.id {
+            Some(id) => {
+                self.extmarks.replace_extmark(ns, id, mark);
+                id
+            }
+            None => self.extmarks.set_extmark(ns, mark),
+        }
     }
 
     /// Clear every extmark in `ns` whose anchor lies within
@@ -526,39 +657,44 @@ impl Buffer {
     }
 
     pub fn highlights_at(&self, line: usize) -> Vec<Span> {
-        // Walk every namespace whose extmarks carry highlight payloads,
-        // not just `ns_highlights`. Cross-namespace ordering is
-        // namespace-id ascending so later-created namespaces (e.g. the
-        // transcript's `selection` namespace registered after
-        // `ns_highlights`) paint on top of earlier ones. Within a
-        // namespace, BTreeMap iteration is by extmark id — insertion
-        // order — so spans from a single source paint in registration
-        // order. Highlight extmarks today are single-row (matching the
-        // nvim convention where line-spanning highlights are emitted
-        // per-row by the parser); end-row is recorded but not yet
-        // split here.
+        // Collect every Highlight extmark for this row across all
+        // namespaces, then sort by `(priority, namespace id, insertion
+        // order)`. Lower priority paints first; equal priorities fall
+        // back to namespace-id ascending then insertion order. Mirrors
+        // nvim's z-order: priority is the primary axis, and the
+        // namespace + id pair is a stable tiebreaker so spans from a
+        // single source still paint in registration order. Highlight
+        // extmarks today are single-row (matching the nvim convention
+        // where line-spanning highlights are emitted per-row by the
+        // parser); end-row is recorded but not yet split here.
+        let mut entries: Vec<(u32, u32, u32, Span)> = Vec::new();
         let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
         ns_ids.sort_by_key(|n| n.0);
-        let mut out = Vec::new();
         for ns in ns_ids {
             let Some(state) = self.extmarks.ns(ns) else {
                 continue;
             };
-            for mark in state.extmarks.values() {
+            for (id, mark) in state.extmarks.iter() {
                 if mark.start_row != line {
                     continue;
                 }
-                if let ExtmarkPayload::Highlight { style, meta } = &mark.payload {
-                    out.push(Span {
-                        col_start: mark.start_col as u16,
-                        col_end: mark.end_col as u16,
-                        style: *style,
-                        meta: meta.clone(),
-                    });
+                if let ExtmarkPayload::Highlight { style, meta, .. } = &mark.payload {
+                    entries.push((
+                        mark.priority,
+                        ns.0,
+                        id.0,
+                        Span {
+                            col_start: mark.start_col as u16,
+                            col_end: mark.end_col as u16,
+                            style: *style,
+                            meta: meta.clone(),
+                        },
+                    ));
                 }
             }
         }
-        out
+        entries.sort_by_key(|(prio, ns, id, _)| (*prio, *ns, *id));
+        entries.into_iter().map(|(_, _, _, s)| s).collect()
     }
 
     pub fn set_decoration(&mut self, line: usize, decoration: LineDecoration) {
@@ -639,27 +775,34 @@ impl Buffer {
     /// insertion order — so virt_texts from a single source paint in
     /// registration order. Mirrors the `highlights_at` precedent.
     pub fn virtual_text_at(&self, line: usize) -> Vec<VirtualText> {
+        let mut entries: Vec<(u32, u32, u32, VirtualText)> = Vec::new();
         let mut ns_ids: Vec<NsId> = self.extmarks.namespaces.keys().copied().collect();
         ns_ids.sort_by_key(|n| n.0);
-        let mut out = Vec::new();
         for ns in ns_ids {
             let Some(state) = self.extmarks.ns(ns) else {
                 continue;
             };
-            for mark in state.extmarks.values() {
+            for (id, mark) in state.extmarks.iter() {
                 if mark.start_row != line {
                     continue;
                 }
-                if let ExtmarkPayload::VirtText { text, hl_group } = &mark.payload {
-                    out.push(VirtualText {
-                        col: mark.start_col,
-                        text: text.clone(),
-                        hl_group: hl_group.clone(),
-                    });
+                if let ExtmarkPayload::VirtText { text, hl_group, pos } = &mark.payload {
+                    entries.push((
+                        mark.priority,
+                        ns.0,
+                        id.0,
+                        VirtualText {
+                            col: mark.start_col,
+                            text: text.clone(),
+                            hl_group: hl_group.clone(),
+                            pos: *pos,
+                        },
+                    ));
                 }
             }
         }
-        out
+        entries.sort_by_key(|(prio, ns, id, _)| (*prio, *ns, *id));
+        entries.into_iter().map(|(_, _, _, v)| v).collect()
     }
 }
 

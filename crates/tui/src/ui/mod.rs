@@ -2,6 +2,7 @@ pub mod callback;
 pub(crate) mod compositor;
 pub(crate) mod event;
 pub(crate) mod flush;
+pub mod geometry;
 pub mod grid;
 pub mod layout;
 pub(crate) mod motions;
