@@ -144,6 +144,9 @@ async fn main() {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
     }
     lua_runtime.load_user_config();
+    lua_runtime.load_global_plugins();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    lua_runtime.load_project_config(&cwd);
     let lua_cfg = lua_runtime.to_config();
     let lua_permission_rules = lua_runtime.take_permission_rules();
     if let Some(err) = lua_runtime.load_error() {

@@ -340,14 +340,16 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   Lua surface collapses to `smelt.api.create_namespace(name)` +
   `smelt.buf.set_extmark(buf, ns, row, col, opts)`. `add_highlight`
   / `add_dim` retire. EmmyLua stubs deferred post-P10.
-- **P9.g** ⏸ — **Plugin auto-discovery + project-local config.**
+- **P9.g** ✅ — **Plugin auto-discovery + project-local config.**
   Plugins are the only user-facing concept: `<config>/init.lua` +
   `<config>/plugins/*.lua` + `<cwd>/.smelt/{init.lua,plugins/*.lua}`
-  (project content trust-gated, hash-based). A plugin file may
-  register tools/commands/keymaps/anything — no separate `tools/`
-  user folder. Existing `commands/*.md` markdown commands keep
-  loading via the autoloaded `custom_commands.lua` plugin (extended
-  to scan project-local once trust clears).
+  (project content SHA-256-trusted via the new `core::trust` module
+  + persisted to `<state>/trust.json`). New `/trust` slash command
+  whitelists the current project's content. Untrusted project
+  content silently no-ops with a startup toast; running `/trust`
+  records the hash and the next launch loads it. Existing
+  `commands/*.md` markdown commands keep loading via the autoloaded
+  `custom_commands.lua` plugin.
 - **P9.h** ✅ — **Cell `(new, old)` payload.** Cells store `prev`;
   subscribers fire `fn(new, old)`, glob subscribers fire
   `fn(name, new, old)`. Other hook-surface ideas (typed names, more

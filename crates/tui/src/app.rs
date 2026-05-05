@@ -861,9 +861,10 @@ impl TuiApp {
         // time — e.g. `model.lua` declares `args = smelt.engine.models()`
         // for its arg picker. Install the TLS app pointer before any
         // Lua runs at startup so those reads land on the real TuiApp.
+        let project_trust;
         {
             let _guard = crate::lua::install_app_ptr(self);
-            self.lua.load_plugins();
+            project_trust = self.lua.load_plugins();
             self.core.cells.set_dyn(
                 "session_started",
                 std::rc::Rc::new(self.core.session.id.clone()),
@@ -872,6 +873,12 @@ impl TuiApp {
         }
         if let Some(err) = self.lua.take_load_error() {
             self.notify_error(format!("lua init: {err}"));
+        }
+        if matches!(
+            project_trust,
+            smelt_core::trust::TrustState::Untrusted { .. }
+        ) {
+            self.notify("project .smelt/ content not trusted; run /trust to load it".to_string());
         }
         self.flush_lua_callbacks();
         // Plugins have now registered their commands — pull every
