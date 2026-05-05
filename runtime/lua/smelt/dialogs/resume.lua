@@ -5,6 +5,8 @@
 -- session, Ctrl-d deletes it, Alt-w toggles the workspace-only
 -- filter. Fuzzy search uses `smelt.fuzzy.score`.
 
+local NS_META = smelt.buf.create_namespace("smelt.resume.meta")
+
 local function is_junk(s)
   if s == nil then return true end
   local t = s:match("^%s*(.-)%s*$") or ""
@@ -102,7 +104,7 @@ local function refresh_list(buf_id, filtered, now_ms)
   -- [0, LEADING+SIZE_COL+GAP+TIME_COL), everything after is the title.
   local meta_end = LEADING + SIZE_COL + GAP + TIME_COL
   for i = 1, #filtered do
-    smelt.buf.add_dim(buf_id, i, 0, meta_end)
+    smelt.buf.set_extmark(buf_id, NS_META, i, 0, { end_col = meta_end, dim = true })
   end
 end
 

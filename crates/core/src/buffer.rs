@@ -76,10 +76,35 @@ pub trait BufferParser: Send + Sync {
     fn on_attach(&self, _buf: &mut Buffer) {}
 }
 
-/// Identifier returned by `Buffer::create_namespace`. Stable for the
-/// lifetime of the Buffer.
+/// Process-global namespace id. Minted by [`create_namespace`] (or
+/// equivalently `Buffer::create_namespace`); stable for the process
+/// lifetime — the same name always returns the same id, across
+/// every Buffer. Mirrors `nvim_create_namespace`'s semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NsId(pub u32);
+
+/// Process-global name → id minter. Idempotent: the same `name`
+/// always returns the same id. Mirrors `nvim_create_namespace`.
+pub fn create_namespace(name: &str) -> NsId {
+    use std::sync::{OnceLock, RwLock};
+    static REG: OnceLock<RwLock<NamespaceRegistry>> = OnceLock::new();
+    let reg = REG.get_or_init(|| RwLock::new(NamespaceRegistry::default()));
+    if let Some(id) = reg.read().unwrap().name_to_id.get(name).copied() {
+        return id;
+    }
+    let mut w = reg.write().unwrap();
+    if let Some(id) = w.name_to_id.get(name).copied() {
+        return id;
+    }
+    let id = NsId(w.name_to_id.len() as u32);
+    w.name_to_id.insert(name.to_string(), id);
+    id
+}
+
+#[derive(Default)]
+struct NamespaceRegistry {
+    name_to_id: HashMap<String, NsId>,
+}
 
 /// Identifier returned by `Buffer::set_extmark`. Unique within a
 /// namespace.
@@ -336,19 +361,12 @@ struct NamespaceState {
 #[derive(Default, Clone)]
 struct ExtmarkStore {
     namespaces: HashMap<NsId, NamespaceState>,
-    name_to_id: HashMap<String, NsId>,
-    next_ns: u32,
 }
 
 impl ExtmarkStore {
     fn create_namespace(&mut self, name: &str) -> NsId {
-        if let Some(id) = self.name_to_id.get(name) {
-            return *id;
-        }
-        let id = NsId(self.next_ns);
-        self.next_ns += 1;
-        self.namespaces.insert(id, NamespaceState::default());
-        self.name_to_id.insert(name.to_string(), id);
+        let id = create_namespace(name);
+        self.namespaces.entry(id).or_default();
         id
     }
 

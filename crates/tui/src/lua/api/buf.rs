@@ -65,8 +65,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     // `smelt.buf.get_line(buf_id, line_idx)` — line_idx is
     // 1-based to match every other Lua-facing line index in the
-    // codebase (`smelt.buf.add_highlight`, etc.). Returns `nil`
-    // when out of range.
+    // codebase. Returns `nil` when out of range.
     buf_tbl.set(
         "get_line",
         lua.create_function(|_, (id, line_idx): (u64, u64)| {
@@ -93,101 +92,138 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         })?,
     )?;
+    buf_tbl.set("set_extmark", lua.create_function(set_extmark)?)?;
     buf_tbl.set(
-        "add_highlight",
-        lua.create_function(
-            |_,
-             (id, line, col_start, col_end, style): (
-                u64,
-                u64,
-                u64,
-                u64,
-                Option<mlua::Table>,
-            )| {
-                let Some(line0) = line.checked_sub(1) else {
-                    return Ok(());
-                };
-                if col_end <= col_start {
-                    return Ok(());
-                }
-                let (fg, bold, italic, dim) = match style {
-                    Some(t) => {
-                        let fg = match t.get::<Option<String>>("fg").ok().flatten() {
-                            Some(role) => Some(
-                                crate::lua::with_app(|app| {
-                                    theme_role_get(app.ui.theme(), &role)
-                                })
-                                .ok_or_else(|| {
-                                    LuaError::RuntimeError(format!(
-                                        "unknown theme role: {role}"
-                                    ))
-                                })?,
-                            ),
-                            None => None,
-                        };
-                        (
-                            fg,
-                            t.get::<bool>("bold").unwrap_or(false),
-                            t.get::<bool>("italic").unwrap_or(false),
-                            t.get::<bool>("dim").unwrap_or(false),
-                        )
-                    }
-                    None => (None, false, false, false),
-                };
-                crate::lua::with_app(|app| {
-                    if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
-                        if (line0 as usize) < buf.line_count() {
-                            buf.add_highlight(
-                                line0 as usize,
-                                col_start.min(u16::MAX as u64) as u16,
-                                col_end.min(u16::MAX as u64) as u16,
-                                crate::ui::SpanStyle {
-                                    fg,
-                                    bg: None,
-                                    bold,
-                                    dim,
-                                    italic,
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                    }
-                });
-                Ok(())
-            },
-        )?,
-    )?;
-    buf_tbl.set(
-        "add_dim",
-        lua.create_function(|_, (id, line, col_start, col_end): (u64, u64, u64, u64)| {
-            let Some(line0) = line.checked_sub(1) else {
-                return Ok(());
-            };
-            if col_end <= col_start {
-                return Ok(());
-            }
-            crate::lua::with_app(|app| {
-                if let Some(buf) = app.ui.buf_mut(crate::ui::BufId(id)) {
-                    if (line0 as usize) < buf.line_count() {
-                        buf.add_highlight(
-                            line0 as usize,
-                            col_start.min(u16::MAX as u64) as u16,
-                            col_end.min(u16::MAX as u64) as u16,
-                            crate::ui::SpanStyle {
-                                fg: None,
-                                bg: None,
-                                bold: false,
-                                dim: true,
-                                italic: false,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                }
-            });
-            Ok(())
-        })?,
+        "create_namespace",
+        lua.create_function(|_, name: String| Ok(smelt_core::buffer::create_namespace(&name).0))?,
     )?;
     smelt.set("buf", buf_tbl)?;
     Ok(())
+}
+
+/// `smelt.buf.set_extmark(buf, ns, row, col, opts) -> extmark_id`.
+/// Mirrors `nvim_buf_set_extmark`'s keyset. `row` is 1-based to
+/// match every other Lua row index in smelt; convert to 0-based
+/// internally. `opts.id` retargets an existing mark across re-runs.
+///
+/// Highlight payload: pick whichever of `hl_group` (theme name),
+/// or per-attribute `fg / bg / bold / dim / italic` is set.
+/// VirtText payload: pass `virt_text` (and optionally
+/// `virt_text_pos`).
+fn set_extmark(
+    lua: &Lua,
+    (id, ns, row, col, opts): (u64, u32, u64, u64, Option<mlua::Table>),
+) -> LuaResult<u64> {
+    use crate::ui::BufId;
+    use smelt_core::buffer::{ExtmarkId, ExtmarkOpts, NsId};
+
+    let Some(row0) = row.checked_sub(1) else {
+        return Ok(0);
+    };
+    let row0 = row0 as usize;
+    let col0 = col as usize;
+
+    let opts_tbl = match opts {
+        Some(t) => t,
+        None => lua.create_table()?,
+    };
+
+    let end_row: Option<usize> = opts_tbl
+        .get::<Option<u64>>("end_row")?
+        .and_then(|n| n.checked_sub(1).map(|x| x as usize));
+    let end_col: Option<usize> = opts_tbl.get::<Option<u64>>("end_col")?.map(|n| n as usize);
+    let priority: u32 = opts_tbl.get::<Option<u32>>("priority")?.unwrap_or(0);
+    let right_gravity: bool = opts_tbl
+        .get::<Option<bool>>("right_gravity")?
+        .unwrap_or(true);
+    let end_right_gravity: bool = opts_tbl
+        .get::<Option<bool>>("end_right_gravity")?
+        .unwrap_or(false);
+    let mark_id: Option<ExtmarkId> = opts_tbl.get::<Option<u32>>("id")?.map(ExtmarkId);
+
+    let virt_text: Option<String> = opts_tbl.get::<Option<String>>("virt_text")?;
+
+    let mut payload_opts = if let Some(text) = virt_text {
+        let hl_group: Option<String> = opts_tbl.get::<Option<String>>("virt_text_hl")?;
+        let mut o = ExtmarkOpts::virt_text(text, hl_group);
+        if let Some(pos) = opts_tbl.get::<Option<String>>("virt_text_pos")? {
+            o = o.with_virt_pos(parse_virt_pos(&pos));
+        }
+        o
+    } else {
+        let style = parse_highlight_style(&opts_tbl)?;
+        let meta = parse_meta(&opts_tbl)?;
+        let mut o = ExtmarkOpts::highlight(end_col.unwrap_or(col0), style, meta);
+        if let Some(true) = opts_tbl.get::<Option<bool>>("hl_eol")? {
+            o = o.with_hl_eol(true);
+        }
+        o
+    };
+
+    payload_opts.end_row = end_row;
+    if !matches!(
+        payload_opts.payload,
+        smelt_core::buffer::ExtmarkPayload::Highlight { .. }
+    ) {
+        payload_opts.end_col = end_col;
+    }
+    payload_opts.priority = priority;
+    payload_opts.right_gravity = right_gravity;
+    payload_opts.end_right_gravity = end_right_gravity;
+    payload_opts.id = mark_id;
+
+    let new_id = crate::lua::with_app(|app| {
+        app.ui
+            .buf_mut(BufId(id))
+            .map(|buf| buf.set_extmark(NsId(ns), row0, col0, payload_opts))
+    })
+    .map(|eid: ExtmarkId| eid.0 as u64)
+    .unwrap_or(0);
+    Ok(new_id)
+}
+
+fn parse_virt_pos(s: &str) -> smelt_core::buffer::VirtTextPos {
+    use smelt_core::buffer::VirtTextPos;
+    match s {
+        "inline" => VirtTextPos::Inline,
+        "overlay" => VirtTextPos::Overlay,
+        "right_align" => VirtTextPos::RightAlign,
+        _ => VirtTextPos::Eol,
+    }
+}
+
+fn parse_highlight_style(t: &mlua::Table) -> LuaResult<crate::ui::SpanStyle> {
+    let resolve_role = |role: &str| -> LuaResult<smelt_core::style::Color> {
+        crate::lua::with_app(|app| theme_role_get(app.ui.theme(), role))
+            .ok_or_else(|| LuaError::RuntimeError(format!("unknown theme role: {role}")))
+    };
+    // hl_group sets fg by name (today's theme groups carry fg
+    // primarily). Per-attribute fields override individual axes.
+    let fg = match t.get::<Option<String>>("fg").ok().flatten() {
+        Some(role) => Some(resolve_role(&role)?),
+        None => match t.get::<Option<String>>("hl_group").ok().flatten() {
+            Some(role) => Some(resolve_role(&role)?),
+            None => None,
+        },
+    };
+    let bg = match t.get::<Option<String>>("bg").ok().flatten() {
+        Some(role) => Some(resolve_role(&role)?),
+        None => None,
+    };
+    Ok(crate::ui::SpanStyle {
+        fg,
+        bg,
+        bold: t.get::<bool>("bold").unwrap_or(false),
+        dim: t.get::<bool>("dim").unwrap_or(false),
+        italic: t.get::<bool>("italic").unwrap_or(false),
+        ..Default::default()
+    })
+}
+
+fn parse_meta(t: &mlua::Table) -> LuaResult<smelt_core::buffer::SpanMeta> {
+    use smelt_core::buffer::SpanMeta;
+    Ok(SpanMeta {
+        selectable: t.get::<Option<bool>>("selectable")?.unwrap_or(true),
+        copy_as: t.get::<Option<String>>("yank_as")?,
+    })
 }
