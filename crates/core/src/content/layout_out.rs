@@ -17,7 +17,7 @@
 use crate::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, LineDecoration, SpanMeta};
 use crate::content::display::{ColorRole, ColorValue, NamedColor, SpanStyle};
 use crate::style::{Color, Style};
-use crate::theme::Theme;
+use crate::theme::{intern, intern_anonymous_style, HlGroup, Theme};
 use unicode_width::UnicodeWidthStr;
 
 /// Display-column width of a string slice. Used for visible-width
@@ -67,7 +67,7 @@ pub struct SpanCollector<'a> {
 
     // Per-line accumulator
     cur_text: String,
-    cur_highlights: Vec<(u16, u16, Style, SpanMeta)>,
+    cur_highlights: Vec<(u16, u16, HlGroup, SpanMeta)>,
     cur_decoration: LineDecoration,
     cur_visible_cols: u16,
 
@@ -163,8 +163,8 @@ impl<'a> SpanCollector<'a> {
         }
         let w = display_width(text) as u16;
         self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
-        let resolved = self.resolve_style(&self.cur_style);
-        self.append_span(text, resolved, SpanMeta::default());
+        let style = self.cur_style.clone();
+        self.append_span_styled(text, &style, SpanMeta::default());
     }
 
     pub(crate) fn print_string(&mut self, s: String) {
@@ -177,8 +177,8 @@ impl<'a> SpanCollector<'a> {
         }
         let w = display_width(text) as u16;
         self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
-        let resolved = self.resolve_style(&self.cur_style);
-        self.append_span(text, resolved, meta);
+        let style = self.cur_style.clone();
+        self.append_span_styled(text, &style, meta);
     }
 
     pub(crate) fn print_gutter(&mut self, text: &str) {
@@ -348,7 +348,47 @@ impl<'a> SpanCollector<'a> {
 
     // ── Internals ───────────────────────────────────────────────────
 
-    fn append_span(&mut self, text: &str, style: Style, meta: SpanMeta) {
+    /// Renderer-facing append: takes the role-typed [`SpanStyle`] so
+    /// single-role spans can intern by the role's theme group name.
+    /// Theme switches that mutate the named group's style flip these
+    /// spans live without re-running the parser.
+    fn append_span_styled(&mut self, text: &str, style: &SpanStyle, meta: SpanMeta) {
+        let resolved = self.resolve_style(style);
+        let style_default = style_is_default(&resolved);
+        let meta_default = meta.selectable && meta.copy_as.is_none();
+        if style_default && meta_default {
+            self.append_text(text);
+            return;
+        }
+        let hl = self.hl_for_style(style, resolved);
+        self.append_span_with_hl(text, hl, meta);
+    }
+
+    /// Resolved-Style append for replay paths that read spans from an
+    /// existing buffer (no role info to recover). Falls through to
+    /// anonymous interning — these spans don't follow theme switches,
+    /// but neither does the source buffer they're being copied from.
+    fn append_span_resolved(&mut self, text: &str, style: Style, meta: SpanMeta) {
+        let style_default = style_is_default(&style);
+        let meta_default = meta.selectable && meta.copy_as.is_none();
+        if style_default && meta_default {
+            self.append_text(text);
+            return;
+        }
+        let hl = intern_anonymous_style(style);
+        self.append_span_with_hl(text, hl, meta);
+    }
+
+    fn append_text(&mut self, text: &str) {
+        let chars_before = self.cur_text.chars().count() as u16;
+        self.cur_text.push_str(text);
+        let chars_after = self.cur_text.chars().count() as u16;
+        if chars_after != chars_before {
+            self.has_pending_content = true;
+        }
+    }
+
+    fn append_span_with_hl(&mut self, text: &str, hl: HlGroup, meta: SpanMeta) {
         let chars_before = self.cur_text.chars().count() as u16;
         self.cur_text.push_str(text);
         let chars_after = self.cur_text.chars().count() as u16;
@@ -356,22 +396,42 @@ impl<'a> SpanCollector<'a> {
             return;
         }
         self.has_pending_content = true;
-
-        let style_default = style_is_default(&style);
-        let meta_default = meta.selectable && meta.copy_as.is_none();
-        if style_default && meta_default {
-            return;
-        }
         // Coalesce with the previous highlight if it has the same
-        // style+meta and was contiguous.
+        // hl+meta and was contiguous.
         if let Some(last) = self.cur_highlights.last_mut() {
-            if last.1 == chars_before && last.2 == style && last.3 == meta {
+            if last.1 == chars_before && last.2 == hl && last.3 == meta {
                 last.1 = chars_after;
                 return;
             }
         }
         self.cur_highlights
-            .push((chars_before, chars_after, style, meta));
+            .push((chars_before, chars_after, hl, meta));
+    }
+
+    /// Map a renderer-facing style to an interned [`HlGroup`]. Single
+    /// theme-role fg with no other axis modifications interns by the
+    /// role's group name when this Theme has the group registered
+    /// (live theme-switch updates). Anything more complex — or roles
+    /// against a Theme that hasn't seen `populate_ui_theme` —  falls
+    /// back to content-hashed anonymous interning, preserving the
+    /// resolved-Style fallback (`Color::Reset` for unset role fg).
+    fn hl_for_style(&self, s: &SpanStyle, resolved: Style) -> HlGroup {
+        let only_role_fg = matches!(s.fg, Some(ColorValue::Role(_)))
+            && s.bg.is_none()
+            && !s.bold
+            && !s.dim
+            && !s.italic
+            && !s.underline
+            && !s.crossedout;
+        if only_role_fg {
+            if let Some(ColorValue::Role(role)) = s.fg {
+                let id = intern(role_group_name(role));
+                if self.theme.contains(id) {
+                    return id;
+                }
+            }
+        }
+        intern_anonymous_style(resolved)
     }
 
     fn commit_line(&mut self) {
@@ -395,9 +455,9 @@ impl<'a> SpanCollector<'a> {
             self.buf.set_lines(buf_len, buf_len, vec![text]);
         }
 
-        for (col_start, col_end, style, meta) in highlights {
+        for (col_start, col_end, hl, meta) in highlights {
             self.buf
-                .add_highlight_with_meta(target_row, col_start, col_end, style, meta);
+                .add_highlight_group_with_meta(target_row, col_start, col_end, hl, meta);
         }
         if has_decoration(&decoration) {
             self.buf.set_decoration(target_row, decoration);
@@ -588,14 +648,18 @@ pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut SpanCollector) {
 
 impl<'a> SpanCollector<'a> {
     /// Append a span whose style is already resolved (no theme lookup
-    /// needed). Internal helper for [`replay_buffer_into`].
+    /// needed). Internal helper for [`replay_buffer_row_into`]:
+    /// replay reads spans by HlGroup id from the source Buffer and
+    /// hands the caller the per-span resolved Style; we re-intern
+    /// anonymously so the replayed mark sits in the destination
+    /// Buffer's payload alongside live-named groups.
     pub(crate) fn append_resolved_span(&mut self, text: &str, style: Style, meta: SpanMeta) {
         if text.is_empty() {
             return;
         }
         let w = display_width(text) as u16;
         self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
-        self.append_span(text, style, meta);
+        self.append_span_resolved(text, style, meta);
     }
 }
 
