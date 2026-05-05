@@ -6,6 +6,8 @@
 //! adds projection / streaming / paint orchestration on top.
 
 use crate::transcript_present::{gap_between, Element, ToolBodyRenderer};
+// Re-uses helpers from the slim core-side `transcript_present` module.
+// Heavy per-block rendering lives in `tui::content::transcript_parsers`.
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 

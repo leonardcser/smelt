@@ -495,18 +495,18 @@ fn emit_inline_nodes(out: &mut SpanCollector, nodes: &[InlineNode]) {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlineStyle {
-    pub(crate) bold: bool,
-    pub(crate) italic: bool,
-    pub(crate) dim: bool,
-    pub(crate) crossedout: bool,
-    pub(crate) code: bool,
-    pub(crate) fg: Option<crate::content::display::ColorValue>,
+    pub bold: bool,
+    pub italic: bool,
+    pub dim: bool,
+    pub crossedout: bool,
+    pub code: bool,
+    pub fg: Option<crate::content::display::ColorValue>,
 }
 
 #[derive(Clone, Debug)]
 pub struct InlineSpan {
-    pub(crate) text: String,
-    pub(crate) style: InlineStyle,
+    pub text: String,
+    pub style: InlineStyle,
 }
 
 pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {

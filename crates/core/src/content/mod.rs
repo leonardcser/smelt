@@ -15,13 +15,13 @@ pub use display::{ColorRole, ColorValue, NamedColor, SpanMeta, SpanStyle};
 /// gets a colored left border prefix and a right border suffix with padding.
 pub struct BoxContext {
     /// Left border string printed before each line (e.g. "   │ ").
-    pub(crate) left: &'static str,
+    pub left: &'static str,
     /// Right border string printed after padding (e.g. " │").
-    pub(crate) right: &'static str,
+    pub right: &'static str,
     /// Color for the border characters.
-    pub(crate) color: display::ColorValue,
+    pub color: display::ColorValue,
     /// Inner content width (between left and right borders).
-    pub(crate) inner_w: usize,
+    pub inner_w: usize,
 }
 
 impl BoxContext {
@@ -78,7 +78,7 @@ pub(crate) fn default_width() -> usize {
 }
 
 /// A markdown table separator line (e.g. `|---|---|`).
-pub(crate) fn is_table_separator(line: &str) -> bool {
+pub fn is_table_separator(line: &str) -> bool {
     let t = line.trim();
     !t.is_empty()
         && t.chars()

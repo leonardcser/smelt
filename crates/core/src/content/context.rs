@@ -8,9 +8,9 @@ use crate::transcript_model::ViewState;
 /// the per-block view state (expanded / collapsed / trimmed).
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutContext {
-    pub(crate) width: u16,
-    pub(crate) show_thinking: bool,
-    pub(crate) view_state: ViewState,
+    pub width: u16,
+    pub show_thinking: bool,
+    pub view_state: ViewState,
 }
 
 impl LayoutContext {

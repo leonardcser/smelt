@@ -55,7 +55,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             move |_, (name, cfg): (String, mlua::Table)| {
                 reject_unknown(&cfg)?;
 
-                let kind = cfg.get::<Option<String>>("type")?.unwrap_or_else(|| "local".to_string());
+                let kind = cfg
+                    .get::<Option<String>>("type")?
+                    .unwrap_or_else(|| "local".to_string());
                 if kind != "local" {
                     return Err(mlua::Error::external(format!(
                         "smelt.mcp.register: unknown type `{kind}`; only `local` is supported"

@@ -167,11 +167,11 @@ impl<'a> SpanCollector<'a> {
         self.append_span_styled(text, &style, SpanMeta::default());
     }
 
-    pub(crate) fn print_string(&mut self, s: String) {
+    pub fn print_string(&mut self, s: String) {
         self.print(&s);
     }
 
-    pub(crate) fn print_with_meta(&mut self, text: &str, meta: SpanMeta) {
+    pub fn print_with_meta(&mut self, text: &str, meta: SpanMeta) {
         if text.is_empty() {
             return;
         }
@@ -181,7 +181,7 @@ impl<'a> SpanCollector<'a> {
         self.append_span_styled(text, &style, meta);
     }
 
-    pub(crate) fn print_gutter(&mut self, text: &str) {
+    pub fn print_gutter(&mut self, text: &str) {
         self.print_with_meta(
             text,
             SpanMeta {
@@ -215,7 +215,7 @@ impl<'a> SpanCollector<'a> {
     /// Fill the remainder of the current visual row with `bg` so the row
     /// extends to the right edge of the viewport (minus `right_margin`
     /// columns reserved on the right). Used by diff and code rows.
-    pub(crate) fn fill_line_bg(&mut self, bg: ColorValue, right_margin: u16) {
+    pub fn fill_line_bg(&mut self, bg: ColorValue, right_margin: u16) {
         // Calling `fill_line_bg` twice on the same row would silently
         // overwrite the first fill. No legitimate caller does this — a
         // row has at most one trailing bg fill — so catch the misuse in
@@ -230,7 +230,7 @@ impl<'a> SpanCollector<'a> {
 
     /// Set the gutter background for the current line. Paint-time gutter
     /// padding will be filled with this color instead of blank spaces.
-    pub(crate) fn set_gutter_bg(&mut self, bg: ColorValue) {
+    pub fn set_gutter_bg(&mut self, bg: ColorValue) {
         self.cur_decoration.gutter_bg = Some(self.resolve(bg));
     }
 
@@ -250,19 +250,19 @@ impl<'a> SpanCollector<'a> {
     /// Tag the next-closed line with `source` and turn every following
     /// `newline()` into a soft-wrap continuation until
     /// `disarm_source_text` is called.
-    pub(crate) fn arm_source_text(&mut self, source: String) {
+    pub fn arm_source_text(&mut self, source: String) {
         self.pending_source_text = Some(source);
         self.auto_soft_wrap_continuation = true;
     }
 
-    pub(crate) fn disarm_source_text(&mut self) {
+    pub fn disarm_source_text(&mut self) {
         self.pending_source_text = None;
         self.auto_soft_wrap_continuation = false;
     }
 
     // ── Style state ─────────────────────────────────────────────────
 
-    pub(crate) fn snapshot_style(&self) -> SpanStyle {
+    pub fn snapshot_style(&self) -> SpanStyle {
         self.cur_style.clone()
     }
 
@@ -281,35 +281,35 @@ impl<'a> SpanCollector<'a> {
         }
     }
 
-    pub(crate) fn reset_style(&mut self) {
+    pub fn reset_style(&mut self) {
         self.apply_style(SpanStyle::default());
     }
 
-    pub(crate) fn set_fg(&mut self, c: ColorValue) {
+    pub fn set_fg(&mut self, c: ColorValue) {
         let mut s = self.snapshot_style();
         s.fg = Some(c);
         self.apply_style(s);
     }
 
-    pub(crate) fn set_bg(&mut self, c: ColorValue) {
+    pub fn set_bg(&mut self, c: ColorValue) {
         let mut s = self.snapshot_style();
         s.bg = Some(c);
         self.apply_style(s);
     }
 
-    pub(crate) fn set_bold(&mut self) {
+    pub fn set_bold(&mut self) {
         let mut s = self.snapshot_style();
         s.bold = true;
         self.apply_style(s);
     }
 
-    pub(crate) fn set_dim(&mut self) {
+    pub fn set_dim(&mut self) {
         let mut s = self.snapshot_style();
         s.dim = true;
         self.apply_style(s);
     }
 
-    pub(crate) fn set_dim_italic(&mut self) {
+    pub fn set_dim_italic(&mut self) {
         let mut s = self.snapshot_style();
         s.dim = true;
         s.italic = true;
@@ -340,7 +340,7 @@ impl<'a> SpanCollector<'a> {
         self.push_style(s);
     }
 
-    pub(crate) fn push_crossedout(&mut self) {
+    pub fn push_crossedout(&mut self) {
         let mut s = self.snapshot_style();
         s.crossedout = true;
         self.push_style(s);
@@ -516,7 +516,7 @@ fn style_is_default(s: &Style) -> bool {
         && !s.crossedout
 }
 
-pub(crate) fn role_group_name(role: ColorRole) -> &'static str {
+pub fn role_group_name(role: ColorRole) -> &'static str {
     match role {
         ColorRole::Accent => "SmeltAccent",
         ColorRole::Slug => "SmeltSlug",
@@ -539,7 +539,7 @@ pub(crate) fn role_group_name(role: ColorRole) -> &'static str {
     }
 }
 
-pub(crate) fn named_to_crossterm(n: NamedColor) -> Color {
+pub fn named_to_crossterm(n: NamedColor) -> Color {
     match n {
         NamedColor::Reset => Color::Reset,
         NamedColor::Black => Color::Black,
@@ -653,7 +653,7 @@ impl<'a> SpanCollector<'a> {
     /// hands the caller the per-span resolved Style; we re-intern
     /// anonymously so the replayed mark sits in the destination
     /// Buffer's payload alongside live-named groups.
-    pub(crate) fn append_resolved_span(&mut self, text: &str, style: Style, meta: SpanMeta) {
+    pub fn append_resolved_span(&mut self, text: &str, style: Style, meta: SpanMeta) {
         if text.is_empty() {
             return;
         }
@@ -669,7 +669,6 @@ impl<'a> SpanCollector<'a> {
 #[allow(dead_code)]
 fn _ext_imports_used(_opts: ExtmarkOpts, _payload: ExtmarkPayload) {}
 
-#[cfg(test)]
 pub mod test_util {
     //! Helpers that rebuild the old `DisplayBlock` / `DisplayLine` /
     //! `DisplaySpan` shape from a rendered `Buffer`, for the unit

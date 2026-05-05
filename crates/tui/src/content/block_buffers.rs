@@ -7,11 +7,12 @@
 //! cache (handled at the `TranscriptProjection` boundary by clearing
 //! on generation mismatch and on theme change).
 
+use crate::content::transcript_parsers::layout_block_into;
 use crate::ui::{BufCreateOpts, BufId, Buffer};
 use smelt_core::content::layout_out::Outcome;
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
-use smelt_core::transcript_present::{layout_block_into, ToolBodyRenderer};
+use smelt_core::transcript_present::ToolBodyRenderer;
 use std::collections::HashMap;
 
 /// Cached per-block layout.

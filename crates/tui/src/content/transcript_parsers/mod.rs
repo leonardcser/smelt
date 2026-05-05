@@ -1,139 +1,44 @@
-//! Projection: `Block` + `ToolState` + `LayoutContext` → `DisplayBlock`.
+//! Per-`Block`-variant renderers. Each variant lives in its own
+//! sibling file (`text.rs`, `user.rs`, `thinking.rs`, `code_line.rs`,
+//! `tool_call.rs`, `compacted.rs`, `exec.rs`) and exposes a
+//! `pub(super) fn render(out, …) -> u16`. This module is the
+//! dispatcher: [`layout_block_into`] (the entry point) builds a
+//! [`SpanCollector`] over the per-block buffer, calls
+//! [`render_block`] which does one match-arm per variant, and then
+//! collapses the laid-out rows according to the block's
+//! [`ViewState`].
 //!
-//! Pattern-matches on the domain `Block` enum and emits presentation-
-//! layer spans through `SpanCollector`. The only consumer is
-//! `BlockHistory::ensure_rows`, which caches the result per
-//! `LayoutKey`. Render paints the resulting `DisplayBlock`; it has no
-//! further knowledge of `Block` variants.
+//! Pulls helpers shared with `tui::content::prompt_buf` and
+//! `tui::app::transcript` (e.g. [`UserBlockGeometry`],
+//! [`render_thinking_summary`]) out of the per-variant files for
+//! direct re-export.
 
-use super::transcript_model::{Block, ToolOutput, ToolState, ToolStatus, ViewState};
-use crate::buffer::Buffer;
-use crate::content::display::{ColorRole, ColorValue, NamedColor, SpanMeta, SpanStyle};
-use crate::content::highlight::{render_code_block, render_markdown_table};
-use crate::content::layout_out::{display_width, Outcome, SpanCollector};
-use crate::content::wrap::wrap_line;
-use crate::content::LayoutContext;
-use crate::theme::Theme;
-
-use crate::utils::format_duration;
-use std::collections::HashMap;
+use smelt_core::buffer::Buffer;
+use smelt_core::content::display::{ColorRole, ColorValue};
+use smelt_core::content::layout_out::{Outcome, SpanCollector};
+use smelt_core::content::LayoutContext;
+use smelt_core::theme::Theme;
+use smelt_core::transcript_model::{Block, ToolState, ViewState};
 
 pub mod markdown;
 mod tools;
 
+mod code_line;
+mod compacted;
+mod exec;
+mod text;
+mod thinking;
+mod tool_call;
+mod user;
+
 #[cfg(test)]
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
-use tools::{pluralize, render_tool};
-pub use tools::{render_default_output, render_wrapped_output};
+pub use thinking::{render_thinking_summary, thinking_summary};
+pub use tools::render_default_output;
+pub use user::UserBlockGeometry;
 
-use std::time::Duration;
-
-/// Callback trait for tool-specific body rendering. Implemented in `tui`
-/// by a Lua caller that receives a mode-spec from the tool's `render` hook.
-pub trait ToolBodyRenderer: Send + Sync {
-    fn render(
-        &self,
-        name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        output: Option<&ToolOutput>,
-        width: usize,
-        out: &mut SpanCollector,
-    ) -> u16;
-
-    /// Whether the tool wants its elapsed time displayed in the
-    /// transcript header. Default `false`; Lua tool defs opt in via
-    /// `elapsed_visible = true` and the tui-side renderer reads the
-    /// flag back through this method.
-    fn elapsed_visible(&self, _name: &str) -> bool {
-        false
-    }
-
-    /// Paint one wrapped line of the tool's summary into `out`. Returns
-    /// `true` if the renderer handled it (the tui-side Lua bridge calls
-    /// the tool's `render_summary` callback); `false` means "paint as
-    /// plain text". Default `false` for fallback / test renderers.
-    fn render_summary_line(
-        &self,
-        _name: &str,
-        _line: &str,
-        _args: &HashMap<String, serde_json::Value>,
-        _out: &mut SpanCollector,
-    ) -> bool {
-        false
-    }
-
-    /// Paint zero or more rows below the summary line (e.g. `web_fetch`
-    /// renders the prompt as a dim wrapped subline). Returns the row
-    /// count painted. Default `0`.
-    fn render_subhead(
-        &self,
-        _name: &str,
-        _args: &HashMap<String, serde_json::Value>,
-        _width: usize,
-        _out: &mut SpanCollector,
-    ) -> u16 {
-        0
-    }
-
-    /// Optional dim-styled badge painted in the row-0 suffix slot
-    /// (between the elapsed-time pill and the line break). `bash` uses
-    /// it for `(timeout: 2m)` while the command is pending. `status`
-    /// is the lowercase tool status (`"pending" | "ok" | …`).
-    fn header_suffix(
-        &self,
-        _name: &str,
-        _args: &HashMap<String, serde_json::Value>,
-        _status: &str,
-    ) -> Option<String> {
-        None
-    }
-}
-
-/// Simple heuristic: does this look like a `/command` line?
-/// (In core we don't have the Lua command registry, so we treat any
-/// `/word` as command-like for styling purposes.)
-pub(crate) fn is_command_like(text: &str) -> bool {
-    let name = text
-        .strip_prefix('/')
-        .and_then(|s| s.split_whitespace().next())
-        .unwrap_or("");
-    !name.is_empty()
-}
-
-/// Preprocessed user message layout: tab-expanded, blank-trimmed lines
-/// with a computed `block_w` for multiline bubble rendering.
-pub struct UserBlockGeometry {
-    pub lines: Vec<String>,
-    pub block_w: usize,
-}
-
-impl UserBlockGeometry {
-    pub fn new(text: &str, text_w: usize) -> Self {
-        let all_lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
-        let start = all_lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
-        let end = all_lines
-            .iter()
-            .rposition(|l| !l.is_empty())
-            .map_or(0, |i| i + 1);
-        let lines: Vec<String> = all_lines[start..end]
-            .iter()
-            .map(|l| l.trim_end().to_string())
-            .collect();
-        let wraps = lines.iter().any(|l| display_width(l) > text_w);
-        let multiline = lines.len() > 1 || wraps;
-        let block_w = if multiline {
-            if wraps {
-                text_w + 1
-            } else {
-                lines.iter().map(|l| display_width(l)).max().unwrap_or(0) + 1
-            }
-        } else {
-            0
-        };
-        Self { lines, block_w }
-    }
-}
+pub use smelt_core::transcript_present::ToolBodyRenderer;
 
 /// Cap on the number of rows a single tool block contributes to the
 /// overlay or scrollback. Applied separately to:
@@ -282,7 +187,7 @@ fn apply_view_state(
                     }
                 }
                 for (i, dec) in kept_decorations.into_iter().enumerate() {
-                    if dec != crate::buffer::LineDecoration::default() {
+                    if dec != smelt_core::buffer::LineDecoration::default() {
                         buf.set_decoration(cur_len + i, dec);
                     }
                 }
@@ -322,121 +227,6 @@ fn append_ellipsis(
     }
 }
 
-/// Animated trailing dots for streaming indicators.
-pub(super) fn animated_dots() -> &'static str {
-    let n = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_millis()
-        / 333) as usize
-        % 3
-        + 1;
-    &"..."[..n]
-}
-
-/// Extract a title and non-empty line count from thinking content.
-/// If the first non-empty line is a markdown bold title (`**...**`), use it as the label.
-pub fn thinking_summary(content: &str) -> (String, usize) {
-    let mut label = None;
-    let mut lines = 0usize;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        lines += 1;
-        if label.is_none()
-            && trimmed.starts_with("**")
-            && trimmed.ends_with("**")
-            && trimmed.len() > 4
-        {
-            label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
-        }
-    }
-    (label.unwrap_or_else(|| "thinking".to_string()), lines)
-}
-
-/// Render a single hidden-thinking summary row with optional animated dots.
-pub fn render_thinking_summary(
-    out: &mut SpanCollector,
-    width: usize,
-    label: &str,
-    line_count: usize,
-    animated: bool,
-) -> u16 {
-    let dots = if animated { animated_dots() } else { "" };
-    let summary = format!("{label} ({}){dots}", pluralize(line_count, "line", "lines"));
-    let max_cols = width.saturating_sub(3).max(1);
-    let segs = wrap_line(&summary, max_cols);
-    if segs.len() > 1 {
-        out.mark_wrapped();
-    }
-    let mut rows = 0u16;
-    for seg in &segs {
-        out.set_dim_italic();
-        out.print_gutter("\u{2502} ");
-        out.print(seg);
-        out.reset_style();
-        out.newline();
-        rows += 1;
-    }
-    rows
-}
-
-/// Element types for spacing calculation.
-pub enum Element<'a> {
-    Block(&'a Block),
-}
-
-/// Number of blank lines to insert between two adjacent elements.
-pub fn gap_between(above: &Element, below: &Element) -> u16 {
-    match (above, below) {
-        // CodeLine→CodeLine: no gap (consecutive lines in same block).
-        (Element::Block(Block::CodeLine { .. }), Element::Block(Block::CodeLine { .. })) => {
-            return 0
-        }
-        // Transitions into/out of code lines need a blank line,
-        // except after headings (headings have no trailing gap).
-        (Element::Block(Block::CodeLine { .. }), _) => return 1,
-        (Element::Block(Block::Text { content }), Element::Block(Block::CodeLine { .. })) => {
-            let last_line = content.lines().last().unwrap_or("");
-            if last_line.trim_start().starts_with('#') {
-                return 0;
-            }
-            return 1;
-        }
-        (_, Element::Block(Block::CodeLine { .. })) => return 1,
-        _ => {}
-    }
-    match (above, below) {
-        (Element::Block(Block::User { .. }), _) => 1,
-        (_, Element::Block(Block::User { .. })) => 1,
-        (Element::Block(Block::Exec { .. }), _) => 1,
-        (_, Element::Block(Block::Exec { .. })) => 1,
-        (Element::Block(Block::ToolCall { .. }), Element::Block(Block::ToolCall { .. })) => 1,
-        (Element::Block(Block::Text { .. }), Element::Block(Block::ToolCall { .. })) => 1,
-        (Element::Block(Block::Thinking { .. }), Element::Block(Block::Thinking { .. })) => 0,
-        (_, Element::Block(Block::Thinking { .. })) => 1,
-        (Element::Block(Block::Thinking { .. }), _) => 1,
-        (Element::Block(Block::ToolCall { .. }), Element::Block(Block::Text { .. })) => 1,
-        (_, Element::Block(Block::Compacted { .. })) => 1,
-        (Element::Block(Block::Compacted { .. }), _) => 1,
-
-        // Text→Text: 1 gap (paragraph spacing), except when the previous
-        // text block ends with a markdown heading — headings do not get a
-        // trailing blank line.
-        (Element::Block(Block::Text { content }), Element::Block(Block::Text { .. })) => {
-            let last_line = content.lines().last().unwrap_or("");
-            if last_line.trim_start().starts_with('#') {
-                0
-            } else {
-                1
-            }
-        }
-        _ => 0,
-    }
-}
-
 pub(super) fn render_block(
     out: &mut SpanCollector,
     block: &Block,
@@ -445,87 +235,20 @@ pub(super) fn render_block(
     show_thinking: bool,
     renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
-    let _perf = match block {
-        Block::User { .. } => crate::perf::begin("render:user"),
-        Block::Thinking { .. } => crate::perf::begin("render:thinking"),
-        Block::Text { .. } => crate::perf::begin("render:text"),
-        Block::CodeLine { .. } => crate::perf::begin("render:code_line"),
-        Block::ToolCall { .. } => crate::perf::begin("render:tool_call"),
-        Block::Compacted { .. } => crate::perf::begin("render:compacted"),
-        Block::Exec { .. } => crate::perf::begin("render:exec"),
-    };
+    let _perf = smelt_core::perf::begin(match block {
+        Block::User { .. } => "render:user",
+        Block::Thinking { .. } => "render:thinking",
+        Block::Text { .. } => "render:text",
+        Block::CodeLine { .. } => "render:code_line",
+        Block::ToolCall { .. } => "render:tool_call",
+        Block::Compacted { .. } => "render:compacted",
+        Block::Exec { .. } => "render:exec",
+    });
     match block {
-        Block::User { text, image_labels } => {
-            let is_command = is_command_like(text.trim());
-            let text_w = width.saturating_sub(1).max(1);
-            let geom = UserBlockGeometry::new(text, text_w);
-            let user_bg = ColorValue::Role(ColorRole::UserBg);
-            let mut rows = 0u16;
-            let pad_meta = SpanMeta {
-                selectable: false,
-                copy_as: None,
-            };
-            for logical_line in &geom.lines {
-                if logical_line.is_empty() {
-                    let fill = if geom.block_w > 0 { geom.block_w } else { 1 };
-                    out.set_bg(user_bg);
-                    out.print_with_meta(&" ".repeat(fill), pad_meta.clone());
-                    out.reset_style();
-                    out.set_gutter_bg(user_bg);
-                    out.newline();
-                    rows += 1;
-                    continue;
-                }
-                let chunks = wrap_line(logical_line, text_w);
-                if chunks.len() > 1 {
-                    out.mark_wrapped();
-                }
-                for chunk in &chunks {
-                    let chunk_w = display_width(chunk);
-                    let trailing = if geom.block_w > 0 {
-                        geom.block_w.saturating_sub(chunk_w)
-                    } else {
-                        1
-                    };
-                    out.set_bg(user_bg);
-                    out.set_bold();
-                    print_user_highlights(out, chunk, image_labels, is_command);
-                    out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
-                    out.reset_style();
-                    out.set_gutter_bg(user_bg);
-                    out.newline();
-                    rows += 1;
-                }
-            }
-            rows
-        }
-        Block::Thinking { content } => {
-            if !show_thinking {
-                let (label, line_count) = thinking_summary(content);
-                return render_thinking_summary(out, width, &label, line_count, false);
-            }
-            let max_cols = width.saturating_sub(3).max(1); // "│ " prefix + 1 margin
-            let mut rows = 0u16;
-            for line in content.lines() {
-                let segments = wrap_line(line, max_cols);
-                if segments.len() > 1 {
-                    out.mark_wrapped();
-                }
-                for seg in &segments {
-                    out.set_dim_italic();
-                    out.print_gutter("│ ");
-                    out.print(seg);
-                    out.reset_style();
-                    out.newline();
-                    rows += 1;
-                }
-            }
-            rows
-        }
-        Block::Text { content } => render_markdown_inner(out, content, width, "", false, None),
-        Block::CodeLine { content, lang } => {
-            render_code_block(out, &[content.as_str()], lang, width, false, None, false)
-        }
+        Block::User { text, image_labels } => user::render(out, text, image_labels, width),
+        Block::Thinking { content } => thinking::render(out, content, width, show_thinking),
+        Block::Text { content } => text::render(out, content, width),
+        Block::CodeLine { content, lang } => code_line::render(out, content, lang, width),
         Block::ToolCall {
             call_id,
             name,
@@ -533,7 +256,7 @@ pub(super) fn render_block(
             args,
         } => {
             let state = state.expect("ToolCall layout requires ToolState");
-            render_tool(
+            tool_call::render(
                 out,
                 call_id,
                 name,
@@ -541,119 +264,26 @@ pub(super) fn render_block(
                 args,
                 state.status,
                 state.elapsed,
-                state.output.as_deref(),
-                state.user_message.as_deref(),
+                state,
                 width,
                 renderer,
             )
         }
-        Block::Compacted { summary } => {
-            let label = " compacted ";
-            let label_len = label.len();
-            let remaining = width.saturating_sub(label_len);
-            let left = remaining / 2;
-            let right = remaining - left;
-            out.push_dim();
-            out.print_gutter(&"─".repeat(left));
-            out.print_gutter(label);
-            out.print_gutter(&"─".repeat(right));
-            out.pop_style();
-            out.newline();
-            1 + render_markdown_inner(out, summary, width, "", true, None)
-        }
-        Block::Exec { command, output } => {
-            let char_len = command.chars().count() + 1;
-            let pad_width = (char_len + 2).min(width);
-            let trailing = pad_width.saturating_sub(char_len + 1);
-            out.push_style(SpanStyle {
-                bg: Some(ColorValue::Role(ColorRole::UserBg)),
-                fg: Some(ColorValue::Role(ColorRole::Exec)),
-                bold: true,
-                ..Default::default()
-            });
-            out.print("!");
-            out.set_fg(ColorValue::Named(NamedColor::Reset));
-            out.print_string(format!("{}{}", command, " ".repeat(trailing)));
-            out.pop_style();
-            out.newline();
-            let mut rows = 1u16;
-            if !output.is_empty() {
-                rows += render_wrapped_output(out, output, false, width);
-            }
-            rows
-        }
+        Block::Compacted { summary } => compacted::render(out, summary, width),
+        Block::Exec { command, output } => exec::render(out, command, output, width),
     }
-}
-/// Print user message text with accent highlighting for valid `@path` refs,
-/// `/command` lines, and `[image]` attachment labels.
-pub(super) fn print_user_highlights(
-    out: &mut SpanCollector,
-    text: &str,
-    image_labels: &[String],
-    is_command: bool,
-) {
-    let accent_role = ColorValue::Role(ColorRole::Accent);
-
-    // Commands: accent the entire text, same as the prompt.
-    if is_command {
-        out.push_fg(accent_role);
-        out.print(text);
-        out.pop_style();
-        return;
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    let mut plain = String::new();
-
-    let flush = |out: &mut SpanCollector, plain: &mut String| {
-        if !plain.is_empty() {
-            let s = std::mem::take(plain);
-            out.print(&s);
-        }
-    };
-
-    let accent = |out: &mut SpanCollector, token: String| {
-        out.push_fg(accent_role);
-        out.print(&token);
-        out.pop_style();
-    };
-
-    while i < len {
-        // Image attachment labels like [screenshot.png].
-        if chars[i] == '[' {
-            let remaining: String = chars[i..].iter().collect();
-            if let Some(label) = image_labels
-                .iter()
-                .find(|l| remaining.starts_with(l.as_str()))
-            {
-                flush(out, &mut plain);
-                accent(out, label.clone());
-                i += label.chars().count();
-                continue;
-            }
-        }
-
-        // @path references validated against the filesystem.
-        if let Some((token, end)) = crate::content::selection::try_at_ref(&chars, i) {
-            flush(out, &mut plain);
-            accent(out, token);
-            i = end;
-        } else {
-            plain.push(chars[i]);
-            i += 1;
-        }
-    }
-    flush(out, &mut plain);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::{BufCreateOpts, BufId, Buffer};
-    use crate::content::layout_out::test_util::{read_buffer, TestLine};
-    use crate::theme::Theme;
+    use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
+    use smelt_core::content::layout_out::test_util::{read_buffer, TestLine};
+    use smelt_core::content::layout_out::SpanCollector;
+    use smelt_core::theme::Theme;
+    use smelt_core::transcript_model::{ToolOutput, ToolStatus};
+    use smelt_core::transcript_present::{gap_between, Element};
+    use std::collections::HashMap;
 
     const W: usize = 80;
 
