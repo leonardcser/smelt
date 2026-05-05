@@ -1,4 +1,11 @@
-use super::*;
+use super::{ToolBodyRenderer, DEFAULT_PREVIEW_LINES, MAX_TOOL_BLOCK_ROWS};
+use smelt_core::content::display::{ColorRole, ColorValue, SpanMeta};
+use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::content::wrap::wrap_line;
+use smelt_core::transcript_model::{ToolOutput, ToolStatus};
+use smelt_core::utils::format_duration;
+use std::collections::HashMap;
+use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool(
@@ -209,7 +216,7 @@ pub fn render_wrapped_output(
     is_error: bool,
     width: usize,
 ) -> u16 {
-    let _perf = crate::perf::begin("render:wrapped_output");
+    let _perf = smelt_core::perf::begin("render:wrapped_output");
     let max_cols = width.saturating_sub(3); // "  " prefix + 1 margin
 
     // Pre-wrap all lines so we can count visual rows.

@@ -7,13 +7,12 @@ use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_and_locate_cursor;
 use crate::ui::{BufCreateOpts, BufId, Buffer, Theme};
 
+use crate::content::transcript_parsers as blocks;
+use crate::content::transcript_parsers::{render_thinking_summary, thinking_summary};
 use smelt_core::transcript_model::{
     Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
-use smelt_core::transcript_present as blocks;
-use smelt_core::transcript_present::{
-    gap_between, render_thinking_summary, thinking_summary, Element, ToolBodyRenderer,
-};
+use smelt_core::transcript_present::{gap_between, Element, ToolBodyRenderer};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +53,7 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         })
         .unwrap_or(false);
         if !ran {
-            return smelt_core::transcript_present::render_default_output(
+            return crate::content::transcript_parsers::render_default_output(
                 out,
                 &tool_out.content,
                 tool_out.is_error,

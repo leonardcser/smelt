@@ -307,8 +307,11 @@ impl TuiApp {
     /// instead of empty padding), and lets the window mutate its own
     /// selection state.
     ///
-    /// On `MouseUp`, returns the selected text so the host can yank
-    /// it to the clipboard.
+    /// On `MouseUp`, the Window returns the selection's byte range over
+    /// the joined display rows. The yank text comes from
+    /// [`crate::content::transcript_snapshot::TranscriptSnapshot::copy_byte_range`]
+    /// so non-selectable cells (gutter glyphs, padding) and `copy_as`
+    /// substitutions (rendered markdown → raw source) are honored.
     fn handle_content_mouse(&mut self, me: MouseEvent, click_count: u8) -> Option<String> {
         let rows = crate::ui::UiHost::rows_for(self, crate::app::TRANSCRIPT_WIN)?;
         if rows.is_empty() {
@@ -317,16 +320,34 @@ impl TuiApp {
         let (soft, hard) = crate::ui::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)?;
         let viewport = crate::ui::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
-        let mouse_ctx = crate::ui::MouseCtx {
-            rows: &rows,
-            soft_breaks: &soft,
-            hard_breaks: &hard,
-            viewport,
-            click_count,
-            vim_mode: &mut self.vim_mode,
+        let range = {
+            let mouse_ctx = crate::ui::MouseCtx {
+                rows: &rows,
+                soft_breaks: &soft,
+                hard_breaks: &hard,
+                viewport,
+                click_count,
+                vim_mode: &mut self.vim_mode,
+            };
+            let (_, range) = self.transcript_window.handle_mouse(snapped, mouse_ctx);
+            range?
         };
-        let (_, yank) = self.transcript_window.handle_mouse(snapped, mouse_ctx);
-        yank
+        let (start, end) = range;
+        let theme = self.ui.theme().clone();
+        let width = self.transcript_width() as u16;
+        let show_thinking = self.core.config.settings.show_thinking;
+        let snap = crate::content::transcript_snapshot::build_snapshot(
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+            &theme,
+        );
+        let text = snap.copy_byte_range(start, end);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
     }
 
     /// Translate `me`'s screen column into a *selectable* column for the

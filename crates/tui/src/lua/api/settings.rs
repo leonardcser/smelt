@@ -132,10 +132,9 @@ pub(super) fn register(
                     return Ok((mlua::Value::Nil, mlua::Value::Nil));
                 }
                 let key = SETTINGS_KEYS[idx];
-                let value = crate::lua::try_with_app(|app| {
-                    read_resolved(&app.core.config.settings, key)
-                })
-                .flatten();
+                let value =
+                    crate::lua::try_with_app(|app| read_resolved(&app.core.config.settings, key))
+                        .flatten();
                 let v = match value {
                     Some(b) => mlua::Value::Boolean(b),
                     None => mlua::Value::Nil,

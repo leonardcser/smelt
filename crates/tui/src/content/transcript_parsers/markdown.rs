@@ -1,4 +1,6 @@
-use super::*;
+use smelt_core::content::display::{ColorRole, ColorValue};
+use smelt_core::content::highlight::{render_code_block, render_markdown_table};
+use smelt_core::content::layout_out::SpanCollector;
 
 pub fn render_markdown_inner(
     out: &mut SpanCollector,
@@ -6,9 +8,9 @@ pub fn render_markdown_inner(
     width: usize,
     indent: &str,
     dim: bool,
-    bctx: Option<&crate::content::BoxContext>,
+    bctx: Option<&smelt_core::content::BoxContext>,
 ) -> u16 {
-    let _perf = crate::perf::begin("render:markdown");
+    let _perf = smelt_core::perf::begin("render:markdown");
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
@@ -96,7 +98,7 @@ pub fn render_markdown_inner(
             }
             let trimmed = lines[i].trim_start();
             {
-                use crate::content::highlight::{
+                use smelt_core::content::highlight::{
                     emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans,
                     InlineSpan, InlineStyle,
                 };
@@ -253,7 +255,7 @@ pub(super) fn is_horizontal_rule(line: &str) -> bool {
 /// only renders 3 of them to match the visual weight of list markers.
 fn render_horizontal_rule(
     out: &mut SpanCollector,
-    bctx: Option<&crate::content::BoxContext>,
+    bctx: Option<&smelt_core::content::BoxContext>,
     indent: &str,
 ) -> u16 {
     // Use box-drawing character, render only 3 chars (like list markers)
@@ -268,7 +270,7 @@ fn render_horizontal_rule(
     out.push_dim();
     out.print_with_meta(
         &hr,
-        crate::content::display::SpanMeta {
+        smelt_core::content::display::SpanMeta {
             selectable: true,
             copy_as: Some("---".into()),
         },
@@ -288,12 +290,12 @@ fn render_markdown_table_from_lines(
     out: &mut SpanCollector,
     lines: &[&str],
     dim: bool,
-    bctx: Option<&crate::content::BoxContext>,
+    bctx: Option<&smelt_core::content::BoxContext>,
     indent: &str,
 ) -> u16 {
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     for line in lines {
-        if crate::content::is_table_separator(line) {
+        if smelt_core::content::is_table_separator(line) {
             continue;
         }
         let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
@@ -315,7 +317,7 @@ fn render_markdown_table_from_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::layout_out::test_util::render_test;
+    use smelt_core::content::layout_out::test_util::render_test;
 
     #[test]
     fn rendered_table_attaches_raw_source_to_first_row() {

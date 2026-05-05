@@ -659,22 +659,22 @@ impl Window {
     /// The window's `drag_anchor_*` fields are managed internally so
     /// successive `Drag` events extend by the right unit.
     ///
-    /// On `MouseUp`, if a selection was active, the selected text is
-    /// returned as `Some(text)` so the host can push it to the
-    /// clipboard. Window still clears its own selection state.
+    /// On `MouseUp`, if a selection was active, the byte range
+    /// `(start, end)` over the joined display rows is returned so the
+    /// host can apply the appropriate copy primitive — plain
+    /// `buf[start..end]` for editor-style buffers, the metadata-aware
+    /// `TranscriptSnapshot::copy_byte_range` for the transcript pane.
+    /// Window still clears its own selection state.
     pub fn handle_mouse(
         &mut self,
         event: MouseEvent,
         mut ctx: MouseCtx,
-    ) -> (Status, Option<String>) {
+    ) -> (Status, Option<(usize, usize)>) {
         // Build the joined buffer once and pass it down. Mouse helpers
         // operate on this `&str` instead of `self.text`, which
         // lets surfaces whose `self.text` is *not* `rows.join("\n")`
         // (the prompt — source buffer ≠ wrapped display rows) reuse
-        // `Window::handle_mouse` directly. The transcript and dialog
-        // buffer panels still keep `self.text == rows.join("\n")`
-        // via their existing sync paths; the buffer arg just doesn't
-        // need it to be true.
+        // `Window::handle_mouse` directly.
         let buf = ctx.rows.join("\n");
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -684,9 +684,9 @@ impl Window {
                 (self.mouse_drag(event, &mut ctx, &buf), None)
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let yank = self.mouse_yank_text(&ctx, &buf);
+                let range = self.mouse_yank_range(&ctx, &buf);
                 let status = self.mouse_up(&mut ctx, &buf);
-                (status, yank)
+                (status, range)
             }
             _ => (Status::Ignored, None),
         }
@@ -795,10 +795,12 @@ impl Window {
         Status::Consumed
     }
 
-    /// Compute the text to yank from the current selection state,
+    /// Compute the byte range to yank from the current selection state,
     /// *before* `mouse_up` clears the anchors. Returns `None` when
-    /// no selection is active or the range is empty.
-    fn mouse_yank_text(&self, ctx: &MouseCtx, buf: &str) -> Option<String> {
+    /// no selection is active or the range is empty. The host applies
+    /// the appropriate copy primitive (plain slice / snapshot copy) on
+    /// the returned `(start, end)`.
+    fn mouse_yank_range(&self, ctx: &MouseCtx, buf: &str) -> Option<(usize, usize)> {
         let cpos = self.compute_cpos(ctx.rows);
         let (start, end) = if self.vim_enabled {
             vim::visual_range(&self.vim_state, buf, cpos, *ctx.vim_mode)?
@@ -810,7 +812,7 @@ impl Window {
         if start >= end {
             return None;
         }
-        Some(buf[start..end].to_string())
+        Some((start, end))
     }
 
     fn mouse_up(&mut self, ctx: &mut MouseCtx, _buf: &str) -> Status {
@@ -1855,7 +1857,7 @@ mod tests {
             ctx,
         );
         assert_eq!(r, Status::Consumed);
-        assert_eq!(yank, Some("hello w".into()));
+        assert_eq!(yank, Some((0, 7)));
     }
 
     #[test]
@@ -1896,7 +1898,7 @@ mod tests {
             ctx,
         );
         assert_eq!(r, Status::Consumed);
-        assert_eq!(yank, Some("world".into()));
+        assert_eq!(yank, Some((6, 11)));
     }
 
     #[test]
@@ -1937,6 +1939,6 @@ mod tests {
             ctx,
         );
         assert_eq!(r, Status::Consumed);
-        assert_eq!(yank, Some("hello world".into()));
+        assert_eq!(yank, Some((0, 11)));
     }
 }
