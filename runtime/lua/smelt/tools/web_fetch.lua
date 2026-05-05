@@ -234,8 +234,8 @@ smelt.tools.register({
     if pat then return { pat } end
     return {}
   end,
-  render = function(args, output, width, ctx)
-    ctx:text(output.content, output.is_error)
+  render = function(args, output, width, buf)
+    smelt.text.render(buf, output.content, { is_error = output.is_error })
   end,
   execute = function(args)
     local raw = fetch_raw(args)

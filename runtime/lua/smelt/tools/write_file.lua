@@ -44,14 +44,15 @@ smelt.tools.register({
   preflight = function(args)
     return preflight_message(args.file_path or "")
   end,
-  render = function(args, output, width, ctx)
+  render = function(args, output, width, buf)
     if output.is_error then
-      ctx:text(output.content, true)
+      smelt.text.render(buf, output.content, { is_error = true })
       return
     end
-    ctx:text("Wrote " .. (args.file_path or ""))
-    ctx:newline()
-    ctx:file(args.content or "", args.file_path or "")
+    smelt.syntax.render(buf, {
+      content = args.content or "",
+      path = args.file_path or "",
+    })
   end,
   execute = function(args)
     local path = args.file_path or ""

@@ -139,7 +139,7 @@ smelt.tools.register({
     if path == "" then return pattern end
     return pattern .. " in " .. path
   end,
-  render = function(args, output, width, ctx)
+  render = function(args, output, width, buf)
     local content = output.content or ""
     local n = 0
     if content ~= "" then
@@ -149,7 +149,7 @@ smelt.tools.register({
         n = n + 1
       end
     end
-    ctx:text(n .. " matches")
+    smelt.text.render(buf, n .. " matches")
   end,
   execute = function(args)
     local offset = pick_int(args.offset, 0)

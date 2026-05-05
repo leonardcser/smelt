@@ -8,7 +8,7 @@ use super::layout_out::SpanCollector;
 use crate::ui::buffer::{Buffer, LineDecoration, SpanMeta, SpanStyle};
 use crate::ui::Theme;
 use smelt_core::content::display::{
-    ColorRole, ColorValue, DisplayLine, SpanStyle as DisplaySpanStyle,
+    ColorRole, ColorValue, DisplayLine, NamedColor, SpanStyle as DisplaySpanStyle,
 };
 use smelt_core::style::Color;
 
@@ -166,6 +166,90 @@ fn style_is_default(s: &SpanStyle) -> bool {
         && !s.italic
         && !s.underline
         && !s.crossedout
+}
+
+/// Inverse of `render_into_buffer`: walk a `Buffer` and emit its lines
+/// (with their highlights) into an existing `SpanCollector`. Lossy on
+/// theme roles (Buffer highlights store resolved `Color` rather than
+/// `ColorValue`), but tool render output is user content (file body,
+/// command stdout) rather than theme-reactive chrome — so the
+/// round-trip preserves the observable look.
+///
+/// Transient bridge for the P9.b tool-render path: Lua hooks now write
+/// into a Buffer (the architectural target), and this projection feeds
+/// the still-`SpanCollector`-based transcript pipeline. Retires when
+/// per-block parsers also write into Buffer.
+pub fn buffer_into_collector(buf: &Buffer, out: &mut SpanCollector) {
+    let n = buf.line_count();
+    for i in 0..n {
+        let text = buf.get_line(i).unwrap_or("");
+        let mut highlights = buf.highlights_at(i);
+        highlights.sort_by_key(|h| h.col_start);
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut col: u16 = 0;
+        for h in &highlights {
+            if h.col_end <= col {
+                continue;
+            }
+            if h.col_start > col {
+                let plain: String = chars[col as usize..h.col_start as usize].iter().collect();
+                out.print(&plain);
+                col = h.col_start;
+            }
+            let end = h.col_end.min(chars.len() as u16);
+            if end <= col {
+                continue;
+            }
+            let segment: String = chars[col as usize..end as usize].iter().collect();
+            let style = buffer_style_to_display(&h.style);
+            out.push_style(style);
+            out.print(&segment);
+            out.pop_style();
+            col = end;
+        }
+        if (col as usize) < chars.len() {
+            let tail: String = chars[col as usize..].iter().collect();
+            out.print(&tail);
+        }
+        out.newline();
+    }
+}
+
+fn buffer_style_to_display(style: &SpanStyle) -> DisplaySpanStyle {
+    DisplaySpanStyle {
+        fg: style.fg.map(color_to_value),
+        bg: style.bg.map(color_to_value),
+        bold: style.bold,
+        dim: style.dim,
+        italic: style.italic,
+        underline: style.underline,
+        crossedout: style.crossedout,
+    }
+}
+
+fn color_to_value(c: Color) -> ColorValue {
+    match c {
+        Color::Reset => ColorValue::Named(NamedColor::Reset),
+        Color::Black => ColorValue::Named(NamedColor::Black),
+        Color::DarkGrey => ColorValue::Named(NamedColor::DarkGrey),
+        Color::Red => ColorValue::Named(NamedColor::Red),
+        Color::DarkRed => ColorValue::Named(NamedColor::DarkRed),
+        Color::Green => ColorValue::Named(NamedColor::Green),
+        Color::DarkGreen => ColorValue::Named(NamedColor::DarkGreen),
+        Color::Yellow => ColorValue::Named(NamedColor::Yellow),
+        Color::DarkYellow => ColorValue::Named(NamedColor::DarkYellow),
+        Color::Blue => ColorValue::Named(NamedColor::Blue),
+        Color::DarkBlue => ColorValue::Named(NamedColor::DarkBlue),
+        Color::Magenta => ColorValue::Named(NamedColor::Magenta),
+        Color::DarkMagenta => ColorValue::Named(NamedColor::DarkMagenta),
+        Color::Cyan => ColorValue::Named(NamedColor::Cyan),
+        Color::DarkCyan => ColorValue::Named(NamedColor::DarkCyan),
+        Color::White => ColorValue::Named(NamedColor::White),
+        Color::Grey => ColorValue::Named(NamedColor::Grey),
+        Color::Rgb { r, g, b } => ColorValue::Rgb(r, g, b),
+        Color::AnsiValue(v) => ColorValue::Ansi(v),
+    }
 }
 
 pub(crate) fn apply_to_buffer(buf: &mut Buffer, lines: &[ProjectedLine]) {

@@ -292,6 +292,13 @@ impl Ui {
         self.bufs.get_mut(&id)
     }
 
+    /// Drain a buffer from the registry and return it. Use for
+    /// short-lived "scratch" buffers (e.g. tool render hooks) that
+    /// produce content the caller needs to consume once and discard.
+    pub fn buf_destroy(&mut self, id: BufId) -> Option<Buffer> {
+        self.bufs.remove(&id)
+    }
+
     /// Mutably borrow the buffer backing `win`, if both the window and
     /// buffer exist.
     pub fn win_buf_mut(&mut self, win: WinId) -> Option<&mut Buffer> {

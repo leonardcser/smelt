@@ -18,8 +18,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Renders tool output bodies by calling the tool's Lua `render` hook
-/// with a `RenderCtx` userdata. Falls back to plain wrapped text when
-/// no hook is registered or Lua is unavailable.
+/// with a `Buffer` userdata (full `smelt.buf.*` API + the
+/// `smelt.{diff,syntax,bash,notebook,markdown}.render` convenience
+/// helpers). The hook writes into a fresh scratch buffer; this
+/// projector then walks the buffer back into the still-`SpanCollector`
+/// transcript pipeline. Falls back to plain wrapped text when Lua is
+/// unavailable or the tool has no `render` hook registered.
 pub(crate) struct LuaRenderRenderer;
 
 impl ToolBodyRenderer for LuaRenderRenderer {
@@ -32,17 +36,34 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         out: &mut SpanCollector,
     ) -> u16 {
         let Some(tool_out) = output else { return 0 };
-        crate::lua::app_ref::try_with_app(|app| {
-            app.lua.render_tool_body(name, args, tool_out, width, out)
+        let before = out.line_count();
+        let ran = crate::lua::app_ref::try_with_app(|app| {
+            let buf_id = app
+                .ui
+                .buf_create(crate::ui::buffer::BufCreateOpts::default());
+            let ok = app
+                .lua
+                .render_tool_body(name, args, tool_out, width, buf_id.0);
+            if !ok {
+                let _ = app.ui.buf_destroy(buf_id);
+                return false;
+            }
+            if let Some(buf) = app.ui.buf_destroy(buf_id) {
+                crate::content::to_buffer::buffer_into_collector(&buf, out);
+            }
+            true
         })
-        .unwrap_or_else(|| {
-            smelt_core::transcript_present::render_default_output(
+        .unwrap_or(false);
+        if !ran {
+            return smelt_core::transcript_present::render_default_output(
                 out,
                 &tool_out.content,
                 tool_out.is_error,
                 width,
-            )
-        })
+            );
+        }
+        let after = out.line_count();
+        (after - before) as u16
     }
 }
 

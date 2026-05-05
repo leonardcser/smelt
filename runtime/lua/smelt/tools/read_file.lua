@@ -88,7 +88,7 @@ smelt.tools.register({
   needs_confirm = function(args)
     return smelt.path.display(args.file_path or "")
   end,
-  render = function(args, output, width, ctx)
+  render = function(args, output, width, buf)
     local content = output.content or ""
     local n = 0
     if content ~= "" then
@@ -98,7 +98,7 @@ smelt.tools.register({
         n = n + 1
       end
     end
-    ctx:text(n .. " lines")
+    smelt.text.render(buf, n .. " lines")
   end,
   execute = function(args)
     local path = args.file_path or ""
