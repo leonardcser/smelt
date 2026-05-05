@@ -9,8 +9,7 @@
 //! constants and the `Ui::set_selection_bg` / `selection_style()` shim
 //! that fanned out one slot to every widget.
 
-use super::grid::Style;
-use smelt_core::style::Color;
+use crate::style::{Color, Style};
 use std::collections::HashMap;
 
 /// Default accent palette index — `Color::AnsiValue(208)`,
@@ -118,7 +117,7 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::style::Color;
+    use crate::style::Color;
 
     #[test]
     fn unknown_name_returns_default() {

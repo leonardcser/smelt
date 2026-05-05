@@ -30,6 +30,7 @@ pub mod runtime;
 pub mod session;
 pub mod state;
 pub mod style;
+pub mod theme;
 pub mod timers;
 pub mod tools;
 pub mod transcript_model;

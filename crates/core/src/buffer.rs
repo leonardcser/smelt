@@ -85,10 +85,19 @@ pub struct NsId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtmarkId(pub u32);
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpanMeta {
     pub selectable: bool,
     pub copy_as: Option<String>,
+}
+
+impl Default for SpanMeta {
+    fn default() -> Self {
+        Self {
+            selectable: true,
+            copy_as: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -366,6 +375,17 @@ impl Buffer {
             return false;
         }
         let source = std::mem::take(&mut self.source);
+        // Reset to a single empty seed line so the parser writes from
+        // row 0. SpanCollector's append-mode replaces a trailing empty
+        // seed on the first commit, then appends — so a single seed
+        // empty line is all the parser needs to start fresh.
+        let n = self.lines.len();
+        if n > 1 || (n == 1 && !self.lines[0].is_empty()) {
+            self.set_lines(0, n, vec![String::new()]);
+        }
+        for state in self.extmarks.namespaces.values_mut() {
+            state.extmarks.clear();
+        }
         parser.parse(self, &source, width);
         self.source = source;
         self.last_render = Some((self.source_tick, width));

@@ -8,10 +8,7 @@ pub mod transcript;
 pub mod wrap;
 
 pub use context::LayoutContext;
-pub use display::DisplayBlock;
-pub use display::{
-    ColorRole, ColorValue, DisplayLine, DisplaySpan, NamedColor, SpanMeta, SpanStyle,
-};
+pub use display::{ColorRole, ColorValue, NamedColor, SpanMeta, SpanStyle};
 
 /// Context for rendering content inside a bordered box.
 /// When passed to `render_markdown` and its sub-renderers, each output line

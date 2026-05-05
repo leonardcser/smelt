@@ -315,7 +315,7 @@ fn render_markdown_table_from_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::layout_out::SpanCollector;
+    use crate::content::layout_out::test_util::render_test;
 
     #[test]
     fn rendered_table_attaches_raw_source_to_first_row() {
@@ -325,10 +325,10 @@ mod tests {
         // `SourceTextOnFirstRow` wrapper: row 0 carries the joined
         // input lines as `source_text`; subsequent rows are marked as
         // soft-wrap continuations.
-        let mut sink = SpanCollector::new(80);
         let md = "| col | val |\n| --- | --- |\n| a   | 1   |\n";
-        render_markdown_inner(&mut sink, md, 80, "", false, None);
-        let block = sink.finish();
+        let block = render_test(80, |sink| {
+            render_markdown_inner(sink, md, 80, "", false, None);
+        });
         assert!(block.lines.len() >= 2, "table should render multiple rows");
         // Row 0 carries the full raw markdown table.
         assert_eq!(

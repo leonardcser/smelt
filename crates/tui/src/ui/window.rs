@@ -6,7 +6,7 @@ use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
 use super::{BufId, WinId};
-use crate::ui::theme::Theme;
+use crate::ui::Theme;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 /// Per-frame paint context handed to `Window::render`. Carries terminal
@@ -1201,8 +1201,8 @@ mod tests {
     use super::BufId;
     use super::*;
     use crate::ui::grid::Grid;
-    use crate::ui::theme::Theme;
     use crate::ui::BufCreateOpts;
+    use crate::ui::Theme;
 
     fn make_win() -> Window {
         Window::new(

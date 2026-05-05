@@ -381,7 +381,7 @@ pub fn paint_chrome(
     grid: &mut crate::ui::grid::Grid,
     area: Rect,
     chrome: &Chrome,
-    _theme: &crate::ui::theme::Theme,
+    _theme: &crate::ui::Theme,
 ) {
     let Some(border) = chrome.border else {
         return;
@@ -893,7 +893,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 10, 5),
             &chrome,
-            &crate::ui::theme::Theme::default(),
+            &crate::ui::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, ' ');
     }
@@ -909,7 +909,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 10, 5),
             &chrome,
-            &crate::ui::theme::Theme::default(),
+            &crate::ui::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(9, 0).symbol, '┐');
@@ -931,7 +931,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 20, 5),
             &chrome,
-            &crate::ui::theme::Theme::default(),
+            &crate::ui::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '╭');
         assert_eq!(grid.cell(1, 0).symbol, 'h');
@@ -952,7 +952,7 @@ mod tests {
             &mut grid,
             Rect::new(0, 0, 8, 3),
             &chrome,
-            &crate::ui::theme::Theme::default(),
+            &crate::ui::Theme::default(),
         );
         assert_eq!(grid.cell(0, 0).symbol, '┌');
         assert_eq!(grid.cell(1, 0).symbol, 'm');
