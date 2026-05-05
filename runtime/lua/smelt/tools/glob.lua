@@ -44,6 +44,10 @@ smelt.tools.register({
     end
     smelt.text.render(buf, n .. " files")
   end,
+  paths_for_workspace = function(args)
+    local p = args.path or ""
+    return p ~= "" and { p } or {}
+  end,
   execute = function(args)
     local pattern = args.pattern or ""
     if pattern == "" then

@@ -9,9 +9,8 @@
 use super::transcript_model::{Block, ToolOutput, ToolState, ToolStatus, ViewState};
 use crate::buffer::Buffer;
 use crate::content::display::{ColorRole, ColorValue, NamedColor, SpanMeta, SpanStyle};
-use crate::content::highlight::{render_code_block, render_markdown_table, BashHighlighter};
+use crate::content::highlight::{render_code_block, render_markdown_table};
 use crate::content::layout_out::{display_width, Outcome, SpanCollector};
-use crate::content::selection::truncate_str;
 use crate::content::wrap::wrap_line;
 use crate::content::LayoutContext;
 use crate::theme::Theme;
@@ -41,6 +40,54 @@ pub trait ToolBodyRenderer: Send + Sync {
         width: usize,
         out: &mut SpanCollector,
     ) -> u16;
+
+    /// Whether the tool wants its elapsed time displayed in the
+    /// transcript header. Default `false`; Lua tool defs opt in via
+    /// `elapsed_visible = true` and the tui-side renderer reads the
+    /// flag back through this method.
+    fn elapsed_visible(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// Paint one wrapped line of the tool's summary into `out`. Returns
+    /// `true` if the renderer handled it (the tui-side Lua bridge calls
+    /// the tool's `render_summary` callback); `false` means "paint as
+    /// plain text". Default `false` for fallback / test renderers.
+    fn render_summary_line(
+        &self,
+        _name: &str,
+        _line: &str,
+        _args: &HashMap<String, serde_json::Value>,
+        _out: &mut SpanCollector,
+    ) -> bool {
+        false
+    }
+
+    /// Paint zero or more rows below the summary line (e.g. `web_fetch`
+    /// renders the prompt as a dim wrapped subline). Returns the row
+    /// count painted. Default `0`.
+    fn render_subhead(
+        &self,
+        _name: &str,
+        _args: &HashMap<String, serde_json::Value>,
+        _width: usize,
+        _out: &mut SpanCollector,
+    ) -> u16 {
+        0
+    }
+
+    /// Optional dim-styled badge painted in the row-0 suffix slot
+    /// (between the elapsed-time pill and the line break). `bash` uses
+    /// it for `(timeout: 2m)` while the command is pending. `status`
+    /// is the lowercase tool status (`"pending" | "ok" | …`).
+    fn header_suffix(
+        &self,
+        _name: &str,
+        _args: &HashMap<String, serde_json::Value>,
+        _status: &str,
+    ) -> Option<String> {
+        None
+    }
 }
 
 /// Simple heuristic: does this look like a `/command` line?
@@ -629,6 +676,43 @@ mod tests {
         read_buffer(&buf, outcome.line_count)
     }
 
+    /// Test renderer that mirrors the production tool registry well enough
+    /// to drive bash-flavored layout assertions.
+    struct TestToolRenderer;
+
+    impl ToolBodyRenderer for TestToolRenderer {
+        fn render(
+            &self,
+            _: &str,
+            _: &HashMap<String, serde_json::Value>,
+            _: Option<&ToolOutput>,
+            _: usize,
+            _: &mut SpanCollector,
+        ) -> u16 {
+            0
+        }
+        fn elapsed_visible(&self, name: &str) -> bool {
+            name == "bash"
+        }
+        fn render_summary_line(
+            &self,
+            name: &str,
+            line: &str,
+            _args: &HashMap<String, serde_json::Value>,
+            out: &mut SpanCollector,
+        ) -> bool {
+            if name == "bash" {
+                // Stand-in for the bash highlighter — preserve the shape
+                // (renderer says "yes I rendered it") without pulling
+                // syntect into core tests.
+                out.print(line);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     fn text(s: &str) -> Block {
         Block::Text {
             content: s.to_string(),
@@ -1149,7 +1233,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx, None);
+        let display = layout_block_test(&block, Some(&state), &ctx, Some(&TestToolRenderer));
 
         assert!(
             display.len() >= 2,
@@ -1199,7 +1283,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx, None);
+        let display = layout_block_test(&block, Some(&state), &ctx, Some(&TestToolRenderer));
 
         assert!(display.len() >= 2);
         assert!(!display[0].soft_wrapped);
@@ -1230,7 +1314,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx, None);
+        let display = layout_block_test(&block, Some(&state), &ctx, Some(&TestToolRenderer));
         let first_line = &display[0];
 
         // The time suffix "  3s" should be in a non-selectable span

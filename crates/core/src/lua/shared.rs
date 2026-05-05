@@ -46,6 +46,12 @@ pub struct ToolHandles {
     pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
     pub render: Option<LuaHandle>,
+    pub render_summary: Option<LuaHandle>,
+    pub render_subhead: Option<LuaHandle>,
+    pub header_suffix: Option<LuaHandle>,
+    pub paths_for_workspace: Option<LuaHandle>,
+    pub preview: Option<LuaHandle>,
+    pub decide: Option<LuaHandle>,
 }
 
 /// All shared state between Lua closures and the app loop.

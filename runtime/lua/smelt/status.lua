@@ -90,8 +90,9 @@ local function compose()
     else
       mode_fg = theme.muted_fg
     end
+    local icon = smelt.mode.icon and smelt.mode.icon(mode.name) or ""
     table.insert(items, {
-      text = " " .. (mode.icon or "") .. (mode.name or "") .. " ",
+      text = " " .. icon .. (mode.name or "") .. " ",
       fg = mode_fg,
       bg = MODE_BG,
       priority = 1,

@@ -175,17 +175,11 @@ fn build_snapshot(app: &mut crate::app::TuiApp, lua: &Lua) -> LuaResult<mlua::Ta
     }
     t.set("vim", vim_tbl)?;
 
-    // AgentMode (Plan/Apply/Yolo/Normal) — icon + name; the Lua composer
-    // reads `theme.{plan,apply,yolo,muted}_fg` to colorize.
+    // AgentMode — name only; icon resolves through `smelt.mode.icon`
+    // in Lua so plugin-defined modes pick up their own glyph. The
+    // composer reads `theme.{plan,apply,yolo,muted}_fg` to colorize.
     let mode_tbl = lua.create_table()?;
-    let (icon, name) = match app.core.config.mode {
-        protocol::AgentMode::Plan => ("◇ ", "plan"),
-        protocol::AgentMode::Apply => ("→ ", "apply"),
-        protocol::AgentMode::Yolo => ("⚡", "yolo"),
-        protocol::AgentMode::Normal => ("○ ", "normal"),
-    };
-    mode_tbl.set("icon", icon)?;
-    mode_tbl.set("name", name)?;
+    mode_tbl.set("name", app.core.config.mode.as_str())?;
     t.set("mode", mode_tbl)?;
 
     // Indicators that flip the "permission pending" / "N procs" / "N

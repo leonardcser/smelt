@@ -26,12 +26,13 @@
 #![allow(clippy::arc_with_non_send_sync)]
 
 mod api;
-pub(crate) mod app_ref;
+pub mod app_ref;
 mod tasks;
 pub(crate) mod ui_ops;
 
+pub use app_ref::try_with_app;
 pub(crate) use app_ref::{
-    install_app_ptr, try_with_app, try_with_host, try_with_ui_host, with_app, with_ui_host,
+    install_app_ptr, try_with_host, try_with_ui_host, with_app, with_ui_host,
 };
 
 pub(crate) use smelt_core::lua::{LuaHandle, TaskDriveOutput, ToolEnv, ToolExecResult};

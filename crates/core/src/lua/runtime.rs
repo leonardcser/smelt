@@ -580,6 +580,291 @@ impl LuaRuntime {
         defs
     }
 
+    /// Whether the tool wants its elapsed time displayed in the
+    /// transcript header. Read from the `elapsed_visible = true` flag
+    /// set on the tool def at registration time.
+    pub fn tool_elapsed_visible(&self, tool_name: &str) -> bool {
+        let meta = match self
+            .lua
+            .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
+        {
+            Ok(meta) => meta,
+            Err(_) => return false,
+        };
+        meta.get::<bool>("elapsed_visible").unwrap_or(false)
+    }
+
+    /// Whether the tool registered a `render_summary` callback. The
+    /// caller mints an ephemeral Buffer, runs the callback through
+    /// [`render_tool_summary_line`], and replays row 0 into the
+    /// transcript / confirm-dialog title.
+    pub fn tool_has_render_summary(&self, tool_name: &str) -> bool {
+        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+        handlers
+            .get(tool_name)
+            .is_some_and(|h| h.render_summary.is_some())
+    }
+
+    /// Run a tool's `render_summary` callback against the buffer named
+    /// by `buf_id`. Mirrors [`render_tool_body`] but for a single
+    /// summary line (transcript header / confirm title). Returns `true`
+    /// iff the callback ran successfully.
+    pub fn render_tool_summary_line(
+        &self,
+        tool_name: &str,
+        line: &str,
+        args: &HashMap<String, serde_json::Value>,
+        buf_id: u64,
+    ) -> bool {
+        let render_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return false;
+            };
+            let Some(rh) = h.render_summary.as_ref() else {
+                return false;
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return false,
+            }
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool render_summary: build args: {e}"));
+                return false;
+            }
+        };
+
+        if let Err(e) = render_fn.call::<()>((buf_id, line.to_string(), args_table)) {
+            self.record_error(format!("tool render_summary `{tool_name}`: {e}"));
+            return false;
+        }
+        true
+    }
+
+    pub fn tool_has_render_subhead(&self, tool_name: &str) -> bool {
+        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+        handlers
+            .get(tool_name)
+            .is_some_and(|h| h.render_subhead.is_some())
+    }
+
+    /// Run a tool's `render_subhead` callback against the buffer named
+    /// by `buf_id`. The callback paints arbitrary rows below the
+    /// summary line (e.g. `web_fetch`'s prompt subline). Returns `true`
+    /// iff the callback ran successfully.
+    pub fn render_tool_subhead(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        buf_id: u64,
+    ) -> bool {
+        let render_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return false;
+            };
+            let Some(rh) = h.render_subhead.as_ref() else {
+                return false;
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return false,
+            }
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool render_subhead: build args: {e}"));
+                return false;
+            }
+        };
+
+        if let Err(e) = render_fn.call::<()>((buf_id, args_table)) {
+            self.record_error(format!("tool render_subhead `{tool_name}`: {e}"));
+            return false;
+        }
+        true
+    }
+
+    /// Call a tool's `paths_for_workspace(args)` Lua callback if
+    /// registered. Returns the filesystem paths the tool call would
+    /// touch, used by the workspace-boundary policy in
+    /// `core::permissions`. Tools that don't touch paths return `[]`
+    /// (and typically don't register the callback at all).
+    pub fn tool_paths_for_workspace(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) -> Vec<String> {
+        let func = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return Vec::new();
+            };
+            let Some(rh) = h.paths_for_workspace.as_ref() else {
+                return Vec::new();
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return Vec::new(),
+            }
+        };
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool paths_for_workspace: build args: {e}"));
+                return Vec::new();
+            }
+        };
+        match func.call::<Option<mlua::Table>>(args_table) {
+            Ok(Some(t)) => t
+                .sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect(),
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                self.record_error(format!("tool paths_for_workspace `{tool_name}`: {e}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Run a tool's `decide(args, mode)` Lua callback if registered.
+    /// The callback returns `"allow" | "ask" | "deny"`; anything else
+    /// (or no callback) yields `None` so the caller falls through to
+    /// the generic `Permissions::check_tool` path. The bash + web_fetch
+    /// tools register decide callbacks; everything else relies on the
+    /// generic path.
+    pub fn tool_decide(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        mode: protocol::AgentMode,
+    ) -> Option<protocol::Decision> {
+        let func = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let h = handlers.get(tool_name)?;
+            let rh = h.decide.as_ref()?;
+            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
+        };
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool decide: build args: {e}"));
+                return None;
+            }
+        };
+        let mode_str = mode.as_str();
+        match func.call::<String>((args_table, mode_str)) {
+            Ok(label) => match label.as_str() {
+                "allow" => Some(protocol::Decision::Allow),
+                "ask" => Some(protocol::Decision::Ask),
+                "deny" => Some(protocol::Decision::Deny),
+                other => {
+                    self.record_error(format!(
+                        "tool decide `{tool_name}`: unknown decision `{other}`"
+                    ));
+                    None
+                }
+            },
+            Err(e) => {
+                self.record_error(format!("tool decide `{tool_name}`: {e}"));
+                None
+            }
+        }
+    }
+
+    pub fn tool_has_preview(&self, tool_name: &str) -> bool {
+        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+        handlers.get(tool_name).is_some_and(|h| h.preview.is_some())
+    }
+
+    /// Run a tool's `preview(buf, args)` Lua callback against the
+    /// buffer named by `buf_id`. The callback paints the confirm
+    /// dialog's preview pane (diff / syntax / notebook / bash). Returns
+    /// `true` iff the callback ran successfully.
+    pub fn render_tool_preview(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        buf_id: u64,
+    ) -> bool {
+        let render_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return false;
+            };
+            let Some(rh) = h.preview.as_ref() else {
+                return false;
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return false,
+            }
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool preview: build args: {e}"));
+                return false;
+            }
+        };
+
+        if let Err(e) = render_fn.call::<()>((buf_id, args_table)) {
+            self.record_error(format!("tool preview `{tool_name}`: {e}"));
+            return false;
+        }
+        true
+    }
+
+    /// Call a tool's `header_suffix(args, ctx)` callback, if registered.
+    /// Returns the optional decoration string painted in the row-0 suffix
+    /// area (after the elapsed time slot). `ctx.status` is one of
+    /// `"pending" | "ok" | "err" | "denied" | "confirm"` so the tool can
+    /// branch on lifecycle (e.g. `bash` only emits `(timeout: 2m)` while
+    /// pending).
+    pub fn tool_header_suffix(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        status: &str,
+    ) -> Option<String> {
+        let func = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let h = handlers.get(tool_name)?;
+            let rh = h.header_suffix.as_ref()?;
+            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
+        };
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool header_suffix: build args: {e}"));
+                return None;
+            }
+        };
+        let ctx = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool header_suffix: build ctx: {e}"));
+                return None;
+            }
+        };
+        let _ = ctx.set("status", status);
+        match func.call::<Option<String>>((args_table, ctx)) {
+            Ok(s) => s,
+            Err(e) => {
+                self.record_error(format!("tool header_suffix `{tool_name}`: {e}"));
+                None
+            }
+        }
+    }
+
     pub fn tool_summary(
         &self,
         tool_name: &str,
@@ -671,6 +956,11 @@ impl LuaRuntime {
                 Ok(None) => {}
                 Err(e) => self.record_error(format!("tool hook preflight: {e}")),
             }
+        }
+
+        let summary = self.tool_summary(tool_name, args);
+        if !summary.is_empty() {
+            out.summary = Some(summary);
         }
 
         out

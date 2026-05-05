@@ -102,6 +102,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(crate::permissions::DEFAULT_BASH_ALLOW.contains(&pattern.as_str()))
         })?,
     )?;
+    // smelt.shell.extract_paths(command) -> [string]
+    //
+    // Pull tokens that look like absolute (`/foo`) or home-rooted
+    // (`~/foo`) paths from a shell command. Heredoc bodies are
+    // stripped first. Used by the bash tool's
+    // `paths_for_workspace(args)` callback.
+    shell_tbl.set(
+        "extract_paths",
+        lua.create_function(|_, command: String| {
+            Ok(crate::permissions::workspace::extract_paths_from_command(
+                &command,
+            ))
+        })?,
+    )?;
     smelt.set("shell", shell_tbl)?;
     Ok(())
 }

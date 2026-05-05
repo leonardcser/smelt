@@ -205,6 +205,7 @@ smelt.tools.register({
     .. "The page is fetched, converted to markdown, then an isolated LLM call "
     .. "extracts only what the prompt asks for.",
   override = true,
+  elapsed_visible = true,
   parameters = {
     type = "object",
     properties = {
@@ -236,6 +237,24 @@ smelt.tools.register({
   end,
   render = function(args, output, width, buf)
     smelt.text.render(buf, output.content, { is_error = output.is_error })
+  end,
+  render_subhead = function(buf, args)
+    if args.prompt and args.prompt ~= "" then
+      smelt.text.render(buf, args.prompt)
+    end
+  end,
+  decide = function(args, mode)
+    -- Compose the web_fetch decision: tool-level + per-URL pattern.
+    -- Deny dominates. A pattern allow short-circuits to Allow even if
+    -- the tool decision was Ask. An Ask pattern combined with Allow
+    -- tool collapses to Ask. Otherwise the URL pattern decision wins.
+    local tool = smelt.permissions.check_tool(mode, "web_fetch")
+    if tool == "deny" then return "deny" end
+    local pat = smelt.permissions.check_web_fetch(mode, args.url or "")
+    if pat == "deny" then return "deny" end
+    if pat == "allow" then return "allow" end
+    if tool == "allow" and pat == "ask" then return "ask" end
+    return pat
   end,
   execute = function(args)
     local raw = fetch_raw(args)

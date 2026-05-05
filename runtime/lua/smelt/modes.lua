@@ -2,7 +2,7 @@
 -- the seed `smelt.mode.cycle` / `smelt.reasoning.cycle` no-op stubs
 -- registered by the Rust bindings. Reads the configured cycle list
 -- from Rust, finds the current value, and calls `set` with the next
--- entry.
+-- entry. Also owns the mode-icon registry the statusline reads.
 
 local function next_in_cycle(list, current)
   for i, v in ipairs(list) do
@@ -11,6 +11,21 @@ local function next_in_cycle(list, current)
     end
   end
   return list[1]
+end
+
+local mode_icons = {
+  normal = "○ ",
+  plan = "◇ ",
+  apply = "→ ",
+  yolo = "⚡",
+}
+
+smelt.mode.icon = function(name)
+  return mode_icons[name] or ""
+end
+
+smelt.mode.set_icon = function(name, icon)
+  mode_icons[name] = icon
 end
 
 smelt.mode.cycle = function()

@@ -4,45 +4,13 @@
 //! and decide whether any of them escape the configured workspace root.
 
 use crate::permissions::bash::strip_heredoc_bodies;
-use serde_json::Value;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-fn str_arg(args: &HashMap<String, Value>, key: &str) -> String {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
 
 // ── Workspace path restriction ───────────────────────────────────────────────
 
-pub(super) fn extract_tool_paths(tool_name: &str, args: &HashMap<String, Value>) -> Vec<String> {
-    match tool_name {
-        "read_file" | "write_file" | "edit_file" => {
-            let p = str_arg(args, "file_path");
-            if p.is_empty() {
-                vec![]
-            } else {
-                vec![p]
-            }
-        }
-        "glob" | "grep" => {
-            let p = str_arg(args, "path");
-            if p.is_empty() {
-                vec![]
-            } else {
-                vec![p]
-            }
-        }
-        "bash" => extract_paths_from_command(&str_arg(args, "command")),
-        _ => vec![],
-    }
-}
-
 /// Extract tokens that look like absolute paths from a shell command.
 /// Relative paths are fine (they resolve within the workspace).
-pub(super) fn extract_paths_from_command(cmd: &str) -> Vec<String> {
+pub fn extract_paths_from_command(cmd: &str) -> Vec<String> {
     // Strip heredoc bodies — they are data, not shell commands.
     let cmd = strip_heredoc_bodies(cmd);
     let mut paths = Vec::new();
@@ -94,11 +62,6 @@ pub(super) fn is_in_workspace(path_str: &str, workspace: &Path) -> bool {
     resolved.starts_with(&ws)
 }
 
-pub(super) fn has_paths_outside_workspace(
-    tool_name: &str,
-    args: &HashMap<String, Value>,
-    workspace: &Path,
-) -> bool {
-    let paths = extract_tool_paths(tool_name, args);
+pub(super) fn any_outside_workspace(paths: &[String], workspace: &Path) -> bool {
     paths.iter().any(|p| !is_in_workspace(p, workspace))
 }

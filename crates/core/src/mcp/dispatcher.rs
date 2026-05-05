@@ -80,6 +80,7 @@ impl ToolDispatcher for McpDispatcher {
             decision,
             confirm_message: Some(confirm_message),
             approval_patterns: Vec::new(),
+            summary: None,
         })
     }
 

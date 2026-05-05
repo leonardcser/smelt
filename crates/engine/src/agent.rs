@@ -1176,16 +1176,6 @@ impl<'a> Turn<'a> {
                     let desc = hooks
                         .confirm_message
                         .unwrap_or_else(|| tc.function.name.clone());
-                    let cmd_summary = if tc.function.name == "bash" {
-                        let d = args
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        (!d.is_empty()).then_some(d)
-                    } else {
-                        None
-                    };
                     let request_id = next_request_id();
                     self.emit(EngineEvent::RequestPermission {
                         request_id,
@@ -1194,7 +1184,7 @@ impl<'a> Turn<'a> {
                         args: args.clone(),
                         confirm_message: desc,
                         approval_patterns: hooks.approval_patterns,
-                        summary: cmd_summary,
+                        summary: hooks.summary,
                     });
                     plan.slots.push(ToolSlot {
                         tc,
@@ -1439,13 +1429,6 @@ impl<'a> Turn<'a> {
                                     outstanding -= 1;
                                 }
                                 Decision::Ask => {
-                                    let cmd_summary =
-                                        if pending.tc.function.name == "bash" {
-                                            let d = pending.args.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            (!d.is_empty()).then_some(d)
-                                        } else {
-                                            None
-                                        };
                                     let confirm_msg = hooks
                                         .confirm_message
                                         .clone()
@@ -1460,7 +1443,7 @@ impl<'a> Turn<'a> {
                                             args: pending.args.clone(),
                                             confirm_message: confirm_msg,
                                             approval_patterns: hooks.approval_patterns,
-                                            summary: cmd_summary,
+                                            summary: hooks.summary,
                                         });
                                     plan.pending_tool_perms.push((rid, pending));
                                 }

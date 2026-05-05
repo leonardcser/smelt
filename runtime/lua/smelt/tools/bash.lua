@@ -15,6 +15,18 @@ local function basename(s)
   return s:match("([^/]+)$") or s
 end
 
+local function format_duration(secs)
+  if secs < 60 then
+    return string.format("%ds", secs)
+  elseif secs < 3600 then
+    return string.format("%dm %ds", secs // 60, secs % 60)
+  else
+    local h = secs // 3600
+    local rest = secs % 3600
+    return string.format("%dh %dm %ds", h, rest // 60, rest % 60)
+  end
+end
+
 function M.approval_patterns(args)
   local cmd = args.command or ""
   local subs = smelt.shell.split(cmd)
@@ -64,6 +76,7 @@ end
 smelt.tools.register({
   name = "bash",
   override = true,
+  elapsed_visible = true,
   description =
   "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
   parameters = {
@@ -77,8 +90,41 @@ smelt.tools.register({
   },
   needs_confirm = function(args) return args.command or "" end,
   approval_patterns = M.approval_patterns,
+  summary = function(args)
+    local d = args.description or ""
+    return d ~= "" and d or nil
+  end,
   render = function(args, output, width, buf)
     smelt.text.render(buf, output.content, { is_error = output.is_error })
+  end,
+  render_summary = function(buf, line, args)
+    smelt.bash.render_line(buf, line)
+  end,
+  header_suffix = function(args, ctx)
+    if ctx.status ~= "pending" then return nil end
+    local ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
+    local secs = math.floor(ms / 1000)
+    return "timeout: " .. format_duration(secs)
+  end,
+  paths_for_workspace = function(args)
+    return smelt.shell.extract_paths(args.command or "")
+  end,
+  decide = function(args, mode)
+    -- Compose the bash decision: tool-level + per-subcommand. Deny
+    -- dominates; an Allow tool decision with an Ask bash decision
+    -- collapses to Ask; otherwise the bash decision wins.
+    local tool = smelt.permissions.check_tool(mode, "bash")
+    if tool == "deny" then return "deny" end
+    local sub = smelt.permissions.check_bash(mode, args.command or "")
+    if sub == "deny" then return "deny" end
+    if tool == "allow" and sub == "ask" then return "ask" end
+    return sub
+  end,
+  preview = function(buf, args)
+    local cmd = args.command or ""
+    if cmd:find("\n") then
+      smelt.bash.render(buf, cmd)
+    end
   end,
   execute = M.execute,
 })
