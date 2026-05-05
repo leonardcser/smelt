@@ -576,7 +576,8 @@ pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut SpanCollector) {
             continue;
         }
         let segment: String = chars[col_idx as usize..end as usize].iter().collect();
-        out.append_resolved_span(&segment, h.style, h.meta.clone());
+        let style = out.theme.resolve(h.hl);
+        out.append_resolved_span(&segment, style, h.meta.clone());
         col_idx = end;
     }
     if (col_idx as usize) < chars.len() {
@@ -636,13 +637,13 @@ pub mod test_util {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         let outcome = render_into(&mut buf, width, &theme, fill);
-        let lines = read_buffer(&buf, outcome.line_count);
+        let lines = read_buffer(&buf, &theme, outcome.line_count);
         TestBlock { lines, outcome }
     }
 
     /// Convert a rendered buffer into per-line text + source / soft-wrap
     /// metadata + spans (highlight runs interleaved with plain runs).
-    pub fn read_buffer(buf: &Buffer, line_count: usize) -> Vec<TestLine> {
+    pub fn read_buffer(buf: &Buffer, theme: &Theme, line_count: usize) -> Vec<TestLine> {
         let n = line_count.min(buf.line_count());
         (0..n)
             .map(|i| {
@@ -672,9 +673,10 @@ pub mod test_util {
                         continue;
                     }
                     let segment: String = chars[col as usize..end as usize].iter().collect();
+                    let style = theme.resolve(h.hl);
                     spans.push(TestSpan {
                         text: segment,
-                        style: h.style,
+                        style,
                         meta: h.meta.clone(),
                     });
                     col = end;

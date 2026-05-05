@@ -272,11 +272,11 @@ fn apply_view_state(
                 for (i, hl_list) in kept_highlights.into_iter().enumerate() {
                     let row = cur_len + i;
                     for span in hl_list {
-                        buf.add_highlight_with_meta(
+                        buf.add_highlight_group_with_meta(
                             row,
                             span.col_start,
                             span.col_end,
-                            span.style,
+                            span.hl,
                             span.meta,
                         );
                     }
@@ -673,7 +673,7 @@ mod tests {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         let outcome = layout_block_into(&mut buf, &theme, block, state, ctx, renderer);
-        read_buffer(&buf, outcome.line_count)
+        read_buffer(&buf, &theme, outcome.line_count)
     }
 
     /// Test renderer that mirrors the production tool registry well enough
