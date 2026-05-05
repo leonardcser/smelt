@@ -153,6 +153,59 @@ impl LuaRuntime {
         self.lua.load(&src).set_name("init.lua").exec()
     }
 
+    /// Load every `.lua` file under `<config>/plugins/` (sorted) at
+    /// startup. Errors are recorded as load errors but do not stop
+    /// the runtime.
+    pub fn load_global_plugins(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        let dir = crate::config::config_dir().join("plugins");
+        for path in lua_files_in(&dir) {
+            if let Err(e) = self.load_plugin_file(&path) {
+                self.load_error = Some(format!("{}: {e}", path.display()));
+                return;
+            }
+        }
+    }
+
+    /// Load `<cwd>/.smelt/init.lua` and `<cwd>/.smelt/plugins/*.lua`,
+    /// gated by [`crate::trust`]. Returns the trust state so the
+    /// caller can surface a notification when the project is
+    /// untrusted.
+    pub fn load_project_config(&mut self, cwd: &std::path::Path) -> crate::trust::TrustState {
+        let state = crate::trust::project_trust_state(cwd);
+        if !matches!(state, crate::trust::TrustState::Trusted { .. }) {
+            return state;
+        }
+        if self.load_error.is_some() {
+            return state;
+        }
+        let smelt_dir = cwd.join(".smelt");
+        for path in lua_files_in(&smelt_dir.join("plugins")) {
+            if let Err(e) = self.load_plugin_file(&path) {
+                self.load_error = Some(format!("{}: {e}", path.display()));
+                return state;
+            }
+        }
+        let init = smelt_dir.join("init.lua");
+        if init.exists() {
+            if let Err(e) = self.load_init(&init) {
+                self.load_error = Some(format!("{}: {e}", init.display()));
+            }
+        }
+        state
+    }
+
+    fn load_plugin_file(&self, path: &std::path::Path) -> LuaResult<()> {
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| LuaError::RuntimeError(format!("read {}: {e}", path.display())))?;
+        self.lua
+            .load(&src)
+            .set_name(path.display().to_string())
+            .exec()
+    }
+
     /// Build a `Config` from the LuaShared registries populated by
     /// `init.lua`.
     pub fn to_config(&self) -> crate::config::Config {
@@ -940,6 +993,22 @@ fn module_overlay_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// Sorted list of `.lua` files directly under `dir`. Missing dir
+/// returns empty.
+fn lua_files_in(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("lua"))
+        .collect();
+    out.sort();
+    out
+}
+
 fn init_lua_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -1000,6 +1069,48 @@ mod tests {
                 "bootstrap file missing from embedded tree: {rel}"
             );
         }
+    }
+
+    #[test]
+    fn project_config_skipped_when_untrusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let smelt_dir = tmp.path().join(".smelt");
+        std::fs::create_dir_all(&smelt_dir).unwrap();
+        std::fs::write(smelt_dir.join("init.lua"), "PROJECT_LOADED = true\n").unwrap();
+
+        let state = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", state.path());
+
+        let mut rt = LuaRuntime::new();
+        let trust = rt.load_project_config(tmp.path());
+        assert!(matches!(trust, crate::trust::TrustState::Untrusted { .. }));
+        let loaded: bool = rt.lua.load("return PROJECT_LOADED == true").eval().unwrap();
+        assert!(!loaded, "project init.lua must not run when untrusted");
+    }
+
+    #[test]
+    fn project_config_runs_after_mark_trusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let smelt_dir = tmp.path().join(".smelt");
+        std::fs::create_dir_all(smelt_dir.join("plugins")).unwrap();
+        std::fs::write(smelt_dir.join("init.lua"), "PROJECT_INIT = true\n").unwrap();
+        std::fs::write(
+            smelt_dir.join("plugins").join("a.lua"),
+            "PROJECT_PLUGIN = true\n",
+        )
+        .unwrap();
+
+        let state = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", state.path());
+        crate::trust::mark_trusted(tmp.path()).unwrap();
+
+        let mut rt = LuaRuntime::new();
+        let trust = rt.load_project_config(tmp.path());
+        assert!(matches!(trust, crate::trust::TrustState::Trusted { .. }));
+        let init_ran: bool = rt.lua.load("return PROJECT_INIT == true").eval().unwrap();
+        let plugin_ran: bool = rt.lua.load("return PROJECT_PLUGIN == true").eval().unwrap();
+        assert!(init_ran, "project init.lua must run after trust");
+        assert!(plugin_ran, "project plugins/*.lua must run after trust");
     }
 
     #[test]

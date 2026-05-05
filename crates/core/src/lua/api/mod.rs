@@ -41,6 +41,7 @@ mod spawn;
 mod task;
 mod timer;
 mod tools;
+mod trust;
 
 use mlua::prelude::*;
 use std::collections::HashMap;
@@ -146,5 +147,6 @@ pub fn register_host_api(
     task::register(lua, smelt, shared)?;
     timer::register(lua, smelt)?;
     tools::register(lua, smelt, shared)?;
+    trust::register(lua, smelt)?;
     Ok(())
 }

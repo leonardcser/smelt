@@ -361,10 +361,18 @@ impl LuaRuntime {
 
     /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
     /// *after* pushing startup snapshots so plugins see populated
-    /// `smelt.engine.models()` etc.
-    pub(crate) fn load_plugins(&mut self) {
-        self.core.load_user_config();
+    /// `smelt.engine.models()` etc. Order: embedded autoload → user
+    /// `init.lua` → global `<config>/plugins/*.lua` → project-local
+    /// `<cwd>/.smelt/{plugins/*.lua,init.lua}` (only when
+    /// [`smelt_core::trust`] reports the project trusted). Returns
+    /// the project trust state so the caller can notify the user
+    /// when project content was skipped.
+    pub(crate) fn load_plugins(&mut self) -> smelt_core::trust::TrustState {
         self.load_autoload();
+        self.core.load_user_config();
+        self.core.load_global_plugins();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        self.core.load_project_config(&cwd)
     }
 
     /// Run embedded autoload plugins only. Call *after* installing
