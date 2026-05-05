@@ -133,6 +133,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
+/// Reserved override keys that map to typed `CommandOverrides` fields.
+/// Anything else becomes a per-tool subpattern bucket in `subcommands`.
+const RESERVED_OVERRIDE_KEYS: &[&str] = &[
+    "description",
+    "provider",
+    "model",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repeat_penalty",
+    "reasoning_effort",
+    "tools",
+];
+
 fn parse_overrides(t: &mlua::Table) -> LuaResult<smelt_core::custom_commands::CommandOverrides> {
     use smelt_core::custom_commands::{CommandOverrides, RuleOverride};
 
@@ -146,6 +161,13 @@ fn parse_overrides(t: &mlua::Table) -> LuaResult<smelt_core::custom_commands::Co
             deny: list(&sub, "deny")?,
         }))
     }
+    fn rule_from(sub: &mlua::Table) -> LuaResult<RuleOverride> {
+        Ok(RuleOverride {
+            allow: list(sub, "allow")?,
+            ask: list(sub, "ask")?,
+            deny: list(sub, "deny")?,
+        })
+    }
     fn list(t: &mlua::Table, key: &str) -> LuaResult<Vec<String>> {
         let Some(v) = t.get::<Option<mlua::Table>>(key)? else {
             return Ok(Vec::new());
@@ -155,6 +177,17 @@ fn parse_overrides(t: &mlua::Table) -> LuaResult<smelt_core::custom_commands::Co
             out.push(pair?);
         }
         Ok(out)
+    }
+
+    let mut subcommands = std::collections::HashMap::new();
+    for pair in t.clone().pairs::<String, mlua::Value>() {
+        let (key, value) = pair?;
+        if RESERVED_OVERRIDE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        if let mlua::Value::Table(sub) = value {
+            subcommands.insert(key, rule_from(&sub)?);
+        }
     }
 
     Ok(CommandOverrides {
@@ -167,7 +200,6 @@ fn parse_overrides(t: &mlua::Table) -> LuaResult<smelt_core::custom_commands::Co
         repeat_penalty: t.get::<Option<f64>>("repeat_penalty")?,
         reasoning_effort: t.get::<Option<String>>("reasoning_effort")?,
         tools: rule(t, "tools")?,
-        bash: rule(t, "bash")?,
-        web_fetch: rule(t, "web_fetch")?,
+        subcommands,
     })
 }

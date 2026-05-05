@@ -115,7 +115,7 @@ smelt.tools.register({
     -- collapses to Ask; otherwise the bash decision wins.
     local tool = smelt.permissions.check_tool(mode, "bash")
     if tool == "deny" then return "deny" end
-    local sub = smelt.permissions.check_bash(mode, args.command or "")
+    local sub = smelt.permissions.check(mode, "bash", args.command or "")
     if sub == "deny" then return "deny" end
     if tool == "allow" and sub == "ask" then return "ask" end
     return sub

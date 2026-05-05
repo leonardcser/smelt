@@ -58,7 +58,7 @@ impl ToolDispatcher for McpDispatcher {
 
     fn is_visible(&self, name: &str, mode: AgentMode) -> bool {
         self.defs.iter().any(|d| d.qualified_name() == name)
-            && self.permissions.check_mcp(mode, name) != protocol::Decision::Deny
+            && self.permissions.check_subcommand(mode, "mcp", name) != protocol::Decision::Deny
     }
 
     fn evaluate_hooks(

@@ -20,13 +20,16 @@ pub struct RawRuleSet {
     pub deny: Vec<String>,
 }
 
+/// Per-mode permission rules. `tools` is the tool-name decision bucket;
+/// `subcommands` is keyed by tool name (`bash`, `web_fetch`, `mcp`,
+/// or any tool that registers one) and carries pattern rulesets the
+/// tool's `decide` callback consults.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct RawModePerms {
     pub tools: RawRuleSet,
-    pub bash: RawRuleSet,
-    pub web_fetch: RawRuleSet,
-    pub mcp: RawRuleSet,
+    #[serde(default)]
+    pub subcommands: HashMap<String, RawRuleSet>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -48,11 +51,26 @@ fn merge_ruleset(default: &RawRuleSet, mode: &RawRuleSet) -> RawRuleSet {
 }
 
 pub(super) fn merge_mode(default: &RawModePerms, mode: &RawModePerms) -> RawModePerms {
+    let mut subcommands: HashMap<String, RawRuleSet> = HashMap::new();
+    let keys: std::collections::HashSet<&String> = default
+        .subcommands
+        .keys()
+        .chain(mode.subcommands.keys())
+        .collect();
+    for key in keys {
+        let d = default.subcommands.get(key);
+        let m = mode.subcommands.get(key);
+        let merged = match (d, m) {
+            (Some(d), Some(m)) => merge_ruleset(d, m),
+            (Some(d), None) => merge_ruleset(d, &RawRuleSet::default()),
+            (None, Some(m)) => merge_ruleset(&RawRuleSet::default(), m),
+            (None, None) => RawRuleSet::default(),
+        };
+        subcommands.insert(key.clone(), merged);
+    }
     RawModePerms {
         tools: merge_ruleset(&default.tools, &mode.tools),
-        bash: merge_ruleset(&default.bash, &mode.bash),
-        web_fetch: merge_ruleset(&default.web_fetch, &mode.web_fetch),
-        mcp: merge_ruleset(&default.mcp, &mode.mcp),
+        subcommands,
     }
 }
 
@@ -63,7 +81,7 @@ pub(crate) struct RawConfig {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RuleSet {
+pub struct RuleSet {
     pub(super) allow: Vec<glob::Pattern>,
     pub(super) ask: Vec<glob::Pattern>,
     pub(super) deny: Vec<glob::Pattern>,
@@ -72,9 +90,7 @@ pub(crate) struct RuleSet {
 #[derive(Debug, Clone)]
 pub(super) struct ModePerms {
     pub(super) tools: HashMap<String, Decision>,
-    pub(super) bash: RuleSet,
-    pub(super) web_fetch: RuleSet,
-    pub(super) mcp: RuleSet,
+    pub(super) subcommands: HashMap<String, RuleSet>,
 }
 
 pub(super) fn compile_patterns(raw: &[String]) -> Vec<glob::Pattern> {
@@ -142,12 +158,14 @@ pub const DEFAULT_BASH_ALLOW: &[&str] = &[
     "strings *",
 ];
 
-pub(super) fn build_mode(raw: &RawModePerms, mode: AgentMode) -> ModePerms {
-    let mut tools = build_tool_map(&raw.tools);
-
+/// Mode defaults: which tool names get allow/ask/deny when neither
+/// the config nor a runtime override speaks. Lives in core (not Lua) so
+/// the engine has reasonable behaviour when no `init.lua` is loaded;
+/// real product UX overrides this via `smelt.permissions.set_rules`.
+fn install_tool_defaults(tools: &mut HashMap<String, Decision>, mode: AgentMode) {
     if mode == AgentMode::Yolo {
-        // Yolo defaults: everything allowed unless explicitly overridden.
-        // Any tool not in the map will also default to Allow via check_tool().
+        // Yolo: everything not explicitly denied → Allow. The catch-all
+        // also lives in `Permissions::check_tool` for unregistered names.
         for name in [
             "read_file",
             "edit_file",
@@ -163,43 +181,43 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: AgentMode) -> ModePerms {
         ] {
             tools.entry(name.to_string()).or_insert(Decision::Allow);
         }
-    } else {
-        // read_file: allow in all non-yolo modes
-        tools
-            .entry("read_file".to_string())
-            .or_insert(Decision::Allow);
-
-        // edit_file: ask in normal/plan, allow in apply
-        let default_edit = if mode == AgentMode::Apply {
-            Decision::Allow
-        } else {
-            Decision::Ask
-        };
-        tools.entry("edit_file".to_string()).or_insert(default_edit);
-
-        // write_file: ask in normal/plan, allow in apply
-        let default_write = if mode == AgentMode::Apply {
-            Decision::Allow
-        } else {
-            Decision::Ask
-        };
-        tools
-            .entry("write_file".to_string())
-            .or_insert(default_write);
-
-        tools.entry("glob".to_string()).or_insert(Decision::Allow);
-        tools.entry("grep".to_string()).or_insert(Decision::Allow);
-        tools
-            .entry("ask_user_question".to_string())
-            .or_insert(Decision::Allow);
+        return;
     }
+    tools
+        .entry("read_file".to_string())
+        .or_insert(Decision::Allow);
+    let default_edit = if mode == AgentMode::Apply {
+        Decision::Allow
+    } else {
+        Decision::Ask
+    };
+    tools.entry("edit_file".to_string()).or_insert(default_edit);
+    let default_write = if mode == AgentMode::Apply {
+        Decision::Allow
+    } else {
+        Decision::Ask
+    };
+    tools
+        .entry("write_file".to_string())
+        .or_insert(default_write);
+    tools.entry("glob".to_string()).or_insert(Decision::Allow);
+    tools.entry("grep".to_string()).or_insert(Decision::Allow);
+    tools
+        .entry("ask_user_question".to_string())
+        .or_insert(Decision::Allow);
+}
 
-    let mut bash_allow = compile_patterns(&raw.bash.allow);
-    if bash_allow.is_empty() {
+/// Compile a raw subpattern bucket into a `RuleSet`. `bucket_name` is
+/// used for bucket-specific defaults: `bash` falls back to
+/// `DEFAULT_BASH_ALLOW` in non-Yolo modes when no allow patterns are
+/// configured; every bucket falls back to `*` in Yolo.
+fn build_subcommand_ruleset(name: &str, raw: &RawRuleSet, mode: AgentMode) -> RuleSet {
+    let mut allow = compile_patterns(&raw.allow);
+    if allow.is_empty() {
         if mode == AgentMode::Yolo {
-            bash_allow = vec![glob::Pattern::new("*").unwrap()];
-        } else {
-            bash_allow = compile_patterns(
+            allow = vec![glob::Pattern::new("*").unwrap()];
+        } else if name == "bash" {
+            allow = compile_patterns(
                 &DEFAULT_BASH_ALLOW
                     .iter()
                     .map(|s| s.to_string())
@@ -207,35 +225,31 @@ pub(super) fn build_mode(raw: &RawModePerms, mode: AgentMode) -> ModePerms {
             );
         }
     }
+    RuleSet {
+        allow,
+        ask: compile_patterns(&raw.ask),
+        deny: compile_patterns(&raw.deny),
+    }
+}
 
-    let mut web_allow = compile_patterns(&raw.web_fetch.allow);
-    if mode == AgentMode::Yolo && web_allow.is_empty() {
-        web_allow = vec![glob::Pattern::new("*").unwrap()];
+pub(super) fn build_mode(raw: &RawModePerms, mode: AgentMode) -> ModePerms {
+    let mut tools = build_tool_map(&raw.tools);
+    install_tool_defaults(&mut tools, mode);
+
+    let mut subcommands: HashMap<String, RuleSet> = HashMap::new();
+    // Ensure bash always has a ruleset so `DEFAULT_BASH_ALLOW` engages
+    // even when no `bash =` block is configured.
+    if !raw.subcommands.contains_key("bash") {
+        subcommands.insert(
+            "bash".to_string(),
+            build_subcommand_ruleset("bash", &RawRuleSet::default(), mode),
+        );
+    }
+    for (name, rs) in &raw.subcommands {
+        subcommands.insert(name.clone(), build_subcommand_ruleset(name, rs, mode));
     }
 
-    let mut mcp_allow = compile_patterns(&raw.mcp.allow);
-    if mode == AgentMode::Yolo && mcp_allow.is_empty() {
-        mcp_allow = vec![glob::Pattern::new("*").unwrap()];
-    }
-
-    ModePerms {
-        tools,
-        bash: RuleSet {
-            allow: bash_allow,
-            ask: compile_patterns(&raw.bash.ask),
-            deny: compile_patterns(&raw.bash.deny),
-        },
-        web_fetch: RuleSet {
-            allow: web_allow,
-            ask: compile_patterns(&raw.web_fetch.ask),
-            deny: compile_patterns(&raw.web_fetch.deny),
-        },
-        mcp: RuleSet {
-            allow: mcp_allow,
-            ask: compile_patterns(&raw.mcp.ask),
-            deny: compile_patterns(&raw.mcp.deny),
-        },
-    }
+    ModePerms { tools, subcommands }
 }
 
 fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {

@@ -70,14 +70,14 @@ pub struct RuleSetOverride {
     pub deny: Vec<String>,
 }
 
-/// Per-turn permission overrides for tools, bash, and web_fetch.
+/// Per-turn permission overrides. `tools` matches tool *names*; every
+/// other entry in `subcommands` is a per-tool subpattern bucket
+/// (`bash`, `web_fetch`, `mcp`, or any tool that registers one).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PermissionOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<RuleSetOverride>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bash: Option<RuleSetOverride>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub web_fetch: Option<RuleSetOverride>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub subcommands: HashMap<String, RuleSetOverride>,
 }

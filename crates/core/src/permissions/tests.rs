@@ -26,13 +26,16 @@ fn empty_ruleset() -> RuleSet {
     }
 }
 
+fn mode_perms(tools: HashMap<String, Decision>, buckets: &[(&str, RuleSet)]) -> ModePerms {
+    let mut subcommands = HashMap::new();
+    for (name, rs) in buckets {
+        subcommands.insert((*name).to_string(), rs.clone());
+    }
+    ModePerms { tools, subcommands }
+}
+
 fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
-    let mode = ModePerms {
-        tools: HashMap::new(),
-        bash: ruleset(allow, ask, deny),
-        web_fetch: empty_ruleset(),
-        mcp: empty_ruleset(),
-    };
+    let mode = mode_perms(HashMap::new(), &[("bash", ruleset(allow, ask, deny))]);
     Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
@@ -64,7 +67,7 @@ fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
             if tool == protocol::Decision::Deny {
                 return Some(protocol::Decision::Deny);
             }
-            let sub = perms_for_hook.check_bash(mode, cmd);
+            let sub = perms_for_hook.check_subcommand(mode, "bash", cmd);
             if sub == protocol::Decision::Deny {
                 return Some(protocol::Decision::Deny);
             }
@@ -79,7 +82,7 @@ fn install_stub_decide_hook(perms: &mut crate::permissions::Permissions) {
             if tool == protocol::Decision::Deny {
                 return Some(protocol::Decision::Deny);
             }
-            let pat = perms_for_hook.check_web_fetch(mode, url);
+            let pat = perms_for_hook.check_subcommand(mode, "web_fetch", url);
             if pat == protocol::Decision::Deny {
                 return Some(protocol::Decision::Deny);
             }
@@ -136,14 +139,14 @@ fn assert_bash(
     expected: Decision,
 ) {
     let p = perms_with_bash(allow, ask, deny);
-    assert_eq!(p.check_bash(mode, cmd), expected);
+    assert_eq!(p.check_subcommand(mode, "bash", cmd), expected);
 }
 
 #[test]
 fn yolo_allows_mcp_by_default() {
     let p = perms_with_bash(&[], &[], &[]);
     assert_eq!(
-        p.check_mcp(AgentMode::Yolo, "filesystem_read_file"),
+        p.check_subcommand(AgentMode::Yolo, "mcp", "filesystem_read_file"),
         Decision::Allow
     );
 }
@@ -152,7 +155,7 @@ fn yolo_allows_mcp_by_default() {
 fn normal_mode_asks_for_mcp_by_default() {
     let p = perms_with_bash(&[], &[], &[]);
     assert_eq!(
-        p.check_mcp(AgentMode::Normal, "filesystem_read_file"),
+        p.check_subcommand(AgentMode::Normal, "mcp", "filesystem_read_file"),
         Decision::Ask
     );
 }
@@ -400,7 +403,7 @@ fn operator_in_quoted_argument() {
     let p = perms_with_bash(&["grep *"], &[], &[]);
     // && inside quotes is not an operator — stays as single command
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"grep "&&" file.txt"#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"grep "&&" file.txt"#),
         Decision::Allow
     );
 }
@@ -410,7 +413,7 @@ fn semicolon_in_echo() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     // shlex sees: ["echo", "hello; world"] — semicolon inside quotes
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"echo "hello; world""#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "hello; world""#),
         Decision::Allow
     );
 }
@@ -420,7 +423,7 @@ fn pipe_in_quoted_filename() {
     let p = perms_with_bash(&["cat *"], &[], &["rm *"]);
     // shlex sees: ["cat", "file|name"] — pipe inside quotes
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"cat "file|name""#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"cat "file|name""#),
         Decision::Allow
     );
 }
@@ -433,7 +436,7 @@ fn single_ampersand_background() {
     // shlex sees: ["sleep", "5", "&", "rm", "foo"]
     // splits to ["sleep 5", "rm foo"] — rm is denied
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "sleep 5 & rm foo"),
+        p.check_subcommand(AgentMode::Normal, "bash", "sleep 5 & rm foo"),
         Decision::Deny
     );
 }
@@ -445,7 +448,7 @@ fn command_substitution() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     // rm inside $() is now extracted and checked
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "echo $(rm -rf /)"),
+        p.check_subcommand(AgentMode::Normal, "bash", "echo $(rm -rf /)"),
         Decision::Deny
     );
 }
@@ -455,7 +458,7 @@ fn backtick_substitution() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     // rm inside backticks is now extracted and checked
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "echo `rm -rf /`"),
+        p.check_subcommand(AgentMode::Normal, "bash", "echo `rm -rf /`"),
         Decision::Deny
     );
 }
@@ -467,7 +470,7 @@ fn newline_separator() {
     let p = perms_with_bash(&["ls *"], &[], &["rm *"]);
     // Newline is now treated as a command separator
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "ls\nrm -rf /"),
+        p.check_subcommand(AgentMode::Normal, "bash", "ls\nrm -rf /"),
         Decision::Deny
     );
 }
@@ -496,7 +499,10 @@ fn leading_operator() {
     let p = perms_with_bash(&["rm *"], &[], &[]);
     // shlex sees: ["&&", "rm", "foo"] → splits to ["rm foo"]
     // single-command path uses original "&& rm foo" which won't match
-    assert_eq!(p.check_bash(AgentMode::Normal, "&& rm foo"), Decision::Ask);
+    assert_eq!(
+        p.check_subcommand(AgentMode::Normal, "bash", "&& rm foo"),
+        Decision::Ask
+    );
 }
 
 #[test]
@@ -552,7 +558,7 @@ fn unclosed_quote() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     // shlex returns None for unclosed quotes — treated as single command
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"echo "hello && rm foo"#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "hello && rm foo"#),
         Decision::Allow
     );
 }
@@ -591,7 +597,7 @@ fn single_quotes_inside_double() {
     // echo "it's fine" && rm foo → two commands
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"echo "it's fine" && rm foo"#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "it's fine" && rm foo"#),
         Decision::Deny
     );
 }
@@ -601,7 +607,7 @@ fn double_quotes_inside_single() {
     // echo '"hello"' && rm foo → two commands
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"echo '"hello"' && rm foo"#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"echo '"hello"' && rm foo"#),
         Decision::Deny
     );
 }
@@ -613,7 +619,7 @@ fn escaped_quote_inside_double_quotes() {
     // echo "he said \"hi\" && rm" is all one quoted string — single command
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"echo "he said \"hi\" && rm""#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "he said \"hi\" && rm""#),
         Decision::Allow
     );
 }
@@ -662,7 +668,10 @@ fn extra_whitespace_around_operators() {
 fn leading_whitespace_single_command() {
     let p = perms_with_bash(&["ls *"], &[], &[]);
     // Input is trimmed before matching, so leading whitespace is fine
-    assert_eq!(p.check_bash(AgentMode::Normal, "  ls -la"), Decision::Allow);
+    assert_eq!(
+        p.check_subcommand(AgentMode::Normal, "bash", "  ls -la"),
+        Decision::Allow
+    );
 }
 
 #[test]
@@ -670,7 +679,7 @@ fn leading_whitespace_chained_command() {
     let p = perms_with_bash(&["ls *", "echo *"], &[], &[]);
     // Multi-command path trims each part, so "ls -la" matches "ls *".
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "  ls -la && echo hi"),
+        p.check_subcommand(AgentMode::Normal, "bash", "  ls -la && echo hi"),
         Decision::Allow
     );
 }
@@ -682,7 +691,7 @@ fn subshell_not_parsed() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     // rm inside (...) subshell is now extracted and checked
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "echo hi && (rm -rf /)"),
+        p.check_subcommand(AgentMode::Normal, "bash", "echo hi && (rm -rf /)"),
         Decision::Deny
     );
 }
@@ -694,7 +703,7 @@ fn subshell_hides_denied_command() {
     // but extract_embedded_commands scans the full command including quotes.
     // The $() is found and rm is extracted → Deny.
     assert_eq!(
-        p.check_bash(AgentMode::Normal, r#"echo "$(rm -rf /)""#),
+        p.check_subcommand(AgentMode::Normal, "bash", r#"echo "$(rm -rf /)""#),
         Decision::Deny
     );
 }
@@ -776,7 +785,10 @@ fn heredoc_permission_check() {
     let p = perms_with_bash(&["cat *", "grep *"], &[], &["rm *"]);
     let cmd = "cat << 'EOF' | grep foo\nrm -rf /\nEOF";
     // "rm -rf /" is heredoc content, not a command — should not be denied
-    assert_eq!(p.check_bash(AgentMode::Normal, cmd), Decision::Allow);
+    assert_eq!(
+        p.check_subcommand(AgentMode::Normal, "bash", cmd),
+        Decision::Allow
+    );
 }
 
 // --- 2>&1 not split on & ---
@@ -820,25 +832,24 @@ fn newline_treated_as_separator() {
 // ── workspace restriction ────────────────────────────────────────
 
 fn perms_with_workspace(workspace: &str) -> Permissions {
-    let mode = ModePerms {
-        tools: {
-            let mut m = HashMap::new();
-            m.insert("read_file".to_string(), Decision::Allow);
-            m.insert("write_file".to_string(), Decision::Allow);
-            m.insert("edit_file".to_string(), Decision::Allow);
-            m.insert("glob".to_string(), Decision::Allow);
-            m.insert("grep".to_string(), Decision::Allow);
-            m.insert("bash".to_string(), Decision::Allow);
-            m
-        },
-        bash: RuleSet {
-            allow: vec![glob::Pattern::new("*").unwrap()],
-            ask: vec![],
-            deny: vec![],
-        },
-        web_fetch: empty_ruleset(),
-        mcp: empty_ruleset(),
-    };
+    let mut tools = HashMap::new();
+    tools.insert("read_file".to_string(), Decision::Allow);
+    tools.insert("write_file".to_string(), Decision::Allow);
+    tools.insert("edit_file".to_string(), Decision::Allow);
+    tools.insert("glob".to_string(), Decision::Allow);
+    tools.insert("grep".to_string(), Decision::Allow);
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(
+        tools,
+        &[(
+            "bash",
+            RuleSet {
+                allow: vec![glob::Pattern::new("*").unwrap()],
+                ask: vec![],
+                deny: vec![],
+            },
+        )],
+    );
     let mut p = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
@@ -1086,7 +1097,10 @@ fn yolo_unknown_tool_defaults_allow() {
 #[test]
 fn yolo_bash_allows_everything_by_default() {
     let p = Permissions::load();
-    assert_eq!(p.check_bash(AgentMode::Yolo, "rm -rf /"), Decision::Allow);
+    assert_eq!(
+        p.check_subcommand(AgentMode::Yolo, "bash", "rm -rf /"),
+        Decision::Allow
+    );
 }
 
 #[test]
@@ -1215,7 +1229,7 @@ fn auto_allowed_with_output_redirect_escalates_to_ask() {
     // cat * is in the default allowlist, but with > it should ask
     let p = perms_with_bash(&["cat *"], &[], &[]);
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "cat file.txt > output.txt"),
+        p.check_subcommand(AgentMode::Normal, "bash", "cat file.txt > output.txt"),
         Decision::Ask
     );
 }
@@ -1237,7 +1251,10 @@ fn auto_allowed_heredoc_with_redirect_escalates_to_ask() {
     // cat << 'EOF' > file.txt matches cat * but has output redirection
     let p = perms_with_bash(&["cat *"], &[], &[]);
     let cmd = "cat << 'EOF' > long_file.txt\nhello\nworld\nEOF";
-    assert_eq!(p.check_bash(AgentMode::Normal, cmd), Decision::Ask);
+    assert_eq!(
+        p.check_subcommand(AgentMode::Normal, "bash", cmd),
+        Decision::Ask
+    );
 }
 
 #[test]
@@ -1245,7 +1262,7 @@ fn auto_allowed_no_redirect_stays_allow() {
     // Without redirection, cat * should still be allowed
     let p = perms_with_bash(&["cat *"], &[], &[]);
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "cat file.txt"),
+        p.check_subcommand(AgentMode::Normal, "bash", "cat file.txt"),
         Decision::Allow
     );
 }
@@ -1255,7 +1272,7 @@ fn chained_command_with_redirect_escalates() {
     let p = perms_with_bash(&["ls *", "cat *"], &[], &[]);
     // ls is allowed, cat with redirect should escalate
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "ls -la && cat file > out.txt"),
+        p.check_subcommand(AgentMode::Normal, "bash", "ls -la && cat file > out.txt"),
         Decision::Ask
     );
 }
@@ -1265,7 +1282,7 @@ fn pipe_with_output_redirect_escalates() {
     let p = perms_with_bash(&["cat *", "grep *"], &[], &[]);
     // pipe is allowed, but output redirect at end should escalate
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "cat file | grep foo > out.txt"),
+        p.check_subcommand(AgentMode::Normal, "bash", "cat file | grep foo > out.txt"),
         Decision::Ask
     );
 }
@@ -1275,7 +1292,7 @@ fn denied_command_with_redirect_stays_deny() {
     let p = perms_with_bash(&[], &[], &["rm *"]);
     // rm is denied regardless of redirection
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "rm file.txt > /dev/null"),
+        p.check_subcommand(AgentMode::Normal, "bash", "rm file.txt > /dev/null"),
         Decision::Deny
     );
 }
@@ -1298,16 +1315,9 @@ fn broad_allow_still_works_for_non_specific() {
 
 #[test]
 fn bash_tool_allow_pattern_ask() {
-    let mode = ModePerms {
-        tools: {
-            let mut m = HashMap::new();
-            m.insert("bash".to_string(), Decision::Allow);
-            m
-        },
-        bash: ruleset(&[], &["git push *"], &[]),
-        web_fetch: empty_ruleset(),
-        mcp: empty_ruleset(),
-    };
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", ruleset(&[], &["git push *"], &[]))]);
     let mut perms = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
@@ -1330,16 +1340,9 @@ fn bash_tool_allow_pattern_ask() {
 
 #[test]
 fn override_tightens_allow_to_ask() {
-    let mode = ModePerms {
-        tools: {
-            let mut m = HashMap::new();
-            m.insert("bash".to_string(), Decision::Allow);
-            m
-        },
-        bash: empty_ruleset(),
-        web_fetch: empty_ruleset(),
-        mcp: empty_ruleset(),
-    };
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", empty_ruleset())]);
     let mut perms = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
@@ -1357,8 +1360,7 @@ fn override_tightens_allow_to_ask() {
             ask: vec!["bash".to_string()],
             deny: vec![],
         }),
-        bash: None,
-        web_fetch: None,
+        subcommands: std::collections::HashMap::new(),
     };
     let tightened = perms.with_overrides(&overrides);
     assert_eq!(tightened.check_tool(AgentMode::Yolo, "bash"), Decision::Ask);
@@ -1381,7 +1383,7 @@ fn cd_in_chain_does_not_escalate() {
     // cd should not contribute to the worst decision; only ls matters
     let p = perms_with_bash(&["ls *"], &[], &[]);
     assert_eq!(
-        p.check_bash(AgentMode::Normal, "cd /tmp && ls -la"),
+        p.check_subcommand(AgentMode::Normal, "bash", "cd /tmp && ls -la"),
         Decision::Allow
     );
 }
@@ -1591,30 +1593,29 @@ fn dirs_approved_multiple_paths_one_uncovered() {
 // --- tilde normalization in is_auto_approved ---
 
 fn perms_with_workspace_default_bash(workspace: &str) -> Permissions {
-    let mode = ModePerms {
-        tools: {
-            let mut m = HashMap::new();
-            m.insert("read_file".to_string(), Decision::Allow);
-            m.insert("write_file".to_string(), Decision::Allow);
-            m.insert("edit_file".to_string(), Decision::Allow);
-            m.insert("glob".to_string(), Decision::Allow);
-            m.insert("grep".to_string(), Decision::Allow);
-            m.insert("bash".to_string(), Decision::Allow);
-            m
-        },
-        bash: RuleSet {
-            allow: compile_patterns(
-                &DEFAULT_BASH_ALLOW
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>(),
-            ),
-            ask: vec![],
-            deny: vec![],
-        },
-        web_fetch: empty_ruleset(),
-        mcp: empty_ruleset(),
-    };
+    let mut tools = HashMap::new();
+    tools.insert("read_file".to_string(), Decision::Allow);
+    tools.insert("write_file".to_string(), Decision::Allow);
+    tools.insert("edit_file".to_string(), Decision::Allow);
+    tools.insert("glob".to_string(), Decision::Allow);
+    tools.insert("grep".to_string(), Decision::Allow);
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(
+        tools,
+        &[(
+            "bash",
+            RuleSet {
+                allow: compile_patterns(
+                    &DEFAULT_BASH_ALLOW
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                ask: vec![],
+                deny: vec![],
+            },
+        )],
+    );
     let mut p = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),

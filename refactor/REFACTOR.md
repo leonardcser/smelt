@@ -316,15 +316,17 @@ Status table + open sub-phase sketches + decisions + deferrals in
   `copy_range(buf, range)` primitive replaces the divergent paths.
   Mandated by P10 entry conditions — open work, not deferred.
   See `P9.md` § P9.c.
-- **P9.d** 🚧 — **Tool name matches deleted from shared Rust.**
-  Most landed (`decide_base` bash/web_fetch, `ActiveTool::elapsed`,
-  `agent.rs` cmd_summary, `extract_tool_paths`, `confirm.rs::is_bash`,
-  statusline glyph map). Closeout owes: `is_auto_approved` bash
-  branch, `RawModePerms` field hardcoding, `RuleOverride` /
-  `CommandOverrides` struct buckets, `set_rules` parser buckets,
-  and decide-callback collapse (`decide` + `needs_confirm` +
-  `approval_patterns` → one returning-decision callback). See
-  `P9.md` § P9.d.
+- **P9.d** 🚧 closeout — **Tool name matches deleted from shared
+  Rust.** Mostly landed (`decide_base` bash/web_fetch,
+  `ActiveTool::elapsed`, `agent.rs` cmd_summary,
+  `extract_tool_paths`, `confirm.rs::is_bash`, statusline glyph
+  map). In-flight closeout collapses every remaining hardcoded
+  `bash` / `web_fetch` / `mcp` field into a generic
+  `subcommands: HashMap<String, _>` shape across `RawModePerms`,
+  `RuleOverride`, `PermissionOverrides`, the Lua `set_rules` parser,
+  and `is_auto_approved`. `smelt.permissions.check_bash` /
+  `check_web_fetch` / `check_mcp` retire — replaced by generic
+  `smelt.permissions.check(mode, tool_name, value)`.
 - **P9.e** ✅ — **HlGroup-id model.** Buffer extmarks carry
   `HlGroup(u32)` ids; theme resolves at paint via
   `Theme::resolve(hl)`. Theme switches mutate `Theme.styles[id]`
@@ -400,6 +402,15 @@ Status table + open sub-phase sketches + decisions + deferrals in
   collapses to field access via metatable
   (`smelt.settings.vim = true` reads/writes/iterates; unknown keys
   error at the access site).
+- **P9.r** 📝 — **Tool render returns `LayoutTree<BufId>`.** Single
+  render callback per tool returning a layout tree of Buffers; tool
+  composes its own block layout. Drops `render_summary` /
+  `render_subhead` / `header_suffix` / `elapsed_visible` callbacks.
+  Same primitive (`LayoutTree`) dialogs and overlays already use.
+  `LayoutTree` gains a `Leaf(BufId)` variant; `BlockBufferCache`
+  extends to per-leaf caching; live updates flow via cells, not
+  callbacks. `preview` stays separate (different surface). ~250 LOC.
+  See `P9.md` § P9.r.
 
 ---
 

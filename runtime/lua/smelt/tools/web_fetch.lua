@@ -250,7 +250,7 @@ smelt.tools.register({
     -- tool collapses to Ask. Otherwise the URL pattern decision wins.
     local tool = smelt.permissions.check_tool(mode, "web_fetch")
     if tool == "deny" then return "deny" end
-    local pat = smelt.permissions.check_web_fetch(mode, args.url or "")
+    local pat = smelt.permissions.check(mode, "web_fetch", args.url or "")
     if pat == "deny" then return "deny" end
     if pat == "allow" then return "allow" end
     if tool == "allow" and pat == "ask" then return "ask" end

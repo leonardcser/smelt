@@ -150,15 +150,25 @@ local function file_desc(path)
   return ""
 end
 
+-- Reserved keys that map to typed CommandOverrides fields. Anything
+-- else under the frontmatter that's a sub-table becomes a per-tool
+-- subpattern bucket (`bash`, `web_fetch`, `mcp`, plus any custom
+-- tool that registers one).
+local RESERVED = {
+  description = true, provider = true, model = true, temperature = true,
+  top_p = true, top_k = true, min_p = true, repeat_penalty = true,
+  reasoning_effort = true, tools = true,
+}
+
 local function build_overrides(fm)
   if not fm then return nil end
   local out = {}
-  for _, k in ipairs({
-    "description", "provider", "model", "temperature", "top_p",
-    "top_k", "min_p", "repeat_penalty", "reasoning_effort",
-    "tools", "bash", "web_fetch",
-  }) do
-    if fm[k] ~= nil then out[k] = fm[k] end
+  for k, v in pairs(fm) do
+    if RESERVED[k] then
+      out[k] = v
+    elseif type(v) == "table" then
+      out[k] = v
+    end
   end
   return out
 end

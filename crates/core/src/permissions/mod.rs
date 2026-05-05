@@ -23,7 +23,6 @@ mod tests;
 pub use approvals::RuntimeApprovals;
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use protocol::Decision;
-use rules::RuleSet;
 pub use rules::DEFAULT_BASH_ALLOW;
 
 use bash::{has_output_redirection, is_cd_command};
@@ -31,7 +30,7 @@ use bash::{has_output_redirection, is_cd_command};
 use protocol::AgentMode;
 #[cfg(test)]
 use rules::compile_patterns;
-use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerms};
+use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerms, RuleSet};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -135,27 +134,21 @@ impl Permissions {
                     mode.tools.insert(name.clone(), Decision::Deny);
                 }
             }
-            if let Some(ref bash) = overrides.bash {
-                let mut allow = compile_patterns(&bash.allow);
-                allow.append(&mut mode.bash.allow);
-                mode.bash.allow = allow;
-                let mut ask = compile_patterns(&bash.ask);
-                ask.append(&mut mode.bash.ask);
-                mode.bash.ask = ask;
-                let mut deny = compile_patterns(&bash.deny);
-                deny.append(&mut mode.bash.deny);
-                mode.bash.deny = deny;
-            }
-            if let Some(ref wf) = overrides.web_fetch {
-                let mut allow = compile_patterns(&wf.allow);
-                allow.append(&mut mode.web_fetch.allow);
-                mode.web_fetch.allow = allow;
-                let mut ask = compile_patterns(&wf.ask);
-                ask.append(&mut mode.web_fetch.ask);
-                mode.web_fetch.ask = ask;
-                let mut deny = compile_patterns(&wf.deny);
-                deny.append(&mut mode.web_fetch.deny);
-                mode.web_fetch.deny = deny;
+            for (bucket, rs) in &overrides.subcommands {
+                let entry = mode.subcommands.entry(bucket.clone()).or_insert(RuleSet {
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                });
+                let mut allow = compile_patterns(&rs.allow);
+                allow.append(&mut entry.allow);
+                entry.allow = allow;
+                let mut ask = compile_patterns(&rs.ask);
+                ask.append(&mut entry.ask);
+                entry.ask = ask;
+                let mut deny = compile_patterns(&rs.deny);
+                deny.append(&mut entry.deny);
+                entry.deny = deny;
             }
         }
         apply_to_mode(&mut cloned.normal, overrides);
@@ -226,19 +219,34 @@ impl Permissions {
         perms.tools.get(tool_name).cloned().unwrap_or(default)
     }
 
-    /// Check a URL against the `web_fetch` ruleset of `mode`. Owned by
-    /// the tool's `decide` Lua callback (`tools/web_fetch.lua`); the
-    /// engine never reaches this directly.
-    pub fn check_web_fetch(&self, mode: AgentMode, url: &str) -> Decision {
-        check_ruleset(&self.mode_perms(mode).web_fetch, url)
+    /// Look up a per-tool subpattern ruleset for the given mode. Tools
+    /// register subpattern buckets via `smelt.permissions.set_rules`
+    /// (`bash`, `web_fetch`, `mcp`, plus any custom-named tool); each
+    /// is consulted by the tool's own `decide` Lua callback through
+    /// [`Permissions::check_subcommand`].
+    pub fn subcommand_ruleset(&self, mode: AgentMode, bucket: &str) -> Option<&RuleSet> {
+        self.mode_perms(mode).subcommands.get(bucket)
     }
 
-    /// Check permission for an MCP tool call. Matches the qualified tool name
-    /// (e.g. `filesystem_read_file`) against glob patterns in the `mcp` ruleset.
-    /// Defaults to Allow in yolo mode, Ask otherwise, if no pattern matches.
-    pub fn check_mcp(&self, mode: AgentMode, qualified_name: &str) -> Decision {
-        let perms = self.mode_perms(mode);
-        let decision = check_ruleset(&perms.mcp, qualified_name);
+    /// Check a value against a tool's subpattern ruleset for the given
+    /// mode. `bucket` is the tool name. Special-cases:
+    /// - `bash`: splits on shell operators and folds per-subcommand.
+    /// - everything else: simple glob match against the value.
+    ///
+    /// Returns `Decision::Ask` (or Allow in Yolo) when no bucket is
+    /// registered.
+    pub fn check_subcommand(&self, mode: AgentMode, bucket: &str, value: &str) -> Decision {
+        let Some(rs) = self.subcommand_ruleset(mode, bucket) else {
+            return if mode == AgentMode::Yolo {
+                Decision::Allow
+            } else {
+                Decision::Ask
+            };
+        };
+        if bucket == "bash" {
+            return check_bash_against(rs, value, mode);
+        }
+        let decision = check_ruleset(rs, value);
         if decision == Decision::Ask && mode == AgentMode::Yolo {
             Decision::Allow
         } else {
@@ -246,48 +254,9 @@ impl Permissions {
         }
     }
 
-    pub fn check_bash(&self, mode: AgentMode, command: &str) -> Decision {
-        let perms = self.mode_perms(mode);
-        let command = command.trim();
-        // Escalate output redirection only in Normal/Plan modes.
-        let escalate_redirect = matches!(mode, AgentMode::Normal | AgentMode::Plan);
-        let subcmds = split_shell_commands(command);
-        if subcmds.len() <= 1 {
-            if is_cd_command(command) {
-                return Decision::Allow;
-            }
-            let d = check_ruleset(&perms.bash, command);
-            if escalate_redirect && d == Decision::Allow && has_output_redirection(command) {
-                return Decision::Ask;
-            }
-            return d;
-        }
-        let mut worst = Decision::Allow;
-        for subcmd in subcmds {
-            // `cd` is always allowed at the command level; the workspace
-            // path restriction in `decide()` handles outside-workspace paths.
-            if is_cd_command(&subcmd) {
-                continue;
-            }
-            let d = check_ruleset(&perms.bash, &subcmd);
-            let d = if escalate_redirect && d == Decision::Allow && has_output_redirection(&subcmd)
-            {
-                Decision::Ask
-            } else {
-                d
-            };
-            match d {
-                Decision::Deny => return Decision::Deny,
-                Decision::Ask if worst == Decision::Allow => worst = Decision::Ask,
-                _ => {}
-            }
-        }
-        worst
-    }
-
     /// Full permission decision for a tool call, including workspace restriction.
-    /// When `is_mcp` is true, routes through the MCP ruleset instead of the
-    /// normal tool/bash/web_fetch rulesets.
+    /// When `is_mcp` is true, routes through the `mcp` subpattern bucket
+    /// instead of the generic `check_tool` path.
     pub fn decide(
         &self,
         mode: AgentMode,
@@ -296,7 +265,7 @@ impl Permissions {
         is_mcp: bool,
     ) -> Decision {
         let base = if is_mcp {
-            self.check_mcp(mode, tool_name)
+            self.check_subcommand(mode, "mcp", tool_name)
         } else {
             decide_base(self, mode, tool_name, args)
         };
@@ -323,14 +292,6 @@ impl Permissions {
             && self.restrict_to_workspace
             && !self.workspace.as_os_str().is_empty()
             && any_outside_workspace(&self.paths_for_tool(tool_name, args), &self.workspace)
-    }
-
-    /// Return paths from a tool call that fall outside the workspace.
-    /// Empty if `restrict_to_workspace` is off or no paths escape.
-    /// Get the bash ruleset for the given mode (used by RuntimeApprovals
-    /// to check per-subcommand config decisions).
-    pub(crate) fn bash_ruleset(&self, mode: AgentMode) -> &RuleSet {
-        &self.mode_perms(mode).bash
     }
 
     pub fn outside_workspace_paths(
@@ -360,4 +321,42 @@ fn decide_base(
         return d;
     }
     permissions.check_tool(mode, tool_name)
+}
+
+/// Bash-aware ruleset matching: splits on shell operators, folds per
+/// subcommand to the worst decision, escalates output redirection in
+/// Normal/Plan, and trusts `cd` unconditionally (workspace restriction
+/// in [`Permissions::decide`] still rejects outside-workspace paths).
+fn check_bash_against(rs: &RuleSet, command: &str, mode: AgentMode) -> Decision {
+    let command = command.trim();
+    let escalate_redirect = matches!(mode, AgentMode::Normal | AgentMode::Plan);
+    let subcmds = split_shell_commands(command);
+    if subcmds.len() <= 1 {
+        if is_cd_command(command) {
+            return Decision::Allow;
+        }
+        let d = check_ruleset(rs, command);
+        if escalate_redirect && d == Decision::Allow && has_output_redirection(command) {
+            return Decision::Ask;
+        }
+        return d;
+    }
+    let mut worst = Decision::Allow;
+    for subcmd in subcmds {
+        if is_cd_command(&subcmd) {
+            continue;
+        }
+        let d = check_ruleset(rs, &subcmd);
+        let d = if escalate_redirect && d == Decision::Allow && has_output_redirection(&subcmd) {
+            Decision::Ask
+        } else {
+            d
+        };
+        match d {
+            Decision::Deny => return Decision::Deny,
+            Decision::Ask if worst == Decision::Allow => worst = Decision::Ask,
+            _ => {}
+        }
+    }
+    worst
 }
