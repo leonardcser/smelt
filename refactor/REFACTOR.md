@@ -341,10 +341,11 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   user folder. Existing `commands/*.md` markdown commands keep
   loading via the autoloaded `custom_commands.lua` plugin (extended
   to scan project-local once trust clears).
-- **P9.h** ⏸ — **Cell `(new, old)` payload.** Cells store `prev`;
-  subscribers fire `fn(new, old)`. ~40 LOC. Other hook-surface
-  ideas (typed names, more event cells, prompt-section deps,
-  stale-task tagging) deferred until a real consumer needs them.
+- **P9.h** ✅ — **Cell `(new, old)` payload.** Cells store `prev`;
+  subscribers fire `fn(new, old)`, glob subscribers fire
+  `fn(name, new, old)`. Other hook-surface ideas (typed names, more
+  event cells, prompt-section deps, stale-task tagging) deferred
+  until a real consumer needs them.
 - **P9.i** ⏸ — **Provider middleware.** Neutral `ProviderRequest` /
   `ProviderResponse` between `EngineClient` and the kind-specific
   serializers; `EngineClient` carries `Vec<Box<dyn ProviderMiddleware>>`

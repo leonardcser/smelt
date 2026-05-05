@@ -59,9 +59,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         )?,
     )?;
 
-    // `smelt.cell.subscribe(name, fn)` registers a Lua callback to
+    // `smelt.cell.subscribe(name, fn)` registers `fn(new, old)` to
     // fire each time `name` is `set`. Returns the subscription id
     // `unsubscribe` accepts, or `nil` when `name` isn't declared.
+    // The trailing `old` argument is the value the cell held just
+    // before the publish (the initial value on the first publish).
     cell_tbl.set(
         "subscribe",
         lua.create_function(
@@ -93,7 +95,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
-    // `smelt.cell:glob_subscribe(pattern, fn)` fires `fn(name, value)`
+    // `smelt.cell:glob_subscribe(pattern, fn)` fires `fn(name, new, old)`
     // for every cell whose name matches the glob pattern. Returns the
     // id `glob_unsubscribe` accepts. Errors when `pattern` is not a
     // valid glob.
