@@ -93,6 +93,43 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         })
         .unwrap_or(false)
     }
+
+    fn render_subhead(
+        &self,
+        name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        _width: usize,
+        out: &mut SpanCollector,
+    ) -> u16 {
+        crate::lua::app_ref::try_with_app(|app| {
+            if !app.lua.tool_has_render_subhead(name) {
+                return 0u16;
+            }
+            let buf_id = app.ui.buf_create(crate::ui::BufCreateOpts::default());
+            let ok = app.lua.render_tool_subhead(name, args, buf_id.0);
+            if !ok {
+                let _ = app.ui.buf_destroy(buf_id);
+                return 0;
+            }
+            let Some(buf) = app.ui.buf_destroy(buf_id) else {
+                return 0;
+            };
+            let n = buf.line_count();
+            crate::content::to_buffer::replay_buffer_into(&buf, out);
+            n as u16
+        })
+        .unwrap_or(0)
+    }
+
+    fn header_suffix(
+        &self,
+        name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        status: &str,
+    ) -> Option<String> {
+        crate::lua::app_ref::try_with_app(|app| app.lua.tool_header_suffix(name, args, status))
+            .flatten()
+    }
 }
 
 pub(crate) struct TranscriptData {

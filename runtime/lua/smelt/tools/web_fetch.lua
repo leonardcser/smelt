@@ -238,6 +238,11 @@ smelt.tools.register({
   render = function(args, output, width, buf)
     smelt.text.render(buf, output.content, { is_error = output.is_error })
   end,
+  render_subhead = function(buf, args)
+    if args.prompt and args.prompt ~= "" then
+      smelt.text.render(buf, args.prompt)
+    end
+  end,
   execute = function(args)
     local raw = fetch_raw(args)
     if type(raw) == "table" and raw.is_error then return raw end

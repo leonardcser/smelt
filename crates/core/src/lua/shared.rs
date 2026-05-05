@@ -47,6 +47,8 @@ pub struct ToolHandles {
     pub preflight: Option<LuaHandle>,
     pub render: Option<LuaHandle>,
     pub render_summary: Option<LuaHandle>,
+    pub render_subhead: Option<LuaHandle>,
+    pub header_suffix: Option<LuaHandle>,
 }
 
 /// All shared state between Lua closures and the app loop.

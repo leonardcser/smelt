@@ -15,6 +15,18 @@ local function basename(s)
   return s:match("([^/]+)$") or s
 end
 
+local function format_duration(secs)
+  if secs < 60 then
+    return string.format("%ds", secs)
+  elseif secs < 3600 then
+    return string.format("%dm %ds", secs // 60, secs % 60)
+  else
+    local h = secs // 3600
+    local rest = secs % 3600
+    return string.format("%dh %dm %ds", h, rest // 60, rest % 60)
+  end
+end
+
 function M.approval_patterns(args)
   local cmd = args.command or ""
   local subs = smelt.shell.split(cmd)
@@ -87,6 +99,12 @@ smelt.tools.register({
   end,
   render_summary = function(buf, line, args)
     smelt.bash.render_line(buf, line)
+  end,
+  header_suffix = function(args, ctx)
+    if ctx.status ~= "pending" then return nil end
+    local ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
+    local secs = math.floor(ms / 1000)
+    return "timeout: " .. format_duration(secs)
   end,
   execute = M.execute,
 })

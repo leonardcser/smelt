@@ -26,16 +26,14 @@ pub(super) fn render_tool(
     } else {
         None
     };
-    let tl = if name == "bash" && status == ToolStatus::Pending {
-        let ms = args
-            .get("timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(120_000);
-        let secs = ms / 1000;
-        Some(format!("timeout: {}", format_duration(secs)))
-    } else {
-        None
+    let status_label = match status {
+        ToolStatus::Pending => "pending",
+        ToolStatus::Ok => "ok",
+        ToolStatus::Err => "err",
+        ToolStatus::Denied => "denied",
+        ToolStatus::Confirm => "confirm",
     };
+    let tl = renderer.and_then(|r| r.header_suffix(name, args, status_label));
     let mut rows = print_tool_line(
         out,
         name,
@@ -47,18 +45,8 @@ pub(super) fn render_tool(
         width,
         renderer,
     );
-    if name == "web_fetch" {
-        if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
-            let segs = wrap_line(prompt, width.saturating_sub(3));
-            if segs.len() > 1 {
-                out.mark_wrapped();
-            }
-            for seg in &segs {
-                print_dim(out, &format!("  {}", seg));
-                out.newline();
-                rows += 1;
-            }
-        }
+    if let Some(r) = renderer {
+        rows += r.render_subhead(name, args, width, out);
     }
     if let Some(msg) = user_message {
         print_dim(out, &format!("  {msg}"));

@@ -62,6 +62,32 @@ pub trait ToolBodyRenderer: Send + Sync {
     ) -> bool {
         false
     }
+
+    /// Paint zero or more rows below the summary line (e.g. `web_fetch`
+    /// renders the prompt as a dim wrapped subline). Returns the row
+    /// count painted. Default `0`.
+    fn render_subhead(
+        &self,
+        _name: &str,
+        _args: &HashMap<String, serde_json::Value>,
+        _width: usize,
+        _out: &mut SpanCollector,
+    ) -> u16 {
+        0
+    }
+
+    /// Optional dim-styled badge painted in the row-0 suffix slot
+    /// (between the elapsed-time pill and the line break). `bash` uses
+    /// it for `(timeout: 2m)` while the command is pending. `status`
+    /// is the lowercase tool status (`"pending" | "ok" | …`).
+    fn header_suffix(
+        &self,
+        _name: &str,
+        _args: &HashMap<String, serde_json::Value>,
+        _status: &str,
+    ) -> Option<String> {
+        None
+    }
 }
 
 /// Simple heuristic: does this look like a `/command` line?

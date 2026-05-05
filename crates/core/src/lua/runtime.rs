@@ -645,6 +645,94 @@ impl LuaRuntime {
         true
     }
 
+    pub fn tool_has_render_subhead(&self, tool_name: &str) -> bool {
+        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+        handlers
+            .get(tool_name)
+            .is_some_and(|h| h.render_subhead.is_some())
+    }
+
+    /// Run a tool's `render_subhead` callback against the buffer named
+    /// by `buf_id`. The callback paints arbitrary rows below the
+    /// summary line (e.g. `web_fetch`'s prompt subline). Returns `true`
+    /// iff the callback ran successfully.
+    pub fn render_tool_subhead(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        buf_id: u64,
+    ) -> bool {
+        let render_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return false;
+            };
+            let Some(rh) = h.render_subhead.as_ref() else {
+                return false;
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return false,
+            }
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool render_subhead: build args: {e}"));
+                return false;
+            }
+        };
+
+        if let Err(e) = render_fn.call::<()>((buf_id, args_table)) {
+            self.record_error(format!("tool render_subhead `{tool_name}`: {e}"));
+            return false;
+        }
+        true
+    }
+
+    /// Call a tool's `header_suffix(args, ctx)` callback, if registered.
+    /// Returns the optional decoration string painted in the row-0 suffix
+    /// area (after the elapsed time slot). `ctx.status` is one of
+    /// `"pending" | "ok" | "err" | "denied" | "confirm"` so the tool can
+    /// branch on lifecycle (e.g. `bash` only emits `(timeout: 2m)` while
+    /// pending).
+    pub fn tool_header_suffix(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        status: &str,
+    ) -> Option<String> {
+        let func = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let h = handlers.get(tool_name)?;
+            let rh = h.header_suffix.as_ref()?;
+            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
+        };
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool header_suffix: build args: {e}"));
+                return None;
+            }
+        };
+        let ctx = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool header_suffix: build ctx: {e}"));
+                return None;
+            }
+        };
+        let _ = ctx.set("status", status);
+        match func.call::<Option<String>>((args_table, ctx)) {
+            Ok(s) => s,
+            Err(e) => {
+                self.record_error(format!("tool header_suffix `{tool_name}`: {e}"));
+                None
+            }
+        }
+    }
+
     pub fn tool_summary(
         &self,
         tool_name: &str,
