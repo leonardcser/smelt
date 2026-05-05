@@ -124,6 +124,12 @@ pub struct ToolHooks {
     /// Used when `decision == Ask`.
     #[serde(default)]
     pub approval_patterns: Vec<String>,
+    /// One-line human summary of this invocation. Comes from the
+    /// tool's `summary(args)` Lua callback. Used by the confirm
+    /// dialog header and the engine's `RequestPermission.summary`
+    /// — the engine never extracts arg fields by tool name.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// Events emitted by the engine. The UI consumes these to update its display.

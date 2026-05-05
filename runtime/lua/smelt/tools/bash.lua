@@ -77,6 +77,10 @@ smelt.tools.register({
   },
   needs_confirm = function(args) return args.command or "" end,
   approval_patterns = M.approval_patterns,
+  summary = function(args)
+    local d = args.description or ""
+    return d ~= "" and d or nil
+  end,
   render = function(args, output, width, buf)
     smelt.text.render(buf, output.content, { is_error = output.is_error })
   end,

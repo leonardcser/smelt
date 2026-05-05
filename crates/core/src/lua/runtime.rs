@@ -673,6 +673,11 @@ impl LuaRuntime {
             }
         }
 
+        let summary = self.tool_summary(tool_name, args);
+        if !summary.is_empty() {
+            out.summary = Some(summary);
+        }
+
         out
     }
 
