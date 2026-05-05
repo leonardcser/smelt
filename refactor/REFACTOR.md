@@ -316,13 +316,20 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   `BlockHistory.artifacts` deletes. Width-independent parsing moves to
   ingest time as namespaced extmarks. Pulls in: prompt wrap
   unification, copy/yank unification, responsive-bar dedup.
-- **P9.d** ⏸ — **De-Rustify Lua concerns.** Tool registration grows
-  `summary(args)`, `render(buf, args, output, width)`,
-  `paths_for_workspace(args)`, `elapsed_visible` callbacks. Engine
-  drops `if name == "bash"` cmd_summary; permission-workspace path
-  extraction queries Lua tools; mode icons / labels move to
-  `modes.lua`; confirm title composes in Lua. Eternal rule: **no
-  tool/command/dialog name matching in Rust.**
+- **P9.d** ⏸ — **Tool hook owns the decision.** The five
+  `tool_name == "bash" | "web_fetch"` matches in `permissions/`,
+  `agent.rs`, and `transcript_model.rs` are one architectural
+  mistake. Fix: tool's `hooks(args, mode, ctx)` returns
+  `{ decision, summary?, confirm_message?, approval_patterns?,
+  paths_outside_workspace? }` and Rust honors it. `needs_confirm +
+  approval_patterns + preflight` collapse into `hooks`. Permission
+  rules in Rust become a passive store queried via Lua helpers.
+  Deletes `decide_base`, `extract_tool_paths`, `is_auto_approved`
+  bash branch, `ActiveTool::elapsed` match, `agent.rs` cmd_summary
+  branches, `confirm.rs::is_bash`, `statusline` mode→glyph map,
+  `dialogs/confirm.lua::fill_preview` (→ `tool.preview`). Eternal
+  rule extends to Lua dispatch: **no tool/command/dialog/mode name
+  matching anywhere shared.**
 - **P9.e** ⏸ — **HlGroup-id model.** Buffer extmarks carry semantic
   `HlGroup(u32)` instead of raw `Style` / `Color`. Theme is the
   paint-time resolver. Theme switches stop rewriting buffers. `Color`
@@ -361,6 +368,12 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   protocol; agent loop runs all tools sequentially. Read-only tools
   (`read_file`, `glob`, `grep`, `web_fetch`, `web_search`) marked
   `Parallel` get `tokio::join_all`.
+- **P9.l** ⏸ — **Embedded Lua tree.** `EMBEDDED_MODULES` (140
+  lines) + `BOOTSTRAP_CHUNKS` (~30) + `AUTOLOAD_MODULES` (~30)
+  collapse to one `include_dir!("runtime/lua/smelt")` walk.
+  Adding a built-in Lua file requires zero Rust edits. Pairs with
+  P9.g's auto-discovery (same walker shape). ~5 LOC + one
+  dependency, ~200 LOC of registry boilerplate deleted.
 
 ---
 
