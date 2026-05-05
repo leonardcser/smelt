@@ -292,8 +292,9 @@ zero `crossterm` / `ui` imports. See `P8.md`.
 ## P9 — Make the architecture true
 
 **Goal:** close the deferral chain (`P1.a-tail → P4.b → old P9.b`) and
-purge every place where Rust still encodes a Lua-shaped decision. Three
-fat sub-phases sequenced by dependency. Full detail in `P9.md`.
+purge every place where Rust still encodes a Lua-shaped decision.
+Status table + open sub-phase sketches + decisions + deferrals in
+`P9.md`.
 
 - **P9.a** ✅ — Well-known window IDs moved from `ui` to `app`;
   `win_open_split` collision-tolerant; `prompt_data.rs` renamed to
@@ -303,46 +304,39 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
 - **P9.b.0/b.1** ✅ — Dead `cache_dirty` field deleted; persisted layout
   cache deleted; `TranscriptSnapshot` moved from `core` to `tui`; Lua
   `render` hook + `RenderCtx` introduced for tool output.
-- **P9.b** 🚧 — **`Buffer` to `core`.** The keystone. `Buffer` +
-  `BufferParser` + extmark types + `BufId` / `LUA_BUF_ID_BASE` +
-  `UndoHistory` live in `core`. `core::style::{Color, Style}` is a
-  frontend-neutral mirror of crossterm's enum; tui converts at the
-  SGR-emit boundary. Core has zero terminal deps. `Theme` stays in
-  `tui`. Lua `render` hook + `render_tool_body` migrate to write `&mut
-  Buffer`; `RenderCtx`, `DisplayBlock`, `DisplayLine`, `SpanCollector`,
-  `layout_out.rs`, `transcript_present/` rendering glue all delete.
-- **P9.c** ⏸ — **Transcript pipeline as `BufferParser` impls.** One
-  parser per `Block` variant in `tui::content::transcript_parsers/`.
-  `BlockHistory.artifacts` deletes. Width-independent parsing moves to
-  ingest time as namespaced extmarks. Pulls in: prompt wrap
-  unification, copy/yank unification, responsive-bar dedup.
-- **P9.d** ⏸ — **Tool hook owns the decision.** The five
-  `tool_name == "bash" | "web_fetch"` matches in `permissions/`,
-  `agent.rs`, and `transcript_model.rs` are one architectural
-  mistake. Fix: tool's `hooks(args, mode, ctx)` returns
-  `{ decision, summary?, confirm_message?, approval_patterns?,
-  paths_outside_workspace? }` and Rust honors it. `needs_confirm +
-  approval_patterns + preflight` collapse into `hooks`. Permission
-  rules in Rust become a passive store queried via Lua helpers.
-  Deletes `decide_base`, `extract_tool_paths`, `is_auto_approved`
-  bash branch, `ActiveTool::elapsed` match, `agent.rs` cmd_summary
-  branches, `confirm.rs::is_bash`, `statusline` mode→glyph map,
-  `dialogs/confirm.lua::fill_preview` (→ `tool.preview`). Eternal
-  rule extends to Lua dispatch: **no tool/command/dialog/mode name
-  matching anywhere shared.**
-- **P9.e** ⏸ — **HlGroup-id model.** Buffer extmarks carry semantic
-  `HlGroup(u32)` instead of raw `Style` / `Color`. Theme is the
-  paint-time resolver. Theme switches stop rewriting buffers. `Color`
-  / `Style` survive only at the paint boundary.
-- **P9.f** ⏸ — **Unified extmark keyset (nvim parity).** Extend
-  `core::buffer::ExtmarkOpts` with `priority`, gravity, `sign_text`,
-  `hl_eol`, `hl_mode`, `conceal`, `id`, `virt_text_pos`, `virt_lines`.
-  Lua surface collapses to `smelt.api.create_namespace(name)` +
-  `smelt.buf.set_extmark(buf, ns, row, col, opts)`. `add_highlight`
-  / `add_dim` retire. Folds in the lone structural cycle fix: extract
-  `Rect` from `tui/src/ui/layout.rs` into `tui/src/ui/geometry.rs`
-  so `grid.rs` no longer imports from `layout.rs`. EmmyLua stubs
-  deferred post-P10.
+- **P9.b** ✅ — **`Buffer` to `core`.** The keystone. `Buffer` +
+  `BufferParser` + extmark types + `BufId` + `UndoHistory` live in
+  `core`. `core::style::{Color, Style}` mirrors crossterm; tui
+  converts at SGR-emit. Lua `render` hook writes `&mut Buffer`;
+  `RenderCtx` / `DisplayBlock` / `DisplayLine` / `SpanCollector`-as-IR
+  all gone. Three pieces deferred to P9.c.
+- **P9.c** 🚧 — **Transcript pipeline as `BufferParser` impls.**
+  Per-`Block` parsers under `tui::content::transcript_parsers/`;
+  prompt rendering through the same parser; one
+  `copy_range(buf, range)` primitive replaces the divergent paths.
+  Mandated by P10 entry conditions — open work, not deferred.
+  See `P9.md` § P9.c.
+- **P9.d** 🚧 — **Tool name matches deleted from shared Rust.**
+  Most landed (`decide_base` bash/web_fetch, `ActiveTool::elapsed`,
+  `agent.rs` cmd_summary, `extract_tool_paths`, `confirm.rs::is_bash`,
+  statusline glyph map). Closeout owes: `is_auto_approved` bash
+  branch, `RawModePerms` field hardcoding, `RuleOverride` /
+  `CommandOverrides` struct buckets, `set_rules` parser buckets,
+  and decide-callback collapse (`decide` + `needs_confirm` +
+  `approval_patterns` → one returning-decision callback). See
+  `P9.md` § P9.d.
+- **P9.e** ✅ — **HlGroup-id model.** Buffer extmarks carry
+  `HlGroup(u32)` ids; theme resolves at paint via
+  `Theme::resolve(hl)`. Theme switches mutate `Theme.styles[id]`
+  once instead of rewriting buffers. Anonymous interning via
+  content hash keeps transitional sites working without naming.
+- **P9.f** ✅ — **Unified extmark keyset (nvim parity).**
+  `ExtmarkOpts` carries the full nvim option set (`priority`,
+  gravity, `id`, `hl_eol`, `hl_mode`, `conceal`, `virt_text_pos`).
+  Lua surface collapsed: `smelt.buf.create_namespace(name) -> u32`
+  + `smelt.buf.set_extmark(buf, ns, row, col, opts)`;
+  `add_highlight` / `add_dim` retired. `Rect` extracted to
+  `ui/geometry.rs` (lone structural cycle gone).
 - **P9.g** ✅ — **Plugin auto-discovery + project-local config.**
   Plugins are the only user-facing concept: `<config>/init.lua` +
   `<config>/plugins/*.lua` + `<cwd>/.smelt/{init.lua,plugins/*.lua}`
@@ -358,12 +352,9 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   `fn(name, new, old)`. Other hook-surface ideas (typed names, more
   event cells, prompt-section deps, stale-task tagging) deferred
   until a real consumer needs them.
-- **P9.i** ⏸ — **Provider middleware.** Neutral `ProviderRequest` /
-  `ProviderResponse` between `EngineClient` and the kind-specific
-  serializers; `EngineClient` carries `Vec<Box<dyn ProviderMiddleware>>`
-  with return-payload `before_request(req) -> req` +
-  `after_response(resp) -> resp`. Plugin-extensibility seam for
-  redaction / prompt rewriting / A/B swaps. ~500 LOC.
+- **P9.i** ⏸ — **Provider middleware.** Deferred — speculative
+  seam without a consumer. Land when the first plugin needs
+  redaction / A/B swap / cassette capture. Sketch in `P9.md`.
 - **P9.j** ✅ — **Loader override search path.** mlua `require`
   searches `<cwd>/.smelt/runtime/?.lua` →
   `<XDG_DATA_HOME>/smelt/runtime/?.lua` → `include_str!`'d embedded.
@@ -401,6 +392,14 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   onto the same shape: prompt buffer + prompt Window + a
   `widgets/prompt.lua` recipe. Aligns with everything else and
   removes the bespoke completion / wrap / submit path.
+- **P9.x** 📝 — **Config binding fidelity.** Reject-unknown /
+  fidelity bugs in config-time bindings (~100 LOC):
+  `provider.register` accepts per-model fields (today drops
+  temperature / top_p / pricing); `mcp.register` reads
+  `type`/`timeout`/`enabled` and rejects unknowns; `smelt.settings`
+  collapses to field access via metatable
+  (`smelt.settings.vim = true` reads/writes/iterates; unknown keys
+  error at the access site).
 
 ---
 
