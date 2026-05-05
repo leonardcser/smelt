@@ -72,6 +72,7 @@ end
 
 smelt.tools.register({
   name = "read_process_output",
+  elapsed_visible = true,
   description =
   "Read output from a background bash process (proc_1, proc_2, etc). Blocks until the process finishes by default. Set block=false for a non-blocking check of current output.",
   parameters = {
@@ -126,6 +127,7 @@ smelt.tools.register({
 
 smelt.tools.register({
   name = "stop_process",
+  elapsed_visible = true,
   description = "Stop a running background bash process and return its accumulated output.",
   parameters = {
     type = "object",

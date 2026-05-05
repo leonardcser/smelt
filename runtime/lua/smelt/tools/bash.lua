@@ -64,6 +64,7 @@ end
 smelt.tools.register({
   name = "bash",
   override = true,
+  elapsed_visible = true,
   description =
   "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
   parameters = {

@@ -580,6 +580,20 @@ impl LuaRuntime {
         defs
     }
 
+    /// Whether the tool wants its elapsed time displayed in the
+    /// transcript header. Read from the `elapsed_visible = true` flag
+    /// set on the tool def at registration time.
+    pub fn tool_elapsed_visible(&self, tool_name: &str) -> bool {
+        let meta = match self
+            .lua
+            .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
+        {
+            Ok(meta) => meta,
+            Err(_) => return false,
+        };
+        meta.get::<bool>("elapsed_visible").unwrap_or(false)
+    }
+
     pub fn tool_summary(
         &self,
         tool_name: &str,

@@ -64,6 +64,10 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         let after = out.line_count();
         (after - before) as u16
     }
+
+    fn elapsed_visible(&self, name: &str) -> bool {
+        crate::lua::app_ref::try_with_app(|app| app.lua.tool_elapsed_visible(name)).unwrap_or(false)
+    }
 }
 
 pub(crate) struct TranscriptData {

@@ -41,6 +41,14 @@ pub trait ToolBodyRenderer: Send + Sync {
         width: usize,
         out: &mut SpanCollector,
     ) -> u16;
+
+    /// Whether the tool wants its elapsed time displayed in the
+    /// transcript header. Default `false`; Lua tool defs opt in via
+    /// `elapsed_visible = true` and the tui-side renderer reads the
+    /// flag back through this method.
+    fn elapsed_visible(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 /// Simple heuristic: does this look like a `/command` line?
@@ -1230,7 +1238,23 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx, None);
+        struct ElapsedRenderer;
+        impl ToolBodyRenderer for ElapsedRenderer {
+            fn render(
+                &self,
+                _: &str,
+                _: &HashMap<String, serde_json::Value>,
+                _: Option<&ToolOutput>,
+                _: usize,
+                _: &mut SpanCollector,
+            ) -> u16 {
+                0
+            }
+            fn elapsed_visible(&self, _name: &str) -> bool {
+                true
+            }
+        }
+        let display = layout_block_test(&block, Some(&state), &ctx, Some(&ElapsedRenderer));
         let first_line = &display[0];
 
         // The time suffix "  3s" should be in a non-selectable span

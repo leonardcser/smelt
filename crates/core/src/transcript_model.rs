@@ -15,21 +15,13 @@ use std::time::{Duration, Instant};
 /// `TuiApp::update_tool_state` which invalidates the layout cache.
 pub struct ActiveTool {
     pub call_id: String,
-    pub(crate) name: String,
     pub(crate) block_id: BlockId,
     pub(crate) start_time: Instant,
 }
 
 impl ActiveTool {
-    pub fn elapsed(&self) -> Option<Duration> {
-        if matches!(
-            self.name.as_str(),
-            "bash" | "web_fetch" | "read_process_output" | "stop_process"
-        ) {
-            Some(self.start_time.elapsed())
-        } else {
-            None
-        }
+    pub fn elapsed(&self) -> Duration {
+        self.start_time.elapsed()
     }
 }
 

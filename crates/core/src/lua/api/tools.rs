@@ -67,6 +67,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         // dispatch to the plugin.
         let override_core: bool = def.get::<bool>("override").unwrap_or(false);
         meta.set("override_core", override_core)?;
+        let elapsed_visible: bool = def.get::<bool>("elapsed_visible").unwrap_or(false);
+        meta.set("elapsed_visible", elapsed_visible)?;
         if let Some(summary) = summary_fn {
             meta.set("summary", summary)?;
         }

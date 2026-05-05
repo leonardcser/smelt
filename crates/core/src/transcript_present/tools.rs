@@ -20,10 +20,7 @@ pub(super) fn render_tool(
         ToolStatus::Confirm => ColorValue::Role(ColorRole::Accent),
         ToolStatus::Pending => ColorValue::Role(ColorRole::ToolPending),
     };
-    let time = if matches!(
-        name,
-        "bash" | "web_fetch" | "read_process_output" | "stop_process"
-    ) && status != ToolStatus::Confirm
+    let time = if status != ToolStatus::Confirm && renderer.is_some_and(|r| r.elapsed_visible(name))
     {
         elapsed
     } else {

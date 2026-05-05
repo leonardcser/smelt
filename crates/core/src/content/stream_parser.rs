@@ -379,7 +379,7 @@ impl StreamParser {
         let start_time = Instant::now();
         let block = Block::ToolCall {
             call_id: call_id.clone(),
-            name: name.clone(),
+            name,
             summary,
             args,
         };
@@ -393,7 +393,6 @@ impl StreamParser {
         history.set_status(block_id, Status::Streaming);
         self.active_tools.push(ActiveTool {
             call_id,
-            name,
             block_id,
             start_time,
         });
@@ -491,7 +490,7 @@ impl StreamParser {
             None
         } else if let Some(idx) = active_idx {
             let tool = &self.active_tools[idx];
-            engine_elapsed.or_else(|| tool.elapsed())
+            engine_elapsed.or(Some(tool.elapsed()))
         } else {
             engine_elapsed
         };
@@ -519,7 +518,7 @@ impl StreamParser {
             let elapsed = if status == ToolStatus::Denied {
                 None
             } else {
-                tool.elapsed()
+                Some(tool.elapsed())
             };
             history.set_status(tool.block_id, Status::Done);
             let cid = tool.call_id.clone();
