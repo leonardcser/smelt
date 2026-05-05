@@ -1,7 +1,8 @@
 use super::{ToolBodyRenderer, DEFAULT_PREVIEW_LINES, MAX_TOOL_BLOCK_ROWS};
-use smelt_core::content::display::{ColorRole, ColorValue, SpanMeta};
+use smelt_core::content::display::SpanMeta;
 use smelt_core::content::layout_out::SpanCollector;
 use smelt_core::content::wrap::wrap_line;
+use smelt_core::theme::{role_hl, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 use smelt_core::utils::format_duration;
 use std::collections::HashMap;
@@ -21,11 +22,11 @@ pub(super) fn render_tool(
     width: usize,
     renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
-    let color: ColorValue = match status {
-        ToolStatus::Ok => ColorValue::Role(ColorRole::Success),
-        ToolStatus::Err | ToolStatus::Denied => ColorValue::Role(ColorRole::ErrorMsg),
-        ToolStatus::Confirm => ColorValue::Role(ColorRole::Accent),
-        ToolStatus::Pending => ColorValue::Role(ColorRole::ToolPending),
+    let color: HlGroup = match status {
+        ToolStatus::Ok => role_hl("Success"),
+        ToolStatus::Err | ToolStatus::Denied => role_hl("ErrorMsg"),
+        ToolStatus::Confirm => role_hl("Accent"),
+        ToolStatus::Pending => role_hl("ToolPending"),
     };
     let time = if status != ToolStatus::Confirm && renderer.is_some_and(|r| r.elapsed_visible(name))
     {
@@ -95,13 +96,13 @@ fn print_tool_line(
     name: &str,
     summary: &str,
     args: &HashMap<String, serde_json::Value>,
-    pill_color: ColorValue,
+    pill_color: HlGroup,
     elapsed: Option<Duration>,
     timeout_label: Option<&str>,
     width: usize,
     renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
-    out.push_fg(pill_color);
+    out.push_hl(pill_color);
     out.print("\u{23fa}");
     out.pop_style();
     let time_str = elapsed
@@ -246,7 +247,7 @@ pub fn render_wrapped_output(
     let start = total.saturating_sub(MAX_TOOL_BLOCK_ROWS);
     for seg in &wrapped[start..] {
         if is_error {
-            out.push_fg(ColorValue::Role(ColorRole::ErrorMsg));
+            out.push_hl(role_hl("ErrorMsg"));
             out.print_string(format!("  {}", seg));
             out.pop_style();
         } else {
@@ -273,7 +274,7 @@ pub fn render_default_output(
     let mut rows = 0u16;
     for seg in &segs {
         if is_error {
-            out.push_fg(ColorValue::Role(ColorRole::ErrorMsg));
+            out.push_hl(role_hl("ErrorMsg"));
             out.print_string(format!("  {}", seg));
             out.pop_style();
         } else {

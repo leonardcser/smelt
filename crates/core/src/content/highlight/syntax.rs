@@ -7,8 +7,9 @@ use syntect::highlighting::Style;
 
 use super::{syntax_theme, SYNTAX_SET};
 use crate::content::default_width;
-use crate::content::display::{ColorRole, ColorValue, NamedColor};
 use crate::content::layout_out::SpanCollector;
+use crate::style::Color;
+use crate::theme::role_hl;
 
 /// Render a code block. When `fence` is true, the rendered output
 /// stays unchanged but each code line's `source_text` carries its raw
@@ -53,7 +54,8 @@ pub fn render_code_block(
         out.set_dim();
     }
 
-    let bg = ColorValue::Role(ColorRole::CodeBlockBg);
+    let bg_group = role_hl("CodeBlockBg");
+    let bg = out.theme().resolve(bg_group).bg.unwrap_or(Color::Reset);
     let last_idx = expanded.len().saturating_sub(1);
     for (line_idx, line) in expanded.iter().enumerate() {
         let line_with_nl = format!("{}\n", line);
@@ -99,7 +101,7 @@ pub fn render_code_block(
                 if dim {
                     out.reset_style();
                 }
-                out.set_fg(b.color);
+                out.set_hl(b.group);
                 out.print(b.right);
             }
             out.reset_style();
@@ -147,7 +149,7 @@ pub(super) fn render_highlighted(
             if total_rows >= skip && emitted < emit_limit {
                 out.print_gutter(indent);
                 if vi == 0 {
-                    out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
+                    out.set_fg(Color::DarkGrey);
                     out.print_gutter(&format!(" {:>w$}", i + 1, w = gutter_width));
                     out.reset_style();
                     out.print_gutter("   ");
@@ -271,7 +273,11 @@ impl<'a> BashHighlighter<'a> {
             if text.is_empty() {
                 continue;
             }
-            let fg = ColorValue::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+            let fg = Color::Rgb {
+                r: style.foreground.r,
+                g: style.foreground.g,
+                b: style.foreground.b,
+            };
             out.set_fg(fg);
             out.print(text);
         }
@@ -283,7 +289,7 @@ impl<'a> BashHighlighter<'a> {
 fn print_split_regions(
     out: &mut SpanCollector,
     regions: &[(Style, String)],
-    bg: Option<ColorValue>,
+    bg: Option<Color>,
 ) -> usize {
     let mut col = 0;
     for (style, text) in regions {
@@ -293,7 +299,11 @@ fn print_split_regions(
         if let Some(bg_color) = bg {
             out.set_bg(bg_color);
         }
-        let fg = ColorValue::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+        let fg = Color::Rgb {
+            r: style.foreground.r,
+            g: style.foreground.g,
+            b: style.foreground.b,
+        };
         out.set_fg(fg);
         out.print(text);
         col += text.chars().count();

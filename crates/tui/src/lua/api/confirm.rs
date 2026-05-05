@@ -27,7 +27,7 @@ use crate::app::TuiApp;
 use crate::content::to_buffer::{render_into_buffer, replay_buffer_row_into};
 use crate::ui::{BufCreateOpts, BufId};
 use smelt_core::cells::ConfirmResolved;
-use smelt_core::content::display::{ColorRole, ColorValue};
+use smelt_core::theme::role_hl;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
 
 /// Wire `smelt.confirm.*` primitives onto the supplied table.
@@ -262,7 +262,7 @@ fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) 
     if let Some(buf) = app.ui.buf_mut(buf_id) {
         render_into_buffer(buf, width, &theme_snap, |sink| {
             sink.print(" ");
-            sink.push_fg(ColorValue::Role(ColorRole::Accent));
+            sink.push_hl(role_hl("Accent"));
             sink.print(&req.tool_name);
             sink.pop_style();
             sink.print(": ");

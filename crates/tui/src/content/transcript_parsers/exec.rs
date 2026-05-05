@@ -1,8 +1,10 @@
 //! `Block::Exec` renderer — one shell-escape command + (optional)
 //! captured output.
 
-use smelt_core::content::display::{ColorRole, ColorValue, NamedColor, SpanStyle};
+use smelt_core::content::display::SpanStyle;
 use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::style::Color;
+use smelt_core::theme::role_hl;
 
 use super::tools::render_wrapped_output;
 
@@ -10,14 +12,24 @@ pub(super) fn render(out: &mut SpanCollector, command: &str, output: &str, width
     let char_len = command.chars().count() + 1;
     let pad_width = (char_len + 2).min(width);
     let trailing = pad_width.saturating_sub(char_len + 1);
+    let user_bg = out
+        .theme()
+        .resolve(role_hl("UserBg"))
+        .bg
+        .unwrap_or(Color::Reset);
+    let exec_fg = out
+        .theme()
+        .resolve(role_hl("Exec"))
+        .fg
+        .unwrap_or(Color::Reset);
     out.push_style(SpanStyle {
-        bg: Some(ColorValue::Role(ColorRole::UserBg)),
-        fg: Some(ColorValue::Role(ColorRole::Exec)),
+        bg: Some(user_bg),
+        fg: Some(exec_fg),
         bold: true,
         ..Default::default()
     });
     out.print("!");
-    out.set_fg(ColorValue::Named(NamedColor::Reset));
+    out.set_fg(Color::Reset);
     out.print_string(format!("{}{}", command, " ".repeat(trailing)));
     out.pop_style();
     out.newline();

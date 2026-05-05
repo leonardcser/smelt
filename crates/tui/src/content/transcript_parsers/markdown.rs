@@ -1,6 +1,6 @@
-use smelt_core::content::display::{ColorRole, ColorValue};
 use smelt_core::content::highlight::{render_code_block, render_markdown_table};
 use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::theme::role_hl;
 
 pub fn render_markdown_inner(
     out: &mut SpanCollector,
@@ -111,7 +111,7 @@ pub fn render_markdown_inner(
                         style: InlineStyle {
                             bold: true,
                             dim,
-                            fg: Some(ColorValue::Role(ColorRole::Heading)),
+                            group: Some(role_hl("Heading")),
                             ..Default::default()
                         },
                     });

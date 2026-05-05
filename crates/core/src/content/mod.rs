@@ -8,7 +8,9 @@ pub mod transcript;
 pub mod wrap;
 
 pub use context::LayoutContext;
-pub use display::{ColorRole, ColorValue, NamedColor, SpanMeta, SpanStyle};
+pub use display::{SpanMeta, SpanStyle};
+
+use crate::theme::HlGroup;
 
 /// Context for rendering content inside a bordered box.
 /// When passed to `render_markdown` and its sub-renderers, each output line
@@ -18,8 +20,8 @@ pub struct BoxContext {
     pub left: &'static str,
     /// Right border string printed after padding (e.g. " │").
     pub right: &'static str,
-    /// Color for the border characters.
-    pub color: display::ColorValue,
+    /// Theme group whose fg colors the border characters.
+    pub group: HlGroup,
     /// Inner content width (between left and right borders).
     pub inner_w: usize,
 }
@@ -27,7 +29,7 @@ pub struct BoxContext {
 impl BoxContext {
     /// Print the left border with color.
     pub fn print_left(&self, out: &mut layout_out::SpanCollector) {
-        out.push_fg(self.color);
+        out.push_hl(self.group);
         out.print_gutter(self.left);
         out.pop_style();
     }
@@ -38,7 +40,7 @@ impl BoxContext {
         if pad > 0 {
             out.print_gutter(&" ".repeat(pad));
         }
-        out.push_fg(self.color);
+        out.push_hl(self.group);
         out.print_gutter(self.right);
         out.pop_style();
     }

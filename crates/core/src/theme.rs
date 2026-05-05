@@ -61,6 +61,35 @@ fn registry() -> &'static RwLock<HlGroupRegistry> {
     REG.get_or_init(|| RwLock::new(HlGroupRegistry::new()))
 }
 
+/// Resolve a smelt role label (e.g. `"Accent"`, `"Slug"`, `"Muted"`)
+/// to its canonical theme group id. Renderers flow the returned id
+/// through extmarks so theme switches mutate `Theme.styles[id]` once
+/// instead of re-rendering buffers. Unknown labels intern as-is.
+pub fn role_hl(role: &str) -> HlGroup {
+    let name = match role {
+        "Muted" => "Comment",
+        "ErrorMsg" => "ErrorMsg",
+        "Accent" => "SmeltAccent",
+        "Slug" => "SmeltSlug",
+        "UserBg" => "SmeltUserBg",
+        "CodeBlockBg" => "SmeltCodeBlockBg",
+        "Bar" => "SmeltBar",
+        "ToolPending" => "SmeltToolPending",
+        "ReasonOff" => "SmeltReasonOff",
+        "Success" => "SmeltSuccess",
+        "Apply" => "SmeltModeApply",
+        "Plan" => "SmeltModePlan",
+        "Exec" => "SmeltModeExec",
+        "Heading" => "SmeltHeading",
+        "ReasonLow" => "SmeltReasonLow",
+        "ReasonMed" => "SmeltReasonMed",
+        "ReasonHigh" => "SmeltReasonHigh",
+        "ReasonMax" => "SmeltReasonMax",
+        other => other,
+    };
+    intern(name)
+}
+
 /// Get-or-mint the [`HlGroup`] id for `name`. Stable across the whole
 /// process; the same name always interns to the same id.
 pub fn intern(name: &str) -> HlGroup {

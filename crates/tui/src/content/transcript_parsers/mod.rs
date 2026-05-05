@@ -14,9 +14,9 @@
 //! direct re-export.
 
 use smelt_core::buffer::Buffer;
-use smelt_core::content::display::{ColorRole, ColorValue};
 use smelt_core::content::layout_out::{Outcome, SpanCollector};
 use smelt_core::content::LayoutContext;
+use smelt_core::theme::role_hl;
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{Block, ToolState, ViewState};
 
@@ -212,7 +212,7 @@ fn append_ellipsis(
     let added = {
         let mut col = SpanCollector::new(buf, theme, width);
         col.push_dim();
-        col.push_fg(ColorValue::Role(ColorRole::Muted));
+        col.push_hl(role_hl("Muted"));
         col.print(text);
         col.pop_style();
         col.pop_style();

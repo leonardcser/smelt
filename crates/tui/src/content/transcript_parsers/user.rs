@@ -2,9 +2,9 @@
 //! the prompt buffer to size the tinted user-bubble.
 
 use smelt_core::buffer::SpanMeta;
-use smelt_core::content::display::{ColorRole, ColorValue};
 use smelt_core::content::layout_out::{display_width, SpanCollector};
 use smelt_core::content::wrap::wrap_line;
+use smelt_core::theme::role_hl;
 use smelt_core::transcript_present::is_command_like;
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines
@@ -50,7 +50,7 @@ pub(super) fn render(
     let is_command = is_command_like(text.trim());
     let text_w = width.saturating_sub(1).max(1);
     let geom = UserBlockGeometry::new(text, text_w);
-    let user_bg = ColorValue::Role(ColorRole::UserBg);
+    let user_bg = role_hl("UserBg");
     let mut rows = 0u16;
     let pad_meta = SpanMeta {
         selectable: false,
@@ -59,10 +59,10 @@ pub(super) fn render(
     for logical_line in &geom.lines {
         if logical_line.is_empty() {
             let fill = if geom.block_w > 0 { geom.block_w } else { 1 };
-            out.set_bg(user_bg);
+            out.set_hl(user_bg);
             out.print_with_meta(&" ".repeat(fill), pad_meta.clone());
             out.reset_style();
-            out.set_gutter_bg(user_bg);
+            out.set_gutter_bg_group(user_bg);
             out.newline();
             rows += 1;
             continue;
@@ -78,12 +78,12 @@ pub(super) fn render(
             } else {
                 1
             };
-            out.set_bg(user_bg);
+            out.set_hl(user_bg);
             out.set_bold();
             print_highlights(out, chunk, image_labels, is_command);
             out.print_with_meta(&" ".repeat(trailing), pad_meta.clone());
             out.reset_style();
-            out.set_gutter_bg(user_bg);
+            out.set_gutter_bg_group(user_bg);
             out.newline();
             rows += 1;
         }
@@ -99,10 +99,10 @@ fn print_highlights(
     image_labels: &[String],
     is_command: bool,
 ) {
-    let accent_role = ColorValue::Role(ColorRole::Accent);
+    let accent_role = role_hl("Accent");
 
     if is_command {
-        out.push_fg(accent_role);
+        out.push_hl(accent_role);
         out.print(text);
         out.pop_style();
         return;
@@ -121,7 +121,7 @@ fn print_highlights(
     };
 
     let accent = |out: &mut SpanCollector, token: String| {
-        out.push_fg(accent_role);
+        out.push_hl(accent_role);
         out.print(&token);
         out.pop_style();
     };

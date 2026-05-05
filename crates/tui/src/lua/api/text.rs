@@ -6,8 +6,8 @@
 use crate::content::to_buffer::render_into_buffer;
 use crate::ui::BufId;
 use mlua::prelude::*;
-use smelt_core::content::display::{ColorRole, ColorValue};
 use smelt_core::content::wrap::wrap_line;
+use smelt_core::theme::role_hl;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let text = lua.create_table()?;
@@ -33,7 +33,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                                 }
                                 for seg in &segs {
                                     if is_error {
-                                        sink.push_fg(ColorValue::Role(ColorRole::ErrorMsg));
+                                        sink.push_hl(role_hl("ErrorMsg"));
                                         sink.print(&format!("  {}", seg));
                                         sink.pop_style();
                                     } else {
