@@ -38,6 +38,14 @@ legend right
   **No tool/command/dialog/mode name matching in Rust.** A `match name {
   "bash" => … }` over a Lua-registered identifier is a bug. The
   registration table carries the metadata; Rust calls through it.
+
+  **Plugin-author surface (P9.f-h, plan).** Namespaces are integer
+  handles minted by `smelt.api.create_namespace(name)`. Extmark API
+  is one keyset call mirroring nvim verbatim plus smelt extensions
+  (yank, on_click). Plugins live in `~/.config/smelt/` AND project-local
+  `<cwd>/.smelt/` (trust-gated). Tool files auto-register on require.
+  System-prompt sections register as closures, mirror statusline
+  source pattern.
 end legend
 
 ' =====================================================================
@@ -181,46 +189,71 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
     }
     class Cells <<reactive registry — also the event bus>> {
       Map<CellName, Box<dyn Any>>
-      built-ins: now, spinner_frame,
-        agent_mode, vim_mode, model,
-        reasoning, confirms_pending,
-        tokens_used, errors, cwd,
-        session_title,
-        history (Cell<HistoryDelta>),
-        turn_complete (Cell<TurnMeta>),
-        turn_error (Cell<TurnError>),
-        confirm_requested (Cell<ConfirmRequested>),
-        confirm_resolved (Cell<…>),
-        session_started/ended,
+      built-ins (state): now,
+        spinner_frame, agent_mode,
+        vim_mode, model, reasoning,
+        confirms_pending, tokens_used,
+        errors, cwd, session_title,
         branch
+      built-ins (events): history,
+        turn_complete, turn_error,
+        confirm_requested,
+        confirm_resolved,
+        session_started, session_ended
+      P9.h adds (events):
+        session_before_compact|fork,
+        message_start|end,
+        tool_execution_start|end,
+        input_submit
       --
       new<T>(name, initial) -> CellId
       get<T>(name) -> &T
       set<T>(name, T)        ' wakes loop;
-                              ' notifies subs;
-                              ' next render
-                              ' resolves spec
-                              ' bindings
+                              ' notifies subs
       subscribe(name, CbId)   ' sole observer
                               ' mechanism — autocmd
                               ' is sugar over this.
-                              ' Pure events =
-                              ' Cell<()>.set(()).
       glob_subscribe(pattern, CbId)
+      ' Mutate-payload is NOT a cell pattern.
+      ' System-prompt composition uses the
+      ' source-register pattern below
+      ' (see PromptSections / smelt.prompt).
     }
     class LuaShared <<shared state — lives in core>> {
       commands, keymaps,
-      statusline_sources, tools,
-      callbacks, tasks,
+      statusline_sources,
+      prompt_section_sources,  ' P9.h
+      tools, callbacks, tasks,
       task_inbox, json_inbox,
       providers, permission_rules,
-      mcp_configs, settings_overrides
+      mcp_configs, settings_overrides,
+      trusted_workspaces       ' P9.g
     }
 
     class LuaTaskRuntime <<task runtime — lives in core>> {
       coroutine tasks
-      cancel tokens
+      cancel tokens (per-task,
+        tagged with session id —
+        cancel-on-mismatch enforces
+        stale-context invalidation,
+        P9.h)
       tool env
+    }
+
+    class PromptSections <<source-register — P9.h>> {
+      ' Mirror of statusline source
+      ' registry. Mutate-payload would
+      ' fight Cells' snapshot model;
+      ' source registration is the
+      ' codebase's existing pattern.
+      register_section(name, fn, deps?)
+      assemble() -> String
+      ' Walks registered sources in
+      ' registration order;
+      ' concatenates returned strings.
+      ' deps re-evals only when listed
+      ' Cells change (same hot-path
+      ' rule as statusline).
     }
   }
 
@@ -266,11 +299,25 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
       yank_text_for_range(r)  ' walks extmark
                               ' YankSubst values
     }
-    class Namespace
-    class Extmark {
-      pos, hl_id              ' → tui::ui::Theme
-      virt_text, sign, conceal
+    class Namespace <<NsId(u32) handle>> {
+      ' Integer ids minted by
+      ' Buffer::create_namespace(name).
+      ' Same name returns same id
+      ' (nvim semantics). Lua boundary
+      ' exposes via smelt.api.
+      ' create_namespace; built-ins
+      ' under smelt.ns.*.
+    }
+    class Extmark <<keyset — nvim parity>> {
+      pos, end_row, end_col
+      hl_group: HlGroup       ' P9.e (was Style)
+      virt_text, virt_lines
+      virt_text_pos, virt_lines_above
+      sign_text, sign_hl_group
+      conceal, hl_eol, hl_mode
+      priority
       right_gravity
+      end_right_gravity        ' P9.f
       on_click: Option<WinEvent>
       yank: Option<YankSubst>
     }
@@ -311,6 +358,19 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
     ' from core; adds tui-specific
     ' methods (tick_statusline,
     ' prepare_invocation, etc.).
+    --
+    autoload order (P9.g):
+      1. embedded runtime/lua/smelt/
+      2. ~/.config/smelt/init.lua
+         + plugins/*.lua + tools/*.lua
+      3. <cwd>/.smelt/init.lua
+         + plugins/*.lua + tools/*.lua
+         (gated by trust prompt)
+    auto-register (P9.g): files
+      under tools/*.lua whose returned
+      table has `name` + `run` register
+      without an explicit
+      smelt.tools.register call.
   }
 
   class TuiApp <<terminal frontend>> {
@@ -723,7 +783,8 @@ Session   ..> Buffer  : transcript + prompt\nvia BufId on WellKnown
 EngineClient --> EngineHandle : owns handle\nreads event stream
 EngineClient ..> Confirms        : gates on is_clear()
 EngineClient ..> Session         : update history,\ncosts, snapshots
-EngineClient ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage), …
+EngineClient ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage),\nset(message_start|end),\nset(tool_execution_start|end), …
+TuiApp       ..> PromptSections   : assemble() before\nUiCommand::StartTurn
 Confirms ..> EngineHandle        : PermissionDecision
 
 Window ..> UiHost           : direct mutation\nvia &mut dyn UiHost
@@ -734,6 +795,7 @@ LDLGHELP -[#aa6,dashed]-> Ui              : splices into splits\nor opens an Ove
 LDLGHELP -[#aa6,dashed]-> LWID            : composes widgets
 LSTAT    -[#aa6,dashed]-> Window          : statusline as a Window
 LSTAT    -[#aa6,dashed]-> Cells           : binds segments to cells
+LPLG     -[#aa6,dashed]-> PromptSections  : register_section(name, fn)\n— P9.h system-prompt assembly
 Timers   ..> Cells                        : drives `now`, `spinner_frame`
 LMOD     -[#aa6,dashed]-> Cells           : reads/writes\nagent_mode cell
 LTX      -[#aa6,dashed]-> TPARSE          : parse markdown +\nhighlight code
