@@ -12,193 +12,44 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use include_dir::{include_dir, Dir, DirEntry};
 use mlua::prelude::*;
 
 use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
 };
 
-/// Modules embedded in the binary, available via `require("smelt.*")`.
-const EMBEDDED_MODULES: &[(&str, &str)] = &[
-    (
-        "smelt.plugins.plan_mode",
-        include_str!("../../../../runtime/lua/smelt/plugins/plan_mode.lua"),
-    ),
-    (
-        "smelt.commands.btw",
-        include_str!("../../../../runtime/lua/smelt/commands/btw.lua"),
-    ),
-    (
-        "smelt.plugins.predict",
-        include_str!("../../../../runtime/lua/smelt/plugins/predict.lua"),
-    ),
-    (
-        "smelt.tools.ask_user_question",
-        include_str!("../../../../runtime/lua/smelt/tools/ask_user_question.lua"),
-    ),
-    (
-        "smelt.commands.export",
-        include_str!("../../../../runtime/lua/smelt/commands/export.lua"),
-    ),
-    (
-        "smelt.dialogs.rewind",
-        include_str!("../../../../runtime/lua/smelt/dialogs/rewind.lua"),
-    ),
-    (
-        "smelt.plugins.background_commands",
-        include_str!("../../../../runtime/lua/smelt/plugins/background_commands.lua"),
-    ),
-    (
-        "smelt.commands.help",
-        include_str!("../../../../runtime/lua/smelt/commands/help.lua"),
-    ),
-    (
-        "smelt.plugins.yank_block",
-        include_str!("../../../../runtime/lua/smelt/plugins/yank_block.lua"),
-    ),
-    (
-        "smelt.dialogs.permissions",
-        include_str!("../../../../runtime/lua/smelt/dialogs/permissions.lua"),
-    ),
-    (
-        "smelt.dialogs.resume",
-        include_str!("../../../../runtime/lua/smelt/dialogs/resume.lua"),
-    ),
-    (
-        "smelt.commands.theme",
-        include_str!("../../../../runtime/lua/smelt/commands/theme.lua"),
-    ),
-    (
-        "smelt.commands.color",
-        include_str!("../../../../runtime/lua/smelt/commands/color.lua"),
-    ),
-    (
-        "smelt.commands.model",
-        include_str!("../../../../runtime/lua/smelt/commands/model.lua"),
-    ),
-    (
-        "smelt.commands.settings",
-        include_str!("../../../../runtime/lua/smelt/commands/settings.lua"),
-    ),
-    (
-        "smelt.commands.history_search",
-        include_str!("../../../../runtime/lua/smelt/commands/history_search.lua"),
-    ),
-    (
-        "smelt.commands.toggles",
-        include_str!("../../../../runtime/lua/smelt/commands/toggles.lua"),
-    ),
-    (
-        "smelt.commands.stats",
-        include_str!("../../../../runtime/lua/smelt/commands/stats.lua"),
-    ),
-    (
-        "smelt.commands.session",
-        include_str!("../../../../runtime/lua/smelt/commands/session.lua"),
-    ),
-    (
-        "smelt.commands.quit",
-        include_str!("../../../../runtime/lua/smelt/commands/quit.lua"),
-    ),
-    (
-        "smelt.commands.compact",
-        include_str!("../../../../runtime/lua/smelt/commands/compact.lua"),
-    ),
-    (
-        "smelt.commands.reflect",
-        include_str!("../../../../runtime/lua/smelt/commands/reflect.lua"),
-    ),
-    (
-        "smelt.commands.simplify",
-        include_str!("../../../../runtime/lua/smelt/commands/simplify.lua"),
-    ),
-    (
-        "smelt.commands.custom_commands",
-        include_str!("../../../../runtime/lua/smelt/commands/custom_commands.lua"),
-    ),
-    (
-        "smelt.colorschemes.default",
-        include_str!("../../../../runtime/lua/smelt/colorschemes/default.lua"),
-    ),
-    (
-        "smelt.tools.glob",
-        include_str!("../../../../runtime/lua/smelt/tools/glob.lua"),
-    ),
-    (
-        "smelt.tools.grep",
-        include_str!("../../../../runtime/lua/smelt/tools/grep.lua"),
-    ),
-    (
-        "smelt.tools.load_skill",
-        include_str!("../../../../runtime/lua/smelt/tools/load_skill.lua"),
-    ),
-    (
-        "smelt.tools.web_search",
-        include_str!("../../../../runtime/lua/smelt/tools/web_search.lua"),
-    ),
-    (
-        "smelt.tools.write_file",
-        include_str!("../../../../runtime/lua/smelt/tools/write_file.lua"),
-    ),
-    (
-        "smelt.tools.edit_file",
-        include_str!("../../../../runtime/lua/smelt/tools/edit_file.lua"),
-    ),
-    (
-        "smelt.tools.read_file",
-        include_str!("../../../../runtime/lua/smelt/tools/read_file.lua"),
-    ),
-    (
-        "smelt.tools.notebook_edit",
-        include_str!("../../../../runtime/lua/smelt/tools/notebook_edit.lua"),
-    ),
-    (
-        "smelt.tools.web_fetch",
-        include_str!("../../../../runtime/lua/smelt/tools/web_fetch.lua"),
-    ),
-    (
-        "smelt.tools.bash",
-        include_str!("../../../../runtime/lua/smelt/tools/bash.lua"),
-    ),
+/// Embedded `runtime/lua/smelt/` tree. Every `.lua` file under here is
+/// `require`-able as `smelt.<dotted-path>`; the paths in
+/// [`BOOTSTRAP_FILES`] additionally run at `register_api` time, and
+/// every file under `tools/`, `commands/`, `plugins/` is required at
+/// startup.
+static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/lua/smelt");
+
+/// Lua chunks executed at `register_api` time, in this order, after
+/// the `smelt` global is fully populated but before any plugin or user
+/// init.lua runs. Order is semantic: framework primitives (`_bootstrap`,
+/// `dialog`, `cmd`) ship before consumers (`widgets`, `dialogs/confirm`,
+/// `status`, `modes`).
+const BOOTSTRAP_FILES: &[&str] = &[
+    "_bootstrap.lua",
+    "dialog.lua",
+    "widgets/picker.lua",
+    "widgets/prompt_picker.lua",
+    "cmd.lua",
+    "dialogs/confirm.lua",
+    "status.lua",
+    "modes.lua",
 ];
 
-/// Bootstrap Lua chunks loaded at `register_api` time, after the
-/// `smelt` global is fully populated but before any plugin or user
-/// init.lua runs. Not `require`-able — they extend `smelt` directly.
-const BOOTSTRAP_CHUNKS: &[(&str, &str)] = &[
-    (
-        "smelt/_bootstrap.lua",
-        include_str!("../../../../runtime/lua/smelt/_bootstrap.lua"),
-    ),
-    (
-        "smelt/dialog.lua",
-        include_str!("../../../../runtime/lua/smelt/dialog.lua"),
-    ),
-    (
-        "smelt/widgets/picker.lua",
-        include_str!("../../../../runtime/lua/smelt/widgets/picker.lua"),
-    ),
-    (
-        "smelt/widgets/prompt_picker.lua",
-        include_str!("../../../../runtime/lua/smelt/widgets/prompt_picker.lua"),
-    ),
-    (
-        "smelt/cmd.lua",
-        include_str!("../../../../runtime/lua/smelt/cmd.lua"),
-    ),
-    (
-        "smelt/dialogs/confirm.lua",
-        include_str!("../../../../runtime/lua/smelt/dialogs/confirm.lua"),
-    ),
-    (
-        "smelt/status.lua",
-        include_str!("../../../../runtime/lua/smelt/status.lua"),
-    ),
-    (
-        "smelt/modes.lua",
-        include_str!("../../../../runtime/lua/smelt/modes.lua"),
-    ),
-];
+/// Top-level subdirectories whose `.lua` files are `require`'d at
+/// startup. Files within these directories must be self-contained;
+/// they register tools, commands, and cell subscribers as a
+/// side-effect of being loaded. `dialogs/` is autoloaded because most
+/// dialog modules register a slash command at top level; the one
+/// exception (`dialogs/confirm.lua`) is loaded earlier via
+/// [`BOOTSTRAP_FILES`] and the second `require` is a no-op.
+const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "plugins", "dialogs"];
 
 /// Headless-safe Lua runtime.
 pub struct LuaRuntime {
@@ -966,10 +817,75 @@ impl LuaRuntime {
 }
 
 pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    for (name, src) in BOOTSTRAP_CHUNKS {
-        lua.load(*src).set_name(*name).exec()?;
+    for rel in BOOTSTRAP_FILES {
+        let file = EMBEDDED_LUA.get_file(rel).ok_or_else(|| {
+            LuaError::RuntimeError(format!("missing embedded bootstrap chunk: {rel}"))
+        })?;
+        let src = file
+            .contents_utf8()
+            .ok_or_else(|| LuaError::RuntimeError(format!("bootstrap chunk not utf-8: {rel}")))?;
+        let name = format!("smelt/{rel}");
+        lua.load(src).set_name(name).exec()?;
     }
     Ok(())
+}
+
+/// Iterate every `.lua` file under [`EMBEDDED_LUA`] as
+/// `(module_name, source)` pairs.
+fn embedded_lua_modules() -> impl Iterator<Item = (String, &'static str)> {
+    fn walk(dir: &'static Dir<'static>, out: &mut Vec<(String, &'static str)>) {
+        for entry in dir.entries() {
+            match entry {
+                DirEntry::File(f) => {
+                    let path = f.path();
+                    if path.extension().and_then(|s| s.to_str()) != Some("lua") {
+                        continue;
+                    }
+                    let Some(rel) = path.to_str() else { continue };
+                    let module = path_to_module(rel);
+                    if let Some(src) = f.contents_utf8() {
+                        out.push((module, src));
+                    }
+                }
+                DirEntry::Dir(d) => walk(d, out),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&EMBEDDED_LUA, &mut out);
+    out.into_iter()
+}
+
+/// Translate an embedded relative path (`tools/glob.lua`) into a
+/// `smelt.*` module name (`smelt.tools.glob`).
+fn path_to_module(rel: &str) -> String {
+    let trimmed = rel.strip_suffix(".lua").unwrap_or(rel);
+    let dotted = trimmed.replace('/', ".");
+    format!("smelt.{dotted}")
+}
+
+/// Modules to `require` at startup, derived from [`AUTOLOAD_DIRS`].
+/// Sorted within each directory for deterministic order. Files
+/// already executed in [`BOOTSTRAP_FILES`] are skipped to avoid a
+/// re-run during autoload.
+pub fn autoload_modules() -> Vec<String> {
+    let bootstrap_modules: std::collections::HashSet<String> =
+        BOOTSTRAP_FILES.iter().map(|p| path_to_module(p)).collect();
+    let mut out = Vec::new();
+    for dir_name in AUTOLOAD_DIRS {
+        let Some(dir) = EMBEDDED_LUA.get_dir(*dir_name) else {
+            continue;
+        };
+        let mut names: Vec<String> = dir
+            .files()
+            .filter(|f| f.path().extension().and_then(|s| s.to_str()) == Some("lua"))
+            .filter_map(|f| f.path().to_str().map(path_to_module))
+            .filter(|m| !bootstrap_modules.contains(m))
+            .collect();
+        names.sort();
+        out.extend(names);
+    }
+    out
 }
 
 fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
@@ -977,6 +893,7 @@ fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
 }
 
 fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaResult<()> {
+    let modules: HashMap<String, &'static str> = embedded_lua_modules().collect();
     let searcher = lua.create_function(move |lua, module: String| {
         let rel = module_to_relpath(&module);
         for root in &roots {
@@ -987,11 +904,9 @@ fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaRes
                 return Ok(mlua::Value::Function(loader));
             }
         }
-        for &(name, source) in EMBEDDED_MODULES {
-            if name == module {
-                let loader = lua.load(source).set_name(name).into_function()?;
-                return Ok(mlua::Value::Function(loader));
-            }
+        if let Some(source) = modules.get(&module) {
+            let loader = lua.load(*source).set_name(module).into_function()?;
+            return Ok(mlua::Value::Function(loader));
         }
         Ok(mlua::Value::String(lua.create_string(format!(
             "\n\tno embedded module '{module}'"
@@ -1058,6 +973,33 @@ mod tests {
             PathBuf::from("smelt/dialogs/confirm.lua")
         );
         assert_eq!(module_to_relpath("smelt"), PathBuf::from("smelt.lua"));
+    }
+
+    #[test]
+    fn path_to_module_translates_slashes_to_dots() {
+        assert_eq!(
+            path_to_module("dialogs/confirm.lua"),
+            "smelt.dialogs.confirm"
+        );
+        assert_eq!(path_to_module("modes.lua"), "smelt.modes");
+    }
+
+    #[test]
+    fn autoload_covers_tools_commands_plugins() {
+        let modules = autoload_modules();
+        assert!(modules.contains(&"smelt.tools.bash".to_string()));
+        assert!(modules.contains(&"smelt.commands.btw".to_string()));
+        assert!(modules.contains(&"smelt.plugins.background_commands".to_string()));
+    }
+
+    #[test]
+    fn embedded_lua_includes_bootstrap_files() {
+        for rel in BOOTSTRAP_FILES {
+            assert!(
+                EMBEDDED_LUA.get_file(rel).is_some(),
+                "bootstrap file missing from embedded tree: {rel}"
+            );
+        }
     }
 
     #[test]

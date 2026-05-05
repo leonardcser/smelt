@@ -368,12 +368,13 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   protocol; agent loop runs all tools sequentially. Read-only tools
   (`read_file`, `glob`, `grep`, `web_fetch`, `web_search`) marked
   `Parallel` get `tokio::join_all`.
-- **P9.l** ⏸ — **Embedded Lua tree.** `EMBEDDED_MODULES` (140
+- **P9.l** ✅ — **Embedded Lua tree.** `EMBEDDED_MODULES` (140
   lines) + `BOOTSTRAP_CHUNKS` (~30) + `AUTOLOAD_MODULES` (~30)
-  collapse to one `include_dir!("runtime/lua/smelt")` walk.
-  Adding a built-in Lua file requires zero Rust edits. Pairs with
-  P9.g's auto-discovery (same walker shape). ~5 LOC + one
-  dependency, ~200 LOC of registry boilerplate deleted.
+  collapsed to one `include_dir!("runtime/lua/smelt")` walk.
+  Bootstrap stays explicit (semantic ordering); module enumeration
+  and autoload come from directory walks (`tools/`, `commands/`,
+  `plugins/`, `dialogs/`). Adding a built-in `.lua` under one of
+  those dirs now requires zero Rust edits.
 
 ---
 

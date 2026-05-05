@@ -373,9 +373,9 @@ impl LuaRuntime {
         if self.core.load_error.is_some() {
             return;
         }
-        for &name in AUTOLOAD_MODULES {
+        for name in smelt_core::lua::autoload_modules() {
             let code = format!("require('{name}')");
-            if let Err(e) = self.core.lua.load(&code).set_name(name).exec() {
+            if let Err(e) = self.core.lua.load(&code).set_name(name.as_str()).exec() {
                 self.core.load_error = Some(format!("autoload {name}: {e}"));
                 return;
             }
@@ -508,43 +508,6 @@ impl Default for LuaRuntime {
         Self::new()
     }
 }
-
-/// Plugins that must always be active (the user can't opt out via
-/// init.lua). These are former Rust built-ins migrated to Lua. Required
-/// after the embedded searcher is set up, before user init.lua runs.
-const AUTOLOAD_MODULES: &[&str] = &[
-    "smelt.tools.ask_user_question",
-    "smelt.commands.btw",
-    "smelt.commands.export",
-    "smelt.dialogs.rewind",
-    "smelt.commands.help",
-    "smelt.dialogs.permissions",
-    "smelt.dialogs.resume",
-    "smelt.commands.theme",
-    "smelt.commands.color",
-    "smelt.commands.model",
-    "smelt.commands.settings",
-    "smelt.commands.history_search",
-    "smelt.commands.toggles",
-    "smelt.commands.stats",
-    "smelt.commands.session",
-    "smelt.commands.quit",
-    "smelt.commands.compact",
-    "smelt.commands.reflect",
-    "smelt.commands.simplify",
-    "smelt.commands.custom_commands",
-    "smelt.tools.glob",
-    "smelt.tools.grep",
-    "smelt.tools.load_skill",
-    "smelt.tools.web_search",
-    "smelt.tools.write_file",
-    "smelt.tools.edit_file",
-    "smelt.tools.read_file",
-    "smelt.tools.notebook_edit",
-    "smelt.tools.web_fetch",
-    "smelt.tools.bash",
-    "smelt.plugins.background_commands",
-];
 
 #[cfg(test)]
 mod tests {
