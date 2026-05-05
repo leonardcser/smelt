@@ -235,15 +235,26 @@ autocmd fire is `Cell::set`, and named events without a value are
 
 A `Cell<T>` is a typed, named slot that:
 
-1. Holds a value.
+1. Holds the current value plus the previous value (`prev: Option<T>`).
 2. On `set`, wakes the loop (one `select!` branch on the cells channel).
-3. Notifies all subscribers, in registration order, queued and drained
-   after the current `&mut` borrows release.
+3. Notifies all subscribers with `(new, old)`, in registration order,
+   queued and drained after the current `&mut` borrows release.
 
-Lua surface: `smelt.cell(name):subscribe(fn)`,
-`smelt.cell.new(name, init):set(value)`, and a glob form
+Subscribers receiving `(new, old)` removes the "remember the previous
+value" boilerplate that plagues observer patterns. Statusline
+animations, "did the model actually change", undo of mode flips —
+all read the diff directly.
+
+Lua surface: `smelt.cell(name):subscribe(function(new, old) … end)`,
+`smelt.cell.new(name, init):set(value)`, glob form
 `smelt.cell:glob_subscribe("*_changed", fn)`. `smelt.au.{on,fire}` is
 a thin alias kept for nvim familiarity.
+
+**Built-in cell names are typed.** Built-ins are declared as a Rust
+enum in `core::cells::events`; `smelt.cell("agent_mode")` does an
+enum lookup and rejects unknown names. User-defined cells go through
+`smelt.cell.user("my_plugin:foo")` which bypasses the typed registry.
+Typos are caught at registration, not silently no-op'd.
 
 Built-in cells the runtime ships (stateful slots and pure events both):
 
@@ -475,11 +486,25 @@ handler treats it the same as a complete block (highlights what's
 there); the `incomplete` flag is informational so plugins can render a
 truncation marker if they want.
 
-If the bridge remains a distinct type, it should own the full
-event-to-buffer/cell fan-out. If it stays a thin wrapper around
-`EngineHandle`, delete the wrapper and keep translation as plain reducer
-code. The target is not the current middle state where both coexist. The
-Buffer is the source of truth.
+Bridge target: full event-to-buffer/cell fan-out lives in one place,
+not split between EngineClient and reducer code. Buffer is SoT.
+
+### Provider middleware
+
+A neutral `ProviderRequest` struct (messages + tools + sampling) sits
+between `EngineClient` and the kind-specific serializers
+(`anthropic` / `openai` / `codex` / `copilot`). Each serializer reads
+the neutral struct → wire format. `Vec<Box<dyn ProviderMiddleware>>`
+hooks `before_request(&mut ProviderRequest)` and
+`after_response(&mut ProviderResponse)` around the serializer. Lua:
+`smelt.engine.use_middleware(before?, after?)`. Mutation is the
+point — redaction, prompt rewriting, A/B swaps, cassette capture.
+Observation alone is the `turn_complete` / `message_start|end` cells.
+
+Today serializers build the wire body inline; introducing the
+neutral struct is the heaviest piece of the seam (~500 LOC). Worth
+it: without this, plugins can't do redaction or rewriting without
+forking a provider.
 
 ## Dialogs — one question per dialog
 
@@ -744,23 +769,24 @@ the `eprintln!`s before committing.
 
 ## Future multi-agent — optional plugin pattern, not engine concept
 
-Engine has no agent concept. Any future multi-agent feature is an
-optional Lua plugin over `core::process` long-lived IPC (`spawn`,
-`send`, `on_event`, `wait`, `kill`). Child process can be anything —
-agent, MCP server, long-running bash. Transcript renders these tool
-calls the same way as any other tool call; fancier UI rides on a
-custom Buffer attach + cells. Bidirectional async happens through
-`on_event` updating Lua-side cells.
+Engine has no agent concept. Any future multi-agent feature is a Lua
+plugin over `core::process` long-lived IPC (`spawn / send / on_event
+/ wait / kill`). Bidirectional async via `on_event` → Lua cells.
 
 ## Configuration — one format, one entry point
 
 User config: `~/.config/smelt/init.lua`. Plugins:
-`~/.config/smelt/plugins/*.lua`. Tools:
-`~/.config/smelt/tools/*.lua` (P9.g auto-register). Project-local
-(P9.g): `<cwd>/.smelt/{init.lua, plugins/*.lua, tools/*.lua,
-commands/*.md}` — autoloaded after globals, gated by a first-load
-trust prompt. Embedded autoloads under `runtime/lua/smelt/` are the
-SoT for default UX; init.lua runs after and overrides.
+`~/.config/smelt/plugins/*.lua`. Tools: `~/.config/smelt/tools/*.lua`
+(P9.g auto-register). Project-local (P9.g):
+`<cwd>/.smelt/{init.lua, plugins/*.lua, tools/*.lua, commands/*.md}`
+— autoloaded after globals, gated by a first-load trust prompt.
+
+**Runtime override search path.** Default UX modules stay
+`include_str!`'d in the binary — `cargo install smelt` works with no
+external state. The `require` loader searches
+`<cwd>/.smelt/runtime/?.lua` → `~/.local/share/smelt/runtime/?.lua`
+→ embedded, so users override an individual file (e.g.
+`dialogs/confirm.lua`) without forking. ~20 LOC mlua searcher hook.
 
 No YAML/TOML, no settings registry. Every option is a Lua binding
 argument: providers, permissions, MCP, theme, keymap, model defaults.
