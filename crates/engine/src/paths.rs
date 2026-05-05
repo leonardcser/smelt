@@ -50,6 +50,13 @@ pub fn cache_dir() -> PathBuf {
         .join(APP_NAME)
 }
 
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".local").join("share"))
+        .join(APP_NAME)
+}
+
 /// Detect the git repository root for the given directory.
 /// Returns `None` if not in a git repo, or if the root is the home directory
 /// or filesystem root (too broad to be useful as a workspace boundary).

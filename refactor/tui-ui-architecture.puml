@@ -39,13 +39,15 @@ legend right
   "bash" => … }` over a Lua-registered identifier is a bug. The
   registration table carries the metadata; Rust calls through it.
 
-  **Plugin-author surface (P9.f-h, plan).** Namespaces are integer
-  handles minted by `smelt.api.create_namespace(name)`. Extmark API
-  is one keyset call mirroring nvim verbatim plus smelt extensions
-  (yank, on_click). Plugins live in `~/.config/smelt/` AND project-local
-  `<cwd>/.smelt/` (trust-gated). Tool files auto-register on require.
-  System-prompt sections register as closures, mirror statusline
-  source pattern.
+  **Plugin-author surface (P9.f-k, plan).** Namespaces are integer
+  handles minted by `smelt.api.create_namespace`. Extmark API is one
+  keyset call mirroring nvim verbatim. Plugins live in
+  `~/.config/smelt/` AND project-local `<cwd>/.smelt/` (trust-gated).
+  Tool files auto-register on require. Prompt sections register as
+  closures (statusline pattern). Cell subscribers see (new, old);
+  built-in names typed. Provider middleware mutates request +
+  response. `require` searches workspace + user runtime before
+  embedded fallback. Read-only tools opt into parallel execution.
 end legend
 
 ' =====================================================================
@@ -189,17 +191,21 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
     }
     class Cells <<reactive registry — also the event bus>> {
       Map<CellName, Box<dyn Any>>
-      built-ins (state): now,
-        spinner_frame, agent_mode,
-        vim_mode, model, reasoning,
-        confirms_pending, tokens_used,
-        errors, cwd, session_title,
-        branch
-      built-ins (events): history,
-        turn_complete, turn_error,
-        confirm_requested,
-        confirm_resolved,
-        session_started, session_ended
+      Cell<T> { value: T, prev: Option<T> }
+      ' P9.h: subscribers receive
+      ' (new, old) — eliminates
+      ' "remember prior value"
+      ' boilerplate.
+      built-ins typed (Rust enum) — P9.h:
+        state: now, spinner_frame,
+          agent_mode, vim_mode, model,
+          reasoning, confirms_pending,
+          tokens_used, errors, cwd,
+          session_title, branch
+        events: history, turn_complete,
+          turn_error, confirm_requested,
+          confirm_resolved,
+          session_started, session_ended
       P9.h adds (events):
         session_before_compact|fork,
         message_start|end,
@@ -209,15 +215,14 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
       new<T>(name, initial) -> CellId
       get<T>(name) -> &T
       set<T>(name, T)        ' wakes loop;
-                              ' notifies subs
+                              ' notifies subs(new, old)
       subscribe(name, CbId)   ' sole observer
-                              ' mechanism — autocmd
-                              ' is sugar over this.
       glob_subscribe(pattern, CbId)
+      ' Built-in names typed; user names via
+      ' smelt.cell.user("plug:foo") bypass.
       ' Mutate-payload is NOT a cell pattern.
-      ' System-prompt composition uses the
-      ' source-register pattern below
-      ' (see PromptSections / smelt.prompt).
+      ' Prompt assembly: PromptSections
+      ' source-register pattern below.
     }
     class LuaShared <<shared state — lives in core>> {
       commands, keymaps,
@@ -266,6 +271,27 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
         (Rust-only; no Lua per chunk)
       ToolStarted/Finished, block end
         → Buffer attach `on_block` cb
+      middleware:
+        Vec<Box<dyn ProviderMiddleware>>
+        ' P9.i — runs around each
+        ' provider call, mutates request
+        ' before / response after.
+    }
+    interface ProviderMiddleware <<P9.i>> {
+      before_request(&mut ProviderRequest)
+      after_response(&mut ProviderResponse)
+      ' Plugins register via
+      ' smelt.engine.use_middleware.
+      ' Use cases: redaction, prompt
+      ' rewriting, A/B model swaps,
+      ' cassette capture.
+    }
+    class ProviderRequest <<neutral — P9.i>> {
+      messages, tools, sampling
+      ' Each kind-specific serializer
+      ' (anthropic / openai / codex /
+      ' copilot) reads this neutral
+      ' struct, builds wire body.
     }
   }
 
@@ -366,6 +392,11 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
       3. <cwd>/.smelt/init.lua
          + plugins/*.lua + tools/*.lua
          (gated by trust prompt)
+    require search (P9.j):
+      <cwd>/.smelt/runtime/?.lua →
+      ~/.local/share/smelt/runtime/?.lua →
+      embedded fallback. Override
+      individual UX files without forking.
     auto-register (P9.g): files
       under tools/*.lua whose returned
       table has `name` + `run` register
@@ -784,7 +815,9 @@ EngineClient --> EngineHandle : owns handle\nreads event stream
 EngineClient ..> Confirms        : gates on is_clear()
 EngineClient ..> Session         : update history,\ncosts, snapshots
 EngineClient ..> Cells           : set(history),\nset(turn_complete),\nset(token_usage),\nset(message_start|end),\nset(tool_execution_start|end), …
+EngineClient o--> "*" ProviderMiddleware : runs before /\nafter each provider call
 TuiApp       ..> PromptSections   : assemble() before\nUiCommand::StartTurn
+LPLG     -[#aa6,dashed]-> ProviderMiddleware : smelt.engine.use_middleware
 Confirms ..> EngineHandle        : PermissionDecision
 
 Window ..> UiHost           : direct mutation\nvia &mut dyn UiHost

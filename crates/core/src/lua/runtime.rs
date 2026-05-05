@@ -973,7 +973,20 @@ pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
 }
 
 fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
-    let searcher = lua.create_function(|lua, module: String| {
+    register_module_searcher_with_roots(lua, module_overlay_roots())
+}
+
+fn register_module_searcher_with_roots(lua: &Lua, roots: Vec<PathBuf>) -> LuaResult<()> {
+    let searcher = lua.create_function(move |lua, module: String| {
+        let rel = module_to_relpath(&module);
+        for root in &roots {
+            let path = root.join(&rel);
+            if let Ok(source) = std::fs::read_to_string(&path) {
+                let name = path.display().to_string();
+                let loader = lua.load(source).set_name(name).into_function()?;
+                return Ok(mlua::Value::Function(loader));
+            }
+        }
         for &(name, source) in EMBEDDED_MODULES {
             if name == module {
                 let loader = lua.load(source).set_name(name).into_function()?;
@@ -990,6 +1003,26 @@ fn register_embedded_searcher(lua: &Lua) -> LuaResult<()> {
     let len = searchers.raw_len();
     searchers.raw_set(len + 1, searcher)?;
     Ok(())
+}
+
+/// Translate a Lua module name (`smelt.dialogs.confirm`) into a
+/// relative file path (`smelt/dialogs/confirm.lua`).
+fn module_to_relpath(module: &str) -> PathBuf {
+    let mut path = PathBuf::from(module.replace('.', "/"));
+    path.set_extension("lua");
+    path
+}
+
+/// Roots searched for Lua module overrides, in priority order:
+/// project-local `.smelt/runtime/`, then user data
+/// `<XDG_DATA_HOME>/smelt/runtime/`. The embedded fallback runs last.
+fn module_overlay_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd.join(".smelt").join("runtime"));
+    }
+    roots.push(engine::data_dir().join("runtime"));
+    roots
 }
 
 fn init_lua_path() -> Option<PathBuf> {
@@ -1012,4 +1045,37 @@ fn build_tool_ctx(
     t.set("session_id", session_id.to_string())?;
     t.set("session_dir", session_dir.to_string_lossy().into_owned())?;
     Ok(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_relpath_translates_dots_to_slashes() {
+        assert_eq!(
+            module_to_relpath("smelt.dialogs.confirm"),
+            PathBuf::from("smelt/dialogs/confirm.lua")
+        );
+        assert_eq!(module_to_relpath("smelt"), PathBuf::from("smelt.lua"));
+    }
+
+    #[test]
+    fn overlay_file_overrides_embedded_module() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tmp.path().join("smelt").join("dialogs");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("confirm.lua"), "return { tag = 'overlay' }\n").unwrap();
+
+        let lua = Lua::new();
+        let roots = vec![tmp.path().to_path_buf()];
+        register_module_searcher_with_roots(&lua, roots).unwrap();
+
+        let v: mlua::Table = lua
+            .load("return require('smelt.dialogs.confirm')")
+            .eval()
+            .unwrap();
+        let tag: String = v.get("tag").unwrap();
+        assert_eq!(tag, "overlay");
+    }
 }

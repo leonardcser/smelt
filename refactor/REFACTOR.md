@@ -335,11 +335,26 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   `tools/*.lua` auto-register on require; autoload
   `<cwd>/.smelt/{init,plugins,tools,commands}` after globals; trust
   gate on first load.
-- **P9.h** ⏸ — **Hook surface expansion.** Event cells
+- **P9.h** ⏸ — **Cells + hook surface.** `(new, old)` payloads to
+  subscribers; built-in cell names typed (Rust enum); event cells
   (`session_before_compact|fork`, `message_start|end`,
   `tool_execution_start|end`, `input_submit`); prompt composition via
   `smelt.prompt.register_section`; stale-task invalidation by session
   tag.
+- **P9.i** ⏸ — **Provider middleware.** Neutral `ProviderRequest` /
+  `ProviderResponse` between `EngineClient` and the kind-specific
+  serializers; `EngineClient` carries `Vec<Box<dyn ProviderMiddleware>>`
+  with `before_request` + `after_response`. Plugin-extensibility seam
+  for redaction / prompt rewriting / A/B swaps. ~500 LOC.
+- **P9.j** ✅ — **Loader override search path.** mlua `require`
+  searches `<cwd>/.smelt/runtime/?.lua` →
+  `<XDG_DATA_HOME>/smelt/runtime/?.lua` → `include_str!`'d embedded.
+  Users override individual UX files without forking. New
+  `engine::data_dir()` accessor.
+- **P9.k** ⏸ — **Honor `ToolExecutionMode::Parallel`.** Already in
+  protocol; agent loop runs all tools sequentially. Read-only tools
+  (`read_file`, `glob`, `grep`, `web_fetch`, `web_search`) marked
+  `Parallel` get `tokio::join_all`.
 
 ---
 
