@@ -626,6 +626,7 @@ impl TuiApp {
         let lua = self.lua.lua();
         for fire in fires {
             let value = self.core.cells.project_to_lua(&*fire.value, lua);
+            let prev = self.core.cells.project_to_lua(&*fire.prev, lua);
             for cb in &fire.callbacks {
                 let smelt_core::cells::SubscriberKind::Lua(handle) = &cb.kind;
                 let func = match lua.registry_value::<mlua::Function>(&handle.key) {
@@ -633,9 +634,9 @@ impl TuiApp {
                     Err(_) => continue,
                 };
                 let result = if cb.is_glob {
-                    func.call::<()>((fire.name.clone(), value.clone()))
+                    func.call::<()>((fire.name.clone(), value.clone(), prev.clone()))
                 } else {
-                    func.call::<()>(value.clone())
+                    func.call::<()>((value.clone(), prev.clone()))
                 };
                 if let Err(e) = result {
                     self.lua.record_error(format!("cell `{}`: {e}", fire.name));

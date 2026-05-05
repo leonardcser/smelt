@@ -86,20 +86,27 @@ struct Slot {
 
 /// One queued callback inside a `PendingFire`. `is_glob` lets the
 /// drain pump pick the right call shape: direct subscribers receive
-/// `(value)`, glob subscribers receive `(name, value)` — matching
-/// nvim's `pattern`-augmented autocmd ergonomics.
+/// `(new, old)`, glob subscribers receive `(name, new, old)` —
+/// matching nvim's `pattern`-augmented autocmd ergonomics. The trailing
+/// `old` argument lets diff-on-change subscribers (animation, mode
+/// flips, "did the model actually change") read the prior value
+/// directly instead of mirroring it in plugin state.
 pub struct PendingCallback {
     pub kind: SubscriberKind,
     pub is_glob: bool,
 }
 
-/// One queued notification: the value snapshot at the moment of `set`
-/// plus the subscriber callbacks captured at that moment. The caller
-/// fires each callback in registration order after the `&mut Cells`
-/// borrow releases.
+/// One queued notification: the value snapshot at the moment of `set`,
+/// the previous value the slot held just before the write, and the
+/// subscriber callbacks captured at that moment. The caller fires each
+/// callback in registration order after the `&mut Cells` borrow
+/// releases. `prev` is the value the slot carried prior to this `set`
+/// (the initial value for the first publish), so subscribers see
+/// `(new, old)` without having to remember the prior value themselves.
 pub struct PendingFire {
     pub name: String,
     pub value: Rc<dyn Any>,
+    pub prev: Rc<dyn Any>,
     pub callbacks: Vec<PendingCallback>,
 }
 
@@ -197,7 +204,7 @@ impl Cells {
         let Some(slot) = self.slots.get_mut(name) else {
             return false;
         };
-        slot.value = value;
+        let prev = std::mem::replace(&mut slot.value, value);
         let mut callbacks: Vec<PendingCallback> = slot
             .subscribers
             .iter()
@@ -221,6 +228,7 @@ impl Cells {
         self.pending.push(PendingFire {
             name: name.to_string(),
             value: snapshot,
+            prev,
             callbacks,
         });
         true
@@ -765,6 +773,25 @@ mod tests {
         assert_eq!(fires.len(), 2);
         assert_eq!(fires[0].value.downcast_ref::<u32>(), Some(&1u32));
         assert_eq!(fires[1].value.downcast_ref::<u32>(), Some(&2u32));
+    }
+
+    #[test]
+    fn fire_carries_prev_value() {
+        let lua = Lua::new();
+        let mut c = Cells::new();
+        c.declare("count", 7u32);
+        c.subscribe_kind("count", SubscriberKind::Lua(handle(&lua, "function() end")))
+            .unwrap();
+        // First publish: prev = initial value from declare.
+        c.set_dyn("count", Rc::new(8u32));
+        // Second publish: prev = the value set by the first publish.
+        c.set_dyn("count", Rc::new(9u32));
+        let fires = c.drain_pending();
+        assert_eq!(fires.len(), 2);
+        assert_eq!(fires[0].value.downcast_ref::<u32>(), Some(&8u32));
+        assert_eq!(fires[0].prev.downcast_ref::<u32>(), Some(&7u32));
+        assert_eq!(fires[1].value.downcast_ref::<u32>(), Some(&9u32));
+        assert_eq!(fires[1].prev.downcast_ref::<u32>(), Some(&8u32));
     }
 
     #[test]
