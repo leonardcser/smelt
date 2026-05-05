@@ -22,29 +22,6 @@ impl TuiApp {
         }
     }
 
-    /// Toggle one of the named boolean settings (`vim`, `auto_compact`,
-    /// `show_tps`, …). Notifies an error toast on unknown keys.
-    pub(crate) fn toggle_named_setting(&mut self, key: &str) {
-        let mut s = self.settings_state();
-        match key {
-            "vim" => s.vim ^= true,
-            "auto_compact" => s.auto_compact ^= true,
-            "show_tps" => s.show_tps ^= true,
-            "show_tokens" => s.show_tokens ^= true,
-            "show_cost" => s.show_cost ^= true,
-            "show_prediction" => s.show_prediction ^= true,
-            "show_slug" => s.show_slug ^= true,
-            "show_thinking" => s.show_thinking ^= true,
-            "restrict_to_workspace" => s.restrict_to_workspace ^= true,
-            "redact_secrets" => s.redact_secrets ^= true,
-            _ => {
-                self.notify_error(format!("unknown setting: {key}"));
-                return;
-            }
-        }
-        self.set_settings(s);
-    }
-
     /// Compact the transcript or notify "nothing to compact" when
     /// `session.messages` is empty.
     pub(crate) fn compact_or_notify(&mut self, instructions: Option<String>) {

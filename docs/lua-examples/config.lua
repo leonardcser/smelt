@@ -26,9 +26,9 @@ smelt.mcp.register("filesystem", {
 })
 
 -- Settings
-smelt.settings.set("vim_mode", true)
-smelt.settings.set("auto_compact", false)
-smelt.settings.set("show_cost", true)
+smelt.settings.vim = true
+smelt.settings.auto_compact = false
+smelt.settings.show_cost = true
 
 -- Permission rules
 smelt.permissions.set_rules({

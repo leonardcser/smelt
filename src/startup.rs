@@ -91,7 +91,15 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
             eprintln!("error: --set requires KEY=VALUE format, got '{pair}'");
             std::process::exit(1);
         };
-        if let Err(e) = cfg.settings.apply(key, value) {
+        let parsed = match value {
+            "true" => true,
+            "false" => false,
+            _ => {
+                eprintln!("error: --set {pair}: invalid bool value '{value}' for {key}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = cfg.settings.set_bool(key, parsed) {
             eprintln!("error: --set {pair}: {e}");
             std::process::exit(1);
         }

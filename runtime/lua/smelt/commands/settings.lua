@@ -17,12 +17,11 @@ local SETTINGS_META = {
 }
 
 local function build_items()
-  local snap = smelt.settings.snapshot()
   local items = {}
   for _, m in ipairs(SETTINGS_META) do
     items[#items + 1] = {
       label        = m.label,
-      description  = snap[m.key] and "on" or "off",
+      description  = smelt.settings[m.key] and "on" or "off",
       search_terms = m.key .. " " .. (m.terms or ""),
       _key         = m.key,
     }
@@ -33,7 +32,11 @@ end
 smelt.cmd.picker("settings", {
   desc       = "open settings menu",
   items      = build_items,
-  on_enter   = function(item) if item._key then smelt.settings.toggle(item._key) end end,
+  on_enter   = function(item)
+    if item._key then
+      smelt.settings[item._key] = not smelt.settings[item._key]
+    end
+  end,
   stay_open  = true,
   startup_ok = true,
 })
