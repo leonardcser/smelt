@@ -369,10 +369,11 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   `<XDG_DATA_HOME>/smelt/runtime/?.lua` → `include_str!`'d embedded.
   Users override individual UX files without forking. New
   `engine::data_dir()` accessor.
-- **P9.k** ⏸ — **Honor `ToolExecutionMode::Parallel`.** Already in
-  protocol; agent loop runs all tools sequentially. Read-only tools
-  (`read_file`, `glob`, `grep`, `web_fetch`, `web_search`) marked
-  `Parallel` get `tokio::join_all`.
+- **P9.k** ✅ — **Concurrent tool execution.** Protocol's
+  `ToolExecutionMode::Concurrent` (default) is honored: the agent
+  drives all dispatched tools through a `FuturesUnordered` so
+  reads run concurrently. `Sequential` (e.g. `ask_user_question`)
+  is deferred until peers finish, matching the original spec.
 - **P9.l** ✅ — **Embedded Lua tree.** `EMBEDDED_MODULES` (140
   lines) + `BOOTSTRAP_CHUNKS` (~30) + `AUTOLOAD_MODULES` (~30)
   collapsed to one `include_dir!("runtime/lua/smelt")` walk.
@@ -380,13 +381,12 @@ fat sub-phases sequenced by dependency. Full detail in `P9.md`.
   and autoload come from directory walks (`tools/`, `commands/`,
   `plugins/`, `dialogs/`). Adding a built-in `.lua` under one of
   those dirs now requires zero Rust edits.
-- **P9.m** ⏸ — **Single LuaRuntime instance.** `main.rs` builds a
-  throwaway `LuaRuntime` to parse config-time `init.lua`; `TuiApp::new`
-  builds another, so `init.lua` runs twice against two `LuaShared`
-  instances. Build the runtime once in `main.rs`, hand it (already
-  loaded with user config) to `TuiApp::new` / `HeadlessApp::new`.
-  Eliminates a second Lua VM at startup and the implicit "things
-  registered at config time vanish" surprise.
+- **P9.m** ✅ — **Single LuaRuntime instance.** `main.rs` stages
+  every Lua load (autoload → user `init.lua` → global plugins →
+  project plugins+init under trust gate) before construction, then
+  hands the loaded runtime + `TrustState` to `TuiApp::new` by value.
+  `TuiApp::start` only installs the TLS app pointer and emits the
+  untrusted-project toast. `init.lua` runs exactly once.
 - **P9.n** ⏸ — **Vim becomes Lua-extensible.** `ui/vim.rs` keymap
   dispatch (~30 free functions) is the only interactive surface
   whose bindings aren't Lua-registerable. Move per-buffer state
