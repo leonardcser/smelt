@@ -1,8 +1,10 @@
+use super::block_buffers::BlockBufferCache;
 use super::to_buffer::{apply_to_buffer, project_display_line, ProjectedLine};
 use crate::ui::buffer::Buffer;
 use crate::ui::Theme;
 use smelt_core::content::display::DisplayLine;
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};
+use smelt_core::transcript_present::ToolBodyRenderer;
 
 /// Namespace name for transcript selection extmarks. Created on the
 /// transcript display buffer at startup; populated each frame from the
@@ -19,6 +21,7 @@ pub(crate) struct TranscriptProjection {
     generation: u64,
     width: u16,
     show_thinking: bool,
+    cache: BlockBufferCache,
 }
 
 impl TranscriptProjection {
@@ -27,9 +30,11 @@ impl TranscriptProjection {
             generation: u64::MAX,
             width: 0,
             show_thinking: false,
+            cache: BlockBufferCache::new(),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn project(
         &mut self,
         buf: &mut Buffer,
@@ -38,14 +43,18 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
         ephemeral_lines: &[DisplayLine],
+        renderer: Option<&dyn ToolBodyRenderer>,
     ) {
         let gen = history.generation();
         if gen == self.generation && width == self.width && show_thinking == self.show_thinking {
             return;
         }
 
-        if width as usize != history.cache_width {
-            history.invalidate_for_width(width as usize);
+        // Generation changed — some block content mutated. Coarse
+        // full-clear; incremental per-block invalidation is a perf
+        // optimisation that can attach a hash-per-block when needed.
+        if gen != self.generation {
+            self.cache.clear();
         }
 
         let key = LayoutKey {
@@ -58,19 +67,16 @@ impl TranscriptProjection {
         let mut lines: Vec<ProjectedLine> = Vec::new();
 
         for i in 0..history.len() {
-            let rows = history.ensure_rows(i, key);
-            let gap = if rows == 0 { 0 } else { history.block_gap(i) };
-
+            let gap = history.block_gap(i);
             for _ in 0..gap {
                 lines.push(ProjectedLine::default());
             }
 
             let id = history.order[i];
             let bkey = history.resolve_key(id, key);
-            if let Some(display) = history.artifacts.get(&id).and_then(|a| a.get(bkey)) {
-                for dline in &display.lines {
-                    lines.push(project_display_line(dline, theme));
-                }
+            let display = self.cache.ensure(history, id, bkey, renderer);
+            for dline in &display.lines {
+                lines.push(project_display_line(dline, theme));
             }
         }
 

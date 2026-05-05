@@ -4,12 +4,14 @@ pub use smelt_core::content::layout_out;
 pub(crate) mod selection;
 
 // Tui-specific submodules
+pub(crate) mod block_buffers;
 pub(crate) mod layout;
 pub(crate) mod prompt_buf;
 pub(crate) mod prompt_wrap;
 pub(crate) mod status;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
+pub(crate) mod transcript_snapshot;
 
 use crossterm::{style::Color, terminal};
 
