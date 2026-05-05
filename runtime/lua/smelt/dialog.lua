@@ -86,11 +86,13 @@ local function split_lines(text)
   return out
 end
 
+local NS_PLACEHOLDER = smelt.buf.create_namespace("smelt.dialog.placeholder")
+
 local function make_input_buffer(placeholder)
   local buf = smelt.buf.create()
   if placeholder and placeholder ~= "" then
     smelt.buf.set_lines(buf, { placeholder })
-    smelt.buf.add_dim(buf, 1, 0, #placeholder)
+    smelt.buf.set_extmark(buf, NS_PLACEHOLDER, 1, 0, { end_col = #placeholder, dim = true })
   else
     smelt.buf.set_lines(buf, { "" })
   end
