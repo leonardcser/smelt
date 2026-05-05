@@ -773,44 +773,30 @@ impl LuaRuntime {
     }
 
     /// Call a tool's Lua `render` hook, if registered.
-    /// Receives the tool args, the `ToolOutput`, and a `RenderCtx` userdata.
-    /// Returns the number of rows added to `out`.
+    /// The hook receives `(args, output, width, buf_id)` and writes its
+    /// content into the buffer named by `buf_id` (which the caller has
+    /// already created in the UI's buffer registry). Returns `true` iff
+    /// the hook ran successfully; the caller decides what fallback to
+    /// paint when this returns `false`.
     pub fn render_tool_body(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
         output: &crate::transcript_model::ToolOutput,
         width: usize,
-        out: &mut crate::content::layout_out::SpanCollector,
-    ) -> u16 {
+        buf_id: u64,
+    ) -> bool {
         let render_fn = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = handlers.get(tool_name) else {
-                return crate::transcript_present::render_default_output(
-                    out,
-                    &output.content,
-                    output.is_error,
-                    width,
-                );
+                return false;
             };
             let Some(rh) = h.render.as_ref() else {
-                return crate::transcript_present::render_default_output(
-                    out,
-                    &output.content,
-                    output.is_error,
-                    width,
-                );
+                return false;
             };
             match self.lua.registry_value::<mlua::Function>(&rh.key) {
                 Ok(f) => f,
-                Err(_) => {
-                    return crate::transcript_present::render_default_output(
-                        out,
-                        &output.content,
-                        output.is_error,
-                        width,
-                    );
-                }
+                Err(_) => return false,
             }
         };
 
@@ -818,12 +804,7 @@ impl LuaRuntime {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("tool render: build args: {e}"));
-                return crate::transcript_present::render_default_output(
-                    out,
-                    &output.content,
-                    output.is_error,
-                    width,
-                );
+                return false;
             }
         };
 
@@ -831,12 +812,7 @@ impl LuaRuntime {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("tool render: build output table: {e}"));
-                return crate::transcript_present::render_default_output(
-                    out,
-                    &output.content,
-                    output.is_error,
-                    width,
-                );
+                return false;
             }
         };
         let _ = output_table.set("content", output.content.clone());
@@ -850,27 +826,11 @@ impl LuaRuntime {
             }
         }
 
-        let before = out.line_count();
-        let ctx = super::render_ctx::RenderCtx::new(out, width);
-        let ctx_ud = match self.lua.create_userdata(ctx) {
-            Ok(ud) => ud,
-            Err(e) => {
-                self.record_error(format!("tool render: create ctx: {e}"));
-                return crate::transcript_present::render_default_output(
-                    out,
-                    &output.content,
-                    output.is_error,
-                    width,
-                );
-            }
-        };
-
-        if let Err(e) = render_fn.call::<()>((args_table, output_table, width, ctx_ud)) {
+        if let Err(e) = render_fn.call::<()>((args_table, output_table, width, buf_id)) {
             self.record_error(format!("tool render `{tool_name}`: {e}"));
+            return false;
         }
-
-        let after = out.line_count();
-        (after - before) as u16
+        true
     }
 
     fn args_to_lua_table(

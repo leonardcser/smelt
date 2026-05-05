@@ -32,7 +32,7 @@ smelt.tools.register({
   needs_confirm = function(args)
     return confirm_message(args)
   end,
-  render = function(args, output, width, ctx)
+  render = function(args, output, width, buf)
     local content = output.content or ""
     local n = 0
     if content ~= "" then
@@ -42,7 +42,7 @@ smelt.tools.register({
         n = n + 1
       end
     end
-    ctx:text(n .. " files")
+    smelt.text.render(buf, n .. " files")
   end,
   execute = function(args)
     local pattern = args.pattern or ""
