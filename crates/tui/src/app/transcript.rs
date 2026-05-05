@@ -200,13 +200,21 @@ impl TuiApp {
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let tw = self.transcript_width() as u16;
         if !self.has_ephemeral(show_thinking) {
-            let snap = self.transcript.snapshot(tw, show_thinking);
+            let snap = crate::content::transcript_snapshot::build_snapshot(
+                &mut self.transcript.history,
+                tw,
+                show_thinking,
+            );
             return Arc::clone(&snap.rows);
         }
         let mut col = SpanCollector::new(tw);
         self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
         let ephemeral_lines = col.finish().lines;
-        let snap = self.transcript.snapshot(tw, show_thinking);
+        let snap = crate::content::transcript_snapshot::build_snapshot(
+            &mut self.transcript.history,
+            tw,
+            show_thinking,
+        );
         let mut rows: Vec<String> = (*snap.rows).clone();
         for line in ephemeral_lines {
             let mut s = String::new();
@@ -228,7 +236,11 @@ impl TuiApp {
         show_thinking: bool,
     ) -> (Vec<usize>, Vec<usize>) {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
+        let snap = crate::content::transcript_snapshot::build_snapshot(
+            &mut self.transcript.history,
+            tw,
+            show_thinking,
+        );
         let rows = snap.rows.clone();
         let mut soft = Vec::new();
         let mut hard = Vec::new();
@@ -280,7 +292,11 @@ impl TuiApp {
         // (tool / confirm) whose "raw" form isn't a single
         // string.
         let block_id = {
-            let snap = self.transcript.snapshot(tw, show_thinking);
+            let snap = crate::content::transcript_snapshot::build_snapshot(
+                &mut self.transcript.history,
+                tw,
+                show_thinking,
+            );
             snap.block_of_row.get(abs_row).copied().flatten()
         };
         if let Some(id) = block_id {
@@ -288,7 +304,11 @@ impl TuiApp {
                 return Some(raw);
             }
         }
-        let snap = self.transcript.snapshot(tw, show_thinking);
+        let snap = crate::content::transcript_snapshot::build_snapshot(
+            &mut self.transcript.history,
+            tw,
+            show_thinking,
+        );
         snap.block_text_at(abs_row)
     }
 
@@ -299,7 +319,11 @@ impl TuiApp {
         show_thinking: bool,
     ) -> usize {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
+        let snap = crate::content::transcript_snapshot::build_snapshot(
+            &mut self.transcript.history,
+            tw,
+            show_thinking,
+        );
         snap.snap_to_selectable(abs_row, col)
             .map(|(_, c)| c)
             .unwrap_or(col)
@@ -312,7 +336,11 @@ impl TuiApp {
         show_thinking: bool,
     ) -> usize {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
+        let snap = crate::content::transcript_snapshot::build_snapshot(
+            &mut self.transcript.history,
+            tw,
+            show_thinking,
+        );
         let (row, col) = snap.byte_to_row_col(cpos);
         if let Some((_, snapped_col)) = snap.snap_to_selectable(row, col) {
             if snapped_col == col {
@@ -338,7 +366,11 @@ impl TuiApp {
         show_thinking: bool,
     ) -> String {
         let tw = self.transcript_width() as u16;
-        let snap = self.transcript.snapshot(tw, show_thinking);
+        let snap = crate::content::transcript_snapshot::build_snapshot(
+            &mut self.transcript.history,
+            tw,
+            show_thinking,
+        );
         snap.copy_byte_range(start, end)
     }
 
@@ -423,6 +455,8 @@ impl TuiApp {
                 Vec::new()
             };
 
+        let renderer_arc = self.transcript.history.body_renderer.clone();
+        let renderer = renderer_arc.as_deref();
         let buf = self
             .ui
             .win_buf_mut(self.well_known.transcript)
@@ -434,6 +468,7 @@ impl TuiApp {
             show_thinking,
             &theme,
             &ephemeral_lines,
+            renderer,
         );
 
         let total_rows = buf.line_count() as u16;

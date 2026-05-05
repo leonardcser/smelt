@@ -111,7 +111,7 @@ const DEFAULT_PREVIEW_LINES: usize = 3;
 ///
 /// `state` must be `Some(_)` for `Block::ToolCall` and is unused for every
 /// other variant.
-pub(crate) fn layout_block(
+pub fn layout_block(
     block: &Block,
     state: Option<&ToolState>,
     ctx: &LayoutContext,

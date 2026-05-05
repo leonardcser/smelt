@@ -12,3 +12,13 @@ pub struct LayoutContext {
     pub(crate) show_thinking: bool,
     pub(crate) view_state: ViewState,
 }
+
+impl LayoutContext {
+    pub fn new(width: u16, show_thinking: bool, view_state: ViewState) -> Self {
+        Self {
+            width,
+            show_thinking,
+            view_state,
+        }
+    }
+}

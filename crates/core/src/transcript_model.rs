@@ -200,6 +200,12 @@ pub enum ConfirmChoice {
 )]
 pub struct BlockId(pub(crate) u64);
 
+impl BlockId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 /// Per-block view state — how the block is presented inside the
 /// transcript. Independent of the block's [`Status`] (a still-streaming
 /// block can be `Collapsed`; a finished block can be `TrimmedHead`).
@@ -318,9 +324,6 @@ pub struct BlockHistory {
     pub(crate) statuses: HashMap<BlockId, Status>,
     /// Viewport width when artifacts were last width-pruned.
     pub cache_width: usize,
-    /// True iff the layout cache has changed since the last persisted save.
-    /// When false, `save_session` skips writing the layout cache file.
-    pub cache_dirty: bool,
     /// Block ids that transitioned from `Streaming` to `Done` since the
     /// last drain. Drained by the app loop to emit `block_done`
     /// autocmds into the Lua runtime.
@@ -346,7 +349,6 @@ impl BlockHistory {
             view_states: HashMap::new(),
             statuses: HashMap::new(),
             cache_width: 0,
-            cache_dirty: false,
             finished_blocks: Vec::new(),
             generation: 0,
             body_renderer: None,
@@ -409,7 +411,6 @@ impl BlockHistory {
         if let Some(art) = self.artifacts.get_mut(&id) {
             art.clear();
         }
-        self.cache_dirty = true;
         self.bump_generation();
     }
 
@@ -449,7 +450,6 @@ impl BlockHistory {
         self.blocks.insert(id, block);
         self.content_hashes.insert(id, hash);
         self.artifacts.entry(id).or_default();
-        self.cache_dirty = true;
         self.bump_generation();
         id
     }
@@ -486,7 +486,6 @@ impl BlockHistory {
         }
         self.blocks.insert(id, block);
         self.content_hashes.insert(id, hash);
-        self.cache_dirty = true;
         self.bump_generation();
     }
 
@@ -505,7 +504,6 @@ impl BlockHistory {
         if let Some(artifact) = self.artifacts.get_mut(&id) {
             if !artifact.is_empty() {
                 artifact.clear();
-                self.cache_dirty = true;
                 self.bump_generation();
             }
         }
@@ -520,7 +518,6 @@ impl BlockHistory {
         self.tool_states.clear();
         self.view_states.clear();
         self.statuses.clear();
-        self.cache_dirty = true;
         self.bump_generation();
     }
 
@@ -531,18 +528,10 @@ impl BlockHistory {
     pub fn invalidate_for_width(&mut self, new_width: usize) {
         let _perf = crate::perf::begin("history:invalidate_for_width");
         let nw = new_width as u16;
-        let mut dirty = false;
         for artifact in self.artifacts.values_mut() {
-            let before = artifact.layouts.len();
             artifact.invalidate_for_width(nw);
-            if artifact.layouts.len() != before {
-                dirty = true;
-            }
         }
         self.cache_width = new_width;
-        if dirty {
-            self.cache_dirty = true;
-        }
     }
 
     /// Gap (in rows) before the block at `i`, based on adjacency rules.
@@ -610,7 +599,6 @@ impl BlockHistory {
         let rows = display.rows();
         let artifact = self.artifacts.get_mut(&id).unwrap();
         artifact.insert(key, display);
-        self.cache_dirty = true;
         rows
     }
 
@@ -626,7 +614,6 @@ impl BlockHistory {
             self.view_states.remove(&id);
             self.statuses.remove(&id);
         }
-        self.cache_dirty = true;
         self.bump_generation();
         self.gc_tool_states();
     }
