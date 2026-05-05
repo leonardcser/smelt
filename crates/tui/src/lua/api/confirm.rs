@@ -116,6 +116,29 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         })?,
     )?;
 
+    // smelt.confirm._render_preview(buf_id, handle_id) → bool. Routes
+    // the request's args through the tool's `preview` Lua callback (if
+    // registered) painting into `buf_id`. Returns false when the tool
+    // didn't register one — caller leaves the buffer empty.
+    confirm_tbl.set(
+        "_render_preview",
+        lua.create_function(|_, (buf_id, handle_id): (u64, u64)| {
+            let req = match crate::lua::with_app(|app| {
+                app.core
+                    .confirms
+                    .get(handle_id)
+                    .map(|e| (e.req.tool_name.clone(), e.req.args.clone()))
+            }) {
+                Some(r) => r,
+                None => return Ok(false),
+            };
+            Ok(crate::lua::try_with_app(|app| {
+                app.lua.render_tool_preview(&req.0, &req.1, buf_id)
+            })
+            .unwrap_or(false))
+        })?,
+    )?;
+
     // smelt.confirm._resolve(handle_id, decision, message?).
     // `decision` is the label string Lua built alongside the option
     // labels (`"yes"` / `"no"` / `"always_session"` / …); same lexicon

@@ -95,6 +95,13 @@ smelt.tools.register({
     local p = args.file_path or ""
     return p ~= "" and { p } or {}
   end,
+  preview = function(buf, args)
+    smelt.diff.render(buf, {
+      old  = args.old_string or "",
+      new  = args.new_string or "",
+      path = args.file_path or "",
+    })
+  end,
 
   execute = function(args)
     local path = args.file_path or ""

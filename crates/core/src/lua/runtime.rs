@@ -734,6 +734,50 @@ impl LuaRuntime {
         }
     }
 
+    pub fn tool_has_preview(&self, tool_name: &str) -> bool {
+        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+        handlers.get(tool_name).is_some_and(|h| h.preview.is_some())
+    }
+
+    /// Run a tool's `preview(buf, args)` Lua callback against the
+    /// buffer named by `buf_id`. The callback paints the confirm
+    /// dialog's preview pane (diff / syntax / notebook / bash). Returns
+    /// `true` iff the callback ran successfully.
+    pub fn render_tool_preview(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        buf_id: u64,
+    ) -> bool {
+        let render_fn = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return false;
+            };
+            let Some(rh) = h.preview.as_ref() else {
+                return false;
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return false,
+            }
+        };
+
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool preview: build args: {e}"));
+                return false;
+            }
+        };
+
+        if let Err(e) = render_fn.call::<()>((buf_id, args_table)) {
+            self.record_error(format!("tool preview `{tool_name}`: {e}"));
+            return false;
+        }
+        true
+    }
+
     /// Call a tool's `header_suffix(args, ctx)` callback, if registered.
     /// Returns the optional decoration string painted in the row-0 suffix
     /// area (after the elapsed time slot). `ctx.status` is one of

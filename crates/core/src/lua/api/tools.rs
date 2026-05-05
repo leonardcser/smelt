@@ -58,6 +58,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             .ok()
             .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
             .transpose()?;
+        let preview_handle = def
+            .get::<mlua::Function>("preview")
+            .ok()
+            .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
+            .transpose()?;
         let summary_fn = def.get::<mlua::Function>("summary").ok();
 
         let meta = lua.create_table()?;
@@ -88,6 +93,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "hook_paths_for_workspace",
             paths_for_workspace_handle.is_some(),
         )?;
+        meta.set("hook_preview", preview_handle.is_some())?;
         // override_core: explicit signal that this plugin shadows a
         // core Rust tool of the same name. The engine drops the
         // colliding core definition from the LLM schema and routes
@@ -114,6 +120,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     render_subhead: render_subhead_handle,
                     header_suffix: header_suffix_handle,
                     paths_for_workspace: paths_for_workspace_handle,
+                    preview: preview_handle,
                 },
             );
         }

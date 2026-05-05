@@ -21,27 +21,11 @@
 -- The preview panel is interactive — click it to focus, then scroll
 -- with the wheel or vim motions (j/k, gg/G, Ctrl-D/Ctrl-U).
 
--- Tools whose preview is rendered into the preview buffer. The Lua
--- side dispatches by tool_name onto the matching renderer primitive.
-local function fill_preview(buf, req)
-  local tool = req.tool_name
-  if tool == "edit_file" then
-    smelt.diff.render(buf, {
-      old  = req.args.old_string or "",
-      new  = req.args.new_string or "",
-      path = req.args.file_path or "",
-    })
-  elseif tool == "write_file" then
-    smelt.syntax.render(buf, {
-      content = req.args.content or "",
-      path    = req.args.file_path or "",
-    })
-  elseif tool == "edit_notebook" then
-    smelt.notebook.render(buf, req.args)
-  elseif tool == "bash" and req.desc:find("\n") then
-    smelt.bash.render(buf, req.desc)
-  end
-end
+-- Each tool registers its own `preview(buf, args)` callback (see
+-- `tools/{bash,edit_file,write_file,notebook_edit}.lua`). The dispatch
+-- routes by tool name on the Rust side via `smelt.confirm._render_preview`,
+-- so adding a new tool with a confirm preview is a matter of dropping a
+-- callback into its Lua definition — no edit here.
 
 -- `~/`-rewrite of the process cwd, used for "in {cwd}" labels on the
 -- workspace-scoped variants. Falls back to the absolute path if the
@@ -117,7 +101,7 @@ function smelt.confirm.open(handle_id)
   if req.summary and req.summary ~= "" then
     smelt.buf.set_lines(summary_buf, { " " .. req.summary })
   end
-  fill_preview(preview_buf, req)
+  smelt.confirm._render_preview(preview_buf, handle_id)
 
   local labels, decisions = build_options(req)
   local items = {}

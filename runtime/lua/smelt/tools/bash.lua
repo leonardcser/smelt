@@ -109,6 +109,12 @@ smelt.tools.register({
   paths_for_workspace = function(args)
     return smelt.shell.extract_paths(args.command or "")
   end,
+  preview = function(buf, args)
+    local cmd = args.command or ""
+    if cmd:find("\n") then
+      smelt.bash.render(buf, cmd)
+    end
+  end,
   execute = M.execute,
 })
 

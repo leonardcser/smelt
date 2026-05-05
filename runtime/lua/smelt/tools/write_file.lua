@@ -58,6 +58,12 @@ smelt.tools.register({
     local p = args.file_path or ""
     return p ~= "" and { p } or {}
   end,
+  preview = function(buf, args)
+    smelt.syntax.render(buf, {
+      content = args.content or "",
+      path    = args.file_path or "",
+    })
+  end,
   execute = function(args)
     local path = args.file_path or ""
     local content = args.content or ""

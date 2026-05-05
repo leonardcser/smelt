@@ -52,6 +52,9 @@ smelt.tools.register({
     end
     return smelt.fs.file_state.staleness_error(path, "notebook")
   end,
+  preview = function(buf, args)
+    smelt.notebook.render(buf, args)
+  end,
   render = function(args, output, width, buf)
     if output.is_error then
       smelt.text.render(buf, output.content, { is_error = true })
