@@ -539,9 +539,9 @@ impl StreamParser {
             return;
         };
         mutator(state);
-        if let Some(id) = history.tool_block_id(call_id) {
-            history.invalidate_block_layout(id);
-        }
+        // Tool state mutation needs to invalidate the per-block layout
+        // cache. The frontend cache is generation-keyed; bump it.
+        history.bump_generation();
     }
 
     // ── Exec lifecycle ──────────────────────────────────────────────

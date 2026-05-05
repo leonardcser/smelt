@@ -5,6 +5,7 @@
 use crate::app::TuiApp;
 use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_and_locate_cursor;
+use crate::ui::{BufCreateOpts, BufId, Buffer, Theme};
 
 use smelt_core::transcript_model::{
     Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
@@ -47,7 +48,7 @@ impl ToolBodyRenderer for LuaRenderRenderer {
                 return false;
             }
             if let Some(buf) = app.ui.buf_destroy(buf_id) {
-                crate::content::to_buffer::buffer_into_collector(&buf, out);
+                crate::content::to_buffer::replay_buffer_into(&buf, out);
             }
             true
         })
@@ -218,29 +219,26 @@ impl TuiApp {
     /// rows. Callers treat it as a `&[String]` via deref coercion.
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
         if !self.has_ephemeral(show_thinking) {
             let snap = crate::content::transcript_snapshot::build_snapshot(
                 &mut self.transcript.history,
                 tw,
                 show_thinking,
+                &theme,
             );
             return Arc::clone(&snap.rows);
         }
-        let mut col = SpanCollector::new(tw);
-        self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
-        let ephemeral_lines = col.finish().lines;
+        let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
         let snap = crate::content::transcript_snapshot::build_snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
+            &theme,
         );
         let mut rows: Vec<String> = (*snap.rows).clone();
-        for line in ephemeral_lines {
-            let mut s = String::new();
-            for span in &line.spans {
-                s.push_str(&span.text);
-            }
-            rows.push(s);
+        for r in 0..ephemeral_buf.line_count() {
+            rows.push(ephemeral_buf.get_line(r).unwrap_or("").to_string());
         }
         Arc::new(rows)
     }
@@ -255,10 +253,12 @@ impl TuiApp {
         show_thinking: bool,
     ) -> (Vec<usize>, Vec<usize>) {
         let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
         let snap = crate::content::transcript_snapshot::build_snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
+            &theme,
         );
         let rows = snap.rows.clone();
         let mut soft = Vec::new();
@@ -281,18 +281,15 @@ impl TuiApp {
         // hard break.
         let snap_row_count = rows.len();
         if self.has_ephemeral(show_thinking) {
-            let mut col = SpanCollector::new(tw);
-            self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
+            let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
             let mut first_ephemeral = true;
-            for line in col.finish().lines {
+            for r in 0..ephemeral_buf.line_count() {
                 if !first_ephemeral || snap_row_count > 0 {
                     hard.push(pos);
                     pos += 1;
                 }
                 first_ephemeral = false;
-                for span in &line.spans {
-                    pos += span.text.len();
-                }
+                pos += ephemeral_buf.get_line(r).unwrap_or("").len();
             }
         }
         (soft, hard)
@@ -304,6 +301,7 @@ impl TuiApp {
         show_thinking: bool,
     ) -> Option<String> {
         let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
         // Prefer the block's raw markdown source (text-bearing variants
         // expose `Block::raw_text`) so yanking a rendered markdown block
         // returns `**bold**`, `` `code` ``, fenced blocks, tables etc.
@@ -315,6 +313,7 @@ impl TuiApp {
                 &mut self.transcript.history,
                 tw,
                 show_thinking,
+                &theme,
             );
             snap.block_of_row.get(abs_row).copied().flatten()
         };
@@ -327,6 +326,7 @@ impl TuiApp {
             &mut self.transcript.history,
             tw,
             show_thinking,
+            &theme,
         );
         snap.block_text_at(abs_row)
     }
@@ -338,10 +338,12 @@ impl TuiApp {
         show_thinking: bool,
     ) -> usize {
         let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
         let snap = crate::content::transcript_snapshot::build_snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
+            &theme,
         );
         snap.snap_to_selectable(abs_row, col)
             .map(|(_, c)| c)
@@ -355,10 +357,12 @@ impl TuiApp {
         show_thinking: bool,
     ) -> usize {
         let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
         let snap = crate::content::transcript_snapshot::build_snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
+            &theme,
         );
         let (row, col) = snap.byte_to_row_col(cpos);
         if let Some((_, snapped_col)) = snap.snap_to_selectable(row, col) {
@@ -385,10 +389,12 @@ impl TuiApp {
         show_thinking: bool,
     ) -> String {
         let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
         let snap = crate::content::transcript_snapshot::build_snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
+            &theme,
         );
         snap.copy_byte_range(start, end)
     }
@@ -412,13 +418,11 @@ impl TuiApp {
     }
 
     /// Invalidate the width-dependent block layout cache when the
-    /// terminal width changes. Called from the resize handler; the
-    /// projection picks up the fresh layouts on the next render.
-    pub(crate) fn invalidate_for_width(&mut self, width: u16) {
-        if width as usize != self.transcript.history.cache_width {
-            self.transcript.history.invalidate_for_width(width as usize);
-        }
-    }
+    /// terminal width changes. The TranscriptProjection's BlockBufferCache
+    /// is keyed by width, so a width change naturally invalidates on
+    /// the next paint pass — this hook is preserved as a no-op for
+    /// callers that explicitly want to signal the resize.
+    pub(crate) fn invalidate_for_width(&mut self, _width: u16) {}
 
     pub(crate) fn clear_transcript(&mut self) {
         self.transcript.history.clear();
@@ -465,14 +469,7 @@ impl TuiApp {
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let theme = self.ui.theme().clone();
 
-        let ephemeral_lines: Vec<smelt_core::content::display::DisplayLine> =
-            if self.has_ephemeral(show_thinking) {
-                let mut col = SpanCollector::new(tw as u16);
-                self.render_ephemeral_into(&mut col, tw, show_thinking);
-                col.finish().lines
-            } else {
-                Vec::new()
-            };
+        let ephemeral_buf = self.render_ephemeral_to_buffer(tw as u16, show_thinking, &theme);
 
         let renderer_arc = self.transcript.history.body_renderer.clone();
         let renderer = renderer_arc.as_deref();
@@ -486,7 +483,7 @@ impl TuiApp {
             tw as u16,
             show_thinking,
             &theme,
-            &ephemeral_lines,
+            &ephemeral_buf,
             renderer,
         );
 
@@ -679,6 +676,22 @@ impl TuiApp {
             crate::content::emit_newlines(out, self.thinking_summary_gap());
             render_thinking_summary(out, width, &label, line_count, true);
         }
+    }
+
+    /// Render the ephemeral (active thinking) summary into a fresh
+    /// scratch Buffer at the given width. Returns an empty buffer when
+    /// there's no ephemeral content. Used by the transcript snapshot
+    /// helpers and projection path so the same rendering writes
+    /// directly into a Buffer (no SpanCollector→DisplayBlock detour).
+    fn render_ephemeral_to_buffer(&self, tw: u16, show_thinking: bool, theme: &Theme) -> Buffer {
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        if !self.has_ephemeral(show_thinking) {
+            return buf;
+        }
+        let mut col = SpanCollector::new(&mut buf, theme, tw);
+        self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
+        let _ = col.finish();
+        buf
     }
 
     pub(crate) fn measure_prompt_height(

@@ -694,10 +694,10 @@ pub fn inline_spans_width(spans: &[InlineSpan]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::layout_out::SpanCollector;
+    use super::super::super::layout_out::test_util::render_test;
     use super::super::syntax::render_code_block;
     use super::*;
-    use crate::content::display::{ColorRole, ColorValue, SpanStyle};
+    use crate::style::Style;
 
     /// Render `text` through `print_inline_styled` (dim=false) and return
     /// a compact `Vec<(tag, text)>` representation of the span tree.
@@ -705,9 +705,7 @@ mod tests {
     /// "strike". Adjacent spans with the same style are merged by the
     /// sink, so you get one entry per visible style run.
     fn parse(text: &str) -> Vec<(&'static str, String)> {
-        let mut sink = SpanCollector::new(200);
-        print_inline_styled(&mut sink, text, false);
-        let block = sink.finish();
+        let block = render_test(200, |sink| print_inline_styled(sink, text, false));
         let line = match block.lines.into_iter().next() {
             Some(l) => l,
             None => return Vec::new(),
@@ -719,11 +717,13 @@ mod tests {
             .collect()
     }
 
-    fn tag_for(style: &SpanStyle) -> &'static str {
-        // Code spans carry an accent foreground; they can also inherit
-        // bold/italic when nested inside emphasis, in which case the
-        // rendered span shows both attributes at once.
-        let is_code = matches!(style.fg, Some(ColorValue::Role(ColorRole::Accent)));
+    fn tag_for(style: &Style) -> &'static str {
+        // Code spans resolve through `ColorValue::Role(Accent)` and the
+        // default core Theme keeps `SmeltAccent` empty, so the resolved
+        // fg is `Some(Color::Reset)` — distinct from plain runs (which
+        // never make it to the highlight list because their style is
+        // entirely default).
+        let is_code = style.fg.is_some();
         match (style.bold, style.italic, style.crossedout, is_code) {
             (false, false, false, false) => "plain",
             (true, false, false, false) => "bold",
@@ -1093,10 +1093,10 @@ mod tests {
     /// when the first / last row is in the selection.
     #[test]
     fn render_code_block_with_fence_attaches_source_text_per_line() {
-        let mut sink = SpanCollector::new(80);
         let lines = ["let x = 1;", "let y = 2;", "let z = 3;"];
-        render_code_block(&mut sink, &lines, "rust", 80, false, None, true);
-        let block = sink.finish();
+        let block = render_test(80, |sink| {
+            render_code_block(sink, &lines, "rust", 80, false, None, true);
+        });
         assert_eq!(block.lines.len(), 3);
         assert_eq!(
             block.lines[0].source_text.as_deref(),
@@ -1111,9 +1111,9 @@ mod tests {
 
     #[test]
     fn render_code_block_single_line_wraps_with_both_fences() {
-        let mut sink = SpanCollector::new(80);
-        render_code_block(&mut sink, &["let x = 1;"], "rust", 80, false, None, true);
-        let block = sink.finish();
+        let block = render_test(80, |sink| {
+            render_code_block(sink, &["let x = 1;"], "rust", 80, false, None, true);
+        });
         assert_eq!(block.lines.len(), 1);
         assert_eq!(
             block.lines[0].source_text.as_deref(),
@@ -1125,9 +1125,9 @@ mod tests {
     fn render_code_block_without_fence_sets_raw_source_per_line() {
         // Block::CodeLine streaming path: no fences, but each line
         // still gets its raw source so partial selections preserve it.
-        let mut sink = SpanCollector::new(80);
-        render_code_block(&mut sink, &["let x = 1;"], "rust", 80, false, None, false);
-        let block = sink.finish();
+        let block = render_test(80, |sink| {
+            render_code_block(sink, &["let x = 1;"], "rust", 80, false, None, false);
+        });
         assert_eq!(block.lines.len(), 1);
         assert_eq!(block.lines[0].source_text.as_deref(), Some("let x = 1;"));
     }

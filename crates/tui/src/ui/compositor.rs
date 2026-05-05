@@ -1,6 +1,6 @@
 use super::flush::flush_diff;
 use super::grid::Grid;
-use super::theme::Theme;
+use super::Theme;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::QueueableCommand;
 use std::io::Write;

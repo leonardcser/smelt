@@ -8,14 +8,13 @@ pub(crate) mod motions;
 pub(crate) mod overlay;
 pub mod text;
 pub(crate) mod text_objects;
-pub mod theme;
 pub mod vim;
 pub(crate) mod window;
 
 pub use smelt_core::attachment::AttachmentId;
 pub use smelt_core::buffer::{
-    BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, LineDecoration,
-    SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
+    BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, SpanMeta, SpanStyle,
+    LUA_BUF_ID_BASE,
 };
 pub use smelt_core::clipboard::Clipboard;
 pub use smelt_core::undo::{UndoEntry, UndoHistory};
@@ -48,7 +47,7 @@ pub use grid::{Grid, Style};
 pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, Rect};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
-pub use theme::Theme;
+pub use smelt_core::theme::{Theme, DEFAULT_ACCENT};
 pub use vim::VimMode;
 pub use window::{
     CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,

@@ -5,8 +5,7 @@
 //! owned by `TuiApp`. Held inside `app::transcript::Transcript`, which
 //! adds projection / streaming / paint orchestration on top.
 
-use crate::content::{DisplayBlock, LayoutContext};
-use crate::transcript_present::{gap_between, layout_block, Element, ToolBodyRenderer};
+use crate::transcript_present::{gap_between, Element, ToolBodyRenderer};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -242,8 +241,10 @@ pub enum Status {
     Done,
 }
 
-/// Cache key for a single `DisplayBlock` layout — the inputs to
-/// `layout_block` that affect the laid-out output for a given block.
+/// Cache key for a single block's per-frame layout — the inputs to
+/// `layout_block_into` that affect the laid-out output. Used by the
+/// frontend's per-block buffer cache (`BlockBufferCache` in `tui`)
+/// for hit / miss decisions; the model itself stores no layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutKey {
     pub width: u16,
@@ -256,45 +257,6 @@ pub struct LayoutKey {
     pub content_hash: u64,
 }
 
-/// Per-block cached artifacts. Keeps a bounded LRU of the most recent
-/// `LayoutKey → DisplayBlock` pairs so that resize cycles (e.g. 100→80→100)
-/// can hit the cache on every step.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct BlockArtifact {
-    /// `(LayoutKey, DisplayBlock)` entries ordered most-recently-used first.
-    pub layouts: Vec<(LayoutKey, DisplayBlock)>,
-}
-
-impl BlockArtifact {
-    pub(crate) const MAX_LAYOUTS: usize = 4;
-
-    pub fn get(&self, key: LayoutKey) -> Option<&DisplayBlock> {
-        self.layouts.iter().find(|(k, _)| *k == key).map(|(_, b)| b)
-    }
-
-    pub fn insert(&mut self, key: LayoutKey, block: DisplayBlock) {
-        self.layouts.retain(|(k, _)| *k != key);
-        self.layouts.insert(0, (key, block));
-        self.layouts.truncate(Self::MAX_LAYOUTS);
-    }
-
-    pub fn clear(&mut self) {
-        self.layouts.clear();
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.layouts.is_empty()
-    }
-
-    /// Drop cached layouts whose replay would be stale at `new_width`.
-    /// Layouts whose `layout_width` equals `new_width` or whose source
-    /// didn't wrap and still fits are preserved.
-    pub fn invalidate_for_width(&mut self, new_width: u16) {
-        self.layouts
-            .retain(|(k, b)| k.width == new_width || b.is_valid_at(new_width));
-    }
-}
-
 pub struct BlockHistory {
     /// Append-only sequence of `BlockId`s. Each entry is a unique
     /// monotonic handle; positions are 1:1 with block instances.
@@ -305,10 +267,6 @@ pub struct BlockHistory {
     /// so layout-key construction and persisted-cache re-keying can
     /// skip re-hashing the block bytes.
     pub(crate) content_hashes: HashMap<BlockId, u64>,
-    /// Per-block layout cache, keyed by the monotonic `BlockId`. Cache
-    /// invalidation on content change is handled via
-    /// `LayoutKey::content_hash` + the bounded LRU in `BlockArtifact`.
-    pub artifacts: HashMap<BlockId, BlockArtifact>,
     /// Monotonic counter driving fresh `BlockId`s on push.
     pub(crate) next_id: u64,
     /// Mutable sidecar state for `Block::ToolCall` entries, keyed by `call_id`.
@@ -322,8 +280,6 @@ pub struct BlockHistory {
     /// default to `Status::Done`. Streaming blocks signal to callers
     /// that layout may change on the next frame.
     pub(crate) statuses: HashMap<BlockId, Status>,
-    /// Viewport width when artifacts were last width-pruned.
-    pub cache_width: usize,
     /// Block ids that transitioned from `Streaming` to `Done` since the
     /// last drain. Drained by the app loop to emit `block_done`
     /// autocmds into the Lua runtime.
@@ -343,12 +299,10 @@ impl BlockHistory {
             order: Vec::new(),
             blocks: HashMap::new(),
             content_hashes: HashMap::new(),
-            artifacts: HashMap::new(),
             next_id: 0,
             tool_states: HashMap::new(),
             view_states: HashMap::new(),
             statuses: HashMap::new(),
-            cache_width: 0,
             finished_blocks: Vec::new(),
             generation: 0,
             body_renderer: None,
@@ -359,7 +313,7 @@ impl BlockHistory {
         self.generation
     }
 
-    fn bump_generation(&mut self) {
+    pub(crate) fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -396,8 +350,8 @@ impl BlockHistory {
         self.view_states.get(&id).copied().unwrap_or_default()
     }
 
-    /// Set the view state for `id`. Invalidates cached layouts for
-    /// that block so the next paint re-lays-out under the new state.
+    /// Set the view state for `id`. Bumps the generation counter so
+    /// the frontend per-block buffer cache picks up the change.
     pub(crate) fn set_view_state(&mut self, id: BlockId, state: ViewState) {
         let prev = self.view_states.get(&id).copied().unwrap_or_default();
         if prev == state {
@@ -408,13 +362,11 @@ impl BlockHistory {
         } else {
             self.view_states.insert(id, state);
         }
-        if let Some(art) = self.artifacts.get_mut(&id) {
-            art.clear();
-        }
         self.bump_generation();
     }
 
     /// Current status for `id`. Defaults to [`Status::Done`].
+    #[allow(dead_code)]
     pub(crate) fn status(&self, id: BlockId) -> Status {
         self.statuses.get(&id).copied().unwrap_or_default()
     }
@@ -449,7 +401,6 @@ impl BlockHistory {
         self.order.push(id);
         self.blocks.insert(id, block);
         self.content_hashes.insert(id, hash);
-        self.artifacts.entry(id).or_default();
         self.bump_generation();
         id
     }
@@ -490,6 +441,7 @@ impl BlockHistory {
     }
 
     /// `BlockId` of the most recent `Block::ToolCall` whose `call_id` matches.
+    #[allow(dead_code)]
     pub(crate) fn tool_block_id(&self, call_id: &str) -> Option<BlockId> {
         self.order.iter().rev().copied().find(|id| {
             matches!(
@@ -499,39 +451,15 @@ impl BlockHistory {
         })
     }
 
-    /// Drop every cached layout for a single block id.
-    pub(crate) fn invalidate_block_layout(&mut self, id: BlockId) {
-        if let Some(artifact) = self.artifacts.get_mut(&id) {
-            if !artifact.is_empty() {
-                artifact.clear();
-                self.bump_generation();
-            }
-        }
-    }
-
     pub fn clear(&mut self) {
         self.order.clear();
         self.blocks.clear();
         self.content_hashes.clear();
-        self.artifacts.clear();
         self.next_id = 0;
         self.tool_states.clear();
         self.view_states.clear();
         self.statuses.clear();
         self.bump_generation();
-    }
-
-    /// Width-aware invalidation: prune cached layouts that are no longer
-    /// replayable at `new_width`. The bounded LRU in each artifact means
-    /// layouts from previous widths survive and can be reused after a
-    /// resize cycle.
-    pub fn invalidate_for_width(&mut self, new_width: usize) {
-        let _perf = crate::perf::begin("history:invalidate_for_width");
-        let nw = new_width as u16;
-        for artifact in self.artifacts.values_mut() {
-            artifact.invalidate_for_width(nw);
-        }
-        self.cache_width = new_width;
     }
 
     /// Gap (in rows) before the block at `i`, based on adjacency rules.
@@ -564,44 +492,6 @@ impl BlockHistory {
         }
     }
 
-    pub fn ensure_rows(&mut self, i: usize, base: LayoutKey) -> u16 {
-        let id = self.order[i];
-        // While streaming with thinking hidden, the ephemeral overlay
-        // renders the combined animated summary. Suppress the committed
-        // thinking block so it doesn't appear as a second summary.
-        if matches!(self.blocks.get(&id), Some(Block::Thinking { .. }))
-            && !base.show_thinking
-            && matches!(self.status(id), Status::Streaming)
-        {
-            return 0;
-        }
-        let key = self.resolve_key(id, base);
-        if let Some(rows) = self
-            .artifacts
-            .get(&id)
-            .and_then(|a| a.get(key))
-            .map(|d| d.rows())
-        {
-            return rows;
-        }
-        let block = &self.blocks[&id];
-        let tool_state = if let Block::ToolCall { call_id, .. } = block {
-            self.tool_states.get(call_id)
-        } else {
-            None
-        };
-        let lctx = LayoutContext {
-            width: key.width,
-            show_thinking: key.show_thinking,
-            view_state: key.view_state,
-        };
-        let display = layout_block(block, tool_state, &lctx, self.body_renderer.as_deref());
-        let rows = display.rows();
-        let artifact = self.artifacts.get_mut(&id).unwrap();
-        artifact.insert(key, display);
-        rows
-    }
-
     pub(crate) fn truncate(&mut self, idx: usize) {
         if idx >= self.order.len() {
             return;
@@ -610,7 +500,6 @@ impl BlockHistory {
         for id in removed {
             self.blocks.remove(&id);
             self.content_hashes.remove(&id);
-            self.artifacts.remove(&id);
             self.view_states.remove(&id);
             self.statuses.remove(&id);
         }
@@ -634,23 +523,6 @@ impl BlockHistory {
             })
             .collect();
         self.tool_states.retain(|cid, _| live.contains(cid));
-    }
-
-    /// Plain-text rendering of the full transcript at the given width.
-    #[cfg(test)]
-    pub(crate) fn total_rows(&mut self, width: usize, show_thinking: bool) -> u16 {
-        let key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width: width as u16,
-            show_thinking,
-            content_hash: 0,
-        };
-        let mut total: u32 = 0;
-        for i in 0..self.order.len() {
-            total += self.block_gap(i) as u32;
-            total += self.ensure_rows(i, key) as u32;
-        }
-        total.min(u16::MAX as u32) as u16
     }
 }
 
@@ -689,55 +561,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn block_artifact_bounded_lru_roundtrip() {
-        // Resize cycle 100 → 80 → 100 → 80 must hit cache on every repeat
-        // step, because the bounded LRU keeps both widths resident.
-        let mut history = BlockHistory::new();
-        let id = history.push(Block::Text {
-            content: "the quick brown fox jumps over the lazy dog".into(),
-        });
-
-        let _ = history.total_rows(100, true);
-        let _ = history.total_rows(80, true);
-        let _ = history.total_rows(100, true);
-        let _ = history.total_rows(80, true);
-
-        let content_hash = history.content_hash(id);
-        let keys: Vec<LayoutKey> = history
-            .artifacts
-            .get(&id)
-            .unwrap()
-            .layouts
-            .iter()
-            .map(|(k, _)| *k)
-            .collect();
-        let k100 = LayoutKey {
-            width: 100,
-            show_thinking: true,
-            view_state: ViewState::Expanded,
-            content_hash,
-        };
-        let k80 = LayoutKey {
-            width: 80,
-            show_thinking: true,
-            view_state: ViewState::Expanded,
-            content_hash,
-        };
-        assert!(keys.contains(&k100), "expected width=100 cached: {keys:?}");
-        assert!(keys.contains(&k80), "expected width=80 cached: {keys:?}");
-        assert!(keys.len() <= BlockArtifact::MAX_LAYOUTS);
-    }
-
-    #[test]
-    fn rewrite_preserves_id_and_invalidates_layout_by_hash() {
+    fn rewrite_preserves_id_and_bumps_generation() {
         let mut history = BlockHistory::new();
         let id = history.push(Block::Text {
             content: "hello".into(),
         });
 
-        let _ = history.total_rows(80, true);
         let h0 = history.content_hash(id);
-        assert!(!history.artifacts.get(&id).unwrap().is_empty());
+        let g0 = history.generation();
 
         history.rewrite(
             id,
@@ -752,48 +583,7 @@ mod tests {
             vec![id],
             "rewrite must not change order"
         );
-
-        let _ = history.total_rows(80, true);
-        let keys: Vec<u64> = history
-            .artifacts
-            .get(&id)
-            .unwrap()
-            .layouts
-            .iter()
-            .map(|(k, _)| k.content_hash)
-            .collect();
-        assert!(keys.contains(&h1), "new content hash cached: {keys:?}");
-    }
-
-    #[test]
-    fn streaming_blocks_render_inline() {
-        // Streaming blocks participate in the main paint path like any
-        // other block — alt-buffer repaints every frame, and the "live"
-        // status is a style distinction, not a layout one.
-        let mut history = BlockHistory::new();
-        history.push(Block::Text {
-            content: "hello".into(),
-        });
-        let base_rows = history.total_rows(80, false);
-        let streaming_id = history.push(Block::Text {
-            content: "streaming content".into(),
-        });
-        history.set_status(streaming_id, Status::Streaming);
-        assert!(
-            history.total_rows(80, false) > base_rows,
-            "streaming block must render inline",
-        );
-        assert!(history.block_gap(1) > 0, "streaming block takes its gap");
-        let key = LayoutKey {
-            width: 80,
-            show_thinking: false,
-            view_state: ViewState::Expanded,
-            content_hash: 0,
-        };
-        assert!(history.ensure_rows(1, key) > 0);
-        // Flipping to Done doesn't change rendering.
-        history.set_status(streaming_id, Status::Done);
-        assert!(history.total_rows(80, false) > base_rows);
+        assert_ne!(history.generation(), g0, "rewrite must bump generation");
     }
 
     #[test]

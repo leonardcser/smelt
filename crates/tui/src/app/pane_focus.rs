@@ -76,10 +76,12 @@ impl TuiApp {
     /// buffer), then looks up the snapshot's `block_of_row`.
     fn focused_block_id(&mut self) -> Option<BlockId> {
         let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
         let snap = crate::content::transcript_snapshot::build_snapshot(
             &mut self.transcript.history,
             tw,
             self.core.config.settings.show_thinking,
+            &theme,
         );
         if snap.rows.is_empty() {
             return None;

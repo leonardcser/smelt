@@ -10,7 +10,7 @@
 use smelt_core::style::Color;
 
 /// Re-export so callers can refer to one canonical name.
-pub use crate::ui::theme::DEFAULT_ACCENT;
+pub use crate::ui::DEFAULT_ACCENT;
 
 /// Look up a preset by name. Returns the ansi value if found.
 pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
@@ -278,7 +278,7 @@ pub(crate) fn populate_ui_theme(theme: &mut crate::ui::Theme) {
 
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[
-    ("ember", "default", crate::ui::theme::DEFAULT_ACCENT),
+    ("ember", "default", crate::ui::DEFAULT_ACCENT),
     ("coral", "salmon pink", 210),
     ("rose", "soft pink", 211),
     ("gold", "warm yellow", 220),

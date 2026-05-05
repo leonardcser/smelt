@@ -5,7 +5,9 @@
 //! (pane focus, transcript scrolling, copy/yank, cursor snapping). `core`
 //! keeps `BlockHistory`; `tui` owns display projection.
 
-use smelt_core::content::display::SpanMeta;
+use crate::content::block_buffers::BlockBufferCache;
+use crate::ui::Theme;
+use smelt_core::buffer::SpanMeta;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -190,11 +192,17 @@ impl TranscriptSnapshot {
     }
 }
 
-/// Build a fresh `TranscriptSnapshot` from `history` at the given width.
+/// Build a fresh `TranscriptSnapshot` from `history` at the given
+/// width. Renders each block into a per-block scratch Buffer via a
+/// fresh [`BlockBufferCache`]; the snapshot reads back text + cell
+/// metadata + decorations from those buffers. Theme is required
+/// because [`crate::content::layout_out::SpanCollector`] resolves
+/// theme-role colours at write time.
 pub fn build_snapshot(
     history: &mut BlockHistory,
     width: u16,
     show_thinking: bool,
+    theme: &Theme,
 ) -> TranscriptSnapshot {
     let base_key = LayoutKey {
         view_state: ViewState::Expanded,
@@ -210,8 +218,16 @@ pub fn build_snapshot(
     let mut block_of_row: Vec<Option<BlockId>> = Vec::new();
     let mut row_of_block: HashMap<BlockId, Range<u16>> = HashMap::new();
 
+    let mut cache = BlockBufferCache::new();
+    let renderer_arc = history.body_renderer.clone();
+    let renderer = renderer_arc.as_deref();
+
     for i in 0..history.order.len() {
-        let block_rows = history.ensure_rows(i, base_key);
+        let id = history.order[i];
+        let bkey = history.resolve_key(id, base_key);
+        let (block_buf, outcome) = cache.ensure(history, id, bkey, theme, renderer);
+        let block_buf = block_buf.clone();
+        let block_rows = outcome.line_count;
         if block_rows > 0 {
             let gap = history.block_gap(i);
             for _ in 0..gap {
@@ -222,41 +238,17 @@ pub fn build_snapshot(
                 block_of_row.push(None);
             }
         }
-        let id = history.order[i];
-        let bkey = history.resolve_key(id, base_key);
         let start = rows.len() as u16;
-        if let Some(display) = history.artifacts.get(&id).and_then(|a| a.get(bkey)) {
-            for line in &display.lines {
-                let mut text = String::new();
-                let mut cells = Vec::new();
-                for span in &line.spans {
-                    let has_copy_as = span.meta.copy_as.is_some();
-                    let mut first = true;
-                    for ch in span.text.chars() {
-                        text.push(ch);
-                        if has_copy_as && !first {
-                            cells.push(SnapshotCell {
-                                ch,
-                                meta: SpanMeta {
-                                    selectable: span.meta.selectable,
-                                    copy_as: Some(String::new()),
-                                },
-                            });
-                        } else {
-                            cells.push(SnapshotCell {
-                                ch,
-                                meta: span.meta.clone(),
-                            });
-                        }
-                        first = false;
-                    }
-                }
-                rows.push(text);
-                row_cells.push(cells);
-                soft_wrapped.push(line.soft_wrapped);
-                source_text.push(line.source_text.clone());
-                block_of_row.push(Some(id));
-            }
+        for r in 0..block_rows {
+            let text = block_buf.get_line(r).unwrap_or("").to_string();
+            let highlights = block_buf.highlights_at(r);
+            let dec = block_buf.decoration_at(r).clone();
+            let cells = build_row_cells(&text, &highlights);
+            rows.push(text);
+            row_cells.push(cells);
+            soft_wrapped.push(dec.soft_wrapped);
+            source_text.push(dec.source_text);
+            block_of_row.push(Some(id));
         }
         let end = rows.len() as u16;
         if end > start {
@@ -277,10 +269,45 @@ pub fn build_snapshot(
     }
 }
 
+fn build_row_cells(text: &str, highlights: &[smelt_core::buffer::Span]) -> Vec<SnapshotCell> {
+    // Default meta = selectable, no copy_as. Highlights override per
+    // covered character range. Multi-cell `copy_as` substitutes the
+    // first cell's payload and emits empty payloads for the rest, so
+    // the substitution lands once per span (preserves the previous
+    // snapshot semantics).
+    let chars: Vec<char> = text.chars().collect();
+    let mut cells: Vec<SnapshotCell> = chars
+        .iter()
+        .map(|&ch| SnapshotCell {
+            ch,
+            meta: SpanMeta::default(),
+        })
+        .collect();
+    for h in highlights {
+        let start = (h.col_start as usize).min(cells.len());
+        let end = (h.col_end as usize).min(cells.len());
+        if end <= start {
+            continue;
+        }
+        let has_copy_as = h.meta.copy_as.is_some();
+        for (i, idx) in (start..end).enumerate() {
+            if has_copy_as && i > 0 {
+                cells[idx].meta = SpanMeta {
+                    selectable: h.meta.selectable,
+                    copy_as: Some(String::new()),
+                };
+            } else {
+                cells[idx].meta = h.meta.clone();
+            }
+        }
+    }
+    cells
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::display::SpanMeta;
+    use smelt_core::buffer::SpanMeta;
 
     fn cell(ch: char) -> SnapshotCell {
         SnapshotCell {

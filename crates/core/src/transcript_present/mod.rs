@@ -7,14 +7,14 @@
 //! further knowledge of `Block` variants.
 
 use super::transcript_model::{Block, ToolOutput, ToolState, ToolStatus, ViewState};
-use crate::content::display::{
-    ColorRole, ColorValue, DisplayBlock, NamedColor, SpanMeta, SpanStyle,
-};
+use crate::buffer::Buffer;
+use crate::content::display::{ColorRole, ColorValue, NamedColor, SpanMeta, SpanStyle};
 use crate::content::highlight::{render_code_block, render_markdown_table, BashHighlighter};
-use crate::content::layout_out::{display_width, SpanCollector};
+use crate::content::layout_out::{display_width, Outcome, SpanCollector};
 use crate::content::selection::truncate_str;
 use crate::content::wrap::wrap_line;
 use crate::content::LayoutContext;
+use crate::theme::Theme;
 
 use crate::utils::format_duration;
 use std::collections::HashMap;
@@ -105,83 +105,173 @@ const MAX_TOOL_BLOCK_ROWS: usize = 20;
 /// (`render_default_output`). Joined with " | " separators.
 const DEFAULT_PREVIEW_LINES: usize = 3;
 
-/// Layout entry point: produce a `DisplayBlock` for `block` at the given
-/// width. Drives the per-variant renderers against a `SpanCollector` and
-/// hands the resulting span tree off to the cache / paint stage.
+/// Layout entry point: render `block` directly into `buf` at the
+/// given width. Drives the per-variant renderers against a fresh
+/// `SpanCollector` and applies the block's view state on the resulting
+/// buffer slice.
 ///
-/// `state` must be `Some(_)` for `Block::ToolCall` and is unused for every
-/// other variant.
-pub fn layout_block(
+/// `state` must be `Some(_)` for `Block::ToolCall` and is unused for
+/// every other variant. Returns rendering metadata (`line_count`,
+/// `was_wrapped`, `max_line_width`) so callers can reason about width
+/// pinning the same way the old `DisplayBlock` shape allowed.
+pub fn layout_block_into(
+    buf: &mut Buffer,
+    theme: &Theme,
     block: &Block,
     state: Option<&ToolState>,
     ctx: &LayoutContext,
     renderer: Option<&dyn ToolBodyRenderer>,
-) -> DisplayBlock {
+) -> Outcome {
     let width = ctx.width as usize;
     let show_thinking = ctx.show_thinking;
-    let mut col = SpanCollector::new(ctx.width);
-    render_block(&mut col, block, state, width, show_thinking, renderer);
-    let mut display = col.finish();
-    apply_view_state(&mut display, ctx.view_state);
-    display
+    let outcome = {
+        let mut col = SpanCollector::new(buf, theme, ctx.width);
+        render_block(&mut col, block, state, width, show_thinking, renderer);
+        col.finish()
+    };
+    apply_view_state(buf, theme, ctx.width, ctx.view_state, outcome)
 }
 
 /// Truncate / collapse the laid-out block according to its view state.
 /// Runs post-layout so every block variant gets the same treatment.
-fn apply_view_state(display: &mut crate::content::display::DisplayBlock, state: ViewState) {
-    use crate::content::display::{ColorRole, ColorValue, DisplayLine, DisplaySpan, SpanStyle};
-    let total = display.lines.len();
-    let ellipsis_line = |text: String| -> DisplayLine {
-        DisplayLine {
-            spans: vec![DisplaySpan {
-                text,
-                style: SpanStyle {
-                    fg: Some(ColorValue::Role(ColorRole::Muted)),
-                    dim: true,
-                    ..SpanStyle::default()
-                },
-                meta: Default::default(),
-            }],
-            gutter_bg: None,
-            fill_bg: None,
-            fill_right_margin: 0,
-            soft_wrapped: false,
-            source_text: None,
-        }
-    };
+fn apply_view_state(
+    buf: &mut Buffer,
+    theme: &Theme,
+    width: u16,
+    state: ViewState,
+    outcome: Outcome,
+) -> Outcome {
+    let total = outcome.line_count;
+    let start = buf.line_count().saturating_sub(total);
     match state {
-        ViewState::Expanded => {}
+        ViewState::Expanded => outcome,
         ViewState::Collapsed => {
             if total > 1 {
                 let hidden = total - 1;
-                display.lines.truncate(1);
-                display
-                    .lines
-                    .push(ellipsis_line(format!("… {hidden} more lines")));
+                // Keep first line, drop the rest.
+                buf.set_lines(start + 1, start + total, vec![]);
+                let after_truncate_outcome = Outcome {
+                    line_count: 1,
+                    ..outcome
+                };
+                append_ellipsis(
+                    buf,
+                    theme,
+                    width,
+                    &format!("… {hidden} more lines"),
+                    after_truncate_outcome,
+                )
+            } else {
+                outcome
             }
         }
         ViewState::TrimmedHead { keep } => {
             let keep = keep as usize;
             if total > keep {
                 let hidden = total - keep;
-                display.lines.truncate(keep);
-                display
-                    .lines
-                    .push(ellipsis_line(format!("… {hidden} more lines")));
+                buf.set_lines(start + keep, start + total, vec![]);
+                let after_truncate_outcome = Outcome {
+                    line_count: keep,
+                    ..outcome
+                };
+                append_ellipsis(
+                    buf,
+                    theme,
+                    width,
+                    &format!("… {hidden} more lines"),
+                    after_truncate_outcome,
+                )
+            } else {
+                outcome
             }
         }
         ViewState::TrimmedTail { keep } => {
             let keep = keep as usize;
             if total > keep {
                 let hidden = total - keep;
-                let tail = display.lines.split_off(total - keep);
-                display.lines.clear();
-                display
-                    .lines
-                    .push(ellipsis_line(format!("… {hidden} more lines above")));
-                display.lines.extend(tail);
+                // Drop the leading lines we don't keep.
+                buf.set_lines(start, start + (total - keep), vec![]);
+                // Now insert an ellipsis line before the kept tail.
+                // Easiest: render the ellipsis at `start`, then move the
+                // kept tail by one. We do that by collecting the kept
+                // lines, clearing the slice, rendering the ellipsis
+                // first, then re-inserting via set_lines.
+                let mut kept_lines: Vec<String> = (0..keep)
+                    .map(|i| buf.get_line(start + i).unwrap_or("").to_string())
+                    .collect();
+                // Snapshot per-line decorations + highlights for the
+                // kept tail before we overwrite.
+                let kept_decorations: Vec<_> = (0..keep)
+                    .map(|i| buf.decoration_at(start + i).clone())
+                    .collect();
+                let kept_highlights: Vec<_> =
+                    (0..keep).map(|i| buf.highlights_at(start + i)).collect();
+                // Wipe the slice.
+                buf.set_lines(start, start + keep, vec![]);
+                // Render ellipsis at `start`.
+                let after_ellipsis_outcome = append_ellipsis(
+                    buf,
+                    theme,
+                    width,
+                    &format!("… {hidden} more lines above"),
+                    Outcome {
+                        line_count: 0,
+                        ..outcome
+                    },
+                );
+                // Re-append the kept content rows.
+                let cur_len = buf.line_count();
+                buf.set_lines(cur_len, cur_len, std::mem::take(&mut kept_lines));
+                for (i, hl_list) in kept_highlights.into_iter().enumerate() {
+                    let row = cur_len + i;
+                    for span in hl_list {
+                        buf.add_highlight_with_meta(
+                            row,
+                            span.col_start,
+                            span.col_end,
+                            span.style,
+                            span.meta,
+                        );
+                    }
+                }
+                for (i, dec) in kept_decorations.into_iter().enumerate() {
+                    if dec != crate::buffer::LineDecoration::default() {
+                        buf.set_decoration(cur_len + i, dec);
+                    }
+                }
+                Outcome {
+                    line_count: after_ellipsis_outcome.line_count + keep,
+                    ..outcome
+                }
+            } else {
+                outcome
             }
         }
+    }
+}
+
+fn append_ellipsis(
+    buf: &mut Buffer,
+    theme: &Theme,
+    width: u16,
+    text: &str,
+    outcome: Outcome,
+) -> Outcome {
+    let added = {
+        let mut col = SpanCollector::new(buf, theme, width);
+        col.push_dim();
+        col.push_fg(ColorValue::Role(ColorRole::Muted));
+        col.print(text);
+        col.pop_style();
+        col.pop_style();
+        col.newline();
+        col.finish()
+    };
+    Outcome {
+        line_count: outcome.line_count + added.line_count,
+        was_wrapped: outcome.was_wrapped || added.was_wrapped,
+        max_line_width: outcome.max_line_width.max(added.max_line_width),
+        layout_width: outcome.layout_width,
     }
 }
 
@@ -514,8 +604,30 @@ pub(super) fn print_user_highlights(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::{BufCreateOpts, BufId, Buffer};
+    use crate::content::layout_out::test_util::{read_buffer, TestLine};
+    use crate::theme::Theme;
 
     const W: usize = 80;
+
+    fn mk_collector_buf() -> (Buffer, Theme) {
+        (
+            Buffer::new(BufId(0), BufCreateOpts::default()),
+            Theme::default(),
+        )
+    }
+
+    fn layout_block_test(
+        block: &Block,
+        state: Option<&ToolState>,
+        ctx: &LayoutContext,
+        renderer: Option<&dyn ToolBodyRenderer>,
+    ) -> Vec<TestLine> {
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let outcome = layout_block_into(&mut buf, &theme, block, state, ctx, renderer);
+        read_buffer(&buf, outcome.line_count)
+    }
 
     fn text(s: &str) -> Block {
         Block::Text {
@@ -570,7 +682,8 @@ mod tests {
     }
 
     fn block_rows(block: &Block) -> u16 {
-        let mut out = SpanCollector::new(W as u16);
+        let (mut buf, theme) = mk_collector_buf();
+        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
         let st = state_for(block);
         render_block(&mut out, block, st.as_ref(), W, true, None)
     }
@@ -587,7 +700,8 @@ mod tests {
     /// rendered in one pass, then active tool is appended.
     /// Returns (block_rows, tool_gap, total_before_tool).
     fn render_all_at_once(blocks: &[Block]) -> (u16, u16, u16) {
-        let mut out = SpanCollector::new(W as u16);
+        let (mut buf, theme) = mk_collector_buf();
+        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
         let mut total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -606,7 +720,8 @@ mod tests {
     }
 
     fn render_split(blocks: &[Block]) -> (u16, u16, u16) {
-        let mut out = SpanCollector::new(W as u16);
+        let (mut buf, theme) = mk_collector_buf();
+        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
         let mut block_rows_total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -645,7 +760,8 @@ mod tests {
         //
         // Net effect: final anchor = sum of all block rows + gaps.
         // This is the same as render_split.
-        let mut out = SpanCollector::new(W as u16);
+        let (mut buf, theme) = mk_collector_buf();
+        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
         let mut cumulative = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -832,7 +948,8 @@ mod tests {
         for &end in flushed_at {
             // This frame renders blocks[flushed..end]
             let mut frame_block_rows = 0u16;
-            let mut out = SpanCollector::new(W as u16);
+            let (mut buf, theme) = mk_collector_buf();
+            let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
             for i in flushed..end {
                 let gap = if i > 0 {
                     gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))
@@ -1032,19 +1149,19 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block(&block, Some(&state), &ctx, None);
+        let display = layout_block_test(&block, Some(&state), &ctx, None);
 
         assert!(
-            display.lines.len() >= 2,
+            display.len() >= 2,
             "command should wrap at width 30, got {} lines",
-            display.lines.len()
+            display.len()
         );
         assert_eq!(
-            display.lines[0].source_text.as_deref(),
+            display[0].source_text.as_deref(),
             Some("echo hello && echo world && echo done"),
         );
-        assert!(!display.lines[0].soft_wrapped);
-        for line in &display.lines[1..] {
+        assert!(!display[0].soft_wrapped);
+        for line in &display[1..] {
             assert!(
                 line.source_text.is_none(),
                 "continuation rows should not have source_text"
@@ -1082,12 +1199,12 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block(&block, Some(&state), &ctx, None);
+        let display = layout_block_test(&block, Some(&state), &ctx, None);
 
-        assert!(display.lines.len() >= 2);
-        assert!(!display.lines[0].soft_wrapped);
+        assert!(display.len() >= 2);
+        assert!(!display[0].soft_wrapped);
         assert!(
-            !display.lines[1].soft_wrapped,
+            !display[1].soft_wrapped,
             "second real line should NOT be soft-wrapped"
         );
     }
@@ -1113,8 +1230,8 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block(&block, Some(&state), &ctx, None);
-        let first_line = &display.lines[0];
+        let display = layout_block_test(&block, Some(&state), &ctx, None);
+        let first_line = &display[0];
 
         // The time suffix "  3s" should be in a non-selectable span
         let has_non_selectable_time = first_line
