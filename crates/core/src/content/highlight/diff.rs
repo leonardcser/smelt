@@ -9,8 +9,8 @@ use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, SYNTAX_SET};
 use crate::content::default_width;
-use crate::content::display::{ColorValue, NamedColor};
 use crate::content::layout_out::SpanCollector;
+use crate::style::Color;
 
 struct DiffChange {
     tag: ChangeTag,
@@ -345,11 +345,7 @@ pub fn print_inline_diff(
     print_cached_inline_diff(out, &cache, skip, max_rows)
 }
 
-fn print_cached_spans(
-    out: &mut SpanCollector,
-    spans: &[CachedSpan],
-    bg: Option<ColorValue>,
-) -> usize {
+fn print_cached_spans(out: &mut SpanCollector, spans: &[CachedSpan], bg: Option<Color>) -> usize {
     let mut col = 0;
     for span in spans {
         if span.text.is_empty() {
@@ -358,7 +354,11 @@ fn print_cached_spans(
         if let Some(bg_color) = bg {
             out.set_bg(bg_color);
         }
-        out.set_fg(ColorValue::Rgb(span.fg.0, span.fg.1, span.fg.2));
+        out.set_fg(Color::Rgb {
+            r: span.fg.0,
+            g: span.fg.1,
+            b: span.fg.2,
+        });
         out.print(&span.text);
         col += span.text.chars().count();
     }
@@ -424,8 +424,16 @@ pub fn print_cached_inline_diff(
     // bounds, so the layout cannot be replayed at a different width.
     out.mark_wrapped();
     let emit_limit = if max_rows == 0 { u16::MAX } else { max_rows };
-    let bg_del = ColorValue::Rgb(60, 20, 20);
-    let bg_add = ColorValue::Rgb(20, 50, 20);
+    let bg_del = Color::Rgb {
+        r: 60,
+        g: 20,
+        b: 20,
+    };
+    let bg_add = Color::Rgb {
+        r: 20,
+        g: 50,
+        b: 20,
+    };
     let blank_gutter = " ".repeat(1 + gutter_width + 3);
 
     let mut emitted = 0u16;
@@ -439,7 +447,7 @@ pub fn print_cached_inline_diff(
         match line {
             CachedDiffLine::Ellipsis => {
                 out.print_gutter(indent);
-                out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
+                out.set_fg(Color::DarkGrey);
                 out.print_gutter(&format!("{:>w$}", "...", w = 1 + gutter_width));
                 out.reset_style();
                 out.newline();
@@ -450,14 +458,8 @@ pub fn print_cached_inline_diff(
                 let visual_rows = split_cached_spans_into_rows(out, spans, max_content);
                 let (sign, bg) = match line {
                     CachedDiffLine::Context { .. } => (None, None),
-                    CachedDiffLine::Delete { .. } => (
-                        Some(('-', ColorValue::Named(NamedColor::Red))),
-                        Some(bg_del),
-                    ),
-                    CachedDiffLine::Insert { .. } => (
-                        Some(('+', ColorValue::Named(NamedColor::Green))),
-                        Some(bg_add),
-                    ),
+                    CachedDiffLine::Delete { .. } => (Some(('-', Color::Red)), Some(bg_del)),
+                    CachedDiffLine::Insert { .. } => (Some(('+', Color::Green)), Some(bg_add)),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
                 for (vi, vrow) in visual_rows.iter().enumerate() {
@@ -478,7 +480,7 @@ pub fn print_cached_inline_diff(
                         out.reset_style();
                     } else {
                         if vi == 0 {
-                            out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
+                            out.set_fg(Color::DarkGrey);
                             out.print_gutter(&format!(" {:>w$}", lineno, w = gutter_width));
                             out.reset_style();
                             out.print_gutter("   ");

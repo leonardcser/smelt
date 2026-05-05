@@ -14,9 +14,9 @@ use crate::content::layout_out::SpanCollector;
 use crate::content::selection::wrap_line;
 use crate::ui::BufId;
 use mlua::prelude::*;
-use smelt_core::content::display::{ColorRole, ColorValue};
 use smelt_core::notebook;
 use smelt_core::notebook::NotebookRenderData;
+use smelt_core::theme::role_hl;
 use std::collections::HashMap;
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -198,7 +198,7 @@ fn render_notebook_preview(
             return;
         }
         out.print(" ");
-        out.push_fg(ColorValue::Role(ColorRole::Muted));
+        out.push_hl(role_hl("Muted"));
         out.print(line);
         out.pop_style();
         out.newline();

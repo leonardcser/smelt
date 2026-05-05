@@ -3,8 +3,9 @@
 //! renderer that uses both.
 
 use crate::content::default_width;
-use crate::content::display::{ColorRole, ColorValue, NamedColor};
 use crate::content::layout_out::SpanCollector;
+use crate::style::Color;
+use crate::theme::{role_hl, HlGroup};
 use unicode_width::UnicodeWidthStr;
 
 use super::util::{
@@ -101,7 +102,7 @@ pub fn render_markdown_table(
     let mut total_rows = 0u16;
 
     let bar = |out: &mut SpanCollector, dim: bool| {
-        out.set_fg(ColorValue::Role(ColorRole::Bar));
+        out.set_hl(role_hl("Bar"));
         if dim {
             out.set_dim();
         }
@@ -242,7 +243,7 @@ fn render_table_stacked(out: &mut SpanCollector, rows: &[Vec<String>], dim: bool
             for (li, line) in wrapped.iter().enumerate() {
                 if li == 0 {
                     out.print("  ");
-                    out.set_fg(ColorValue::Named(NamedColor::DarkGrey));
+                    out.set_fg(Color::DarkGrey);
                     if dim {
                         out.set_dim();
                     }
@@ -457,7 +458,7 @@ fn emit_inline_nodes(out: &mut SpanCollector, nodes: &[InlineNode]) {
         match node {
             InlineNode::Text(s) => out.print(s),
             InlineNode::Code(s) => {
-                out.push_fg(ColorValue::Role(ColorRole::Accent));
+                out.push_hl(role_hl("Accent"));
                 out.print(s);
                 out.pop_style();
             }
@@ -493,14 +494,17 @@ fn emit_inline_nodes(out: &mut SpanCollector, nodes: &[InlineNode]) {
 // Inline markdown is parsed into styled spans FIRST, then wrapped by
 // display width. This preserves formatting across soft-wrap boundaries.
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InlineStyle {
     pub bold: bool,
     pub italic: bool,
     pub dim: bool,
     pub crossedout: bool,
-    pub code: bool,
-    pub fg: Option<crate::content::display::ColorValue>,
+    /// Theme group whose fg/bg fill the rendered span. `None` for
+    /// plain text. Inline `code` spans default to `role_hl("Accent")`
+    /// when the parser sees a backtick run; markdown headings paint
+    /// through `role_hl("Heading")`.
+    pub group: Option<HlGroup>,
 }
 
 #[derive(Clone, Debug)]
@@ -527,7 +531,7 @@ fn flatten_nodes_into(nodes: &[InlineNode], style: &InlineStyle, out: &mut Vec<I
             InlineNode::Text(s) if !s.is_empty() => {
                 out.push(InlineSpan {
                     text: s.clone(),
-                    style: style.clone(),
+                    style: *style,
                 });
             }
             InlineNode::Text(_) => {}
@@ -535,7 +539,7 @@ fn flatten_nodes_into(nodes: &[InlineNode], style: &InlineStyle, out: &mut Vec<I
                 out.push(InlineSpan {
                     text: s.clone(),
                     style: InlineStyle {
-                        code: true,
+                        group: Some(role_hl("Accent")),
                         ..*style
                     },
                 });
@@ -646,7 +650,7 @@ fn append_text_to_row(row: &mut Vec<InlineSpan>, text: &str, style: &InlineStyle
     }
     row.push(InlineSpan {
         text: text.to_string(),
-        style: style.clone(),
+        style: *style,
     });
 }
 
@@ -659,20 +663,16 @@ fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) 
     }
     row.push(InlineSpan {
         text: ch.to_string(),
-        style: style.clone(),
+        style: *style,
     });
 }
 
 pub fn emit_inline_spans(out: &mut SpanCollector, spans: &[InlineSpan]) {
-    use crate::content::display::{ColorRole, ColorValue, SpanStyle};
+    use crate::content::display::SpanStyle;
 
     for span in spans {
         let style = SpanStyle {
-            fg: if span.style.code {
-                Some(ColorValue::Role(ColorRole::Accent))
-            } else {
-                span.style.fg
-            },
+            group: span.style.group,
             bold: span.style.bold,
             italic: span.style.italic,
             dim: span.style.dim,
@@ -718,10 +718,10 @@ mod tests {
     }
 
     fn tag_for(style: &Style) -> &'static str {
-        // Code spans resolve through `ColorValue::Role(Accent)` and the
-        // default core Theme keeps `SmeltAccent` empty, so the resolved
-        // fg is `Some(Color::Reset)` — distinct from plain runs (which
-        // never make it to the highlight list because their style is
+        // Code spans flow through `role_hl("Accent")` and the default
+        // core Theme keeps `SmeltAccent` empty, so the resolved fg is
+        // `Some(Color::Reset)` — distinct from plain runs (which never
+        // make it to the highlight list because their style is
         // entirely default).
         let is_code = style.fg.is_some();
         match (style.bold, style.italic, style.crossedout, is_code) {

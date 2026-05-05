@@ -289,9 +289,8 @@ fn role_to_group(role: &str) -> Option<&'static str> {
     })
 }
 
-/// Resolved color for a `crate::ui::Theme` highlight group: prefer fg, then
-/// bg, then `Color::Reset`. Matches the convention used by
-/// `to_buffer::resolve` for `ColorRole` lookups.
+/// Resolved color for a `crate::ui::Theme` highlight group: prefer
+/// fg, then bg, then `Color::Reset`.
 fn group_color(theme: &crate::ui::Theme, group: &str) -> smelt_core::style::Color {
     let style = theme.get(group);
     style

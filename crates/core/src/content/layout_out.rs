@@ -15,9 +15,9 @@
 //! pinning info) returned.
 
 use crate::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, LineDecoration, SpanMeta};
-use crate::content::display::{ColorRole, ColorValue, NamedColor, SpanStyle};
+use crate::content::display::SpanStyle;
 use crate::style::{Color, Style};
-use crate::theme::{intern, intern_anonymous_style, HlGroup, Theme};
+use crate::theme::{intern_anonymous_style, HlGroup, Theme};
 use unicode_width::UnicodeWidthStr;
 
 /// Display-column width of a string slice. Used for visible-width
@@ -126,6 +126,13 @@ impl<'a> SpanCollector<'a> {
         }
     }
 
+    /// Active theme reference. Used by callers that need to resolve
+    /// theme groups to concrete colors (e.g. for paint-time decoration
+    /// fields that don't carry an HlGroup id).
+    pub fn theme(&self) -> &Theme {
+        self.theme
+    }
+
     /// Commit any pending line and return rendering metadata.
     pub fn finish(mut self) -> Outcome {
         if self.has_pending_content || self.cur_decoration_present() || self.cur_visible_cols > 0 {
@@ -215,7 +222,7 @@ impl<'a> SpanCollector<'a> {
     /// Fill the remainder of the current visual row with `bg` so the row
     /// extends to the right edge of the viewport (minus `right_margin`
     /// columns reserved on the right). Used by diff and code rows.
-    pub fn fill_line_bg(&mut self, bg: ColorValue, right_margin: u16) {
+    pub fn fill_line_bg(&mut self, bg: Color, right_margin: u16) {
         // Calling `fill_line_bg` twice on the same row would silently
         // overwrite the first fill. No legitimate caller does this — a
         // row has at most one trailing bg fill — so catch the misuse in
@@ -224,14 +231,30 @@ impl<'a> SpanCollector<'a> {
             self.cur_decoration.fill_bg.is_none(),
             "fill_line_bg called twice on the same row"
         );
-        self.cur_decoration.fill_bg = Some(self.resolve(bg));
+        self.cur_decoration.fill_bg = Some(bg);
         self.cur_decoration.fill_right_margin = right_margin;
+    }
+
+    /// Same as `fill_line_bg` but takes a theme group; reads the
+    /// group's bg through the active theme. For role-keyed background
+    /// fills the renderer still wants the *current* color baked in
+    /// (decoration is a paint-time hint, not a buffer-level group ref).
+    pub fn fill_line_bg_group(&mut self, group: HlGroup, right_margin: u16) {
+        let bg = self.theme.resolve(group).bg.unwrap_or(Color::Reset);
+        self.fill_line_bg(bg, right_margin);
     }
 
     /// Set the gutter background for the current line. Paint-time gutter
     /// padding will be filled with this color instead of blank spaces.
-    pub fn set_gutter_bg(&mut self, bg: ColorValue) {
-        self.cur_decoration.gutter_bg = Some(self.resolve(bg));
+    pub fn set_gutter_bg(&mut self, bg: Color) {
+        self.cur_decoration.gutter_bg = Some(bg);
+    }
+
+    /// Same as `set_gutter_bg` but takes a theme group; reads the
+    /// group's bg through the active theme.
+    pub fn set_gutter_bg_group(&mut self, group: HlGroup) {
+        let bg = self.theme.resolve(group).bg.unwrap_or(Color::Reset);
+        self.set_gutter_bg(bg);
     }
 
     /// Mark the current line as a soft-wrap continuation of the
@@ -285,15 +308,26 @@ impl<'a> SpanCollector<'a> {
         self.apply_style(SpanStyle::default());
     }
 
-    pub fn set_fg(&mut self, c: ColorValue) {
+    pub fn set_fg(&mut self, c: Color) {
         let mut s = self.snapshot_style();
         s.fg = Some(c);
         self.apply_style(s);
     }
 
-    pub fn set_bg(&mut self, c: ColorValue) {
+    pub fn set_bg(&mut self, c: Color) {
         let mut s = self.snapshot_style();
         s.bg = Some(c);
+        self.apply_style(s);
+    }
+
+    /// Set the current span's theme group. The group's resolved
+    /// fg/bg fill any unset slots on the explicit `fg`/`bg`. When the
+    /// rest of the style is default, the collector emits this id
+    /// directly so theme switches flip the rendered span without
+    /// re-running the parser.
+    pub fn set_hl(&mut self, group: HlGroup) {
+        let mut s = self.snapshot_style();
+        s.group = Some(group);
         self.apply_style(s);
     }
 
@@ -316,9 +350,15 @@ impl<'a> SpanCollector<'a> {
         self.apply_style(s);
     }
 
-    pub fn push_fg(&mut self, c: ColorValue) {
+    pub fn push_fg(&mut self, c: Color) {
         let mut s = self.snapshot_style();
         s.fg = Some(c);
+        self.push_style(s);
+    }
+
+    pub fn push_hl(&mut self, group: HlGroup) {
+        let mut s = self.snapshot_style();
+        s.group = Some(group);
         self.push_style(s);
     }
 
@@ -409,26 +449,16 @@ impl<'a> SpanCollector<'a> {
     }
 
     /// Map a renderer-facing style to an interned [`HlGroup`]. Single
-    /// theme-role fg with no other axis modifications interns by the
-    /// role's group name when this Theme has the group registered
-    /// (live theme-switch updates). Anything more complex — or roles
-    /// against a Theme that hasn't seen `populate_ui_theme` —  falls
-    /// back to content-hashed anonymous interning, preserving the
-    /// resolved-Style fallback (`Color::Reset` for unset role fg).
+    /// theme-group reference with no other axis modifications flows
+    /// the group id directly (theme switches mutate `Theme.styles[id]`
+    /// once and the rendered span tracks live). Anything more
+    /// complex — group plus axis mods, or concrete `fg`/`bg` — falls
+    /// back to content-hashed anonymous interning of the resolved
+    /// `Style`.
     fn hl_for_style(&self, s: &SpanStyle, resolved: Style) -> HlGroup {
-        let only_role_fg = matches!(s.fg, Some(ColorValue::Role(_)))
-            && s.bg.is_none()
-            && !s.bold
-            && !s.dim
-            && !s.italic
-            && !s.underline
-            && !s.crossedout;
-        if only_role_fg {
-            if let Some(ColorValue::Role(role)) = s.fg {
-                let id = intern(role_group_name(role));
-                if self.theme.contains(id) {
-                    return id;
-                }
+        if let Some(group) = s.group {
+            if !s.has_axis_mods() && self.theme.contains(group) {
+                return group;
             }
         }
         intern_anonymous_style(resolved)
@@ -473,27 +503,31 @@ impl<'a> SpanCollector<'a> {
     }
 
     fn resolve_style(&self, style: &SpanStyle) -> Style {
+        let (group_fg, group_bg) = match style.group {
+            Some(g) => {
+                let s = self.theme.resolve(g);
+                // Empty Theme entry ⇒ ensure the span still emits a
+                // non-default Style so the extmark survives the
+                // `style_is_default` short-circuit. `Color::Reset`
+                // is the role-fallback color for groups the active
+                // theme hasn't registered.
+                let fg = s.fg.or(if s.bg.is_none() {
+                    Some(Color::Reset)
+                } else {
+                    None
+                });
+                (fg, s.bg)
+            }
+            None => (None, None),
+        };
         Style {
-            fg: style.fg.map(|c| self.resolve(c)),
-            bg: style.bg.map(|c| self.resolve(c)),
+            fg: style.fg.or(group_fg),
+            bg: style.bg.or(group_bg),
             bold: style.bold,
             dim: style.dim,
             italic: style.italic,
             underline: style.underline,
             crossedout: style.crossedout,
-        }
-    }
-
-    fn resolve(&self, c: ColorValue) -> Color {
-        match c {
-            ColorValue::Rgb(r, g, b) => Color::Rgb { r, g, b },
-            ColorValue::Ansi(v) => Color::AnsiValue(v),
-            ColorValue::Named(n) => named_to_crossterm(n),
-            ColorValue::Role(role) => {
-                let group = role_group_name(role);
-                let style = self.theme.get(group);
-                style.fg.or(style.bg).unwrap_or(Color::Reset)
-            }
         }
     }
 }
@@ -514,51 +548,6 @@ fn style_is_default(s: &Style) -> bool {
         && !s.italic
         && !s.underline
         && !s.crossedout
-}
-
-pub fn role_group_name(role: ColorRole) -> &'static str {
-    match role {
-        ColorRole::Accent => "SmeltAccent",
-        ColorRole::Slug => "SmeltSlug",
-        ColorRole::UserBg => "SmeltUserBg",
-        ColorRole::CodeBlockBg => "SmeltCodeBlockBg",
-        ColorRole::Bar => "SmeltBar",
-        ColorRole::ToolPending => "SmeltToolPending",
-        ColorRole::ReasonOff => "SmeltReasonOff",
-        ColorRole::Muted => "Comment",
-        ColorRole::Success => "SmeltSuccess",
-        ColorRole::ErrorMsg => "ErrorMsg",
-        ColorRole::Apply => "SmeltModeApply",
-        ColorRole::Plan => "SmeltModePlan",
-        ColorRole::Exec => "SmeltModeExec",
-        ColorRole::Heading => "SmeltHeading",
-        ColorRole::ReasonLow => "SmeltReasonLow",
-        ColorRole::ReasonMed => "SmeltReasonMed",
-        ColorRole::ReasonHigh => "SmeltReasonHigh",
-        ColorRole::ReasonMax => "SmeltReasonMax",
-    }
-}
-
-pub fn named_to_crossterm(n: NamedColor) -> Color {
-    match n {
-        NamedColor::Reset => Color::Reset,
-        NamedColor::Black => Color::Black,
-        NamedColor::DarkGrey => Color::DarkGrey,
-        NamedColor::Red => Color::Red,
-        NamedColor::DarkRed => Color::DarkRed,
-        NamedColor::Green => Color::Green,
-        NamedColor::DarkGreen => Color::DarkGreen,
-        NamedColor::Yellow => Color::Yellow,
-        NamedColor::DarkYellow => Color::DarkYellow,
-        NamedColor::Blue => Color::Blue,
-        NamedColor::DarkBlue => Color::DarkBlue,
-        NamedColor::Magenta => Color::Magenta,
-        NamedColor::DarkMagenta => Color::DarkMagenta,
-        NamedColor::Cyan => Color::Cyan,
-        NamedColor::DarkCyan => Color::DarkCyan,
-        NamedColor::White => Color::White,
-        NamedColor::Grey => Color::Grey,
-    }
 }
 
 /// Convenience: build a fresh Buffer, render into it, and return the
