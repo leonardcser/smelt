@@ -160,6 +160,10 @@ pub struct TuiApp {
     /// TurnMeta from the engine, consumed by `finish_turn`.
     pub(crate) pending_turn_meta: Option<protocol::TurnMeta>,
     startup_auth_error: Option<String>,
+    /// Trust gate result for `<cwd>/.smelt/`, computed in `main.rs`
+    /// when `LuaRuntime::load_project_config` ran. Surfaced as a
+    /// startup toast in `start()` and then dropped.
+    pub(crate) project_trust: Option<smelt_core::trust::TrustState>,
     /// TuiApp-level focus (Prompt = editing buffer; History = navigating transcript).
     pub(crate) app_focus: AppFocus,
     /// Readonly pane showing the transcript. Owns its `Buffer`
@@ -337,6 +341,8 @@ impl TuiApp {
         cli_api_key_env_override: bool,
         startup_auth_error: Option<String>,
         runtime_approvals: Arc<std::sync::RwLock<smelt_core::permissions::RuntimeApprovals>>,
+        lua: crate::lua::LuaRuntime,
+        project_trust: smelt_core::trust::TrustState,
     ) -> Self {
         let saved = state::State::load();
         let mode = saved.mode();
@@ -470,7 +476,6 @@ impl TuiApp {
         };
 
         let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui);
-        let lua = crate::lua::LuaRuntime::new();
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
         let mut app = Self {
@@ -517,6 +522,7 @@ impl TuiApp {
             pending_compact_epoch: 0,
             pending_turn_meta: None,
             startup_auth_error,
+            project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
             transcript_window: {
                 let mut w = crate::ui::Window::new(
@@ -855,14 +861,12 @@ impl TuiApp {
             self.notify_error(message);
         }
 
-        // Plugins read live TuiApp state via `with_app` at registration
-        // time — e.g. `model.lua` declares `args = smelt.engine.models()`
-        // for its arg picker. Install the TLS app pointer before any
-        // Lua runs at startup so those reads land on the real TuiApp.
-        let project_trust;
+        // Lua autoload + `init.lua` + global / project plugins all
+        // ran in `main.rs` before construction. Just install the TLS
+        // app pointer for the rest of the runtime and publish the
+        // session-started cell.
         {
             let _guard = crate::lua::install_app_ptr(self);
-            project_trust = self.lua.load_plugins();
             self.core.cells.set_dyn(
                 "session_started",
                 std::rc::Rc::new(self.core.session.id.clone()),
@@ -872,11 +876,12 @@ impl TuiApp {
         if let Some(err) = self.lua.take_load_error() {
             self.notify_error(format!("lua init: {err}"));
         }
-        if matches!(
-            project_trust,
-            smelt_core::trust::TrustState::Untrusted { .. }
-        ) {
-            self.notify("project .smelt/ content not trusted; run /trust to load it".to_string());
+        if let Some(state) = self.project_trust.take() {
+            if matches!(state, smelt_core::trust::TrustState::Untrusted { .. }) {
+                self.notify(
+                    "project .smelt/ content not trusted; run /trust to load it".to_string(),
+                );
+            }
         }
         self.flush_lua_callbacks();
         // Plugins have now registered their commands — pull every

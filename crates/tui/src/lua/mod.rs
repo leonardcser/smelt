@@ -359,25 +359,13 @@ impl LuaRuntime {
         self.core.load_error.take()
     }
 
-    /// Run autoload plugins and `~/.config/smelt/init.lua`. Call
-    /// *after* pushing startup snapshots so plugins see populated
-    /// `smelt.engine.models()` etc. Order: embedded autoload → user
-    /// `init.lua` → global `<config>/plugins/*.lua` → project-local
+    /// Run embedded autoload plugins. Order at startup is:
+    /// embedded autoload → user `init.lua` → global
+    /// `<config>/plugins/*.lua` → project-local
     /// `<cwd>/.smelt/{plugins/*.lua,init.lua}` (only when
-    /// [`smelt_core::trust`] reports the project trusted). Returns
-    /// the project trust state so the caller can notify the user
-    /// when project content was skipped.
-    pub(crate) fn load_plugins(&mut self) -> smelt_core::trust::TrustState {
-        self.load_autoload();
-        self.core.load_user_config();
-        self.core.load_global_plugins();
-        let cwd = std::env::current_dir().unwrap_or_default();
-        self.core.load_project_config(&cwd)
-    }
-
-    /// Run embedded autoload plugins only. Call *after* installing
-    /// the TLS app pointer so plugins that read `with_app` work.
-    pub(crate) fn load_autoload(&mut self) {
+    /// [`smelt_core::trust`] reports the project trusted). All
+    /// staged from `main.rs` so the runtime is built once.
+    pub fn load_autoload(&mut self) {
         if self.core.load_error.is_some() {
             return;
         }
@@ -746,7 +734,7 @@ mod tests {
     #[test]
     fn autoload_registers_export_command() {
         let mut rt = LuaRuntime::new();
-        rt.load_plugins();
+        rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         assert!(
             rt.has_command("export"),
@@ -757,7 +745,7 @@ mod tests {
     #[test]
     fn autoload_registers_ps_command() {
         let mut rt = LuaRuntime::new();
-        rt.load_plugins();
+        rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         assert!(
             rt.has_command("ps"),
@@ -768,7 +756,7 @@ mod tests {
     #[test]
     fn autoload_registers_rewind_command() {
         let mut rt = LuaRuntime::new();
-        rt.load_plugins();
+        rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         assert!(
             rt.has_command("rewind"),
@@ -779,7 +767,7 @@ mod tests {
     #[test]
     fn autoload_registers_ask_user_question_as_sequential() {
         let mut rt = LuaRuntime::new();
-        rt.load_plugins();
+        rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let defs = rt.tool_defs(protocol::AgentMode::Normal);
         let ask = defs
@@ -819,7 +807,7 @@ mod tests {
         // at the top level, so the call errors before reaching the
         // Rust `_open` binding.
         let mut rt = LuaRuntime::new();
-        rt.load_plugins();
+        rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         let res: LuaResult<()> = rt.lua.load("smelt.ui.dialog.open({panels = {}})").exec();
         assert!(res.is_err());

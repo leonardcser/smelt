@@ -143,10 +143,15 @@ async fn main() {
     if let Some(ref path) = args.config {
         lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
     }
+    // Embedded autoload first so user code can override built-in
+    // registrations. Runs without a TLS app pointer; autoload modules
+    // only do `smelt.{tools,cmd,au,cell}.register` at load time, which
+    // writes to `LuaShared` and never reaches into live app state.
+    lua_runtime.load_autoload();
     lua_runtime.load_user_config();
     lua_runtime.load_global_plugins();
     let cwd = std::env::current_dir().unwrap_or_default();
-    lua_runtime.load_project_config(&cwd);
+    let project_trust = lua_runtime.load_project_config(&cwd);
     let lua_cfg = lua_runtime.to_config();
     let lua_permission_rules = lua_runtime.take_permission_rules();
     if let Some(err) = lua_runtime.load_error() {
@@ -459,6 +464,8 @@ async fn main() {
             args.api_key_env.is_some(),
             startup_auth_error.take(),
             runtime_approvals,
+            lua_runtime,
+            project_trust,
         );
         app.core.config.model_config = (&model_config).into();
         app.core.skills = Some(tui_skill_loader.clone());
