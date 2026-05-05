@@ -9,8 +9,8 @@
 
 use crate::app::{CommandAction, TuiApp};
 
-use crate::ui::buffer::BufCreateOpts;
 use crate::ui::layout::Anchor;
+use crate::ui::BufCreateOpts;
 use crate::ui::UiHost;
 use crate::ui::{Constraint, LayoutTree, Overlay, SplitConfig};
 use crossterm::event::{KeyCode, KeyEvent};

@@ -104,7 +104,7 @@ mod tests {
     use crate::ui::{Constraint, LayoutTree, WinId};
 
     fn open_split(ui: &mut crate::ui::Ui, win: WinId, region: &str) {
-        let buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(crate::ui::BufCreateOpts::default());
         assert!(ui.win_open_split_at(
             win,
             buf,
@@ -124,7 +124,7 @@ mod tests {
         ui.set_terminal_size(term_width, term_height);
         open_split(&mut ui, crate::app::TRANSCRIPT_WIN, "transcript");
         open_split(&mut ui, crate::app::PROMPT_WIN, "prompt");
-        let status_buf = ui.buf_create(crate::ui::buffer::BufCreateOpts::default());
+        let status_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
         let status_win = ui
             .win_open_split(
                 status_buf,

@@ -30,7 +30,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 crate::lua::with_app(|app| {
                     match app.ui.buf_create_with_id(
                         crate::ui::BufId(id),
-                        crate::ui::buffer::BufCreateOpts::default(),
+                        crate::ui::BufCreateOpts::default(),
                     ) {
                         Ok(bid) => {
                             if let Some(fmt) = format {
@@ -141,7 +141,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                                 line0 as usize,
                                 col_start.min(u16::MAX as u64) as u16,
                                 col_end.min(u16::MAX as u64) as u16,
-                                crate::ui::buffer::SpanStyle {
+                                crate::ui::SpanStyle {
                                     fg,
                                     bg: None,
                                     bold,
@@ -173,7 +173,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             line0 as usize,
                             col_start.min(u16::MAX as u64) as u16,
                             col_end.min(u16::MAX as u64) as u16,
-                            crate::ui::buffer::SpanStyle {
+                            crate::ui::SpanStyle {
                                 fg: None,
                                 bg: None,
                                 bold: false,

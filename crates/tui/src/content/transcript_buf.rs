@@ -1,6 +1,6 @@
 use super::block_buffers::BlockBufferCache;
 use super::to_buffer::{apply_to_buffer, project_display_line, ProjectedLine};
-use crate::ui::buffer::Buffer;
+use crate::ui::Buffer;
 use crate::ui::Theme;
 use smelt_core::content::display::DisplayLine;
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};

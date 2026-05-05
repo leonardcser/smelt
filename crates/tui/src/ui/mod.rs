@@ -1,4 +1,3 @@
-pub mod buffer;
 pub mod callback;
 pub(crate) mod compositor;
 pub(crate) mod event;
@@ -10,32 +9,46 @@ pub(crate) mod overlay;
 pub mod text;
 pub(crate) mod text_objects;
 pub mod theme;
-pub(crate) mod undo;
 pub mod vim;
 pub(crate) mod window;
 
-mod id;
-
 pub use smelt_core::attachment::AttachmentId;
+pub use smelt_core::buffer::{
+    BufCreateOpts, BufId, Buffer, BufferParser, ExtmarkOpts, ExtmarkPayload, LineDecoration,
+    SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
+};
+pub use smelt_core::clipboard::Clipboard;
+pub use smelt_core::undo::{UndoEntry, UndoHistory};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WinId(pub u64);
+
+impl WinId {
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for WinId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "win:{}", self.0)
+    }
+}
 
 /// Callback shape for routing `Callback::Lua` handles out of Ui into
 /// the host's Lua runtime. Receives the handle, the focused window,
 /// and the event payload.
-pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, id::WinId, &callback::Payload) + 'a;
+pub type LuaInvoke<'a> = dyn FnMut(callback::LuaHandle, WinId, &callback::Payload) + 'a;
 
-pub use buffer::Buffer;
 use callback::Callbacks;
 pub use callback::{Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, Payload, WinEvent};
 use compositor::Compositor;
 pub use event::{Event, Status};
 pub use grid::{Grid, Style};
-pub use id::{BufId, WinId, LUA_BUF_ID_BASE};
 pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, Rect};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
-pub use smelt_core::clipboard::Clipboard;
 pub use theme::Theme;
-pub use undo::{UndoEntry, UndoHistory};
 pub use vim::VimMode;
 pub use window::{
     CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,
@@ -250,7 +263,7 @@ impl Ui {
         self.resolve_splits().get(&win).copied()
     }
 
-    pub fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId {
+    pub fn buf_create(&mut self, opts: BufCreateOpts) -> BufId {
         let id = BufId(self.next_buf_id);
         self.next_buf_id += 1;
         let buf = Buffer::new(id, opts);
@@ -263,11 +276,7 @@ impl Ui {
     /// via `buf_create`. Plugin-facing IDs (Lua `smelt.buf.create`)
     /// live above `LUA_BUF_ID_BASE` so they can't collide with
     /// sequentially-allocated Rust buffers.
-    pub fn buf_create_with_id(
-        &mut self,
-        id: BufId,
-        opts: buffer::BufCreateOpts,
-    ) -> Result<BufId, BufId> {
+    pub fn buf_create_with_id(&mut self, id: BufId, opts: BufCreateOpts) -> Result<BufId, BufId> {
         if self.bufs.contains_key(&id) {
             return Err(id);
         }
@@ -1338,7 +1347,7 @@ pub trait UiHost {
 
     /// Create a fresh buffer with an auto-allocated `BufId`.
     /// Mirrors [`Ui::buf_create`].
-    fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId;
+    fn buf_create(&mut self, opts: BufCreateOpts) -> BufId;
 
     /// Mutably borrow a buffer by id. Mirrors [`Ui::buf_mut`].
     fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer>;
@@ -1397,7 +1406,7 @@ impl UiHost for Ui {
     fn set_focus(&mut self, win: WinId) -> bool {
         Ui::set_focus(self, win)
     }
-    fn buf_create(&mut self, opts: buffer::BufCreateOpts) -> BufId {
+    fn buf_create(&mut self, opts: BufCreateOpts) -> BufId {
         Ui::buf_create(self, opts)
     }
     fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer> {
@@ -1625,7 +1634,7 @@ mod tests {
     /// windows. Most focus / overlay tests just need a focusable target
     /// to exercise; this helper takes the boilerplate.
     fn make_split(ui: &mut Ui, win_id: WinId) {
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         assert!(ui.win_open_split_at(
             win_id,
             buf,
@@ -1647,10 +1656,10 @@ mod tests {
     #[test]
     fn buf_create_with_id_lua_range_does_not_advance_rust_allocator() {
         let mut ui = make_ui();
-        let rust_first = ui.buf_create(buffer::BufCreateOpts::default());
-        ui.buf_create_with_id(BufId(LUA_BUF_ID_BASE), buffer::BufCreateOpts::default())
+        let rust_first = ui.buf_create(BufCreateOpts::default());
+        ui.buf_create_with_id(BufId(LUA_BUF_ID_BASE), BufCreateOpts::default())
             .unwrap();
-        let rust_second = ui.buf_create(buffer::BufCreateOpts::default());
+        let rust_second = ui.buf_create(BufCreateOpts::default());
         assert_eq!(rust_second.0, rust_first.0 + 1);
         assert!(rust_second.0 < LUA_BUF_ID_BASE);
     }
@@ -1781,7 +1790,7 @@ mod tests {
         // produces rect (top=5, left=10, width=30, height=8) on an
         // 80x24 terminal.
         let target = WinId(999);
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         assert!(ui.win_open_split_at(
             target,
             buf,
@@ -2178,7 +2187,7 @@ mod tests {
     #[test]
     fn overlay_open_modal_focuses_first_leaf() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2196,7 +2205,7 @@ mod tests {
     #[test]
     fn set_focus_accepts_overlay_leaf() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2215,7 +2224,7 @@ mod tests {
     #[test]
     fn set_focus_accepts_focusable_splits_leaf() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2236,7 +2245,7 @@ mod tests {
     #[test]
     fn set_focus_rejects_non_focusable_splits_leaf() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2258,7 +2267,7 @@ mod tests {
     #[test]
     fn set_layout_drops_focus_when_focused_leaf_disappears() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2298,7 +2307,7 @@ mod tests {
     #[test]
     fn set_layout_clears_capture_when_split_owner_disappears() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2321,7 +2330,7 @@ mod tests {
     #[test]
     fn set_layout_keeps_capture_when_split_owner_persists() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2374,7 +2383,7 @@ mod tests {
     fn focused_painted_split_cursor_returns_hardware_cursor_position() {
         let mut ui = make_ui();
         ui.set_terminal_size(20, 4);
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2401,7 +2410,7 @@ mod tests {
     fn focused_painted_split_cursor_returns_none_when_unfocused() {
         let mut ui = make_ui();
         ui.set_terminal_size(20, 4);
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2425,7 +2434,7 @@ mod tests {
     #[test]
     fn handle_key_routes_to_overlay_leaf_callback() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2467,7 +2476,7 @@ mod tests {
         // dispatcher must follow up with `fire_win_event` so any
         // registered `on_event(win, "submit", ...)` handler fires.
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,
@@ -2690,7 +2699,7 @@ mod tests {
         // detach one panel) and clear callbacks for every leaf so the
         // Lua-side registry drops them in lockstep.
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win_a = ui
             .win_open_split(
                 buf,
@@ -2741,14 +2750,14 @@ mod tests {
         struct WidthRecorder {
             calls: Arc<Mutex<Vec<u16>>>,
         }
-        impl buffer::BufferParser for WidthRecorder {
+        impl BufferParser for WidthRecorder {
             fn parse(&self, buf: &mut Buffer, _source: &str, width: u16) {
                 self.calls.lock().unwrap().push(width);
                 buf.set_all_lines(vec![format!("rendered@{width}")]);
             }
         }
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let calls = Arc::new(Mutex::new(Vec::<u16>::new()));
         if let Some(b) = ui.buf_mut(buf) {
             b.set_parser(Arc::new(WidthRecorder {
@@ -2785,7 +2794,7 @@ mod tests {
     #[test]
     fn render_paints_overlay_leaf_buffer() {
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         if let Some(b) = ui.buf_mut(buf) {
             b.set_all_lines(vec!["overlay-text".into()]);
         }
@@ -2828,7 +2837,7 @@ mod tests {
         // path). Mirrors how P2.b.5's Lua bindings will reach the
         // compositor — by trait, not by direct field access.
         fn drive(host: &mut dyn UiHost) -> (BufId, WinId, OverlayId) {
-            let buf = host.buf_create(buffer::BufCreateOpts::default());
+            let buf = host.buf_create(BufCreateOpts::default());
             host.buf_mut(buf)
                 .unwrap()
                 .set_all_lines(vec!["uihost".into()]);
@@ -2900,7 +2909,7 @@ mod tests {
         // three through `&mut dyn UiHost` so the trait shape is
         // exercised end-to-end.
         let mut ui = make_ui();
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         ui.buf_mut(buf)
             .unwrap()
             .set_all_lines(vec!["hello".into(), "world!".into(), "ok".into()]);
@@ -2955,7 +2964,7 @@ mod tests {
     /// the leaf's `WinId` so callers can latch capture / hit-test
     /// against it.
     fn make_scrollbar_split(ui: &mut Ui) -> WinId {
-        let buf = ui.buf_create(buffer::BufCreateOpts::default());
+        let buf = ui.buf_create(BufCreateOpts::default());
         let win = ui
             .win_open_split(
                 buf,

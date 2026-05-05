@@ -10,7 +10,7 @@ use crate::app::TuiApp;
 impl TuiApp {
     pub(crate) fn refresh_status_bar(&mut self) {
         use crate::content::status::{spans_to_buffer_line, StatusSpan};
-        use crate::ui::buffer::SpanStyle;
+        use crate::ui::SpanStyle;
         use smelt_core::style::Color;
 
         let (term_w, _) = self.ui.terminal_size();

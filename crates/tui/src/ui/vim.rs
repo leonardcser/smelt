@@ -9,9 +9,9 @@ use super::text::{
     word_forward_pos, CharClass,
 };
 use super::text_objects::text_object;
-use super::undo::{UndoEntry, UndoHistory};
 use super::AttachmentId;
 use super::Clipboard;
+use super::{UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // ── Public types ────────────────────────────────────────────────────────────
