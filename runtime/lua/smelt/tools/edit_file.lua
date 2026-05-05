@@ -91,6 +91,10 @@ smelt.tools.register({
       path = args.file_path or "",
     })
   end,
+  paths_for_workspace = function(args)
+    local p = args.file_path or ""
+    return p ~= "" and { p } or {}
+  end,
 
   execute = function(args)
     local path = args.file_path or ""

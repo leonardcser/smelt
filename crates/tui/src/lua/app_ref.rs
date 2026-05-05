@@ -76,7 +76,7 @@ pub(crate) fn with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> R {
 /// Variant that returns `None` if the pointer is unset instead of
 /// panicking. Useful from bindings that might be called from a
 /// benchmark / test harness without a `TuiApp`.
-pub(crate) fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
+pub fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
     let ptr = APP.with(|cell| cell.get())?;
     // SAFETY: same contract as `with_app`.
     Some(unsafe { f(ptr.as_ptr().as_mut().expect("app ptr must be non-null")) })

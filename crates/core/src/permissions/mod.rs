@@ -41,9 +41,17 @@ use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerm
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use workspace::{extract_tool_paths, has_paths_outside_workspace, is_in_workspace};
+use std::sync::Arc;
+use workspace::{any_outside_workspace, is_in_workspace};
 
-#[derive(Debug, Clone)]
+/// Lookup "what filesystem paths does this tool call touch?" without
+/// hardcoding tool names in Rust. Wired from each Lua tool's
+/// `paths_for_workspace(args)` callback at startup; tools that don't
+/// touch paths simply don't register one and the workspace-boundary
+/// check short-circuits to "in".
+pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send + Sync;
+
+#[derive(Clone)]
 pub struct Permissions {
     normal: ModePerms,
     plan: ModePerms,
@@ -51,6 +59,21 @@ pub struct Permissions {
     yolo: ModePerms,
     restrict_to_workspace: bool,
     workspace: PathBuf,
+    paths_fn: Option<Arc<PathsFn>>,
+}
+
+impl std::fmt::Debug for Permissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Permissions")
+            .field("normal", &self.normal)
+            .field("plan", &self.plan)
+            .field("apply", &self.apply)
+            .field("yolo", &self.yolo)
+            .field("restrict_to_workspace", &self.restrict_to_workspace)
+            .field("workspace", &self.workspace)
+            .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl Permissions {
@@ -64,6 +87,7 @@ impl Permissions {
             yolo: build_mode(&merge_mode(def, &raw.permissions.yolo), AgentMode::Yolo),
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
+            paths_fn: None,
         }
     }
 
@@ -78,6 +102,7 @@ impl Permissions {
             yolo: build_mode(&merge_mode(def, &raw.yolo), AgentMode::Yolo),
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
+            paths_fn: None,
         }
     }
 
@@ -135,6 +160,22 @@ impl Permissions {
 
     pub fn set_restrict_to_workspace(&mut self, val: bool) {
         self.restrict_to_workspace = val;
+    }
+
+    /// Install the per-tool path-extraction callback. Called once at
+    /// startup after Lua tool defs are registered. The callback's job
+    /// is to map `(tool_name, args) -> [paths]` by invoking each
+    /// tool's `paths_for_workspace(args)` Lua hook (and returning
+    /// `[]` for tools that didn't register one).
+    pub fn set_paths_fn(&mut self, f: Arc<PathsFn>) {
+        self.paths_fn = Some(f);
+    }
+
+    fn paths_for_tool(&self, tool_name: &str, args: &HashMap<String, Value>) -> Vec<String> {
+        match self.paths_fn.as_ref() {
+            Some(f) => f(tool_name, args),
+            None => Vec::new(),
+        }
     }
 
     fn mode_perms(&self, mode: AgentMode) -> &ModePerms {
@@ -240,7 +281,7 @@ impl Permissions {
         if base == Decision::Allow
             && self.restrict_to_workspace
             && !self.workspace.as_os_str().is_empty()
-            && has_paths_outside_workspace(tool_name, args, &self.workspace)
+            && any_outside_workspace(&self.paths_for_tool(tool_name, args), &self.workspace)
         {
             return Decision::Ask;
         }
@@ -259,7 +300,7 @@ impl Permissions {
         base == Decision::Allow
             && self.restrict_to_workspace
             && !self.workspace.as_os_str().is_empty()
-            && has_paths_outside_workspace(tool_name, args, &self.workspace)
+            && any_outside_workspace(&self.paths_for_tool(tool_name, args), &self.workspace)
     }
 
     /// Return paths from a tool call that fall outside the workspace.
@@ -278,7 +319,7 @@ impl Permissions {
         if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
             return vec![];
         }
-        extract_tool_paths(tool_name, args)
+        self.paths_for_tool(tool_name, args)
             .into_iter()
             .filter(|p| !is_in_workspace(p, &self.workspace))
             .collect()

@@ -40,7 +40,39 @@ fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
         yolo: mode,
         restrict_to_workspace: false,
         workspace: PathBuf::new(),
+        paths_fn: None,
     }
+}
+
+/// Stub `paths_fn` matching the production wiring of the built-in
+/// tools' `paths_for_workspace(args)` callbacks: file tools read
+/// `file_path`, glob/grep read `path`, bash extracts paths from the
+/// shell command. Tests that exercise the workspace boundary install
+/// this so the eternal rule (no tool-name matching in Rust) is upheld
+/// in production while tests still get realistic behaviour.
+fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
+    std::sync::Arc::new(|name, args| match name {
+        "read_file" | "write_file" | "edit_file" => {
+            let p = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            if p.is_empty() {
+                vec![]
+            } else {
+                vec![p.to_string()]
+            }
+        }
+        "glob" | "grep" => {
+            let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if p.is_empty() {
+                vec![]
+            } else {
+                vec![p.to_string()]
+            }
+        }
+        "bash" => crate::permissions::workspace::extract_paths_from_command(
+            args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+        ),
+        _ => vec![],
+    })
 }
 
 #[track_caller]
@@ -756,14 +788,17 @@ fn perms_with_workspace(workspace: &str) -> Permissions {
         web_fetch: empty_ruleset(),
         mcp: empty_ruleset(),
     };
-    Permissions {
+    let mut p = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
         apply: mode.clone(),
         yolo: mode,
         restrict_to_workspace: true,
         workspace: PathBuf::from(workspace),
-    }
+        paths_fn: None,
+    };
+    p.set_paths_fn(stub_paths_fn());
+    p
 }
 
 fn args_with(key: &str, val: &str) -> HashMap<String, Value> {
@@ -772,56 +807,34 @@ fn args_with(key: &str, val: &str) -> HashMap<String, Value> {
     m
 }
 
-// --- path extraction ---
+// --- bash shell-string path extraction ---
+//
+// The tool→path mapping (read_file→file_path, etc.) lives in each
+// tool's Lua `paths_for_workspace(args)` callback now. The shell
+// parsing primitive that bash's callback composes via
+// `smelt.shell.extract_paths` is the only path-extraction logic
+// left in Rust, so it's the only one with a unit test here.
 
 #[test]
-fn extract_paths_from_file_tools() {
+fn shell_extracts_absolute_paths() {
     assert_eq!(
-        extract_tool_paths("read_file", &args_with("file_path", "/etc/passwd")),
-        vec!["/etc/passwd"]
-    );
-    assert_eq!(
-        extract_tool_paths("write_file", &args_with("file_path", "relative.txt")),
-        vec!["relative.txt"]
-    );
-    assert_eq!(
-        extract_tool_paths("edit_file", &args_with("file_path", "")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn extract_paths_from_glob_grep() {
-    assert_eq!(
-        extract_tool_paths("glob", &args_with("path", "/tmp")),
-        vec!["/tmp"]
-    );
-    assert_eq!(
-        extract_tool_paths("grep", &args_with("path", "")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn extract_paths_from_bash() {
-    assert_eq!(
-        extract_tool_paths("bash", &args_with("command", "rm -rf /tmp/foo")),
+        extract_paths_from_command("rm -rf /tmp/foo"),
         vec!["/tmp/foo"]
     );
     assert_eq!(
-        extract_tool_paths("bash", &args_with("command", "ls relative/dir")),
+        extract_paths_from_command("ls relative/dir"),
         Vec::<String>::new()
     );
     assert_eq!(
-        extract_tool_paths("bash", &args_with("command", "cat ~/secret.txt")),
+        extract_paths_from_command("cat ~/secret.txt"),
         vec!["~/secret.txt"]
     );
 }
 
 #[test]
-fn extract_paths_from_bash_strips_quotes() {
+fn shell_strips_quotes_around_paths() {
     assert_eq!(
-        extract_tool_paths("bash", &args_with("command", "rm '/etc/passwd'")),
+        extract_paths_from_command("rm '/etc/passwd'"),
         vec!["/etc/passwd"]
     );
 }
@@ -1249,6 +1262,7 @@ fn bash_tool_allow_pattern_ask() {
         yolo: mode,
         restrict_to_workspace: false,
         workspace: PathBuf::new(),
+        paths_fn: None,
     };
     let args = args_with("command", "git push origin main");
     assert_eq!(
@@ -1278,6 +1292,7 @@ fn override_tightens_allow_to_ask() {
         yolo: mode,
         restrict_to_workspace: false,
         workspace: PathBuf::new(),
+        paths_fn: None,
     };
     let overrides = protocol::PermissionOverrides {
         tools: Some(protocol::RuleSetOverride {
@@ -1543,14 +1558,17 @@ fn perms_with_workspace_default_bash(workspace: &str) -> Permissions {
         web_fetch: empty_ruleset(),
         mcp: empty_ruleset(),
     };
-    Permissions {
+    let mut p = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
         apply: mode.clone(),
         yolo: mode,
         restrict_to_workspace: true,
         workspace: PathBuf::from(workspace),
-    }
+        paths_fn: None,
+    };
+    p.set_paths_fn(stub_paths_fn());
+    p
 }
 
 #[test]

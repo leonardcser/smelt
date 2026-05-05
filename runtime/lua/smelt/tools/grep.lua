@@ -151,6 +151,10 @@ smelt.tools.register({
     end
     smelt.text.render(buf, n .. " matches")
   end,
+  paths_for_workspace = function(args)
+    local p = args.path or ""
+    return p ~= "" and { p } or {}
+  end,
   execute = function(args)
     local offset = pick_int(args.offset, 0)
     local head_limit = pick_int(args.head_limit, 0)

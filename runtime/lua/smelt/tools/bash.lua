@@ -106,6 +106,9 @@ smelt.tools.register({
     local secs = math.floor(ms / 1000)
     return "timeout: " .. format_duration(secs)
   end,
+  paths_for_workspace = function(args)
+    return smelt.shell.extract_paths(args.command or "")
+  end,
   execute = M.execute,
 })
 

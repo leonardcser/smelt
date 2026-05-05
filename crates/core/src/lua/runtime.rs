@@ -691,6 +691,49 @@ impl LuaRuntime {
         true
     }
 
+    /// Call a tool's `paths_for_workspace(args)` Lua callback if
+    /// registered. Returns the filesystem paths the tool call would
+    /// touch, used by the workspace-boundary policy in
+    /// `core::permissions`. Tools that don't touch paths return `[]`
+    /// (and typically don't register the callback at all).
+    pub fn tool_paths_for_workspace(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) -> Vec<String> {
+        let func = {
+            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(h) = handlers.get(tool_name) else {
+                return Vec::new();
+            };
+            let Some(rh) = h.paths_for_workspace.as_ref() else {
+                return Vec::new();
+            };
+            match self.lua.registry_value::<mlua::Function>(&rh.key) {
+                Ok(f) => f,
+                Err(_) => return Vec::new(),
+            }
+        };
+        let args_table = match self.args_to_lua_table(args) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool paths_for_workspace: build args: {e}"));
+                return Vec::new();
+            }
+        };
+        match func.call::<Option<mlua::Table>>(args_table) {
+            Ok(Some(t)) => t
+                .sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .collect(),
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                self.record_error(format!("tool paths_for_workspace `{tool_name}`: {e}"));
+                Vec::new()
+            }
+        }
+    }
+
     /// Call a tool's `header_suffix(args, ctx)` callback, if registered.
     /// Returns the optional decoration string painted in the row-0 suffix
     /// area (after the elapsed time slot). `ctx.status` is one of

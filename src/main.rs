@@ -315,6 +315,13 @@ async fn main() {
     };
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
+    // Wire the workspace-path query to each Lua tool's
+    // `paths_for_workspace(args)` callback. Resolved at call time via
+    // the TLS app pointer the main loop installs while dispatching.
+    permissions.set_paths_fn(std::sync::Arc::new(|name, args| {
+        tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
+            .unwrap_or_default()
+    }));
     let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();
