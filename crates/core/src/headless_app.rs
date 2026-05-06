@@ -57,7 +57,7 @@ impl HeadlessApp {
         }
 
         // Commands require interactive mode.
-        if trimmed.starts_with('/') && crate::transcript_present::is_command_like(trimmed) {
+        if trimmed.starts_with('/') && crate::transcript_model::is_command_like(trimmed) {
             eprintln!("\"{}\" requires interactive mode", trimmed);
             std::process::exit(1);
         }

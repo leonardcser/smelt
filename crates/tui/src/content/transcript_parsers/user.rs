@@ -5,7 +5,7 @@ use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::role_hl;
-use smelt_core::transcript_present::is_command_like;
+use smelt_core::transcript_model::is_command_like;
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines
 /// with a computed `block_w` for multiline bubble rendering.
