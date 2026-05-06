@@ -7,6 +7,7 @@ pub mod grid;
 pub mod layout;
 pub(crate) mod motions;
 pub(crate) mod overlay;
+pub mod snapshot;
 pub mod text;
 pub(crate) mod text_objects;
 pub mod vim;
@@ -49,6 +50,7 @@ pub use layout::{Border, Constraint, Corner, Gutters, LayoutTree, Rect};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use smelt_core::theme::{Theme, DEFAULT_ACCENT};
+pub use snapshot::SnapshotFrame;
 pub use vim::VimMode;
 pub use window::{
     CursorShape, DrawContext, EventCtx, MouseCtx, ScrollbarState, SplitConfig, Window,
@@ -1013,6 +1015,16 @@ impl Ui {
             }
             cursor_override
         })
+    }
+
+    /// Render the current state into the compositor (discarding SGR
+    /// output) and return a structured snapshot of the resulting
+    /// frame. Used by the L3 storybook harness; in production, the
+    /// compositor's previous-grid is internal state.
+    pub fn snapshot(&mut self) -> SnapshotFrame {
+        let mut sink = std::io::sink();
+        self.render(&mut sink).expect("snapshot render to sink");
+        SnapshotFrame::from_grid(self.compositor.previous())
     }
 
     /// Compute the absolute hardware cursor position for the focused

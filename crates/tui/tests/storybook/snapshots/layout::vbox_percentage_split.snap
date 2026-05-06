@@ -1,0 +1,8 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+30 percent
+
+
+70 percent

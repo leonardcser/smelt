@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+hello 你好 world

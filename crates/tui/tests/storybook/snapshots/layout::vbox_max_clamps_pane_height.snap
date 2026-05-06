@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+capped at 2 rows tal
+
+rest

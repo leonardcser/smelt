@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+aaa one
+aaa two
+aaa three
+bbb one
+bbb two
+bbb three

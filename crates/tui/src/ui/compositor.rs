@@ -87,6 +87,13 @@ impl Compositor {
     pub(crate) fn force_redraw(&mut self) {
         self.force_redraw = true;
     }
+
+    /// Read the most recently flushed grid. After `render_with` swaps,
+    /// `previous` carries the just-rendered frame. The L3 storybook
+    /// harness routes through this after a discard-writer render.
+    pub(crate) fn previous(&self) -> &Grid {
+        &self.previous
+    }
 }
 
 fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {

@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+top pane
+
+middle pane
+
+
+
+bottom pane
