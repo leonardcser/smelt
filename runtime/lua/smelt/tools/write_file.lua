@@ -44,15 +44,16 @@ smelt.tools.register({
   preflight = function(args)
     return preflight_message(args.file_path or "")
   end,
-  render = function(args, output, width, buf)
+  render = function(args, output, ctx)
     if output.is_error then
-      smelt.text.render(buf, output.content, { is_error = true })
-      return
+      return smelt.layout.text(output.content, { is_error = true })
     end
+    local buf = smelt.buf.create()
     smelt.syntax.render(buf, {
       content = args.content or "",
       path = args.file_path or "",
     })
+    return smelt.layout.leaf(buf)
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""

@@ -76,7 +76,6 @@ end
 smelt.tools.register({
   name = "bash",
   override = true,
-  elapsed_visible = true,
   description =
   "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
   parameters = {
@@ -94,17 +93,15 @@ smelt.tools.register({
     local d = args.description or ""
     return d ~= "" and d or nil
   end,
-  render = function(args, output, width, buf)
-    smelt.text.render(buf, output.content, { is_error = output.is_error })
-  end,
-  render_summary = function(buf, line, args)
-    smelt.bash.render_line(buf, line)
-  end,
-  header_suffix = function(args, ctx)
-    if ctx.status ~= "pending" then return nil end
-    local ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
-    local secs = math.floor(ms / 1000)
-    return "timeout: " .. format_duration(secs)
+  render = function(args, output, ctx)
+    local items = {}
+    if ctx.status == "pending" then
+      local ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
+      local secs = math.floor(ms / 1000)
+      table.insert(items, smelt.layout.text("(timeout: " .. format_duration(secs) .. ")"))
+    end
+    table.insert(items, smelt.layout.text(output.content, { is_error = output.is_error }))
+    return smelt.layout.vbox(items)
   end,
   paths_for_workspace = function(args)
     return smelt.shell.extract_paths(args.command or "")

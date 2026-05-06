@@ -27,6 +27,7 @@ mod grep;
 mod html;
 mod http;
 mod image;
+pub(crate) mod layout;
 mod mcp;
 mod mode;
 mod os;
@@ -133,6 +134,7 @@ pub fn register_host_api(
     html::register(lua, smelt)?;
     http::register(lua, smelt)?;
     image::register(lua, smelt)?;
+    layout::register(lua, smelt)?;
     mcp::register(lua, smelt, shared)?;
     mode::register(lua, smelt)?;
     os::register(lua, smelt)?;

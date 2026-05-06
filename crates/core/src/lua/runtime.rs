@@ -51,6 +51,28 @@ const BOOTSTRAP_FILES: &[&str] = &[
 /// [`BOOTSTRAP_FILES`] and the second `require` is a no-op.
 const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "plugins", "dialogs"];
 
+/// Lifecycle context passed to a tool's `render(args, output, ctx)`
+/// hook. Mirrors the data the transcript composer would otherwise paint
+/// itself (status pill, elapsed pill, available width).
+pub struct ToolRenderCtx<'a> {
+    /// Available column budget for the body (after the `⏺ name `
+    /// prefix is reserved).
+    pub width: usize,
+    /// Plain-text summary the engine recorded for the call (the
+    /// `summary(args)` callback's return value). Tools that want a
+    /// custom-styled summary line typically render `args` themselves
+    /// and ignore this string.
+    pub summary: &'a str,
+    /// Lifecycle status: `"pending" | "ok" | "err" | "denied" | "confirm"`.
+    pub status: &'a str,
+    /// Elapsed time in seconds (rounded down). `None` while the call
+    /// is still running and no measurement is available.
+    pub elapsed_secs: Option<u64>,
+    /// Engine-side call id. `None` for synthetic renders (preview /
+    /// dialog title).
+    pub call_id: Option<&'a str>,
+}
+
 /// Headless-safe Lua runtime.
 pub struct LuaRuntime {
     pub lua: Lua,
@@ -582,117 +604,6 @@ impl LuaRuntime {
         defs
     }
 
-    /// Whether the tool wants its elapsed time displayed in the
-    /// transcript header. Read from the `elapsed_visible = true` flag
-    /// set on the tool def at registration time.
-    pub fn tool_elapsed_visible(&self, tool_name: &str) -> bool {
-        let meta = match self
-            .lua
-            .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
-        {
-            Ok(meta) => meta,
-            Err(_) => return false,
-        };
-        meta.get::<bool>("elapsed_visible").unwrap_or(false)
-    }
-
-    /// Whether the tool registered a `render_summary` callback. The
-    /// caller mints an ephemeral Buffer, runs the callback through
-    /// [`render_tool_summary_line`], and replays row 0 into the
-    /// transcript / confirm-dialog title.
-    pub fn tool_has_render_summary(&self, tool_name: &str) -> bool {
-        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-        handlers
-            .get(tool_name)
-            .is_some_and(|h| h.render_summary.is_some())
-    }
-
-    /// Run a tool's `render_summary` callback against the buffer named
-    /// by `buf_id`. Mirrors [`render_tool_body`] but for a single
-    /// summary line (transcript header / confirm title). Returns `true`
-    /// iff the callback ran successfully.
-    pub fn render_tool_summary_line(
-        &self,
-        tool_name: &str,
-        line: &str,
-        args: &HashMap<String, serde_json::Value>,
-        buf_id: u64,
-    ) -> bool {
-        let render_fn = {
-            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(h) = handlers.get(tool_name) else {
-                return false;
-            };
-            let Some(rh) = h.render_summary.as_ref() else {
-                return false;
-            };
-            match self.lua.registry_value::<mlua::Function>(&rh.key) {
-                Ok(f) => f,
-                Err(_) => return false,
-            }
-        };
-
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool render_summary: build args: {e}"));
-                return false;
-            }
-        };
-
-        if let Err(e) = render_fn.call::<()>((buf_id, line.to_string(), args_table)) {
-            self.record_error(format!("tool render_summary `{tool_name}`: {e}"));
-            return false;
-        }
-        true
-    }
-
-    pub fn tool_has_render_subhead(&self, tool_name: &str) -> bool {
-        let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-        handlers
-            .get(tool_name)
-            .is_some_and(|h| h.render_subhead.is_some())
-    }
-
-    /// Run a tool's `render_subhead` callback against the buffer named
-    /// by `buf_id`. The callback paints arbitrary rows below the
-    /// summary line (e.g. `web_fetch`'s prompt subline). Returns `true`
-    /// iff the callback ran successfully.
-    pub fn render_tool_subhead(
-        &self,
-        tool_name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        buf_id: u64,
-    ) -> bool {
-        let render_fn = {
-            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(h) = handlers.get(tool_name) else {
-                return false;
-            };
-            let Some(rh) = h.render_subhead.as_ref() else {
-                return false;
-            };
-            match self.lua.registry_value::<mlua::Function>(&rh.key) {
-                Ok(f) => f,
-                Err(_) => return false,
-            }
-        };
-
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool render_subhead: build args: {e}"));
-                return false;
-            }
-        };
-
-        if let Err(e) = render_fn.call::<()>((buf_id, args_table)) {
-            self.record_error(format!("tool render_subhead `{tool_name}`: {e}"));
-            return false;
-        }
-        true
-    }
-
     /// Call a tool's `paths_for_workspace(args)` Lua callback if
     /// registered. Returns the filesystem paths the tool call would
     /// touch, used by the workspace-boundary policy in
@@ -825,48 +736,6 @@ impl LuaRuntime {
         true
     }
 
-    /// Call a tool's `header_suffix(args, ctx)` callback, if registered.
-    /// Returns the optional decoration string painted in the row-0 suffix
-    /// area (after the elapsed time slot). `ctx.status` is one of
-    /// `"pending" | "ok" | "err" | "denied" | "confirm"` so the tool can
-    /// branch on lifecycle (e.g. `bash` only emits `(timeout: 2m)` while
-    /// pending).
-    pub fn tool_header_suffix(
-        &self,
-        tool_name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        status: &str,
-    ) -> Option<String> {
-        let func = {
-            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let h = handlers.get(tool_name)?;
-            let rh = h.header_suffix.as_ref()?;
-            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
-        };
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool header_suffix: build args: {e}"));
-                return None;
-            }
-        };
-        let ctx = match self.lua.create_table() {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool header_suffix: build ctx: {e}"));
-                return None;
-            }
-        };
-        let _ = ctx.set("status", status);
-        match func.call::<Option<String>>((args_table, ctx)) {
-            Ok(s) => s,
-            Err(e) => {
-                self.record_error(format!("tool header_suffix `{tool_name}`: {e}"));
-                None
-            }
-        }
-    }
-
     pub fn tool_summary(
         &self,
         tool_name: &str,
@@ -968,39 +837,33 @@ impl LuaRuntime {
         out
     }
 
-    /// Call a tool's Lua `render` hook, if registered.
-    /// The hook receives `(args, output, width, buf_id)` and writes its
-    /// content into the buffer named by `buf_id` (which the caller has
-    /// already created in the UI's buffer registry). Returns `true` iff
-    /// the hook ran successfully; the caller decides what fallback to
-    /// paint when this returns `false`.
-    pub fn render_tool_body(
+    /// Call a tool's Lua `render` hook, if registered. Returns the
+    /// composed [`BlockLayout`] tree so the transcript composer can
+    /// replay each leaf buffer's lines into its `LineBuilder`.
+    ///
+    /// The hook receives `(args, output, ctx)` where `ctx` carries
+    /// `{ width, summary, status, elapsed_secs, call_id }`. The tool
+    /// mints its own buffers via `smelt.buf.create` and arranges them
+    /// using `smelt.layout.{vbox,hbox,leaf}`.
+    pub fn render_tool_layout(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-        output: &crate::transcript_model::ToolOutput,
-        width: usize,
-        buf_id: u64,
-    ) -> bool {
+        output: Option<&crate::transcript_model::ToolOutput>,
+        ctx: ToolRenderCtx<'_>,
+    ) -> Option<crate::content::block_layout::BlockLayout> {
         let render_fn = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(h) = handlers.get(tool_name) else {
-                return false;
-            };
-            let Some(rh) = h.render.as_ref() else {
-                return false;
-            };
-            match self.lua.registry_value::<mlua::Function>(&rh.key) {
-                Ok(f) => f,
-                Err(_) => return false,
-            }
+            let h = handlers.get(tool_name)?;
+            let rh = h.render.as_ref()?;
+            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
         };
 
         let args_table = match self.args_to_lua_table(args) {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("tool render: build args: {e}"));
-                return false;
+                return None;
             }
         };
 
@@ -1008,25 +871,67 @@ impl LuaRuntime {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("tool render: build output table: {e}"));
-                return false;
+                return None;
             }
         };
-        let _ = output_table.set("content", output.content.clone());
-        let _ = output_table.set("is_error", output.is_error);
-        if let Some(meta) = &output.metadata {
-            match json_to_lua(&self.lua, meta) {
-                Ok(v) => {
-                    let _ = output_table.set("metadata", v);
+        if let Some(out) = output {
+            let _ = output_table.set("content", out.content.clone());
+            let _ = output_table.set("is_error", out.is_error);
+            if let Some(meta) = &out.metadata {
+                match json_to_lua(&self.lua, meta) {
+                    Ok(v) => {
+                        let _ = output_table.set("metadata", v);
+                    }
+                    Err(e) => self.record_error(format!("tool render: metadata: {e}")),
                 }
-                Err(e) => self.record_error(format!("tool render: metadata: {e}")),
             }
         }
 
-        if let Err(e) = render_fn.call::<()>((args_table, output_table, width, buf_id)) {
-            self.record_error(format!("tool render `{tool_name}`: {e}"));
-            return false;
+        let ctx_table = match self.lua.create_table() {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("tool render: build ctx: {e}"));
+                return None;
+            }
+        };
+        let _ = ctx_table.set("width", ctx.width);
+        let _ = ctx_table.set("summary", ctx.summary);
+        let _ = ctx_table.set("status", ctx.status);
+        if let Some(secs) = ctx.elapsed_secs {
+            let _ = ctx_table.set("elapsed_secs", secs);
         }
-        true
+        if let Some(cid) = ctx.call_id {
+            let _ = ctx_table.set("call_id", cid);
+        }
+
+        let result: mlua::Value = match render_fn.call((args_table, output_table, ctx_table)) {
+            Ok(v) => v,
+            Err(e) => {
+                self.record_error(format!("tool render `{tool_name}`: {e}"));
+                return None;
+            }
+        };
+
+        match result {
+            mlua::Value::Nil => None,
+            mlua::Value::UserData(ud) => {
+                match ud.borrow::<crate::lua::api::layout::LuaBlockLayout>() {
+                    Ok(layout) => Some(layout.0.clone()),
+                    Err(e) => {
+                        self.record_error(format!(
+                            "tool render `{tool_name}`: expected smelt.layout value: {e}"
+                        ));
+                        None
+                    }
+                }
+            }
+            _ => {
+                self.record_error(format!(
+                    "tool render `{tool_name}`: expected smelt.layout value or nil"
+                ));
+                None
+            }
+        }
     }
 
     fn args_to_lua_table(

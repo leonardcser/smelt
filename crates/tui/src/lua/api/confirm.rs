@@ -24,8 +24,8 @@
 use mlua::prelude::*;
 
 use crate::app::TuiApp;
-use crate::content::to_buffer::{render_into_buffer, replay_buffer_row_into};
-use crate::ui::{BufCreateOpts, BufId};
+use crate::content::to_buffer::render_into_buffer;
+use crate::ui::BufId;
 use smelt_core::cells::ConfirmResolved;
 use smelt_core::theme::role_hl;
 use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
@@ -225,39 +225,18 @@ fn outside_dir_string(req: &ConfirmRequest) -> String {
 }
 
 /// Render the ` tool: desc Allow?` title into `buf_id`. The tool name
-/// shows in the accent color; the desc is painted via the tool's
-/// `render_summary` Lua callback when registered (e.g. `bash` →
-/// bash-highlighted), otherwise plain text. Multi-line summaries show
-/// only the first line in the title — the rest renders into the preview
-/// panel.
+/// shows in the accent color; the description is painted as plain
+/// text. Multi-line descriptions paint the first line only — the rest
+/// renders into the preview panel.
 fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) {
     let theme_snap = app.ui.theme().clone();
     let width = crate::content::term_width() as u16;
-    let has_render_summary = app.lua.tool_has_render_summary(&req.tool_name);
-    let truncate_to_first_line = has_render_summary && req.desc.lines().count() > 1;
-    let shown = if truncate_to_first_line {
-        req.desc.lines().next().unwrap_or("").to_string()
-    } else {
-        req.desc.clone()
-    };
-
-    // Run the tool's `render_summary` callback (if any) into a scratch
-    // Buffer; replay row 0 inline below. Same shape as the transcript
-    // tool-line painting in `print_tool_line`.
-    let painted_desc: Option<crate::ui::Buffer> = if has_render_summary {
-        let scratch = app.ui.buf_create(BufCreateOpts::default());
-        let ok = app
-            .lua
-            .render_tool_summary_line(&req.tool_name, &shown, &req.args, scratch.0);
-        let buf = app.ui.buf_destroy(scratch);
-        if ok {
-            buf
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let shown = req
+        .desc
+        .lines()
+        .next()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| req.desc.clone());
 
     if let Some(buf) = app.ui.buf_mut(buf_id) {
         render_into_buffer(buf, width, &theme_snap, |sink| {
@@ -266,11 +245,7 @@ fn render_title_into_buf(app: &mut TuiApp, buf_id: BufId, req: &ConfirmRequest) 
             sink.print(&req.tool_name);
             sink.pop_style();
             sink.print(": ");
-            if let Some(scratch) = painted_desc.as_ref() {
-                replay_buffer_row_into(scratch, 0, sink);
-            } else {
-                sink.print(&shown);
-            }
+            sink.print(&shown);
             sink.print(" Allow?");
             sink.newline();
         });

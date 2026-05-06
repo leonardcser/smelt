@@ -139,7 +139,7 @@ smelt.tools.register({
     if path == "" then return pattern end
     return pattern .. " in " .. path
   end,
-  render = function(args, output, width, buf)
+  render = function(args, output, ctx)
     local content = output.content or ""
     local n = 0
     if content ~= "" then
@@ -149,7 +149,7 @@ smelt.tools.register({
         n = n + 1
       end
     end
-    smelt.text.render(buf, n .. " matches")
+    return smelt.layout.text(n .. " matches")
   end,
   paths_for_workspace = function(args)
     local p = args.path or ""

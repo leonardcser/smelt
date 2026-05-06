@@ -1,9 +1,9 @@
 use super::block_buffers::BlockBufferCache;
+use crate::content::transcript_snapshot::TranscriptSnapshot;
 use crate::ui::Buffer;
 use crate::ui::Theme;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, LayoutKey, ViewState};
-use smelt_core::transcript_present::ToolBodyRenderer;
 
 /// Namespace name for transcript selection extmarks. Created on the
 /// transcript display buffer at startup; populated each frame from the
@@ -12,28 +12,55 @@ use smelt_core::transcript_present::ToolBodyRenderer;
 /// selection paints over projection highlights).
 pub(crate) const NS_SELECTION: &str = "transcript.selection";
 
-/// Projection cache for the transcript buffer. Tracks the last
-/// (generation, width, show_thinking) it projected at so repeated
-/// renders short-circuit when nothing changed. The buffer itself
-/// lives in `Ui::bufs`; the projection borrows it through `project`.
+/// Single per-block cache shared between the display-buffer projection
+/// and the snapshot consumers (copy / yank / line-break / cell-snap /
+/// pane-focus). Both reads ride the same `BlockBufferCache`; both
+/// invalidate on `BlockHistory::generation()` change.
 pub(crate) struct TranscriptProjection {
+    cache: BlockBufferCache,
+    cache_generation: u64,
+    cache_width: u16,
+    /// Last `(generation, width, show_thinking)` we wrote into the
+    /// display buffer. Same-key reprojection is a no-op.
+    project_key: Option<ProjectKey>,
+    /// Cached snapshot. Rebuilt lazily when its embedded
+    /// `(generation, width, show_thinking)` no longer matches the
+    /// caller's request.
+    snapshot: Option<TranscriptSnapshot>,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct ProjectKey {
     generation: u64,
     width: u16,
     show_thinking: bool,
-    cache: BlockBufferCache,
 }
 
 impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
-            generation: u64::MAX,
-            width: 0,
-            show_thinking: false,
             cache: BlockBufferCache::new(),
+            cache_generation: u64::MAX,
+            cache_width: 0,
+            project_key: None,
+            snapshot: None,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Drop cached per-block buffers when generation or width drifts.
+    /// Width changes are key-discriminating in `BlockBufferCache`, but
+    /// we still clear so dead entries don't accumulate after rewinds
+    /// or terminal resizes. The snapshot also drops on generation
+    /// change (its rows reflect the laid-out blocks).
+    fn gc_if_stale(&mut self, gen: u64, width: u16) {
+        if gen != self.cache_generation || width != self.cache_width {
+            self.cache.clear();
+            self.cache_generation = gen;
+            self.cache_width = width;
+            self.snapshot = None;
+        }
+    }
+
     pub(crate) fn project(
         &mut self,
         buf: &mut Buffer,
@@ -42,19 +69,18 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
         ephemeral: &Buffer,
-        renderer: Option<&dyn ToolBodyRenderer>,
     ) {
         let gen = history.generation();
-        if gen == self.generation && width == self.width && show_thinking == self.show_thinking {
+        let key = ProjectKey {
+            generation: gen,
+            width,
+            show_thinking,
+        };
+        if self.project_key == Some(key) {
             return;
         }
 
-        // Generation changed — some block content mutated. Coarse
-        // full-clear; incremental per-block invalidation is a perf
-        // optimisation that can attach a hash-per-block when needed.
-        if gen != self.generation || width != self.width {
-            self.cache.clear();
-        }
+        self.gc_if_stale(gen, width);
 
         let base_key = LayoutKey {
             view_state: ViewState::Expanded,
@@ -97,7 +123,7 @@ impl TranscriptProjection {
 
             let id = history.order[i];
             let bkey = history.resolve_key(id, base_key);
-            let (block_buf, _) = self.cache.ensure(history, id, bkey, theme, renderer);
+            let (block_buf, _) = self.cache.ensure(history, id, bkey, theme);
             for r in 0..block_buf.line_count() {
                 let text = block_buf.get_line(r).unwrap_or("").to_string();
                 let row_h = block_buf.highlights_at(r);
@@ -138,9 +164,37 @@ impl TranscriptProjection {
             }
         }
 
-        self.generation = gen;
-        self.width = width;
-        self.show_thinking = show_thinking;
+        self.project_key = Some(key);
+    }
+
+    /// Lazily rebuilt snapshot of the transcript at `(width,
+    /// show_thinking)`. Reuses the per-block cache `project()`
+    /// populated. Returned reference is valid until the next call
+    /// to `snapshot` or `project`.
+    pub(crate) fn snapshot(
+        &mut self,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) -> &TranscriptSnapshot {
+        let gen = history.generation();
+        let needs_rebuild = match &self.snapshot {
+            None => true,
+            Some(s) => s.generation != gen || s.width != width || s.show_thinking != show_thinking,
+        };
+        if needs_rebuild {
+            self.gc_if_stale(gen, width);
+            let snap = crate::content::transcript_snapshot::build_snapshot(
+                &mut self.cache,
+                history,
+                width,
+                show_thinking,
+                theme,
+            );
+            self.snapshot = Some(snap);
+        }
+        self.snapshot.as_ref().expect("just rebuilt")
     }
 }
 

@@ -77,10 +77,11 @@ impl TuiApp {
     fn focused_block_id(&mut self) -> Option<BlockId> {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let snap = crate::content::transcript_snapshot::build_snapshot(
+        let show_thinking = self.core.config.settings.show_thinking;
+        let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             tw,
-            self.core.config.settings.show_thinking,
+            show_thinking,
             &theme,
         );
         if snap.rows.is_empty() {

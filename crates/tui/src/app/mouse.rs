@@ -336,7 +336,7 @@ impl TuiApp {
         let theme = self.ui.theme().clone();
         let width = self.transcript_width() as u16;
         let show_thinking = self.core.config.settings.show_thinking;
-        let snap = crate::content::transcript_snapshot::build_snapshot(
+        let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             width,
             show_thinking,

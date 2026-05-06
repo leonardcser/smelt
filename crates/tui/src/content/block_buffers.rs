@@ -12,7 +12,6 @@ use crate::ui::{BufCreateOpts, BufId, Buffer};
 use smelt_core::content::builder::Outcome;
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
-use smelt_core::transcript_present::ToolBodyRenderer;
 use std::collections::HashMap;
 
 /// Cached per-block layout.
@@ -51,7 +50,6 @@ impl BlockBufferCache {
         id: BlockId,
         key: LayoutKey,
         theme: &Theme,
-        renderer: Option<&dyn ToolBodyRenderer>,
     ) -> (&Buffer, Outcome) {
         let hit = self.blocks.get(&id).is_some_and(|c| c.key == key);
         if !hit {
@@ -70,7 +68,7 @@ impl BlockBufferCache {
             let buf_id = BufId(self.next_buf_id);
             self.next_buf_id += 1;
             let mut buf = Buffer::new(buf_id, BufCreateOpts::default());
-            let outcome = layout_block_into(&mut buf, theme, block, tool_state, &lctx, renderer);
+            let outcome = layout_block_into(&mut buf, theme, block, tool_state, &lctx);
             self.blocks.insert(id, CachedBlock { key, buf, outcome });
         }
         let entry = &self.blocks[&id];
@@ -104,13 +102,11 @@ impl BlockBufferCache {
             content_hash: 0,
         };
         let mut total: u32 = 0;
-        let renderer_arc = history.body_renderer.clone();
-        let renderer = renderer_arc.as_deref();
         for i in 0..history.order.len() {
             total += history.block_gap(i) as u32;
             let id = history.order[i];
             let key = history.resolve_key(id, base_key);
-            let (_, outcome) = self.ensure(history, id, key, theme, renderer);
+            let (_, outcome) = self.ensure(history, id, key, theme);
             total += outcome.line_count as u32;
         }
         total.min(u16::MAX as u32) as u16

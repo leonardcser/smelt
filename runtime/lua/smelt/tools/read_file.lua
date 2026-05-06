@@ -88,7 +88,7 @@ smelt.tools.register({
   needs_confirm = function(args)
     return smelt.path.display(args.file_path or "")
   end,
-  render = function(args, output, width, buf)
+  render = function(args, output, ctx)
     local content = output.content or ""
     local n = 0
     if content ~= "" then
@@ -98,7 +98,7 @@ smelt.tools.register({
         n = n + 1
       end
     end
-    smelt.text.render(buf, n .. " lines")
+    return smelt.layout.text(n .. " lines")
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""

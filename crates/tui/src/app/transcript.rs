@@ -10,126 +10,11 @@ use crate::ui::{BufCreateOpts, BufId, Buffer, Theme};
 use crate::content::transcript_parsers as blocks;
 use crate::content::transcript_parsers::{render_thinking_summary, thinking_summary};
 use smelt_core::transcript_model::{
-    gap_between, Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    gap_between, Block, BlockId, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
-use smelt_core::transcript_present::ToolBodyRenderer;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Renders tool output bodies by calling the tool's Lua `render` hook
-/// with a `Buffer` userdata (full `smelt.buf.*` API + the
-/// `smelt.{diff,syntax,bash,notebook,markdown}.render` convenience
-/// helpers). The hook writes into a fresh scratch buffer; this
-/// projector then walks the buffer back into the still-`LineBuilder`
-/// transcript pipeline. Falls back to plain wrapped text when Lua is
-/// unavailable or the tool has no `render` hook registered.
-pub(crate) struct LuaRenderRenderer;
-
-impl ToolBodyRenderer for LuaRenderRenderer {
-    fn render(
-        &self,
-        name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        output: Option<&ToolOutput>,
-        width: usize,
-        out: &mut LineBuilder,
-    ) -> u16 {
-        let Some(tool_out) = output else { return 0 };
-        let before = out.line_count();
-        let ran = crate::lua::app_ref::try_with_app(|app| {
-            let buf_id = app.ui.buf_create(crate::ui::BufCreateOpts::default());
-            let ok = app
-                .lua
-                .render_tool_body(name, args, tool_out, width, buf_id.0);
-            if !ok {
-                let _ = app.ui.buf_destroy(buf_id);
-                return false;
-            }
-            if let Some(buf) = app.ui.buf_destroy(buf_id) {
-                crate::content::to_buffer::replay_buffer_into(&buf, out);
-            }
-            true
-        })
-        .unwrap_or(false);
-        if !ran {
-            return crate::content::transcript_parsers::render_default_output(
-                out,
-                &tool_out.content,
-                tool_out.is_error,
-                width,
-            );
-        }
-        let after = out.line_count();
-        (after - before) as u16
-    }
-
-    fn elapsed_visible(&self, name: &str) -> bool {
-        crate::lua::app_ref::try_with_app(|app| app.lua.tool_elapsed_visible(name)).unwrap_or(false)
-    }
-
-    fn render_summary_line(
-        &self,
-        name: &str,
-        line: &str,
-        args: &HashMap<String, serde_json::Value>,
-        out: &mut LineBuilder,
-    ) -> bool {
-        crate::lua::app_ref::try_with_app(|app| {
-            if !app.lua.tool_has_render_summary(name) {
-                return false;
-            }
-            let buf_id = app.ui.buf_create(crate::ui::BufCreateOpts::default());
-            let ok = app.lua.render_tool_summary_line(name, line, args, buf_id.0);
-            if !ok {
-                let _ = app.ui.buf_destroy(buf_id);
-                return false;
-            }
-            if let Some(buf) = app.ui.buf_destroy(buf_id) {
-                crate::content::to_buffer::replay_buffer_row_into(&buf, 0, out);
-            }
-            true
-        })
-        .unwrap_or(false)
-    }
-
-    fn render_subhead(
-        &self,
-        name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        _width: usize,
-        out: &mut LineBuilder,
-    ) -> u16 {
-        crate::lua::app_ref::try_with_app(|app| {
-            if !app.lua.tool_has_render_subhead(name) {
-                return 0u16;
-            }
-            let buf_id = app.ui.buf_create(crate::ui::BufCreateOpts::default());
-            let ok = app.lua.render_tool_subhead(name, args, buf_id.0);
-            if !ok {
-                let _ = app.ui.buf_destroy(buf_id);
-                return 0;
-            }
-            let Some(buf) = app.ui.buf_destroy(buf_id) else {
-                return 0;
-            };
-            let n = buf.line_count();
-            crate::content::to_buffer::replay_buffer_into(&buf, out);
-            n as u16
-        })
-        .unwrap_or(0)
-    }
-
-    fn header_suffix(
-        &self,
-        name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        status: &str,
-    ) -> Option<String> {
-        crate::lua::app_ref::try_with_app(|app| app.lua.tool_header_suffix(name, args, status))
-            .flatten()
-    }
-}
 
 pub(crate) struct TranscriptData {
     pub(crate) clamped_scroll: u16,
@@ -286,7 +171,7 @@ impl TuiApp {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         if !self.has_ephemeral(show_thinking) {
-            let snap = crate::content::transcript_snapshot::build_snapshot(
+            let snap = self.transcript_projection.snapshot(
                 &mut self.transcript.history,
                 tw,
                 show_thinking,
@@ -295,7 +180,7 @@ impl TuiApp {
             return Arc::clone(&snap.rows);
         }
         let ephemeral_buf = self.render_ephemeral_to_buffer(tw, show_thinking, &theme);
-        let snap = crate::content::transcript_snapshot::build_snapshot(
+        let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
@@ -319,20 +204,22 @@ impl TuiApp {
     ) -> (Vec<usize>, Vec<usize>) {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let snap = crate::content::transcript_snapshot::build_snapshot(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        );
-        let rows = snap.rows.clone();
+        let (rows, soft_wrapped) = {
+            let snap = self.transcript_projection.snapshot(
+                &mut self.transcript.history,
+                tw,
+                show_thinking,
+                &theme,
+            );
+            (snap.rows.clone(), snap.soft_wrapped.clone())
+        };
         let mut soft = Vec::new();
         let mut hard = Vec::new();
         let mut pos = 0usize;
         for (i, row) in rows.iter().enumerate() {
             pos += row.len();
             if i + 1 < rows.len() {
-                let next_is_soft = snap.soft_wrapped.get(i + 1).copied().unwrap_or(false);
+                let next_is_soft = soft_wrapped.get(i + 1).copied().unwrap_or(false);
                 if next_is_soft {
                     soft.push(pos);
                 } else {
@@ -374,7 +261,7 @@ impl TuiApp {
         // (tool / confirm) whose "raw" form isn't a single
         // string.
         let block_id = {
-            let snap = crate::content::transcript_snapshot::build_snapshot(
+            let snap = self.transcript_projection.snapshot(
                 &mut self.transcript.history,
                 tw,
                 show_thinking,
@@ -387,7 +274,7 @@ impl TuiApp {
                 return Some(raw);
             }
         }
-        let snap = crate::content::transcript_snapshot::build_snapshot(
+        let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
@@ -404,7 +291,7 @@ impl TuiApp {
     ) -> usize {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let snap = crate::content::transcript_snapshot::build_snapshot(
+        let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
@@ -423,7 +310,7 @@ impl TuiApp {
     ) -> usize {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let snap = crate::content::transcript_snapshot::build_snapshot(
+        let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
@@ -455,7 +342,7 @@ impl TuiApp {
     ) -> String {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let snap = crate::content::transcript_snapshot::build_snapshot(
+        let snap = self.transcript_projection.snapshot(
             &mut self.transcript.history,
             tw,
             show_thinking,
@@ -536,8 +423,6 @@ impl TuiApp {
 
         let ephemeral_buf = self.render_ephemeral_to_buffer(tw as u16, show_thinking, &theme);
 
-        let renderer_arc = self.transcript.history.body_renderer.clone();
-        let renderer = renderer_arc.as_deref();
         let buf = self
             .ui
             .win_buf_mut(self.well_known.transcript)
@@ -549,7 +434,6 @@ impl TuiApp {
             show_thinking,
             &theme,
             &ephemeral_buf,
-            renderer,
         );
 
         let total_rows = buf.line_count() as u16;
