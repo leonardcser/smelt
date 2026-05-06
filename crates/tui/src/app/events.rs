@@ -724,8 +724,7 @@ impl TuiApp {
         self.core
             .cells
             .set_dyn("input_submit", std::rc::Rc::new(trimmed.to_string()));
-        self.drain_cells_pending();
-        self.flush_lua_callbacks();
+        self.pump_lua();
 
         InputOutcome::StartAgent
     }

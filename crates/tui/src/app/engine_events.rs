@@ -109,8 +109,7 @@ impl TuiApp {
                         args: args.clone(),
                     }),
                 );
-                self.drain_cells_pending();
-                self.flush_lua_callbacks();
+                self.pump_lua();
                 pending.push(PendingTool {
                     call_id,
                     name: tool_name,
@@ -152,8 +151,7 @@ impl TuiApp {
                             elapsed_ms,
                         }),
                     );
-                    self.drain_cells_pending();
-                    self.flush_lua_callbacks();
+                    self.pump_lua();
                 }
                 SessionControl::Continue
             }

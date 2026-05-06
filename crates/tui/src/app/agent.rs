@@ -67,8 +67,7 @@ impl TuiApp {
         self.core
             .cells
             .set_dyn("turn_start", std::rc::Rc::new(smelt_core::cells::EventStub));
-        self.drain_cells_pending();
-        self.flush_lua_callbacks();
+        self.pump_lua();
 
         let system_prompt = self.rebuild_system_prompt();
         let tools = self.lua.tool_defs(self.core.config.mode);
@@ -305,8 +304,7 @@ impl TuiApp {
             "turn_end",
             std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled }),
         );
-        self.drain_cells_pending();
-        self.flush_lua_callbacks();
+        self.pump_lua();
         // Flush any in-flight streaming content before committing tools.
         self.flush_streaming_thinking();
         self.flush_streaming_text();
