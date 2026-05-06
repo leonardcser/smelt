@@ -194,7 +194,7 @@ pub(super) fn register(
         lua.create_function(|_, (mode_str, name): (String, String)| {
             Ok(crate::lua::try_with_app(|app| {
                 let mode = parse_mode(&mode_str);
-                decision_label(app.permissions.check_tool(mode, &name)).to_string()
+                decision_label(app.core.permissions.check_tool(mode, &name)).to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
         })?,
@@ -204,7 +204,8 @@ pub(super) fn register(
         lua.create_function(|_, (mode_str, bucket, value): (String, String, String)| {
             Ok(crate::lua::try_with_app(|app| {
                 let mode = parse_mode(&mode_str);
-                decision_label(app.permissions.check_subcommand(mode, &bucket, &value)).to_string()
+                decision_label(app.core.permissions.check_subcommand(mode, &bucket, &value))
+                    .to_string()
             })
             .unwrap_or_else(|| "ask".to_string()))
         })?,

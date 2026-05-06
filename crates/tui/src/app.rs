@@ -100,22 +100,9 @@ pub struct TuiApp {
     /// `None` when no toast. Closing the leaf via `close_overlay_leaf`
     /// cascades through `overlay_close` to remove the overlay.
     pub(crate) notification: Option<crate::ui::WinId>,
-    /// Persistent `:` history across open/close cycles. Most-recent
-    /// at the back; submit appends (dedup'd against the previous
-    /// entry).
-    pub(crate) cmdline_history: Vec<String>,
-    /// Index into `cmdline_history` while the user is browsing with
-    /// Up/Down. `None` when not browsing.
-    pub(crate) cmdline_history_browse: Option<usize>,
-    /// Snapshot of the cmdline payload at the moment the user started
-    /// history browsing. Restored when Down past the most-recent
-    /// entry returns to "live" input.
-    pub(crate) cmdline_history_stash: String,
-    /// Shared completer instance for `:` command completion. Lazily
-    /// constructed on first Tab press (it queries Lua command names),
-    /// dropped on cmdline close or any text mutation that invalidates
-    /// the current selection.
-    pub(crate) cmdline_completer: Option<crate::completer::Completer>,
+    /// Cmdline (`:`) mode state — history, history-browse cursor,
+    /// pre-browse stash, and lazily-allocated completer.
+    pub(crate) cmdline: crate::app::cmdline::CmdlineState,
     /// Per-leaf bookkeeping for open picker overlays. Populated by
     /// `crate::picker::open` and cleaned up by `close_overlay_leaf` when the
     /// leaf closes. Lookup keyed by leaf `WinId` so `set_items` /
@@ -139,14 +126,11 @@ pub struct TuiApp {
     /// hit-testing and viewport-rows estimation.
     pub(crate) layout: crate::content::layout::LayoutState,
 
-    pub(crate) permissions: Arc<smelt_core::permissions::Permissions>,
     /// The active turn's state, or `None` when the app is idle.
     /// Owned by `TuiApp` so reducer handlers (`apply_ops`) can mutate
     /// it directly rather than threading `&mut Option<TurnState>`
     /// through every call chain.
     pub(crate) agent: Option<TurnState>,
-    /// Monotonic counter to discard stale predictions.
-    pub(crate) predict_generation: u64,
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
     pub(crate) pending_title: bool,
@@ -472,7 +456,7 @@ impl TuiApp {
             )
         };
 
-        let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui);
+        let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui, permissions);
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
         Self {
@@ -497,18 +481,13 @@ impl TuiApp {
             custom_status_items: Vec::new(),
             statusline_last_errors: HashMap::new(),
             notification: None,
-            cmdline_history: Vec::new(),
-            cmdline_history_browse: None,
-            cmdline_history_stash: String::new(),
-            cmdline_completer: None,
+            cmdline: crate::app::cmdline::CmdlineState::default(),
             picker_state: HashMap::new(),
             term_focused: true,
             working: smelt_core::working::WorkingState::new(),
             transcript_gutters: crate::window::TRANSCRIPT_GUTTERS,
             layout: crate::content::layout::LayoutState::default(),
-            permissions,
             agent: None,
-            predict_generation: 0,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
             pending_title: false,

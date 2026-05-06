@@ -353,7 +353,9 @@ impl BlockHistory {
     }
 
     /// Current status for `id`. Defaults to [`Status::Done`].
-    #[allow(dead_code)]
+    /// Test-only accessor — production code reads status as part of
+    /// the projected snapshot rather than poking the field directly.
+    #[cfg(test)]
     pub(crate) fn status(&self, id: BlockId) -> Status {
         self.statuses.get(&id).copied().unwrap_or_default()
     }
@@ -425,17 +427,6 @@ impl BlockHistory {
         self.blocks.insert(id, block);
         self.content_hashes.insert(id, hash);
         self.bump_generation();
-    }
-
-    /// `BlockId` of the most recent `Block::ToolCall` whose `call_id` matches.
-    #[allow(dead_code)]
-    pub(crate) fn tool_block_id(&self, call_id: &str) -> Option<BlockId> {
-        self.order.iter().rev().copied().find(|id| {
-            matches!(
-                self.blocks.get(id),
-                Some(Block::ToolCall { call_id: c, .. }) if c == call_id
-            )
-        })
     }
 
     pub fn clear(&mut self) {

@@ -11,7 +11,7 @@ use crate::content::transcript_parsers::layout_block_into;
 use crate::ui::{BufCreateOpts, BufId, Buffer};
 use smelt_core::content::builder::Outcome;
 use smelt_core::theme::Theme;
-use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey};
 use std::collections::HashMap;
 
 /// Cached per-block layout.
@@ -78,37 +78,5 @@ impl BlockBufferCache {
     /// Drop all cached layouts.
     pub fn clear(&mut self) {
         self.blocks.clear();
-    }
-
-    #[allow(dead_code)]
-    pub fn invalidate(&mut self, id: BlockId) {
-        self.blocks.remove(&id);
-    }
-
-    /// Total rows for the full transcript at the given width/show_thinking.
-    /// Used by callers that need to size the viewport before painting.
-    #[allow(dead_code)]
-    pub fn total_rows(
-        &mut self,
-        history: &mut BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        theme: &Theme,
-    ) -> u16 {
-        let base_key = LayoutKey {
-            view_state: ViewState::Expanded,
-            width,
-            show_thinking,
-            content_hash: 0,
-        };
-        let mut total: u32 = 0;
-        for i in 0..history.order.len() {
-            total += history.block_gap(i) as u32;
-            let id = history.order[i];
-            let key = history.resolve_key(id, base_key);
-            let (_, outcome) = self.ensure(history, id, key, theme);
-            total += outcome.line_count as u32;
-        }
-        total.min(u16::MAX as u32) as u16
     }
 }

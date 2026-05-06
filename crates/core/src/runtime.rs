@@ -17,7 +17,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontendKind {
     /// Interactive terminal — `TuiApp` over a `crate::ui::Ui`.
-    /// (TODO: move TuiApp out of core/ in P8.a)
     Tui,
     /// One-shot CLI — `smelt -p "..."` / `--headless`. No Ui, no human input.
     Headless,
@@ -94,6 +93,12 @@ pub struct Core {
     /// `smelt.process.{list,read_output,spawn_bg}` and read by the
     /// statusline + `/clear`-style session resets.
     pub processes: ProcessRegistry,
+    /// Resolved permission policy (per-mode tool / subcommand rulesets
+    /// plus workspace boundary). Set once at startup from
+    /// `LuaShared.permission_rules`; read by the agent loop, the
+    /// engine-event dispatcher, the MCP dispatcher, and the
+    /// `smelt.permissions.*` Lua bindings (Host-tier).
+    pub permissions: Arc<crate::permissions::Permissions>,
 }
 
 impl Core {
@@ -101,7 +106,12 @@ impl Core {
     /// fresh `EngineHandle`. Both `TuiApp::new` (TUI) and `HeadlessApp::new`
     /// (one-shot) call this — the only single source of
     /// truth for the eight subsystem fields' construction.
-    pub fn new(config: AppConfig, engine: EngineHandle, frontend: FrontendKind) -> Self {
+    pub fn new(
+        config: AppConfig,
+        engine: EngineHandle,
+        frontend: FrontendKind,
+        permissions: Arc<crate::permissions::Permissions>,
+    ) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
@@ -132,6 +142,7 @@ impl Core {
             skills: None,
             files: crate::fs::FileStateCache::new(),
             processes: ProcessRegistry::new(),
+            permissions,
         }
     }
 }

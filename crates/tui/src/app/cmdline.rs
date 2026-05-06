@@ -21,6 +21,29 @@ use crossterm::event::{KeyCode, KeyEvent};
 const PREFIX: &str = ":";
 const PREFIX_LEN: u16 = 1;
 
+/// Cohesive cmdline-mode state owned by `TuiApp.cmdline`. Persists
+/// across open/close cycles (history) and lazily allocates the
+/// completer on first Tab.
+#[derive(Default)]
+pub(crate) struct CmdlineState {
+    /// Persistent `:` history across open/close cycles. Most-recent
+    /// at the back; submit appends (dedup'd against the previous
+    /// entry).
+    pub(crate) history: Vec<String>,
+    /// Index into `history` while the user is browsing with Up/Down.
+    /// `None` when not browsing.
+    pub(crate) history_browse: Option<usize>,
+    /// Snapshot of the cmdline payload at the moment the user started
+    /// history browsing. Restored when Down past the most-recent
+    /// entry returns to "live" input.
+    pub(crate) history_stash: String,
+    /// Shared completer instance for `:` command completion. Lazily
+    /// constructed on first Tab press (it queries Lua command names),
+    /// dropped on cmdline close or any text mutation that invalidates
+    /// the current selection.
+    pub(crate) completer: Option<crate::completer::Completer>,
+}
+
 impl TuiApp {
     pub(crate) fn cmdline_is_focused(&self) -> bool {
         self.well_known
@@ -65,14 +88,14 @@ impl TuiApp {
 
         self.set_focus(win);
         self.well_known.cmdline = Some(win);
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
     }
 
     fn close_cmdline(&mut self) {
         if let Some(win) = self.well_known.cmdline.take() {
             self.close_overlay_leaf(win);
         }
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
     }
 
     /// Read the cmdline's typed text (without the leading prefix).
@@ -120,8 +143,7 @@ impl TuiApp {
     /// `Quit` (so the main loop tears down), `Some(false)` when we
     /// handled but stay alive, and `None` only when the key isn't
     /// ours. The overlay leaf carries no callbacks so a `None` return
-    /// silently swallows the key — same as the legacy widget's
-    /// `Status::Ignored` path.
+    /// silently swallows the key.
     pub(crate) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
@@ -197,15 +219,14 @@ impl TuiApp {
             .chain(chars[cur..].iter().copied())
             .collect();
         self.cmdline_set_payload(&new, cur + 1);
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
     }
 
     fn cmdline_backspace(&mut self) -> Option<bool> {
         let payload = self.cmdline_text();
         let cur = self.cmdline_cursor_in_payload();
         if payload.is_empty() {
-            // Backspace on the bare prefix dismisses (mirrors the
-            // legacy widget's "empty buffer" exit).
+            // Backspace on the bare prefix dismisses.
             self.close_cmdline();
             return Some(false);
         }
@@ -221,7 +242,7 @@ impl TuiApp {
             .chain(chars[cur..].iter().copied())
             .collect();
         self.cmdline_set_payload(&new, cur - 1);
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
         Some(false)
     }
 
@@ -239,14 +260,13 @@ impl TuiApp {
             .chain(chars[cur + 1..].iter().copied())
             .collect();
         self.cmdline_set_payload(&new, cur);
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
     }
 
     fn cmdline_delete_word_back(&mut self) -> Option<bool> {
         let payload = self.cmdline_text();
         if payload.is_empty() {
-            // Same exit semantics as the legacy widget: Ctrl+W on a
-            // blank cmdline closes.
+            // Ctrl+W on a blank cmdline closes.
             self.close_cmdline();
             return Some(false);
         }
@@ -274,13 +294,13 @@ impl TuiApp {
         let tail: String = chars[split..].iter().collect();
         let new = format!("{head}{tail}");
         self.cmdline_set_payload(&new, new_cursor);
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
         Some(false)
     }
 
     fn cmdline_clear(&mut self) {
         self.cmdline_set_payload("", 0);
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
     }
 
     fn cmdline_move(&mut self, delta: i32) {
@@ -313,41 +333,41 @@ impl TuiApp {
     }
 
     fn cmdline_history_up(&mut self) {
-        if self.cmdline_history.is_empty() {
+        if self.cmdline.history.is_empty() {
             return;
         }
-        let next_idx = match self.cmdline_history_browse {
-            None => self.cmdline_history.len().saturating_sub(1),
+        let next_idx = match self.cmdline.history_browse {
+            None => self.cmdline.history.len().saturating_sub(1),
             Some(0) => 0,
             Some(i) => i.saturating_sub(1),
         };
-        if self.cmdline_history_browse.is_none() {
-            self.cmdline_history_stash = self.cmdline_text();
+        if self.cmdline.history_browse.is_none() {
+            self.cmdline.history_stash = self.cmdline_text();
         }
-        self.cmdline_history_browse = Some(next_idx);
-        let entry = self.cmdline_history[next_idx].clone();
+        self.cmdline.history_browse = Some(next_idx);
+        let entry = self.cmdline.history[next_idx].clone();
         let cursor = entry.chars().count();
         self.cmdline_set_payload(&entry, cursor);
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
     }
 
     fn cmdline_history_down(&mut self) {
-        let Some(idx) = self.cmdline_history_browse else {
+        let Some(idx) = self.cmdline.history_browse else {
             return;
         };
-        if idx + 1 >= self.cmdline_history.len() {
-            self.cmdline_history_browse = None;
-            let stash = std::mem::take(&mut self.cmdline_history_stash);
+        if idx + 1 >= self.cmdline.history.len() {
+            self.cmdline.history_browse = None;
+            let stash = std::mem::take(&mut self.cmdline.history_stash);
             let cursor = stash.chars().count();
             self.cmdline_set_payload(&stash, cursor);
         } else {
             let next_idx = idx + 1;
-            self.cmdline_history_browse = Some(next_idx);
-            let entry = self.cmdline_history[next_idx].clone();
+            self.cmdline.history_browse = Some(next_idx);
+            let entry = self.cmdline.history[next_idx].clone();
             let cursor = entry.chars().count();
             self.cmdline_set_payload(&entry, cursor);
         }
-        self.cmdline_completer = None;
+        self.cmdline.completer = None;
     }
 
     /// Persist the current line into history (if non-empty and not a
@@ -357,9 +377,9 @@ impl TuiApp {
     /// the main loop on the next tick.
     fn cmdline_submit(&mut self) -> bool {
         let line = self.cmdline_text();
-        let last = self.cmdline_history.last().cloned();
+        let last = self.cmdline.history.last().cloned();
         if !line.is_empty() && last.as_deref() != Some(line.as_str()) {
-            self.cmdline_history.push(line.clone());
+            self.cmdline.history.push(line.clone());
         }
         self.close_cmdline();
         if line.is_empty() {
@@ -381,7 +401,7 @@ impl TuiApp {
     /// apply the selected label as the cmdline text.
     fn cmdline_cycle_completer(&mut self, next: bool) {
         use crate::completer::{Completer, CompletionItem};
-        if self.cmdline_completer.is_none() {
+        if self.cmdline.completer.is_none() {
             let typed = self.cmdline_text();
             let mut comp = Completer::commands(0);
             let lua_cmds = self.lua.command_names();
@@ -399,8 +419,8 @@ impl TuiApp {
                 comp.refresh_items(items);
             }
             comp.update_query(typed);
-            self.cmdline_completer = Some(comp);
-        } else if let Some(ref mut comp) = self.cmdline_completer {
+            self.cmdline.completer = Some(comp);
+        } else if let Some(ref mut comp) = self.cmdline.completer {
             // Reversed picker style: `next` advances upward toward the
             // best match near the prompt.
             if next {
@@ -409,7 +429,7 @@ impl TuiApp {
                 comp.move_down();
             }
         }
-        if let Some(ref comp) = self.cmdline_completer {
+        if let Some(ref comp) = self.cmdline.completer {
             if let Some(item) = comp.selected_item() {
                 let label = item.label.clone();
                 let cursor = label.chars().count();

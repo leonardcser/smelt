@@ -1,4 +1,4 @@
-use crate::provider::{FunctionSchema, ToolDefinition};
+use crate::provider::ToolDefinition;
 use protocol::ToolHooks;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -38,49 +38,17 @@ pub struct ToolContext;
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
 
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn parameters(&self) -> Value;
-    fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a>;
-    /// Evaluate per-call permission hooks. Returns a `ToolHooks`
-    /// carrying:
-    /// - `confirm_text`: confirm-dialog message (None falls back to the
-    ///   tool name).
-    /// - `approval_patterns`: glob patterns offered as session-level
-    ///   "always allow" choices.
-    /// - `preflight_error`: pre-execution error that skips the dialog
-    ///   and fails the call immediately.
-    ///
-    /// Mirrors the shape returned by plugin tools through
-    /// `ToolHooksRequest` so the engine consumes both paths
-    /// uniformly.
-    fn evaluate_hooks(&self, _args: &HashMap<String, Value>) -> ToolHooks {
-        ToolHooks::default()
-    }
-}
-
-pub struct ToolEntry {
-    pub(crate) tool: Box<dyn Tool>,
-    /// MCP tools use the `mcp` permission ruleset rather than the per-tool
-    /// `tools` ruleset; tracked here so the trait stays dispatch-only.
-    pub(crate) is_mcp: bool,
-}
-
 /// Resolves and executes tool calls during a turn. The engine
 /// never touches tool impls directly — every per-call decision (schema
 /// list, hook eval, dispatch, ruleset selection) routes through this
-/// trait. A future tui-side `ToolRuntime` walks a Lua-driven registry
-/// behind the same surface.
+/// trait. The frontend's Lua-tool registry runs through `UiCommand::
+/// ToolDispatch`; engine-side this trait is implemented only by
+/// `core::mcp::dispatcher::McpDispatcher` (and `EmptyDispatcher` for
+/// the no-MCP fallback).
 ///
 /// Lookup, hook evaluation, and dispatch all return `Option` so the
 /// engine can synthesise a "tool not found" result when the LLM emits
 /// a call for a tool the dispatcher doesn't know.
-///
-/// The trait carries no permission policy — the engine returns the
-/// unfiltered tool list from `definitions` and applies no mode or
-/// permission filtering. That concern moved to `app::permissions` and
-/// Lua-tool hooks in P5.c.
 pub trait ToolDispatcher: Send + Sync {
     /// All tool definitions registered with this dispatcher.
     fn definitions(&self) -> Vec<ToolDefinition>;
@@ -117,66 +85,46 @@ pub trait ToolDispatcher: Send + Sync {
     ) -> Option<ToolFuture<'a>>;
 }
 
-impl ToolDispatcher for ToolRegistry {
+/// No-op dispatcher: holds no tools, denies every lookup. Used as the
+/// engine's tool surface when no MCP servers are configured. Lua tools
+/// route through `UiCommand::ToolDispatch` and don't appear here.
+#[derive(Default)]
+pub struct EmptyDispatcher;
+
+impl EmptyDispatcher {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ToolDispatcher for EmptyDispatcher {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .iter()
-            .map(|e| {
-                ToolDefinition::new(FunctionSchema {
-                    name: e.tool.name().into(),
-                    description: e.tool.description().into(),
-                    parameters: e.tool.parameters(),
-                })
-            })
-            .collect()
+        Vec::new()
     }
 
-    fn contains(&self, name: &str) -> bool {
-        self.get(name).is_some()
+    fn contains(&self, _name: &str) -> bool {
+        false
     }
 
-    fn is_mcp(&self, name: &str) -> bool {
-        self.get(name).is_some_and(|e| e.is_mcp)
+    fn is_mcp(&self, _name: &str) -> bool {
+        false
     }
 
     fn evaluate_hooks(
         &self,
-        name: &str,
-        args: &HashMap<String, Value>,
+        _name: &str,
+        _args: &HashMap<String, Value>,
         _mode: protocol::AgentMode,
     ) -> Option<ToolHooks> {
-        self.get(name).map(|e| e.tool.evaluate_hooks(args))
+        None
     }
 
     fn dispatch<'a>(
         &'a self,
-        name: &str,
-        args: HashMap<String, Value>,
-        ctx: &'a ToolContext,
+        _name: &str,
+        _args: HashMap<String, Value>,
+        _ctx: &'a ToolContext,
     ) -> Option<ToolFuture<'a>> {
-        self.get(name).map(|e| e.tool.execute(args, ctx))
+        None
     }
-}
-
-#[derive(Default)]
-pub struct ToolRegistry {
-    tools: Vec<ToolEntry>,
-}
-
-impl ToolRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register_mcp(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(ToolEntry { tool, is_mcp: true });
-    }
-
-    pub fn get(&self, name: &str) -> Option<&ToolEntry> {
-        self.tools.iter().find(|e| e.tool.name() == name)
-    }
-}
-
-pub fn build_tools() -> ToolRegistry {
-    ToolRegistry::new()
 }

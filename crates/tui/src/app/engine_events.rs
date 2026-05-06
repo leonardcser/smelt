@@ -204,12 +204,6 @@ impl TuiApp {
                 let _ = content;
                 SessionControl::Continue
             }
-            EngineEvent::InputPrediction { text, generation } => {
-                if generation == self.predict_generation {
-                    self.handle_input_prediction(text);
-                }
-                SessionControl::Continue
-            }
             EngineEvent::EngineAskResponse { id, content } => {
                 self.lua.fire_callback(id, &content);
                 SessionControl::Continue
@@ -282,7 +276,7 @@ impl TuiApp {
                 drop(_guard);
                 // Apply permission policy on the TUI side.
                 if !matches!(hooks.decision, protocol::Decision::Error(_)) {
-                    let decision = self.permissions.decide(mode, &tool_name, &args, false);
+                    let decision = self.core.permissions.decide(mode, &tool_name, &args, false);
                     let mut decision = decision;
                     if decision == protocol::Decision::Ask {
                         let desc = hooks
@@ -290,7 +284,13 @@ impl TuiApp {
                             .clone()
                             .unwrap_or_else(|| tool_name.clone());
                         let rt = self.runtime_approvals.read().unwrap();
-                        if rt.is_auto_approved(&self.permissions, mode, &tool_name, &args, &desc) {
+                        if rt.is_auto_approved(
+                            &self.core.permissions,
+                            mode,
+                            &tool_name,
+                            &args,
+                            &desc,
+                        ) {
                             decision = protocol::Decision::Allow;
                         }
                     }
@@ -341,11 +341,6 @@ impl TuiApp {
         }
         EngineEvent::BtwResponse { content } => {
             let _ = content;
-        }
-        EngineEvent::InputPrediction { text, generation }
-            if generation == self.predict_generation =>
-        {
-            self.handle_input_prediction(text);
         }
         EngineEvent::EngineAskResponse { id, content } => {
             self.lua.fire_callback(id, &content);

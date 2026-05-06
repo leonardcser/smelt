@@ -265,10 +265,9 @@ pub struct ExtmarkOpts {
 
 impl ExtmarkOpts {
     /// Anonymous-style convenience: interns the given Style as a
-    /// content-hashed [`HlGroup`] so legacy call sites that carry
-    /// resolved colors slot into the HlGroup-keyed extmark payload
-    /// without naming a group. Prefer [`Self::highlight_group`] for
-    /// new call sites that resolve through the theme.
+    /// content-hashed [`HlGroup`] for call sites that carry resolved
+    /// colors. Prefer [`Self::highlight_group`] when the style is
+    /// theme-reactive — anonymous groups bypass theme switches.
     pub fn highlight(end_col: usize, style: SpanStyle, meta: SpanMeta) -> Self {
         Self::highlight_group(end_col, intern_anonymous_style(style), meta)
     }

@@ -890,14 +890,6 @@ impl Provider {
         }
     }
 
-    pub(crate) async fn complete_predict(
-        &self,
-        messages: &[protocol::Message],
-        model: &str,
-    ) -> Result<(String, TokenUsage), ProviderError> {
-        self.complete_simple(messages, model, None).await
-    }
-
     async fn complete_short(
         &self,
         prompt: &str,

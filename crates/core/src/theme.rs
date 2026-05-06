@@ -111,11 +111,11 @@ pub fn name_of(g: HlGroup) -> Option<String> {
 }
 
 /// Intern a Style as an anonymous group keyed by its content hash.
-/// Used during the P9.e migration to store legacy inline-Style call
-/// sites in the new HlGroup-keyed extmark payload without forcing a
-/// name on every site. Future commits convert call sites to named
-/// groups (`intern("My.Name")`); anonymous groups are bypassed by
-/// theme switches because there's no name to override.
+/// Lets call sites that resolve a concrete Style (rather than a
+/// theme-named group) ride the same HlGroup-keyed extmark payload
+/// shape. Anonymous groups bypass theme switches — there's no name to
+/// override — so callers that want theme-reactive styling should use
+/// [`intern`] with a stable name instead.
 pub fn intern_anonymous_style(style: Style) -> HlGroup {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

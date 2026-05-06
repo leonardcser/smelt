@@ -2,7 +2,7 @@
 //! Lua-side `bash` tool and `background_commands` plugin. Wraps
 //! `crate::permissions::split_shell_commands` for AST-level
 //! splitting, plus inline interactive-binary / shell-background
-//! validators (the legacy engine `BashTool` owned these).
+//! validators.
 
 use mlua::prelude::*;
 
