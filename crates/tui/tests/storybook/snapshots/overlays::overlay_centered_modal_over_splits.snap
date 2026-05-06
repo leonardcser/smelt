@@ -4,11 +4,11 @@ expression: frame.text()
 ---
 backdrop row 01
 backdrop row 02
-backdrop row 03
-backdrop row 04
-backdrop row 05    ╭╮
-backdrop row 06    ╰╯
-backdrop row 07
+backdrop row╭modal─────────╮
+backdrop row│pick one:     │
+backdrop row│  • alpha     │
+backdrop row│  • beta      │
+backdrop row╰──────────────╯
 backdrop row 08
 backdrop row 09
 backdrop row 10

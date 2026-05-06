@@ -2,4 +2,4 @@
 source: crates/tui/tests/storybook/mod.rs
 expression: frame.styles_text()
 ---
-  0   0   3 bg=DarkGreen
+  0   0  10 bg=DarkGreen

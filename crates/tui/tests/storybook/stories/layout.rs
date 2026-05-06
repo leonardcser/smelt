@@ -27,13 +27,12 @@ story!(vbox_three_panes, |ctx| {
     ctx.assert_snapshot();
 });
 
-story!(splits_chrome_does_not_paint_border, |ctx| {
-    // Splits don't go through `paint_chrome` — borders + titles set on
-    // the top-level layout don't render. Pinning this so it's obvious
-    // when chrome paint moves; chrome stories live under
-    // `stories::chrome` and target overlays.
+story!(splits_paint_border_and_title, |ctx| {
+    // Splits paint chrome the same way overlays do — `paint_layout_node`
+    // runs over the splits tree, so `with_border` / `with_title` on the
+    // top-level layout renders a frame around the inset content rect.
     ctx.set_viewport(30, 6);
-    let buf = ctx.buf_with_lines(["inside the (un-)bordered pane"]);
+    let buf = ctx.buf_with_lines(["inside the bordered pane"]);
     let win = ctx.open_split(buf, pane_config("only"));
     ctx.set_layout(
         LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))])

@@ -36,9 +36,10 @@ fn backdrop(ctx: &mut crate::storybook::StoryCtx, w: u16, h: u16) {
     )]));
 }
 
-/// Push a small bordered overlay at `anchor`. Uses Length(width) +
-/// Length(height) to give the overlay a deterministic size so the
-/// anchor's clamping behaviour shows in the snapshot.
+/// Push a small bordered overlay at `anchor`. Outer box sizes to
+/// `(width + 2, height + 2)` so the anchor's clamping behaviour shows
+/// against a deterministic-shaped frame, and the buffer's first
+/// `height` lines are visible inside the border.
 fn open_box_overlay(
     ctx: &mut crate::storybook::StoryCtx,
     title: &str,
@@ -48,10 +49,12 @@ fn open_box_overlay(
 ) {
     let dlg = ctx.buf_with_lines([title, "+++++"]);
     let dw = ctx.ui.win_open_split(dlg, pane("box")).expect("buf exists");
-    let layout = LayoutTree::hbox(vec![(Constraint::Length(width), LayoutTree::leaf(dw))])
-        .with_border(Border::Rounded)
-        .with_title(title);
-    let _ = height;
+    let layout = LayoutTree::vbox(vec![(
+        Constraint::Length(height),
+        LayoutTree::hbox(vec![(Constraint::Length(width), LayoutTree::leaf(dw))]),
+    )])
+    .with_border(Border::Rounded)
+    .with_title(title);
     ctx.ui
         .overlay_open(Overlay::new(layout, anchor).with_z(100));
 }
@@ -73,14 +76,21 @@ story!(overlay_centered_modal_over_splits, |ctx| {
     )]));
 
     // Modal: one bordered leaf centered, smaller than the screen.
+    // Leaves don't carry natural size, so size the modal explicitly:
+    // Length(3) rows for the buffer's three lines, Length(14) cols for
+    // its widest line ("  • alpha" plus a little headroom). Outer
+    // box becomes 16×5 once the rounded border is added.
     let dlg = ctx.buf_with_lines(["pick one:", "  • alpha", "  • beta"]);
     let dw = ctx
         .ui
         .win_open_split(dlg, pane("dialog"))
         .expect("buf exists");
-    let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(dw))])
-        .with_border(Border::Rounded)
-        .with_title("modal");
+    let layout = LayoutTree::vbox(vec![(
+        Constraint::Length(3),
+        LayoutTree::hbox(vec![(Constraint::Length(14), LayoutTree::leaf(dw))]),
+    )])
+    .with_border(Border::Rounded)
+    .with_title("modal");
     ctx.ui.overlay_open(
         Overlay::new(layout, Anchor::ScreenCenter)
             .modal(true)
@@ -160,16 +170,21 @@ story!(anchor_clamped_when_offscreen, |ctx| {
 
 story!(anchor_screen_bottom_docked, |ctx| {
     // ScreenBottom reserves `above_rows` cells for the statusline +
-    // docks the overlay there full-width.
+    // docks the overlay there full-width. `Percentage(100)` on the
+    // inner Hbox sizes the leaf to the terminal width — same shape the
+    // cmdline uses in production.
     backdrop(ctx, 30, 8);
     let dlg = ctx.buf_with_lines(["docked"]);
     let dw = ctx
         .ui
         .win_open_split(dlg, pane("dock"))
         .expect("buf exists");
-    let layout = LayoutTree::vbox(vec![(Constraint::Length(2), LayoutTree::leaf(dw))])
-        .with_border(Border::Single)
-        .with_title("dock");
+    let layout = LayoutTree::vbox(vec![(
+        Constraint::Length(1),
+        LayoutTree::hbox(vec![(Constraint::Percentage(100), LayoutTree::leaf(dw))]),
+    )])
+    .with_border(Border::Single)
+    .with_title("dock");
     ctx.ui
         .overlay_open(Overlay::new(layout, Anchor::ScreenBottom { above_rows: 1 }));
     ctx.assert_snapshot();
@@ -236,7 +251,12 @@ story!(anchor_win_attaches_above_target, |ctx| {
         .ui
         .win_open_split(toast, pane("toast"))
         .expect("buf exists");
-    let layout = LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(tw))]);
+    // Wrap the leaf in a 1-row Vbox so the toast has a non-zero
+    // natural height (leaves carry no intrinsic size).
+    let layout = LayoutTree::vbox(vec![(
+        Constraint::Length(1),
+        LayoutTree::hbox(vec![(Constraint::Length(8), LayoutTree::leaf(tw))]),
+    )]);
     ctx.ui.overlay_open(Overlay::new(
         layout,
         Anchor::Win {
