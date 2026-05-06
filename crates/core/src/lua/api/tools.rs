@@ -49,6 +49,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 defaults.subcommand_allow.insert(name.clone(), patterns);
             }
         }
+        // Optional `subpattern_parser = "<kind>"` selects a Rust-built-in
+        // subpattern decision function (today only `"shell"` ships,
+        // wired by `tools/bash.lua`). Unknown kinds are ignored — tools
+        // fall through to the plain glob-match path.
+        if let Ok(kind) = def.get::<String>("subpattern_parser") {
+            if let Some(parser) = crate::permissions::builtin_subpattern_parser(&kind) {
+                let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
+                defaults.subpattern_parsers.insert(name.clone(), parser);
+            }
+        }
 
         // Optional permission hooks. When present, the engine asks
         // the host to evaluate them before deciding Allow / Deny / Ask.
