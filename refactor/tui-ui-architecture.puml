@@ -536,16 +536,17 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
 
   package "layout + composition" as LO #F4F8FF {
     class LayoutTree {
-      Vbox { gap, separator,
-             border, title, items }
-      Hbox { gap, separator,
-             border, title, items }
+      Vbox { gap, border,
+             title, items }
+      Hbox { gap, border,
+             title, items }
       Leaf(WinId)         ' splits / overlays
-      Leaf(BufId)         ' inline composition
-                          ' (tool render returns
-                          '  this; transcript
-                          '  composer replays it)
       Item = (Constraint, LayoutTree)
+      ' Dividers between siblings are
+      ' painted by inserting a Window
+      ' leaf containing ─ / │ — same
+      ' pattern Ratatui uses; no
+      ' separator chrome field.
       ' Any container can carry chrome
       ' (border + title). Convention
       ' is to use it on overlays only;
@@ -560,8 +561,25 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
       Fill(u16)
       Fit
     }
-    enum SeparatorStyle {
-      None / Solid / Dashed / Double
+    class BlockLayout <<tool render>> {
+      Leaf(BufId)
+      Vbox(Vec<BlockLayout>)
+      Hbox(Vec<HboxItem>)
+      ' Returned by a tool's
+      ' render(args, output, ctx).
+      ' Composer replays leaves into
+      ' the surrounding LineBuilder;
+      ' 1×1 leaves auto-repeat to
+      ' fill their allocated rect
+      ' (gives sep for free).
+    }
+    class HboxItem {
+      constraint: BlockConstraint
+      layout: BlockLayout
+    }
+    enum BlockConstraint {
+      Length(u16)
+      Fill(u16)
     }
     enum BorderStyle {
       Sharp / Rounded
@@ -872,7 +890,8 @@ ToolDispatcher ..> LTOOLS : calls callbacks generically\nby field name, never by
 Window   ..> Buffer            : reads via BufId
 
 LayoutTree --> Constraint
-LayoutTree --> SeparatorStyle  : optional, between siblings
+BlockLayout  --> HboxItem      : per-column sizing
+HboxItem     --> BlockConstraint
 Border     --> BorderStyle
 Border     --> Borders
 LayoutTree --> Border          : optional chrome

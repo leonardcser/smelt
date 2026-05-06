@@ -411,9 +411,12 @@ Status table + open sub-phase sketches + decisions + deferrals in
   `render(args, output, ctx) -> BlockLayout` callback per tool;
   drops `render_summary` / `render_subhead` / `header_suffix` /
   `elapsed_visible`. New `core::content::block_layout::BlockLayout`
-  enum (`Leaf(BufId) | Vbox`); `smelt.layout.{leaf,vbox}`
-  + `smelt.layout.text` Lua surface. Composer walks the returned
-  tree and replays leaves into the surrounding `LineBuilder`.
+  enum (`Leaf(BufId) | Vbox(Vec) | Hbox(Vec<HboxItem>)`) +
+  `Constraint` (`Length(u16) | Fill(u16)`);
+  `smelt.layout.{leaf, vbox, hbox, sep}` + `smelt.layout.text`
+  Lua surface. Composer walks the returned tree and replays
+  leaves into the surrounding `LineBuilder`; 1×1 leaves
+  auto-repeat to fill their allocated rect (gives `sep` for free).
   `ToolBodyRenderer` trait + `core/transcript_present.rs` retire.
   Per-leaf cache extension and projection-layer fold deferred (no
   perf signal). See `P9.md` § P9.r.

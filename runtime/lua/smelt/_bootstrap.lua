@@ -100,6 +100,16 @@ function smelt.layout.text(content, opts)
   return smelt.layout.leaf(buf)
 end
 
+-- Sugar: build a 1×1 leaf with a single glyph. The transcript composer
+-- auto-repeats 1×1 leaves to fill their allocated rect along the parent's
+-- layout axis — `sep("│")` inside an `hbox` paints a vertical divider;
+-- `sep("─")` inside a `vbox` paints a horizontal one.
+function smelt.layout.sep(char)
+  local buf = smelt.buf.create()
+  smelt.buf.set_lines(buf, 0, -1, { char or "─" })
+  return smelt.layout.leaf(buf)
+end
+
 -- Apply a colorscheme by name. `smelt.theme.use("default")` requires
 -- `smelt.colorschemes.<name>` and lets the loaded chunk run its
 -- `smelt.theme.set` / `smelt.theme.link` calls. Plugin authors install

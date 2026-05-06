@@ -43,7 +43,8 @@ pub(super) fn render_tool(
         let layout =
             call_render_layout(name, args, output, summary, status, elapsed, call_id, width);
         if let Some(layout) = layout {
-            rows += replay_layout(out, &layout);
+            let inner_width = (width as u16).saturating_sub(2);
+            rows += replay_layout(out, &layout, inner_width);
         } else if let Some(out_data) = output {
             if !out_data.content.is_empty() {
                 rows += print_tool_output(out, name, out_data, args, width);
@@ -188,32 +189,304 @@ fn call_render_layout(
 /// Walk a [`BlockLayout`] returned by a tool's `render` hook and
 /// replay each leaf buffer's rows into `out`. Continuation rows are
 /// gutter-padded to two columns so they line up under the `⏺ name `
-/// prefix. Caps at [`MAX_TOOL_BLOCK_ROWS`].
-fn replay_layout(out: &mut LineBuilder, layout: &BlockLayout) -> u16 {
+/// prefix. Caps at [`MAX_TOOL_BLOCK_ROWS`]. `inner_width` is the
+/// width available inside the gutter; used by `Hbox` column allocation
+/// and 1×1 leaf auto-repeat.
+fn replay_layout(out: &mut LineBuilder, layout: &BlockLayout, inner_width: u16) -> u16 {
     crate::lua::app_ref::try_with_app(|app| {
-        let leaves = layout.leaves();
-        let mut rows = 0u16;
-        for buf_id in leaves {
-            if rows as usize >= MAX_TOOL_BLOCK_ROWS {
-                break;
-            }
-            let Some(buf) = app.ui.buf_destroy(buf_id) else {
-                continue;
-            };
-            let n = buf.line_count();
-            for i in 0..n {
-                if rows as usize >= MAX_TOOL_BLOCK_ROWS {
-                    break;
-                }
-                out.print_gutter("  ");
-                replay_buffer_row_into(&buf, i as u16, out);
-                out.newline();
-                rows += 1;
-            }
-        }
-        rows
+        let cap = MAX_TOOL_BLOCK_ROWS as u16;
+        replay_node(out, layout, app, cap, inner_width, true)
     })
     .unwrap_or(0)
+}
+
+fn replay_node(
+    out: &mut LineBuilder,
+    layout: &BlockLayout,
+    app: &mut crate::app::TuiApp,
+    rows_cap: u16,
+    width: u16,
+    with_gutter: bool,
+) -> u16 {
+    if rows_cap == 0 {
+        return 0;
+    }
+    match layout {
+        BlockLayout::Leaf(buf_id) => {
+            let Some(buf) = app.ui.buf_destroy(*buf_id) else {
+                return 0;
+            };
+            replay_leaf(out, &buf, rows_cap, width, with_gutter)
+        }
+        BlockLayout::Vbox(items) => {
+            let mut written = 0u16;
+            for child in items {
+                let remaining = rows_cap.saturating_sub(written);
+                if remaining == 0 {
+                    break;
+                }
+                written = written.saturating_add(replay_node(
+                    out,
+                    child,
+                    app,
+                    remaining,
+                    width,
+                    with_gutter,
+                ));
+            }
+            written
+        }
+        BlockLayout::Hbox(items) => replay_hbox(out, items, app, rows_cap, width, with_gutter),
+    }
+}
+
+fn replay_leaf(
+    out: &mut LineBuilder,
+    buf: &smelt_core::buffer::Buffer,
+    rows_cap: u16,
+    width: u16,
+    with_gutter: bool,
+) -> u16 {
+    let n = buf.line_count();
+    if n == 0 || rows_cap == 0 {
+        return 0;
+    }
+    if is_unit_leaf(buf) && width > 0 {
+        let glyph = buf.get_line(0).unwrap_or("");
+        if with_gutter {
+            out.print_gutter("  ");
+        }
+        out.print(&glyph.repeat(width as usize));
+        out.newline();
+        return 1;
+    }
+    let limit = (n as u16).min(rows_cap);
+    for i in 0..limit {
+        if with_gutter {
+            out.print_gutter("  ");
+        }
+        replay_buffer_row_into(buf, i, out);
+        out.newline();
+    }
+    limit
+}
+
+fn replay_hbox(
+    out: &mut LineBuilder,
+    items: &[smelt_core::content::block_layout::HboxItem],
+    app: &mut crate::app::TuiApp,
+    rows_cap: u16,
+    total_width: u16,
+    with_gutter: bool,
+) -> u16 {
+    let widths = smelt_core::content::block_layout::solve_hbox_widths(items, total_width);
+
+    // Take ownership of each child leaf's buffer when it is a Leaf.
+    // Non-Leaf Hbox children render as their flattened leaves stacked
+    // (a v1 limitation; nested Hbox/Vbox columns aren't laid out
+    // side-by-side). Using leaves() preserves the buf-destroy semantics
+    // and order.
+    let mut columns: Vec<Vec<smelt_core::buffer::Buffer>> = Vec::with_capacity(items.len());
+    let mut col_height: u16 = 0;
+    let mut any_unit_only = true;
+    for item in items {
+        let mut bufs: Vec<smelt_core::buffer::Buffer> = Vec::new();
+        for buf_id in item.layout.leaves() {
+            if let Some(buf) = app.ui.buf_destroy(buf_id) {
+                bufs.push(buf);
+            }
+        }
+        let height: u16 = bufs
+            .iter()
+            .map(|b| {
+                if is_unit_leaf(b) {
+                    0
+                } else {
+                    b.line_count() as u16
+                }
+            })
+            .sum();
+        if height > 0 {
+            any_unit_only = false;
+        }
+        if height > col_height {
+            col_height = height;
+        }
+        columns.push(bufs);
+    }
+    if any_unit_only {
+        // Pure separator row — keep it a single line.
+        col_height = 1;
+    }
+    let row_total = col_height.min(rows_cap);
+    if row_total == 0 {
+        return 0;
+    }
+
+    for r in 0..row_total {
+        if with_gutter {
+            out.print_gutter("  ");
+        }
+        for (col_idx, bufs) in columns.iter().enumerate() {
+            let col_w = widths.get(col_idx).copied().unwrap_or(0);
+            if col_w == 0 {
+                continue;
+            }
+            let emitted = emit_column_row(out, bufs, r, col_w);
+            // Pad the rest of the column with spaces so subsequent
+            // columns start at the right offset.
+            if emitted < col_w {
+                out.print(&" ".repeat((col_w - emitted) as usize));
+            }
+        }
+        out.newline();
+    }
+    row_total
+}
+
+/// Pick which leaf inside a column owns row `r`, then emit a clipped
+/// styled row into `out`. Returns the display width emitted.
+fn emit_column_row(
+    out: &mut LineBuilder,
+    bufs: &[smelt_core::buffer::Buffer],
+    r: u16,
+    col_w: u16,
+) -> u16 {
+    // 1×1 unit leaves repeat horizontally to fill the column; if the
+    // column contains a unit leaf at any vertical position it paints on
+    // every row.
+    for buf in bufs {
+        if is_unit_leaf(buf) {
+            let glyph = buf.get_line(0).unwrap_or("");
+            let repeat = col_w as usize;
+            let s = glyph.repeat(repeat);
+            out.print(&s);
+            return col_w;
+        }
+    }
+    // Walk the leaves to find the (leaf, local_row) for absolute row r.
+    let mut consumed: u16 = 0;
+    for buf in bufs {
+        let h = buf.line_count() as u16;
+        if r < consumed + h {
+            return emit_buffer_row_clipped(buf, r - consumed, col_w, out);
+        }
+        consumed = consumed.saturating_add(h);
+    }
+    0
+}
+
+fn is_unit_leaf(buf: &smelt_core::buffer::Buffer) -> bool {
+    if buf.line_count() != 1 {
+        return false;
+    }
+    let line = buf.get_line(0).unwrap_or("");
+    smelt_core::content::builder::display_width(line) == 1
+}
+
+/// Emit a buffer row's styled spans into `out`, clipped to `max_cols`
+/// display columns. Returns the display width actually emitted.
+fn emit_buffer_row_clipped(
+    buf: &smelt_core::buffer::Buffer,
+    row: u16,
+    max_cols: u16,
+    out: &mut LineBuilder,
+) -> u16 {
+    use unicode_width::UnicodeWidthChar;
+
+    let text = buf.get_line(row as usize).unwrap_or("");
+    let mut highlights = buf.highlights_at(row as usize);
+    highlights.sort_by_key(|h| h.col_start);
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut emitted_cols: u16 = 0;
+    let mut col_idx: u16 = 0;
+
+    let theme_clone = out.theme().clone();
+
+    for h in &highlights {
+        if h.col_end <= col_idx {
+            continue;
+        }
+        if h.col_start > col_idx {
+            let plain: String = chars[col_idx as usize..h.col_start as usize]
+                .iter()
+                .collect();
+            let used = emit_clipped(out, &plain, None, SpanMeta::default(), max_cols, emitted_cols);
+            emitted_cols = emitted_cols.saturating_add(used);
+            col_idx = h.col_start;
+            if emitted_cols >= max_cols {
+                return emitted_cols;
+            }
+        }
+        let end = h.col_end.min(chars.len() as u16);
+        if end <= col_idx {
+            continue;
+        }
+        let segment: String = chars[col_idx as usize..end as usize].iter().collect();
+        let style = theme_clone.resolve(h.hl);
+        let used = emit_clipped(
+            out,
+            &segment,
+            Some(style),
+            h.meta.clone(),
+            max_cols,
+            emitted_cols,
+        );
+        emitted_cols = emitted_cols.saturating_add(used);
+        col_idx = end;
+        if emitted_cols >= max_cols {
+            return emitted_cols;
+        }
+    }
+    if (col_idx as usize) < chars.len() && emitted_cols < max_cols {
+        let tail: String = chars[col_idx as usize..].iter().collect();
+        let used = emit_clipped(
+            out,
+            &tail,
+            None,
+            SpanMeta::default(),
+            max_cols,
+            emitted_cols,
+        );
+        emitted_cols = emitted_cols.saturating_add(used);
+    }
+    let _ = UnicodeWidthChar::width(' '); // satisfy import even if loop empty
+    emitted_cols
+}
+
+fn emit_clipped(
+    out: &mut LineBuilder,
+    segment: &str,
+    style: Option<smelt_core::style::Style>,
+    meta: SpanMeta,
+    max_cols: u16,
+    already: u16,
+) -> u16 {
+    use unicode_width::UnicodeWidthChar;
+    let budget = max_cols.saturating_sub(already);
+    if budget == 0 {
+        return 0;
+    }
+    let mut acc = String::new();
+    let mut acc_w: u16 = 0;
+    for ch in segment.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if acc_w.saturating_add(cw) > budget {
+            break;
+        }
+        acc.push(ch);
+        acc_w = acc_w.saturating_add(cw);
+    }
+    if acc.is_empty() {
+        return 0;
+    }
+    if let Some(s) = style {
+        out.append_resolved_span(&acc, s, meta);
+    } else {
+        out.print(&acc);
+    }
+    acc_w
 }
 
 pub(super) fn print_tool_output(
