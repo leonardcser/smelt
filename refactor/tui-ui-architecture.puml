@@ -106,7 +106,7 @@ package "runtime/lua/smelt/  (UX layer — the whole user-facing surface)" as LU
 }
 
 ' =====================================================================
-' crate: core — headless-safe runtime (Core + Host + capabilities)
+' crate: core — headless-safe runtime (Core + capabilities)
 ' =====================================================================
 package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
 
@@ -127,7 +127,13 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
     ' task runtime (LuaTaskRuntime).
     --
     runs the event loop
-    impl Host (no Ui knowledge)
+    inherent accessor methods
+    (cells / timers / engine /
+    session / files / processes /
+    confirms / config / clipboard
+    / skills / frontend) — no
+    trait, just direct field
+    access.
     ' Shared by TuiApp + HeadlessApp.
   }
 
@@ -135,33 +141,12 @@ package "crate: core  (headless-safe runtime)" as CORE #FFF6E0 {
     core: Core
     sink: HeadlessSink     ' JSON / text out
     --
-    impl Host (not UiHost)
-    ' Lua-driven UX bindings that
-    ' touch ui/win/buf are absent
-    ' here; tools, engine, cells,
-    ' timers, autocmds all work.
-  }
-
-  interface Host <<ui-agnostic trait — core::host>> {
-    config()    : &AppConfig
-    clipboard() : &mut Clipboard
-    cells()     : &mut Cells
-    timers()    : &mut Timers
-    engine()    : &mut EngineClient
-    session()   : &mut Session
-    files()     : &mut FileStateCache
-    processes() : &mut ProcessRegistry
-    skills()    : &Option<Arc<SkillLoader>>
-    frontend()  : FrontendKind
-    confirms()  : &mut Confirms
-    ' Everything Lua bindings need
-    ' that does NOT touch Ui:
-    ' cell/timer/clipboard/cmd/
-    ' engine/permissions/confirm/
-    ' agent/session/tools/os/fs/
-    ' http/html/notebook/path/
-    ' parse/grep/fuzzy/au/theme.
-    ' Headless impls only this.
+    Host-tier Lua bindings reach
+    through `&mut Core` via the
+    `try_with_core` TLS slot.
+    UiHost-tier bindings (ui /
+    win / buf / statusline) error
+    when invoked from headless.
   }
 
   package "subsystems  (owned by Core)" as SUB #FFF1C8 {
@@ -384,7 +369,7 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
     plugin scripts
     callback queue
     coroutine tasks
-    TLS pointer to &mut Host
+    TLS pointer to &mut Core
     tool registry + dispatch
     command registry
     cancel: cooperative —
@@ -419,8 +404,10 @@ package "crate: tui  (terminal frontend)" as TUI #E0E8FF {
     well_known: WellKnown
     ui:         ui::Ui
     --
-    impl Host (delegates to Core)
-    impl UiHost
+    impl UiHost (compositor surface)
+    Host-tier Lua flows through
+    `&mut Core` directly — no
+    parallel trait impl on TuiApp.
   }
 
   class WellKnown <<well-known WinIds — TuiApp only>> {
@@ -491,8 +478,12 @@ package "tui::ui  (terminal UI primitives module)" as UI #E6F1FF {
       ' smelt.buf / smelt.statusline
       ' require UiHost; calling them
       ' from a HeadlessApp errors.
-      ' No request_redraw — rendering
-      ' is event-driven + diff-based.
+      ' Host-tier bindings reach
+      ' &mut Core directly via the
+      ' CORE_PTR TLS slot — no Host
+      ' trait. No request_redraw —
+      ' rendering is event-driven
+      ' + diff-based.
     }
     enum Event {
       Key(KeyEvent)
@@ -796,7 +787,7 @@ ENG   -[#888,dashed]-> PROTO : uses wire types
 CORE  -[#888,dashed]-> PROTO : uses wire types
 CORE  -[#888,dashed]-> ENG   : EngineHandle\n(channels only)
 TUI   -[#888,dashed]-> PROTO : uses wire types
-TUI   -[#888,dashed]-> CORE  : Core + Host\n+ capabilities
+TUI   -[#888,dashed]-> CORE  : Core + capabilities
 TUI   -[#888,dashed]-> UI    : ui primitives
 ' UI has zero internal dependencies
 LUA   -[#888,dashed]-> CORE  : Host-tier smelt.* API
@@ -828,13 +819,11 @@ Core *--> LuaTaskRuntime
 Core *--> EngineClient
 
 HeadlessApp *--> Core
-HeadlessApp ..|> Host         : impls (Ui-agnostic)
 
 TuiApp      *--> Core
 TuiApp      *--> LuaRuntime
 TuiApp      *--> WellKnown
 TuiApp      --> Ui            : drives compositor
-TuiApp      ..|> Host         : delegates to Core
 TuiApp      ..|> UiHost       : impls with Ui surface
 
 LuaRuntime  *--> LuaShared

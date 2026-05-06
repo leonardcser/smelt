@@ -21,9 +21,9 @@ Every change lands closer to all three, never farther from any.
    Anything visible is a Window registered with the compositor.
 
 2. **Lua surface = Rust API.** Lua plugins call the same Rust functions the
-   core does. `smelt.*` is a thin wrapper around `Host` methods, not a
-   translation layer. No stringly-typed action tokens. No effect log. Reads go
-   live; writes go direct.
+   core does. `smelt.*` is a thin wrapper around `Core` and `UiHost` methods,
+   not a translation layer. No stringly-typed action tokens. No effect log.
+   Reads go live; writes go direct.
 
 3. **Rust core, Lua features.** Rust owns pixel pushing (compositor, buffers,
    windows, layout, paint), generic capabilities (process/fs/http/parse/grep),
@@ -54,7 +54,7 @@ Theme, VimMode — internally.  It is not a separate crate.)
 | ------------------------ | ----------------------------------------------------------------------- |
 | `protocol`               | Wire types, pure data, serde-serializable. Stable contract, no behavior. Includes `AgentMode`, `ReasoningEffort`, `PermissionOverrides`, `TurnMeta` |
 | `engine`                 | LLM core. Provider abstraction, agent loop, MCP, cancel tokens, schema-aware streaming. Tools = schema + dispatcher trait only; impls live in Lua. **No permission policy, no multi-agent concept**. **Zero UI imports** |
-| `core`                   | Headless-safe runtime. `Core` + `HeadlessApp`, subsystems, `Host` trait, `LuaRuntime`, `EngineClient`, Rust capabilities (`fs`/`http`/`permissions`/`process`/…), `Clipboard`/`KillRing`, and **`Buffer` + `BufferParser` (the content data type)**. No terminal imports |
+| `core`                   | Headless-safe runtime. `Core` + `HeadlessApp`, subsystems, `LuaRuntime`, `EngineClient`, Rust capabilities (`fs`/`http`/`permissions`/`process`/…), `Clipboard`/`KillRing`, and **`Buffer` + `BufferParser` (the content data type)**. No terminal imports |
 | `tui`                    | Terminal frontend. `TuiApp`, event loop, terminal input editing, `UiHost` Lua bindings, rendering adapters (`to_buffer`, `prompt_buf`, `status`), `BufferParser` impls (markdown / diff / syntax / bash) under `tui::content::transcript_parsers/`, and the `ui` module (Window, Grid, LayoutTree, Theme, VimMode). Depends on `core` and `crossterm` |
 | `runtime/lua/smelt/`     | The whole UX. Widgets, dialogs, commands, statusline, transcript/diff presentation, themes, tools |
 
@@ -364,22 +364,25 @@ One binary, two entry points: `smelt` → `TuiApp`, `smelt -p "..."` →
 `HeadlessApp`. No `EngineConfig.interactive` flag, no `if interactive`
 branches. Borrow checker enforces the split.
 
-### Side effects — `Host` and `UiHost`, no Effect enum
+### Side effects — `Core` and `UiHost`, no Effect enum
 
-Two small traits, side effects are direct method calls. **`UiHost`
-does not extend `Host`** — keeps `ui` free of tui-defined types.
+Side effects are direct method calls. Host-tier flows reach `Core`
+directly via inherent accessor methods (`core.cells()`,
+`core.timers()`, `core.engine()`, …) — no `Host` trait wraps the
+11 subsystem fields. UiHost is a small trait owned by `tui::ui`;
+`TuiApp` impls it. Keeps `ui` free of tui-defined types.
 
-`Host` exposes the 11 Ui-agnostic accessors (`config`, `clipboard`,
+`Core` exposes the 11 Ui-agnostic accessors (`config`, `clipboard`,
 `cells`, `timers`, `engine`, `session`, `files`, `processes`,
-`skills`, `frontend`, `confirms`). `UiHost` exposes `ui`, `focus`,
-`buf_*`, `win_*`, `overlay_open`. `Core` impls `Host`; `TuiApp`
-impls both (delegating Host); `HeadlessApp` impls only `Host`.
+`skills`, `frontend`, `confirms`) as inherent methods. `UiHost`
+exposes `ui`, `focus`, `buf_*`, `win_*`, `overlay_open`.
 
-Lua bindings divide by trait. Host-tier (works in headless + tui)
-lives in `core/src/lua/api/`; UiHost-tier (errors in headless) lives
-in `tui/src/lua/api/`. Two cross-runtime cases keep typed forms
-because they cross channels: engine boundary (`UiCommand`) and Lua
-coroutine resumption (`host.lua().resume_task`).
+Lua bindings divide by tier. Host-tier (works in headless + tui)
+lives in `core/src/lua/api/` and reborrows `&mut Core`. UiHost-tier
+(errors in headless) lives in `tui/src/lua/api/` and reborrows
+`&mut dyn UiHost`. Two cross-runtime cases keep typed forms because
+they cross channels: engine boundary (`UiCommand`) and Lua
+coroutine resumption (`core.lua().resume_task`).
 
 No reducer, no Effect log. Observability via `tracing::trace!`.
 
@@ -406,10 +409,10 @@ hatches — they aren't shipped at all.
 
 ### Lua → Rust writes (TLS pointer)
 
-Lua FFI functions reborrow `&mut App` from a TLS pointer
-(`crate::lua::with_app(|app| ...)`) and call Host methods through it. Same
-surface Rust handlers see — no Effect indirection. One pattern, used
-everywhere.
+Lua FFI functions reborrow `&mut App` (or `&mut Core`) from a TLS pointer
+(`crate::lua::with_app(|app| ...)`, `core::host::with_core(|core| ...)`) and
+call methods through it. Same surface Rust handlers see — no Effect
+indirection. One pattern, used everywhere.
 
 `install_app_ptr(self)` is set at every `&mut App` site that drives Lua: the
 main loop tick, startup `load_plugins`, the deferred callback drain. Lua
@@ -417,13 +420,18 @@ callbacks registered via `ui::Callbacks` would collide with the `&mut Ui`
 borrow held during dispatch, so they're queued and drained after the borrow
 releases.
 
-**TLS pointers are type-erased over the trait, not the concrete struct.**
-Host tier is `*mut dyn Host` (set in P8.f via `CORE_PTR`); UiHost tier
-mirrors with `*mut dyn UiHost` (set in P9.o.1 via `UI_HOST`).
-Concrete frontend structs (`TuiApp`, `HeadlessApp`, future `StoryApp`)
-impl the trait pair and install through the same pointer slots.
-Bindings reborrow the trait object — never the concrete struct — so any
-UI-bearing frontend hosts UiHost-tier Lua without binding rewrites.
+**Two TLS slots: `*mut Core` for Host-tier, `*mut dyn UiHost` for
+UiHost-tier.** The Host-tier slot (`CORE_PTR`, set via
+`install_core_ptr`) holds a concrete `&mut Core` — every frontend
+embeds `Core` and installs through the same pointer; bindings
+reborrow `&mut Core` and reach subsystems via inherent accessor
+methods (`core.cells()`, `core.timers()`, …). The UiHost-tier slot
+(`UI_HOST`, set in P9.o.1) is type-erased over the trait so future
+frontends with their own compositor (`StoryApp`, alternative
+backends) host UiHost-tier Lua without binding rewrites — bindings
+reborrow the trait object, never the concrete `TuiApp`. The Host
+trait was retired in P10.3.8: pure DI table over `Core`'s field
+list adding zero behavior, replaced by direct field access.
 
 ### Bindings layout
 
@@ -442,8 +450,9 @@ A few bindings remain in `tui/src/lua/api/` pending reclassification
 `image.rs`, `model.rs`, `settings.rs`, `metrics.rs`, `transcript.rs`,
 `vim.rs`, `keymap.rs`, `history.rs`).
 
-Each binding declares whether it needs `Host` or `UiHost`; calling a
-UiHost binding from a `HeadlessApp` raises a runtime error in Lua.
+Each binding declares whether it's Host-tier (reborrows `&mut Core`)
+or UiHost-tier (reborrows `&mut dyn UiHost`); calling a UiHost binding
+from a `HeadlessApp` raises a runtime error in Lua.
 
 ## Engine boundary — channels only
 
@@ -464,7 +473,7 @@ same channel boundary.
 
 **Single event loop.** One `select!` merges `terminal_rx`, `engine.event_rx`,
 `lua_callback_rx`, `cells_rx`, and the animation tick. Each event dispatches
-through Host directly — no Effect serialization.
+against `Core` / `UiHost` directly — no Effect serialization.
 
 ### Streaming pipeline
 
@@ -776,12 +785,13 @@ Per-`Block` parsers moved into `tui::content::transcript_parsers/`
 reads (P9.c). Tool render returns `BlockLayout`
 (P9.r); snapshot folded onto `TranscriptProjection` (P9.s);
 permission defaults declared in Lua (P9.y). Host-tier Lua
-bindings in `core/src/lua/api/` resolve via `try_with_host`;
-UiHost-tier in `tui/src/lua/api/` via `try_with_app`. UiHost TLS
-trait-object slot landed (P9.o.1) — `*mut dyn UiHost` mirrors
-the `*mut dyn Host` slot, decoupling future frontends from the
-concrete `TuiApp`. Theme registry landed (P1.0): `set(name,
-style)`, `link(from, to)`, `get(name)`.
+bindings in `core/src/lua/api/` resolve via `try_with_core` over
+a `*mut Core` TLS slot; UiHost-tier in `tui/src/lua/api/` via
+`try_with_app`. The `Host` trait retired in P10.3.8 (pure DI
+table, zero behavior); UiHost TLS trait-object slot landed
+(P9.o.1) — `*mut dyn UiHost` decouples future compositor
+frontends from the concrete `TuiApp`. Theme registry landed
+(P1.0): `set(name, style)`, `link(from, to)`, `get(name)`.
 
 ## Code rules — eternal
 
@@ -896,6 +906,7 @@ argument: providers, permissions, MCP, theme, keymap, model defaults.
 
 - Single-threaded TUI loop; Lua runtime is `!Send`.
   `Arc<Mutex<…>>` boundaries for cross-thread state.
-- TLS app pointer is sound: Rust never holds its `&mut dyn Host`
-  borrow while Lua runs (synchronous, single-threaded FFI).
+- TLS app pointer is sound: Rust never holds its `&mut Core` /
+  `&mut dyn UiHost` borrow while Lua runs (synchronous,
+  single-threaded FFI).
 
