@@ -382,9 +382,9 @@ ARCH § Streaming.)
    calls into Rust:
    ```rust
    // tui/src/lua/api/confirm.rs
-   fn resolve(host: &mut dyn Host, handle_id: HandleId, decision: Decision) {
-       host.confirms_mut().resolve(handle_id, decision);
-       host.engine().send(UiCommand::PermissionDecision {
+   fn resolve(core: &mut Core, handle_id: HandleId, decision: Decision) {
+       core.confirms.resolve(handle_id, decision);
+       core.engine.send(UiCommand::PermissionDecision {
            request_id: handle_id, approved: matches!(decision, Decision::Allow), message: None,
        });
    }
