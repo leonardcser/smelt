@@ -1,7 +1,9 @@
 //! Interactive setup flows: first-run wizard and `smelt auth` subcommand.
 //!
-//! Provider login/logout goes through `engine::auth`; YAML manipulation
-//! goes through `engine::config_file`.
+//! Provider login/logout goes through `engine::auth`; first-run wizard
+//! writes a Lua `init.lua` seed when no config exists. `smelt auth` for
+//! non-OAuth providers prints the Lua block for manual pasting into
+//! `init.lua` — the app never edits an existing user config file.
 
 use dialoguer::{Input, Select};
 use engine::auth::{AuthProvider, LoginMethod, LoginProgress};
@@ -87,7 +89,7 @@ fn pick_provider() -> Option<usize> {
         .ok()
 }
 
-fn collect_provider(tmpl: &ProviderTemplate) -> Option<engine::config_file::NewProvider> {
+fn collect_provider(tmpl: &ProviderTemplate) -> Option<NewProvider> {
     let api_base = if tmpl.needs_api_base {
         Input::<String>::new()
             .with_prompt("API base URL")
@@ -141,33 +143,13 @@ fn collect_provider(tmpl: &ProviderTemplate) -> Option<engine::config_file::NewP
         tmpl.name.to_string()
     };
 
-    Some(engine::config_file::NewProvider {
+    Some(NewProvider {
         name,
         provider_type: tmpl.provider_type.to_string(),
         api_base,
         api_key_env,
         models: vec![model],
     })
-}
-
-/// Template for providers whose login adds an OAuth-only config entry.
-fn oauth_new_provider(tmpl: &ProviderTemplate) -> engine::config_file::NewProvider {
-    engine::config_file::NewProvider {
-        name: tmpl.name.to_string(),
-        provider_type: tmpl.provider_type.to_string(),
-        api_base: tmpl.api_base.to_string(),
-        api_key_env: None,
-        models: vec![],
-    }
-}
-
-fn ensure_oauth_provider(tmpl: &ProviderTemplate) {
-    let provider = oauth_new_provider(tmpl);
-    match engine::config_file::ensure_provider(&provider) {
-        Ok(true) => println!("Added {} provider to config.", tmpl.name),
-        Ok(false) => {}
-        Err(e) => eprintln!("error: {e}"),
-    }
 }
 
 // ── OAuth flows ───────────────────────────────────────────────────────────
@@ -241,17 +223,17 @@ pub async fn run_initial_setup(config_path: &Path) -> bool {
     };
     let tmpl = &PROVIDERS[idx];
 
-    let provider = if let Some(kind) = tmpl.oauth {
+    if let Some(kind) = tmpl.oauth {
         run_login(kind).await;
-        oauth_new_provider(tmpl)
-    } else {
-        let Some(p) = collect_provider(tmpl) else {
-            return false;
-        };
-        p
+        println!("Provider auto-detected from credentials — no config file needed.");
+        return true;
+    }
+
+    let Some(provider) = collect_provider(tmpl) else {
+        return false;
     };
 
-    match engine::config_file::write_initial_config(config_path, &provider) {
+    match write_initial_config(config_path, &provider) {
         Ok(()) => {
             println!("Config written to {}", config_path.display());
             true
@@ -281,10 +263,7 @@ pub async fn run_auth_command() {
             return;
         };
         match choice {
-            0 => {
-                run_login(kind).await;
-                ensure_oauth_provider(tmpl);
-            }
+            0 => run_login(kind).await,
             1 => run_logout(kind, tmpl.label),
             _ => {}
         }
@@ -292,9 +271,55 @@ pub async fn run_auth_command() {
         let Some(provider) = collect_provider(tmpl) else {
             return;
         };
-        match engine::config_file::add_provider(&provider) {
-            Ok(()) => println!("Provider '{}' added.", provider.name),
-            Err(e) => eprintln!("error: {e}"),
+        println!("\n  Add the following to your init.lua:\n");
+        println!("{}", provider_to_lua(&provider));
+        println!(
+            "  (init.lua location: {})",
+            engine::config_dir().join("init.lua").display()
+        );
+    }
+}
+
+// ── Config file helpers (Lua init.lua generation) ───────────────────────────
+
+/// A provider entry to insert into the config.
+struct NewProvider {
+    name: String,
+    provider_type: String,
+    api_base: String,
+    api_key_env: Option<String>,
+    models: Vec<String>,
+}
+
+/// Generate a Lua provider registration block.
+fn provider_to_lua(provider: &NewProvider) -> String {
+    let mut lines = String::new();
+    lines.push_str(&format!(
+        "smelt.provider.register(\"{}\", {{\n",
+        provider.name
+    ));
+    lines.push_str(&format!("  type = \"{}\",\n", provider.provider_type));
+    lines.push_str(&format!("  api_base = \"{}\",\n", provider.api_base));
+    if let Some(ref key_env) = provider.api_key_env {
+        if !key_env.is_empty() {
+            lines.push_str(&format!("  api_key_env = \"{}\",\n", key_env));
         }
     }
+    if !provider.models.is_empty() {
+        let models = provider.models.join("\", \"");
+        lines.push_str(&format!("  models = {{ \"{}\" }},\n", models));
+    }
+    lines.push_str("})\n");
+    lines
+}
+
+/// Write a fresh `init.lua` with a single provider (for first-time setup).
+fn write_initial_config(path: &Path, provider: &NewProvider) -> Result<(), String> {
+    let mut lua = String::new();
+    lua.push_str("-- Auto-generated by smelt setup wizard\n\n");
+    lua.push_str(&provider_to_lua(provider));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, lua).map_err(|e| e.to_string())
 }

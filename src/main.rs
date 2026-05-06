@@ -17,7 +17,7 @@ pub struct Args {
     command: Option<Commands>,
     /// Initial message to send (auto-submits on startup)
     message: Option<String>,
-    #[arg(long, value_name = "PATH", help = "Path to a custom config file")]
+    #[arg(long, value_name = "PATH", help = "Path to a custom init.lua")]
     config: Option<String>,
     #[arg(long)]
     api_base: Option<String>,
@@ -89,30 +89,6 @@ pub struct Args {
     color: ColorMode,
     #[arg(short, long, help = "Show tool output in headless mode")]
     verbose: bool,
-    #[arg(long, help = "Run as a subagent (persistent headless with IPC)")]
-    subagent: bool,
-    #[arg(long, help = "Enable multi-agent mode (registry, socket, agent tools)")]
-    multi_agent: bool,
-    #[arg(long, help = "Disable multi-agent even if config enables it")]
-    no_multi_agent: bool,
-    #[arg(long, value_name = "PID", help = "Parent agent PID (for subagents)")]
-    parent_pid: Option<u32>,
-    #[arg(long, value_name = "N", help = "Agent depth in the spawn tree")]
-    depth: Option<u8>,
-    #[arg(
-        long,
-        value_name = "N",
-        default_value = "1",
-        help = "Maximum agent spawn depth"
-    )]
-    max_agent_depth: u8,
-    #[arg(
-        long,
-        value_name = "N",
-        default_value = "8",
-        help = "Maximum concurrent agents per session"
-    )]
-    max_agents: u8,
     #[arg(short, long, num_args = 0..=1, default_missing_value = "", value_name = "SESSION_ID")]
     resume: Option<String>,
     #[arg(
@@ -145,6 +121,8 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     std::panic::set_hook(Box::new(|info| {
+        let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
+        let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
         let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
@@ -160,7 +138,28 @@ async fn main() {
         return;
     }
 
-    let s = startup::resolve(&args).await;
+    // Phase 1: run Lua init.lua for config registration (before engine starts).
+    let mut lua_runtime = tui::lua::LuaRuntime::new();
+    if let Some(ref path) = args.config {
+        lua_runtime.set_init_lua_path(std::path::PathBuf::from(path));
+    }
+    // Embedded autoload first so user code can override built-in
+    // registrations. Runs without a TLS app pointer; autoload modules
+    // only do `smelt.{tools,cmd,au,cell}.register` at load time, which
+    // writes to `LuaShared` and never reaches into live app state.
+    lua_runtime.load_autoload();
+    lua_runtime.load_user_config();
+    lua_runtime.load_global_plugins();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let project_trust = lua_runtime.load_project_config(&cwd);
+    let lua_cfg = lua_runtime.to_config();
+    let lua_permission_rules = lua_runtime.take_permission_rules();
+    let lua_tool_defaults = lua_runtime.tool_defaults();
+    if let Some(err) = lua_runtime.load_error() {
+        eprintln!("warning: lua init: {err}");
+    }
+
+    let s = startup::resolve(&args, lua_cfg).await;
     let startup::ResolvedStartup {
         cfg,
         available_models,
@@ -172,12 +171,12 @@ async fn main() {
         model,
         model_config,
         settings,
-        multi_agent,
         mode_override,
         mode_cycle,
         reasoning_effort,
         reasoning_cycle,
         mut startup_auth_error,
+        cache,
     } = s;
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
@@ -190,32 +189,21 @@ async fn main() {
     }
 
     if args.bench {
-        tui::perf::enable();
+        smelt_core::perf::enable();
         tui::alloc::enable();
     }
 
     // Eager-load syntect's syntax and theme sets in the background so the
     // first tool render doesn't pay the ~30ms lazy-init cost mid-frame.
     // Runs in parallel with session loading and is done well before first paint.
-    std::thread::spawn(tui::render::warm_up_syntect);
+    std::thread::spawn(tui::warm_up_syntect);
 
     if args.headless && args.message.is_none() {
         eprintln!("error: --headless requires a message argument");
         std::process::exit(1);
     }
 
-    if args.subagent {
-        if args.message.is_none() {
-            eprintln!("error: --subagent requires a message argument");
-            std::process::exit(1);
-        }
-        if args.parent_pid.is_none() || args.depth.is_none() {
-            eprintln!("error: --subagent requires --parent-pid and --depth");
-            std::process::exit(1);
-        }
-    }
-
-    if (args.headless || args.subagent) && startup_auth_error.is_some() {
+    if args.headless && startup_auth_error.is_some() {
         eprintln!(
             "error: {}",
             startup_auth_error.as_deref().unwrap_or_default()
@@ -223,9 +211,9 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Parse theme accent from config.
-    if let Some(ref accent) = cfg.theme.accent {
-        let theme_value = if let Ok(v) = accent.parse::<u8>() {
+    // Parse theme accent from config (applied after TuiApp::new — see below).
+    let cfg_accent: Option<u8> = cfg.theme.accent.as_ref().map(|accent| {
+        if let Ok(v) = accent.parse::<u8>() {
             v
         } else {
             // Try to find by name in presets
@@ -234,11 +222,11 @@ async fn main() {
                 .find(|(name, _, _)| name.eq_ignore_ascii_case(accent))
                 .map(|(_, _, value)| *value)
                 .unwrap_or(tui::theme::DEFAULT_ACCENT)
-        };
-        tui::theme::set_accent(theme_value);
-    }
+        }
+    });
 
-    let shared_session: Arc<Mutex<Option<tui::session::Session>>> = Arc::new(Mutex::new(None));
+    let shared_session: Arc<Mutex<Option<smelt_core::session::Session>>> =
+        Arc::new(Mutex::new(None));
     let headless_cancel = Arc::new(tokio::sync::Notify::new());
 
     // Signal handler for graceful shutdown
@@ -271,7 +259,7 @@ async fn main() {
             }
             let session_id = if let Ok(guard) = shared.lock() {
                 if let Some(ref s) = *guard {
-                    tui::session::save(s, &tui::attachment::AttachmentStore::new());
+                    smelt_core::session::save(s, &smelt_core::attachment::AttachmentStore::new());
                     if !s.messages.is_empty() {
                         Some(s.id.clone())
                     } else {
@@ -283,15 +271,13 @@ async fn main() {
             } else {
                 None
             };
+            let _ = std::io::stdout().execute(crossterm::event::DisableMouseCapture);
+            let _ = std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen);
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
             if let Some(id) = session_id {
-                tui::session::print_resume_hint(&id);
-            }
-            // Kill child agents on shutdown.
-            if multi_agent {
-                engine::registry::cleanup_self(std::process::id());
+                tui::print_resume_hint(&id);
             }
             std::process::exit(0);
         });
@@ -325,75 +311,85 @@ async fn main() {
 
     // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let mut permissions = engine::Permissions::load();
+    let mut permissions = smelt_core::permissions::Permissions::from_raw(
+        &lua_permission_rules.unwrap_or_default(),
+        &lua_tool_defaults,
+    );
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
+    // Wire the workspace-path query to each Lua tool's
+    // `paths_for_workspace(args)` callback. Resolved at call time via
+    // the TLS app pointer the main loop installs while dispatching.
+    permissions.set_paths_fn(std::sync::Arc::new(|name, args| {
+        tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))
+            .unwrap_or_default()
+    }));
+    // Wire the per-tool decision override to each Lua tool's
+    // `decide(args, mode)` callback. Tools without one (everything but
+    // bash and web_fetch today) return `None` and the generic
+    // `check_tool` path runs.
+    permissions.set_decide_hook_fn(std::sync::Arc::new(|name, args, mode| {
+        tui::lua::try_with_app(|app| app.lua.tool_decide(name, args, mode)).flatten()
+    }));
     let permissions = Arc::new(permissions);
     let initial_api_base = api_base.clone();
     let initial_provider_type = provider_type.clone();
 
-    // Pick the interactive root agent ID once and share it across
-    // engine tools + registry registration to avoid identity drift.
-    let planned_agent_id = if multi_agent && !args.subagent {
-        Some(engine::registry::next_agent_id())
-    } else {
-        None
-    };
-
     // Create shared runtime approvals and load workspace rules.
     let runtime_approvals = {
         let cwd_str = cwd.to_string_lossy();
-        let rules = tui::workspace_permissions::load(&cwd_str);
-        let (ws_tools, ws_dirs) = tui::workspace_permissions::into_approvals(&rules);
-        let mut rt = engine::permissions::RuntimeApprovals::new();
+        let rules = smelt_core::permissions::store::load(&cwd_str);
+        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
+        let mut rt = smelt_core::permissions::RuntimeApprovals::new();
         rt.load_workspace(ws_tools, ws_dirs);
         Arc::new(std::sync::RwLock::new(rt))
     };
 
-    let engine_handle = engine::start(engine::EngineConfig {
-        api: engine::ApiConfig {
-            base: api_base,
-            key: api_key,
-            key_env: api_key_env.clone(),
-            provider_type,
-            model_config: (&model_config).into(),
-        },
-        model: model.clone(),
-        auxiliary,
-        instructions,
-        system_prompt_override,
-        cwd: cwd.clone(),
-        permissions: permissions.clone(),
-        runtime_approvals: runtime_approvals.clone(),
-        multi_agent: if multi_agent {
-            Some(engine::MultiAgentConfig {
-                depth: args.depth.unwrap_or(0),
-                max_depth: args.max_agent_depth,
-                max_agents: args.max_agents,
-                parent_pid: args.parent_pid,
-                agent_id: planned_agent_id.clone(),
-            })
-        } else {
-            None
-        },
-        interactive: !args.headless && !args.subagent,
-        mcp_servers: cfg.mcp.clone(),
-        skills: {
-            let extra_paths: Vec<std::path::PathBuf> = cfg
-                .skills
-                .paths
-                .iter()
-                .map(std::path::PathBuf::from)
-                .collect();
-            let loader = engine::SkillLoader::load(&extra_paths);
-            Some(Arc::new(loader))
-        },
-        auto_compact: settings.auto_compact,
-        context_window: cfg.settings.context_window,
-        redact_secrets: settings.redact_secrets,
-    });
-    let engine_injector = engine_handle.injector();
+    let skill_loader = {
+        let extra_paths: Vec<std::path::PathBuf> = cfg
+            .skills
+            .paths
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        Arc::new(engine::SkillLoader::load(&extra_paths))
+    };
+    let tui_skill_section = skill_loader.prompt_section().map(String::from);
+    let tui_skill_loader = skill_loader.clone();
+    let tui_instructions = instructions.clone();
 
+    let mcp_dispatcher = smelt_core::mcp::dispatcher::McpDispatcher::start(
+        &cfg.mcp,
+        Arc::clone(&permissions),
+        Arc::clone(&runtime_approvals),
+    )
+    .await;
+    let dispatcher: Box<dyn engine::tools::ToolDispatcher> = match mcp_dispatcher {
+        Some(d) => Box::new(d),
+        None => Box::new(engine::tools::ToolRegistry::new()),
+    };
+
+    let engine_handle = engine::start(
+        engine::EngineConfig {
+            api: engine::ApiConfig {
+                base: api_base,
+                key: api_key,
+                key_env: api_key_env.clone(),
+                provider_type,
+                model_config: (&model_config).into(),
+            },
+            model: model.clone(),
+            auxiliary,
+            instructions,
+            system_prompt_override,
+            cwd: cwd.clone(),
+            skills: Some(skill_loader),
+            auto_compact: settings.auto_compact,
+            context_window: cfg.settings.context_window,
+            redact_secrets: settings.redact_secrets,
+        },
+        dispatcher,
+    );
     // Fetch context window in background (only needed for interactive TUI display).
     // If the user set it in config, skip the fetch entirely.
     let ctx_rx = if !args.headless && cfg.settings.context_window.is_none() {
@@ -425,177 +421,153 @@ async fn main() {
         None
     };
 
-    // Build the TUI app.
-    let mut app = tui::app::App::new(
-        model,
-        initial_api_base,
-        api_key_env,
-        initial_provider_type,
-        Arc::clone(&permissions),
-        engine_handle,
-        settings,
-        multi_agent,
-        reasoning_effort,
-        reasoning_cycle,
-        mode_cycle,
-        shared_session,
-        available_models,
-        args.model.is_some(),
-        args.api_base.is_some(),
-        args.api_key_env.is_some(),
-        startup_auth_error.take(),
-    );
-    app.model_config = (&model_config).into();
-    if let Some(mode) = mode_override {
-        app.mode = mode;
-    }
-    if !app.mode_cycle.contains(&app.mode) {
-        app.mode_cycle.push(app.mode);
-    }
+    let color_mode = match args.color {
+        ColorMode::Auto => smelt_core::ColorMode::Auto,
+        ColorMode::Always => smelt_core::ColorMode::Always,
+        ColorMode::Never => smelt_core::ColorMode::Never,
+    };
 
-    if let Some(ref resume_val) = args.resume {
-        if resume_val.is_empty() {
-            // Open the resume dialog inside `run()` so dismissal goes
-            // through the normal dialog lifecycle (clear_dialog_area).
-            args.message = Some("/resume".to_string());
-        } else if let Some(loaded) = tui::session::load(resume_val) {
-            app.load_session(loaded);
-        } else {
-            eprintln!("error: session '{}' not found", resume_val);
-            std::process::exit(1);
+    if args.headless {
+        let output_format = match args.format {
+            OutputFormat::Text => smelt_core::OutputFormat::Text,
+            OutputFormat::Json => smelt_core::OutputFormat::Json,
+        };
+        let app_config = build_headless_config(
+            model,
+            initial_api_base,
+            api_key_env,
+            initial_provider_type,
+            available_models,
+            (&model_config).into(),
+            args.model.is_some(),
+            args.api_base.is_some(),
+            args.api_key_env.is_some(),
+            mode_override,
+            mode_cycle,
+            reasoning_effort,
+            reasoning_cycle,
+            settings,
+            cfg.settings.context_window,
+        );
+        let mut core = smelt_core::Core::new(
+            app_config,
+            engine_handle,
+            smelt_core::FrontendKind::Headless,
+        );
+        core.skills = Some(tui_skill_loader.clone());
+        let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
+        let mut headless = smelt_core::HeadlessApp::new(core, sink);
+        headless
+            .run_oneshot(args.message.unwrap(), headless_cancel)
+            .await;
+    } else {
+        // Build the TUI app.
+        let mut app = tui::app::TuiApp::new(
+            model,
+            initial_api_base,
+            api_key_env,
+            initial_provider_type,
+            Arc::clone(&permissions),
+            engine_handle,
+            settings,
+            reasoning_effort,
+            reasoning_cycle,
+            mode_cycle,
+            shared_session,
+            available_models,
+            args.model.is_some(),
+            args.api_base.is_some(),
+            args.api_key_env.is_some(),
+            startup_auth_error.take(),
+            runtime_approvals,
+            lua_runtime,
+            project_trust,
+            cache,
+        );
+        app.core.config.model_config = (&model_config).into();
+        app.core.skills = Some(tui_skill_loader.clone());
+        app.extra_instructions = tui_instructions;
+        app.skill_section = tui_skill_section;
+        if let Some(accent) = cfg_accent {
+            app.ui.theme_mut().set_accent(accent);
         }
-    }
+        if let Some(mode) = mode_override {
+            app.core.config.mode = mode;
+        }
+        if !app.core.config.mode_cycle.contains(&app.core.config.mode) {
+            app.core.config.mode_cycle.push(app.core.config.mode);
+        }
 
-    if args.subagent {
-        let parent_pid = args.parent_pid.unwrap();
-        let depth = args.depth.unwrap();
-        let my_pid = std::process::id();
-
-        // Request SIGTERM when parent dies (Linux only).
-        #[cfg(target_os = "linux")]
-        unsafe {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            // Check if parent already died between our fork and prctl.
-            if !engine::registry::is_pid_alive(parent_pid) {
+        if let Some(ref resume_val) = args.resume {
+            if resume_val.is_empty() {
+                // Open the resume dialog inside `run()` so dismissal goes
+                // through the normal dialog lifecycle (clear_dialog_area).
+                args.message = Some("/resume".to_string());
+            } else if let Some(loaded) = smelt_core::session::load(resume_val) {
+                app.load_session(loaded);
+            } else {
+                eprintln!("error: session '{}' not found", resume_val);
                 std::process::exit(1);
             }
         }
 
-        // Start socket listener.
-        let (socket_path, socket_rx) =
-            engine::socket::start_listener(my_pid).expect("failed to start agent socket");
-
-        // Detect scope for registry.
-        let scope = engine::paths::git_root(&cwd)
-            .unwrap_or_else(|| cwd.clone())
-            .to_string_lossy()
-            .into_owned();
-
-        // Register in the agent registry (update the pre-registered entry).
-        let branch = engine::paths::git_branch(&cwd);
-        let agent_id = engine::registry::read_entry(my_pid)
-            .ok()
-            .map(|e| e.agent_id)
-            .unwrap_or_else(|| format!("agent-{my_pid}"));
-        engine::registry::register(&engine::registry::RegistryEntry {
-            agent_id,
-            pid: my_pid,
-            parent_pid: Some(parent_pid),
-            git_root: Some(scope.clone()),
-            git_branch: branch,
-            cwd: cwd.to_string_lossy().into_owned(),
-            status: engine::registry::AgentStatus::Idle,
-            task_slug: None,
-            session_id: app.session.id.clone(),
-            socket_path: socket_path.to_string_lossy().into_owned(),
-            depth,
-            started_at: timestamp_now(),
-        })
-        .expect("failed to register agent");
-
-        app.run_subagent(args.message.unwrap(), parent_pid, socket_rx)
-            .await;
-
-        engine::registry::cleanup_self(my_pid);
-    } else if args.headless {
-        let output_format = match args.format {
-            OutputFormat::Text => tui::app::OutputFormat::Text,
-            OutputFormat::Json => tui::app::OutputFormat::Json,
-        };
-        let color_mode = match args.color {
-            ColorMode::Auto => tui::app::ColorMode::Auto,
-            ColorMode::Always => tui::app::ColorMode::Always,
-            ColorMode::Never => tui::app::ColorMode::Never,
-        };
-        app.run_headless(
-            args.message.unwrap(),
-            output_format,
-            color_mode,
-            args.verbose,
-            headless_cancel,
-        )
-        .await;
-    } else {
         // Redirect stderr to a log file so stray output from system processes
         // (e.g. polkit, PAM) or libraries doesn't corrupt the TUI display.
         redirect_stderr();
 
-        // Interactive mode: register if multi-agent is enabled.
-        if multi_agent {
-            let my_pid = std::process::id();
-            let scope = engine::paths::git_root(&cwd)
-                .unwrap_or_else(|| cwd.clone())
-                .to_string_lossy()
-                .into_owned();
-            let branch = engine::paths::git_branch(&cwd);
-
-            let (socket_path, socket_rx) =
-                engine::socket::start_listener(my_pid).expect("failed to start agent socket");
-
-            // Bridge socket messages to the engine + child permission channel.
-            let (child_perm_tx, child_perm_rx) = tokio::sync::mpsc::unbounded_channel();
-            spawn_socket_bridge(socket_rx, engine_injector.clone(), child_perm_tx);
-            app.set_child_permission_rx(child_perm_rx);
-
-            let my_agent_id = planned_agent_id
-                .clone()
-                .unwrap_or_else(engine::registry::next_agent_id);
-            app.agent_id = my_agent_id.clone();
-            if let Err(e) = engine::registry::register(&engine::registry::RegistryEntry {
-                agent_id: my_agent_id,
-                pid: my_pid,
-                parent_pid: None,
-                git_root: Some(scope),
-                git_branch: branch,
-                cwd: cwd.to_string_lossy().into_owned(),
-                status: engine::registry::AgentStatus::Idle,
-                task_slug: None,
-                session_id: app.session.id.clone(),
-                socket_path: socket_path.to_string_lossy().into_owned(),
-                depth: 0,
-                started_at: timestamp_now(),
-            }) {
-                eprintln!("warning: failed to register in agent registry: {e}");
-            }
-
-            // Prune dead entries on startup.
-            engine::registry::prune_dead();
-
-            // Watch for child agent deaths.
-            spawn_child_watcher(my_pid, engine_injector.clone());
-        }
-
         println!();
         app.run(ctx_rx, args.message).await;
-        if !app.session.messages.is_empty() {
-            tui::session::print_resume_hint(&app.session.id);
-        }
-
-        if multi_agent {
-            engine::registry::cleanup_self(std::process::id());
+        if !app.core.session.messages.is_empty() {
+            tui::print_resume_hint(&app.core.session.id);
         }
     }
-    tui::perf::print_summary();
+    smelt_core::perf::print_summary();
+}
+
+/// Assemble the `AppConfig` for a headless frontend from resolved CLI +
+/// config inputs. No saved-state seeding — predictable behaviour from
+/// the CLI invocation; the TUI path threads `SessionCache` through
+/// `TuiApp::new` instead.
+#[allow(clippy::too_many_arguments)]
+fn build_headless_config(
+    model: String,
+    api_base: String,
+    api_key_env: String,
+    provider_type: String,
+    available_models: Vec<smelt_core::config::ResolvedModel>,
+    model_config: engine::ModelConfig,
+    cli_model_override: bool,
+    cli_api_base_override: bool,
+    cli_api_key_env_override: bool,
+    mode_override: Option<protocol::AgentMode>,
+    mode_cycle: Vec<protocol::AgentMode>,
+    reasoning_effort: protocol::ReasoningEffort,
+    reasoning_cycle: Vec<protocol::ReasoningEffort>,
+    settings: smelt_core::config::ResolvedSettings,
+    context_window: Option<u32>,
+) -> smelt_core::AppConfig {
+    let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);
+    let mut mode_cycle = mode_cycle;
+    if !mode_cycle.contains(&mode) {
+        mode_cycle.push(mode);
+    }
+    smelt_core::AppConfig {
+        model,
+        api_base,
+        api_key_env,
+        provider_type,
+        available_models,
+        model_config,
+        cli_model_override,
+        cli_api_base_override,
+        cli_api_key_env_override,
+        mode,
+        mode_cycle,
+        reasoning_effort,
+        reasoning_cycle,
+        settings,
+        context_window,
+    }
 }
 
 /// Redirect stderr (fd 2) to a file in the logs directory so that any stray
@@ -622,60 +594,4 @@ fn redirect_stderr() {
             // description, so it stays open.
         }
     }
-}
-
-fn spawn_socket_bridge(
-    mut socket_rx: tokio::sync::mpsc::UnboundedReceiver<engine::socket::IncomingMessage>,
-    injector: engine::EventInjector,
-    child_perm_tx: tokio::sync::mpsc::UnboundedSender<engine::socket::IncomingMessage>,
-) {
-    tokio::spawn(async move {
-        while let Some(msg) = socket_rx.recv().await {
-            match msg {
-                engine::socket::IncomingMessage::Message {
-                    from_id,
-                    from_slug,
-                    message,
-                } => {
-                    injector.inject_agent_message(from_id, from_slug, message);
-                }
-                engine::socket::IncomingMessage::Query { reply_tx, .. } => {
-                    let _ = reply_tx.send(
-                        "agent is in interactive mode and cannot serve queries at this time".into(),
-                    );
-                }
-                perm @ engine::socket::IncomingMessage::PermissionCheck { .. } => {
-                    let _ = child_perm_tx.send(perm);
-                }
-            }
-        }
-    });
-}
-
-fn spawn_child_watcher(parent_pid: u32, injector: engine::EventInjector) {
-    tokio::spawn(async move {
-        let mut known: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            let children = engine::registry::children_of(parent_pid);
-            let current: std::collections::HashSet<u32> = children.iter().map(|c| c.pid).collect();
-
-            for (pid, agent_id) in &known {
-                if !current.contains(pid) {
-                    injector.inject_agent_exited(agent_id.clone(), None);
-                }
-            }
-
-            known = children.into_iter().map(|c| (c.pid, c.agent_id)).collect();
-        }
-    });
-}
-
-fn timestamp_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
 }

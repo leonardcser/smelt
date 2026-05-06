@@ -18,7 +18,7 @@ arguments and no config file launches the interactive setup wizard.
 
 | Flag                  | Description                                                                                                                       |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `--config <PATH>`     | Path to a custom config file                                                                                                      |
+| `--config <PATH>`     | Path to a custom `init.lua`                                                                                                       |
 | `-m, --model <MODEL>` | Model to use. With configured providers, prefer `provider_name/model_name`; with `--api-base`, use the provider-native model name |
 | `--api-base <URL>`    | API base URL (overrides config)                                                                                                   |
 | `--api-key-env <VAR>` | Env var holding the API key                                                                                                       |
@@ -65,15 +65,6 @@ Models that don't support thinking ignore this setting.
 | Flag                        | Description                        |
 | --------------------------- | ---------------------------------- |
 | `-r, --resume [SESSION_ID]` | Resume a session (picker if no ID) |
-
-## Multi-Agent
-
-| Flag                    | Description                            |
-| ----------------------- | -------------------------------------- |
-| `--multi-agent`         | Enable multi-agent mode                |
-| `--no-multi-agent`      | Disable multi-agent (overrides config) |
-| `--max-agent-depth <N>` | Max spawn depth (default: 1)           |
-| `--max-agents <N>`      | Max concurrent agents (default: 8)     |
 
 ## Runtime
 

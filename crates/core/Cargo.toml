@@ -1,0 +1,37 @@
+[package]
+name = "smelt-core"
+version = "0.4.7"
+edition = "2021"
+
+[dependencies]
+protocol = { path = "../protocol" }
+engine = { path = "../engine" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+glob = "0.3"
+globset = "0.4"
+ignore = "0.4"
+futures-core = "0.3"
+syntect = "5"
+two-face = "0.5"
+similar = "2"
+reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "rustls", "blocking"] }
+rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
+base64 = "0.22"
+sha2 = "0.10"
+tempfile = "3"
+libc = "0.2"
+flate2 = "1"
+seahash = "4"
+mlua = { version = "0.11", features = ["lua54", "vendored"] }
+dirs = "6"
+scraper = "0.26"
+ego-tree = "0.11"
+url = "2"
+unicode-width = "0.1"
+include_dir = "0.7"
+
+[dev-dependencies]
+vt100 = "0.16"

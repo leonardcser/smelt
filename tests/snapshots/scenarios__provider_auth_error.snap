@@ -1,0 +1,36 @@
+---
+source: tests/scenarios.rs
+assertion_line: 90
+expression: out.events
+---
+[
+  "Ready",
+  {
+    "Messages": {
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        }
+      ],
+      "turn_id": 1
+    }
+  },
+  {
+    "TurnComplete": {
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        }
+      ],
+      "meta": {
+        "avg_tps": "[avg_tps]",
+        "elapsed_ms": "[elapsed_ms]",
+        "interrupted": false,
+        "tool_elapsed": {}
+      },
+      "turn_id": 1
+    }
+  }
+]

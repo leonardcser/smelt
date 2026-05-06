@@ -5,7 +5,7 @@ use tokio::sync::Notify;
 /// Lightweight cancellation token backed by an atomic bool + Notify.
 /// Drop-in replacement for `tokio_util::sync::CancellationToken`.
 #[derive(Clone)]
-pub struct CancellationToken {
+pub(crate) struct CancellationToken {
     inner: Arc<Inner>,
 }
 
@@ -21,7 +21,7 @@ struct Inner {
 }
 
 impl CancellationToken {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
                 cancelled: AtomicBool::new(false),
@@ -30,16 +30,16 @@ impl CancellationToken {
         }
     }
 
-    pub fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.inner.cancelled.store(true, Ordering::Release);
         self.inner.notify.notify_waiters();
     }
 
-    pub fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::Acquire)
     }
 
-    pub async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         // Create the Notified future *before* checking the flag so that a
         // cancel() between the check and the await is not lost.
         loop {

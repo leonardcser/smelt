@@ -43,25 +43,6 @@ pub struct TurnMeta {
     /// Per-tool-call elapsed times, keyed by call_id.
     #[serde(default)]
     pub tool_elapsed: HashMap<String, u64>,
-    /// Subagent block data, keyed by spawn_agent call_id.
-    #[serde(default)]
-    pub agent_blocks: HashMap<String, AgentBlockData>,
-}
-
-/// Persisted subagent block state for session resume.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentBlockData {
-    pub slug: Option<String>,
-    pub tool_calls: Vec<AgentToolData>,
-}
-
-/// A single tool call from a subagent's execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentToolData {
-    pub tool_name: String,
-    pub summary: String,
-    pub elapsed_ms: Option<u64>,
-    pub is_error: bool,
 }
 
 /// Model-parameter overrides applied to a single turn.
@@ -89,14 +70,14 @@ pub struct RuleSetOverride {
     pub deny: Vec<String>,
 }
 
-/// Per-turn permission overrides for tools, bash, and web_fetch.
+/// Per-turn permission overrides. `tools` matches tool *names*; every
+/// other entry in `subcommands` is a per-tool subpattern bucket
+/// (`bash`, `web_fetch`, `mcp`, or any tool that registers one).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PermissionOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<RuleSetOverride>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bash: Option<RuleSetOverride>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub web_fetch: Option<RuleSetOverride>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub subcommands: HashMap<String, RuleSetOverride>,
 }

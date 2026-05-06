@@ -1,50 +1,48 @@
-//! Low-level buffer editing primitives for `InputState`.
+//! Low-level buffer editing primitives for `PromptState`.
 //!
 //! These operate directly on `buf`, `cpos`, and `attachment_ids`, and are the
 //! implementation details behind the `KeyAction` dispatch in `mod.rs`. They
 //! assume any selection handling, undo recording, and completer recomputation
 //! has already been set up by the caller (the dispatcher).
 
-use super::{InputState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
-use crate::attachment::AttachmentId;
-use crate::vim::ViMode;
+use super::{PromptState, ATTACHMENT_MARKER, PASTE_LINE_THRESHOLD};
+use crate::ui::VimMode;
+use smelt_core::attachment::AttachmentId;
 
-impl InputState {
+impl PromptState {
     /// Save undo state before an editing operation.
     /// When vim is in insert mode, skip — the entire insert session is
     /// already covered by the undo entry saved on insert entry.
-    pub fn save_undo(&mut self) {
-        if let Some(ref vim) = self.vim {
-            if vim.mode() == ViMode::Insert {
-                return; // insert session groups all edits into one undo step
-            }
+    pub(crate) fn save_undo(&mut self, mode: VimMode) {
+        if self.win.vim_enabled && mode == VimMode::Insert {
+            return; // insert session groups all edits into one undo step
         }
-        self.history.save(crate::undo::UndoEntry::snapshot(
-            &self.buf,
-            self.cpos,
-            &self.attachment_ids,
+        self.win.history.save(crate::ui::UndoEntry::snapshot(
+            &self.win.text,
+            self.win.cpos,
+            &self.win.attachment_ids,
         ));
     }
 
-    pub(super) fn insert_char(&mut self, c: char) {
+    pub(super) fn insert_char(&mut self, c: char, mode: VimMode) {
         self.from_paste = false;
-        if self.selection_range().is_some() {
-            self.save_undo();
-            self.delete_selection();
+        if self.selection_range(mode).is_some() {
+            self.save_undo(mode);
+            self.delete_selection(mode);
         }
-        self.buf.insert(self.cpos, c);
-        self.cpos += c.len_utf8();
+        self.win.text.insert(self.win.cpos, c);
+        self.win.cpos += c.len_utf8();
         self.recompute_completer();
     }
 
-    pub(super) fn backspace(&mut self) {
-        if self.selection_range().is_some() {
-            self.save_undo();
-            self.delete_selection();
+    pub(super) fn backspace(&mut self, mode: VimMode) {
+        if self.selection_range(mode).is_some() {
+            self.save_undo(mode);
+            self.delete_selection(mode);
             self.recompute_completer();
             return;
         }
-        if self.cpos == 0 {
+        if self.win.cpos == 0 {
             return;
         }
         // If deleting the closing `"` of a `"@path"` token, remove the whole token.
@@ -52,12 +50,12 @@ impl InputState {
             if start == 0 {
                 self.from_paste = false;
             }
-            self.buf.drain(start..self.cpos);
-            self.cpos = start;
+            self.win.text.drain(start..self.win.cpos);
+            self.win.cpos = start;
             self.recompute_completer();
             return;
         }
-        let prev = self.buf[..self.cpos]
+        let prev = self.win.text[..self.win.cpos]
             .char_indices()
             .next_back()
             .map(|(i, _)| i)
@@ -66,21 +64,21 @@ impl InputState {
             self.from_paste = false;
         }
         self.maybe_remove_attachment(prev);
-        self.buf.drain(prev..self.cpos);
-        self.cpos = prev;
+        self.win.text.drain(prev..self.win.cpos);
+        self.win.cpos = prev;
         self.recompute_completer();
     }
 
     /// If the cursor is right after the closing `"` of a `"@path"` token,
     /// return the byte offset of the opening `"`.
     fn quoted_at_ref_start(&self) -> Option<usize> {
-        let before = &self.buf[..self.cpos];
+        let before = &self.win.text[..self.win.cpos];
         if !before.ends_with('"') {
             return None;
         }
         let inner = &before[..before.len() - 1];
         let at_pos = inner.rfind("@\"")?;
-        if at_pos > 0 && !self.buf[..at_pos].ends_with(char::is_whitespace) {
+        if at_pos > 0 && !self.win.text[..at_pos].ends_with(char::is_whitespace) {
             return None;
         }
         if inner[at_pos + 2..].contains('"') {
@@ -90,127 +88,127 @@ impl InputState {
     }
 
     pub(super) fn delete_word_backward(&mut self) {
-        if self.cpos == 0 {
+        if self.win.cpos == 0 {
             return;
         }
-        let target = crate::text_utils::word_backward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
+        let target = crate::ui::text::word_backward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
         );
         if target == 0 {
             self.from_paste = false;
         }
-        self.remove_attachments_in_range(target, self.cpos);
-        self.buf.drain(target..self.cpos);
-        self.cpos = target;
+        self.remove_attachments_in_range(target, self.win.cpos);
+        self.win.text.drain(target..self.win.cpos);
+        self.win.cpos = target;
         self.recompute_completer();
     }
 
     pub(super) fn delete_char_forward(&mut self) {
-        if self.cpos >= self.buf.len() {
+        if self.win.cpos >= self.win.text.len() {
             return;
         }
-        self.maybe_remove_attachment(self.cpos);
-        let next = self.buf[self.cpos..]
+        self.maybe_remove_attachment(self.win.cpos);
+        let next = self.win.text[self.win.cpos..]
             .char_indices()
             .nth(1)
-            .map(|(i, _)| self.cpos + i)
-            .unwrap_or(self.buf.len());
-        self.buf.drain(self.cpos..next);
+            .map(|(i, _)| self.win.cpos + i)
+            .unwrap_or(self.win.text.len());
+        self.win.text.drain(self.win.cpos..next);
         self.recompute_completer();
     }
 
     pub(super) fn delete_word_forward(&mut self) {
-        if self.cpos >= self.buf.len() {
+        if self.win.cpos >= self.win.text.len() {
             return;
         }
-        let target = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
+        let target = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
         );
-        self.remove_attachments_in_range(self.cpos, target);
-        self.buf.drain(self.cpos..target);
+        self.remove_attachments_in_range(self.win.cpos, target);
+        self.win.text.drain(self.win.cpos..target);
         self.recompute_completer();
     }
 
-    pub(super) fn kill_to_end_of_line(&mut self) {
-        let end = self.buf[self.cpos..]
+    pub(super) fn kill_to_end_of_line(&mut self, clipboard: &mut crate::ui::Clipboard) {
+        let end = self.win.text[self.win.cpos..]
             .find('\n')
-            .map(|i| self.cpos + i)
-            .unwrap_or(self.buf.len());
-        let killed = self.buf[self.cpos..end].to_string();
-        self.remove_attachments_in_range(self.cpos, end);
-        self.buf.drain(self.cpos..end);
-        self.kill_and_copy(killed);
+            .map(|i| self.win.cpos + i)
+            .unwrap_or(self.win.text.len());
+        let killed = self.win.text[self.win.cpos..end].to_string();
+        self.remove_attachments_in_range(self.win.cpos, end);
+        self.win.text.drain(self.win.cpos..end);
+        self.kill_and_copy(killed, clipboard);
         self.recompute_completer();
     }
 
-    pub(super) fn kill_to_start_of_line(&mut self) {
-        let start = self.buf[..self.cpos]
+    pub(super) fn kill_to_start_of_line(&mut self, clipboard: &mut crate::ui::Clipboard) {
+        let start = self.win.text[..self.win.cpos]
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        let killed = self.buf[start..self.cpos].to_string();
-        self.remove_attachments_in_range(start, self.cpos);
-        self.buf.drain(start..self.cpos);
-        self.cpos = start;
-        self.kill_and_copy(killed);
+        let killed = self.win.text[start..self.win.cpos].to_string();
+        self.remove_attachments_in_range(start, self.win.cpos);
+        self.win.text.drain(start..self.win.cpos);
+        self.win.cpos = start;
+        self.kill_and_copy(killed, clipboard);
         self.recompute_completer();
     }
 
     pub(super) fn delete_to_start_of_line(&mut self) {
-        let start = self.buf[..self.cpos]
+        let start = self.win.text[..self.win.cpos]
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        self.remove_attachments_in_range(start, self.cpos);
-        self.buf.drain(start..self.cpos);
-        self.cpos = start;
+        self.remove_attachments_in_range(start, self.win.cpos);
+        self.win.text.drain(start..self.win.cpos);
+        self.win.cpos = start;
         self.recompute_completer();
     }
 
     pub(super) fn uppercase_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
+        let end = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
         );
-        if end == self.cpos {
+        if end == self.win.cpos {
             return;
         }
-        let upper: String = self.buf[self.cpos..end].to_uppercase();
-        self.buf.replace_range(self.cpos..end, &upper);
-        self.cpos += upper.len();
+        let upper: String = self.win.text[self.win.cpos..end].to_uppercase();
+        self.win.text.replace_range(self.win.cpos..end, &upper);
+        self.win.cpos += upper.len();
         self.recompute_completer();
     }
 
     pub(super) fn lowercase_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
+        let end = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
         );
-        if end == self.cpos {
+        if end == self.win.cpos {
             return;
         }
-        let lower: String = self.buf[self.cpos..end].to_lowercase();
-        self.buf.replace_range(self.cpos..end, &lower);
-        self.cpos += lower.len();
+        let lower: String = self.win.text[self.win.cpos..end].to_lowercase();
+        self.win.text.replace_range(self.win.cpos..end, &lower);
+        self.win.cpos += lower.len();
         self.recompute_completer();
     }
 
     pub(super) fn capitalize_word(&mut self) {
-        let end = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
+        let end = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
         );
-        if end == self.cpos {
+        if end == self.win.cpos {
             return;
         }
-        let word = &self.buf[self.cpos..end];
+        let word = &self.win.text[self.win.cpos..end];
         let mut cap = String::with_capacity(word.len());
         let mut first = true;
         for c in word.chars() {
@@ -221,32 +219,33 @@ impl InputState {
                 cap.push(c);
             }
         }
-        self.buf.replace_range(self.cpos..end, &cap);
-        self.cpos += cap.len();
+        self.win.text.replace_range(self.win.cpos..end, &cap);
+        self.win.cpos += cap.len();
         self.recompute_completer();
     }
 
     pub(super) fn undo(&mut self) {
-        let current = crate::undo::UndoEntry::snapshot(&self.buf, self.cpos, &self.attachment_ids);
-        if let Some(entry) = self.history.undo(current) {
-            self.buf = entry.buf;
-            self.cpos = entry.cpos;
-            self.attachment_ids = entry.attachments;
+        let current =
+            crate::ui::UndoEntry::snapshot(&self.win.text, self.win.cpos, &self.win.attachment_ids);
+        if let Some(entry) = self.win.history.undo(current) {
+            self.win.text = entry.buf;
+            self.win.cpos = entry.cpos;
+            self.win.attachment_ids = entry.attachments;
         }
         self.recompute_completer();
     }
 
     pub(super) fn move_word_forward(&mut self) -> bool {
-        if self.cpos >= self.buf.len() {
+        if self.win.cpos >= self.win.text.len() {
             return false;
         }
-        let target = crate::text_utils::word_forward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
+        let target = crate::ui::text::word_forward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
         );
-        if target != self.cpos {
-            self.cpos = target;
+        if target != self.win.cpos {
+            self.win.cpos = target;
             self.recompute_completer();
             true
         } else {
@@ -255,16 +254,16 @@ impl InputState {
     }
 
     pub(super) fn move_word_backward(&mut self) -> bool {
-        if self.cpos == 0 {
+        if self.win.cpos == 0 {
             return false;
         }
-        let target = crate::text_utils::word_backward_pos(
-            &self.buf,
-            self.cpos,
-            crate::text_utils::CharClass::Word,
+        let target = crate::ui::text::word_backward_pos(
+            &self.win.text,
+            self.win.cpos,
+            crate::ui::text::CharClass::Word,
         );
-        if target != self.cpos {
-            self.cpos = target;
+        if target != self.win.cpos {
+            self.win.cpos = target;
             self.recompute_completer();
             true
         } else {
@@ -283,61 +282,62 @@ impl InputState {
         }
 
         let lines = data.lines().count();
-        let char_threshold = PASTE_LINE_THRESHOLD * (crate::render::term_width().saturating_sub(1));
+        let char_threshold =
+            PASTE_LINE_THRESHOLD * (crate::content::term_width().saturating_sub(1));
         // Mark as from_paste if inserting at the beginning of the current line.
         // This prevents pasted content starting with '!' from being treated as a shell escape.
-        let line_start = self.buf[..self.cpos]
+        let line_start = self.win.text[..self.win.cpos]
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        if self.cpos == line_start {
+        if self.win.cpos == line_start {
             self.from_paste = true;
         }
         if lines >= PASTE_LINE_THRESHOLD || data.len() >= char_threshold {
             let id = self.store.insert_paste(data);
             self.insert_attachment_id(id);
         } else {
-            self.buf.insert_str(self.cpos, &data);
-            self.cpos += data.len();
+            self.win.text.insert_str(self.win.cpos, &data);
+            self.win.cpos += data.len();
         }
     }
 
     pub(super) fn insert_attachment_id(&mut self, id: AttachmentId) {
-        let idx = self.buf[..self.cpos]
+        let idx = self.win.text[..self.win.cpos]
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
             .count();
-        self.attachment_ids.insert(idx, id);
-        self.buf.insert(self.cpos, ATTACHMENT_MARKER);
-        self.cpos += ATTACHMENT_MARKER.len_utf8();
+        self.win.attachment_ids.insert(idx, id);
+        self.win.text.insert(self.win.cpos, ATTACHMENT_MARKER);
+        self.win.cpos += ATTACHMENT_MARKER.len_utf8();
     }
 
     /// Remove attachment IDs for any markers in `buf[start..end]`.
     pub(super) fn remove_attachments_in_range(&mut self, start: usize, end: usize) {
-        let before = self.buf[..start]
+        let before = self.win.text[..start]
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
             .count();
-        let count = self.buf[start..end]
+        let count = self.win.text[start..end]
             .chars()
             .filter(|&c| c == ATTACHMENT_MARKER)
             .count();
         for i in (0..count).rev() {
             let idx = before + i;
-            if idx < self.attachment_ids.len() {
-                self.attachment_ids.remove(idx);
+            if idx < self.win.attachment_ids.len() {
+                self.win.attachment_ids.remove(idx);
             }
         }
     }
 
     pub(super) fn maybe_remove_attachment(&mut self, byte_pos: usize) {
-        if self.buf[byte_pos..].starts_with(ATTACHMENT_MARKER) {
-            let idx = self.buf[..byte_pos]
+        if self.win.text[byte_pos..].starts_with(ATTACHMENT_MARKER) {
+            let idx = self.win.text[..byte_pos]
                 .chars()
                 .filter(|&c| c == ATTACHMENT_MARKER)
                 .count();
-            if idx < self.attachment_ids.len() {
-                self.attachment_ids.remove(idx);
+            if idx < self.win.attachment_ids.len() {
+                self.win.attachment_ids.remove(idx);
             }
         }
     }
@@ -346,7 +346,7 @@ impl InputState {
     pub(super) fn move_to_line(&mut self, target_line: usize) {
         let mut line = 0;
         let mut pos = 0;
-        for (i, c) in self.buf.char_indices() {
+        for (i, c) in self.win.text.char_indices() {
             if line == target_line {
                 pos = i;
                 break;
@@ -361,17 +361,20 @@ impl InputState {
         }
         if line < target_line {
             // target beyond end, go to last line start
-            pos = self.buf.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            pos = self.win.text.rfind('\n').map(|i| i + 1).unwrap_or(0);
         }
-        self.cpos = pos;
+        self.win.cpos = pos;
         self.recompute_completer();
     }
 
     /// Kill text into the kill ring and copy to the system clipboard.
-    pub(super) fn kill_and_copy(&mut self, text: String) {
-        if !text.is_empty() {
-            let _ = crate::app::copy_to_clipboard(&text);
+    /// Records the clipboard write on the kill ring so subsequent
+    /// pastes know this is *our* latest push (distinguished from an
+    /// externally-updated clipboard).
+    pub(super) fn kill_and_copy(&mut self, text: String, clipboard: &mut crate::ui::Clipboard) {
+        if !text.is_empty() && clipboard.write(&text).is_ok() {
+            clipboard.kill_ring.record_clipboard_write(text.clone());
         }
-        self.kill_ring.kill(text);
+        clipboard.kill_ring.kill(text);
     }
 }

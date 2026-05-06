@@ -1,7 +1,7 @@
 //! Secret redaction for chat content.
 //!
 //! The policy is **redact-at-ingress**: data entering the conversation from
-//! outside the model (user input, tool results, inter-agent messages) is
+//! outside the model (user input, tool results) is
 //! scrubbed once at the boundary, before it lands in history. Model-generated
 //! content (assistant text, reasoning, tool-call arguments) is never touched.
 //! This is the only layer preventing secrets from leaving the machine toward
@@ -444,7 +444,7 @@ fn entropy_tokens(input: &str) -> Vec<(usize, usize, f64)> {
 /// Only mutates `content`. `reasoning_content` and `tool_calls.arguments`
 /// are left alone — they reflect the model's own prior thought and actions,
 /// generated from already-redacted inputs.
-pub fn redact_message(msg: &mut protocol::Message) {
+pub(crate) fn redact_message(msg: &mut protocol::Message) {
     if let Some(ref mut content) = msg.content {
         redact_content(content);
     }

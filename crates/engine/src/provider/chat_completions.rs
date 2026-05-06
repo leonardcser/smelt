@@ -3,7 +3,7 @@ use super::{collect_indexed_tool_calls, non_empty, sse};
 use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
-use crate::tools::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
+use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
@@ -18,9 +18,6 @@ pub(super) fn build_body(
         .iter()
         .map(|m| {
             let mut v = serde_json::to_value(m).unwrap();
-            if m.role == Role::Agent {
-                super::fixup_agent_message(m, &mut v);
-            }
             if let Some(obj) = v.as_object_mut() {
                 obj.remove("is_error");
                 if m.role == Role::Tool {

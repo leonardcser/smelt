@@ -13,8 +13,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// The dispatch loop matches on these to perform side effects. Ordering here
 /// doesn't matter — priority comes from the binding list order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyAction {
-    // App control
+pub(crate) enum KeyAction {
+    // TuiApp control
     Quit,
     CancelAgent,
     ClearBuffer,
@@ -22,8 +22,7 @@ pub enum KeyAction {
     CycleReasoning,
     ToggleStash,
     OpenHelp,
-    OpenHistorySearch,
-    PurgeRedraw,
+    Redraw,
     AcceptGhostText,
 
     // Submit
@@ -69,6 +68,8 @@ pub enum KeyAction {
     // Selection (shift+movement extends selection)
     SelectLeft,
     SelectRight,
+    SelectUp,
+    SelectDown,
     SelectWordForward,
     SelectWordBackward,
     SelectStartOfLine,
@@ -81,12 +82,12 @@ pub enum KeyAction {
 // ── Context ──────────────────────────────────────────────────────────────────
 
 /// Snapshot of app state used for condition matching.
-pub struct KeyContext {
-    pub buf_empty: bool,
-    pub vim_non_insert: bool,
-    pub vim_enabled: bool,
-    pub agent_running: bool,
-    pub ghost_text_visible: bool,
+pub(crate) struct KeyContext {
+    pub(crate) buf_empty: bool,
+    pub(crate) vim_non_insert: bool,
+    pub(crate) vim_enabled: bool,
+    pub(crate) agent_running: bool,
+    pub(crate) ghost_text_visible: bool,
 }
 
 // ── Conditions ───────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ impl Cond {
 
 /// Builder for binding conditions.
 #[derive(Clone, Copy, Debug)]
-pub struct When {
+pub(crate) struct When {
     buf_empty: Cond,
     vim_non_insert: Cond,
     vim_enabled: Cond,
@@ -147,11 +148,6 @@ impl When {
 
     const fn not_vim_non_insert(mut self) -> Self {
         self.vim_non_insert = Cond::No;
-        self
-    }
-
-    const fn not_vim(mut self) -> Self {
-        self.vim_enabled = Cond::No;
         self
     }
 
@@ -250,7 +246,7 @@ static BINDINGS: &[Binding] = &[
         when().ghost_text().buf_empty(),
         KeyAction::AcceptGhostText,
     ),
-    // ── App control ─────────────────────────────────────────────────────
+    // ── TuiApp control ─────────────────────────────────────────────────────
     // Ctrl+C: context-dependent (menu/completer/clear/quit/cancel)
     // Note: menu and completer dismissal happen before keymap lookup.
     bind(
@@ -274,13 +270,7 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::Char('s'), CTRL, when(), KeyAction::ToggleStash),
     bind(KeyCode::BackTab, NONE, when(), KeyAction::ToggleMode),
     bind(KeyCode::Char('t'), CTRL, when(), KeyAction::CycleReasoning),
-    bind(
-        KeyCode::Char('r'),
-        CTRL,
-        when().not_vim_non_insert(),
-        KeyAction::OpenHistorySearch,
-    ),
-    bind(KeyCode::Char('l'), CTRL, when(), KeyAction::PurgeRedraw),
+    bind(KeyCode::Char('l'), CTRL, when(), KeyAction::Redraw),
     bind(
         KeyCode::Char('?'),
         NONE,
@@ -414,51 +404,33 @@ static BINDINGS: &[Binding] = &[
     bind(
         KeyCode::Left,
         SHIFT.union(ALT),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordBackward,
     ),
     bind(
         KeyCode::Right,
         SHIFT.union(ALT),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordForward,
     ),
     bind(
         KeyCode::Left,
         SHIFT.union(CTRL),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordBackward,
     ),
     bind(
         KeyCode::Right,
         SHIFT.union(CTRL),
-        when().not_vim(),
+        when(),
         KeyAction::SelectWordForward,
     ),
-    bind(
-        KeyCode::Left,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectLeft,
-    ),
-    bind(
-        KeyCode::Right,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectRight,
-    ),
-    bind(
-        KeyCode::Home,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectStartOfLine,
-    ),
-    bind(
-        KeyCode::End,
-        SHIFT,
-        when().not_vim(),
-        KeyAction::SelectEndOfLine,
-    ),
+    bind(KeyCode::Left, SHIFT, when(), KeyAction::SelectLeft),
+    bind(KeyCode::Right, SHIFT, when(), KeyAction::SelectRight),
+    bind(KeyCode::Up, SHIFT, when(), KeyAction::SelectUp),
+    bind(KeyCode::Down, SHIFT, when(), KeyAction::SelectDown),
+    bind(KeyCode::Home, SHIFT, when(), KeyAction::SelectStartOfLine),
+    bind(KeyCode::End, SHIFT, when(), KeyAction::SelectEndOfLine),
     // ── Arrow / Home / End navigation ───────────────────────────────────
     bind(KeyCode::Left, ALT, when(), KeyAction::MoveWordBackward),
     bind(KeyCode::Left, SUPER, when(), KeyAction::MoveStartOfLine),
@@ -506,7 +478,11 @@ static BINDINGS: &[Binding] = &[
 
 /// Look up the first matching action for the given key event and context.
 /// Returns `None` if no binding matches (caller should try vim / char insert).
-pub fn lookup(code: KeyCode, modifiers: KeyModifiers, ctx: &KeyContext) -> Option<KeyAction> {
+pub(crate) fn lookup(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    ctx: &KeyContext,
+) -> Option<KeyAction> {
     for b in BINDINGS {
         if b.code != code {
             continue;
@@ -537,130 +513,16 @@ pub fn lookup(code: KeyCode, modifiers: KeyModifiers, ctx: &KeyContext) -> Optio
     None
 }
 
-// ── Dialog keymap ────────────────────────────────────────────────────────────
+// ── Help dialog ──────────────────────────────────────────────────────────────
 
-/// Actions shared across dialogs, menus, and list navigation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NavAction {
-    /// Dismiss / cancel the dialog.
-    Dismiss,
-    /// Confirm the current selection.
-    Confirm,
-    /// Move selection up one item.
-    Up,
-    /// Move selection down one item.
-    Down,
-    /// Scroll up one page.
-    PageUp,
-    /// Scroll down one page.
-    PageDown,
-    /// Switch to text editing mode (e.g. Tab in confirm dialog).
-    Edit,
-}
-
-/// Shared dialog key bindings. Dialogs call this instead of hand-matching
-/// the same keys everywhere. Returns `None` for keys the dialog should
-/// handle with its own specific logic.
-pub fn nav_lookup(code: KeyCode, modifiers: KeyModifiers) -> Option<NavAction> {
-    match (code, modifiers) {
-        // Dismiss
-        (KeyCode::Esc, _) => Some(NavAction::Dismiss),
-        (KeyCode::Char('c'), m) if m.contains(CTRL) => Some(NavAction::Dismiss),
-        // Confirm
-        (KeyCode::Enter, m) if !m.contains(SHIFT) => Some(NavAction::Confirm),
-        // Page scroll
-        (KeyCode::Char('u'), m) if m.contains(CTRL) => Some(NavAction::PageUp),
-        (KeyCode::Char('d'), m) if m.contains(CTRL) => Some(NavAction::PageDown),
-        (KeyCode::Up, m) if m.contains(ALT) => Some(NavAction::PageUp),
-        (KeyCode::Down, m) if m.contains(ALT) => Some(NavAction::PageDown),
-        (KeyCode::PageUp, _) => Some(NavAction::PageUp),
-        (KeyCode::PageDown, _) => Some(NavAction::PageDown),
-        // Item navigation
-        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(NavAction::Up),
-        (KeyCode::Char('k'), m) if m.contains(CTRL) => Some(NavAction::Up),
-        (KeyCode::Char('p'), m) if m.contains(CTRL) => Some(NavAction::Up),
-        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => Some(NavAction::Down),
-        (KeyCode::Char('j'), m) if m.contains(CTRL) => Some(NavAction::Down),
-        (KeyCode::Char('n'), m) if m.contains(CTRL) => Some(NavAction::Down),
-        // Edit mode
-        (KeyCode::Tab, _) => Some(NavAction::Edit),
-        _ => None,
-    }
-}
-
-// ── Contextual hints ─────────────────────────────────────────────────────────
-
-/// Shared hint fragments for dialog footers.
-pub mod hints {
-    // Common nav
-    pub fn nav(vim: bool) -> &'static str {
-        if vim {
-            "j/k: navigate"
-        } else {
-            "↑/↓: navigate"
-        }
-    }
-    pub fn picker_nav(vim: bool) -> &'static str {
-        if vim {
-            "ctrl+j/k: navigate"
-        } else {
-            "↑/↓: navigate"
-        }
-    }
-    pub fn scroll(vim: bool) -> &'static str {
-        if vim {
-            "ctrl+u/d: scroll"
-        } else {
-            "pgup/pgdn: scroll"
-        }
-    }
-    pub const CLOSE: &str = "esc: close";
-    pub const CANCEL: &str = "esc: cancel";
-    pub const CONFIRM: &str = "enter: confirm";
-    pub const SELECT: &str = "enter: select";
-
-    // Dialog-specific
-    pub const SEND: &str = "enter: send";
-    pub const ADD_MSG: &str = "tab: add message";
-    pub const EDIT_MSG: &str = "tab: edit";
-    pub const CONFIRM_WITH_MSG: &str = "enter: confirm with message";
-    pub fn dd_delete(vim: bool) -> &'static str {
-        if vim {
-            "dd/\u{232b}: delete"
-        } else {
-            "\u{232b}/dd: delete"
-        }
-    }
-    pub fn del_delete(vim: bool) -> &'static str {
-        if vim {
-            "dd/del: delete"
-        } else {
-            "del: delete"
-        }
-    }
-    pub const DD_PENDING: &str = "press d to confirm delete";
-    pub const KILL_PROC: &str = "\u{232b}: kill selected";
-    pub const BACK: &str = "esc: back";
-    pub const NEXT_Q: &str = "tab: next question";
-
-    /// Build a hint line from fragments.
-    pub fn join(parts: &[&str]) -> String {
-        let mut s = String::from(" ");
-        for (i, part) in parts.iter().enumerate() {
-            if i > 0 {
-                s.push_str("  ");
-            }
-            s.push_str(part);
-        }
-        s
-    }
-
+/// Help dialog content sections sourced by the Lua keymap-help binding.
+pub(crate) mod hints {
     // ── Help dialog content ─────────────────────────────────────────
 
     const HELP_PREFIXES: &[(&str, &str)] = &[
         (
             "/command",
-            "slash commands  (try /resume, /compact, /fork, /ps, /vim\u{2026})",
+            "commands  (try /resume, /compact, /fork, /ps, /vim\u{2026})",
         ),
         ("@<path>", "attach a file or URL"),
         ("!<cmd>", "run a shell command"),
@@ -705,7 +567,7 @@ pub mod hints {
     ];
 
     /// Build the help sections for the current mode.
-    pub fn help_sections(
+    pub(crate) fn help_sections(
         vim_enabled: bool,
     ) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
         let mut sections = vec![

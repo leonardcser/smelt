@@ -1,80 +1,19 @@
-use crossterm::style::Color;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+//! Smelt-specific theme initialization for `crate::ui::Theme`.
+//!
+//! Atomic state (accent, slug, light/dark flag) lives directly on
+//! `crate::ui::Theme` now. This module owns:
+//!   * `populate_ui_theme` — write the smelt highlight groups into a
+//!     `crate::ui::Theme` registry, sourced from the Theme's own state.
+//!   * `detect_background` — OSC 11 / `$COLORFGBG` light/dark probe.
+//!   * `PRESETS` — the picker list for `/theme` & `/color`.
 
-/// Immutable snapshot of the theme atomics taken at the start of a paint
-/// pass. Resolved span colors look up roles in this snapshot instead of
-/// reading the global atomics, so a single redraw is theme-consistent.
-#[derive(Debug, Clone, Copy)]
-pub struct Theme {
-    pub accent: Color,
-    pub slug: Color,
-    pub user_bg: Color,
-    pub code_block_bg: Color,
-    pub bar: Color,
-    pub tool_pending: Color,
-    pub reason_off: Color,
-    pub muted: Color,
-    pub is_light: bool,
-}
+use smelt_core::style::Color;
 
-pub fn snapshot() -> Theme {
-    Theme {
-        accent: accent(),
-        slug: slug_color(),
-        user_bg: user_bg(),
-        code_block_bg: code_block_bg(),
-        bar: bar(),
-        tool_pending: tool_pending(),
-        reason_off: reason_off(),
-        muted: muted(),
-        is_light: is_light(),
-    }
-}
-
-pub const DEFAULT_ACCENT: u8 = 208;
-pub const DEFAULT_ACCENT_LIGHT: u8 = 208;
-
-static ACCENT_VALUE: AtomicU8 = AtomicU8::new(DEFAULT_ACCENT);
-static ACCENT_LIGHT_VALUE: AtomicU8 = AtomicU8::new(DEFAULT_ACCENT_LIGHT);
-
-pub fn accent() -> Color {
-    if is_light() {
-        Color::AnsiValue(ACCENT_LIGHT_VALUE.load(Ordering::Relaxed))
-    } else {
-        Color::AnsiValue(ACCENT_VALUE.load(Ordering::Relaxed))
-    }
-}
-
-pub fn set_accent(value: u8) {
-    ACCENT_VALUE.store(value, Ordering::Relaxed);
-}
-
-pub fn accent_value() -> u8 {
-    ACCENT_VALUE.load(Ordering::Relaxed)
-}
-
-/// Session-only slug color. 0 means "use accent".
-static SLUG_COLOR_VALUE: AtomicU8 = AtomicU8::new(0);
-
-pub fn slug_color() -> Color {
-    let v = SLUG_COLOR_VALUE.load(Ordering::Relaxed);
-    if v == 0 {
-        accent()
-    } else {
-        Color::AnsiValue(v)
-    }
-}
-
-pub fn set_slug_color(value: u8) {
-    SLUG_COLOR_VALUE.store(value, Ordering::Relaxed);
-}
-
-pub fn slug_color_value() -> u8 {
-    SLUG_COLOR_VALUE.load(Ordering::Relaxed)
-}
+/// Re-export so callers can refer to one canonical name.
+pub use crate::ui::DEFAULT_ACCENT;
 
 /// Look up a preset by name. Returns the ansi value if found.
-pub fn preset_by_name(name: &str) -> Option<u8> {
+pub(crate) fn preset_by_name(name: &str) -> Option<u8> {
     PRESETS
         .iter()
         .find(|(n, _, _)| *n == name)
@@ -85,24 +24,15 @@ pub fn preset_by_name(name: &str) -> Option<u8> {
 // Light / dark terminal detection
 // ---------------------------------------------------------------------------
 
-static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
-
-pub fn is_light() -> bool {
-    LIGHT_THEME.load(Ordering::Relaxed)
-}
-
-pub fn set_light(light: bool) {
-    LIGHT_THEME.store(light, Ordering::Relaxed);
-}
-
-/// Detect whether the terminal has a light background and store the result.
-/// Must be called *before* entering the TUI's raw-mode / alternate screen
-/// since we temporarily enable raw mode ourselves for the OSC query.
-pub fn detect_background() {
+/// Detect whether the terminal has a light background and store the
+/// result on `theme`. Must be called *before* entering the TUI's
+/// raw-mode / alternate screen since we temporarily enable raw mode
+/// ourselves for the OSC query.
+pub(crate) fn detect_background(theme: &mut crate::ui::Theme) {
     if let Some(light) = detect_light_background() {
-        set_light(light);
+        theme.set_light(light);
     }
-    // On failure, default stays `false` (dark).
+    // On failure, leave the existing flag (default: dark).
 }
 
 /// Try OSC 11 query first, fall back to `$COLORFGBG`.
@@ -246,103 +176,117 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Theme-aware colors
+// Highlight group population
 // ---------------------------------------------------------------------------
 
-pub fn tool_pending() -> Color {
-    if is_light() {
-        Color::AnsiValue(250)
-    } else {
-        Color::DarkGrey
-    }
-}
+/// Write smelt's default highlight groups into `theme`, sourced from
+/// the Theme's own accent / slug / is_light state. Idempotent — safe
+/// to call every frame so Lua-driven `set_accent` mutations propagate
+/// without an extra notification path.
+///
+/// Group names follow nvim conventions where they overlap (`Visual`,
+/// `Comment`, `ErrorMsg`) and use the `Smelt*` prefix for app-specific
+/// roles (`SmeltAccent`, `SmeltAgent`, `SmeltModePlan`, …). Code with
+/// a `DrawContext` reads these via `ctx.theme.get("Visual")` etc.
+pub(crate) fn populate_ui_theme(theme: &mut crate::ui::Theme) {
+    use crate::ui::grid::Style;
 
-pub const APPLY: Color = Color::AnsiValue(141);
+    let is_light = theme.is_light();
+    crate::content::highlight::set_syntax_theme_light(is_light);
 
-pub fn user_bg() -> Color {
-    if is_light() {
+    let muted = Color::AnsiValue(244);
+    let user_bg = if is_light {
         Color::AnsiValue(254)
     } else {
         Color::AnsiValue(236)
-    }
-}
-
-pub fn code_block_bg() -> Color {
-    if is_light() {
+    };
+    let code_block_bg = if is_light {
         Color::AnsiValue(255)
     } else {
         Color::AnsiValue(233)
-    }
-}
-
-pub fn bar() -> Color {
-    if is_light() {
+    };
+    let bar = if is_light {
         Color::AnsiValue(252)
     } else {
         Color::AnsiValue(237)
-    }
-}
-
-pub fn selection_bg() -> Color {
-    if is_light() {
+    };
+    let selection_bg = if is_light {
         Color::AnsiValue(189)
     } else {
         Color::AnsiValue(238)
-    }
-}
-
-pub fn scrollbar_track() -> Color {
-    if is_light() {
+    };
+    let scrollbar_track = if is_light {
         Color::AnsiValue(254)
     } else {
         Color::AnsiValue(235)
-    }
-}
-
-pub fn scrollbar_thumb() -> Color {
-    if is_light() {
+    };
+    let scrollbar_thumb = if is_light {
         Color::AnsiValue(247)
     } else {
         Color::AnsiValue(243)
-    }
-}
-
-pub const HEADING: Color = Color::AnsiValue(117);
-
-pub fn muted() -> Color {
-    Color::AnsiValue(244)
-}
-
-pub fn reason_off() -> Color {
-    if is_light() {
+    };
+    let cursor_line_bg = if is_light {
+        Color::AnsiValue(253)
+    } else {
+        Color::AnsiValue(237)
+    };
+    let tool_pending = if is_light {
         Color::AnsiValue(250)
     } else {
         Color::DarkGrey
-    }
-}
+    };
+    let reason_off = if is_light {
+        Color::AnsiValue(250)
+    } else {
+        Color::DarkGrey
+    };
 
-pub const REASON_LOW: Color = Color::AnsiValue(75);
-pub const REASON_MED: Color = Color::AnsiValue(214);
-pub const REASON_HIGH: Color = Color::AnsiValue(203);
-pub const REASON_MAX: Color = Color::AnsiValue(196);
-pub const PLAN: Color = Color::AnsiValue(79);
-pub const YOLO: Color = Color::AnsiValue(204);
-pub const EXEC: Color = Color::AnsiValue(197);
-pub const SUCCESS: Color = Color::AnsiValue(77);
-pub const ERROR: Color = Color::Red;
-pub const AGENT: Color = Color::AnsiValue(75);
+    theme.set("Visual", Style::bg(selection_bg));
+    theme.set("CursorLine", Style::bg(cursor_line_bg));
+    theme.set("Comment", Style::fg(muted));
+    theme.set("ErrorMsg", Style::fg(Color::Red));
+    theme.set(
+        "GhostText",
+        Style {
+            dim: true,
+            ..Style::default()
+        },
+    );
+
+    theme.set("SmeltAccent", Style::fg(theme.accent_color()));
+    theme.set("SmeltSlug", Style::bg(theme.slug_color()));
+    theme.set("SmeltUserBg", Style::bg(user_bg));
+    theme.set("SmeltCodeBlockBg", Style::bg(code_block_bg));
+    theme.set("SmeltBar", Style::bg(bar));
+    theme.set("SmeltScrollbarTrack", Style::bg(scrollbar_track));
+    theme.set("SmeltScrollbarThumb", Style::bg(scrollbar_thumb));
+    theme.set("SmeltToolPending", Style::fg(tool_pending));
+    theme.set("SmeltReasonOff", Style::fg(reason_off));
+    theme.set("SmeltSuccess", Style::fg(Color::AnsiValue(77)));
+    theme.set("SmeltHeading", Style::fg(Color::AnsiValue(117)));
+
+    theme.set("SmeltModePlan", Style::fg(Color::AnsiValue(79)));
+    theme.set("SmeltModeApply", Style::fg(Color::AnsiValue(141)));
+    theme.set("SmeltModeYolo", Style::fg(Color::AnsiValue(204)));
+    theme.set("SmeltModeExec", Style::fg(Color::AnsiValue(197)));
+
+    theme.set("SmeltReasonLow", Style::fg(Color::AnsiValue(75)));
+    theme.set("SmeltReasonMed", Style::fg(Color::AnsiValue(214)));
+    theme.set("SmeltReasonHigh", Style::fg(Color::AnsiValue(203)));
+    theme.set("SmeltReasonMax", Style::fg(Color::AnsiValue(196)));
+}
 
 /// Preset themes: (name, detail, ansi value)
 pub const PRESETS: &[(&str, &str, u8)] = &[
-    ("ember", "default", DEFAULT_ACCENT),
+    ("ember", "default", crate::ui::DEFAULT_ACCENT),
     ("coral", "salmon pink", 210),
     ("rose", "soft pink", 211),
     ("gold", "warm yellow", 220),
     ("ice", "cool white-blue", 159),
     ("sky", "light blue", 117),
     ("blue", "classic blue", 69),
-    ("lavender", "purple", 147),
-    ("lilac", "purple", 183),
+    ("lavender", "cool purple", 147),
+    ("lilac", "warm purple", 183),
     ("mint", "soft green", 115),
     ("sage", "muted green", 108),
     ("silver", "grey", 244),
@@ -390,5 +334,34 @@ mod tests {
     fn parse_osc11_garbage() {
         assert!(parse_osc11_response("garbage").is_none());
         assert!(parse_osc11_response("").is_none());
+    }
+
+    #[test]
+    fn populate_writes_groups_for_default_theme() {
+        let mut t = crate::ui::Theme::new();
+        populate_ui_theme(&mut t);
+        assert!(t.get("SmeltAccent").fg.is_some());
+        assert!(t.get("SmeltSlug").bg.is_some());
+        assert!(t.get("Comment").fg.is_some());
+    }
+
+    #[test]
+    fn populate_reflects_set_accent() {
+        let mut t = crate::ui::Theme::new();
+        t.set_accent(108); // sage
+        populate_ui_theme(&mut t);
+        assert_eq!(t.get("SmeltAccent").fg, Some(Color::AnsiValue(108)));
+        // slug == 0 falls back to accent
+        assert_eq!(t.get("SmeltSlug").bg, Some(Color::AnsiValue(108)));
+    }
+
+    #[test]
+    fn populate_light_palette_differs_from_dark() {
+        let mut dark = crate::ui::Theme::new();
+        populate_ui_theme(&mut dark);
+        let mut light = crate::ui::Theme::new();
+        light.set_light(true);
+        populate_ui_theme(&mut light);
+        assert_ne!(dark.get("Visual").bg, light.get("Visual").bg);
     }
 }

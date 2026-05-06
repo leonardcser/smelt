@@ -2,7 +2,7 @@ use super::{collect_indexed_tool_calls, non_empty, sse};
 use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
-use crate::tools::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
+use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
@@ -73,12 +73,6 @@ pub(super) fn build_body(
                 content.push(serde_json::json!({
                     "role": "assistant",
                     "content": message_content,
-                }));
-            }
-            Role::Agent => {
-                content.push(serde_json::json!({
-                    "role": "user",
-                    "content": m.agent_api_text(),
                 }));
             }
             Role::Tool => {

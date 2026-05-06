@@ -11,24 +11,24 @@
 use std::path::PathBuf;
 
 /// Credential persistence backend parameterized by provider-specific addresses.
-pub struct CredStore {
-    pub keyring_service: &'static str,
-    pub keyring_user: &'static str,
-    pub file_path: PathBuf,
+pub(crate) struct CredStore {
+    pub(crate) keyring_service: &'static str,
+    pub(crate) keyring_user: &'static str,
+    pub(crate) file_path: PathBuf,
     /// Environment variable checked first on load. Lets a parent process pass
     /// credentials to a child without touching disk.
-    pub env_var: &'static str,
+    pub(crate) env_var: &'static str,
 }
 
 impl CredStore {
-    pub fn save(&self, json: &str) -> Result<(), String> {
+    pub(crate) fn save(&self, json: &str) -> Result<(), String> {
         self.file_save(json)?;
         let _ = self.keyring_save(json);
         Ok(())
     }
 
     /// Try env var → keyring → file, returning the first JSON blob found.
-    pub fn load(&self) -> Option<String> {
+    pub(crate) fn load(&self) -> Option<String> {
         if let Ok(json) = std::env::var(self.env_var) {
             return Some(json);
         }
@@ -38,7 +38,7 @@ impl CredStore {
         std::fs::read_to_string(&self.file_path).ok()
     }
 
-    pub fn delete(&self) {
+    pub(crate) fn delete(&self) {
         let _ = self.keyring_delete();
         let _ = std::fs::remove_file(&self.file_path);
     }

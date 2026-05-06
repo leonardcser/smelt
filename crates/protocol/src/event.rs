@@ -2,16 +2,141 @@
 
 use crate::content::Content;
 use crate::message::{Message, ToolOutcome};
-use crate::mode::{Mode, ReasoningEffort};
+use crate::mode::{AgentMode, ReasoningEffort};
 use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMeta};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Auxiliary LLM task — routed to a dedicated auxiliary model when the
+/// engine config has one, otherwise falls back to the primary model.
+/// `Btw` is the generic escape hatch (plain `/btw` prompts, plugin
+/// `engine.ask` calls without a specific task tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryTask {
+    Title,
+    Prediction,
+    Compaction,
+    #[default]
+    Btw,
+}
+
+/// How a registered tool interacts with concurrent tool execution.
+///
+/// `Concurrent` (default): runs alongside other tools via the engine's
+/// `pending_tools` channel — good for pure data fetches with no UI.
+///
+/// `Sequential`: deferred until after every concurrent tool has
+/// finished, then dispatched one at a time. Used by tools that open a
+/// dialog and await a user reply — the user should see all other tool
+/// output before the prompt. `ask_user_question` is the canonical
+/// example.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionMode {
+    #[default]
+    Concurrent,
+    Sequential,
+}
+
+/// A tool defined in Lua. Sent from TUI to engine so the engine
+/// can include it in LLM tool definitions and proxy execution back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    /// When set, the tool is only available in these modes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub modes: Option<Vec<AgentMode>>,
+    #[serde(default)]
+    pub execution_mode: ToolExecutionMode,
+    /// When `true`, this tool replaces the core Rust tool of the
+    /// same name. The engine drops the core definition from the LLM
+    /// schema and dispatches calls to Lua instead. When `false`
+    /// (default), registering a name that collides with a core tool
+    /// is an error reported back to the user.
+    #[serde(default)]
+    pub override_core: bool,
+    /// Hook signals declared by the tool. Each `true` flag tells the
+    /// engine to round-trip through `ToolHooksRequest` before
+    /// dispatching the tool — to ask the user for permission, run a
+    /// preflight check, etc. When all flags are false the engine
+    /// dispatches the tool directly (today's behavior, no permission
+    /// gate). Tools that touch security-sensitive surfaces
+    /// (bash, file mutation) MUST opt in.
+    #[serde(default)]
+    pub hooks: ToolHookFlags,
+}
+
+/// Which permission hooks a tool has registered. Sent with
+/// `ToolDef` so the engine knows whether to ask the TUI to
+/// evaluate them per-call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolHookFlags {
+    #[serde(default)]
+    pub confirm_text: bool,
+    #[serde(default)]
+    pub approval_patterns: bool,
+    #[serde(default)]
+    pub preflight: bool,
+}
+
+impl ToolHookFlags {
+    /// True when at least one hook is registered — i.e. the engine must
+    /// round-trip through `ToolHooksRequest` before dispatch.
+    pub fn any(&self) -> bool {
+        self.confirm_text || self.approval_patterns || self.preflight
+    }
+}
+
+/// Final permission decision for a single tool call, produced by the
+/// dispatcher after evaluating hooks and checking policy.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    #[default]
+    Allow,
+    Ask,
+    Deny,
+    #[serde(rename = "error")]
+    Error(String),
+}
+
+/// Result of evaluating a tool's permission hooks for a specific
+/// invocation. Returned by the TUI in response to
+/// `EngineEvent::ToolHooksRequest` (Lua tools) or by the dispatcher's
+/// `evaluate_hooks` (MCP / core tools).
+///
+/// The `decision` field is authoritative: `Allow` → dispatch,
+/// `Ask` → prompt the user, `Deny` → synthetic denial,
+/// `Error(msg)` → synthetic error result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolHooks {
+    /// Final permission decision.
+    #[serde(default)]
+    pub decision: Decision,
+    /// Confirm dialog message; used when `decision == Ask`.
+    /// `None` falls back to the tool name.
+    #[serde(default)]
+    pub confirm_message: Option<String>,
+    /// Approval patterns to offer "always allow" for.
+    /// Used when `decision == Ask`.
+    #[serde(default)]
+    pub approval_patterns: Vec<String>,
+    /// One-line human summary of this invocation. Comes from the
+    /// tool's `summary(args)` Lua callback. Used by the confirm
+    /// dialog header and the engine's `RequestPermission.summary`
+    /// — the engine never extracts arg fields by tool name.
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
 /// Events emitted by the engine. The UI consumes these to update its display.
 ///
-/// Most variants are fire-and-forget. The exceptions are `RequestPermission`
-/// and `RequestAnswer`, which carry a `request_id` that the UI must eventually
-/// reply to via `UiCommand`.
+/// Most variants are fire-and-forget. The exception is `RequestPermission`,
+/// which carries a `request_id` that the UI must eventually reply to via
+/// `UiCommand::PermissionDecision`.
 ///
 /// Event ordering within a turn:
 ///   Ready → (Thinking* → Text* → ToolStarted → ToolOutput* → ToolFinished)*
@@ -43,7 +168,6 @@ pub enum EngineEvent {
         call_id: String,
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
-        summary: String,
     },
 
     /// Incremental output from a running tool (stdout/stderr lines).
@@ -65,12 +189,6 @@ pub enum EngineEvent {
         confirm_message: String,
         approval_patterns: Vec<String>,
         summary: Option<String>,
-    },
-
-    /// Engine needs the user to answer a question (ask_user_question tool).
-    RequestAnswer {
-        request_id: u64,
-        args: HashMap<String, serde_json::Value>,
     },
 
     /// Token usage update after an LLM call.
@@ -102,6 +220,9 @@ pub enum EngineEvent {
     /// Predicted next user input (ghost text autocomplete).
     InputPrediction { text: String, generation: u64 },
 
+    /// Response to a `UiCommand::EngineAsk` request.
+    EngineAskResponse { id: u64, content: String },
+
     /// Snapshot of the engine's message list, sent after each significant step.
     Messages {
         turn_id: u64,
@@ -121,17 +242,36 @@ pub enum EngineEvent {
     /// Engine is shutting down.
     Shutdown { reason: Option<String> },
 
-    /// A subagent exited (expected or unexpected).
-    AgentExited {
-        agent_id: String,
-        exit_code: Option<i32>,
+    /// Engine needs the TUI to execute a Lua-defined tool.
+    ToolDispatch {
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
     },
 
-    /// An inter-agent message arrived via the socket.
-    AgentMessage {
-        from_id: String,
-        from_slug: String,
-        message: String,
+    /// Engine asks the TUI to evaluate a tool's permission
+    /// hooks (`confirm_text`, `approval_patterns`, `preflight`) for a
+    /// specific invocation. The TUI replies with
+    /// `UiCommand::ToolHooksResponse`, after which the engine
+    /// resumes the standard Allow / Deny / Ask flow.
+    ToolHooksRequest {
+        request_id: u64,
+        call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+        mode: AgentMode,
+    },
+
+    /// Result of a core-tool side call requested by Lua via
+    /// `smelt.tools.call`. Streamed back so the suspended Lua coroutine
+    /// can resume with the tool's output.
+    CoreToolResult {
+        request_id: u64,
+        content: String,
+        is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        metadata: Option<serde_json::Value>,
     },
 }
 
@@ -143,7 +283,7 @@ pub enum UiCommand {
     StartTurn {
         turn_id: u64,
         content: Content,
-        mode: Mode,
+        mode: AgentMode,
         model: String,
         reasoning_effort: ReasoningEffort,
         history: Vec<Message>,
@@ -158,9 +298,19 @@ pub enum UiCommand {
         /// Per-turn model parameter overrides (from custom commands).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         model_config_overrides: Option<ModelConfigOverrides>,
-        /// Per-turn permission overrides (from custom commands).
+        /// Per-turn permission overrides (from custom commands or Lua).
         #[serde(skip_serializing_if = "Option::is_none", default)]
         permission_overrides: Option<PermissionOverrides>,
+        /// Full system prompt assembled by the TUI (from prompt sections).
+        /// When present the engine uses this verbatim instead of rendering
+        /// its built-in template.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        system_prompt: Option<String>,
+        /// Tools registered in Lua. The engine
+        /// includes these in the LLM tool definitions and proxies execution
+        /// back to the TUI via `ToolDispatch`.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        tools: Vec<ToolDef>,
     },
 
     /// Inject a message mid-turn (steering / type-ahead).
@@ -176,14 +326,16 @@ pub enum UiCommand {
         message: Option<String>,
     },
 
-    /// Reply to a `RequestAnswer` event.
-    QuestionAnswer {
-        request_id: u64,
-        answer: Option<String>,
-    },
-
     /// Change the active mode while the engine is running.
-    SetMode { mode: Mode },
+    SetAgentMode {
+        mode: AgentMode,
+        /// Updated system prompt for the new mode (if managed by TUI).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        system_prompt: Option<String>,
+        /// Updated tools for the new mode.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        tools: Option<Vec<ToolDef>>,
+    },
 
     /// Change reasoning effort while the engine is running.
     SetReasoningEffort { effort: ReasoningEffort },
@@ -222,13 +374,42 @@ pub enum UiCommand {
         generation: u64,
     },
 
+    /// One-shot LLM call initiated by Lua. The engine spawns
+    /// a fire-and-forget request routed through `task`'s auxiliary
+    /// model (or the primary model when the routing slot is empty) and
+    /// returns the response as `EngineAskResponse`.
+    EngineAsk {
+        id: u64,
+        system: String,
+        messages: Vec<Message>,
+        #[serde(default)]
+        task: AuxiliaryTask,
+    },
+
+    /// Result of a tool execution (response to `ToolDispatch`).
+    ToolResult {
+        request_id: u64,
+        call_id: String,
+        content: String,
+        is_error: bool,
+    },
+
+    /// Result of evaluating a tool's permission hooks (response
+    /// to `EngineEvent::ToolHooksRequest`).
+    ToolHooksResponse { request_id: u64, hooks: ToolHooks },
+
+    /// Side-call from Lua to a core tool.
+    /// The engine runs the named tool and replies with
+    /// `EngineEvent::CoreToolResult`. The parent `call_id` is
+    /// reused so streamed output (e.g. `ToolOutput`) is grouped under
+    /// the visible tool invocation.
+    CallCoreTool {
+        request_id: u64,
+        parent_call_id: String,
+        tool_name: String,
+        args: HashMap<String, serde_json::Value>,
+    },
+
     /// Cancel the current turn.
     Cancel,
-
-    /// Inject an inter-agent message as a steer message.
-    AgentMessage {
-        from_id: String,
-        from_slug: String,
-        message: String,
-    },
 }

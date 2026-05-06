@@ -9,7 +9,7 @@ mod sse;
 
 use crate::cancel::CancellationToken;
 use crate::log;
-pub use protocol::TokenUsage;
+pub(crate) use protocol::TokenUsage;
 use protocol::{Content, Message, ReasoningEffort, ToolCall};
 use reqwest::Client;
 use serde::Serialize;
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 pub struct ToolDefinition {
     #[serde(rename = "type")]
     def_type: AlwaysFunctionDef,
-    pub function: FunctionSchema,
+    pub(crate) function: FunctionSchema,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,14 +53,14 @@ impl ToolDefinition {
 
 /// Internal parsed fields from an API response. Shared across backends.
 pub(crate) struct ParsedResponse {
-    pub content: Option<String>,
-    pub reasoning: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: TokenUsage,
+    pub(crate) content: Option<String>,
+    pub(crate) reasoning: Option<String>,
+    pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) usage: TokenUsage,
 }
 
 impl ParsedResponse {
-    pub fn into_response(self, tokens_per_sec: Option<f64>) -> LLMResponse {
+    pub(crate) fn into_response(self, tokens_per_sec: Option<f64>) -> LLMResponse {
         LLMResponse {
             content: self.content,
             reasoning_content: self.reasoning,
@@ -105,23 +105,23 @@ pub(crate) fn collect_indexed_tool_calls(
 }
 
 /// A streaming delta from the LLM.
-pub enum StreamDelta<'a> {
+pub(crate) enum StreamDelta<'a> {
     Text(&'a str),
     Thinking(&'a str),
 }
 
-pub struct LLMResponse {
-    pub content: Option<String>,
-    pub reasoning_content: Option<String>,
-    pub tool_calls: Vec<ToolCall>,
-    pub usage: TokenUsage,
-    pub tokens_per_sec: Option<f64>,
+pub(crate) struct LLMResponse {
+    pub(crate) content: Option<String>,
+    pub(crate) reasoning_content: Option<String>,
+    pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) usage: TokenUsage,
+    pub(crate) tokens_per_sec: Option<f64>,
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
+pub(crate) enum ProviderError {
     #[error("cancelled")]
     Cancelled,
     #[error("{}", format_rate_limit(resets_at))]
@@ -338,32 +338,27 @@ impl ProviderKind {
 /// Providers that don't support structured outputs ignore it; the model still
 /// usually emits valid JSON thanks to the prompt, but without enforcement.
 #[derive(Clone)]
-pub struct ResponseFormat {
-    pub name: String,
-    pub schema: serde_json::Value,
+pub(crate) struct ResponseFormat {
+    pub(crate) name: String,
+    pub(crate) schema: serde_json::Value,
 }
 
 /// Execution-time options for a `Provider::chat()` call.
-pub struct ChatOptions<'a> {
-    pub cancel: &'a CancellationToken,
-    pub on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
-    pub on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
-    pub response_format: Option<ResponseFormat>,
+pub(crate) struct ChatOptions<'a> {
+    pub(crate) cancel: &'a CancellationToken,
+    pub(crate) on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
+    pub(crate) on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
+    pub(crate) response_format: Option<ResponseFormat>,
 }
 
 impl<'a> ChatOptions<'a> {
-    pub fn new(cancel: &'a CancellationToken) -> Self {
+    pub(crate) fn new(cancel: &'a CancellationToken) -> Self {
         Self {
             cancel,
             on_retry: None,
             on_delta: None,
             response_format: None,
         }
-    }
-
-    pub fn with_response_format(mut self, fmt: ResponseFormat) -> Self {
-        self.response_format = Some(fmt);
-        self
     }
 }
 
@@ -399,15 +394,6 @@ pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, ser
 }
 
 /// Rewrite an Agent-role message as a user message for API serialization.
-pub(crate) fn fixup_agent_message(m: &Message, v: &mut serde_json::Value) {
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert("role".into(), serde_json::json!("user"));
-        obj.remove("agent_from_id");
-        obj.remove("agent_from_slug");
-        obj.insert("content".into(), serde_json::json!(m.agent_api_text()));
-    }
-}
-
 impl Provider {
     pub fn new(api_base: String, api_key: String, provider_type: &str, client: Client) -> Self {
         let api_base = api_base.trim_end_matches('/').to_string();
@@ -423,20 +409,20 @@ impl Provider {
     }
 
     /// Reset the sticky routing state. Call this at the start of each new turn.
-    pub fn reset_turn_state(&self) {
+    pub(crate) fn reset_turn_state(&self) {
         *self.turn_state.lock().unwrap() = None;
     }
 
-    pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
+    pub(crate) fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
         self
     }
 
-    pub fn tool_calling(&self) -> bool {
+    pub(crate) fn tool_calling(&self) -> bool {
         self.model_config.tool_calling()
     }
 
-    pub fn apply_model_overrides(&mut self, overrides: &protocol::ModelConfigOverrides) {
+    pub(crate) fn apply_model_overrides(&mut self, overrides: &protocol::ModelConfigOverrides) {
         if let Some(v) = overrides.temperature {
             self.model_config.temperature = Some(v);
         }
@@ -456,7 +442,7 @@ impl Provider {
 
     // ── Main chat method ────────────────────────────────────────────────
 
-    pub async fn chat(
+    pub(crate) async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
@@ -904,7 +890,7 @@ impl Provider {
         }
     }
 
-    pub async fn complete_predict(
+    pub(crate) async fn complete_predict(
         &self,
         messages: &[protocol::Message],
         model: &str,
@@ -926,24 +912,7 @@ impl Provider {
             .await
     }
 
-    pub async fn extract_web_content(
-        &self,
-        content: &str,
-        prompt: &str,
-        model: &str,
-    ) -> Result<(String, TokenUsage), ProviderError> {
-        let messages = vec![
-            Message::system(
-                "Answer the user's question based solely on the provided web page content. Be concise and direct.".to_string(),
-            ),
-            Message::user(Content::text(format!(
-                "<content>\n{content}\n</content>\n\n{prompt}"
-            ))),
-        ];
-        self.complete_simple(&messages, model, None).await
-    }
-
-    pub async fn complete_title(
+    pub(crate) async fn complete_title(
         &self,
         last_user_message: &str,
         assistant_tail: &str,
@@ -1112,7 +1081,7 @@ fn messages_have_images(messages: &[Message]) -> bool {
     })
 }
 
-pub fn slugify(title: &str) -> String {
+pub(crate) fn slugify(title: &str) -> String {
     title
         .to_lowercase()
         .chars()

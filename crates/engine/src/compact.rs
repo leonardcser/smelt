@@ -16,7 +16,7 @@ use crate::provider::{ChatOptions, Provider, ProviderError, TokenUsage};
 use protocol::{Content, Message, ReasoningEffort, Role};
 
 /// Handoff instructions handed to the summarizing model.
-pub const SUMMARIZATION_PROMPT: &str = include_str!("prompts/compact.md");
+pub(crate) const SUMMARIZATION_PROMPT: &str = include_str!("prompts/compact.md");
 
 /// Lead-in text the _next_ model sees at the top of the handoff summary.
 /// Used both as a marker to detect "already summarized" messages on repeat
@@ -26,7 +26,7 @@ pub const SUMMARY_PREFIX: &str = include_str!("prompts/compact_summary_prefix.md
 
 /// Soft cap on user-message text preserved verbatim after compaction, so the
 /// replacement history leaves room for the next turn in the context window.
-pub const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+pub(crate) const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 
 /// Per-message cap when flattening history for the summarizer: stops a single
 /// oversized tool output from eating the compact prompt's budget.
@@ -42,7 +42,7 @@ const MAX_EMPTY_RETRIES: u8 = 2;
 
 /// Controls how much context the replacement history preserves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InitialContextInjection {
+pub(crate) enum InitialContextInjection {
     /// Drop everything except the summary. Fits a user-initiated `/compact`
     /// where a fresh user message is expected to arrive next.
     DoNotInject,
@@ -53,7 +53,7 @@ pub enum InitialContextInjection {
 
 /// Why compaction is running. Surfaced to logs so flakiness is diagnosable.
 #[derive(Debug, Clone, Copy)]
-pub enum CompactReason {
+pub(crate) enum CompactReason {
     /// The prompt crossed the configured context-window percentage.
     ContextLimit,
     /// The user invoked `/compact`.
@@ -71,7 +71,7 @@ impl CompactReason {
 
 /// Which point in the turn lifecycle triggered compaction.
 #[derive(Debug, Clone, Copy)]
-pub enum CompactPhase {
+pub(crate) enum CompactPhase {
     MidTurn,
     Manual,
 }
@@ -89,10 +89,10 @@ impl CompactPhase {
 /// when. Bundled into a single options struct so `run_compact` doesn't grow
 /// an unwieldy positional argument list.
 #[derive(Debug, Clone, Copy)]
-pub struct CompactOptions {
-    pub injection: InitialContextInjection,
-    pub phase: CompactPhase,
-    pub reason: CompactReason,
+pub(crate) struct CompactOptions {
+    pub(crate) injection: InitialContextInjection,
+    pub(crate) phase: CompactPhase,
+    pub(crate) reason: CompactReason,
 }
 
 /// Run a compaction pass against `history` (which must NOT contain the
@@ -107,7 +107,7 @@ pub struct CompactOptions {
 ///   [`MAX_CONTEXT_TRIMS`] times.
 /// - If the model returns an empty summary, retries up to
 ///   [`MAX_EMPTY_RETRIES`] times before giving up.
-pub async fn run_compact(
+pub(crate) async fn run_compact(
     provider: &Provider,
     history: &[Message],
     model: &str,
@@ -273,7 +273,6 @@ fn stringify_conversation(messages: &[Message]) -> String {
             Role::User => ("User", message_text(m)),
             Role::Assistant => ("Assistant", assistant_text(m)),
             Role::Tool => ("ToolResult", message_text(m)),
-            Role::Agent => ("Agent", m.agent_api_text()),
         };
 
         let text = text.trim();
@@ -339,15 +338,15 @@ fn truncate_bytes_floor(text: &str, max_bytes: usize) -> String {
     out
 }
 
-/// Collect user and inter-agent messages as plain text, skipping anything
+/// Collect user messages as plain text, skipping anything
 /// that was itself produced by a prior compaction.
-pub fn collect_user_messages(messages: &[Message]) -> Vec<String> {
+fn collect_user_messages(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
         .filter_map(|m| {
             let text = match m.role {
                 Role::User => m.content.as_ref()?.as_text().to_string(),
-                Role::Agent => m.agent_api_text(),
+
                 _ => return None,
             };
             let trimmed = text.trim();
@@ -363,7 +362,8 @@ pub fn collect_user_messages(messages: &[Message]) -> Vec<String> {
 /// True if `message` is a handoff summary produced by a prior compaction.
 /// Used on re-compaction so a prior summary doesn't get re-ingested as user
 /// input and nested under a new summary.
-pub fn is_summary_message(message: &Message) -> bool {
+#[cfg(test)]
+fn is_summary_message(message: &Message) -> bool {
     if !matches!(message.role, Role::User) {
         return false;
     }
@@ -381,7 +381,7 @@ fn is_summary_text(text: &str) -> bool {
 /// Assemble the replacement history: recent user-authored messages
 /// (token-budgeted, most recent kept) followed by the handoff summary as the
 /// final user message. Caller prepends the system prompt.
-pub fn build_compacted_history(
+fn build_compacted_history(
     user_messages: Vec<String>,
     summary_text: &str,
     injection: InitialContextInjection,
@@ -434,7 +434,7 @@ fn select_recent_user_messages(user_messages: Vec<String>, max_tokens: usize) ->
 
 /// Very rough token estimator: ~4 bytes per token. Only used to budget user-
 /// message carryover, so exactness against a real tokenizer isn't required.
-pub fn approx_token_count(text: &str) -> usize {
+fn approx_token_count(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 

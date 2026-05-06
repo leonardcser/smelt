@@ -1,6 +1,6 @@
 //! Background session persistence.
 //!
-//! `App::save_session` used to serialize + write the full session on the
+//! `TuiApp::save_session` used to serialize + write the full session on the
 //! main loop — easily 1–5 MB of JSON work at every turn boundary. This
 //! module moves the serialization and disk I/O to a worker thread. The
 //! main loop clones the session + the blob data it needs into a
@@ -11,23 +11,20 @@
 //! Callers that need the on-disk state to be up-to-date (session load,
 //! fork, shutdown) call [`Persister::flush`] to drain the queue first.
 
-use crate::render::{PersistedLayoutCache, RenderCache};
-use crate::session::{self, Session};
+use smelt_core::session::{self, Session};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 /// One image blob to write alongside the session.
-pub struct Blob {
-    pub filename: String,
-    pub data_url: String,
+pub(crate) struct Blob {
+    pub(crate) filename: String,
+    pub(crate) data_url: String,
 }
 
-pub struct PersistRequest {
-    pub session: Session,
-    pub blobs: Vec<Blob>,
-    pub render_cache: Option<RenderCache>,
-    pub layout_cache: Option<PersistedLayoutCache>,
+pub(crate) struct PersistRequest {
+    pub(crate) session: Session,
+    pub(crate) blobs: Vec<Blob>,
 }
 
 enum Cmd {
@@ -35,13 +32,13 @@ enum Cmd {
     Flush(Sender<()>),
 }
 
-pub struct Persister {
+pub(crate) struct Persister {
     tx: Option<Sender<Cmd>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Persister {
-    pub fn spawn() -> Self {
+    pub(crate) fn spawn() -> Self {
         let (tx, rx) = mpsc::channel();
         let handle = thread::Builder::new()
             .name("smelt-persist".into())
@@ -53,7 +50,7 @@ impl Persister {
         }
     }
 
-    pub fn save(&self, req: PersistRequest) {
+    pub(crate) fn save(&self, req: PersistRequest) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Cmd::Save(Box::new(req)));
         }
@@ -61,7 +58,7 @@ impl Persister {
 
     /// Block until all queued saves have been written. No-op if the worker
     /// has already exited (panic or shutdown).
-    pub fn flush(&self) {
+    pub(crate) fn flush(&self) {
         let Some(tx) = &self.tx else { return };
         if self.handle.as_ref().is_some_and(|h| h.is_finished()) {
             return;
@@ -124,12 +121,6 @@ fn write(req: &PersistRequest) {
     let blob_dir = session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs);
     session::save_with_blobs(&req.session, &url_to_blob);
-    if let Some(cache) = &req.render_cache {
-        session::save_render_cache(&req.session, cache);
-    }
-    if let Some(cache) = &req.layout_cache {
-        session::save_layout_cache(&req.session, cache);
-    }
 }
 
 fn write_blobs(

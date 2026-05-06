@@ -1,7 +1,53 @@
 use protocol::TokenUsage;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+// ── Local disk cache (inlined from the retired engine/tools/web_cache.rs) ──
+
+fn cache_dir() -> PathBuf {
+    crate::paths::cache_dir().join("web")
+}
+
+fn key_path(key: &str) -> PathBuf {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let hash = hasher.finish();
+    cache_dir().join(format!("{hash:x}"))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn cache_get(key: &str) -> Option<String> {
+    let path = key_path(key);
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let (first_line, rest) = contents.split_once('\n')?;
+    let expires: u64 = first_line.parse().ok()?;
+    if now_secs() > expires {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+fn cache_put_with_ttl(key: &str, value: &str, ttl: Duration) {
+    let dir = cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = key_path(key);
+    let tmp = dir.join(format!("{}.tmp", std::process::id()));
+    let expires = now_secs() + ttl.as_secs();
+    let data = format!("{expires}\n{value}");
+    if std::fs::write(&tmp, &data).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
 
 /// Per-model pricing in USD per 1M tokens.
 #[derive(Debug, Clone, Copy)]
@@ -14,7 +60,7 @@ pub struct ModelPricing {
 
 impl ModelPricing {
     /// Calculate the cost in USD for the given token usage.
-    pub fn cost(&self, usage: &TokenUsage) -> f64 {
+    pub(crate) fn cost(&self, usage: &TokenUsage) -> f64 {
         let input = usage.prompt_tokens.unwrap_or(0) as f64;
         let output = usage.completion_tokens.unwrap_or(0) as f64;
         let cache_read = usage.cache_read_tokens.unwrap_or(0) as f64;
@@ -81,7 +127,7 @@ static CATALOG: OnceLock<HashMap<(String, String), ModelPricing>> = OnceLock::ne
 
 /// Fetch pricing from models.dev in the background. Call once at startup.
 /// Safe to call multiple times — only the first call populates the catalog.
-pub fn spawn_catalog_fetch(client: reqwest::Client) {
+pub(crate) fn spawn_catalog_fetch(client: reqwest::Client) {
     if CATALOG.get().is_some() {
         return;
     }
@@ -93,7 +139,7 @@ pub fn spawn_catalog_fetch(client: reqwest::Client) {
 
 async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), ModelPricing> {
     // Try disk cache first.
-    if let Some(json) = crate::tools::web_cache::get(CACHE_KEY) {
+    if let Some(json) = cache_get(CACHE_KEY) {
         if let Some(map) = parse_catalog(&json) {
             return map;
         }
@@ -108,7 +154,7 @@ async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), Mo
     };
     let map = parse_catalog(&json).unwrap_or_default();
     if !map.is_empty() {
-        crate::tools::web_cache::put_with_ttl(CACHE_KEY, &json, CACHE_TTL);
+        cache_put_with_ttl(CACHE_KEY, &json, CACHE_TTL);
     }
     map
 }

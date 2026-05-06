@@ -21,7 +21,7 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
-    pub fn tool_calling(&self) -> bool {
+    pub(crate) fn tool_calling(&self) -> bool {
         self.tool_calling.unwrap_or(true)
     }
 }

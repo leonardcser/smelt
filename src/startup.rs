@@ -1,5 +1,5 @@
 use crate::{setup, Args};
-use protocol::{Mode, ReasoningEffort};
+use protocol::{AgentMode, ReasoningEffort};
 
 /// Read an API key from the given environment variable name.
 /// An empty `key_env` yields an empty key (used by providers that don't need one).
@@ -21,22 +21,22 @@ pub fn resolve_api_key(key_env: &str) -> Result<String, String> {
 /// Everything resolved from args + config + cached state before the engine
 /// starts. Produced by [`resolve`] and consumed by the mode dispatch in `main`.
 pub struct ResolvedStartup {
-    pub cfg: tui::config::Config,
-    pub available_models: Vec<tui::config::ResolvedModel>,
+    pub cfg: smelt_core::config::Config,
+    pub available_models: Vec<smelt_core::config::ResolvedModel>,
     pub auxiliary: engine::AuxiliaryModelConfig,
     pub api_base: String,
     pub api_key: String,
     pub api_key_env: String,
     pub provider_type: String,
     pub model: String,
-    pub model_config: tui::config::ModelConfig,
-    pub settings: tui::state::ResolvedSettings,
-    pub multi_agent: bool,
-    pub mode_override: Option<Mode>,
-    pub mode_cycle: Vec<Mode>,
+    pub model_config: smelt_core::config::ModelConfig,
+    pub settings: smelt_core::config::ResolvedSettings,
+    pub mode_override: Option<AgentMode>,
+    pub mode_cycle: Vec<AgentMode>,
     pub reasoning_effort: ReasoningEffort,
     pub reasoning_cycle: Vec<ReasoningEffort>,
     pub startup_auth_error: Option<String>,
+    pub cache: smelt_core::state::SessionCache,
 }
 
 /// Resolve the four priority fallbacks for the active model reference:
@@ -47,16 +47,16 @@ pub struct ResolvedStartup {
 /// caller then falls back to `--api-base`-driven configuration).
 fn resolve_model_reference(
     args: &Args,
-    cfg: &tui::config::Config,
-    available_models: &[tui::config::ResolvedModel],
-    app_state: &tui::state::State,
-) -> Option<tui::config::ResolvedModel> {
-    let pick = |reference: &str, allow_not_found: bool| match tui::config::resolve_model_ref(
+    cfg: &smelt_core::config::Config,
+    available_models: &[smelt_core::config::ResolvedModel],
+    cache: &smelt_core::state::SessionCache,
+) -> Option<smelt_core::config::ResolvedModel> {
+    let pick = |reference: &str, allow_not_found: bool| match smelt_core::config::resolve_model_ref(
         available_models,
         reference,
     ) {
         Ok(model) => Some(model.clone()),
-        Err(tui::config::ResolveModelRefError::NotFound { .. }) if allow_not_found => None,
+        Err(smelt_core::config::ResolveModelRefError::NotFound { .. }) if allow_not_found => None,
         Err(err) => {
             eprintln!("error: {err}");
             std::process::exit(1);
@@ -70,9 +70,9 @@ fn resolve_model_reference(
     } else if let Some(default) = cfg.get_default_model() {
         // Config has a default: use it, ignore cached selection.
         pick(default, false)
-    } else if let Some(ref cached) = app_state.selected_model {
+    } else if let Some(ref cached) = cache.selected_model {
         // No config default: prefer last-used, fall back to first if stale.
-        tui::config::resolve_model_ref(available_models, cached)
+        smelt_core::config::resolve_model_ref(available_models, cached)
             .ok()
             .cloned()
             .or_else(|| available_models.first().cloned())
@@ -81,40 +81,34 @@ fn resolve_model_reference(
     }
 }
 
-/// Load config (honouring `--config` + `--set`), fetch dynamic model lists,
-/// resolve the active model, auxiliary routing, API keys, and all pure
-/// defaults merges (mode, reasoning, settings, multi-agent).
-pub async fn resolve(args: &Args) -> ResolvedStartup {
-    let mut cfg = match args.config {
-        Some(ref path) => {
-            let c = tui::config::Config::load_from(std::path::Path::new(path));
-            match c.source {
-                Some(tui::config::ConfigSource::NotFound) => {
-                    eprintln!("error: config file not found: {path}");
-                    std::process::exit(1);
-                }
-                Some(tui::config::ConfigSource::ParseError) => {
-                    // warning already printed by load_from
-                    std::process::exit(1);
-                }
-                _ => c,
-            }
-        }
-        None => tui::config::Config::load(),
-    };
+/// Build config from Lua registries (already populated by init.lua),
+/// honour `--set`, fetch dynamic model lists, resolve the active model,
+/// auxiliary routing, API keys, and all pure defaults merges.
+pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedStartup {
+    let mut cfg = cfg;
 
     for pair in &args.set {
         let Some((key, value)) = pair.split_once('=') else {
             eprintln!("error: --set requires KEY=VALUE format, got '{pair}'");
             std::process::exit(1);
         };
-        if let Err(e) = cfg.settings.apply(key, value) {
+        let parsed = match value {
+            "true" => true,
+            "false" => false,
+            _ => {
+                eprintln!("error: --set {pair}: invalid bool value '{value}' for {key}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = cfg.settings.set_bool(key, parsed) {
             eprintln!("error: --set {pair}: {e}");
             std::process::exit(1);
         }
     }
 
-    let app_state = tui::state::State::load();
+    cfg.inject_oauth_providers();
+
+    let cache = smelt_core::state::SessionCache::load();
     let mut available_models = cfg.resolve_models();
 
     // For Codex providers, fetch models dynamically from the API (with cache).
@@ -158,7 +152,7 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
 
     // Resolve the active model and the connection details derived from it.
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolved = resolve_model_reference(args, &cfg, &available_models, &app_state);
+        let resolved = resolve_model_reference(args, &cfg, &available_models, &cache);
 
         if let Some(r) = resolved {
             let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
@@ -181,14 +175,29 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
                 r.model_name.clone(),
                 r.config.clone(),
             )
-        } else if cfg.source == Some(tui::config::ConfigSource::NotFound) && args.api_base.is_none()
+        } else if cfg.source == Some(smelt_core::config::ConfigSource::NotFound)
+            && args.api_base.is_none()
         {
             // No config at all — run the interactive setup wizard.
             if !setup::run_initial_setup(&cfg.path).await {
                 std::process::exit(1);
             }
-            cfg = tui::config::Config::load_from(&cfg.path);
+            cfg = smelt_core::config::Config::load_from(&cfg.path);
+            cfg.inject_oauth_providers();
             available_models = cfg.resolve_models();
+            // Inject cached models for OAuth providers discovered after the wizard.
+            if cfg.has_codex_provider() {
+                let ids = engine::auth::cached_models(engine::auth::AuthProvider::Codex);
+                if !ids.is_empty() {
+                    cfg.inject_codex_models(&mut available_models, &ids);
+                }
+            }
+            if cfg.has_copilot_provider() {
+                let ids = engine::auth::cached_models(engine::auth::AuthProvider::Copilot);
+                if !ids.is_empty() {
+                    cfg.inject_copilot_models(&mut available_models, &ids);
+                }
+            }
             if let Some(r) = available_models.first() {
                 let key = match resolve_api_key(&r.api_key_env) {
                     Ok(key) => key,
@@ -230,11 +239,11 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
                     .as_config_str()
                     .to_string(),
                 model,
-                tui::config::ModelConfig::default(),
+                smelt_core::config::ModelConfig::default(),
             )
         } else {
             match cfg.source {
-                Some(tui::config::ConfigSource::ParseError) => {
+                Some(smelt_core::config::ConfigSource::ParseError) => {
                     eprintln!(
                         "error: config file at {} failed to parse (see warning above)\n\
                          Fix the config or provide --api-base and --model.",
@@ -281,7 +290,7 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
     // here so interactive sessions can still render their "set your API key"
     // hint without aborting.
     let auxiliary = {
-        let mut build = |task: tui::config::AuxiliaryTask| {
+        let mut build = |task: smelt_core::config::AuxiliaryTask| {
             auxiliary_routing.model_for(task).map(|resolved| {
                 let key = resolve_api_key(&resolved.api_key_env).unwrap_or_else(|err| {
                     startup_auth_error.get_or_insert(err);
@@ -300,20 +309,11 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
             })
         };
         engine::AuxiliaryModelConfig {
-            title: build(tui::config::AuxiliaryTask::Title),
-            prediction: build(tui::config::AuxiliaryTask::Prediction),
-            compaction: build(tui::config::AuxiliaryTask::Compaction),
-            btw: build(tui::config::AuxiliaryTask::Btw),
+            title: build(smelt_core::config::AuxiliaryTask::Title),
+            prediction: build(smelt_core::config::AuxiliaryTask::Prediction),
+            compaction: build(smelt_core::config::AuxiliaryTask::Compaction),
+            btw: build(smelt_core::config::AuxiliaryTask::Btw),
         }
-    };
-
-    // Multi-agent: CLI flags override config.
-    let multi_agent = if args.no_multi_agent {
-        false
-    } else if args.multi_agent || args.subagent {
-        true
-    } else {
-        cfg.settings.multi_agent.unwrap_or(false)
     };
 
     let mode_override = args
@@ -321,9 +321,9 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         .as_deref()
         .or(cfg.defaults.mode.as_deref())
         .map(|s| {
-            Mode::parse(s).unwrap_or_else(|| {
+            AgentMode::parse(s).unwrap_or_else(|| {
                 eprintln!("warning: unknown mode '{s}', defaulting to normal");
-                Mode::Normal
+                AgentMode::Normal
             })
         });
 
@@ -331,11 +331,11 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         .mode_cycle
         .as_deref()
         .or(cfg.defaults.mode_cycle.as_deref())
-        .map(Mode::parse_list)
+        .map(AgentMode::parse_list)
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| Mode::ALL.to_vec());
+        .unwrap_or_else(|| AgentMode::ALL.to_vec());
 
-    // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
+    // Reasoning effort: CLI --reasoning-effort > config defaults > saved cache.
     let reasoning_effort = args
         .reasoning_effort
         .as_deref()
@@ -346,7 +346,7 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
                 .as_deref()
                 .and_then(ReasoningEffort::parse)
         })
-        .unwrap_or(app_state.reasoning_effort);
+        .unwrap_or(cache.reasoning_effort);
 
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
     let mut reasoning_cycle = args
@@ -360,9 +360,9 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         reasoning_cycle.push(reasoning_effort);
     }
 
-    let mut settings = app_state.settings.resolve(&cfg.settings);
-    // Force auto_compact on for subagent/headless mode.
-    if args.subagent || args.headless {
+    let mut settings = cfg.settings.resolve();
+    // Force auto_compact on for headless mode.
+    if args.headless {
         settings.auto_compact = true;
     }
 
@@ -377,11 +377,11 @@ pub async fn resolve(args: &Args) -> ResolvedStartup {
         model,
         model_config,
         settings,
-        multi_agent,
         mode_override,
         mode_cycle,
         reasoning_effort,
         reasoning_cycle,
         startup_auth_error,
+        cache,
     }
 }

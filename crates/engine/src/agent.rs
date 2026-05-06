@@ -1,17 +1,17 @@
 use crate::compact::{self, CompactOptions, CompactPhase, CompactReason, InitialContextInjection};
 use crate::log;
-use crate::permissions::{Decision, Permissions, RuntimeApprovals};
-use crate::provider::{self, ChatOptions, Provider, ProviderError, ToolDefinition};
-use crate::tools::{self, ToolContext, ToolRegistry, ToolResult};
+use crate::provider::{self, ChatOptions, FunctionSchema, Provider, ProviderError, ToolDefinition};
+use crate::tools::{ToolContext, ToolDispatcher, ToolResult};
 use crate::{ApiConfig, AuxiliaryTask, EngineConfig, ModelConfig};
+use protocol::Decision;
 use protocol::{
-    Content, EngineEvent, Message, Mode, ReasoningEffort, Role, ToolOutcome, TurnMeta, UiCommand,
+    AgentMode, Content, EngineEvent, Message, ReasoningEffort, Role, ToolOutcome, TurnMeta,
+    UiCommand,
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -24,36 +24,16 @@ fn next_request_id() -> u64 {
 }
 
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
-pub async fn engine_task(
+pub(crate) async fn engine_task(
     mut config: EngineConfig,
-    mut registry: ToolRegistry,
-    processes: tools::ProcessRegistry,
+    dispatcher: Box<dyn crate::tools::ToolDispatcher>,
     mut cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     event_tx: mpsc::UnboundedSender<EngineEvent>,
 ) {
     let client = reqwest::Client::new();
     crate::pricing::spawn_catalog_fetch(client.clone());
-    let file_locks = tools::FileLocks::default();
-
-    // Connect MCP servers and register their tools.
-    let _mcp_manager = if !config.mcp_servers.is_empty() {
-        let mgr = crate::mcp::McpManager::start(&config.mcp_servers).await;
-        let tool_defs = mgr.tool_defs().await;
-        for def in tool_defs {
-            registry.register(Box::new(crate::mcp::McpTool::new(
-                def,
-                std::sync::Arc::clone(&mgr),
-            )));
-        }
-        Some(mgr)
-    } else {
-        None
-    };
 
     let _ = event_tx.send(EngineEvent::Ready);
-
-    // Process completion channel for background processes
-    let (proc_done_tx, mut proc_done_rx) = mpsc::unbounded_channel::<(String, Option<i32>)>();
 
     // Context window size — set from config or lazily fetched from the
     // provider API on the first turn.
@@ -63,7 +43,7 @@ pub async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id, session_dir, model_config_overrides, permission_overrides } => {
+                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir: _, model_config_overrides, permission_overrides: _, system_prompt: tui_system_prompt, tools } => {
 
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -72,63 +52,20 @@ pub async fn engine_task(
                         if let Some(overrides) = model_config_overrides {
                             provider.apply_model_overrides(&overrides);
                         }
-                        let turn_permissions: Permissions;
-                        let perm_ref: &Permissions = if let Some(ref perm_ovr) = permission_overrides {
-                            turn_permissions = config.permissions.with_overrides(perm_ovr);
-                            &turn_permissions
-                        } else {
-                            &config.permissions
-                        };
-                        let agent_config = if let Some(ref ma) = config.multi_agent {
-                            let scope = config.cwd.to_string_lossy();
-                            let my_pid = std::process::id();
-                            let my_entry = crate::registry::read_entry(my_pid).ok();
-                            let agent_id = my_entry
-                                .as_ref()
-                                .map(|e| e.agent_id.clone())
-                                .unwrap_or_default();
-                            let parent_id = ma.parent_pid.and_then(|ppid| {
-                                crate::registry::read_entry(ppid)
-                                    .ok()
-                                    .map(|e| e.agent_id)
-                            });
-                            let siblings = if ma.depth > 0 {
-                                let entries = crate::registry::discover(&scope);
-                                entries
-                                    .iter()
-                                    .filter(|e| e.pid != my_pid && e.parent_pid == ma.parent_pid)
-                                    .map(|e| e.agent_id.clone())
-                                    .collect()
-                            } else {
-                                vec![]
-                            };
-                            Some(crate::AgentPromptConfig {
-                                agent_id,
-                                depth: ma.depth,
-                                parent_id,
-                                siblings,
-                            })
-                        } else {
-                            None
-                        };
                         let skill_section = config.skills.as_ref().and_then(|s| s.prompt_section());
-                        let system_prompt = config.system_prompt_override.clone().unwrap_or_else(|| {
-                            crate::build_system_prompt_full(
-                                mode,
-                                &config.cwd,
-                                config.instructions.as_deref(),
-                                agent_config.as_ref(),
-                                skill_section,
-                                config.interactive,
-                            )
-                        });
+                        let system_prompt = tui_system_prompt
+                            .or_else(|| config.system_prompt_override.clone())
+                            .unwrap_or_else(|| {
+                                crate::build_system_prompt_full(
+                                    mode,
+                                    &config.cwd,
+                                    config.instructions.as_deref(),
+                                    skill_section,
+                                )
+                            });
                         let mut turn = Turn {
                             provider,
-                            registry: &registry,
-                            permissions: perm_ref,
-                            runtime_approvals: &config.runtime_approvals,
-                            processes: &processes,
-                            proc_done_tx: &proc_done_tx,
+                            dispatcher: &*dispatcher,
                             cmd_rx: &mut cmd_rx,
                             event_tx: &event_tx,
                             config: &config,
@@ -140,13 +77,10 @@ pub async fn engine_task(
                             turn_id,
                             model,
                             system_prompt,
-                            agent_config,
-                            session_id,
-                            session_dir,
+                            tools,
                             started_at: Instant::now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
-                            file_locks: &file_locks,
                             context_window,
                             compacted_this_turn: false,
                         };
@@ -219,6 +153,16 @@ pub async fn engine_task(
                     } => {
                         spawn_predict_request(&config, &client, history, &event_tx, generation);
                     }
+                    UiCommand::EngineAsk {
+                        id,
+                        system,
+                        messages,
+                        task,
+                    } => {
+                        spawn_engine_ask(
+                            &config, &client, id, system, messages, task, &event_tx,
+                        );
+                    }
                     UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                         config.api.base = api_base;
                         config.api.key = api_key;
@@ -227,9 +171,6 @@ pub async fn engine_task(
                     }
                     _ => {} // Steer, Cancel, etc. only relevant during a turn
                 }
-            }
-            Some((id, exit_code)) = proc_done_rx.recv() => {
-                let _ = event_tx.send(EngineEvent::ProcessCompleted { id, exit_code });
             }
             else => break,
         }
@@ -434,6 +375,44 @@ fn spawn_predict_request(
     });
 }
 
+fn spawn_engine_ask(
+    config: &EngineConfig,
+    client: &reqwest::Client,
+    id: u64,
+    system: String,
+    mut messages: Vec<protocol::Message>,
+    task: AuxiliaryTask,
+    event_tx: &mpsc::UnboundedSender<EngineEvent>,
+) {
+    let request = config.aux_or_primary(task);
+    let provider = build_provider_from_api(&request.api, client);
+    let pricing = PricingContext::from_api(&request.api);
+    let model = request.model;
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let cancel = crate::cancel::CancellationToken::new();
+        messages.insert(0, protocol::Message::system(&system));
+
+        let content = match provider
+            .chat(
+                &messages,
+                &[],
+                &model,
+                protocol::ReasoningEffort::default(),
+                &ChatOptions::new(&cancel),
+            )
+            .await
+        {
+            Ok(resp) => {
+                pricing.emit(&tx, &model, resp.usage);
+                resp.content.unwrap_or_default()
+            }
+            Err(e) => format!("error: {e}"),
+        };
+        let _ = tx.send(EngineEvent::EngineAskResponse { id, content });
+    });
+}
+
 fn build_provider_from_api(api: &ApiConfig, client: &reqwest::Client) -> Provider {
     build_provider(
         &api.base,
@@ -478,12 +457,11 @@ fn build_provider(
 // ── Turn ────────────────────────────────────────────────────────────────────
 
 /// A tool call awaiting execution. Borrows the `ToolCall` from the parent
-/// assistant message and the tool impl from the registry; lifetime `'a`
-/// ties both to the turn iteration that built the plan.
+/// assistant message; the tool name keys the dispatcher when it's time
+/// to launch.
 struct ToolSlot<'a> {
     tc: &'a protocol::ToolCall,
     args: HashMap<String, Value>,
-    tool: &'a dyn tools::Tool,
     confirm_msg: Option<String>,
     start: Instant,
 }
@@ -491,7 +469,7 @@ struct ToolSlot<'a> {
 /// Tool calls from one LLM response, sorted by how they execute.
 ///
 /// Tools whose base decision is `Allow` go into `ready` (run concurrently)
-/// or `sequential` (one at a time, currently only `ask_user_question`).
+/// or `sequential_tools` (tools that blocked the LLM turn).
 /// Tools whose decision is `Ask` go into `pending_perms`; they sit in
 /// `slots` waiting for a `PermissionDecision` to either launch or cancel.
 /// `Deny` decisions don't land here at all — they produce a synthetic
@@ -500,32 +478,48 @@ struct ToolExecutionPlan<'a> {
     slots: Vec<ToolSlot<'a>>,
     ready: Vec<usize>,
     pending_perms: Vec<(usize, u64)>,
-    sequential: Vec<usize>,
+    /// Tools awaiting execution by the TUI (request_id, call_id, start).
+    pending_tools: Vec<(u64, String, Instant)>,
+    /// Tools that opted into sequential execution — deferred
+    /// until after the concurrent phase, then dispatched one at a time.
+    /// (tool_call, args, start)
+    sequential_tools: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
+    /// Tools whose permission hooks are being evaluated by the
+    /// TUI. Resolved by `UiCommand::ToolHooksResponse`, after which
+    /// the call transitions into `pending_tools` (Allow), into
+    /// `pending_tool_perms` (Ask), or into a synthetic deny result.
+    pending_tool_hooks: Vec<(u64, PendingToolCall<'a>)>,
+    /// Tools awaiting a user permission decision after their
+    /// hooks evaluated to `Ask`. Resolved by
+    /// `UiCommand::PermissionDecision`.
+    pending_tool_perms: Vec<(u64, PendingToolCall<'a>)>,
+}
+
+/// In-flight tool call carried through the hooks→permission
+/// pipeline. Mirrors the data `ToolSlot` carries for core tools.
+struct PendingToolCall<'a> {
+    tc: &'a protocol::ToolCall,
+    args: HashMap<String, Value>,
+    tool_start: Instant,
+    is_sequential: bool,
 }
 
 /// Encapsulates the state of a single agent turn.
 struct Turn<'a> {
     provider: Provider,
-    registry: &'a ToolRegistry,
-    permissions: &'a Permissions,
-    runtime_approvals: &'a Arc<RwLock<RuntimeApprovals>>,
-    processes: &'a tools::ProcessRegistry,
-    proc_done_tx: &'a mpsc::UnboundedSender<(String, Option<i32>)>,
+    dispatcher: &'a dyn ToolDispatcher,
     cmd_rx: &'a mut mpsc::UnboundedReceiver<UiCommand>,
     event_tx: &'a mpsc::UnboundedSender<EngineEvent>,
     config: &'a EngineConfig,
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
-    file_locks: &'a tools::FileLocks,
     messages: Vec<Message>,
-    mode: Mode,
+    mode: AgentMode,
     reasoning_effort: ReasoningEffort,
     turn_id: u64,
     model: String,
     system_prompt: String,
-    agent_config: Option<crate::AgentPromptConfig>,
-    session_id: String,
-    session_dir: PathBuf,
+    tools: Vec<protocol::ToolDef>,
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
@@ -545,7 +539,7 @@ impl<'a> Turn<'a> {
     /// from outside the model — is scrubbed at this boundary. Model-generated
     /// messages (assistant, system) are passed through untouched.
     fn push_message(&mut self, mut msg: Message) {
-        if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool | Role::Agent) {
+        if self.config.redact_secrets && matches!(msg.role, Role::User | Role::Tool) {
             crate::redact::redact_message(&mut msg);
         }
         self.messages.push(msg);
@@ -564,9 +558,7 @@ impl<'a> Turn<'a> {
                     self.mode,
                     &self.config.cwd,
                     self.config.instructions.as_deref(),
-                    self.agent_config.as_ref(),
                     skill_section,
-                    self.config.interactive,
                 )
             });
         self.system_prompt = new;
@@ -578,11 +570,6 @@ impl<'a> Turn<'a> {
     }
 
     fn emit_messages_snapshot(&self) {
-        // Only subagents consume Messages snapshots. Interactive mode ignores
-        // them, so skip the expensive clone of the entire conversation history.
-        if self.config.interactive {
-            return;
-        }
         let mut messages = self.messages.clone();
         if messages
             .first()
@@ -703,7 +690,6 @@ impl<'a> Turn<'a> {
             avg_tps,
             interrupted,
             tool_elapsed: self.tool_elapsed.clone(),
-            agent_blocks: std::collections::HashMap::new(),
         }
     }
 
@@ -751,6 +737,23 @@ impl<'a> Turn<'a> {
                 );
                 true
             }
+            UiCommand::EngineAsk {
+                id,
+                system,
+                messages,
+                task,
+            } => {
+                spawn_engine_ask(
+                    self.config,
+                    self.http_client,
+                    id,
+                    system,
+                    messages,
+                    task,
+                    self.event_tx,
+                );
+                true
+            }
             _ => false,
         }
     }
@@ -777,9 +780,25 @@ impl<'a> Turn<'a> {
                 self.emit_messages_snapshot();
                 true
             }
-            UiCommand::SetMode { mode } => {
+            UiCommand::SetAgentMode {
+                mode,
+                system_prompt,
+                tools,
+            } => {
                 self.mode = mode;
-                self.regenerate_system_prompt();
+                if let Some(prompt) = system_prompt {
+                    self.system_prompt = prompt;
+                    if let Some(first) = self.messages.first_mut() {
+                        if matches!(first.role, Role::System) {
+                            *first = Message::system(&self.system_prompt);
+                        }
+                    }
+                } else {
+                    self.regenerate_system_prompt();
+                }
+                if let Some(tools) = tools {
+                    self.tools = tools;
+                }
                 true
             }
             UiCommand::SetReasoningEffort { effort } => {
@@ -797,19 +816,6 @@ impl<'a> Turn<'a> {
             }
             UiCommand::Cancel => {
                 self.cancel.cancel();
-                true
-            }
-            UiCommand::AgentMessage {
-                from_id,
-                from_slug,
-                message,
-            } => {
-                // Don't re-emit EngineEvent::AgentMessage here — the TUI
-                // already rendered the block when the socket bridge first
-                // delivered the event. Just inject into conversation history
-                // so the LLM sees it on the next API call.
-                self.push_message(Message::agent(&from_id, &from_slug, &message));
-                self.emit_messages_snapshot();
                 true
             }
             other => self.handle_background_cmd(other),
@@ -839,15 +845,47 @@ impl<'a> Turn<'a> {
             first = false;
 
             // Ensure the system prompt reflects the current mode — a mid-turn
-            // mode change (via SetMode) updates self.mode but the prompt may
+            // mode change (via SetAgentMode) updates self.mode but the prompt may
             // still describe the old mode.
             self.regenerate_system_prompt();
 
             // Recompute tool definitions each iteration — mode may have
             // changed (e.g. Plan → Apply after plan approval).
             let tool_defs: Vec<ToolDefinition> = if self.provider.tool_calling() {
-                self.registry
-                    .definitions(self.permissions, self.mode, self.config.interactive)
+                let mut defs: Vec<ToolDefinition> = self
+                    .dispatcher
+                    .definitions()
+                    .into_iter()
+                    .filter(|d| {
+                        self.dispatcher
+                            .is_visible(d.function.name.as_str(), self.mode)
+                    })
+                    .collect();
+                // Plugin tools with `override_core` shadow the core
+                // definition of the same name — drop the core one so
+                // the LLM only sees a single schema for that tool name.
+                let overridden: std::collections::HashSet<&str> = self
+                    .tools
+                    .iter()
+                    .filter(|pt| pt.override_core)
+                    .map(|pt| pt.name.as_str())
+                    .collect();
+                if !overridden.is_empty() {
+                    defs.retain(|d| !overridden.contains(d.function.name.as_str()));
+                }
+                for pt in &self.tools {
+                    if let Some(ref modes) = pt.modes {
+                        if !modes.contains(&self.mode) {
+                            continue;
+                        }
+                    }
+                    defs.push(ToolDefinition::new(FunctionSchema {
+                        name: pt.name.clone(),
+                        description: pt.description.clone(),
+                        parameters: pt.parameters.clone(),
+                    }));
+                }
+                defs
             } else {
                 Vec::new()
             };
@@ -996,13 +1034,17 @@ impl<'a> Turn<'a> {
             let mut plan = self.classify_tools(&tool_calls);
             let mut completed: Vec<Option<ToolResult>> =
                 (0..plan.slots.len()).map(|_| None).collect();
-            let (cancelled, deferred) = self.execute_concurrent(&mut plan, &mut completed).await;
-            if !cancelled {
-                self.run_sequential(&plan, &mut completed).await;
-            } else {
+            let (cancelled, deferred, mut tool_results) =
+                self.execute_concurrent(&mut plan, &mut completed).await;
+            let seq_tool_results = self.run_sequential(&plan, &mut completed).await;
+            tool_results.extend(seq_tool_results);
+            if cancelled {
                 self.mark_unfinished_cancelled(&plan, &completed);
             }
             self.collect_results(&plan, completed);
+            for (call_id, content, is_error) in tool_results {
+                self.push_message(Message::tool(call_id, content, is_error));
+            }
             for cmd in deferred {
                 self.handle_turn_cmd(cmd);
             }
@@ -1021,7 +1063,10 @@ impl<'a> Turn<'a> {
             slots: Vec::new(),
             ready: Vec::new(),
             pending_perms: Vec::new(),
-            sequential: Vec::new(),
+            pending_tools: Vec::new(),
+            sequential_tools: Vec::new(),
+            pending_tool_hooks: Vec::new(),
+            pending_tool_perms: Vec::new(),
         };
 
         for tc in tool_calls {
@@ -1033,17 +1078,66 @@ impl<'a> Turn<'a> {
             let args: HashMap<String, Value> =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
-            let summary = tools::tool_arg_summary(&tc.function.name, &args);
             let tool_start = Instant::now();
             self.emit(EngineEvent::ToolStarted {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
                 args: args.clone(),
-                summary,
             });
 
-            let tool = match self.registry.get(&tc.function.name) {
-                Some(t) => t,
+            // Tool dispatch. A tool with `override_core`
+            // shadows the same-named core tool here AND in `definitions()`
+            // — the LLM only sees the Lua schema and we never reach
+            // the core-tool path for that name. Without the flag, the
+            // core tool wins on dispatch (and the engine errors at
+            // schema-emit time for collisions, see `definitions()`).
+            let tool = self.tools.iter().find(|pt| {
+                pt.name == tc.function.name
+                    && (pt.override_core || !self.dispatcher.contains(&tc.function.name))
+            });
+            if let Some(pt) = tool {
+                let is_sequential =
+                    matches!(pt.execution_mode, protocol::ToolExecutionMode::Sequential);
+                if pt.hooks.any() {
+                    // Round-trip through the TUI for permission hooks.
+                    let request_id = next_request_id();
+                    self.emit(EngineEvent::ToolHooksRequest {
+                        request_id,
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function.name.clone(),
+                        args: args.clone(),
+                        mode: self.mode,
+                    });
+                    plan.pending_tool_hooks.push((
+                        request_id,
+                        PendingToolCall {
+                            tc,
+                            args: args.clone(),
+                            tool_start,
+                            is_sequential,
+                        },
+                    ));
+                } else if is_sequential {
+                    plan.sequential_tools.push((tc, args.clone(), tool_start));
+                } else {
+                    let request_id = next_request_id();
+                    self.emit(EngineEvent::ToolDispatch {
+                        request_id,
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function.name.clone(),
+                        args: args.clone(),
+                    });
+                    plan.pending_tools
+                        .push((request_id, tc.id.clone(), tool_start));
+                }
+                continue;
+            }
+
+            let hooks = match self
+                .dispatcher
+                .evaluate_hooks(&tc.function.name, &args, self.mode)
+            {
+                Some(h) => h,
                 None => {
                     self.push_tool_result(
                         &tc.id,
@@ -1055,46 +1149,16 @@ impl<'a> Turn<'a> {
                 }
             };
 
-            let mut decision = tool
-                .decide_override(&args, self.mode, &self.session_dir)
-                .unwrap_or_else(|| {
-                    self.permissions
-                        .decide(self.mode, &tc.function.name, &args, tool.is_mcp())
-                });
-
-            // Runtime approvals (session + workspace) can turn Ask → Allow.
-            if decision == Decision::Ask {
-                let rt = self.runtime_approvals.read().unwrap();
-                let desc = tool
-                    .needs_confirm(&args)
-                    .unwrap_or_else(|| tc.function.name.clone());
-                if rt.is_auto_approved(self.permissions, self.mode, &tc.function.name, &args, &desc)
-                {
-                    decision = Decision::Allow;
-                }
-            }
-
-            // Pre-flight validation: catch errors before prompting (e.g. stale file hash).
-            if let Some(err) = tool.preflight(&args) {
-                self.push_tool_result(&tc.id, &err, true, None);
-                continue;
-            }
-
             let idx = plan.slots.len();
-            match decision {
+            match hooks.decision {
                 Decision::Allow => {
                     plan.slots.push(ToolSlot {
                         tc,
                         args,
-                        tool,
                         confirm_msg: None,
                         start: tool_start,
                     });
-                    if tc.function.name == "ask_user_question" {
-                        plan.sequential.push(idx);
-                    } else {
-                        plan.ready.push(idx);
-                    }
+                    plan.ready.push(idx);
                 }
                 Decision::Deny => {
                     self.push_tool_result(
@@ -1105,17 +1169,13 @@ impl<'a> Turn<'a> {
                         None,
                     );
                 }
+                Decision::Error(ref err) => {
+                    self.push_tool_result(&tc.id, err, true, None);
+                }
                 Decision::Ask => {
-                    let desc = tool
-                        .needs_confirm(&args)
+                    let desc = hooks
+                        .confirm_message
                         .unwrap_or_else(|| tc.function.name.clone());
-                    let approval_patterns = tool.approval_patterns(&args);
-                    let cmd_summary = if tc.function.name == "bash" {
-                        let d = tools::str_arg(&args, "description");
-                        (!d.is_empty()).then_some(d)
-                    } else {
-                        None
-                    };
                     let request_id = next_request_id();
                     self.emit(EngineEvent::RequestPermission {
                         request_id,
@@ -1123,13 +1183,12 @@ impl<'a> Turn<'a> {
                         tool_name: tc.function.name.clone(),
                         args: args.clone(),
                         confirm_message: desc,
-                        approval_patterns,
-                        summary: cmd_summary,
+                        approval_patterns: hooks.approval_patterns,
+                        summary: hooks.summary,
                     });
                     plan.slots.push(ToolSlot {
                         tc,
                         args,
-                        tool,
                         confirm_msg: None,
                         start: tool_start,
                     });
@@ -1147,49 +1206,52 @@ impl<'a> Turn<'a> {
     /// steering / mode / model commands are collected into `deferred` and
     /// replayed after results are committed to history.
     ///
-    /// Returns `(cancelled, deferred_commands)`.
+    /// Returns `(cancelled, deferred_commands, tool_results)`.
     async fn execute_concurrent<'b>(
         &mut self,
         plan: &mut ToolExecutionPlan<'b>,
         completed: &mut [Option<ToolResult>],
-    ) -> (bool, Vec<UiCommand>) {
+    ) -> (bool, Vec<UiCommand>, Vec<(String, String, bool)>) {
         use futures_util::stream::StreamExt;
 
         type TaggedFut<'x> =
             std::pin::Pin<Box<dyn std::future::Future<Output = (usize, ToolResult)> + Send + 'x>>;
 
-        let contexts: Vec<_> = plan
-            .slots
-            .iter()
-            .map(|s| ToolContext {
-                event_tx: self.event_tx,
-                call_id: &s.tc.id,
-                cancel: &self.cancel,
-                processes: self.processes,
-                proc_done_tx: self.proc_done_tx,
-                provider: &self.provider,
-                model: &self.model,
-                session_id: &self.session_id,
-                session_dir: &self.session_dir,
-                file_locks: self.file_locks,
-                engine_config: self.config,
-            })
-            .collect();
+        let contexts: Vec<_> = plan.slots.iter().map(|_| ToolContext).collect();
 
         let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
 
+        // Side-call futures from `smelt.tools.call` invocations.
+        // Tracked separately from `outstanding` since they don't fill a tool
+        // slot — they belong to a parent tool invocation that's already
+        // counted via `pending_tools`.
+        type SideFut<'x> =
+            std::pin::Pin<Box<dyn std::future::Future<Output = (u64, ToolResult)> + Send + 'x>>;
+        let mut side_futs: futures_util::stream::FuturesUnordered<SideFut<'_>> =
+            futures_util::stream::FuturesUnordered::new();
+
+        let dispatcher = self.dispatcher;
         for &i in &plan.ready {
-            let fut = plan.slots[i]
-                .tool
-                .execute(plan.slots[i].args.clone(), &contexts[i]);
+            let fut = dispatcher
+                .dispatch(
+                    &plan.slots[i].tc.function.name,
+                    plan.slots[i].args.clone(),
+                    &contexts[i],
+                )
+                .expect("dispatcher resolved tool at slot-build time");
             futs.push(Box::pin(async move { (i, fut.await) }));
         }
 
-        let mut outstanding = plan.ready.len() + plan.pending_perms.len();
+        let mut outstanding = plan.ready.len()
+            + plan.pending_perms.len()
+            + plan.pending_tools.len()
+            + plan.pending_tool_hooks.len()
+            + plan.pending_tool_perms.len();
         let cancel = &self.cancel;
         let cmd_rx = &mut self.cmd_rx;
         let mut deferred: Vec<UiCommand> = Vec::new();
+        let mut tool_results: Vec<(String, String, bool)> = Vec::new();
 
         let cancelled = loop {
             if outstanding == 0 {
@@ -1199,6 +1261,14 @@ impl<'a> Turn<'a> {
                 Some((idx, result)) = futs.next(), if !futs.is_empty() => {
                     completed[idx] = Some(result);
                     outstanding -= 1;
+                }
+                Some((req_id, result)) = side_futs.next(), if !side_futs.is_empty() => {
+                    let _ = self.event_tx.send(EngineEvent::CoreToolResult {
+                        request_id: req_id,
+                        content: result.content,
+                        is_error: result.is_error,
+                        metadata: result.metadata,
+                    });
                 }
                 _ = cancel.cancelled() => break true,
                 Some(cmd) = cmd_rx.recv() => match cmd {
@@ -1212,9 +1282,13 @@ impl<'a> Turn<'a> {
                             let (idx, _) = plan.pending_perms.swap_remove(pos);
                             if approved {
                                 plan.slots[idx].confirm_msg = message;
-                                let fut = plan.slots[idx]
-                                    .tool
-                                    .execute(plan.slots[idx].args.clone(), &contexts[idx]);
+                                let fut = dispatcher
+                                    .dispatch(
+                                        &plan.slots[idx].tc.function.name,
+                                        plan.slots[idx].args.clone(),
+                                        &contexts[idx],
+                                    )
+                                    .expect("dispatcher resolved tool at slot-build time");
                                 futs.push(Box::pin(async move { (idx, fut.await) }));
                             } else {
                                 let denial = match message {
@@ -1232,12 +1306,194 @@ impl<'a> Turn<'a> {
                                 });
                                 outstanding -= 1;
                             }
+                        } else if let Some(pos) = plan
+                            .pending_tool_perms
+                            .iter()
+                            .position(|(rid, _)| *rid == request_id)
+                        {
+                            // Tool whose hooks evaluated to Ask
+                            // and is now hearing back from the user.
+                            let (_, pending) = plan.pending_tool_perms.swap_remove(pos);
+                            if approved {
+                                if pending.is_sequential {
+                                    plan.sequential_tools.push((
+                                        pending.tc,
+                                        pending.args,
+                                        pending.tool_start,
+                                    ));
+                                } else {
+                                    let rid = next_request_id();
+                                    let _ = self.event_tx.send(EngineEvent::ToolDispatch {
+                                        request_id: rid,
+                                        call_id: pending.tc.id.clone(),
+                                        tool_name: pending.tc.function.name.clone(),
+                                        args: pending.args.clone(),
+                                    });
+                                    plan.pending_tools.push((
+                                        rid,
+                                        pending.tc.id.clone(),
+                                        pending.tool_start,
+                                    ));
+                                }
+                            } else {
+                                let denial = match message {
+                                    Some(msg) => format!(
+                                        "The user denied this tool call with message: {msg}"
+                                    ),
+                                    None => "The user denied this tool call. Try a different \
+                                             approach or ask the user for guidance."
+                                        .to_string(),
+                                };
+                                let elapsed_ms =
+                                    Some(pending.tool_start.elapsed().as_millis() as u64);
+                                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                    call_id: pending.tc.id.clone(),
+                                    result: ToolOutcome {
+                                        content: denial.clone(),
+                                        is_error: false,
+                                        metadata: None,
+                                    },
+                                    elapsed_ms,
+                                });
+                                tool_results.push((pending.tc.id.clone(), denial, false));
+                                outstanding -= 1;
+                            }
                         }
                     }
-                    UiCommand::AgentMessage { .. }
-                    | UiCommand::Steer { .. }
+                    UiCommand::ToolHooksResponse { request_id, hooks } => {
+                        if let Some(pos) = plan
+                            .pending_tool_hooks
+                            .iter()
+                            .position(|(rid, _)| *rid == request_id)
+                        {
+                            let (_, pending) = plan.pending_tool_hooks.swap_remove(pos);
+                            match hooks.decision {
+                                Decision::Allow => {
+                                    if pending.is_sequential {
+                                        plan.sequential_tools.push((
+                                            pending.tc,
+                                            pending.args,
+                                            pending.tool_start,
+                                        ));
+                                    } else {
+                                        let rid = next_request_id();
+                                        let _ = self
+                                            .event_tx
+                                            .send(EngineEvent::ToolDispatch {
+                                                request_id: rid,
+                                                call_id: pending.tc.id.clone(),
+                                                tool_name: pending.tc.function.name.clone(),
+                                                args: pending.args.clone(),
+                                            });
+                                        plan.pending_tools.push((
+                                            rid,
+                                            pending.tc.id.clone(),
+                                            pending.tool_start,
+                                        ));
+                                    }
+                                }
+                                Decision::Deny => {
+                                    let denial = "The user's permission settings blocked \
+                                                  this tool call. Try a different approach \
+                                                  or ask the user for guidance."
+                                        .to_string();
+                                    let elapsed_ms = Some(
+                                        pending.tool_start.elapsed().as_millis() as u64,
+                                    );
+                                    let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                        call_id: pending.tc.id.clone(),
+                                        result: ToolOutcome {
+                                            content: denial.clone(),
+                                            is_error: false,
+                                            metadata: None,
+                                        },
+                                        elapsed_ms,
+                                    });
+                                    tool_results.push((pending.tc.id.clone(), denial, false));
+                                    outstanding -= 1;
+                                }
+                                Decision::Error(ref err) => {
+                                    let elapsed_ms = Some(
+                                        pending.tool_start.elapsed().as_millis() as u64,
+                                    );
+                                    let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                        call_id: pending.tc.id.clone(),
+                                        result: ToolOutcome {
+                                            content: err.clone(),
+                                            is_error: true,
+                                            metadata: None,
+                                        },
+                                        elapsed_ms,
+                                    });
+                                    tool_results.push((pending.tc.id.clone(), err.clone(), true));
+                                    outstanding -= 1;
+                                }
+                                Decision::Ask => {
+                                    let confirm_msg = hooks
+                                        .confirm_message
+                                        .clone()
+                                        .unwrap_or_else(|| pending.tc.function.name.clone());
+                                    let rid = next_request_id();
+                                    let _ = self
+                                        .event_tx
+                                        .send(EngineEvent::RequestPermission {
+                                            request_id: rid,
+                                            call_id: pending.tc.id.clone(),
+                                            tool_name: pending.tc.function.name.clone(),
+                                            args: pending.args.clone(),
+                                            confirm_message: confirm_msg,
+                                            approval_patterns: hooks.approval_patterns,
+                                            summary: hooks.summary,
+                                        });
+                                    plan.pending_tool_perms.push((rid, pending));
+                                }
+                            }
+                        }
+                    }
+                    UiCommand::ToolResult { request_id, call_id, content, is_error } => {
+                        if let Some(pos) = plan
+                            .pending_tools
+                            .iter()
+                            .position(|(rid, _, _)| *rid == request_id)
+                        {
+                            let (_, _, start) = plan.pending_tools.swap_remove(pos);
+                            let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+                            let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                                call_id: call_id.clone(),
+                                result: ToolOutcome {
+                                    content: content.clone(),
+                                    is_error,
+                                    metadata: None,
+                                },
+                                elapsed_ms,
+                            });
+                            tool_results.push((call_id, content, is_error));
+                            outstanding -= 1;
+                        }
+                    }
+                    UiCommand::CallCoreTool { request_id, parent_call_id, tool_name, args } => {
+                        if dispatcher.contains(&tool_name) {
+                            let _ = parent_call_id;
+                            let ctx = ToolContext;
+                            side_futs.push(Box::pin(async move {
+                                let r = dispatcher
+                                    .dispatch(&tool_name, args, &ctx)
+                                    .expect("dispatcher contains tool")
+                                    .await;
+                                (request_id, r)
+                            }));
+                        } else {
+                            let _ = self.event_tx.send(EngineEvent::CoreToolResult {
+                                request_id,
+                                content: format!("tool not found: {tool_name}"),
+                                is_error: true,
+                                metadata: None,
+                            });
+                        }
+                    }
+                    UiCommand::Steer { .. }
                     | UiCommand::Unsteer { .. }
-                    | UiCommand::SetMode { .. }
+                    | UiCommand::SetAgentMode { .. }
                     | UiCommand::SetReasoningEffort { .. }
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
                     _ => {}
@@ -1245,7 +1501,49 @@ impl<'a> Turn<'a> {
             }
         };
 
-        (cancelled, deferred)
+        if cancelled {
+            for (_, call_id, start) in plan.pending_tools.drain(..) {
+                let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                    call_id: call_id.clone(),
+                    result: ToolOutcome {
+                        content: "cancelled".to_string(),
+                        is_error: true,
+                        metadata: None,
+                    },
+                    elapsed_ms,
+                });
+                tool_results.push((call_id, "cancelled".to_string(), true));
+            }
+            for (_, pending) in plan.pending_tool_hooks.drain(..) {
+                let elapsed_ms = Some(pending.tool_start.elapsed().as_millis() as u64);
+                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                    call_id: pending.tc.id.clone(),
+                    result: ToolOutcome {
+                        content: "cancelled".to_string(),
+                        is_error: true,
+                        metadata: None,
+                    },
+                    elapsed_ms,
+                });
+                tool_results.push((pending.tc.id.clone(), "cancelled".to_string(), true));
+            }
+            for (_, pending) in plan.pending_tool_perms.drain(..) {
+                let elapsed_ms = Some(pending.tool_start.elapsed().as_millis() as u64);
+                let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                    call_id: pending.tc.id.clone(),
+                    result: ToolOutcome {
+                        content: "cancelled".to_string(),
+                        is_error: true,
+                        metadata: None,
+                    },
+                    elapsed_ms,
+                });
+                tool_results.push((pending.tc.id.clone(), "cancelled".to_string(), true));
+            }
+        }
+
+        (cancelled, deferred, tool_results)
     }
 
     /// When the turn was cancelled mid-flight, emit a cancelled-result
@@ -1268,16 +1566,49 @@ impl<'a> Turn<'a> {
         }
     }
 
-    /// Phase 2b: sequential tools (currently only `ask_user_question`).
+    /// Phase 2b: sequential tools — deferred past the concurrent
+    /// phase and dispatched one at a time. Used by tools that
+    /// open a dialog and await a user reply.
     async fn run_sequential(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
-        completed: &mut [Option<ToolResult>],
-    ) {
-        for &i in &plan.sequential {
-            let result = self.ask_user(&plan.slots[i].args).await;
-            completed[i] = Some(result);
+        _completed: &mut [Option<ToolResult>],
+    ) -> Vec<(String, String, bool)> {
+        let mut tool_results = Vec::new();
+        let mut cancelled = false;
+        for (tc, args, start) in &plan.sequential_tools {
+            let (content, is_error) = if cancelled || self.cancel.is_cancelled() {
+                cancelled = true;
+                ("cancelled".to_string(), true)
+            } else {
+                let request_id = next_request_id();
+                let _ = self.event_tx.send(EngineEvent::ToolDispatch {
+                    request_id,
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    args: args.clone(),
+                });
+                match self.wait_for_tool_result(request_id).await {
+                    Some(result) => result,
+                    None => {
+                        cancelled = true;
+                        ("cancelled".to_string(), true)
+                    }
+                }
+            };
+            let elapsed_ms = Some(start.elapsed().as_millis() as u64);
+            let _ = self.event_tx.send(EngineEvent::ToolFinished {
+                call_id: tc.id.clone(),
+                result: ToolOutcome {
+                    content: content.clone(),
+                    is_error,
+                    metadata: None,
+                },
+                elapsed_ms,
+            });
+            tool_results.push((tc.id.clone(), content, is_error));
         }
+        tool_results
     }
 
     /// Phase 3: commit each tool's result to history, emit `ToolFinished`,
@@ -1323,8 +1654,8 @@ impl<'a> Turn<'a> {
                 tool_content.push_str(&format!("\n\nUser message: {msg}"));
             }
             let history_content =
-                match tools::result_dedup::duplicate_of(&tool_content, is_error, &self.messages) {
-                    Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
+                match crate::result_dedup::duplicate_of(&tool_content, is_error, &self.messages) {
+                    Some(prior_id) => crate::result_dedup::dedup_stub(prior_id),
                     None => tool_content,
                 };
             self.push_message(Message::tool(slot.tc.id.clone(), history_content, is_error));
@@ -1350,9 +1681,9 @@ impl<'a> Turn<'a> {
 
     /// Call the LLM, monitoring cmd_rx for Cancel during the request.
     /// Returns (response, had_injected_messages). The bool is true when
-    /// Steer or AgentMessage commands arrived during the LLM call and were
-    /// injected into conversation history — the caller should continue the
-    /// loop instead of ending the turn.
+    /// Commands arrived during the LLM call and were injected into
+    /// conversation history — the caller should continue the loop instead of
+    /// ending the turn.
     async fn call_llm(
         &mut self,
         tool_defs: &[ToolDefinition],
@@ -1419,14 +1750,17 @@ impl<'a> Turn<'a> {
                             self.cancel.cancel();
                             cancel_received = true;
                         }
-                        UiCommand::SetMode { mode } => self.mode = mode,
+                        UiCommand::SetAgentMode { mode, system_prompt, tools } => {
+                            self.mode = mode;
+                            if let Some(p) = system_prompt { self.system_prompt = p; }
+                            if let Some(t) = tools { self.tools = t; }
+                        }
                         UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
                         }
                         UiCommand::Steer { .. }
-                        | UiCommand::Unsteer { .. }
-                        | UiCommand::AgentMessage { .. } => deferred_turn_cmds.push(cmd),
+                        | UiCommand::Unsteer { .. } => deferred_turn_cmds.push(cmd),
                         other => {
                             self.handle_background_cmd(other);
                         }
@@ -1443,35 +1777,38 @@ impl<'a> Turn<'a> {
         }
         let had_injected = deferred_turn_cmds
             .iter()
-            .any(|c| matches!(c, UiCommand::Steer { .. } | UiCommand::AgentMessage { .. }));
+            .any(|c| matches!(c, UiCommand::Steer { .. }));
         for cmd in deferred_turn_cmds {
             self.handle_turn_cmd(cmd);
         }
         (result.map(|r| (r, had_injected)), pt, pr)
     }
 
-    /// Handle the ask_user_question tool by requesting an answer from the TUI.
-    async fn ask_user(&mut self, args: &HashMap<String, Value>) -> ToolResult {
-        let request_id = next_request_id();
-        self.emit(EngineEvent::RequestAnswer {
-            request_id,
-            args: args.clone(),
-        });
-        let answer = self.wait_for_answer(request_id).await;
-        ToolResult::ok(answer.unwrap_or_else(|| "no response".to_string()))
-    }
-
-    /// Wait for a QuestionAnswer matching the given request_id.
-    async fn wait_for_answer(&mut self, request_id: u64) -> Option<String> {
+    /// Wait for a ToolResult matching the given request_id.
+    /// Applies mid-wait mode/model/reasoning changes.
+    async fn wait_for_tool_result(&mut self, request_id: u64) -> Option<(String, bool)> {
         loop {
             match self.cmd_rx.recv().await {
-                Some(UiCommand::QuestionAnswer {
+                Some(UiCommand::ToolResult {
                     request_id: id,
-                    answer,
-                }) if id == request_id => return answer,
-                Some(UiCommand::SetMode { mode }) => {
+                    content,
+                    is_error,
+                    ..
+                }) if id == request_id => return Some((content, is_error)),
+                Some(UiCommand::SetAgentMode {
+                    mode,
+                    system_prompt,
+                    tools,
+                }) => {
                     self.mode = mode;
-                    self.regenerate_system_prompt();
+                    if let Some(p) = system_prompt {
+                        self.system_prompt = p;
+                    } else {
+                        self.regenerate_system_prompt();
+                    }
+                    if let Some(t) = tools {
+                        self.tools = t;
+                    }
                 }
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
                 Some(UiCommand::SetModel {
@@ -1500,8 +1837,8 @@ impl<'a> Turn<'a> {
         started_at: Option<Instant>,
     ) {
         let history_content =
-            match tools::result_dedup::duplicate_of(content, is_error, &self.messages) {
-                Some(prior_id) => tools::result_dedup::dedup_stub(prior_id),
+            match crate::result_dedup::duplicate_of(content, is_error, &self.messages) {
+                Some(prior_id) => crate::result_dedup::dedup_stub(prior_id),
                 None => content.to_string(),
             };
         self.push_message(Message::tool(
@@ -1540,24 +1877,6 @@ fn send_usage(
         cost_usd: if cost > 0.0 { Some(cost) } else { None },
         background,
     });
-}
-
-/// Calculate cost from token usage and emit a `TokenUsage` event.
-pub fn emit_usage(
-    tx: &mpsc::UnboundedSender<EngineEvent>,
-    config: &EngineConfig,
-    model: &str,
-    usage: protocol::TokenUsage,
-) {
-    send_usage(
-        tx,
-        &config.api.provider_type,
-        &config.api.model_config,
-        model,
-        usage,
-        None,
-        false,
-    );
 }
 
 /// Emit a background `TokenUsage` event (compaction, title, btw, predict).

@@ -4,53 +4,30 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Mode {
+pub enum AgentMode {
     Normal,
     Plan,
     Apply,
     Yolo,
 }
 
-impl Mode {
-    pub fn toggle(self) -> Self {
-        match self {
-            Mode::Normal => Mode::Plan,
-            Mode::Plan => Mode::Apply,
-            Mode::Apply => Mode::Yolo,
-            Mode::Yolo => Mode::Normal,
-        }
-    }
-
+impl AgentMode {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "normal" => Some(Mode::Normal),
-            "plan" => Some(Mode::Plan),
-            "apply" => Some(Mode::Apply),
-            "yolo" => Some(Mode::Yolo),
+            "normal" => Some(AgentMode::Normal),
+            "plan" => Some(AgentMode::Plan),
+            "apply" => Some(AgentMode::Apply),
+            "yolo" => Some(AgentMode::Yolo),
             _ => None,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Mode::Normal => "normal",
-            Mode::Plan => "plan",
-            Mode::Apply => "apply",
-            Mode::Yolo => "yolo",
-        }
-    }
-
-    /// Cycle to the next mode within the given allowed list.
-    pub fn cycle_within(self, allowed: &[Self]) -> Self {
-        let list = if allowed.is_empty() {
-            Self::ALL
-        } else {
-            allowed
-        };
-        let pos = list.iter().position(|&m| m == self);
-        match pos {
-            Some(i) => list[(i + 1) % list.len()],
-            None => list[0],
+            AgentMode::Normal => "normal",
+            AgentMode::Plan => "plan",
+            AgentMode::Apply => "apply",
+            AgentMode::Yolo => "yolo",
         }
     }
 
@@ -84,18 +61,6 @@ impl ReasoningEffort {
             "high" => Some(Self::High),
             "max" => Some(Self::Max),
             _ => None,
-        }
-    }
-
-    /// Cycle to the next effort level within the given allowed list.
-    pub fn cycle_within(self, allowed: &[Self]) -> Self {
-        if allowed.is_empty() {
-            return self;
-        }
-        let pos = allowed.iter().position(|&e| e == self);
-        match pos {
-            Some(i) => allowed[(i + 1) % allowed.len()],
-            None => allowed[0],
         }
     }
 

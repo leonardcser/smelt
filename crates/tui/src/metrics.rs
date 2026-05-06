@@ -1,11 +1,11 @@
-use crate::config;
 use serde::{Deserialize, Serialize};
+use smelt_core::config;
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 /// Format a USD cost for display.
-pub fn format_cost(usd: f64) -> String {
+pub(crate) fn format_cost(usd: f64) -> String {
     if usd < 0.01 {
         format!("${:.4}", usd)
     } else if usd < 1.0 {
@@ -16,20 +16,20 @@ pub fn format_cost(usd: f64) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricsEntry {
-    pub timestamp_ms: u64,
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub model: String,
+pub(crate) struct MetricsEntry {
+    pub(crate) timestamp_ms: u64,
+    pub(crate) prompt_tokens: u32,
+    pub(crate) completion_tokens: u32,
+    pub(crate) model: String,
     /// Cost of this LLM call in USD. Absent in old entries.
     #[serde(default)]
-    pub cost_usd: Option<f64>,
+    pub(crate) cost_usd: Option<f64>,
     #[serde(default)]
-    pub cache_read_tokens: Option<u32>,
+    pub(crate) cache_read_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_write_tokens: Option<u32>,
+    pub(crate) cache_write_tokens: Option<u32>,
     #[serde(default)]
-    pub reasoning_tokens: Option<u32>,
+    pub(crate) reasoning_tokens: Option<u32>,
 }
 
 fn metrics_path() -> PathBuf {
@@ -37,7 +37,7 @@ fn metrics_path() -> PathBuf {
 }
 
 /// Append a single entry to the metrics JSONL file.
-pub fn append(entry: &MetricsEntry) {
+pub(crate) fn append(entry: &MetricsEntry) {
     let path = metrics_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -55,7 +55,7 @@ pub fn append(entry: &MetricsEntry) {
 }
 
 /// Load all metrics entries from disk.
-pub fn load() -> Vec<MetricsEntry> {
+pub(crate) fn load() -> Vec<MetricsEntry> {
     let path = metrics_path();
     let Ok(f) = std::fs::File::open(&path) else {
         return Vec::new();
@@ -72,7 +72,7 @@ pub fn load() -> Vec<MetricsEntry> {
 // ── Aggregation ─────────────────────────────────────────────────────────────
 
 fn now_ms() -> u64 {
-    crate::session::now_ms()
+    smelt_core::session::now_ms()
 }
 
 fn day_key(ms: u64) -> u64 {
@@ -152,7 +152,7 @@ fn aggregate(entries: &[MetricsEntry]) -> Stats {
 
 // ── Structured output for the renderer ──────────────────────────────────────
 
-pub enum StatsLine {
+pub(crate) enum StatsLine {
     /// Dim label + normal value.
     Kv { label: String, value: String },
     /// Section heading (dim).
@@ -168,7 +168,7 @@ pub enum StatsLine {
 }
 
 #[derive(Clone, Copy)]
-pub enum HeatCell {
+pub(crate) enum HeatCell {
     Empty,
     /// Intensity 0..=3 (maps to increasing brightness).
     Level(u8),
@@ -187,12 +187,12 @@ fn sparkline(values: &[u64]) -> String {
         .collect()
 }
 
-pub struct StatsOutput {
-    pub left: Vec<StatsLine>,
-    pub right: Vec<StatsLine>,
+pub(crate) struct StatsOutput {
+    pub(crate) left: Vec<StatsLine>,
+    pub(crate) right: Vec<StatsLine>,
 }
 
-pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
+pub(crate) fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
     if entries.is_empty() {
         return StatsOutput {
             left: vec![StatsLine::Heading("No metrics recorded yet.".into())],
@@ -325,45 +325,12 @@ pub fn render_stats(entries: &[MetricsEntry]) -> StatsOutput {
     StatsOutput { left, right }
 }
 
-/// Count visual rows needed to display the stats panels.
-/// Accounts for whether side-by-side fits the current terminal width.
-pub fn stats_row_count(left: &[StatsLine], right: &[StatsLine]) -> usize {
-    if right.is_empty() {
-        return left.len();
-    }
-
-    let left_lc = label_col_width(left);
-    let right_lc = label_col_width(right);
-    let left_width = left
-        .iter()
-        .map(|l| stats_line_visual_width(l, left_lc))
-        .max()
-        .unwrap_or(0)
-        + 2;
-    let right_width = right
-        .iter()
-        .map(|l| stats_line_visual_width(l, right_lc))
-        .max()
-        .unwrap_or(0);
-    let term_width = crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80);
-    let gap = 5;
-
-    if left_width + gap + right_width + 2 <= term_width {
-        left.len().max(right.len())
-    } else {
-        // Sequential: left + blank separator + right
-        left.len() + 1 + right.len()
-    }
-}
-
 /// Visual width of a stats line (excluding the 2-char left margin).
 /// Minimum gap between label and value columns.
 const KV_GAP: usize = 2;
 
 /// Compute the label column width for a set of lines (max label length + gap).
-pub fn label_col_width(lines: &[StatsLine]) -> usize {
+fn label_col_width(lines: &[StatsLine]) -> usize {
     lines
         .iter()
         .filter_map(|l| match l {
@@ -375,7 +342,7 @@ pub fn label_col_width(lines: &[StatsLine]) -> usize {
         + KV_GAP
 }
 
-pub fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
+fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
     match line {
         StatsLine::Kv { label, value } => {
             let col = label_col.max(label.len() + KV_GAP);
@@ -388,7 +355,114 @@ pub fn stats_line_visual_width(line: &StatsLine, label_col: usize) -> usize {
     }
 }
 
-pub fn render_session_cost(
+/// Flatten one `StatsLine` to a plain string. Used by the `/stats` and
+/// `/cost` Lua plugins which render through `smelt.ui.dialog.open` and
+/// need a textual representation rather than the structured variants.
+fn stats_line_to_text(line: &StatsLine, label_col: usize) -> String {
+    match line {
+        StatsLine::Kv { label, value } => {
+            let pad = label_col.saturating_sub(label.len());
+            format!("{label}{}{value}", " ".repeat(pad))
+        }
+        StatsLine::Heading(text) => text.clone(),
+        StatsLine::SparklineBars(bars) => bars.clone(),
+        StatsLine::SparklineLegend(text) => text.clone(),
+        StatsLine::HeatRow { label, cells } => {
+            let mut out = String::new();
+            out.push_str(label);
+            out.push(' ');
+            for cell in cells {
+                out.push_str(match cell {
+                    HeatCell::Empty => "·",
+                    HeatCell::Level(0) => "░",
+                    HeatCell::Level(1) => "▒",
+                    HeatCell::Level(2) => "▓",
+                    HeatCell::Level(_) => "█",
+                });
+                out.push(' ');
+            }
+            out
+        }
+        StatsLine::Blank => String::new(),
+    }
+}
+
+/// Render full `/stats` output as a single string. Two-column layout
+/// joined row-by-row when both columns are present; falls back to
+/// sequential left → blank → right.
+pub(crate) fn render_stats_text(out: &StatsOutput) -> String {
+    let left_col = label_col_width(&out.left);
+    let right_col = label_col_width(&out.right);
+    if out.right.is_empty() {
+        return out
+            .left
+            .iter()
+            .map(|l| stats_line_to_text(l, left_col))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    let left_visual = out
+        .left
+        .iter()
+        .map(|l| stats_line_visual_width(l, left_col))
+        .max()
+        .unwrap_or(0);
+    let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+    let right_visual = out
+        .right
+        .iter()
+        .map(|l| stats_line_visual_width(l, right_col))
+        .max()
+        .unwrap_or(0);
+    let gap = 5;
+
+    if left_visual + gap + right_visual + 2 <= term_width {
+        // Side-by-side.
+        let rows = out.left.len().max(out.right.len());
+        (0..rows)
+            .map(|i| {
+                let l_text = out
+                    .left
+                    .get(i)
+                    .map(|l| stats_line_to_text(l, left_col))
+                    .unwrap_or_default();
+                let r_text = out
+                    .right
+                    .get(i)
+                    .map(|l| stats_line_to_text(l, right_col))
+                    .unwrap_or_default();
+                let pad = (left_visual + gap).saturating_sub(l_text.chars().count());
+                format!("{l_text}{}{r_text}", " ".repeat(pad))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        // Sequential.
+        let mut rows: Vec<String> = out
+            .left
+            .iter()
+            .map(|l| stats_line_to_text(l, left_col))
+            .collect();
+        rows.push(String::new());
+        rows.extend(out.right.iter().map(|l| stats_line_to_text(l, right_col)));
+        rows.join("\n")
+    }
+}
+
+/// Render `/cost` output (single column) as a plain string.
+pub(crate) fn render_cost_text(lines: &[StatsLine]) -> String {
+    let col = label_col_width(lines);
+    lines
+        .iter()
+        .map(|l| stats_line_to_text(l, col))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn render_session_cost(
     cost_usd: f64,
     model: &str,
     turns: usize,

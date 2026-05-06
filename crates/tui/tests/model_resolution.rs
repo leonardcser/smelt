@@ -1,23 +1,63 @@
-use tui::config::{resolve_model_ref, AuxiliaryTask, Config, ResolveModelRefError};
+use smelt_core::config::{
+    resolve_model_ref, AuxiliaryConfig, AuxiliaryTask, AuxiliaryUseForConfig, Config, ModelConfig,
+    ProviderConfig, ResolveModelRefError,
+};
+
+fn openai_provider() -> ProviderConfig {
+    ProviderConfig {
+        name: Some("openai".to_string()),
+        provider_type: Some("openai".to_string()),
+        api_base: Some("https://api.openai.com/v1".to_string()),
+        api_key_env: Some("OPENAI_API_KEY".to_string()),
+        models: vec![ModelConfig {
+            name: Some("gpt-5".to_string()),
+            ..Default::default()
+        }],
+    }
+}
+
+fn openrouter_provider() -> ProviderConfig {
+    ProviderConfig {
+        name: Some("openrouter".to_string()),
+        provider_type: Some("openai-compatible".to_string()),
+        api_base: Some("https://openrouter.ai/api/v1".to_string()),
+        api_key_env: Some("OPENROUTER_API_KEY".to_string()),
+        models: vec![ModelConfig {
+            name: Some("anthropic/claude-sonnet-4".to_string()),
+            ..Default::default()
+        }],
+    }
+}
+
+fn anthropic_provider() -> ProviderConfig {
+    ProviderConfig {
+        name: Some("anthropic".to_string()),
+        provider_type: Some("anthropic".to_string()),
+        api_base: Some("https://api.anthropic.com/v1".to_string()),
+        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+        models: vec![ModelConfig {
+            name: Some("claude-sonnet-4".to_string()),
+            ..Default::default()
+        }],
+    }
+}
+
+fn codex_provider() -> ProviderConfig {
+    ProviderConfig {
+        name: Some("chatgpt".to_string()),
+        provider_type: Some("codex".to_string()),
+        api_base: Some("https://chatgpt.com/backend-api/codex".to_string()),
+        api_key_env: None,
+        models: vec![],
+    }
+}
 
 #[test]
 fn resolve_model_reference_prefers_exact_key_even_when_model_name_contains_slashes() {
-    let yaml = r#"
-providers:
-  - name: openrouter
-    type: openai-compatible
-    api_base: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    models:
-      - anthropic/claude-sonnet-4
-  - name: anthropic
-    type: anthropic
-    api_base: https://api.anthropic.com/v1
-    api_key_env: ANTHROPIC_API_KEY
-    models:
-      - claude-sonnet-4
-"#;
-    let cfg: Config = serde_yml::from_str(yaml).unwrap();
+    let cfg = Config {
+        providers: vec![openrouter_provider(), anthropic_provider()],
+        ..Default::default()
+    };
     let resolved = cfg.resolve_models();
 
     let model = resolve_model_ref(&resolved, "openrouter/anthropic/claude-sonnet-4").unwrap();
@@ -26,16 +66,10 @@ providers:
 
 #[test]
 fn resolve_model_reference_accepts_unique_bare_model_name() {
-    let yaml = r#"
-providers:
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5
-"#;
-    let cfg: Config = serde_yml::from_str(yaml).unwrap();
+    let cfg = Config {
+        providers: vec![openai_provider()],
+        ..Default::default()
+    };
     let resolved = cfg.resolve_models();
 
     let model = resolve_model_ref(&resolved, "gpt-5").unwrap();
@@ -44,21 +78,34 @@ providers:
 
 #[test]
 fn auxiliary_model_use_for_defaults_to_all_enabled_and_disables_explicitly() {
-    let yaml = r#"
-providers:
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5
-      - gpt-5-mini
-auxiliary:
-  model: openai/gpt-5-mini
-  use_for:
-    btw: false
-"#;
-    let cfg: Config = serde_yml::from_str(yaml).unwrap();
+    let cfg = Config {
+        providers: vec![ProviderConfig {
+            name: Some("openai".to_string()),
+            provider_type: Some("openai".to_string()),
+            api_base: Some("https://api.openai.com/v1".to_string()),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            models: vec![
+                ModelConfig {
+                    name: Some("gpt-5".to_string()),
+                    ..Default::default()
+                },
+                ModelConfig {
+                    name: Some("gpt-5-mini".to_string()),
+                    ..Default::default()
+                },
+            ],
+        }],
+        auxiliary: AuxiliaryConfig {
+            model: Some("openai/gpt-5-mini".to_string()),
+            use_for: AuxiliaryUseForConfig {
+                title: true,
+                prediction: true,
+                compaction: true,
+                btw: false,
+            },
+        },
+        ..Default::default()
+    };
     let resolved = cfg.resolve_models();
     let routing = cfg.resolve_auxiliary_routing(&resolved).unwrap();
     let aux_key = "openai/gpt-5-mini";
@@ -79,18 +126,14 @@ auxiliary:
 
 #[test]
 fn auxiliary_model_unknown_reference_is_rejected() {
-    let yaml = r#"
-providers:
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5
-auxiliary:
-  model: openai/gpt-typo
-"#;
-    let cfg: Config = serde_yml::from_str(yaml).unwrap();
+    let cfg = Config {
+        providers: vec![openai_provider()],
+        auxiliary: AuxiliaryConfig {
+            model: Some("openai/gpt-typo".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     let resolved = cfg.resolve_models();
     let err = cfg.resolve_auxiliary_routing(&resolved).unwrap_err();
     assert!(matches!(err, ResolveModelRefError::NotFound { .. }));
@@ -98,24 +141,32 @@ auxiliary:
 
 #[test]
 fn auxiliary_model_provider_name_works_for_codex_only() {
-    let yaml = r#"
-providers:
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5
-      - gpt-5-mini
-  - name: chatgpt
-    type: codex
-    api_base: https://chatgpt.com/backend-api/codex
-"#;
-    let openai_cfg: Config = serde_yml::from_str(&format!(
-        "{yaml}\nauxiliary:\n  model: openai\n",
-        yaml = yaml
-    ))
-    .unwrap();
+    let openai_cfg = Config {
+        providers: vec![
+            ProviderConfig {
+                name: Some("openai".to_string()),
+                provider_type: Some("openai".to_string()),
+                api_base: Some("https://api.openai.com/v1".to_string()),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                models: vec![
+                    ModelConfig {
+                        name: Some("gpt-5".to_string()),
+                        ..Default::default()
+                    },
+                    ModelConfig {
+                        name: Some("gpt-5-mini".to_string()),
+                        ..Default::default()
+                    },
+                ],
+            },
+            codex_provider(),
+        ],
+        auxiliary: AuxiliaryConfig {
+            model: Some("openai".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     let resolved = openai_cfg.resolve_models();
     let err = openai_cfg.resolve_auxiliary_routing(&resolved).unwrap_err();
     assert!(
@@ -126,11 +177,32 @@ providers:
         "openai provider name should not be a valid aux ref: {err:?}"
     );
 
-    let codex_cfg: Config = serde_yml::from_str(&format!(
-        "{yaml}\nauxiliary:\n  model: chatgpt\n",
-        yaml = yaml
-    ))
-    .unwrap();
+    let codex_cfg = Config {
+        providers: vec![
+            ProviderConfig {
+                name: Some("openai".to_string()),
+                provider_type: Some("openai".to_string()),
+                api_base: Some("https://api.openai.com/v1".to_string()),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                models: vec![
+                    ModelConfig {
+                        name: Some("gpt-5".to_string()),
+                        ..Default::default()
+                    },
+                    ModelConfig {
+                        name: Some("gpt-5-mini".to_string()),
+                        ..Default::default()
+                    },
+                ],
+            },
+            codex_provider(),
+        ],
+        auxiliary: AuxiliaryConfig {
+            model: Some("chatgpt".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     let resolved = codex_cfg.resolve_models();
     let routing = codex_cfg.resolve_auxiliary_routing(&resolved).unwrap();
     let model = routing.model_for(AuxiliaryTask::Title).unwrap();
@@ -140,16 +212,10 @@ providers:
 
 #[test]
 fn auxiliary_routing_yields_no_model_when_unset() {
-    let yaml = r#"
-providers:
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5
-"#;
-    let cfg: Config = serde_yml::from_str(yaml).unwrap();
+    let cfg = Config {
+        providers: vec![openai_provider()],
+        ..Default::default()
+    };
     let resolved = cfg.resolve_models();
     let routing = cfg.resolve_auxiliary_routing(&resolved).unwrap();
     assert!(routing.model_for(AuxiliaryTask::Title).is_none());
@@ -160,26 +226,38 @@ providers:
 
 #[test]
 fn auxiliary_model_reference_reuses_shared_resolution_rules() {
-    let yaml = r#"
-providers:
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5-mini
-  - name: openrouter
-    type: openai-compatible
-    api_base: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    models:
-      - gpt-5-mini
-auxiliary:
-  model: gpt-5-mini
-  use_for:
-    title: true
-"#;
-    let cfg: Config = serde_yml::from_str(yaml).unwrap();
+    let cfg = Config {
+        providers: vec![
+            ProviderConfig {
+                name: Some("openai".to_string()),
+                provider_type: Some("openai".to_string()),
+                api_base: Some("https://api.openai.com/v1".to_string()),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                models: vec![ModelConfig {
+                    name: Some("gpt-5-mini".to_string()),
+                    ..Default::default()
+                }],
+            },
+            ProviderConfig {
+                name: Some("openrouter".to_string()),
+                provider_type: Some("openai-compatible".to_string()),
+                api_base: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key_env: Some("OPENROUTER_API_KEY".to_string()),
+                models: vec![ModelConfig {
+                    name: Some("gpt-5-mini".to_string()),
+                    ..Default::default()
+                }],
+            },
+        ],
+        auxiliary: AuxiliaryConfig {
+            model: Some("gpt-5-mini".to_string()),
+            use_for: AuxiliaryUseForConfig {
+                title: true,
+                ..Default::default()
+            },
+        },
+        ..Default::default()
+    };
     let resolved = cfg.resolve_models();
 
     let err = cfg.resolve_auxiliary_routing(&resolved).unwrap_err();
@@ -197,22 +275,22 @@ auxiliary:
 
 #[test]
 fn resolve_model_reference_rejects_ambiguous_bare_model_name() {
-    let yaml = r#"
-providers:
-  - name: openai
-    type: openai
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    models:
-      - gpt-5
-  - name: openrouter
-    type: openai-compatible
-    api_base: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    models:
-      - gpt-5
-"#;
-    let cfg: Config = serde_yml::from_str(yaml).unwrap();
+    let cfg = Config {
+        providers: vec![
+            openai_provider(),
+            ProviderConfig {
+                name: Some("openrouter".to_string()),
+                provider_type: Some("openai-compatible".to_string()),
+                api_base: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key_env: Some("OPENROUTER_API_KEY".to_string()),
+                models: vec![ModelConfig {
+                    name: Some("gpt-5".to_string()),
+                    ..Default::default()
+                }],
+            },
+        ],
+        ..Default::default()
+    };
     let resolved = cfg.resolve_models();
 
     let err = resolve_model_ref(&resolved, "gpt-5").unwrap_err();

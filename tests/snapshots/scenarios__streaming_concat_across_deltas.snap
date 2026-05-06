@@ -1,0 +1,81 @@
+---
+source: tests/scenarios.rs
+assertion_line: 129
+expression: out.events
+---
+[
+  "Ready",
+  {
+    "Messages": {
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        }
+      ],
+      "turn_id": 1
+    }
+  },
+  {
+    "TextDelta": {
+      "delta": "hel"
+    }
+  },
+  {
+    "TextDelta": {
+      "delta": "lo wor"
+    }
+  },
+  {
+    "TextDelta": {
+      "delta": "ld"
+    }
+  },
+  {
+    "TokenUsage": {
+      "background": false,
+      "cost_usd": null,
+      "tokens_per_sec": "[tps]",
+      "usage": {
+        "completion_tokens": 2,
+        "prompt_tokens": 4
+      }
+    }
+  },
+  {
+    "Messages": {
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        },
+        {
+          "content": "hello world",
+          "role": "assistant"
+        }
+      ],
+      "turn_id": 1
+    }
+  },
+  {
+    "TurnComplete": {
+      "messages": [
+        {
+          "content": "hi",
+          "role": "user"
+        },
+        {
+          "content": "hello world",
+          "role": "assistant"
+        }
+      ],
+      "meta": {
+        "avg_tps": "[avg_tps]",
+        "elapsed_ms": "[elapsed_ms]",
+        "interrupted": false,
+        "tool_elapsed": {}
+      },
+      "turn_id": 1
+    }
+  }
+]

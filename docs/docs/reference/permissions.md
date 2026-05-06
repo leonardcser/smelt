@@ -5,8 +5,8 @@ The permission system controls what the agent can do without asking. Each
 
 ## How Rules Work
 
-Three categories: **tools**, **bash**, and **web_fetch**. Each category has
-three rule lists:
+Four categories: **tools**, **bash**, **web_fetch**, and **mcp**. Each category
+has three rule lists:
 
 - **allow** — execute silently
 - **ask** — prompt for confirmation
@@ -32,15 +32,9 @@ Normal/Plan/Apply or **Allow** in Yolo.
 | `exit_plan_mode`      | —      | Ask   | —     | —     |
 | `read_process_output` | Ask    | Ask   | Ask   | Allow |
 | `stop_process`        | Ask    | Ask   | Ask   | Allow |
-| `spawn_agent`\*       | Allow  | Allow | Allow | Allow |
-| `list_agents`\*       | Allow  | Allow | Allow | Allow |
-| `message_agent`\*     | Allow  | Allow | Allow | Allow |
-| `peek_agent`\*        | Allow  | Allow | Allow | Allow |
 | `load_skill`          | Ask    | Ask   | Ask   | Allow |
-| `stop_agent`\*        | Allow  | Allow | Allow | Allow |
 
-\*Only registered when `--multi-agent` is enabled. — = not available in that
-mode.
+— = not available in that mode.
 
 ## Default Bash Patterns
 
@@ -91,24 +85,42 @@ can modify files, install packages, or affect system state require approval.
 
 ## Configuring Permissions
 
-```yaml
-permissions:
-  default:
-    tools:
-      allow: [web_search]
-    web_fetch:
-      allow: ["*"]
-    bash:
-      allow: ["git log *", "git diff *"]
-  apply:
-    bash:
-      allow: ["git commit *"]
+Set rules in `init.lua` with `smelt.permissions.set_rules`:
+
+```lua
+smelt.permissions.set_rules({
+  default = {
+    tools = {
+      allow = { "web_search" },
+    },
+    web_fetch = {
+      allow = { "*" },
+    },
+    bash = {
+      allow = { "git log *", "git diff *" },
+    },
+  },
+  apply = {
+    bash = {
+      allow = { "git commit *" },
+    },
+  },
+})
 ```
 
 `default` applies to all modes. Mode-specific rules (`normal`, `plan`, `apply`,
 `yolo`) are merged on top: their allow/ask/deny lists are appended to the
 default lists. Since deny always wins, a mode-level deny overrides a
 default-level allow for the same entry.
+
+Each mode table can contain:
+
+| Key         | Value type                |
+| ----------- | ------------------------- |
+| `tools`     | `{ allow = {...}, ask = {...}, deny = {...} }` |
+| `bash`      | `{ allow = {...}, ask = {...}, deny = {...} }` |
+| `web_fetch` | `{ allow = {...}, ask = {...}, deny = {...} }` |
+| `mcp`       | `{ allow = {...}, ask = {...}, deny = {...} }` |
 
 ## Approval Scopes
 

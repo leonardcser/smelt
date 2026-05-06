@@ -9,7 +9,7 @@ pub fn is_image_file(path: &str) -> bool {
     IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
 }
 
-pub fn mime_from_extension(path: &str) -> &'static str {
+fn mime_from_extension(path: &str) -> &'static str {
     match path
         .rsplit('.')
         .next()
@@ -31,8 +31,14 @@ pub fn mime_from_extension(path: &str) -> &'static str {
 pub fn read_image_as_data_url(path: &str) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mime = mime_from_extension(path);
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{b64}"))
+    Ok(data_url_from_bytes(&bytes, mime))
+}
+
+/// Encode in-memory bytes as a `data:mime;base64,...` URL. Used by
+/// tools that already have image bytes in hand (e.g. an HTTP response).
+pub fn data_url_from_bytes(bytes: &[u8], mime: &str) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("data:{mime};base64,{b64}")
 }
 
 /// Extract filename from a path for use as an image label.

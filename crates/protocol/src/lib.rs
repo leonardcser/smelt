@@ -14,10 +14,10 @@ pub mod mode;
 pub mod usage;
 
 pub use content::{Content, ContentPart};
-pub use event::{EngineEvent, UiCommand};
-pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
-pub use mode::{Mode, ReasoningEffort};
-pub use usage::{
-    AgentBlockData, AgentToolData, ModelConfigOverrides, PermissionOverrides, RuleSetOverride,
-    TokenUsage, TurnMeta,
+pub use event::{
+    AuxiliaryTask, Decision, EngineEvent, ToolDef, ToolExecutionMode, ToolHookFlags, ToolHooks,
+    UiCommand,
 };
+pub use message::{FunctionCall, Message, Role, ToolCall, ToolOutcome};
+pub use mode::{AgentMode, ReasoningEffort};
+pub use usage::{ModelConfigOverrides, PermissionOverrides, RuleSetOverride, TokenUsage, TurnMeta};

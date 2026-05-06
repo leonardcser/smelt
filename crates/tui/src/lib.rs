@@ -1,72 +1,42 @@
 pub mod alloc;
+pub(crate) mod api;
 pub mod app;
-pub mod attachment;
-pub mod builtin_commands;
-pub mod completer;
-pub mod config;
-pub mod custom_commands;
-pub mod fuzzy;
-pub mod input;
+pub(crate) mod commands;
+pub(crate) mod completer;
+pub(crate) mod content;
+pub(crate) mod format;
+pub use smelt_core::fuzzy;
 pub mod instructions;
-pub mod keymap;
-pub mod metrics;
-pub mod perf;
-pub mod persist;
-pub mod render;
-pub mod session;
-pub mod sleep_inhibit;
-pub mod state;
-pub mod text_utils;
+pub(crate) mod keymap;
+pub mod lua;
+pub use smelt_core::mcp;
+pub use smelt_core::permissions;
+pub(crate) mod metrics;
+pub use smelt_core::perf;
+pub(crate) mod persist;
+pub(crate) mod picker;
+pub(crate) mod prompt_sections;
+pub(crate) mod sleep_inhibit;
+pub use content::highlight::warm_up_syntect;
+pub use smelt_core::state;
+pub(crate) mod input;
 pub mod theme;
-pub mod undo;
-pub mod utils;
-pub mod vim;
-pub mod workspace_permissions;
+pub(crate) mod ui;
+pub(crate) mod window;
 
-/// Expand `@path` and `"@path with spaces"` references in user input:
-/// if the path exists, append the file/directory contents.
-pub fn expand_at_refs(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut refs: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if let Some((_, path, end)) = render::scan_at_token(&chars, i) {
-            let resolved = path.trim_end_matches([',', '.']);
-            if !resolved.is_empty() && std::path::Path::new(resolved).exists() {
-                refs.push(resolved.to_string());
-            }
-            i = end;
-        } else {
-            i += 1;
-        }
-    }
+pub use smelt_core::attachment;
+pub use smelt_core::session;
 
-    if refs.is_empty() {
-        return input.to_string();
-    }
+pub fn print_resume_hint(session_id: &str) {
+    use crossterm::style::{Attribute, Print, SetAttribute};
+    use crossterm::QueueableCommand;
+    use std::io::Write;
 
-    let mut result = input.to_string();
-    for path in &refs {
-        let p = std::path::Path::new(path);
-        if p.is_dir() {
-            if let Ok(output) = std::process::Command::new("ls")
-                .arg("-1")
-                .arg(path)
-                .output()
-            {
-                let listing = String::from_utf8_lossy(&output.stdout);
-                result.push_str(&format!(
-                    "\n\nDirectory listing of {}:\n```\n{}\n```",
-                    path,
-                    listing.trim_end()
-                ));
-            }
-        } else if let Ok(contents) = std::fs::read_to_string(path) {
-            result.push_str(&format!(
-                "\n\nContents of {}:\n```\n{}\n```",
-                path, contents
-            ));
-        }
-    }
-    result
+    let mut out = std::io::stdout();
+    let _ = out.queue(SetAttribute(Attribute::Dim));
+    let _ = out.queue(Print(format!(
+        "\nresume with:\nagent --resume {session_id}\n\n"
+    )));
+    let _ = out.queue(SetAttribute(Attribute::Reset));
+    let _ = out.flush();
 }

@@ -1,0 +1,154 @@
+-- Built-in `bash` tool. Composes shell-validation helpers
+-- (`smelt.shell.{check_interactive,check_background_op,split}`) with
+-- the streaming subprocess primitive `smelt.process.run_streaming` —
+-- the latter spawns `sh -c command` on a tokio task, fires
+-- `EngineEvent::ToolOutput` per stdout/stderr line as the child
+-- runs, and resumes this coroutine with the aggregated result on
+-- exit.
+
+local M = {}
+
+local DEFAULT_TIMEOUT_MS = 120000
+local MAX_TIMEOUT_MS = 600000
+
+-- Safe read-only command prefixes that auto-approve in non-Yolo
+-- modes. Sourced into the Rust permission layer at registration time
+-- via the `default_allow` field below; consulted locally during
+-- approval-pattern suggestion so we don't propose patterns that are
+-- already permanently allowed.
+local DEFAULT_ALLOW = {
+  -- Directory listing & file search
+  "ls *", "find *", "tree *",
+  -- Text viewing
+  "cat *", "head *", "tail *", "less *",
+  -- Text search & processing (read-only)
+  "grep *", "sort *", "uniq *", "wc *", "diff *", "tr *", "cut *", "jq *",
+  -- Path & file info
+  "echo *", "pwd *", "which *", "dirname *", "basename *", "realpath *",
+  "stat *", "file *", "test *",
+  -- Disk & system info
+  "du *", "df *", "date *", "whoami *",
+  -- Binary inspection
+  "sha256sum *", "md5sum *", "xxd *", "hexdump *", "strings *",
+}
+
+local DEFAULT_ALLOW_SET = {}
+for _, p in ipairs(DEFAULT_ALLOW) do DEFAULT_ALLOW_SET[p] = true end
+
+local function basename(s)
+  return s:match("([^/]+)$") or s
+end
+
+local function format_duration(secs)
+  if secs < 60 then
+    return string.format("%ds", secs)
+  elseif secs < 3600 then
+    return string.format("%dm %ds", secs // 60, secs % 60)
+  else
+    local h = secs // 3600
+    local rest = secs % 3600
+    return string.format("%dh %dm %ds", h, rest // 60, rest % 60)
+  end
+end
+
+function M.approval_patterns(args)
+  local cmd = args.command or ""
+  local subs = smelt.shell.split(cmd)
+  local patterns = {}
+  local seen = {}
+  for _, sub in ipairs(subs) do
+    local bin = sub:match("^%s*(%S+)") or ""
+    local base = basename(bin)
+    -- `cd` is a path permission, not a command permission.
+    if base ~= "" and base ~= "cd" then
+      local pat = base .. " *"
+      if not DEFAULT_ALLOW_SET[pat] and not seen[pat] then
+        seen[pat] = true
+        table.insert(patterns, pat)
+      end
+    end
+  end
+  return patterns
+end
+
+function M.execute(args, ctx)
+  local command = args.command or ""
+
+  local err = smelt.shell.check_interactive(command)
+  if err then
+    return { content = err, is_error = true }
+  end
+  err = smelt.shell.check_background_op(command)
+  if err then
+    return { content = err, is_error = true }
+  end
+
+  local timeout_ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
+  if timeout_ms > MAX_TIMEOUT_MS then
+    timeout_ms = MAX_TIMEOUT_MS
+  end
+
+  local id = smelt.task.alloc()
+  smelt.process.run_streaming(id, ctx.call_id or "", command, timeout_ms)
+  local result = smelt.task.wait(id)
+  return {
+    content = result.content or "",
+    is_error = result.is_error and true or false,
+  }
+end
+
+smelt.tools.register({
+  name = "bash",
+  override = true,
+  default_allow = DEFAULT_ALLOW,
+  description =
+  "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
+  parameters = {
+    type = "object",
+    properties = {
+      command = { type = "string", description = "Shell command to execute" },
+      description = { type = "string", description = "Short (max 10 words) description of what this command does" },
+      timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 120000, max: 600000)" },
+    },
+    required = { "command" },
+  },
+  confirm_text = function(args) return args.command or "" end,
+  approval_patterns = M.approval_patterns,
+  summary = function(args)
+    local d = args.description or ""
+    return d ~= "" and d or nil
+  end,
+  render = function(args, output, ctx)
+    local items = {}
+    if ctx.status == "pending" then
+      local ms = args.timeout_ms or DEFAULT_TIMEOUT_MS
+      local secs = math.floor(ms / 1000)
+      table.insert(items, smelt.layout.text("(timeout: " .. format_duration(secs) .. ")"))
+    end
+    table.insert(items, smelt.layout.text(output.content, { is_error = output.is_error }))
+    return smelt.layout.vbox(items)
+  end,
+  paths_for_workspace = function(args)
+    return smelt.shell.extract_paths(args.command or "")
+  end,
+  decide = function(args, mode)
+    -- Compose the bash decision: tool-level + per-subcommand. Deny
+    -- dominates; an Allow tool decision with an Ask bash decision
+    -- collapses to Ask; otherwise the bash decision wins.
+    local tool = smelt.permissions.check_tool(mode, "bash")
+    if tool == "deny" then return "deny" end
+    local sub = smelt.permissions.check(mode, "bash", args.command or "")
+    if sub == "deny" then return "deny" end
+    if tool == "allow" and sub == "ask" then return "ask" end
+    return sub
+  end,
+  preview = function(buf, args)
+    local cmd = args.command or ""
+    if cmd:find("\n") then
+      smelt.bash.render(buf, cmd)
+    end
+  end,
+  execute = M.execute,
+})
+
+return M

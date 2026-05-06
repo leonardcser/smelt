@@ -34,7 +34,7 @@ const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
 const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
 const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 
-pub const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
+const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
 // ── Persisted tokens ───────────────────────────────────────────────────────
 
@@ -58,33 +58,33 @@ fn cred_store() -> CredStore {
 /// `api_base` = derived from the Copilot token's `proxy-ep=` claim. Cached so
 /// we don't re-parse on every request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CopilotTokens {
-    pub refresh_token: String,
-    pub access_token: String,
-    pub expires_at: u64,
-    pub api_base: String,
+pub(crate) struct CopilotTokens {
+    pub(crate) refresh_token: String,
+    pub(crate) access_token: String,
+    pub(crate) expires_at: u64,
+    pub(crate) api_base: String,
     #[serde(default)]
-    pub last_refresh: u64,
+    pub(crate) last_refresh: u64,
 }
 
 impl CopilotTokens {
     /// True if the access token is expired or within 60 seconds of expiry.
-    pub fn needs_refresh(&self) -> bool {
+    pub(crate) fn needs_refresh(&self) -> bool {
         let now = unix_now();
         now + 60 >= self.expires_at
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    pub(crate) fn save(&self) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         cred_store().save(&json)
     }
 
-    pub fn load() -> Option<Self> {
+    pub(crate) fn load() -> Option<Self> {
         let json = cred_store().load()?;
         serde_json::from_str(&json).ok()
     }
 
-    pub fn delete() {
+    pub(crate) fn delete() {
         cred_store().delete();
     }
 }
@@ -104,7 +104,7 @@ fn client_id() -> String {
 /// Extract the Copilot API base URL from the `proxy-ep=` claim in a Copilot
 /// token. Token format:
 /// `tid=...;exp=...;proxy-ep=proxy.individual.githubcopilot.com;...`
-pub fn base_url_from_token(token: &str) -> Option<String> {
+fn base_url_from_token(token: &str) -> Option<String> {
     let proxy_host = token
         .split(';')
         .find_map(|kv| kv.strip_prefix("proxy-ep="))?;
@@ -117,7 +117,7 @@ pub fn base_url_from_token(token: &str) -> Option<String> {
 
 /// Base headers every Copilot request needs. Dynamic headers (X-Initiator,
 /// Copilot-Vision-Request) are added by the provider layer per request.
-pub fn base_headers() -> [(&'static str, &'static str); 4] {
+pub(crate) fn base_headers() -> [(&'static str, &'static str); 4] {
     [
         ("User-Agent", COPILOT_USER_AGENT),
         ("Editor-Version", EDITOR_VERSION),
@@ -138,17 +138,17 @@ struct DeviceCodeResponse {
 }
 
 /// Callbacks for the interactive device-code login flow.
-pub struct LoginCallbacks<'a> {
+pub(crate) struct LoginCallbacks<'a> {
     /// Called once the verification URL and user code are known. The caller
     /// should display these to the user and open the URL in a browser if
     /// possible.
-    pub on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
+    pub(crate) on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
     /// Called with progress messages (e.g. "Fetching Copilot token…").
-    pub on_progress: &'a (dyn Fn(&str) + Send + Sync),
+    pub(crate) on_progress: &'a (dyn Fn(&str) + Send + Sync),
 }
 
 /// Run the GitHub device-code OAuth flow.
-pub async fn device_code_login(
+pub(crate) async fn device_code_login(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
 ) -> Result<CopilotTokens, String> {
@@ -370,7 +370,7 @@ async fn fetch_copilot_token(
 
 // ── Token refresh ──────────────────────────────────────────────────────────
 
-pub async fn refresh_tokens(
+pub(crate) async fn refresh_tokens(
     client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<CopilotTokens, String> {
@@ -394,7 +394,9 @@ pub async fn refresh_tokens(
 }
 
 /// Return valid Copilot tokens, refreshing if the access token is expired.
-pub async fn ensure_access_token_full(client: &reqwest::Client) -> Result<CopilotTokens, String> {
+pub(crate) async fn ensure_access_token_full(
+    client: &reqwest::Client,
+) -> Result<CopilotTokens, String> {
     let tokens =
         CopilotTokens::load().ok_or("not logged in to GitHub Copilot — run `smelt auth` first")?;
     if !tokens.needs_refresh() {
@@ -407,12 +409,12 @@ pub async fn ensure_access_token_full(client: &reqwest::Client) -> Result<Copilo
 
 /// A model returned by the Copilot `/models` endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CopilotModel {
-    pub id: String,
-    pub name: String,
-    pub vendor: Option<String>,
-    pub context_window: Option<u32>,
-    pub max_output_tokens: Option<u32>,
+pub(crate) struct CopilotModel {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) vendor: Option<String>,
+    pub(crate) context_window: Option<u32>,
+    pub(crate) max_output_tokens: Option<u32>,
 }
 
 async fn fetch_available_models(
@@ -539,7 +541,7 @@ fn cache_path() -> PathBuf {
     crate::paths::cache_dir().join("copilot_models.json")
 }
 
-pub fn load_cached_models() -> Vec<CopilotModel> {
+pub(crate) fn load_cached_models() -> Vec<CopilotModel> {
     let Ok(data) = std::fs::read_to_string(cache_path()) else {
         return Vec::new();
     };
@@ -556,7 +558,7 @@ fn save_models_cache(models: &[CopilotModel]) {
 
 /// Fetch models using the stored credentials, caching on success.
 /// Returns the fresh list, or an empty vec on failure.
-pub async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CopilotModel> {
+pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CopilotModel> {
     let Ok(tokens) = ensure_access_token_full(client).await else {
         return Vec::new();
     };
@@ -570,7 +572,7 @@ pub async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CopilotModel>
 }
 
 /// Look up the context window for a model from the disk cache.
-pub fn cached_context_window(model: &str) -> Option<u32> {
+pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
     load_cached_models()
         .into_iter()
         .find(|m| m.id == model)

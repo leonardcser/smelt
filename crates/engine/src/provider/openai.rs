@@ -4,7 +4,7 @@ use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
 use crate::log;
-use crate::tools::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
+use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
 use protocol::{FunctionCall, Message, ReasoningEffort, Role, TokenUsage, ToolCall};
 use std::collections::HashMap;
 
@@ -105,13 +105,6 @@ pub(super) fn build_body(
                         }));
                     }
                 }
-            }
-            Role::Agent => {
-                input.push(serde_json::json!({
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": m.agent_api_text()}],
-                }));
             }
             Role::Tool => {
                 let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
