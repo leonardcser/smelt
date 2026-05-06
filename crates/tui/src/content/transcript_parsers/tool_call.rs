@@ -3,7 +3,7 @@
 //! glyphs). This file is a thin call site so the `render_block`
 //! dispatch table stays one line per variant.
 
-use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::content::builder::LineBuilder;
 use smelt_core::transcript_model::{ToolState, ToolStatus};
 
 use super::tools::render_tool;
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     call_id: &str,
     name: &str,
     summary: &str,

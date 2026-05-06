@@ -9,7 +9,7 @@
 
 use crate::content::transcript_parsers::layout_block_into;
 use crate::ui::{BufCreateOpts, BufId, Buffer};
-use smelt_core::content::layout_out::Outcome;
+use smelt_core::content::builder::Outcome;
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use smelt_core::transcript_present::ToolBodyRenderer;

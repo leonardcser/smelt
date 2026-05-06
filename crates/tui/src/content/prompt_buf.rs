@@ -264,7 +264,7 @@ fn queued_message_rows(
             }
             let chunks = wrap_line(line, text_w);
             for chunk in &chunks {
-                let chunk_w = super::layout_out::display_width(chunk);
+                let chunk_w = super::builder::display_width(chunk);
                 let trailing = if geom.block_w > 0 {
                     geom.block_w.saturating_sub(chunk_w)
                 } else {
@@ -372,7 +372,7 @@ fn bar_row(
                 let inner: usize = spans
                     .iter()
                     .filter(|s| s.priority < drop_above)
-                    .map(|s| super::layout_out::display_width(&s.text))
+                    .map(|s| super::builder::display_width(&s.text))
                     .sum();
                 if inner > 0 {
                     inner + 1
@@ -386,7 +386,7 @@ fn bar_row(
                 let inner: usize = spans
                     .iter()
                     .filter(|s| s.priority < drop_above)
-                    .map(|s| super::layout_out::display_width(&s.text))
+                    .map(|s| super::builder::display_width(&s.text))
                     .sum();
                 if inner > 0 {
                     inner + 2
@@ -414,7 +414,7 @@ fn bar_row(
     } else {
         left_filtered
             .iter()
-            .map(|s| super::layout_out::display_width(&s.text))
+            .map(|s| super::builder::display_width(&s.text))
             .sum::<usize>()
             + 1
     };
@@ -423,7 +423,7 @@ fn bar_row(
     } else {
         right_filtered
             .iter()
-            .map(|s| super::layout_out::display_width(&s.text))
+            .map(|s| super::builder::display_width(&s.text))
             .sum::<usize>()
             + 2
     };

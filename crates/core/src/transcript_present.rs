@@ -8,7 +8,7 @@
 //! that drives `BlockHistory::block_gap`, and the simple
 //! `/<word>` heuristic used in headless command dispatch.
 
-use crate::content::layout_out::SpanCollector;
+use crate::content::builder::LineBuilder;
 use crate::transcript_model::{Block, ToolOutput};
 use std::collections::HashMap;
 
@@ -21,7 +21,7 @@ pub trait ToolBodyRenderer: Send + Sync {
         args: &HashMap<String, serde_json::Value>,
         output: Option<&ToolOutput>,
         width: usize,
-        out: &mut SpanCollector,
+        out: &mut LineBuilder,
     ) -> u16;
 
     /// Whether the tool wants its elapsed time displayed in the
@@ -41,7 +41,7 @@ pub trait ToolBodyRenderer: Send + Sync {
         _name: &str,
         _line: &str,
         _args: &HashMap<String, serde_json::Value>,
-        _out: &mut SpanCollector,
+        _out: &mut LineBuilder,
     ) -> bool {
         false
     }
@@ -54,7 +54,7 @@ pub trait ToolBodyRenderer: Send + Sync {
         _name: &str,
         _args: &HashMap<String, serde_json::Value>,
         _width: usize,
-        _out: &mut SpanCollector,
+        _out: &mut LineBuilder,
     ) -> u16 {
         0
     }

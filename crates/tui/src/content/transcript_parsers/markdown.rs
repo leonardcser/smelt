@@ -1,9 +1,9 @@
 use smelt_core::content::highlight::{render_code_block, render_markdown_table};
-use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::content::builder::LineBuilder;
 use smelt_core::theme::role_hl;
 
 pub fn render_markdown_inner(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     content: &str,
     width: usize,
     indent: &str,
@@ -254,7 +254,7 @@ pub(super) fn is_horizontal_rule(line: &str) -> bool {
 /// Replaces the HR characters (---, ***, ___) with box-drawing chars (─) but
 /// only renders 3 of them to match the visual weight of list markers.
 fn render_horizontal_rule(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     bctx: Option<&smelt_core::content::BoxContext>,
     indent: &str,
 ) -> u16 {
@@ -287,7 +287,7 @@ fn render_horizontal_rule(
 
 /// Parse pipe-delimited table lines into rows, then render.
 fn render_markdown_table_from_lines(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     lines: &[&str],
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
@@ -317,7 +317,7 @@ fn render_markdown_table_from_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::layout_out::test_util::render_test;
+    use smelt_core::content::builder::test_util::render_test;
 
     #[test]
     fn rendered_table_attaches_raw_source_to_first_row() {

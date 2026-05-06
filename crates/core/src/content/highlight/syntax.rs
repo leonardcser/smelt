@@ -7,7 +7,7 @@ use syntect::highlighting::Style;
 
 use super::{syntax_theme, SYNTAX_SET};
 use crate::content::default_width;
-use crate::content::layout_out::SpanCollector;
+use crate::content::builder::LineBuilder;
 use crate::style::Color;
 use crate::theme::role_hl;
 
@@ -19,7 +19,7 @@ use crate::theme::role_hl;
 /// round-trip back to raw markdown — the visible code body is what the
 /// user sees, the fences re-attach if the first/last row is covered.
 pub fn render_code_block(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     lines: &[&str],
     lang: &str,
     width: usize,
@@ -117,7 +117,7 @@ pub fn render_code_block(
 }
 
 pub(super) fn render_highlighted(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     lines: &[&str],
     syntax: &syntect::parsing::SyntaxReference,
     skip: u16,
@@ -167,7 +167,7 @@ pub(super) fn render_highlighted(
 }
 
 pub fn print_syntax_file(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     content: &str,
     path: &str,
     skip: u16,
@@ -177,7 +177,7 @@ pub fn print_syntax_file(
 }
 
 pub fn print_syntax_file_ext(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     content: &str,
     path: &str,
     syntax_ext: Option<&str>,
@@ -199,7 +199,7 @@ pub fn print_syntax_file_ext(
 }
 /// Split syntax regions into visual rows that each fit within `max_width` columns.
 fn split_regions_into_rows(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     regions: &[(Style, &str)],
     max_width: usize,
 ) -> Vec<Vec<(Style, String)>> {
@@ -262,7 +262,7 @@ impl<'a> BashHighlighter<'a> {
 
     /// Print a single line with syntax highlighting.
     /// Does not emit a newline — the caller controls line breaks.
-    pub fn print_line(&mut self, out: &mut SpanCollector, line: &str) {
+    pub fn print_line(&mut self, out: &mut LineBuilder, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let regions = self
             .h
@@ -287,7 +287,7 @@ impl<'a> BashHighlighter<'a> {
 
 /// Print pre-split owned regions. Returns columns printed.
 fn print_split_regions(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     regions: &[(Style, String)],
     bg: Option<Color>,
 ) -> usize {

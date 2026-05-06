@@ -3,7 +3,7 @@
 //! `SpanStyle` is a thin wrapper over `Style` plus an optional
 //! `group: HlGroup` for theme-tracked highlight groups. When a span
 //! sets only a group with no other axis modifications, the
-//! `SpanCollector` emits the group id directly so theme switches flip
+//! `LineBuilder` emits the group id directly so theme switches flip
 //! the rendered span without re-running the parser. Compound spans
 //! (`group` plus `bold`/`dim`/etc., or two distinct groups for
 //! fg+bg) anonymous-intern at the resolved Style.

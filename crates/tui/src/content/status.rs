@@ -6,7 +6,7 @@
 //! `draw_bar`. Both collapse on narrow terminals by dropping the
 //! highest-priority (least-important) spans first.
 
-use super::{layout_out::display_width, selection::truncate_str};
+use super::{builder::display_width, selection::truncate_str};
 use smelt_core::style::Color;
 
 /// Foreground / background / attribute snapshot for a status-line
