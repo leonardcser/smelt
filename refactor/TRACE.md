@@ -17,10 +17,10 @@ fix.
 That single gesture exercises: keymap dispatch, `WinEvent::Submit`, the
 prompt → engine boundary, streaming through `EngineClient`,
 `Buffer::attach` block callbacks, syntect highlighting via
-`tui::parse::syntax`, the tool dispatcher trait, the Lua hook returning
-`needs_confirm`, the `Confirms` gate, `RequestPermission` ↔
-`PermissionDecision` round-trip, `tui::process` spawning, cell-driven
-statusline updates.
+`tui::content::highlight::syntax`, the tool dispatcher trait, the Lua
+hook returning `needs_confirm`, the `Confirms` gate, `RequestPermission`
+↔ `PermissionDecision` round-trip, `core::process` spawning,
+cell-driven statusline updates.
 
 If any stage below has a "?" or feels invented, that's a design hole.
 Document the resolution and update the canonical doc.
@@ -170,8 +170,10 @@ The engine knows nothing about who's listening. It just streams.
    in-flight write position and bumps `content_tick`.
 2. `Buffer` has `attach { parser = "markdown", on_block = … }`
    registered when the transcript window was created (see Stage 0). The
-   markdown parser is part of `tui::parse::markdown` and tracks
-   stream-state (open block, fence kind, fence depth) across appends.
+   markdown parser is part of `tui::content::transcript_parsers::markdown`
+   (with shared inline/diff/syntax helpers under
+   `core::content::highlight::*`) and tracks stream-state (open block,
+   fence kind, fence depth) across appends.
 3. **Loop iterates** (the engine event was handled — render runs).
    `Ui::render` walks splits/overlays, projects each Window over its
    Buffer into the new Grid, diffs vs previous, flushes the changed
@@ -237,20 +239,17 @@ ARCH § Streaming.)
    then internally calls
    `dispatcher.evaluate_hooks(name="bash", args={"command":"rm -rf /tmp/foo"})`.
 
-   **Open design point — wiring the dispatcher:**
-   - Option A: engine holds `Box<dyn ToolDispatcher>` injected at
-     `engine::start(config, dispatcher)`. Trait methods are async;
-     engine `.await`s them.
-   - Option B: engine emits `EngineEvent::EvaluateHooks { call_id, … }`
-     and waits for `UiCommand::HooksResponse { call_id, result }` —
-     bridge-and-channel pattern, no trait.
+   **Wiring (decided in P5.a, landed):** engine holds
+   `Box<dyn ToolDispatcher>` injected at construction. Trait methods
+   are async; engine `.await`s them on the same tokio thread.
+   `LuaRuntime` impls the trait through a channel bridge — engine
+   sends `UiCommand::ToolDispatch` / `ToolHooksRequest` across the
+   handle, the frontend's Lua runtime answers with `UiCommand::ToolResult`
+   / `ToolHooksResponse`. From the engine's perspective it's one
+   trait call; under the hood it's the same channel boundary every
+   other UI ↔ engine interaction goes through.
 
-   Option A is cleaner if `ToolRuntime` lives in tui. Engine takes a
-   trait object at startup; the trait's methods take `&mut` so the
-   engine task `.await`s them on the same tokio thread. We pick A in
-   P5.a; flag this here so it's not a surprise.
-
-3. `tui::ToolRuntime::evaluate_hooks("bash", args)`:
+3. `LuaRuntime::evaluate_hooks("bash", args)`:
    - Looks up `"bash"` in its registry. Found: `LuaTool { hooks_fn,
      run_fn, schema }`.
    - Spawns a Lua coroutine running `hooks_fn(args, mode, turn_ctx)`.
@@ -270,39 +269,41 @@ ARCH § Streaming.)
        },
      }
 
-     M.hooks = function(args, mode, ctx)
-       local cmd = args.command
-       if not cmd or cmd == "" then
-         return { decision = "deny", reason = "empty command" }
-       end
+     -- Approximate of the landed shape; see runtime/lua/smelt/tools/bash.lua
+     -- for the exact code. Bash composes two generic checks
+     -- (`check_tool` for the tool-level decision + `check` for the
+     -- subcommand-level decision) and lets the standard rule engine
+     -- in core::permissions resolve allow/ask/deny.
+     M.decide = function(args, mode)
+       local cmd = args.command or ""
+       local tool = smelt.permissions.check_tool(mode, "bash")
+       if tool == "deny" then return "deny" end
+       local sub = smelt.permissions.check(mode, "bash", cmd)
+       if sub == "deny" then return "deny" end
+       if tool == "ask" or sub == "ask" then return "ask" end
+       return "allow"
+     end
 
-       -- Already approved this exact call this session?
-       if smelt.permissions.is_approved("bash", args) then
-         return { decision = "allow" }
-       end
+     M.confirm_text = function(args)
+       return "permission required for: " .. (args.command or "")
+     end
 
-       -- Walk subcommands via Rust FFI parser.
-       local ast = smelt.permissions.parse_bash(cmd)
-       for _, sub in ipairs(ast.commands) do
-         local d = smelt.permissions.match_ruleset(
-                     smelt.permissions.rules_for(mode, "bash"),
-                     sub.text)
-         if d == "deny" then
-           return { decision = "deny", reason = "denied: " .. sub.text }
-         end
-         if d == "ask" then
-           return {
-             decision = "needs_confirm",
-             reason   = "permission required for: " .. sub.text,
-             approval_patterns = sub.text,  -- offered as "allow always"
-           }
-         end
-       end
+     M.approval_patterns = function(args)
+       -- Suggest the leading subcommand as a re-usable allow pattern.
+       return { args.command }
+     end
 
-       -- Workspace boundary check (paths in args).
-       local outside = smelt.permissions.outside_workspace_paths(
-                         "bash", args, ctx.workspace)
-       if #outside > 0 then
+     M.paths_for_workspace = function(args)
+       -- Hand the workspace boundary check the paths embedded in the
+       -- command so it can decide if any escape `cwd`.
+       return smelt.shell.extract_paths(args.command or "")
+     end
+
+     -- (Workspace boundary check below illustrates how the
+     -- core engine invokes paths_for_workspace before dispatch.)
+     local outside = smelt.permissions.outside_workspace_paths(
+                       "bash", args, ctx.workspace)
+     if #outside > 0 then
          return {
            decision = "needs_confirm",
            reason   = "paths outside workspace: " .. table.concat(outside, ", "),
@@ -397,12 +398,12 @@ ARCH § Streaming.)
 
 ## Stage 6 — dispatch runs the tool
 
-1. `tui::ToolRuntime::dispatch` runs `bash.lua`'s `M.run` function as
+1. `LuaRuntime::dispatch` runs `bash.lua`'s `M.run` function as
    a Lua coroutine.
 2. Inside `run`:
    - `smelt.process.run("bash", {"-c", "rm -rf /tmp/foo"}, {...})`
-     calls into `tui::process::run`. The Lua coroutine yields.
-   - `tui::process` spawns the child, captures stdout/stderr to
+     calls into `core::process::run`. The Lua coroutine yields.
+   - `core::process` spawns the child, captures stdout/stderr to
      buffers, awaits exit (or timeout). When done, it resumes the
      coroutine with `{ stdout, stderr, exit_code }`.
 3. `run` returns the result table. `ToolRuntime` wraps it as

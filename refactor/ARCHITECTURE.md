@@ -102,13 +102,16 @@ Composition/chrome lives outside Window:
   - `title: Option<String>` — rendered on the `TOP` edge of the border.
     Only meaningful when `sides` includes `TOP`.
 
-  Any container can have chrome. Convention is to use it on overlays only;
-  the type system allows it anywhere. Want a 1-row blank line between
-  transcript and prompt? `Vbox { gap: 1, … }`. Want a divider? Insert a
-  one-row Window leaf containing `─` characters between siblings — same
-  pattern Ratatui uses; no separate separator API. Want a bordered
-  composite? `Vbox { border: Some({ style: Rounded, sides: ALL }), title:
-  Some("Find"), … }`.
+  Any container can have chrome. Splits and overlays go through the
+  same `paint_layout_node` walker, so `with_border` / `with_title` on
+  the splits root paints a frame around the whole tiled area the same
+  way an overlay would. Convention is to leave splits chromeless and
+  reserve chrome for overlays; the type system imposes no preference.
+  Want a 1-row blank line between transcript and prompt?
+  `Vbox { gap: 1, … }`. Want a divider? Insert a one-row Window leaf
+  containing `─` characters between siblings — same pattern Ratatui
+  uses; no separate separator API. Want a bordered composite?
+  `Vbox { border: Some({ style: Rounded, sides: ALL }), title: Some("Find"), … }`.
 
 - **Overlay** — placement + modality wrapper around a LayoutTree:
   `{ layout, anchor, z, modal }`. Carries no chrome itself — chrome lives on
@@ -765,11 +768,20 @@ We borrow only the cell-grid concept as the intermediate rendering surface.
 
 **Current state:** `crates/core` extracted (P8.e). `ui/` absorbed
 into `tui::ui` (P8.a). `term/` dissolved (P8). `Buffer` + `Style` +
-`UndoHistory` + `BufferParser` moved to `core` (P9.b);
-`tui::ui::{buffer,undo,id}` are re-export shims. Host-tier Lua
+`UndoHistory` + `BufferParser` live in `core` (P9.b); `tui::ui`
+re-exports them via `pub use smelt_core::{buffer::*, undo::*, …}`.
+Per-`Block` parsers moved into `tui::content::transcript_parsers/`
+(P9.c stage 1); `core/transcript_present.rs` deleted; one
+`copy_range` primitive across vim, kill-ring, and dialog buffer
+reads (P9.c). Tool render returns `BlockLayout`
+(P9.r); snapshot folded onto `TranscriptProjection` (P9.s);
+permission defaults declared in Lua (P9.y). Host-tier Lua
 bindings in `core/src/lua/api/` resolve via `try_with_host`;
-UiHost-tier in `tui/src/lua/api/` via `try_with_app`. Theme registry
-landed (P1.0): `set(name, style)`, `link(from, to)`, `get(name)`.
+UiHost-tier in `tui/src/lua/api/` via `try_with_app`. UiHost TLS
+trait-object slot landed (P9.o.1) — `*mut dyn UiHost` mirrors
+the `*mut dyn Host` slot, decoupling future frontends from the
+concrete `TuiApp`. Theme registry landed (P1.0): `set(name,
+style)`, `link(from, to)`, `get(name)`.
 
 ## Code rules — eternal
 

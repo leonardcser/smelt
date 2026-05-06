@@ -310,23 +310,25 @@ Status table + open sub-phase sketches + decisions + deferrals in
   converts at SGR-emit. Lua `render` hook writes `&mut Buffer`;
   `RenderCtx` / `DisplayBlock` / `DisplayLine` / `SpanCollector`-as-IR
   all gone. Three pieces deferred to P9.c.
-- **P9.c** 🚧 — **Transcript pipeline as `BufferParser` impls.**
-  Per-`Block` parsers under `tui::content::transcript_parsers/`;
-  prompt rendering through the same parser; one
+- **P9.c** ✅ — **Transcript pipeline as `BufferParser` impls.**
+  Per-`Block` parsers under `tui::content::transcript_parsers/`
+  (`user`, `thinking`, `text`, `code_line`, `tool_call`, `exec`,
+  `compacted`, plus the inherited `markdown`, `tools`); one
   `copy_range(buf, range)` primitive replaces the divergent paths.
-  Mandated by P10 entry conditions — open work, not deferred.
-  See `P9.md` § P9.c.
-- **P9.d** 🚧 closeout — **Tool name matches deleted from shared
-  Rust.** Mostly landed (`decide_base` bash/web_fetch,
-  `ActiveTool::elapsed`, `agent.rs` cmd_summary,
-  `extract_tool_paths`, `confirm.rs::is_bash`, statusline glyph
-  map). In-flight closeout collapses every remaining hardcoded
-  `bash` / `web_fetch` / `mcp` field into a generic
+  `core/transcript_present.rs` deleted; `ColorRole` /
+  `ColorValue` / `NamedColor` / `SpanStyle` retired (P9.c-2a/2b);
+  `SpanCollector` renamed `LineBuilder`. Prompt-rendering tail
+  declined alongside P9.o (no consumer for the prompt-as-Window
+  rewrite). See `P9.md` § P9.c.
+- **P9.d** ✅ — **Tool name matches deleted from shared Rust.**
+  Final closeout collapsed every remaining hardcoded `bash` /
+  `web_fetch` / `mcp` field into a generic
   `subcommands: HashMap<String, _>` shape across `RawModePerms`,
   `RuleOverride`, `PermissionOverrides`, the Lua `set_rules` parser,
   and `is_auto_approved`. `smelt.permissions.check_bash` /
-  `check_web_fetch` / `check_mcp` retire — replaced by generic
-  `smelt.permissions.check(mode, tool_name, value)`.
+  `check_web_fetch` / `check_mcp` retired — replaced by generic
+  `smelt.permissions.check(mode, tool_name, value)`. Verification
+  grep returns only test-stub hits.
 - **P9.e** ✅ — **HlGroup-id model.** Buffer extmarks carry
   `HlGroup(u32)` ids; theme resolves at paint via
   `Theme::resolve(hl)`. Theme switches mutate `Theme.styles[id]`
@@ -412,14 +414,14 @@ Status table + open sub-phase sketches + decisions + deferrals in
     no concrete consumer present (deferral rule). Same logic
     rejects the bundled `attachment.rs` and `prompt_wrap.rs`
     moves. Revisit when a concrete consumer materializes.
-- **P9.x** 📝 — **Config binding fidelity.** Reject-unknown /
-  fidelity bugs in config-time bindings (~100 LOC):
-  `provider.register` accepts per-model fields (today drops
-  temperature / top_p / pricing); `mcp.register` reads
-  `type`/`timeout`/`enabled` and rejects unknowns; `smelt.settings`
-  collapses to field access via metatable
-  (`smelt.settings.vim = true` reads/writes/iterates; unknown keys
-  error at the access site).
+- **P9.x** ✅ — **Config binding fidelity.** `provider.register`
+  reads per-model fields (`temperature` / `top_p` / `top_k` /
+  `min_p` / `repeat_penalty` / `tool_calling` / pricing) with
+  reject-unknown over the 11 known fields; `mcp.register` reads
+  `type` / `command` / `args` / `env` / `timeout` / `enabled` and
+  rejects unknown keys; `smelt.settings` collapses to field access
+  via metatable (`smelt.settings.vim = true` reads / writes /
+  iterates; unknown keys error at the access site).
 - **P9.r** ✅ — **Tool render returns `BlockLayout`.** Single
   `render(args, output, ctx) -> BlockLayout` callback per tool;
   drops `render_summary` / `render_subhead` / `header_suffix` /
@@ -430,9 +432,17 @@ Status table + open sub-phase sketches + decisions + deferrals in
   Lua surface. Composer walks the returned tree and replays
   leaves into the surrounding `LineBuilder`; 1×1 leaves
   auto-repeat to fill their allocated rect (gives `sep` for free).
-  `ToolBodyRenderer` trait + `core/transcript_present.rs` retire.
-  Per-leaf cache extension and projection-layer fold deferred (no
-  perf signal). See `P9.md` § P9.r.
+  `ToolBodyRenderer` trait + `core/transcript_present.rs` retired.
+  See `P9.md` § P9.r.
+- **P9.s** ✅ — **Snapshot folds onto `TranscriptProjection`.**
+  `build_snapshot` is `pub(crate)` and takes a borrowed
+  `BlockBufferCache`; `TranscriptProjection` owns the cache plus a
+  lazy snapshot slot rebuilt only when `(generation, width,
+  show_thinking)` changes. The 9 call sites under
+  `app/{transcript,mouse,pane_focus}.rs` route through
+  `TranscriptProjection::snapshot(...)`. One cache per session;
+  the per-frame redundant relayout collapses to
+  one walk per `(gen, width, show_thinking)` change.
 - **P9.y** ✅ — **Permission defaults to Lua.** Each built-in tool's
   `.lua` declares `permission_defaults = { normal = "...", ... }`;
   `bash.lua` declares `default_allow = { "ls *", ... }`. Tool
@@ -454,22 +464,46 @@ Status table + open sub-phase sketches + decisions + deferrals in
 Final hygiene pass after P9 lands. Small, mostly mechanical. Closes
 the refactor. See `P10.md`.
 
-- **Saved-state cleanup ✅.** `core::state` shrunk to a typed
+- **P10.1 — Saved-state cleanup ✅.** `core::state` shrunk to a typed
   `SessionCache` (just last-used `mode` / `selected_model` /
   `reasoning_effort`). `PersistedSettings` retired; `ResolvedSettings`
   moved to `core::config` next to `SettingsConfig`. `TuiApp::new` is
   state-injectable (takes `SessionCache` as a parameter).
-- **INVENTORY drift sweep.** Walk every row marked `done` and verify
-  reality matches; fix every `refactor/check.sh` red `✗`.
-- **Parity walk in tmux.** Drive the binary by hand against a local
-  endpoint and walk the visual matrix from `ARCHITECTURE.md § Testing
-  TUI changes`. Visual behaviour is not test-covered — the human walk
-  is the gate.
-- **Final lint gate.** One `cargo fmt && cargo clippy --workspace
-  --all-targets -- -D warnings && cargo nextest run --workspace`. Green
-  is the ship condition.
-- **Doc-sync close-out.** Decide whether `refactor/` archives or
-  `ARCHITECTURE.md` + the puml stay as living docs outside the folder.
+- **P10.2 — Audit cleanup batch ✅.** Audit-driven dead-surface +
+  modularity cleanup: `PredictInput` / `InputPrediction` chain
+  deleted (A1); `engine::tools::Tool` trait + `ToolRegistry` body
+  collapsed to `EmptyDispatcher` (A2); dead `#[allow(dead_code)]`
+  methods on `BlockBufferCache` / `BlockHistory` removed (A3);
+  cmdline state grouped into one `CmdlineState` field (B2); large
+  `UiCommand::StartTurn` payload boxed via `StartTurnPayload` (C1);
+  stale phase-label and "legacy" comments swept (D1+D2). Item B1
+  (`permissions: Arc<Permissions>` to Core) declined; the field
+  stays on `TuiApp`. Item E1 (transcript stack fold) considered
+  and declined.
+- **L3-prim storybook ✅.** `crates/tui/tests/storybook/` ships
+  with `StoryCtx`, `Ui::snapshot`, `SnapshotFrame`, the `story!`
+  macro, and 58 stories across 6 groups (`buffer`, `chrome`,
+  `layout`, `overlays`, `theme`, `vim`). `EngineHandle::for_test`
+  prerequisite landed for L3-comp. Interactive viewer at
+  `crates/tui/examples/stories.rs` (`cargo run -p tui --example
+  stories`) reads blessed snapshots without re-running the
+  harness.
+- **INVENTORY drift sweep ✅** (mostly). Audit found rows for
+  `transcript_present/*` claiming "deleted" with files gone;
+  `prompt_wrap.rs` flipped to `kept`; `attachment.rs` flipped to
+  `kept`. New `transcript_parsers/` rows + `geometry.rs` row
+  added. Remaining row-count drift on `tui` is a check.sh warning,
+  not a hard fail.
+- **Parity walk in tmux** ⏸. Drive the binary by hand against a
+  local endpoint and walk the visual matrix from
+  `ARCHITECTURE.md § Testing TUI changes`. Visual behaviour is
+  not test-covered — the human walk is the gate.
+- **Final lint gate** ⏸. One `cargo fmt && cargo clippy
+  --workspace --all-targets -- -D warnings && cargo nextest run
+  --workspace`. Green is the ship condition.
+- **Doc-sync close-out** ⏸. Decide whether `refactor/` archives
+  or `ARCHITECTURE.md` + the puml stay as living docs outside the
+  folder.
 
 ---
 
