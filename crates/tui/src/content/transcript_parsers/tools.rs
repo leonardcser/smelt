@@ -412,7 +412,14 @@ fn emit_buffer_row_clipped(
             let plain: String = chars[col_idx as usize..h.col_start as usize]
                 .iter()
                 .collect();
-            let used = emit_clipped(out, &plain, None, SpanMeta::default(), max_cols, emitted_cols);
+            let used = emit_clipped(
+                out,
+                &plain,
+                None,
+                SpanMeta::default(),
+                max_cols,
+                emitted_cols,
+            );
             emitted_cols = emitted_cols.saturating_add(used);
             col_idx = h.col_start;
             if emitted_cols >= max_cols {

@@ -176,6 +176,7 @@ async fn main() {
         reasoning_effort,
         reasoning_cycle,
         mut startup_auth_error,
+        cache,
     } = s;
 
     if let Some(level) = engine::log::parse_level(&args.log_level) {
@@ -481,6 +482,7 @@ async fn main() {
             runtime_approvals,
             lua_runtime,
             project_trust,
+            cache,
         );
         app.core.config.model_config = (&model_config).into();
         app.core.skills = Some(tui_skill_loader.clone());
@@ -522,10 +524,10 @@ async fn main() {
     smelt_core::perf::print_summary();
 }
 
-/// Assemble the `AppConfig` for a headless frontend from
-/// resolved CLI + config inputs. No saved-state seeding (predictable
-/// behaviour from the CLI invocation) — the TUI path layers
-/// `state::State::load()` on top of its own fields inside `TuiApp::new`.
+/// Assemble the `AppConfig` for a headless frontend from resolved CLI +
+/// config inputs. No saved-state seeding — predictable behaviour from
+/// the CLI invocation; the TUI path threads `SessionCache` through
+/// `TuiApp::new` instead.
 #[allow(clippy::too_many_arguments)]
 fn build_headless_config(
     model: String,
@@ -541,7 +543,7 @@ fn build_headless_config(
     mode_cycle: Vec<protocol::AgentMode>,
     reasoning_effort: protocol::ReasoningEffort,
     reasoning_cycle: Vec<protocol::ReasoningEffort>,
-    settings: smelt_core::state::ResolvedSettings,
+    settings: smelt_core::config::ResolvedSettings,
     context_window: Option<u32>,
 ) -> smelt_core::AppConfig {
     let mode = mode_override.unwrap_or(protocol::AgentMode::Normal);

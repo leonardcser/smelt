@@ -4,7 +4,7 @@
 //! flags, and the CLI override flags that take precedence over saved
 //! session values.
 
-use crate::{config, state};
+use crate::config;
 use engine::ModelConfig;
 use protocol::{AgentMode, ReasoningEffort};
 
@@ -26,6 +26,6 @@ pub struct AppConfig {
     pub reasoning_effort: ReasoningEffort,
     pub reasoning_cycle: Vec<ReasoningEffort>,
 
-    pub settings: state::ResolvedSettings,
+    pub settings: config::ResolvedSettings,
     pub context_window: Option<u32>,
 }

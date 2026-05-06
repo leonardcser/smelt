@@ -79,11 +79,11 @@ P8  crate extraction ✅            ── extract `core` module into `crates/co
         │                              split Lua FFI by tier, eliminate `ui`
         │                              and `crossterm` deps from `core`
         ▼
-P9  make architecture true 🚧      ── Buffer to core, transcript pipeline as
+P9  make architecture true ✅      ── Buffer to core, transcript pipeline as
         │                              BufferParser impls, de-Rustify Lua
         │                              concerns (no name matching in Rust)
         ▼
-P10 ship it                        ── saved-state cleanup, parity walk in tmux,
+P10 ship it 🚧                     ── saved-state cleanup, parity walk in tmux,
                                       final lint gate, doc-sync close-out
 ```
 
@@ -441,11 +441,11 @@ Status table + open sub-phase sketches + decisions + deferrals in
 Final hygiene pass after P9 lands. Small, mostly mechanical. Closes
 the refactor. See `P10.md`.
 
-- **Saved-state cleanup.** `core::state::ResolvedSettings` and the
-  surrounding JSON loader survived P5.d's "all config in `init.lua`"
-  claim. Either drop persisted settings entirely (cache-shaped state
-  becomes a small typed `SessionCache`) or move persistence behind a
-  Lua API. Decide during P10.
+- **Saved-state cleanup ✅.** `core::state` shrunk to a typed
+  `SessionCache` (just last-used `mode` / `selected_model` /
+  `reasoning_effort`). `PersistedSettings` retired; `ResolvedSettings`
+  moved to `core::config` next to `SettingsConfig`. `TuiApp::new` is
+  state-injectable (takes `SessionCache` as a parameter).
 - **INVENTORY drift sweep.** Walk every row marked `done` and verify
   reality matches; fix every `refactor/check.sh` red `✗`.
 - **Parity walk in tmux.** Drive the binary by hand against a local

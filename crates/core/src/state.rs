@@ -1,129 +1,42 @@
+//! Cross-session cache for last-used picks (model, mode, reasoning effort,
+//! accent). Genuinely cache-shaped: nothing here is config — config lives
+//! in `init.lua`. The cache only remembers what the user picked last so a
+//! fresh launch lands where they left off.
+
 use crate::config;
 use protocol::{AgentMode, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Toggle settings persisted across sessions. Each field is `Option<bool>`:
-/// `Some(v)` = user explicitly toggled it, `None` = use config/default.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct PersistedSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vim_mode: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_compact: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub show_tps: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub show_tokens: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub show_cost: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_prediction: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_slug: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub show_thinking: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restrict_to_workspace: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub redact_secrets: Option<bool>,
-}
-
-impl PersistedSettings {
-    /// Resolve against config defaults: state wins, then config, then hardcoded default.
-    pub fn resolve(&self, cfg: &crate::config::SettingsConfig) -> ResolvedSettings {
-        ResolvedSettings {
-            vim: self.vim_mode.or(cfg.vim).unwrap_or(false),
-            auto_compact: self.auto_compact.or(cfg.auto_compact).unwrap_or(false),
-            show_tps: self.show_tps.or(cfg.show_tps).unwrap_or(true),
-            show_tokens: self.show_tokens.or(cfg.show_tokens).unwrap_or(true),
-            show_cost: self.show_cost.or(cfg.show_cost).unwrap_or(true),
-            show_prediction: self
-                .input_prediction
-                .or(cfg.show_prediction)
-                .unwrap_or(true),
-            show_slug: self.task_slug.or(cfg.show_slug).unwrap_or(true),
-            show_thinking: self.show_thinking.or(cfg.show_thinking).unwrap_or(true),
-            restrict_to_workspace: self
-                .restrict_to_workspace
-                .or(cfg.restrict_to_workspace)
-                .unwrap_or(true),
-            redact_secrets: self.redact_secrets.or(cfg.redact_secrets).unwrap_or(true),
-        }
-    }
-}
-
-/// Fully resolved boolean settings (no more Options).
-#[derive(Debug, Clone)]
-pub struct ResolvedSettings {
-    pub vim: bool,
-    pub auto_compact: bool,
-    pub show_tps: bool,
-    pub show_tokens: bool,
-    pub show_cost: bool,
-    pub show_prediction: bool,
-    pub show_slug: bool,
-    pub show_thinking: bool,
-    pub restrict_to_workspace: bool,
-    pub redact_secrets: bool,
-}
-
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct State {
+pub struct SessionCache {
     #[serde(default)]
     pub mode: String,
-    // Legacy field — migrated into `settings.vim_mode` on load.
-    #[serde(default)]
-    pub vim_enabled: bool,
     #[serde(default)]
     pub selected_model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
-    #[serde(default)]
-    pub accent_color: Option<u8>,
-    // Legacy field — migrated into `settings.show_thinking` on load.
-    #[serde(default)]
-    pub show_thinking: Option<bool>,
-    #[serde(default)]
-    pub settings: PersistedSettings,
 }
 
-fn state_path() -> PathBuf {
+fn cache_path() -> PathBuf {
     config::state_dir().join("state.json")
 }
 
-fn state_lock_path() -> PathBuf {
+fn cache_lock_path() -> PathBuf {
     config::state_dir().join("state.lock")
 }
 
-impl State {
+impl SessionCache {
     pub fn load() -> Self {
-        Self::load_from_disk()
-    }
-
-    fn load_from_disk() -> Self {
-        let path = state_path();
+        let path = cache_path();
         let Ok(contents) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        Self::migrate_legacy_fields(serde_json::from_str(&contents).unwrap_or_default())
-    }
-
-    fn migrate_legacy_fields(mut s: Self) -> Self {
-        if s.vim_enabled && s.settings.vim_mode.is_none() {
-            s.settings.vim_mode = Some(true);
-            s.vim_enabled = false;
-        }
-        if let Some(v) = s.show_thinking.take() {
-            if s.settings.show_thinking.is_none() {
-                s.settings.show_thinking = Some(v);
-            }
-        }
-        s
+        serde_json::from_str(&contents).unwrap_or_default()
     }
 
     fn save_unlocked(&self) {
-        let path = state_path();
+        let path = cache_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -137,11 +50,11 @@ impl State {
     }
 }
 
-struct StateLock(Option<std::fs::File>);
+struct CacheLock(Option<std::fs::File>);
 
-impl StateLock {
+impl CacheLock {
     fn acquire() -> Self {
-        let path = state_lock_path();
+        let path = cache_lock_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -165,7 +78,7 @@ impl StateLock {
     }
 }
 
-impl Drop for StateLock {
+impl Drop for CacheLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(ref f) = self.0 {
@@ -191,48 +104,28 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn update_state(f: impl FnOnce(&mut State)) {
-    let _lock = StateLock::acquire();
-    let mut s = State::load_from_disk();
+fn update_cache(f: impl FnOnce(&mut SessionCache)) {
+    let _lock = CacheLock::acquire();
+    let mut s = SessionCache::load();
     f(&mut s);
     s.save_unlocked();
 }
 
-// ── Read-modify-write helpers ─────────────────────────────────────────────
-
 pub fn set_mode(mode: AgentMode) {
-    update_state(|s| {
+    update_cache(|s| {
         s.mode = mode.as_str().to_string();
     });
 }
 
 pub fn set_selected_model(key: String) {
-    update_state(|s| {
+    update_cache(|s| {
         s.selected_model = Some(key);
     });
 }
 
 pub fn set_reasoning_effort(effort: ReasoningEffort) {
-    update_state(|s| {
+    update_cache(|s| {
         s.reasoning_effort = effort;
-    });
-}
-
-/// Persist all toggle settings from the resolved values.
-pub fn save_settings(resolved: &ResolvedSettings) {
-    update_state(|s| {
-        s.settings = PersistedSettings {
-            vim_mode: Some(resolved.vim),
-            auto_compact: Some(resolved.auto_compact),
-            show_tps: Some(resolved.show_tps),
-            show_tokens: Some(resolved.show_tokens),
-            show_cost: Some(resolved.show_cost),
-            input_prediction: Some(resolved.show_prediction),
-            task_slug: Some(resolved.show_slug),
-            show_thinking: Some(resolved.show_thinking),
-            restrict_to_workspace: Some(resolved.restrict_to_workspace),
-            redact_secrets: Some(resolved.redact_secrets),
-        };
     });
 }
 
@@ -261,43 +154,6 @@ mod tests {
         result
     }
 
-    fn sample_settings(vim: bool) -> ResolvedSettings {
-        ResolvedSettings {
-            vim,
-            auto_compact: false,
-            show_tps: true,
-            show_tokens: true,
-            show_cost: true,
-            show_prediction: true,
-            show_slug: true,
-            show_thinking: true,
-            restrict_to_workspace: true,
-            redact_secrets: true,
-        }
-    }
-
-    #[test]
-    fn load_migrates_legacy_fields() {
-        with_test_state_dir(|| {
-            let path = state_path();
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(
-                path,
-                r#"{
-  "vim_enabled": true,
-  "show_thinking": false
-}"#,
-            )
-            .unwrap();
-
-            let state = State::load();
-            assert_eq!(state.settings.vim_mode, Some(true));
-            assert_eq!(state.settings.show_thinking, Some(false));
-            assert!(!state.vim_enabled);
-            assert_eq!(state.show_thinking, None);
-        });
-    }
-
     #[test]
     fn concurrent_updates_preserve_unrelated_fields() {
         with_test_state_dir(|| {
@@ -306,24 +162,24 @@ mod tests {
             let b1 = barrier.clone();
             let mode_thread = std::thread::spawn(move || {
                 b1.wait();
-                update_state(|state| {
-                    state.mode = AgentMode::Apply.as_str().to_string();
+                update_cache(|s| {
+                    s.mode = AgentMode::Apply.as_str().to_string();
                     std::thread::sleep(Duration::from_millis(50));
                 });
             });
 
             let b2 = barrier.clone();
-            let settings_thread = std::thread::spawn(move || {
+            let model_thread = std::thread::spawn(move || {
                 b2.wait();
-                save_settings(&sample_settings(true));
+                set_selected_model("anthropic/claude".to_string());
             });
 
             mode_thread.join().unwrap();
-            settings_thread.join().unwrap();
+            model_thread.join().unwrap();
 
-            let state = State::load();
-            assert_eq!(state.mode(), AgentMode::Apply);
-            assert_eq!(state.settings.vim_mode, Some(true));
+            let cache = SessionCache::load();
+            assert_eq!(cache.mode(), AgentMode::Apply);
+            assert_eq!(cache.selected_model.as_deref(), Some("anthropic/claude"));
         });
     }
 }
