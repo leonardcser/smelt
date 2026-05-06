@@ -61,11 +61,8 @@ pub(crate) enum Action {
     Redraw,
     Submit { content: Content, display: String },
     SubmitEmpty,
-    ToggleMode,
-    CycleReasoning,
     EditInEditor,
     CenterScroll,
-    Resize { width: usize, height: usize },
     NotifyError(String),
     Noop,
 }
@@ -480,8 +477,11 @@ impl PromptState {
                 self.clear();
                 Action::Redraw
             }
-            KeyAction::ToggleMode => Action::ToggleMode,
-            KeyAction::CycleReasoning => Action::CycleReasoning,
+            // ToggleMode/CycleReasoning are intercepted by the global
+            // chord layer in events.rs before handle_event runs; reaching
+            // these arms would mean the global chord was bypassed (only
+            // possible if focus routing changes), so fall through to Noop.
+            KeyAction::ToggleMode | KeyAction::CycleReasoning => Action::Noop,
             KeyAction::ToggleStash => {
                 self.toggle_stash();
                 Action::Redraw
@@ -935,15 +935,8 @@ impl PromptState {
             return Action::Redraw;
         }
 
-        // 4. Resize events.
-        if let Event::Resize(w, h) = ev {
-            return Action::Resize {
-                width: w as usize,
-                height: h as usize,
-            };
-        }
-
-        // 5. Key events — look up in the keymap.
+        // 4. Key events — look up in the keymap. (Resize events are
+        // intercepted in dispatch_common before reaching here.)
         if let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = ev

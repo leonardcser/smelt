@@ -416,11 +416,11 @@ releases.
 
 **TLS pointers are type-erased over the trait, not the concrete struct.**
 Host tier is `*mut dyn Host` (set in P8.f via `CORE_PTR`); UiHost tier
-becomes `*mut dyn UiHost` (P9.o re-key, mirroring P8.f). Concrete frontend
-structs (`TuiApp`, `HeadlessApp`, future `StoryApp`) impl the trait pair
-and install through the same pointer slots. Bindings reborrow the
-trait object — never the concrete struct — so any UI-bearing frontend
-hosts UiHost-tier Lua without binding rewrites.
+mirrors with `*mut dyn UiHost` (set in P9.o.1 via `UI_HOST`).
+Concrete frontend structs (`TuiApp`, `HeadlessApp`, future `StoryApp`)
+impl the trait pair and install through the same pointer slots.
+Bindings reborrow the trait object — never the concrete struct — so any
+UI-bearing frontend hosts UiHost-tier Lua without binding rewrites.
 
 ### Bindings layout
 

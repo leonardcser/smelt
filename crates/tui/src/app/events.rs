@@ -569,13 +569,7 @@ impl TuiApp {
                     return EventOutcome::InterruptWithQueued;
                 }
             }
-            Action::ToggleMode => {
-                self.lua.cycle_mode();
-            }
             Action::Redraw => {}
-            Action::CycleReasoning => {
-                self.lua.cycle_reasoning();
-            }
             Action::EditInEditor => {
                 self.edit_in_editor();
             }
@@ -585,7 +579,7 @@ impl TuiApp {
             Action::NotifyError(msg) => {
                 self.notify_error(msg);
             }
-            Action::Noop | Action::Resize { .. } => {}
+            Action::Noop => {}
         }
         EventOutcome::Noop
     }
@@ -597,27 +591,12 @@ impl TuiApp {
         match action {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
             Action::SubmitEmpty => EventOutcome::Noop,
-            Action::ToggleMode => {
-                self.lua.cycle_mode();
-                EventOutcome::Redraw
-            }
-            Action::CycleReasoning => {
-                self.lua.cycle_reasoning();
-                EventOutcome::Redraw
-            }
             Action::EditInEditor => {
                 self.edit_in_editor();
                 EventOutcome::Noop
             }
             Action::CenterScroll => {
                 self.input.win.pending_recenter = true;
-                EventOutcome::Noop
-            }
-            Action::Resize {
-                width: w,
-                height: h,
-            } => {
-                self.handle_resize(w as u16, h as u16);
                 EventOutcome::Noop
             }
             Action::Redraw => EventOutcome::Redraw,

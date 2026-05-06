@@ -93,11 +93,13 @@ Authoring lands once, stories accumulate forever. Two architectural
 prerequisites identified during the 2026-05-06 audit are bundled into
 phases that already touch the relevant surfaces:
 
-- **P9.o** flips the UiHost-tier TLS pointer from `&mut TuiApp` to
-  `&mut dyn UiHost` (mirrors P8.f's Host-tier split). Without this,
-  L3-comp stories can't host UiHost-tier Lua bindings without
-  booting a full TuiApp. P9.o touches the same dispatch surface
-  anyway, so the re-key is bundled there rather than retrofitted.
+- **P9.o.1 ✅** added a `UI_HOST` TLS slot holding `*mut dyn UiHost`
+  alongside the existing concrete `APP` slot in
+  `crates/tui/src/lua/app_ref.rs` (mirrors P8.f's Host-tier split).
+  L3-comp stories can install through the trait-object slot
+  without booting a full `TuiApp`. Existing UiHost-tier bindings
+  still reach through `with_app(|app| ...)` — pulling them onto
+  `with_ui_host` is mechanical and lands when L3 needs it.
 - **P10.1 ✅** made `TuiApp::new` state-injectable (drops the internal
   `state::State::load()` call). Constructor takes `SessionCache` as
   a parameter; `main.rs` reads disk once via `startup::resolve` and
