@@ -58,6 +58,7 @@ fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
         paths_fn: None,
         decide_hook_fn: None,
         subpattern_parsers: bash_parser_map(),
+        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     }
 }
 
@@ -873,6 +874,7 @@ fn perms_with_workspace(workspace: &str) -> Permissions {
         paths_fn: None,
         decide_hook_fn: None,
         subpattern_parsers: bash_parser_map(),
+        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     };
     p.set_paths_fn(stub_paths_fn());
     install_stub_decide_hook(&mut p);
@@ -1342,6 +1344,7 @@ fn bash_tool_allow_pattern_ask() {
         paths_fn: None,
         decide_hook_fn: None,
         subpattern_parsers: bash_parser_map(),
+        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     };
     install_stub_decide_hook(&mut perms);
     let args = args_with("command", "git push origin main");
@@ -1368,6 +1371,7 @@ fn override_tightens_allow_to_ask() {
         paths_fn: None,
         decide_hook_fn: None,
         subpattern_parsers: bash_parser_map(),
+        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     };
     install_stub_decide_hook(&mut perms);
     let overrides = protocol::PermissionOverrides {
@@ -1630,6 +1634,7 @@ fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Perm
         paths_fn: None,
         decide_hook_fn: None,
         subpattern_parsers: bash_parser_map(),
+        approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     };
     p.set_paths_fn(stub_paths_fn());
     install_stub_decide_hook(&mut p);

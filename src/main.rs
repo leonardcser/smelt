@@ -331,19 +331,21 @@ async fn main() {
     permissions.set_decide_hook_fn(std::sync::Arc::new(|name, args, mode| {
         tui::lua::try_with_app(|app| app.lua.tool_decide(name, args, mode)).flatten()
     }));
-    let permissions = Arc::new(permissions);
-    let initial_api_base = api_base.clone();
-    let initial_provider_type = provider_type.clone();
-
-    // Create shared runtime approvals and load workspace rules.
-    let runtime_approvals = {
+    // Load workspace-scoped auto-approvals into the permissions'
+    // interior-mutable approvals slot before sharing the `Arc`.
+    {
         let cwd_str = cwd.to_string_lossy();
         let rules = smelt_core::permissions::store::load(&cwd_str);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
-        let mut rt = smelt_core::permissions::RuntimeApprovals::new();
-        rt.load_workspace(ws_tools, ws_dirs);
-        Arc::new(std::sync::RwLock::new(rt))
-    };
+        permissions
+            .approvals
+            .write()
+            .unwrap()
+            .load_workspace(ws_tools, ws_dirs);
+    }
+    let permissions = Arc::new(permissions);
+    let initial_api_base = api_base.clone();
+    let initial_provider_type = provider_type.clone();
 
     let skill_loader = {
         let extra_paths: Vec<std::path::PathBuf> = cfg
@@ -358,12 +360,8 @@ async fn main() {
     let tui_skill_loader = skill_loader.clone();
     let tui_instructions = instructions.clone();
 
-    let mcp_dispatcher = smelt_core::mcp::dispatcher::McpDispatcher::start(
-        &cfg.mcp,
-        Arc::clone(&permissions),
-        Arc::clone(&runtime_approvals),
-    )
-    .await;
+    let mcp_dispatcher =
+        smelt_core::mcp::dispatcher::McpDispatcher::start(&cfg.mcp, Arc::clone(&permissions)).await;
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> = match mcp_dispatcher {
         Some(d) => Box::new(d),
         None => Box::new(engine::tools::EmptyDispatcher::new()),
@@ -480,7 +478,6 @@ async fn main() {
             args.api_base.is_some(),
             args.api_key_env.is_some(),
             startup_auth_error.take(),
-            runtime_approvals,
             lua_runtime,
             project_trust,
             cache,

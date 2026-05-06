@@ -34,7 +34,7 @@ use rules::{build_mode, check_ruleset, merge_mode, ModePerms, RawConfig, RawPerm
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use workspace::{any_outside_workspace, is_in_workspace};
 
 /// Lookup "what filesystem paths does this tool call touch?" without
@@ -65,6 +65,11 @@ pub struct Permissions {
     paths_fn: Option<Arc<PathsFn>>,
     decide_hook_fn: Option<Arc<DecideFn>>,
     subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
+    /// Runtime auto-approval state (session- and workspace-scoped).
+    /// Interior-mutable so handlers that hold an `Arc<Permissions>`
+    /// can grant approvals without holding a writable handle. Cloned
+    /// `Permissions` share the same approvals lock.
+    pub approvals: Arc<RwLock<RuntimeApprovals>>,
 }
 
 impl std::fmt::Debug for Permissions {
@@ -118,7 +123,27 @@ impl Permissions {
             paths_fn: None,
             decide_hook_fn: None,
             subpattern_parsers: tool_defaults.subpattern_parsers.clone(),
+            approvals: Arc::new(RwLock::new(RuntimeApprovals::new())),
         }
+    }
+
+    /// Convenience: same as `from_raw`, plus loads workspace-scoped
+    /// auto-approvals from `<cwd>/.smelt/permissions.json` (or wherever
+    /// `permissions::store` reads from). Called once at startup.
+    pub fn from_raw_with_workspace(
+        raw: &RawPerms,
+        tool_defaults: &ToolDefaults,
+        cwd: &str,
+    ) -> Self {
+        let perms = Self::from_raw(raw, tool_defaults);
+        let rules = store::load(cwd);
+        let (ws_tools, ws_dirs) = store::into_approvals(&rules);
+        perms
+            .approvals
+            .write()
+            .unwrap()
+            .load_workspace(ws_tools, ws_dirs);
+        perms
     }
 
     /// Create a clone with per-turn permission overrides layered on top.

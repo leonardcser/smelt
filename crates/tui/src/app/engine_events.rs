@@ -283,7 +283,7 @@ impl TuiApp {
                             .confirm_message
                             .clone()
                             .unwrap_or_else(|| tool_name.clone());
-                        let rt = self.runtime_approvals.read().unwrap();
+                        let rt = self.core.permissions.approvals.read().unwrap();
                         if rt.is_auto_approved(
                             &self.core.permissions,
                             mode,
