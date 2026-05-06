@@ -6,8 +6,8 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::Style;
 
 use super::{syntax_theme, SYNTAX_SET};
-use crate::content::default_width;
 use crate::content::builder::LineBuilder;
+use crate::content::default_width;
 use crate::style::Color;
 use crate::theme::role_hl;
 

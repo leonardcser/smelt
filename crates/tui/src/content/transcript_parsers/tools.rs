@@ -1,5 +1,5 @@
 use super::{ToolBodyRenderer, DEFAULT_PREVIEW_LINES, MAX_TOOL_BLOCK_ROWS};
-use smelt_core::content::display::SpanMeta;
+use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::{role_hl, HlGroup};

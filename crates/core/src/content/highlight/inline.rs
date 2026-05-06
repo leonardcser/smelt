@@ -2,8 +2,8 @@
 //! `~~`), inline-span flattening + word-wrap, and the markdown table
 //! renderer that uses both.
 
-use crate::content::default_width;
 use crate::content::builder::LineBuilder;
+use crate::content::default_width;
 use crate::style::Color;
 use crate::theme::{role_hl, HlGroup};
 use unicode_width::UnicodeWidthStr;
@@ -478,10 +478,8 @@ fn emit_inline_nodes(out: &mut LineBuilder, nodes: &[InlineNode]) {
                 out.pop_style();
             }
             InlineNode::BoldItalic(children) => {
-                let mut style = out.snapshot_style();
-                style.bold = true;
-                style.italic = true;
-                out.push_style(style);
+                out.push_bold();
+                out.set_italic();
                 emit_inline_nodes(out, children);
                 out.pop_style();
             }
@@ -668,18 +666,19 @@ fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) 
 }
 
 pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
-    use crate::content::display::SpanStyle;
+    use crate::style::Style;
 
     for span in spans {
-        let style = SpanStyle {
-            group: span.style.group,
-            bold: span.style.bold,
-            italic: span.style.italic,
-            dim: span.style.dim,
-            crossedout: span.style.crossedout,
-            ..Default::default()
-        };
-        out.push_style(style);
+        out.push(
+            span.style.group,
+            Style {
+                bold: span.style.bold,
+                italic: span.style.italic,
+                dim: span.style.dim,
+                crossedout: span.style.crossedout,
+                ..Default::default()
+            },
+        );
         out.print(&span.text);
         out.pop_style();
     }

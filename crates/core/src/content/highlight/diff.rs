@@ -8,8 +8,8 @@ use std::path::Path;
 use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, SYNTAX_SET};
-use crate::content::default_width;
 use crate::content::builder::LineBuilder;
+use crate::content::default_width;
 use crate::style::Color;
 
 struct DiffChange {

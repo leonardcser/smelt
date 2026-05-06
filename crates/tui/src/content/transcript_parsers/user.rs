@@ -93,12 +93,7 @@ pub(super) fn render(
 
 /// Print user message text with accent highlighting for valid `@path` refs,
 /// `/command` lines, and `[image]` attachment labels.
-fn print_highlights(
-    out: &mut LineBuilder,
-    text: &str,
-    image_labels: &[String],
-    is_command: bool,
-) {
+fn print_highlights(out: &mut LineBuilder, text: &str, image_labels: &[String], is_command: bool) {
     let accent_role = role_hl("Accent");
 
     if is_command {

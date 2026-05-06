@@ -14,7 +14,7 @@
 //! direct re-export.
 
 use smelt_core::buffer::Buffer;
-use smelt_core::content::builder::{Outcome, LineBuilder};
+use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::LayoutContext;
 use smelt_core::theme::role_hl;
 use smelt_core::theme::Theme;

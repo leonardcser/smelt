@@ -1,5 +1,5 @@
-use smelt_core::content::highlight::{render_code_block, render_markdown_table};
 use smelt_core::content::builder::LineBuilder;
+use smelt_core::content::highlight::{render_code_block, render_markdown_table};
 use smelt_core::theme::role_hl;
 
 pub fn render_markdown_inner(
@@ -270,7 +270,7 @@ fn render_horizontal_rule(
     out.push_dim();
     out.print_with_meta(
         &hr,
-        smelt_core::content::display::SpanMeta {
+        smelt_core::buffer::SpanMeta {
             selectable: true,
             copy_as: Some("---".into()),
         },
