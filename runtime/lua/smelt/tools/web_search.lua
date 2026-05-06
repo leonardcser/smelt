@@ -26,7 +26,7 @@ smelt.tools.register({
     },
     required = { "query" },
   },
-  needs_confirm = function(args)
+  confirm_text = function(args)
     return args.query or ""
   end,
   render = function(args, output, ctx)

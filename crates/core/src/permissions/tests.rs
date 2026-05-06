@@ -1592,7 +1592,10 @@ fn dirs_approved_multiple_paths_one_uncovered() {
 
 // --- tilde normalization in is_auto_approved ---
 
-fn perms_with_workspace_default_bash(workspace: &str) -> Permissions {
+/// Workspace-restricted permissions with an explicit bash allow list.
+/// Tests pass only the patterns relevant to what they exercise — the
+/// production list lives in `runtime/lua/smelt/tools/bash.lua`.
+fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Permissions {
     let mut tools = HashMap::new();
     tools.insert("read_file".to_string(), Decision::Allow);
     tools.insert("write_file".to_string(), Decision::Allow);
@@ -1600,22 +1603,7 @@ fn perms_with_workspace_default_bash(workspace: &str) -> Permissions {
     tools.insert("glob".to_string(), Decision::Allow);
     tools.insert("grep".to_string(), Decision::Allow);
     tools.insert("bash".to_string(), Decision::Allow);
-    let mode = mode_perms(
-        tools,
-        &[(
-            "bash",
-            RuleSet {
-                allow: compile_patterns(
-                    &DEFAULT_BASH_ALLOW
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<_>>(),
-                ),
-                ask: vec![],
-                deny: vec![],
-            },
-        )],
-    );
+    let mode = mode_perms(tools, &[("bash", ruleset(bash_allow, &[], &[]))]);
     let mut p = Permissions {
         normal: mode.clone(),
         plan: mode.clone(),
@@ -1666,11 +1654,11 @@ fn absolute_dir_approval_works_for_tilde_bash() {
 fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
     let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
-    let p = perms_with_workspace_default_bash(&workspace);
+    // Allow list omits `rm` so the command is Ask. Dir approval alone
+    // shouldn't auto-approve a command that requires its own permission.
+    let p = perms_with_workspace_bash_allow(&workspace, &[]);
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
-    // `rm` is not in DEFAULT_BASH_ALLOW → Ask. Dir approval alone shouldn't
-    // auto-approve a command that requires its own permission.
     let args = args_with("command", "rm ~/syncthing/vault/old.md");
     assert!(!rt.is_auto_approved(
         &p,
@@ -1685,7 +1673,7 @@ fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
 fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
     let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
-    let p = perms_with_workspace_default_bash(&workspace);
+    let p = perms_with_workspace_bash_allow(&workspace, &[]);
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
@@ -1701,9 +1689,9 @@ fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
 
 #[test]
 fn compound_command_default_allowed_with_dir_approval() {
-    // `find | sort` — both are in DEFAULT_BASH_ALLOW.
-    // With wildcard bash allow (perms_with_workspace), both are allowed
-    // at the base level, so was_downgraded is true and dir approval suffices.
+    // Both subcommands are allowed at the base level (perms_with_workspace
+    // uses a wildcard `*` bash allow), so was_downgraded is true and dir
+    // approval suffices.
     let p = perms_with_workspace("/home/user/project");
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
@@ -1719,11 +1707,11 @@ fn compound_command_default_allowed_with_dir_approval() {
 
 #[test]
 fn compound_command_with_ask_subcommand_needs_tool_approval() {
-    // `find | python3` — find is in DEFAULT_BASH_ALLOW, python3 is not.
-    // Dir approval alone is insufficient; the Ask subcommand needs its own approval.
+    // `find` is allowed; `python3` is Ask. Dir approval alone is
+    // insufficient — the Ask subcommand needs its own approval.
     let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
-    let p = perms_with_workspace_default_bash(&workspace);
+    let p = perms_with_workspace_bash_allow(&workspace, &["find *"]);
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "find /tmp/data -name '*.py' | python3");
@@ -1740,7 +1728,7 @@ fn compound_command_with_ask_subcommand_needs_tool_approval() {
 fn compound_command_with_ask_subcommand_and_tool_approval() {
     let home = engine::paths::home_dir();
     let workspace = format!("{}/dev/project", home.display());
-    let p = perms_with_workspace_default_bash(&workspace);
+    let p = perms_with_workspace_bash_allow(&workspace, &["find *"]);
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     rt.add_session_tool("bash", vec![glob::Pattern::new("python3 *").unwrap()]);

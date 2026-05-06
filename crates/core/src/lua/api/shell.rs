@@ -89,19 +89,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "check_background_op",
         lua.create_function(|_, command: String| Ok(check_shell_background_operator(&command)))?,
     )?;
-    // smelt.shell.is_default_bash_allow(pattern) -> bool
-    //
-    // True when `pattern` (e.g. "ls *", "git *") matches one of the
-    // hard-coded safe-read-only patterns in `DEFAULT_BASH_ALLOW`.
-    // The bash tool consults this when building approval-pattern
-    // suggestions: a `git status` invocation shouldn't prompt for
-    // "approve `git *`" since `git *` is already on the allow list.
-    shell_tbl.set(
-        "is_default_bash_allow",
-        lua.create_function(|_, pattern: String| {
-            Ok(crate::permissions::DEFAULT_BASH_ALLOW.contains(&pattern.as_str()))
-        })?,
-    )?;
     // smelt.shell.extract_paths(command) -> [string]
     //
     // Pull tokens that look like absolute (`/foo`) or home-rooted

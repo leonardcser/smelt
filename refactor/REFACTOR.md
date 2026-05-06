@@ -417,17 +417,19 @@ Status table + open sub-phase sketches + decisions + deferrals in
   `ToolBodyRenderer` trait + `core/transcript_present.rs` retire.
   Per-leaf cache extension and projection-layer fold deferred (no
   perf signal). See `P9.md` § P9.r.
-- **P9.y** 📝 — **Permission defaults to Lua.** Surfaced in the
-  2026-05-06 audit. `core/permissions/rules.rs::install_tool_defaults`
-  hardcodes 11 tool names with per-mode `Allow` / `Ask` defaults;
-  `DEFAULT_BASH_ALLOW` (P9.d's "accepted single special case") is
-  data not shell logic. Both move to Lua: each tool's `.lua`
-  declares its mode-defaults, `bash.lua` carries its own
-  default-allow list, Rust permission layer reads via
-  `smelt.permissions.set_rules` at registration. `rules.rs`
-  shrinks ~80 LOC; the `if name == "bash"` arm in
-  `build_subcommand_ruleset` retires; verification grep returns
-  zero hardcoded tool names. See `P9.md` § P9.y.
+- **P9.y** ✅ — **Permission defaults to Lua.** Each built-in tool's
+  `.lua` declares `permission_defaults = { normal = "...", ... }`;
+  `bash.lua` declares `default_allow = { "ls *", ... }`. Tool
+  registration captures both into `LuaShared.tool_defaults`; startup
+  hands them to `Permissions::from_raw(raw, tool_defaults)`.
+  `install_tool_defaults` (11 hardcoded tool names),
+  `DEFAULT_BASH_ALLOW` (data const), and the `if name == "bash"`
+  arm in `build_subcommand_ruleset` retire; the special
+  `if !raw.subcommands.contains_key("bash")` insertion retires too
+  — buckets exist iff the tool declared `default_allow`.
+  `smelt.shell.is_default_bash_allow` retires (bash.lua keeps its
+  own set for approval-pattern dedupe). Verification grep over
+  shared Rust returns zero hits outside test stubs.
 
 ---
 

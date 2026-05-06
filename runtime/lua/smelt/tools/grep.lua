@@ -108,6 +108,7 @@ smelt.tools.register({
   name = "grep",
   description = "A powerful search tool built on ripgrep. Supports full regex syntax, file type filtering, glob filtering, and multiple output modes.",
   override = true,
+  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
   parameters = {
     type = "object",
     properties = {
@@ -133,7 +134,7 @@ smelt.tools.register({
     },
     required = { "pattern" },
   },
-  needs_confirm = function(args)
+  confirm_text = function(args)
     local pattern = args.pattern or ""
     local path = args.path or ""
     if path == "" then return pattern end

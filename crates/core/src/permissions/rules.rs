@@ -3,7 +3,8 @@
 //! This module owns the static permission rules loaded from config:
 //! - `Decision`, `RuleSet`, `ModePerms`
 //! - Raw deserialization types and merge helpers
-//! - `DEFAULT_BASH_ALLOW` safe-read-only-command list
+//! - `ToolDefaults` — Lua-declared per-tool defaults (decisions per
+//!   mode + subpattern allow lists), supplied by tool registration
 //! - `build_mode` (materializes a `ModePerms` for one AgentMode)
 //! - `check_ruleset` (the core pattern-matching decision)
 
@@ -114,115 +115,58 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
     map
 }
 
-/// Default bash patterns that are allowed without explicit approval.
-/// Used by both permissions checking and approval pattern suggestions.
-pub const DEFAULT_BASH_ALLOW: &[&str] = &[
-    // Directory listing & file search
-    "ls *",
-    "find *",
-    "tree *",
-    // Text viewing
-    "cat *",
-    "head *",
-    "tail *",
-    "less *",
-    // Text search & processing (read-only)
-    "grep *",
-    "sort *",
-    "uniq *",
-    "wc *",
-    "diff *",
-    "tr *",
-    "cut *",
-    "jq *",
-    // Path & file info
-    "echo *",
-    "pwd *",
-    "which *",
-    "dirname *",
-    "basename *",
-    "realpath *",
-    "stat *",
-    "file *",
-    "test *",
-    // Disk & system info
-    "du *",
-    "df *",
-    "date *",
-    "whoami *",
-    // Binary inspection
-    "sha256sum *",
-    "md5sum *",
-    "xxd *",
-    "hexdump *",
-    "strings *",
-];
-
-/// Mode defaults: which tool names get allow/ask/deny when neither
-/// the config nor a runtime override speaks. Lives in core (not Lua) so
-/// the engine has reasonable behaviour when no `init.lua` is loaded;
-/// real product UX overrides this via `smelt.permissions.set_rules`.
-fn install_tool_defaults(tools: &mut HashMap<String, Decision>, mode: AgentMode) {
-    if mode == AgentMode::Yolo {
-        // Yolo: everything not explicitly denied → Allow. The catch-all
-        // also lives in `Permissions::check_tool` for unregistered names.
-        for name in [
-            "read_file",
-            "edit_file",
-            "write_file",
-            "glob",
-            "grep",
-            "ask_user_question",
-            "bash",
-            "web_fetch",
-            "web_search",
-            "read_process_output",
-            "stop_process",
-        ] {
-            tools.entry(name.to_string()).or_insert(Decision::Allow);
-        }
-        return;
-    }
-    tools
-        .entry("read_file".to_string())
-        .or_insert(Decision::Allow);
-    let default_edit = if mode == AgentMode::Apply {
-        Decision::Allow
-    } else {
-        Decision::Ask
-    };
-    tools.entry("edit_file".to_string()).or_insert(default_edit);
-    let default_write = if mode == AgentMode::Apply {
-        Decision::Allow
-    } else {
-        Decision::Ask
-    };
-    tools
-        .entry("write_file".to_string())
-        .or_insert(default_write);
-    tools.entry("glob".to_string()).or_insert(Decision::Allow);
-    tools.entry("grep".to_string()).or_insert(Decision::Allow);
-    tools
-        .entry("ask_user_question".to_string())
-        .or_insert(Decision::Allow);
+/// Per-tool, per-mode default decisions declared by the tool's Lua
+/// registration table (`permission_defaults = { normal = "ask", ... }`).
+/// `None` means the tool didn't speak for that mode and the global
+/// fallback in `Permissions::check_tool` (Yolo→Allow, else Ask) takes
+/// over.
+#[derive(Debug, Default, Clone)]
+pub struct ToolPermDefaults {
+    pub normal: Option<Decision>,
+    pub plan: Option<Decision>,
+    pub apply: Option<Decision>,
+    pub yolo: Option<Decision>,
 }
 
-/// Compile a raw subpattern bucket into a `RuleSet`. `bucket_name` is
-/// used for bucket-specific defaults: `bash` falls back to
-/// `DEFAULT_BASH_ALLOW` in non-Yolo modes when no allow patterns are
-/// configured; every bucket falls back to `*` in Yolo.
-fn build_subcommand_ruleset(name: &str, raw: &RawRuleSet, mode: AgentMode) -> RuleSet {
+impl ToolPermDefaults {
+    pub fn for_mode(&self, mode: AgentMode) -> Option<&Decision> {
+        match mode {
+            AgentMode::Normal => self.normal.as_ref(),
+            AgentMode::Plan => self.plan.as_ref(),
+            AgentMode::Apply => self.apply.as_ref(),
+            AgentMode::Yolo => self.yolo.as_ref(),
+        }
+    }
+}
+
+/// Aggregated tool-declared defaults consumed by `Permissions::from_raw`.
+/// `tool_decisions` keys are tool names; `subcommand_allow` keys are
+/// subpattern bucket names (= tool names) and values are pattern lists
+/// used as the bucket's allow fallback when neither user config nor
+/// Yolo's `*` catch-all supplies one.
+#[derive(Debug, Default, Clone)]
+pub struct ToolDefaults {
+    pub tool_decisions: HashMap<String, ToolPermDefaults>,
+    pub subcommand_allow: HashMap<String, Vec<String>>,
+}
+
+/// Compile a raw subpattern bucket into a `RuleSet`. Tools that
+/// declared `default_allow` via Lua registration (e.g. bash's safe
+/// read-only prefix list) get those patterns as the allow fallback
+/// when no user-configured allow patterns are present; every bucket
+/// falls back to `*` in Yolo.
+fn build_subcommand_ruleset(
+    name: &str,
+    raw: &RawRuleSet,
+    mode: AgentMode,
+    tool_defaults: &ToolDefaults,
+) -> RuleSet {
     let mut allow = compile_patterns(&raw.allow);
     if allow.is_empty() {
         if mode == AgentMode::Yolo {
             allow = vec![glob::Pattern::new("*").unwrap()];
-        } else if name == "bash" {
-            allow = compile_patterns(
-                &DEFAULT_BASH_ALLOW
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>(),
-            );
+        } else if let Some(default_allow) = tool_defaults.subcommand_allow.get(name) {
+            allow = compile_patterns(default_allow);
         }
     }
     RuleSet {
@@ -232,21 +176,33 @@ fn build_subcommand_ruleset(name: &str, raw: &RawRuleSet, mode: AgentMode) -> Ru
     }
 }
 
-pub(super) fn build_mode(raw: &RawModePerms, mode: AgentMode) -> ModePerms {
+pub(super) fn build_mode(
+    raw: &RawModePerms,
+    mode: AgentMode,
+    tool_defaults: &ToolDefaults,
+) -> ModePerms {
     let mut tools = build_tool_map(&raw.tools);
-    install_tool_defaults(&mut tools, mode);
+    // Layer in tool-declared per-mode defaults; only fill gaps where
+    // the user config doesn't already speak for the tool.
+    for (name, perms) in &tool_defaults.tool_decisions {
+        if let Some(d) = perms.for_mode(mode) {
+            tools.entry(name.clone()).or_insert_with(|| d.clone());
+        }
+    }
 
     let mut subcommands: HashMap<String, RuleSet> = HashMap::new();
-    // Ensure bash always has a ruleset so `DEFAULT_BASH_ALLOW` engages
-    // even when no `bash =` block is configured.
-    if !raw.subcommands.contains_key("bash") {
+    for (name, rs) in &raw.subcommands {
         subcommands.insert(
-            "bash".to_string(),
-            build_subcommand_ruleset("bash", &RawRuleSet::default(), mode),
+            name.clone(),
+            build_subcommand_ruleset(name, rs, mode, tool_defaults),
         );
     }
-    for (name, rs) in &raw.subcommands {
-        subcommands.insert(name.clone(), build_subcommand_ruleset(name, rs, mode));
+    // Buckets a tool declared `default_allow` for but the user didn't
+    // configure: insert a default ruleset so the allow-fallback engages.
+    for name in tool_defaults.subcommand_allow.keys() {
+        subcommands.entry(name.clone()).or_insert_with(|| {
+            build_subcommand_ruleset(name, &RawRuleSet::default(), mode, tool_defaults)
+        });
     }
 
     ModePerms { tools, subcommands }

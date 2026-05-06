@@ -154,6 +154,7 @@ async fn main() {
     let project_trust = lua_runtime.load_project_config(&cwd);
     let lua_cfg = lua_runtime.to_config();
     let lua_permission_rules = lua_runtime.take_permission_rules();
+    let lua_tool_defaults = lua_runtime.tool_defaults();
     if let Some(err) = lua_runtime.load_error() {
         eprintln!("warning: lua init: {err}");
     }
@@ -309,10 +310,10 @@ async fn main() {
 
     // Start the engine.
     let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let mut permissions = match lua_permission_rules {
-        Some(raw) => smelt_core::permissions::Permissions::from_raw(&raw),
-        None => smelt_core::permissions::Permissions::load(),
-    };
+    let mut permissions = smelt_core::permissions::Permissions::from_raw(
+        &lua_permission_rules.unwrap_or_default(),
+        &lua_tool_defaults,
+    );
     permissions.set_workspace(workspace);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
     // Wire the workspace-path query to each Lua tool's

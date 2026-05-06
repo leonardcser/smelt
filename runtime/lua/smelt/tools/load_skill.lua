@@ -17,7 +17,7 @@ smelt.tools.register({
     },
     required = { "name" },
   },
-  needs_confirm = function(args)
+  confirm_text = function(args)
     return args.name or ""
   end,
   execute = function(args)

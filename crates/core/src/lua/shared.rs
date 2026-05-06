@@ -42,7 +42,7 @@ pub struct StatusSource {
 /// Handles for a plugin tool registered via `smelt.tools.register`.
 pub struct ToolHandles {
     pub execute: LuaHandle,
-    pub needs_confirm: Option<LuaHandle>,
+    pub confirm_text: Option<LuaHandle>,
     pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
     pub render: Option<LuaHandle>,
@@ -100,6 +100,11 @@ pub struct LuaShared {
     pub permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
     pub mcp_configs: Mutex<HashMap<String, crate::mcp::McpServerConfig>>,
     pub settings_overrides: Mutex<HashMap<String, bool>>,
+    /// Per-tool default permission decisions and subpattern allow-lists
+    /// declared at registration time (`permission_defaults` /
+    /// `default_allow` on the tool's registration table). Read once at
+    /// startup and handed to `Permissions::from_raw`.
+    pub tool_defaults: Mutex<crate::permissions::rules::ToolDefaults>,
 }
 
 impl Default for LuaShared {
@@ -121,6 +126,7 @@ impl Default for LuaShared {
             permission_rules: Mutex::new(None),
             mcp_configs: Mutex::new(HashMap::new()),
             settings_overrides: Mutex::new(HashMap::new()),
+            tool_defaults: Mutex::new(crate::permissions::rules::ToolDefaults::default()),
         }
     }
 }

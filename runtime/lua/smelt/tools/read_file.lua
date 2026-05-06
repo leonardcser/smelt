@@ -67,6 +67,7 @@ smelt.tools.register({
   name = "read_file",
   description = "Reads a file from the local filesystem. Supports text files and image files (png, jpg, gif, webp, bmp, tiff, svg).",
   override = true,
+  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
   parameters = {
     type = "object",
     properties = {
@@ -85,7 +86,7 @@ smelt.tools.register({
     },
     required = { "file_path" },
   },
-  needs_confirm = function(args)
+  confirm_text = function(args)
     return smelt.path.display(args.file_path or "")
   end,
   render = function(args, output, ctx)
