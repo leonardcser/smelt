@@ -220,17 +220,20 @@ stories add `.step-N` suffixes. Diffs stay surgical — a colour-only
 change touches only the styles file; a wrap regression touches only
 the text file. Both go through insta's review flow.
 
-### Coverage targets (initial story matrix)
+### Coverage (current — 58 stories across 6 groups)
 
-| File                | Stories                                                                                      | What it hunts                                            |
-| ------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `dialogs.rs`        | confirm_with_diff, confirm_long_command, permissions, agents, picker_100, ask_user_question_4options | dialog stacking, focus chain, Tab-back-add-message       |
-| `transcript.rs`     | text_long_streaming, code_block_rust, code_block_unclosed_at_turn_end, tool_block_bash, tool_block_web_fetch, diff_inline_truncated, mixed_blocks_25 | streaming → on_block, mid-block turn end, block spacing  |
-| `vim.rs`            | visual_across_wrap, visual_line_with_emoji, dot_repeat, dd_undo, registers_named, paste_after_yank | wrap math, register text, undo grouping                  |
-| `overlays.rs`       | cursor_anchor_completer, screen_center_modal, win_attach_top_toast, draggable_position       | anchor edges, z-order, hit-testing through overlays      |
-| `theme.rs`          | all_presets_swatch, accent_swap_buffer_unchanged, light_dark_toggle, custom_ansi             | HlGroup interning, theme-switch-without-rewrite invariant |
-| `layout.rs`         | vbox_chrome_borders, hbox_separator_styles, border_top_only, deeply_nested                   | chrome painting, gap inflation, constraint solver        |
-| `statusline.rs`     | tokens_climb, spinner_phases, model_swap, mode_change_diff_payload                           | cell `(new, old)` payload routing                        |
+L3-prim today. L3-comp groups (`dialogs.rs`, `transcript.rs`,
+`statusline.rs`) land when the first story in each needs Lua + a
+`MockEngine`.
+
+| File          | Stories | Examples                                                                                              | What it hunts                                                |
+| ------------- | ------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `buffer.rs`   | 10      | `cjk_double_width_glyphs_render`, `emoji_double_width_glyphs_render`, `mixed_ascii_and_cjk`, `decoration_fill_bg_paints_full_row`, `highlight_hl_eol_paints_to_line_end`, `highlight_range_paints_in_styles`, `multiple_highlights_same_line_layered`, `virt_text_eol_appends_after_content`, `line_longer_than_viewport_truncates`, `many_lines_more_than_viewport_height` | unicode width, layered highlights, hl_eol fill, virt_text positioning, decoration fill_bg |
+| `chrome.rs`   |  6      | `border_single_with_title`, `border_rounded_with_title`, `border_double_with_title`, `border_single_no_title`, `border_none_omits_frame`, `title_truncates_in_narrow_border` | border style enum, title truncation, no-border passthrough   |
+| `layout.rs`   | 14      | `vbox_three_panes`, `vbox_max_clamps_pane_height`, `vbox_min_competes_with_fill`, `vbox_percentage_split`, `vbox_nested_in_hbox`, `hbox_three_fill_split_evenly`, `hbox_ratio_split_one_to_two`, `hbox_two_columns_with_gap`, `nested_borders_inset_correctly`, `splits_paint_border_and_title`, … | chrome painting on splits + overlays, gap inflation, constraint solver |
+| `overlays.rs` |  8      | `overlay_centered_modal_over_splits`, `two_overlays_stack_by_z`, `anchor_screen_at_topleft_corner`, `anchor_screen_at_topright_corner`, `anchor_screen_at_bottomleft_corner`, `anchor_screen_bottom_docked`, `anchor_win_attaches_above_target`, `anchor_clamped_when_offscreen` | anchor edges, z-order, clamping when off-screen              |
+| `theme.rs`    |  7      | `default_theme_normal_fg`, `theme_link_a_to_b_resolves_b`, `theme_link_chain_three_hops`, `theme_link_cycle_falls_back_to_default`, `theme_swap_repaints_without_buffer_edit`, `theme_unknown_group_returns_default` | HlGroup interning, link chains, cycle fallback, theme-swap-without-rewrite invariant |
+| `vim.rs`      | 13      | `normal_w_word_motion`, `normal_caret_jumps_to_first_nonblank`, `normal_dollar_jumps_to_eol`, `normal_gg_jumps_to_first_line`, `normal_count_prefix_3w`, `operator_dw_removes_word`, `operator_dd_removes_line`, `operator_2x_deletes_two_chars`, `operator_yy_then_p_pastes_below`, `visual_char_extends_with_l`, `visual_line_o_swaps_anchor`, `visual_line_paints_selection_bg`, `empty_buffer_normal_mode_no_panic` | motions, operators, visual-mode anchor flip, selection paint |
 
 ### What L3 doesn't catch
 
@@ -262,7 +265,7 @@ the text file. Both go through insta's review flow.
 | -------------------- | -------------------------------------------------------------------------------------------------------- |
 | **Pre-P0**           | L2 harness + 5–10 baseline scenarios on today's binary. Locked behaviour before demolition. ✅           |
 | **P1–P5**            | L1 imperative tests landed alongside the code they cover (956 across the workspace). ✅                  |
-| **P10**              | L3-prim storybook lands: `StoryCtx`, `Ui::snapshot`, `EngineHandle::for_test`, 8 stories under `crates/tui/tests/storybook/`. ✅ The tmux walk row in `ARCHITECTURE.md § Testing TUI changes` covers what L3 can't (mouse, real terminal). |
+| **P10**              | L3-prim storybook lands: `StoryCtx`, `Ui::snapshot`, `EngineHandle::for_test`, 58 stories across 6 groups (`buffer / chrome / layout / overlays / theme / vim`) under `crates/tui/tests/storybook/`. Interactive viewer at `crates/tui/examples/stories.rs` reads blessed snapshots. ✅ The tmux walk row in `ARCHITECTURE.md § Testing TUI changes` covers what L3 can't (mouse, real terminal). |
 | **post-P10**         | L3-comp lands when the first dialog / transcript / statusline story needs it. Adds `Cells` + `LuaRuntime` + `MockEngine` to `StoryCtx`. |
 
 L2 was the parity gate for the demolition. L1 grew with each phase. L3
@@ -282,4 +285,6 @@ re-blessed only on intended changes.
   everything in one pass.
 
 Run all: `cargo nextest run --workspace`. Review snapshot diffs:
-`cargo insta review`.
+`cargo insta review`. Browse blessed L3 frames interactively:
+`cargo run -p tui --example stories` (`j`/`k` navigate, `g`/`G`
+jump, `q` or `Esc` quits).
