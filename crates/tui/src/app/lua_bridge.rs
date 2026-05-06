@@ -57,6 +57,28 @@ impl TuiApp {
         self.lua.pump_task_events();
     }
 
+    /// Drive everything Lua-shaped to a fixpoint: fire pending cell
+    /// subscribers, drain the resulting invocation queue, and pump the
+    /// task-runtime inbox. Either pass can re-feed the other (a cell
+    /// callback queues a Lua invocation; an invocation sets a cell), so
+    /// loop until both are quiet. Call this at any well-defined yield
+    /// point (after engine drain, after key dispatch, after a handler
+    /// returns) instead of hand-pairing `drain_cells_pending` +
+    /// `flush_lua_callbacks`.
+    pub(crate) fn pump_lua(&mut self) {
+        loop {
+            let cells_had_work = self.core.cells.has_pending();
+            if cells_had_work {
+                self.drain_cells_pending();
+            }
+            self.flush_lua_callbacks();
+            // `flush_lua_callbacks` may have set new cells; re-check.
+            if !self.core.cells.has_pending() {
+                break;
+            }
+        }
+    }
+
     /// Drain the pending-invocation queue built up during
     /// `ui.dispatch_event` / `ui.fire_win_event`. Each Lua callback fires
     /// under an `install_app_ptr` scope so its body can reach `&mut TuiApp`

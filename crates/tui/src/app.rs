@@ -934,8 +934,7 @@ impl TuiApp {
                     .cells
                     .set_dyn("block_done", std::rc::Rc::new(smelt_core::cells::EventStub));
             }
-            self.drain_cells_pending();
-            self.flush_lua_callbacks();
+            self.pump_lua();
             // Fire `WinEvent::Tick` on every window with a registered
             // Tick callback.
             {
