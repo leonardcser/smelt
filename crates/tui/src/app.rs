@@ -75,7 +75,6 @@ pub struct TuiApp {
     /// Runtime approvals shared with the engine. The engine checks these
     /// during `decide()` to auto-approve tools without sending
     /// `RequestPermission`. The TUI writes to them when the user approves.
-    pub(crate) runtime_approvals: Arc<std::sync::RwLock<smelt_core::permissions::RuntimeApprovals>>,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
     pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
@@ -324,7 +323,6 @@ impl TuiApp {
         cli_api_base_override: bool,
         cli_api_key_env_override: bool,
         startup_auth_error: Option<String>,
-        runtime_approvals: Arc<std::sync::RwLock<smelt_core::permissions::RuntimeApprovals>>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
         cache: state::SessionCache,
@@ -353,10 +351,6 @@ impl TuiApp {
             .ok()
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_default();
-        // Runtime approvals are shared with the engine via Arc<RwLock>;
-        // the caller owns the original Arc and passes a clone here so the
-        // frontend and engine see the same approvals state. Workspace
-        // rules are loaded into the Arc at startup by the caller.
 
         let app_config = smelt_core::AppConfig {
             model,
@@ -472,7 +466,6 @@ impl TuiApp {
             exec_kill: None,
             lua_wakeup_rx,
             queued_messages: Vec::new(),
-            runtime_approvals,
             cwd,
             shared_session,
             task_label: None,

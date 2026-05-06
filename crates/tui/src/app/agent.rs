@@ -467,7 +467,7 @@ impl TuiApp {
     }
 
     pub(crate) fn session_permission_entries(&self) -> Vec<PermissionEntry> {
-        let rt = self.runtime_approvals.read().unwrap();
+        let rt = self.core.permissions.approvals.read().unwrap();
         let mut entries = Vec::new();
         for (tool, patterns) in rt.session_tool_entries() {
             if patterns.is_empty() {
@@ -514,7 +514,7 @@ impl TuiApp {
         // Persist and reload workspace rules.
         smelt_core::permissions::store::save(&self.cwd, &workspace_rules);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&workspace_rules);
-        let mut rt = self.runtime_approvals.write().unwrap();
+        let mut rt = self.core.permissions.approvals.write().unwrap();
         rt.set_session(session_tools, session_dirs);
         rt.load_workspace(ws_tools, ws_dirs);
     }
@@ -522,14 +522,21 @@ impl TuiApp {
     fn reload_workspace_permissions(&mut self) {
         let rules = smelt_core::permissions::store::load(&self.cwd);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
-        self.runtime_approvals
+        self.core
+            .permissions
+            .approvals
             .write()
             .unwrap()
             .load_workspace(ws_tools, ws_dirs);
     }
 
     pub(crate) fn reset_session_permissions(&mut self) {
-        self.runtime_approvals.write().unwrap().clear_session();
+        self.core
+            .permissions
+            .approvals
+            .write()
+            .unwrap()
+            .clear_session();
     }
 
     /// Resolve a completed confirm dialog choice.
@@ -562,7 +569,9 @@ impl TuiApp {
             ConfirmChoice::Always(scope) => {
                 match scope {
                     ApprovalScope::Session => {
-                        self.runtime_approvals
+                        self.core
+                            .permissions
+                            .approvals
                             .write()
                             .unwrap()
                             .add_session_tool(tool_name, vec![]);
@@ -583,7 +592,9 @@ impl TuiApp {
                     .collect();
                 match scope {
                     ApprovalScope::Session => {
-                        self.runtime_approvals
+                        self.core
+                            .permissions
+                            .approvals
                             .write()
                             .unwrap()
                             .add_session_tool(tool_name, compiled);
@@ -604,7 +615,9 @@ impl TuiApp {
             ConfirmChoice::AlwaysDir(ref dir, scope) => {
                 match scope {
                     ApprovalScope::Session => {
-                        self.runtime_approvals
+                        self.core
+                            .permissions
+                            .approvals
                             .write()
                             .unwrap()
                             .add_session_dir(std::path::PathBuf::from(dir));
@@ -671,7 +684,7 @@ impl TuiApp {
 
                 // Check runtime auto-approvals.
                 let auto_approved = {
-                    let rt = self.runtime_approvals.read().unwrap();
+                    let rt = self.core.permissions.approvals.read().unwrap();
                     rt.is_auto_approved(
                         &self.core.permissions,
                         self.core.config.mode,
@@ -734,7 +747,7 @@ impl TuiApp {
                 };
 
                 if !req.approval_patterns.is_empty() {
-                    let rt = self.runtime_approvals.read().unwrap();
+                    let rt = self.core.permissions.approvals.read().unwrap();
                     req.approval_patterns
                         .retain(|p| !rt.has_pattern(&req.tool_name, p));
                 }

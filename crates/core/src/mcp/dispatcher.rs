@@ -11,14 +11,12 @@ pub struct McpDispatcher {
     manager: Arc<McpManager>,
     defs: Vec<McpToolDef>,
     permissions: Arc<crate::permissions::Permissions>,
-    runtime_approvals: Arc<std::sync::RwLock<crate::permissions::RuntimeApprovals>>,
 }
 
 impl McpDispatcher {
     pub async fn start(
         configs: &HashMap<String, crate::mcp::McpServerConfig>,
         permissions: Arc<crate::permissions::Permissions>,
-        runtime_approvals: Arc<std::sync::RwLock<crate::permissions::RuntimeApprovals>>,
     ) -> Option<Self> {
         if configs.is_empty() {
             return None;
@@ -29,7 +27,6 @@ impl McpDispatcher {
             manager,
             defs,
             permissions,
-            runtime_approvals,
         })
     }
 }
@@ -71,7 +68,7 @@ impl ToolDispatcher for McpDispatcher {
         let confirm_message = format!("MCP {}_{}", def.server_name, def.tool_name);
         let mut decision = self.permissions.decide(mode, name, args, true);
         if decision == protocol::Decision::Ask {
-            let rt = self.runtime_approvals.read().unwrap();
+            let rt = self.permissions.approvals.read().unwrap();
             if rt.is_auto_approved(&self.permissions, mode, name, args, &confirm_message) {
                 decision = protocol::Decision::Allow;
             }
