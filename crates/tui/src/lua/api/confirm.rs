@@ -90,6 +90,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
             let auto_allowed = crate::lua::with_app(|app| {
                 if app
+                    .core
                     .permissions
                     .decide(app.core.config.mode, &tool_name, &args, false)
                     == protocol::Decision::Allow

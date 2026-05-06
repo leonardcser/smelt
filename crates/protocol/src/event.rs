@@ -217,9 +217,6 @@ pub enum EngineEvent {
     /// Response to `UiCommand::Btw`.
     BtwResponse { content: String },
 
-    /// Predicted next user input (ghost text autocomplete).
-    InputPrediction { text: String, generation: u64 },
-
     /// Response to a `UiCommand::EngineAsk` request.
     EngineAskResponse { id: u64, content: String },
 
@@ -275,43 +272,49 @@ pub enum EngineEvent {
     },
 }
 
+/// Payload for [`UiCommand::StartTurn`]. Boxed at the variant so the
+/// enum stays small — the other variants are channel-frequent
+/// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn is
+/// once-per-turn and carries the full message history + tool list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartTurnPayload {
+    pub turn_id: u64,
+    pub content: Content,
+    pub mode: AgentMode,
+    pub model: String,
+    pub reasoning_effort: ReasoningEffort,
+    pub history: Vec<Message>,
+    /// Override API base URL for this turn (uses engine default if None).
+    pub api_base: Option<String>,
+    /// Override API key for this turn (uses engine default if None).
+    pub api_key: Option<String>,
+    /// Session ID for plan file storage.
+    pub session_id: String,
+    /// On-disk directory for this session (date-bucketed).
+    pub session_dir: std::path::PathBuf,
+    /// Per-turn model parameter overrides (from custom commands).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model_config_overrides: Option<ModelConfigOverrides>,
+    /// Per-turn permission overrides (from custom commands or Lua).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_overrides: Option<PermissionOverrides>,
+    /// Full system prompt assembled by the TUI (from prompt sections).
+    /// When present the engine uses this verbatim instead of rendering
+    /// its built-in template.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub system_prompt: Option<String>,
+    /// Tools registered in Lua. The engine
+    /// includes these in the LLM tool definitions and proxies execution
+    /// back to the TUI via `ToolDispatch`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tools: Vec<ToolDef>,
+}
+
 /// Commands sent from the UI to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
 pub enum UiCommand {
     /// Start a new agent turn.
-    StartTurn {
-        turn_id: u64,
-        content: Content,
-        mode: AgentMode,
-        model: String,
-        reasoning_effort: ReasoningEffort,
-        history: Vec<Message>,
-        /// Override API base URL for this turn (uses engine default if None).
-        api_base: Option<String>,
-        /// Override API key for this turn (uses engine default if None).
-        api_key: Option<String>,
-        /// Session ID for plan file storage.
-        session_id: String,
-        /// On-disk directory for this session (date-bucketed).
-        session_dir: std::path::PathBuf,
-        /// Per-turn model parameter overrides (from custom commands).
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        model_config_overrides: Option<ModelConfigOverrides>,
-        /// Per-turn permission overrides (from custom commands or Lua).
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        permission_overrides: Option<PermissionOverrides>,
-        /// Full system prompt assembled by the TUI (from prompt sections).
-        /// When present the engine uses this verbatim instead of rendering
-        /// its built-in template.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        system_prompt: Option<String>,
-        /// Tools registered in Lua. The engine
-        /// includes these in the LLM tool definitions and proxies execution
-        /// back to the TUI via `ToolDispatch`.
-        #[serde(skip_serializing_if = "Vec::is_empty", default)]
-        tools: Vec<ToolDef>,
-    },
+    StartTurn(Box<StartTurnPayload>),
 
     /// Inject a message mid-turn (steering / type-ahead).
     Steer { text: String },
@@ -366,12 +369,6 @@ pub enum UiCommand {
         question: String,
         history: Vec<Message>,
         reasoning_effort: ReasoningEffort,
-    },
-
-    /// Predict the user's next input based on conversation history.
-    PredictInput {
-        history: Vec<Message>,
-        generation: u64,
     },
 
     /// One-shot LLM call initiated by Lua. The engine spawns

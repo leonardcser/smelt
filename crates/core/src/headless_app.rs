@@ -65,22 +65,24 @@ impl HeadlessApp {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        self.core.engine.send(UiCommand::StartTurn {
-            turn_id,
-            content: Content::text(message),
-            mode: self.core.config.mode,
-            model: self.core.config.model.clone(),
-            reasoning_effort: self.core.config.reasoning_effort,
-            history: self.core.session.messages.clone(),
-            api_base: Some(self.core.config.api_base.clone()),
-            api_key: Some(self.api_key()),
-            session_id: self.core.session.id.clone(),
-            session_dir: crate::session::dir_for(&self.core.session),
-            model_config_overrides: None,
-            permission_overrides: None,
-            system_prompt: None,
-            tools: vec![],
-        });
+        self.core
+            .engine
+            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
+                turn_id,
+                content: Content::text(message),
+                mode: self.core.config.mode,
+                model: self.core.config.model.clone(),
+                reasoning_effort: self.core.config.reasoning_effort,
+                history: self.core.session.messages.clone(),
+                api_base: Some(self.core.config.api_base.clone()),
+                api_key: Some(self.api_key()),
+                session_id: self.core.session.id.clone(),
+                session_dir: crate::session::dir_for(&self.core.session),
+                model_config_overrides: None,
+                permission_overrides: None,
+                system_prompt: None,
+                tools: vec![],
+            })));
 
         // In text mode, buffer assistant text and only print to stdout at the end.
         let mut final_message = String::new();

@@ -76,22 +76,24 @@ impl TuiApp {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        self.core.engine.send(UiCommand::StartTurn {
-            turn_id,
-            content,
-            mode: self.core.config.mode,
-            model: self.core.config.model.clone(),
-            reasoning_effort: self.core.config.reasoning_effort,
-            history: self.core.session.messages.clone(),
-            api_base: Some(self.core.config.api_base.clone()),
-            api_key: Some(api_key),
-            session_id: self.core.session.id.clone(),
-            session_dir: smelt_core::session::dir_for(&self.core.session),
-            model_config_overrides: None,
-            permission_overrides: None,
-            system_prompt: Some(system_prompt),
-            tools,
-        });
+        self.core
+            .engine
+            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
+                turn_id,
+                content,
+                mode: self.core.config.mode,
+                model: self.core.config.model.clone(),
+                reasoning_effort: self.core.config.reasoning_effort,
+                history: self.core.session.messages.clone(),
+                api_base: Some(self.core.config.api_base.clone()),
+                api_key: Some(api_key),
+                session_id: self.core.session.id.clone(),
+                session_dir: smelt_core::session::dir_for(&self.core.session),
+                model_config_overrides: None,
+                permission_overrides: None,
+                system_prompt: Some(system_prompt),
+                tools,
+            })));
 
         TurnState {
             turn_id,
@@ -245,22 +247,24 @@ impl TuiApp {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
-        self.core.engine.send(UiCommand::StartTurn {
-            turn_id,
-            content: Content::text(evaluated),
-            mode: self.core.config.mode,
-            model,
-            reasoning_effort: reasoning,
-            history: self.core.session.messages.clone(),
-            api_base: Some(api_base),
-            api_key: Some(api_key),
-            session_id: self.core.session.id.clone(),
-            session_dir: smelt_core::session::dir_for(&self.core.session),
-            model_config_overrides,
-            permission_overrides,
-            system_prompt: None,
-            tools: vec![],
-        });
+        self.core
+            .engine
+            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
+                turn_id,
+                content: Content::text(evaluated),
+                mode: self.core.config.mode,
+                model,
+                reasoning_effort: reasoning,
+                history: self.core.session.messages.clone(),
+                api_base: Some(api_base),
+                api_key: Some(api_key),
+                session_id: self.core.session.id.clone(),
+                session_dir: smelt_core::session::dir_for(&self.core.session),
+                model_config_overrides,
+                permission_overrides,
+                system_prompt: None,
+                tools: vec![],
+            })));
 
         TurnState {
             turn_id,
@@ -405,12 +409,6 @@ impl TuiApp {
         self.set_task_label(slug.clone());
         self.pending_title = false;
         self.save_session();
-    }
-
-    pub(crate) fn handle_input_prediction(&mut self, text: String) {
-        if self.input.win.text.is_empty() {
-            self.set_prompt_completer(text);
-        }
     }
 
     pub(crate) fn resolve_api_key(&mut self) -> Option<String> {
@@ -675,7 +673,7 @@ impl TuiApp {
                 let auto_approved = {
                     let rt = self.runtime_approvals.read().unwrap();
                     rt.is_auto_approved(
-                        &self.permissions,
+                        &self.core.permissions,
                         self.core.config.mode,
                         &req.tool_name,
                         &req.args,
@@ -688,16 +686,19 @@ impl TuiApp {
                 }
 
                 // Check mode-based permissions (e.g. Apply mode auto-allows writes).
-                if self
-                    .permissions
-                    .decide(self.core.config.mode, &req.tool_name, &req.args, false)
-                    == Decision::Allow
+                if self.core.permissions.decide(
+                    self.core.config.mode,
+                    &req.tool_name,
+                    &req.args,
+                    false,
+                ) == Decision::Allow
                 {
                     self.send_permission_decision(req.request_id, true, None);
                     return LoopAction::Continue;
                 }
 
                 let outside_paths = self
+                    .core
                     .permissions
                     .outside_workspace_paths(&req.tool_name, &req.args);
 
@@ -710,7 +711,7 @@ impl TuiApp {
                 }
 
                 // Prepare dialog options.
-                let downgraded = self.permissions.was_downgraded(
+                let downgraded = self.core.permissions.was_downgraded(
                     self.core.config.mode,
                     &req.tool_name,
                     &req.args,

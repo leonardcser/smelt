@@ -24,7 +24,6 @@ pub(crate) struct SnapshotCell {
 /// Cached, width-keyed projection of the full transcript into plain-text
 /// rows with block↔row mappings. Built lazily by `build_snapshot` and
 /// invalidated on any block mutation or width change.
-#[allow(dead_code)]
 pub struct TranscriptSnapshot {
     pub(crate) width: u16,
     pub(crate) show_thinking: bool,

@@ -366,7 +366,7 @@ async fn main() {
     .await;
     let dispatcher: Box<dyn engine::tools::ToolDispatcher> = match mcp_dispatcher {
         Some(d) => Box::new(d),
-        None => Box::new(engine::tools::ToolRegistry::new()),
+        None => Box::new(engine::tools::EmptyDispatcher::new()),
     };
 
     let engine_handle = engine::start(
@@ -453,6 +453,7 @@ async fn main() {
             app_config,
             engine_handle,
             smelt_core::FrontendKind::Headless,
+            Arc::clone(&permissions),
         );
         core.skills = Some(tui_skill_loader.clone());
         let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);

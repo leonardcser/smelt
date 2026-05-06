@@ -43,7 +43,13 @@ pub(crate) async fn engine_task(
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCommand::StartTurn { turn_id, content: input_content, mode, model, reasoning_effort, history, api_base, api_key, session_id: _, session_dir: _, model_config_overrides, permission_overrides: _, system_prompt: tui_system_prompt, tools } => {
+                    UiCommand::StartTurn(payload) => {
+                        let protocol::StartTurnPayload {
+                            turn_id, content: input_content, mode, model, reasoning_effort,
+                            history, api_base, api_key, session_id: _, session_dir: _,
+                            model_config_overrides, permission_overrides: _,
+                            system_prompt: tui_system_prompt, tools,
+                        } = *payload;
 
                         let mut provider = build_provider_with_overrides(
                             &config, &client,
@@ -146,12 +152,6 @@ pub(crate) async fn engine_task(
                             history,
                             &event_tx,
                         );
-                    }
-                    UiCommand::PredictInput {
-                        history,
-                        generation,
-                    } => {
-                        spawn_predict_request(&config, &client, history, &event_tx, generation);
                     }
                     UiCommand::EngineAsk {
                         id,
@@ -303,75 +303,6 @@ fn spawn_btw_request(
             Err(e) => format!("error: {e}"),
         };
         let _ = tx.send(EngineEvent::BtwResponse { content });
-    });
-}
-
-fn spawn_predict_request(
-    config: &EngineConfig,
-    client: &reqwest::Client,
-    history: Vec<protocol::Message>,
-    event_tx: &mpsc::UnboundedSender<EngineEvent>,
-    generation: u64,
-) {
-    let request = config.aux_or_primary(AuxiliaryTask::Prediction);
-    let provider = build_provider_from_api(&request.api, client);
-    let pricing = PricingContext::from_api(&request.api);
-    let model = request.model;
-    let tx = event_tx.clone();
-    tokio::spawn(async move {
-        let system = "You predict what a user will type next in a coding assistant conversation. \
-                      Reply with ONLY the predicted message — no quotes, no explanation, \
-                      no preamble. Keep it short (one sentence max). If you cannot predict, \
-                      reply with an empty string.";
-
-        // Build context from recent user messages + last assistant response.
-        // History content is already redacted at ingress.
-        let mut context_parts = Vec::new();
-        for msg in &history {
-            let text = msg
-                .content
-                .as_ref()
-                .map(|c| c.text_content())
-                .unwrap_or_default();
-            if text.is_empty() {
-                continue;
-            }
-            // Truncate each message to keep the request small.
-            let truncated = if text.len() > 500 {
-                &text[text.floor_char_boundary(text.len() - 500)..]
-            } else {
-                &text
-            };
-            let label = if msg.role == protocol::Role::User {
-                "User"
-            } else {
-                "Assistant"
-            };
-            context_parts.push(format!("{label}: {truncated}"));
-        }
-
-        let user_msg = format!(
-            "Recent conversation:\n\n{}\n\nPredict the user's next message.",
-            context_parts.join("\n\n")
-        );
-
-        let messages = vec![
-            protocol::Message::system(system),
-            protocol::Message::user(protocol::Content::text(&user_msg)),
-        ];
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            provider.complete_predict(&messages, &model),
-        )
-        .await;
-        if let Ok(Ok((text, usage))) = result {
-            pricing.emit(&tx, &model, usage);
-            let text = text.trim().to_string();
-            if !text.is_empty() {
-                let _ = tx.send(EngineEvent::InputPrediction { text, generation });
-            }
-        }
     });
 }
 

@@ -219,8 +219,7 @@ pub struct EventInjector {
 impl EventInjector {
     /// Stream a chunk of output for an in-flight tool call. Used by
     /// the tui-side bash tool to emit `EngineEvent::ToolOutput` per
-    /// line as a child process runs, matching the streaming UX of
-    /// the legacy engine-side `BashTool`.
+    /// line as a child process runs.
     pub fn inject_tool_output(&self, call_id: String, chunk: String) {
         let _ = self
             .event_tx

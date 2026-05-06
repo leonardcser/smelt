@@ -5,8 +5,7 @@
 //!
 //! When `rg` is missing or fails to launch, callers see an `io::Error`
 //! and decide how to fall back. This module never falls back to grep
-//! by itself — the engine's legacy `grep` tool keeps its own fallback
-//! until it migrates to Lua in P5.b.
+//! by itself — that's the calling Lua tool's concern.
 
 use std::io;
 use std::path::{Path, PathBuf};
