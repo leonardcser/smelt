@@ -330,7 +330,7 @@ impl TuiApp {
         provider_type: String,
         permissions: Arc<smelt_core::permissions::Permissions>,
         engine: EngineHandle,
-        settings: state::ResolvedSettings,
+        settings: smelt_core::config::ResolvedSettings,
         reasoning_effort: protocol::ReasoningEffort,
         reasoning_cycle: Vec<protocol::ReasoningEffort>,
         mode_cycle: Vec<protocol::AgentMode>,
@@ -343,9 +343,9 @@ impl TuiApp {
         runtime_approvals: Arc<std::sync::RwLock<smelt_core::permissions::RuntimeApprovals>>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
+        cache: state::SessionCache,
     ) -> Self {
-        let saved = state::State::load();
-        let mode = saved.mode();
+        let mode = cache.mode();
         let mut input = PromptState::new();
         let vim_enabled = settings.vim;
         if vim_enabled {
@@ -356,11 +356,11 @@ impl TuiApp {
         // now live in Lua plugins and open real `crate::ui::Picker` windows via
         // `smelt.prompt.open_picker`, so they're not listed here.
         input.command_arg_sources = Vec::new();
-        // Use saved reasoning effort if not set from config
+        // Use cached reasoning effort if not set from config
         let reasoning_effort = if reasoning_effort == protocol::ReasoningEffort::Off
-            && saved.reasoning_effort != protocol::ReasoningEffort::Off
+            && cache.reasoning_effort != protocol::ReasoningEffort::Off
         {
-            saved.reasoning_effort
+            cache.reasoning_effort
         } else {
             reasoning_effort
         };
@@ -396,9 +396,6 @@ impl TuiApp {
             let (w, h) = terminal::size().unwrap_or((80, 24));
             let mut ui = crate::ui::Ui::new();
             ui.set_terminal_size(w, h);
-            if let Some(accent) = saved.accent_color {
-                ui.theme_mut().set_accent(accent);
-            }
             let input_display_buf = ui.buf_create(crate::ui::BufCreateOpts::default());
             // Transcript: a Buffer-backed Window painted via `Ui::render`
             // from the post-layer closure. No compositor `Component`

@@ -23,4 +23,4 @@ rules.
 
 @refactor/README.md @refactor/REFACTOR.md @refactor/ARCHITECTURE.md
 @refactor/tui-ui-architecture.puml @refactor/INVENTORY.md @refactor/FEATURES.md
-@refactor/DECISIONS.md @refactor/TRACE.md @refactor/TESTING.md @refactor/P9.md
+@refactor/DECISIONS.md @refactor/TRACE.md @refactor/TESTING.md @refactor/P10.md

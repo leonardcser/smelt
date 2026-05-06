@@ -9,11 +9,10 @@
 //! Unknown keys raise an error at the access site so a typo can't
 //! silently lose an override. The known set lives in
 //! [`smelt_core::config::SETTINGS_KEYS`] and matches the field names
-//! on [`smelt_core::state::ResolvedSettings`].
+//! on [`smelt_core::config::ResolvedSettings`].
 
 use mlua::prelude::*;
-use smelt_core::config::SETTINGS_KEYS;
-use smelt_core::state::ResolvedSettings;
+use smelt_core::config::{ResolvedSettings, SETTINGS_KEYS};
 use std::sync::Arc;
 
 fn known(key: &str) -> bool {

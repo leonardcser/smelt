@@ -107,6 +107,40 @@ impl SettingsConfig {
         }
         Ok(())
     }
+
+    /// Resolve to a fully-realized boolean settings struct using built-in
+    /// defaults for any field the Lua config didn't set.
+    pub fn resolve(&self) -> ResolvedSettings {
+        ResolvedSettings {
+            vim: self.vim.unwrap_or(false),
+            auto_compact: self.auto_compact.unwrap_or(false),
+            show_tps: self.show_tps.unwrap_or(true),
+            show_tokens: self.show_tokens.unwrap_or(true),
+            show_cost: self.show_cost.unwrap_or(true),
+            show_prediction: self.show_prediction.unwrap_or(true),
+            show_slug: self.show_slug.unwrap_or(true),
+            show_thinking: self.show_thinking.unwrap_or(true),
+            restrict_to_workspace: self.restrict_to_workspace.unwrap_or(true),
+            redact_secrets: self.redact_secrets.unwrap_or(true),
+        }
+    }
+}
+
+/// Fully resolved boolean settings (no Options). Lives on `AppConfig`
+/// so runtime reads/writes hit the live struct; persistence is not a
+/// concern of this type — config is `init.lua`, not a JSON registry.
+#[derive(Debug, Clone)]
+pub struct ResolvedSettings {
+    pub vim: bool,
+    pub auto_compact: bool,
+    pub show_tps: bool,
+    pub show_tokens: bool,
+    pub show_cost: bool,
+    pub show_prediction: bool,
+    pub show_slug: bool,
+    pub show_thinking: bool,
+    pub restrict_to_workspace: bool,
+    pub redact_secrets: bool,
 }
 
 #[derive(Debug, Clone)]

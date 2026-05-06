@@ -30,12 +30,13 @@ pub struct ResolvedStartup {
     pub provider_type: String,
     pub model: String,
     pub model_config: smelt_core::config::ModelConfig,
-    pub settings: smelt_core::state::ResolvedSettings,
+    pub settings: smelt_core::config::ResolvedSettings,
     pub mode_override: Option<AgentMode>,
     pub mode_cycle: Vec<AgentMode>,
     pub reasoning_effort: ReasoningEffort,
     pub reasoning_cycle: Vec<ReasoningEffort>,
     pub startup_auth_error: Option<String>,
+    pub cache: smelt_core::state::SessionCache,
 }
 
 /// Resolve the four priority fallbacks for the active model reference:
@@ -48,7 +49,7 @@ fn resolve_model_reference(
     args: &Args,
     cfg: &smelt_core::config::Config,
     available_models: &[smelt_core::config::ResolvedModel],
-    app_state: &smelt_core::state::State,
+    cache: &smelt_core::state::SessionCache,
 ) -> Option<smelt_core::config::ResolvedModel> {
     let pick = |reference: &str, allow_not_found: bool| match smelt_core::config::resolve_model_ref(
         available_models,
@@ -69,7 +70,7 @@ fn resolve_model_reference(
     } else if let Some(default) = cfg.get_default_model() {
         // Config has a default: use it, ignore cached selection.
         pick(default, false)
-    } else if let Some(ref cached) = app_state.selected_model {
+    } else if let Some(ref cached) = cache.selected_model {
         // No config default: prefer last-used, fall back to first if stale.
         smelt_core::config::resolve_model_ref(available_models, cached)
             .ok()
@@ -107,7 +108,7 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
 
     cfg.inject_oauth_providers();
 
-    let app_state = smelt_core::state::State::load();
+    let cache = smelt_core::state::SessionCache::load();
     let mut available_models = cfg.resolve_models();
 
     // For Codex providers, fetch models dynamically from the API (with cache).
@@ -151,7 +152,7 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
 
     // Resolve the active model and the connection details derived from it.
     let (api_base, api_key, api_key_env, mut provider_type, model, mut model_config) = {
-        let resolved = resolve_model_reference(args, &cfg, &available_models, &app_state);
+        let resolved = resolve_model_reference(args, &cfg, &available_models, &cache);
 
         if let Some(r) = resolved {
             let base = args.api_base.clone().unwrap_or_else(|| r.api_base.clone());
@@ -334,7 +335,7 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| AgentMode::ALL.to_vec());
 
-    // Reasoning effort: CLI --reasoning-effort > config defaults > saved state.
+    // Reasoning effort: CLI --reasoning-effort > config defaults > saved cache.
     let reasoning_effort = args
         .reasoning_effort
         .as_deref()
@@ -345,7 +346,7 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
                 .as_deref()
                 .and_then(ReasoningEffort::parse)
         })
-        .unwrap_or(app_state.reasoning_effort);
+        .unwrap_or(cache.reasoning_effort);
 
     let provider_kind = engine::ProviderKind::from_config(&provider_type);
     let mut reasoning_cycle = args
@@ -359,7 +360,7 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         reasoning_cycle.push(reasoning_effort);
     }
 
-    let mut settings = app_state.settings.resolve(&cfg.settings);
+    let mut settings = cfg.settings.resolve();
     // Force auto_compact on for headless mode.
     if args.headless {
         settings.auto_compact = true;
@@ -381,5 +382,6 @@ pub async fn resolve(args: &Args, cfg: smelt_core::config::Config) -> ResolvedSt
         reasoning_effort,
         reasoning_cycle,
         startup_auth_error,
+        cache,
     }
 }

@@ -241,20 +241,22 @@ impl TuiApp {
         }
     }
 
-    /// Mutate resolved settings in place, then persist + propagate to
-    /// input/screen. Centralizes the pattern that used to be scattered across
-    /// the command handlers.
-    pub(super) fn update_settings<F: FnOnce(&mut state::ResolvedSettings)>(&mut self, f: F) {
+    /// Mutate resolved settings in place and propagate to input/screen.
+    /// Settings are not persisted: the runtime live-state is the source
+    /// of truth and config lives in `init.lua`.
+    pub(super) fn update_settings<F: FnOnce(&mut smelt_core::config::ResolvedSettings)>(
+        &mut self,
+        f: F,
+    ) {
         f(&mut self.core.config.settings);
         self.input.set_vim_enabled(self.core.config.settings.vim);
         self.transcript_window
             .set_vim_enabled(self.core.config.settings.vim);
-        state::save_settings(&self.core.config.settings);
     }
 
     /// Replace all resolved settings at once (from a settings dialog result),
-    /// persisting + propagating to input/screen.
-    pub(crate) fn set_settings(&mut self, new: state::ResolvedSettings) {
+    /// propagating to input/screen.
+    pub(crate) fn set_settings(&mut self, new: smelt_core::config::ResolvedSettings) {
         self.update_settings(|slot| *slot = new);
     }
 
