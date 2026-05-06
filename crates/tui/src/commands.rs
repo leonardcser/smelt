@@ -7,6 +7,14 @@ pub(crate) enum ExecEvent {
     Done(Option<i32>),
 }
 
+/// A live shell-escape (`!cmd`) child: the receiver streams stdout/stderr
+/// lines plus a final exit status, and the `kill` notify cancels the
+/// process group on Ctrl-C.
+pub(crate) struct ExecHandle {
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<ExecEvent>,
+    pub kill: std::sync::Arc<tokio::sync::Notify>,
+}
+
 /// Public command runner used by `crate::api::cmd::run`. Accepts raw
 /// command lines (`/quit`, `:q`, `/compact foo`, `! ls`, ...).
 /// Normalises a leading `:` to `/` so `/quit` and `:quit` dispatch
@@ -18,7 +26,7 @@ pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     if let Some(rest) = line.strip_prefix('!') {
         if !app.input.skip_shell_escape() {
             return match app.start_shell_escape(rest) {
-                Some((rx, kill)) => CommandAction::Exec(rx, kill),
+                Some(handle) => CommandAction::Exec(handle),
                 None => CommandAction::Continue,
             };
         }
@@ -69,9 +77,8 @@ impl TuiApp {
                 let turn = self.begin_agent_turn(display, content);
                 self.agent = Some(turn);
             }
-            InputOutcome::Exec(rx, kill) => {
-                self.exec_rx = Some(rx);
-                self.exec_kill = Some(kill);
+            InputOutcome::Exec(handle) => {
+                self.exec = Some(handle);
             }
             InputOutcome::Continue => {}
         }
@@ -86,7 +93,7 @@ impl TuiApp {
         // unconditionally; `run_command` spawns the subprocess.
         if input.starts_with('!') && !is_from_paste {
             return match run_command(self, input) {
-                CommandAction::Exec(rx, kill) => Some(EventOutcome::Exec(rx, kill)),
+                CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
                 CommandAction::Continue => Some(EventOutcome::Noop),
             };
         }
@@ -126,20 +133,14 @@ impl TuiApp {
         }
 
         match run_command(self, &normalized) {
-            CommandAction::Exec(rx, kill) => Some(EventOutcome::Exec(rx, kill)),
+            CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
             CommandAction::Continue => Some(EventOutcome::Noop),
         }
     }
 
-    /// Spawn a shell command asynchronously. Returns a receiver for output
-    /// lines and the child process handle (for killing on Ctrl+C).
-    pub(crate) fn start_shell_escape(
-        &mut self,
-        raw: &str,
-    ) -> Option<(
-        tokio::sync::mpsc::UnboundedReceiver<ExecEvent>,
-        std::sync::Arc<tokio::sync::Notify>,
-    )> {
+    /// Spawn a shell command asynchronously. Returns a handle the caller
+    /// can stash on `TuiApp::exec` to stream output and kill on Ctrl+C.
+    pub(crate) fn start_shell_escape(&mut self, raw: &str) -> Option<ExecHandle> {
         let cmd = raw.trim();
         if cmd.is_empty() {
             return None;
@@ -204,7 +205,7 @@ impl TuiApp {
             let _ = tx.send(ExecEvent::Done(status.and_then(|s| s.code())));
         });
 
-        Some((rx, kill))
+        Some(ExecHandle { rx, kill })
     }
 
     /// Switch to a model by key, updating all relevant state. Silently does

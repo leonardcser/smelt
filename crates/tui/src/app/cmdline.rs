@@ -387,9 +387,8 @@ impl TuiApp {
         }
         let action = crate::commands::run_command(self, &format!(":{line}"));
         match action {
-            CommandAction::Exec(rx, kill) => {
-                self.exec_rx = Some(rx);
-                self.exec_kill = Some(kill);
+            CommandAction::Exec(handle) => {
+                self.exec = Some(handle);
                 false
             }
             CommandAction::Continue => self.pending_quit,

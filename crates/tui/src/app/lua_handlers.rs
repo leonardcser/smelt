@@ -14,9 +14,8 @@ impl TuiApp {
     /// for shell escapes (`! cmd`).
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
         match crate::api::cmd::run(self, line) {
-            crate::app::CommandAction::Exec(rx, kill) => {
-                self.exec_rx = Some(rx);
-                self.exec_kill = Some(kill);
+            crate::app::CommandAction::Exec(handle) => {
+                self.exec = Some(handle);
             }
             crate::app::CommandAction::Continue => {}
         }
