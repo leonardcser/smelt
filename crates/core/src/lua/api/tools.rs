@@ -173,8 +173,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             |_, (request_id, call_id, result): (u64, String, mlua::Table)| {
                 let content: String = result.get("content").unwrap_or_default();
                 let is_error: bool = result.get("is_error").unwrap_or(false);
-                crate::host::with_host(|host| {
-                    host.engine().send(protocol::UiCommand::ToolResult {
+                crate::host::with_core(|core| {
+                    core.engine().send(protocol::UiCommand::ToolResult {
                         request_id,
                         call_id,
                         content,
@@ -199,8 +199,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 mlua::Table,
             )| {
                 let arg_map = lua_table_to_args(lua, &args);
-                crate::host::with_host(|host| {
-                    host.engine().send(protocol::UiCommand::CallCoreTool {
+                crate::host::with_core(|core| {
+                    core.engine().send(protocol::UiCommand::CallCoreTool {
                         request_id,
                         parent_call_id,
                         tool_name,

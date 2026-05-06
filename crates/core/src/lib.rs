@@ -46,7 +46,6 @@ pub(crate) use clipboard::{Osc52Sink, SystemSink};
 pub use engine_client::EngineClient;
 pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
-pub use host::Host;
 pub use runtime::{Core, FrontendKind};
 pub use session::Session;
 pub use timers::Timers;
