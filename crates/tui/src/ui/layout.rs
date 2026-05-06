@@ -42,22 +42,6 @@ pub enum Constraint {
 /// `LayoutTree::Hbox` items.
 pub type Item = (Constraint, LayoutTree);
 
-/// Style of the line drawn on the middle row (or column) of a
-/// container's `gap`. Requires `gap >= 1` to render; `with_separator`
-/// auto-inflates `gap = 0 → 1` when a non-`None` style is set so a
-/// caller can opt into a separator without manually budgeting space.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SeparatorStyle {
-    /// No separator drawn — siblings just have empty cells between
-    /// them (or no cells, when `gap = 0`).
-    #[default]
-    None,
-    /// Solid `─` (Vbox) / `│` (Hbox).
-    Solid,
-    /// Dashed `┄` (Vbox) / `┆` (Hbox).
-    Dashed,
-}
-
 /// Container chrome shared by `Vbox` and `Hbox`.
 #[derive(Clone, Debug, Default)]
 pub struct Chrome {
@@ -72,11 +56,6 @@ pub struct Chrome {
     /// consume layout space (lives in the border row); requires
     /// `border = Some(_)` to render.
     pub title: Option<String>,
-    /// Line drawn on the middle row of the gap between adjacent
-    /// children. Renders only when `gap >= 1`. `with_separator` keeps
-    /// the field and `gap` consistent; setting it directly without
-    /// raising `gap` leaves the separator invisible.
-    pub separator: SeparatorStyle,
 }
 
 #[derive(Clone, Debug)]
@@ -785,12 +764,6 @@ mod tests {
     fn natural_size_clamps_to_cap() {
         let tree = LayoutTree::vbox(vec![(Constraint::Length(100), LayoutTree::leaf(A))]);
         assert_eq!(tree.natural_size((80, 24)), (0, 24));
-    }
-
-    #[test]
-    fn separator_default_is_none() {
-        let chrome = Chrome::default();
-        assert_eq!(chrome.separator, SeparatorStyle::None);
     }
 
     #[test]

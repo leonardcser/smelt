@@ -91,13 +91,11 @@ Two primitives, one role each:
 
 Composition/chrome lives outside Window:
 
-- **LayoutTree** — `Vbox { gap, separator, border, title, items } | Hbox
-  { gap, separator, border, title, items } | Leaf(WinId)`. Composition shape.
-  Container nodes carry four parent-node properties:
+- **LayoutTree** — `Vbox { gap, border, title, items } | Hbox
+  { gap, border, title, items } | Leaf(WinId)`. Composition shape.
+  Container nodes carry three parent-node properties:
   - `gap: u16` — blank rows (Vbox) or columns (Hbox) between adjacent
     siblings. Default 0 = tight tiling.
-  - `separator: SeparatorStyle` — line drawn on the middle row of the gap.
-    Requires `gap >= 1`. `gap=0, separator=Solid` auto-inflates to `gap=1`.
   - `border: Option<Border>` — chrome around the container's whole rect.
     `Border = { style: BorderStyle, sides: Borders }` where `Borders` is a
     bitflag picking edges (`TOP | RIGHT | BOTTOM | LEFT`).
@@ -106,8 +104,9 @@ Composition/chrome lives outside Window:
 
   Any container can have chrome. Convention is to use it on overlays only;
   the type system allows it anywhere. Want a 1-row blank line between
-  transcript and prompt? `Vbox { gap: 1, separator: None, … }`. Want a
-  divider? `Vbox { gap: 1, separator: Solid, … }`. Want a bordered
+  transcript and prompt? `Vbox { gap: 1, … }`. Want a divider? Insert a
+  one-row Window leaf containing `─` characters between siblings — same
+  pattern Ratatui uses; no separate separator API. Want a bordered
   composite? `Vbox { border: Some({ style: Rounded, sides: ALL }), title:
   Some("Find"), … }`.
 
@@ -601,16 +600,26 @@ over a Lua-registered identifier.
 
 A tool's `render` callback returns a
 `smelt_core::content::block_layout::BlockLayout` — a minimal enum
-(`Leaf(BufId) | Vbox(Vec<BlockLayout>)`) carrying buffer ids the tool
-has painted. Rust composer walks the tree depth-first and replays
-each leaf's lines into the surrounding `LineBuilder` with a `"  "`
-gutter prefix.
+(`Leaf(BufId) | Vbox(Vec<BlockLayout>) | Hbox(Vec<HboxItem>)`)
+carrying buffer ids the tool has painted. Rust composer walks the
+tree depth-first and replays each leaf's lines into the surrounding
+`LineBuilder` with a `"  "` gutter prefix.
 
 Slot vocabulary lives in the tool, not in Rust. There is no fixed
 "summary slot" / "subhead slot" / "body slot" the composer
 dispatches to. Tools that want a summary line + body create two
-buffers and arrange them in a `vbox`; plugin tools can produce any
-vertical shape.
+buffers and arrange them in a `vbox`; tools that want side-by-side
+columns wrap children in `hbox`; plugin tools can produce any shape.
+
+`Hbox` items carry a per-child sizing `Constraint`
+(`Length(u16) | Fill(u16)`); the sugar form `hbox{ a, b }` expands
+to `Fill(1)` for each child (equal split). The composer allocates
+column widths via the standard length-then-fill solver familiar
+from ratatui / Qt / GTK. A 1×1 leaf (single row, single column of
+content) auto-repeats its glyph to fill the allocated rect along
+the parent's layout axis — the same primitive serves vertical
+separators in `hbox` (`smelt.layout.sep("│")`) and horizontal in
+`vbox` (`smelt.layout.sep("─")`).
 
 `BlockLayout` is intentionally separate from `tui::ui::LayoutTree<L>`
 (splits / overlays). The two enums look superficially similar —
@@ -618,13 +627,10 @@ both are "a tree of leaves" — but the consumers have nothing in
 common. `LayoutTree` carries chrome / borders / titles / constraints
 / focus semantics and is consumed by the compositor at paint time;
 `BlockLayout` is a sequence of buffer leaves replayed into a
-`LineBuilder` with no chrome, no constraints, no focus. Forcing
-them to share a generic would couple two paint paths that benefit
-from staying independent. They are deliberately two enums.
-
-`Hbox` (side-by-side composition) is reserved but not implemented;
-add when the first plugin needs it (see `P9.md` deferrals for the
-design questions a real consumer would pin).
+`LineBuilder` with no chrome, no focus, and a minimal sizing
+constraint set scoped to per-child column widths. Forcing them to
+share a generic would couple two paint paths that benefit from
+staying independent. They are deliberately two enums.
 
 Live updates (elapsed ticks, status changes) flow via cell
 subscriptions inside the tool's render coroutine. The tool subscribes
@@ -656,8 +662,9 @@ collapsible tool block, custom slash command dialog — all the same
 shape:
 
 1. `smelt.buf.create()` — make Buffers, populate with lines + extmarks.
-2. `smelt.layout.{vbox,leaf}` — compose into a tree (tool render);
-   for splits/overlays use `tui::ui::LayoutTree<WinId>` shapes.
+2. `smelt.layout.{vbox,hbox,leaf,sep}` — compose into a tree (tool
+   render); for splits/overlays use `tui::ui::LayoutTree<WinId>`
+   shapes.
 3. `smelt.win.open(buf, opts)` — display, focusable if interactive.
 4. `smelt.win.set_keymap(win, key, fn)` — input.
 5. `smelt.cell.subscribe(name, fn)` / `smelt.timer.every(ms, fn)` —
