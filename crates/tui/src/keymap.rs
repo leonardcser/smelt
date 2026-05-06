@@ -21,7 +21,6 @@ pub(crate) enum KeyAction {
     ToggleMode,
     CycleReasoning,
     ToggleStash,
-    OpenHelp,
     Redraw,
     AcceptGhostText,
 
@@ -271,12 +270,6 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::BackTab, NONE, when(), KeyAction::ToggleMode),
     bind(KeyCode::Char('t'), CTRL, when(), KeyAction::CycleReasoning),
     bind(KeyCode::Char('l'), CTRL, when(), KeyAction::Redraw),
-    bind(
-        KeyCode::Char('?'),
-        NONE,
-        when().buf_empty(),
-        KeyAction::OpenHelp,
-    ),
     // ── Submit / newline ────────────────────────────────────────────────
     bind_exclude(KeyCode::Enter, NONE, SHIFT, when(), KeyAction::Submit),
     bind(KeyCode::Enter, SHIFT, when(), KeyAction::InsertNewline),
@@ -658,15 +651,6 @@ mod tests {
         };
         // Ctrl+R in vim normal → no keymap match (vim handler does redo)
         assert_eq!(lookup(KeyCode::Char('r'), CTRL, &c), None);
-    }
-
-    #[test]
-    fn question_mark_nonempty_no_match() {
-        let c = KeyContext {
-            buf_empty: false,
-            ..ctx()
-        };
-        assert_eq!(lookup(KeyCode::Char('?'), NONE, &c), None);
     }
 
     #[test]

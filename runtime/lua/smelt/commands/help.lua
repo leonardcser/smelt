@@ -45,3 +45,23 @@ smelt.cmd.register("help", function()
     })
   end)
 end, { desc = "show keybindings" })
+
+-- `?` is a global keybind that opens /help — except when the prompt is
+-- focused with non-empty content (the `?` is part of a real question).
+-- Returning `false` falls through to the built-in dispatcher so the
+-- literal `?` lands in the buffer.
+smelt.keymap.set("", "?", function()
+  if smelt.win.focus() == "prompt" then
+    local txt = smelt.prompt.text()
+    local vim_mode = smelt.win.mode()
+    -- In vim normal/visual the prompt is read-only-style; let `?` pass
+    -- through to the editor recipe (search, etc).
+    if vim_mode == "Normal" or vim_mode == "Visual" or vim_mode == "VisualLine" then
+      return false
+    end
+    if txt and txt ~= "" then
+      return false
+    end
+  end
+  smelt.cmd.run("help")
+end)

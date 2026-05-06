@@ -271,15 +271,21 @@ impl TuiApp {
         }
 
         // Lua-registered keymaps get first crack at key events, matching
-        // nvim's `vim.keymap.set` priority. Unbound chords fall through
-        // to the built-in keymap dispatcher.
+        // nvim's `vim.keymap.set` priority. Handlers may return `false`
+        // to fall through to downstream dispatch (e.g. `?` opens help
+        // when the prompt is empty but inserts the literal otherwise).
         if let Event::Key(k) = *ev {
             if let Some(chord) = crate::lua::chord_string(k) {
                 let vim_mode = self.current_vim_mode_label();
-                let handled = self.lua.run_keymap(&chord, vim_mode.as_deref());
-                if handled {
-                    self.flush_lua_callbacks();
-                    return Some(EventOutcome::Noop);
+                use smelt_core::lua::runtime::KeymapResult;
+                match self.lua.run_keymap(&chord, vim_mode.as_deref()) {
+                    KeymapResult::Consumed => {
+                        self.flush_lua_callbacks();
+                        return Some(EventOutcome::Noop);
+                    }
+                    KeymapResult::PassThrough | KeymapResult::NoBinding => {
+                        self.flush_lua_callbacks();
+                    }
                 }
             }
         }
@@ -428,10 +434,6 @@ impl TuiApp {
                         }
                         t.last_ctrlc = Some(Instant::now());
                         self.input.clear();
-                        return EventOutcome::Redraw;
-                    }
-                    KeyAction::OpenHelp => {
-                        crate::commands::run_command(self, "/help");
                         return EventOutcome::Redraw;
                     }
                     _ => {

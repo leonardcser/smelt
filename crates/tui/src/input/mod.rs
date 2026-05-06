@@ -469,7 +469,6 @@ impl PromptState {
             // ── Actions the caller must handle ──────────────────────────
             KeyAction::Quit => Action::Noop,        // caller checks
             KeyAction::CancelAgent => Action::Noop, // caller checks
-            KeyAction::OpenHelp => Action::Noop,    // caller checks
             KeyAction::AcceptGhostText => Action::Noop, // caller checks
 
             // ── TuiApp control ─────────────────────────────────────────────
