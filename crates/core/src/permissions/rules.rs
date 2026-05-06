@@ -12,6 +12,14 @@ use protocol::AgentMode;
 use protocol::Decision;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Custom subpattern decision function. Tools that need bucket-aware
+/// matching beyond plain glob (e.g. shell-aware splitting + per-piece
+/// fold for the `bash` bucket) register one of these at registration
+/// time. When present, [`super::Permissions::check_subcommand`]
+/// delegates to it; otherwise the plain glob-match path runs.
+pub type SubpatternParserFn = dyn Fn(&RuleSet, &str, AgentMode) -> Decision + Send + Sync;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -143,11 +151,27 @@ impl ToolPermDefaults {
 /// `tool_decisions` keys are tool names; `subcommand_allow` keys are
 /// subpattern bucket names (= tool names) and values are pattern lists
 /// used as the bucket's allow fallback when neither user config nor
-/// Yolo's `*` catch-all supplies one.
-#[derive(Debug, Default, Clone)]
+/// Yolo's `*` catch-all supplies one. `subpattern_parsers` keys are
+/// also bucket names; values are decision functions that override the
+/// plain glob-match path inside `check_subcommand` for that bucket.
+#[derive(Default, Clone)]
 pub struct ToolDefaults {
     pub tool_decisions: HashMap<String, ToolPermDefaults>,
     pub subcommand_allow: HashMap<String, Vec<String>>,
+    pub subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
+}
+
+impl std::fmt::Debug for ToolDefaults {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolDefaults")
+            .field("tool_decisions", &self.tool_decisions)
+            .field("subcommand_allow", &self.subcommand_allow)
+            .field(
+                "subpattern_parsers",
+                &self.subpattern_parsers.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// Compile a raw subpattern bucket into a `RuleSet`. Tools that

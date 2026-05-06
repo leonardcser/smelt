@@ -34,6 +34,18 @@ fn mode_perms(tools: HashMap<String, Decision>, buckets: &[(&str, RuleSet)]) -> 
     ModePerms { tools, subcommands }
 }
 
+/// Production wires the shell parser to the `bash` bucket via
+/// `tools/bash.lua`'s `subpattern_parser = "shell"`. Test helpers
+/// build `Permissions` directly, so they install the same mapping
+/// here.
+fn bash_parser_map() -> HashMap<String, std::sync::Arc<crate::permissions::SubpatternParserFn>> {
+    let mut m = HashMap::new();
+    if let Some(p) = crate::permissions::builtin_subpattern_parser("shell") {
+        m.insert("bash".to_string(), p);
+    }
+    m
+}
+
 fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
     let mode = mode_perms(HashMap::new(), &[("bash", ruleset(allow, ask, deny))]);
     Permissions {
@@ -45,6 +57,7 @@ fn perms_with_bash(allow: &[&str], ask: &[&str], deny: &[&str]) -> Permissions {
         workspace: PathBuf::new(),
         paths_fn: None,
         decide_hook_fn: None,
+        subpattern_parsers: bash_parser_map(),
     }
 }
 
@@ -859,6 +872,7 @@ fn perms_with_workspace(workspace: &str) -> Permissions {
         workspace: PathBuf::from(workspace),
         paths_fn: None,
         decide_hook_fn: None,
+        subpattern_parsers: bash_parser_map(),
     };
     p.set_paths_fn(stub_paths_fn());
     install_stub_decide_hook(&mut p);
@@ -1327,6 +1341,7 @@ fn bash_tool_allow_pattern_ask() {
         workspace: PathBuf::new(),
         paths_fn: None,
         decide_hook_fn: None,
+        subpattern_parsers: bash_parser_map(),
     };
     install_stub_decide_hook(&mut perms);
     let args = args_with("command", "git push origin main");
@@ -1352,6 +1367,7 @@ fn override_tightens_allow_to_ask() {
         workspace: PathBuf::new(),
         paths_fn: None,
         decide_hook_fn: None,
+        subpattern_parsers: bash_parser_map(),
     };
     install_stub_decide_hook(&mut perms);
     let overrides = protocol::PermissionOverrides {
@@ -1613,6 +1629,7 @@ fn perms_with_workspace_bash_allow(workspace: &str, bash_allow: &[&str]) -> Perm
         workspace: PathBuf::from(workspace),
         paths_fn: None,
         decide_hook_fn: None,
+        subpattern_parsers: bash_parser_map(),
     };
     p.set_paths_fn(stub_paths_fn());
     install_stub_decide_hook(&mut p);

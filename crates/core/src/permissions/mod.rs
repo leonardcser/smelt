@@ -23,7 +23,7 @@ mod tests;
 pub use approvals::RuntimeApprovals;
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use protocol::Decision;
-pub use rules::ToolDefaults;
+pub use rules::{SubpatternParserFn, ToolDefaults};
 
 use bash::{has_output_redirection, is_cd_command};
 
@@ -64,6 +64,7 @@ pub struct Permissions {
     workspace: PathBuf,
     paths_fn: Option<Arc<PathsFn>>,
     decide_hook_fn: Option<Arc<DecideFn>>,
+    subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
 }
 
 impl std::fmt::Debug for Permissions {
@@ -79,6 +80,10 @@ impl std::fmt::Debug for Permissions {
             .field(
                 "decide_hook_fn",
                 &self.decide_hook_fn.as_ref().map(|_| "<fn>"),
+            )
+            .field(
+                "subpattern_parsers",
+                &self.subpattern_parsers.keys().collect::<Vec<_>>(),
             )
             .finish()
     }
@@ -112,6 +117,7 @@ impl Permissions {
             workspace: PathBuf::new(),
             paths_fn: None,
             decide_hook_fn: None,
+            subpattern_parsers: tool_defaults.subpattern_parsers.clone(),
         }
     }
 
@@ -228,9 +234,11 @@ impl Permissions {
     }
 
     /// Check a value against a tool's subpattern ruleset for the given
-    /// mode. `bucket` is the tool name. Special-cases:
-    /// - `bash`: splits on shell operators and folds per-subcommand.
-    /// - everything else: simple glob match against the value.
+    /// mode. `bucket` is the tool name. If the tool registered a custom
+    /// subpattern parser at registration time (see [`SubpatternParserFn`]
+    /// — the `bash` tool registers the `shell` parser, which splits on
+    /// shell operators and folds per-subcommand), it runs; otherwise the
+    /// plain glob-match path runs against the value as a whole.
     ///
     /// Returns `Decision::Ask` (or Allow in Yolo) when no bucket is
     /// registered.
@@ -242,8 +250,11 @@ impl Permissions {
                 Decision::Ask
             };
         };
-        if bucket == "bash" {
-            return check_bash_against(rs, value, mode);
+        if let Some(parser) = self.subpattern_parsers.get(bucket) {
+            // Custom parsers embed mode semantics themselves (e.g. the
+            // shell parser only escalates output redirection in
+            // Normal/Plan); their result is taken as authoritative.
+            return parser(rs, value, mode);
         }
         let decision = check_ruleset(rs, value);
         if decision == Decision::Ask && mode == AgentMode::Yolo {
@@ -322,11 +333,14 @@ fn decide_base(
     permissions.check_tool(mode, tool_name)
 }
 
-/// Bash-aware ruleset matching: splits on shell operators, folds per
-/// subcommand to the worst decision, escalates output redirection in
-/// Normal/Plan, and trusts `cd` unconditionally (workspace restriction
-/// in [`Permissions::decide`] still rejects outside-workspace paths).
-fn check_bash_against(rs: &RuleSet, command: &str, mode: AgentMode) -> Decision {
+/// Shell-aware [`SubpatternParserFn`]: splits on shell operators, folds
+/// per subcommand to the worst decision, escalates output redirection
+/// in Normal/Plan, and trusts `cd` unconditionally (workspace
+/// restriction in [`Permissions::decide`] still rejects outside-workspace
+/// paths). The `bash` tool registers this parser at startup; nothing
+/// else uses it, but plugin tools that wrap shell-shaped values
+/// (subcommand wrappers around `git`, `npm`, etc.) can opt in.
+pub fn shell_parser_decide(rs: &RuleSet, command: &str, mode: AgentMode) -> Decision {
     let command = command.trim();
     let escalate_redirect = matches!(mode, AgentMode::Normal | AgentMode::Plan);
     let subcmds = split_shell_commands(command);
@@ -358,4 +372,15 @@ fn check_bash_against(rs: &RuleSet, command: &str, mode: AgentMode) -> Decision 
         }
     }
     worst
+}
+
+/// Look up a built-in subpattern parser by Rust-built-in kind name.
+/// Tool registration ([`crate::lua::api::tools::register`]) reads the
+/// `subpattern_parser` Lua field as a string and routes through this.
+/// Currently `"shell"` is the only built-in.
+pub fn builtin_subpattern_parser(kind: &str) -> Option<Arc<SubpatternParserFn>> {
+    match kind {
+        "shell" => Some(Arc::new(shell_parser_decide)),
+        _ => None,
+    }
 }
