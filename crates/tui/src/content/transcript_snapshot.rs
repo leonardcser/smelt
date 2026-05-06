@@ -196,7 +196,7 @@ impl TranscriptSnapshot {
 /// width. Renders each block into a per-block scratch Buffer via a
 /// fresh [`BlockBufferCache`]; the snapshot reads back text + cell
 /// metadata + decorations from those buffers. Theme is required
-/// because [`crate::content::layout_out::SpanCollector`] resolves
+/// because [`crate::content::builder::LineBuilder`] resolves
 /// theme-role colours at write time.
 pub fn build_snapshot(
     history: &mut BlockHistory,

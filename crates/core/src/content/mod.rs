@@ -1,7 +1,7 @@
 pub(crate) mod context;
 pub mod display;
 pub mod highlight;
-pub mod layout_out;
+pub mod builder;
 pub mod selection;
 pub mod stream_parser;
 pub mod transcript;
@@ -28,14 +28,14 @@ pub struct BoxContext {
 
 impl BoxContext {
     /// Print the left border with color.
-    pub fn print_left(&self, out: &mut layout_out::SpanCollector) {
+    pub fn print_left(&self, out: &mut builder::LineBuilder) {
         out.push_hl(self.group);
         out.print_gutter(self.left);
         out.pop_style();
     }
 
     /// Print right-side padding and border for a line that used `cols` content columns.
-    pub fn print_right(&self, out: &mut layout_out::SpanCollector, cols: usize) {
+    pub fn print_right(&self, out: &mut builder::LineBuilder, cols: usize) {
         let pad = self.inner_w.saturating_sub(cols);
         if pad > 0 {
             out.print_gutter(&" ".repeat(pad));

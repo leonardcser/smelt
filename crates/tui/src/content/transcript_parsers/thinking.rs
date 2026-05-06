@@ -2,13 +2,13 @@
 //! transcript projection (used to build a one-line fold marker when
 //! `show_thinking` is off).
 
-use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::wrap::wrap_line;
 
 use super::tools::pluralize;
 
 pub(super) fn render(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     content: &str,
     width: usize,
     show_thinking: bool,
@@ -72,7 +72,7 @@ pub fn thinking_summary(content: &str) -> (String, usize) {
 
 /// Render a single hidden-thinking summary row with optional animated dots.
 pub fn render_thinking_summary(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     width: usize,
     label: &str,
     line_count: usize,

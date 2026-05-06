@@ -3,7 +3,7 @@
 //! renderer that uses both.
 
 use crate::content::default_width;
-use crate::content::layout_out::SpanCollector;
+use crate::content::builder::LineBuilder;
 use crate::style::Color;
 use crate::theme::{role_hl, HlGroup};
 use unicode_width::UnicodeWidthStr;
@@ -14,7 +14,7 @@ use super::util::{
 };
 
 pub fn render_markdown_table(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     rows: &[Vec<String>],
     dim: bool,
     bctx: Option<&super::super::BoxContext>,
@@ -101,18 +101,18 @@ pub fn render_markdown_table(
 
     let mut total_rows = 0u16;
 
-    let bar = |out: &mut SpanCollector, dim: bool| {
+    let bar = |out: &mut LineBuilder, dim: bool| {
         out.set_hl(role_hl("Bar"));
         if dim {
             out.set_dim();
         }
     };
-    let reset = |out: &mut SpanCollector, _dim: bool| {
+    let reset = |out: &mut LineBuilder, _dim: bool| {
         out.reset_style();
     };
 
     let render_table_row =
-        |out: &mut SpanCollector, row: &[String], widths: &[usize], dim: bool| -> u16 {
+        |out: &mut LineBuilder, row: &[String], widths: &[usize], dim: bool| -> u16 {
             let wrapped: Vec<Vec<String>> = row
                 .iter()
                 .enumerate()
@@ -162,7 +162,7 @@ pub fn render_markdown_table(
 
     // left, horizontal, junction, right
     let render_border =
-        |out: &mut SpanCollector, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
+        |out: &mut LineBuilder, widths: &[usize], dim: bool, l: &str, j: &str, r: &str| -> u16 {
             if let Some(b) = bctx {
                 b.print_left(out);
             } else if !indent.is_empty() {
@@ -212,7 +212,7 @@ pub fn render_markdown_table(
 
 /// Stacked layout for tables too wide for the terminal.
 /// Each data row becomes a block of "Header: value" lines, separated by blank lines.
-fn render_table_stacked(out: &mut SpanCollector, rows: &[Vec<String>], dim: bool) -> u16 {
+fn render_table_stacked(out: &mut LineBuilder, rows: &[Vec<String>], dim: bool) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
         None => return 0,
@@ -267,7 +267,7 @@ fn render_table_stacked(out: &mut SpanCollector, rows: &[Vec<String>], dim: bool
 
 /// Word-wrap cell text so each line's visual width (after stripping markers) fits within `max_width`.
 /// Only breaks at spaces that are outside inline markdown spans.
-fn wrap_cell_words(out: &mut SpanCollector, text: &str, max_width: usize) -> Vec<String> {
+fn wrap_cell_words(out: &mut LineBuilder, text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
@@ -336,7 +336,7 @@ fn min_visual_width(text: &str) -> usize {
 /// Render inline markdown spans: `**bold**`, `__bold__`, `*italic*`, `_italic_`,
 /// `***bold+italic***`, `` `code` ``, `~~strikethrough~~`.
 /// Everything else passes through literally.
-pub(crate) fn print_inline_styled(out: &mut SpanCollector, text: &str, dim: bool) {
+pub(crate) fn print_inline_styled(out: &mut LineBuilder, text: &str, dim: bool) {
     if dim {
         out.push_dim();
     }
@@ -453,7 +453,7 @@ fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
 /// Walk an `InlineNode` tree and emit its spans to the sink. Uses
 /// `push_style`/`pop_style` so inner nodes inherit the outer style —
 /// e.g. italic inside bold becomes a single span with both attributes.
-fn emit_inline_nodes(out: &mut SpanCollector, nodes: &[InlineNode]) {
+fn emit_inline_nodes(out: &mut LineBuilder, nodes: &[InlineNode]) {
     for node in nodes {
         match node {
             InlineNode::Text(s) => out.print(s),
@@ -667,7 +667,7 @@ fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) 
     });
 }
 
-pub fn emit_inline_spans(out: &mut SpanCollector, spans: &[InlineSpan]) {
+pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
     use crate::content::display::SpanStyle;
 
     for span in spans {
@@ -694,7 +694,7 @@ pub fn inline_spans_width(spans: &[InlineSpan]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::layout_out::test_util::render_test;
+    use super::super::super::builder::test_util::render_test;
     use super::super::syntax::render_code_block;
     use super::*;
     use crate::style::Style;

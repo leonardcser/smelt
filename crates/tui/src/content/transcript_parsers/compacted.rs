@@ -1,11 +1,11 @@
 //! `Block::Compacted` renderer — a hr-flanked label with the
 //! summary text underneath, all dim.
 
-use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::content::builder::LineBuilder;
 
 use super::markdown::render_markdown_inner;
 
-pub(super) fn render(out: &mut SpanCollector, summary: &str, width: usize) -> u16 {
+pub(super) fn render(out: &mut LineBuilder, summary: &str, width: usize) -> u16 {
     let label = " compacted ";
     let label_len = label.len();
     let remaining = width.saturating_sub(label_len);

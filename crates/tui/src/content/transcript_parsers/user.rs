@@ -2,7 +2,7 @@
 //! the prompt buffer to size the tinted user-bubble.
 
 use smelt_core::buffer::SpanMeta;
-use smelt_core::content::layout_out::{display_width, SpanCollector};
+use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::role_hl;
 use smelt_core::transcript_present::is_command_like;
@@ -42,7 +42,7 @@ impl UserBlockGeometry {
 }
 
 pub(super) fn render(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     text: &str,
     image_labels: &[String],
     width: usize,
@@ -94,7 +94,7 @@ pub(super) fn render(
 /// Print user message text with accent highlighting for valid `@path` refs,
 /// `/command` lines, and `[image]` attachment labels.
 fn print_highlights(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     text: &str,
     image_labels: &[String],
     is_command: bool,
@@ -113,14 +113,14 @@ fn print_highlights(
     let mut i = 0;
     let mut plain = String::new();
 
-    let flush = |out: &mut SpanCollector, plain: &mut String| {
+    let flush = |out: &mut LineBuilder, plain: &mut String| {
         if !plain.is_empty() {
             let s = std::mem::take(plain);
             out.print(&s);
         }
     };
 
-    let accent = |out: &mut SpanCollector, token: String| {
+    let accent = |out: &mut LineBuilder, token: String| {
         out.push_hl(accent_role);
         out.print(&token);
         out.pop_style();

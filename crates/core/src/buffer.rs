@@ -529,7 +529,7 @@ impl Buffer {
         }
         let source = std::mem::take(&mut self.source);
         // Reset to a single empty seed line so the parser writes from
-        // row 0. SpanCollector's append-mode replaces a trailing empty
+        // row 0. LineBuilder's append-mode replaces a trailing empty
         // seed on the first commit, then appends — so a single seed
         // empty line is all the parser needs to start fresh.
         let n = self.lines.len();

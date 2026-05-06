@@ -1,6 +1,6 @@
 use super::{ToolBodyRenderer, DEFAULT_PREVIEW_LINES, MAX_TOOL_BLOCK_ROWS};
 use smelt_core::content::display::SpanMeta;
-use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::wrap::wrap_line;
 use smelt_core::theme::{role_hl, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     _call_id: &str,
     name: &str,
     summary: &str,
@@ -92,7 +92,7 @@ fn tool_line_layout(name: &str, suffix_len: usize, width: usize) -> ToolLineLayo
 
 #[allow(clippy::too_many_arguments)]
 fn print_tool_line(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     name: &str,
     summary: &str,
     args: &HashMap<String, serde_json::Value>,
@@ -179,7 +179,7 @@ fn print_tool_line(
 }
 
 pub(super) fn print_tool_output(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     _name: &str,
     output: &ToolOutput,
     _args: &HashMap<String, serde_json::Value>,
@@ -188,13 +188,13 @@ pub(super) fn print_tool_output(
     render_wrapped_output(out, &output.content, output.is_error, width)
 }
 
-pub(super) fn print_dim(out: &mut SpanCollector, text: &str) {
+pub(super) fn print_dim(out: &mut LineBuilder, text: &str) {
     out.push_dim();
     out.print(text);
     out.pop_style();
 }
 
-fn print_dim_non_selectable(out: &mut SpanCollector, time_str: &str, timeout_str: &str) {
+fn print_dim_non_selectable(out: &mut LineBuilder, time_str: &str, timeout_str: &str) {
     let meta = SpanMeta {
         selectable: false,
         copy_as: None,
@@ -212,7 +212,7 @@ fn print_dim_non_selectable(out: &mut SpanCollector, time_str: &str, timeout_str
 }
 
 pub fn render_wrapped_output(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     content: &str,
     is_error: bool,
     width: usize,
@@ -260,7 +260,7 @@ pub fn render_wrapped_output(
 }
 
 pub fn render_default_output(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     content: &str,
     is_error: bool,
     width: usize,

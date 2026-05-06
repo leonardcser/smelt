@@ -1,33 +1,33 @@
 //! Buffer-builder used by every block renderer.
 //!
-//! `SpanCollector` is the single layout primitive: renderers
+//! `LineBuilder` is the single layout primitive: renderers
 //! (markdown, diff, syntax, tool blocks, dialog previews) walk their
 //! input and call `print` / `newline` / `push_style` etc. on a
-//! `&mut SpanCollector`; the collector resolves styles against the
+//! `&mut LineBuilder`; the collector resolves styles against the
 //! supplied [`Theme`] and writes lines + highlights + decorations
 //! directly into a [`Buffer`]. There is no intermediate
 //! span-tree representation — `Buffer` is the only output.
 //!
 //! Callers construct a fresh collector each time they want to render
 //! into a buffer. The collector borrows the buffer and theme for the
-//! duration of rendering; on [`SpanCollector::finish`] the trailing
+//! duration of rendering; on [`LineBuilder::finish`] the trailing
 //! incomplete line is flushed and an [`Outcome`] (line count + width
 //! pinning info) returned.
 
-use crate::buffer::{Buffer, ExtmarkOpts, ExtmarkPayload, LineDecoration, SpanMeta};
+use crate::buffer::{Buffer, LineDecoration, SpanMeta};
 use crate::content::display::SpanStyle;
 use crate::style::{Color, Style};
 use crate::theme::{intern_anonymous_style, HlGroup, Theme};
 use unicode_width::UnicodeWidthStr;
 
 /// Display-column width of a string slice. Used for visible-width
-/// tracking inside `SpanCollector` and by callers pre-measuring
+/// tracking inside `LineBuilder` and by callers pre-measuring
 /// content.
 pub fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Outcome metadata returned by [`SpanCollector::finish`]. Mirrors the
+/// Outcome metadata returned by [`LineBuilder::finish`]. Mirrors the
 /// fields the old `DisplayBlock` carried so callers can reason about
 /// width pinning the same way.
 #[derive(Debug, Clone, Copy, Default)]
@@ -60,7 +60,7 @@ impl Outcome {
 /// row at construction (handled internally — collector starts writing
 /// at `buf.line_count()` minus one if the trailing line is empty,
 /// otherwise appends after it).
-pub struct SpanCollector<'a> {
+pub struct LineBuilder<'a> {
     buf: &'a mut Buffer,
     theme: &'a Theme,
     layout_width: u16,
@@ -90,7 +90,7 @@ pub struct SpanCollector<'a> {
     max_line_width: u16,
 }
 
-impl<'a> SpanCollector<'a> {
+impl<'a> LineBuilder<'a> {
     pub fn new(buf: &'a mut Buffer, theme: &'a Theme, layout_width: u16) -> Self {
         // Append mode: write past the existing content. Buffer always
         // starts with at least one (possibly empty) line; the first
@@ -556,7 +556,7 @@ fn style_is_default(s: &Style) -> bool {
 pub fn render_into_fresh(
     width: u16,
     theme: &Theme,
-    fill: impl FnOnce(&mut SpanCollector),
+    fill: impl FnOnce(&mut LineBuilder),
 ) -> (Buffer, Outcome) {
     use crate::buffer::{BufCreateOpts, BufId};
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
@@ -564,15 +564,15 @@ pub fn render_into_fresh(
     (buf, outcome)
 }
 
-/// Construct a `SpanCollector` around `buf`, run `fill`, and return
+/// Construct a `LineBuilder` around `buf`, run `fill`, and return
 /// the outcome. The most common renderer entry point.
 pub fn render_into(
     buf: &mut Buffer,
     width: u16,
     theme: &Theme,
-    fill: impl FnOnce(&mut SpanCollector),
+    fill: impl FnOnce(&mut LineBuilder),
 ) -> Outcome {
-    let mut col = SpanCollector::new(buf, theme, width);
+    let mut col = LineBuilder::new(buf, theme, width);
     fill(&mut col);
     col.finish()
 }
@@ -583,7 +583,7 @@ pub fn render_into(
 /// `buffer_into_collector` shape but writes via the regular
 /// collector API so styles and metas round-trip through theme
 /// resolution unchanged.
-pub fn replay_buffer_into(buf: &Buffer, out: &mut SpanCollector) {
+pub fn replay_buffer_into(buf: &Buffer, out: &mut LineBuilder) {
     let n = buf.line_count();
     for i in 0..n {
         replay_buffer_row_into(buf, i as u16, out);
@@ -602,7 +602,7 @@ pub fn replay_buffer_into(buf: &Buffer, out: &mut SpanCollector) {
 /// a trailing newline. Used by `render_summary` Lua hooks: the caller
 /// mints an ephemeral Buffer, runs the Lua callback against it, then
 /// projects row 0 inline into the transcript / confirm-title sink.
-pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut SpanCollector) {
+pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut LineBuilder) {
     let text = buf.get_line(row as usize).unwrap_or("");
     let mut highlights = buf.highlights_at(row as usize);
     highlights.sort_by_key(|h| h.col_start);
@@ -635,7 +635,7 @@ pub fn replay_buffer_row_into(buf: &Buffer, row: u16, out: &mut SpanCollector) {
     }
 }
 
-impl<'a> SpanCollector<'a> {
+impl<'a> LineBuilder<'a> {
     /// Append a span whose style is already resolved (no theme lookup
     /// needed). Internal helper for [`replay_buffer_row_into`]:
     /// replay reads spans by HlGroup id from the source Buffer and
@@ -651,12 +651,6 @@ impl<'a> SpanCollector<'a> {
         self.append_span_resolved(text, style, meta);
     }
 }
-
-// Suppress unused import warning when ExtmarkOpts/ExtmarkPayload end
-// up not referenced at the public surface (decorations + highlights
-// flow through Buffer's named helpers).
-#[allow(dead_code)]
-fn _ext_imports_used(_opts: ExtmarkOpts, _payload: ExtmarkPayload) {}
 
 pub mod test_util {
     //! Helpers that rebuild the old `DisplayBlock` / `DisplayLine` /
@@ -685,7 +679,7 @@ pub mod test_util {
 
     /// Build a fresh buffer + default theme, run `fill`, then read the
     /// resulting buffer back into the legacy `TestBlock` shape.
-    pub fn render_test(width: u16, fill: impl FnOnce(&mut SpanCollector)) -> TestBlock {
+    pub fn render_test(width: u16, fill: impl FnOnce(&mut LineBuilder)) -> TestBlock {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         let outcome = render_into(&mut buf, width, &theme, fill);

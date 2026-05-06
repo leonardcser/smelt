@@ -1,6 +1,6 @@
 // Re-export headless-safe modules from core
 pub use smelt_core::content::highlight;
-pub use smelt_core::content::layout_out;
+pub use smelt_core::content::builder;
 pub(crate) mod selection;
 
 // Tui-specific submodules
@@ -18,7 +18,7 @@ use crossterm::terminal;
 use smelt_core::style::Color;
 
 /// Emit `n` blank rows.
-pub(crate) fn emit_newlines(out: &mut layout_out::SpanCollector, n: u16) {
+pub(crate) fn emit_newlines(out: &mut builder::LineBuilder, n: u16) {
     for _ in 0..n {
         out.newline();
     }

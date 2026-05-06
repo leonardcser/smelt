@@ -3,7 +3,7 @@
 //! crate::ui::Buffer, and the transcript-cursor glyph cache.
 
 use crate::app::TuiApp;
-use crate::content::layout_out::SpanCollector;
+use crate::content::builder::LineBuilder;
 use crate::content::selection::wrap_and_locate_cursor;
 use crate::ui::{BufCreateOpts, BufId, Buffer, Theme};
 
@@ -21,7 +21,7 @@ use std::time::Duration;
 /// with a `Buffer` userdata (full `smelt.buf.*` API + the
 /// `smelt.{diff,syntax,bash,notebook,markdown}.render` convenience
 /// helpers). The hook writes into a fresh scratch buffer; this
-/// projector then walks the buffer back into the still-`SpanCollector`
+/// projector then walks the buffer back into the still-`LineBuilder`
 /// transcript pipeline. Falls back to plain wrapped text when Lua is
 /// unavailable or the tool has no `render` hook registered.
 pub(crate) struct LuaRenderRenderer;
@@ -33,7 +33,7 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         args: &HashMap<String, serde_json::Value>,
         output: Option<&ToolOutput>,
         width: usize,
-        out: &mut SpanCollector,
+        out: &mut LineBuilder,
     ) -> u16 {
         let Some(tool_out) = output else { return 0 };
         let before = out.line_count();
@@ -73,7 +73,7 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         name: &str,
         line: &str,
         args: &HashMap<String, serde_json::Value>,
-        out: &mut SpanCollector,
+        out: &mut LineBuilder,
     ) -> bool {
         crate::lua::app_ref::try_with_app(|app| {
             if !app.lua.tool_has_render_summary(name) {
@@ -98,7 +98,7 @@ impl ToolBodyRenderer for LuaRenderRenderer {
         name: &str,
         args: &HashMap<String, serde_json::Value>,
         _width: usize,
-        out: &mut SpanCollector,
+        out: &mut LineBuilder,
     ) -> u16 {
         crate::lua::app_ref::try_with_app(|app| {
             if !app.lua.tool_has_render_subhead(name) {
@@ -722,7 +722,7 @@ impl TuiApp {
         self.parser.has_active_thinking() && !show_thinking
     }
 
-    fn render_ephemeral_into(&self, out: &mut SpanCollector, width: usize, show_thinking: bool) {
+    fn render_ephemeral_into(&self, out: &mut LineBuilder, width: usize, show_thinking: bool) {
         let Some(at) = self.parser.active_thinking() else {
             return;
         };
@@ -747,13 +747,13 @@ impl TuiApp {
     /// scratch Buffer at the given width. Returns an empty buffer when
     /// there's no ephemeral content. Used by the transcript snapshot
     /// helpers and projection path so the same rendering writes
-    /// directly into a Buffer (no SpanCollector→DisplayBlock detour).
+    /// directly into a Buffer (no LineBuilder→DisplayBlock detour).
     fn render_ephemeral_to_buffer(&self, tw: u16, show_thinking: bool, theme: &Theme) -> Buffer {
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         if !self.has_ephemeral(show_thinking) {
             return buf;
         }
-        let mut col = SpanCollector::new(&mut buf, theme, tw);
+        let mut col = LineBuilder::new(&mut buf, theme, tw);
         self.render_ephemeral_into(&mut col, tw as usize, show_thinking);
         let _ = col.finish();
         buf
@@ -774,7 +774,7 @@ impl TuiApp {
         for msg in queued {
             let geom = blocks::UserBlockGeometry::new(msg, text_w);
             for line in &geom.lines {
-                let w = crate::content::layout_out::display_width(line);
+                let w = crate::content::builder::display_width(line);
                 queued_rows += if w == 0 { 1 } else { w.div_ceil(text_w) as u16 };
             }
         }

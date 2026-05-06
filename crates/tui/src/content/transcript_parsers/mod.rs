@@ -3,7 +3,7 @@
 //! `tool_call.rs`, `compacted.rs`, `exec.rs`) and exposes a
 //! `pub(super) fn render(out, …) -> u16`. This module is the
 //! dispatcher: [`layout_block_into`] (the entry point) builds a
-//! [`SpanCollector`] over the per-block buffer, calls
+//! [`LineBuilder`] over the per-block buffer, calls
 //! [`render_block`] which does one match-arm per variant, and then
 //! collapses the laid-out rows according to the block's
 //! [`ViewState`].
@@ -14,7 +14,7 @@
 //! direct re-export.
 
 use smelt_core::buffer::Buffer;
-use smelt_core::content::layout_out::{Outcome, SpanCollector};
+use smelt_core::content::builder::{Outcome, LineBuilder};
 use smelt_core::content::LayoutContext;
 use smelt_core::theme::role_hl;
 use smelt_core::theme::Theme;
@@ -59,7 +59,7 @@ const DEFAULT_PREVIEW_LINES: usize = 3;
 
 /// Layout entry point: render `block` directly into `buf` at the
 /// given width. Drives the per-variant renderers against a fresh
-/// `SpanCollector` and applies the block's view state on the resulting
+/// `LineBuilder` and applies the block's view state on the resulting
 /// buffer slice.
 ///
 /// `state` must be `Some(_)` for `Block::ToolCall` and is unused for
@@ -77,7 +77,7 @@ pub fn layout_block_into(
     let width = ctx.width as usize;
     let show_thinking = ctx.show_thinking;
     let outcome = {
-        let mut col = SpanCollector::new(buf, theme, ctx.width);
+        let mut col = LineBuilder::new(buf, theme, ctx.width);
         render_block(&mut col, block, state, width, show_thinking, renderer);
         col.finish()
     };
@@ -210,7 +210,7 @@ fn append_ellipsis(
     outcome: Outcome,
 ) -> Outcome {
     let added = {
-        let mut col = SpanCollector::new(buf, theme, width);
+        let mut col = LineBuilder::new(buf, theme, width);
         col.push_dim();
         col.push_hl(role_hl("Muted"));
         col.print(text);
@@ -228,7 +228,7 @@ fn append_ellipsis(
 }
 
 pub(super) fn render_block(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     block: &Block,
     state: Option<&ToolState>,
     width: usize,
@@ -278,8 +278,8 @@ pub(super) fn render_block(
 mod tests {
     use super::*;
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
-    use smelt_core::content::layout_out::test_util::{read_buffer, TestLine};
-    use smelt_core::content::layout_out::SpanCollector;
+    use smelt_core::content::builder::test_util::{read_buffer, TestLine};
+    use smelt_core::content::builder::LineBuilder;
     use smelt_core::theme::Theme;
     use smelt_core::transcript_model::{ToolOutput, ToolStatus};
     use smelt_core::transcript_present::{gap_between, Element};
@@ -317,7 +317,7 @@ mod tests {
             _: &HashMap<String, serde_json::Value>,
             _: Option<&ToolOutput>,
             _: usize,
-            _: &mut SpanCollector,
+            _: &mut LineBuilder,
         ) -> u16 {
             0
         }
@@ -329,7 +329,7 @@ mod tests {
             name: &str,
             line: &str,
             _args: &HashMap<String, serde_json::Value>,
-            out: &mut SpanCollector,
+            out: &mut LineBuilder,
         ) -> bool {
             if name == "bash" {
                 // Stand-in for the bash highlighter — preserve the shape
@@ -397,7 +397,7 @@ mod tests {
 
     fn block_rows(block: &Block) -> u16 {
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
+        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let st = state_for(block);
         render_block(&mut out, block, st.as_ref(), W, true, None)
     }
@@ -415,7 +415,7 @@ mod tests {
     /// Returns (block_rows, tool_gap, total_before_tool).
     fn render_all_at_once(blocks: &[Block]) -> (u16, u16, u16) {
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
+        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let mut total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -435,7 +435,7 @@ mod tests {
 
     fn render_split(blocks: &[Block]) -> (u16, u16, u16) {
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
+        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let mut block_rows_total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -475,7 +475,7 @@ mod tests {
         // Net effect: final anchor = sum of all block rows + gaps.
         // This is the same as render_split.
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
+        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let mut cumulative = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -663,7 +663,7 @@ mod tests {
             // This frame renders blocks[flushed..end]
             let mut frame_block_rows = 0u16;
             let (mut buf, theme) = mk_collector_buf();
-            let mut out = SpanCollector::new(&mut buf, &theme, W as u16);
+            let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
             for i in flushed..end {
                 let gap = if i > 0 {
                     gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))

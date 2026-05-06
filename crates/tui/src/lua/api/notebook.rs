@@ -10,7 +10,7 @@
 //!   notebook's structure.
 
 use crate::content::highlight::{print_inline_diff, print_syntax_file};
-use crate::content::layout_out::SpanCollector;
+use crate::content::builder::LineBuilder;
 use crate::content::selection::wrap_line;
 use crate::ui::BufId;
 use mlua::prelude::*;
@@ -179,7 +179,7 @@ fn lua_value_to_json(v: &mlua::Value) -> mlua::Result<serde_json::Value> {
 }
 
 fn render_notebook_preview(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     data: &NotebookRenderData,
     skip: u16,
     viewport: u16,

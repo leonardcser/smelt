@@ -19,7 +19,7 @@ use crate::ui::{Buffer, BufferParser};
 use std::sync::Arc;
 
 use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
-use crate::content::layout_out::SpanCollector;
+use crate::content::builder::LineBuilder;
 use crate::content::to_buffer::render_into_buffer;
 
 /// Content kind a parser-backed buffer renders. Constructed from a
@@ -134,7 +134,7 @@ impl BufferParser for ModeParser {
     }
 }
 
-fn render_plain(out: &mut SpanCollector, source: &str, width: u16) {
+fn render_plain(out: &mut LineBuilder, source: &str, width: u16) {
     let width = width.max(1) as usize;
     for line in source.lines() {
         emit_wrapped_line(out, line, width, |sink, segment| {
@@ -143,7 +143,7 @@ fn render_plain(out: &mut SpanCollector, source: &str, width: u16) {
     }
 }
 
-fn render_bash(out: &mut SpanCollector, source: &str, width: u16) {
+fn render_bash(out: &mut LineBuilder, source: &str, width: u16) {
     let width = width.max(1) as usize;
     let mut bh = BashHighlighter::new();
     for line in source.lines() {
@@ -158,9 +158,9 @@ fn render_bash(out: &mut SpanCollector, source: &str, width: u16) {
 /// `source_text` on row 0, `soft_wrapped` on every continuation row,
 /// `mark_wrapped` on the group if it actually wrapped — all the
 /// metadata the transcript copy path and the dialog viewport expect.
-fn emit_wrapped_line<F>(out: &mut SpanCollector, line: &str, width: usize, mut emit: F)
+fn emit_wrapped_line<F>(out: &mut LineBuilder, line: &str, width: usize, mut emit: F)
 where
-    F: FnMut(&mut SpanCollector, &str),
+    F: FnMut(&mut LineBuilder, &str),
 {
     let wrapped = crate::ui::text::wrap_line(line, width);
     if wrapped.len() > 1 {

@@ -2,13 +2,13 @@
 //! captured output.
 
 use smelt_core::content::display::SpanStyle;
-use smelt_core::content::layout_out::SpanCollector;
+use smelt_core::content::builder::LineBuilder;
 use smelt_core::style::Color;
 use smelt_core::theme::role_hl;
 
 use super::tools::render_wrapped_output;
 
-pub(super) fn render(out: &mut SpanCollector, command: &str, output: &str, width: usize) -> u16 {
+pub(super) fn render(out: &mut LineBuilder, command: &str, output: &str, width: usize) -> u16 {
     let char_len = command.chars().count() + 1;
     let pad_width = (char_len + 2).min(width);
     let trailing = pad_width.saturating_sub(char_len + 1);

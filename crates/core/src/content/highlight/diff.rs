@@ -9,7 +9,7 @@ use syntect::easy::HighlightLines;
 
 use super::{syntax_theme, SYNTAX_SET};
 use crate::content::default_width;
-use crate::content::layout_out::SpanCollector;
+use crate::content::builder::LineBuilder;
 use crate::style::Color;
 
 struct DiffChange {
@@ -332,7 +332,7 @@ fn compute_change_visibility(changes: &[DiffChange], ctx: usize) -> Vec<bool> {
 /// `skip` rows are computed but not emitted; up to `max_rows` visible rows
 /// are written to `out`.
 pub fn print_inline_diff(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     old: &str,
     new: &str,
     path: &str,
@@ -345,7 +345,7 @@ pub fn print_inline_diff(
     print_cached_inline_diff(out, &cache, skip, max_rows)
 }
 
-fn print_cached_spans(out: &mut SpanCollector, spans: &[CachedSpan], bg: Option<Color>) -> usize {
+fn print_cached_spans(out: &mut LineBuilder, spans: &[CachedSpan], bg: Option<Color>) -> usize {
     let mut col = 0;
     for span in spans {
         if span.text.is_empty() {
@@ -367,7 +367,7 @@ fn print_cached_spans(out: &mut SpanCollector, spans: &[CachedSpan], bg: Option<
 }
 
 fn split_cached_spans_into_rows(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     spans: &[CachedSpan],
     max_width: usize,
 ) -> Vec<Vec<CachedSpan>> {
@@ -407,7 +407,7 @@ fn split_cached_spans_into_rows(
 }
 
 pub fn print_cached_inline_diff(
-    out: &mut SpanCollector,
+    out: &mut LineBuilder,
     cache: &CachedInlineDiff,
     skip: u16,
     max_rows: u16,
