@@ -2919,6 +2919,7 @@ dependencies = [
  "glob",
  "globset",
  "ignore",
+ "insta",
  "libc",
  "mlua",
  "protocol",

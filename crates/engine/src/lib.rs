@@ -208,6 +208,28 @@ impl EngineHandle {
             event_tx: self.event_tx.clone(),
         }
     }
+
+    /// Construct a handle whose channels are owned by the caller — no
+    /// agent task spawned, no provider wiring. The returned sender
+    /// receives whatever the frontend would normally hand to the agent
+    /// (`UiCommand`s); the returned receiver lets the caller pull
+    /// frontend-bound `EngineEvent`s out of the same `event_tx` the
+    /// handle hands to `EventInjector`. Used by the L3 storybook
+    /// harness to drive UI state without booting a real engine.
+    pub fn for_test() -> (
+        Self,
+        mpsc::UnboundedReceiver<UiCommand>,
+        mpsc::UnboundedSender<EngineEvent>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let handle = EngineHandle {
+            cmd_tx,
+            event_tx: event_tx.clone(),
+            event_rx,
+        };
+        (handle, cmd_rx, event_tx)
+    }
 }
 
 /// Cloneable handle for injecting events from external async tasks.

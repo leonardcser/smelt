@@ -84,14 +84,12 @@ persisted session state.
 
 Storybook supersedes the earlier L3a (`Grid::with_lines` + widget render)
 and L3b (Pilot) sketches; neither landed. The new shape is one registry of
-"stories" — Rust functions that render a specific UI state — exposed in
-two modes over the same code: snapshot-tested in CI, browsable
-interactively for authoring and exploration.
+"stories" — Rust functions that render a specific UI state — snapshot-tested
+in CI via `cargo nextest run --workspace`.
 
-**Phase placement:** L3 is the future visual-test phase (post-P10).
-Authoring lands once, stories accumulate forever. Two architectural
-prerequisites identified during the 2026-05-06 audit are bundled into
-phases that already touch the relevant surfaces:
+**Phase placement:** L3-prim landed during P10 alongside the parity walk
+prep. L3-comp (Lua + MockEngine) lands when the first component story
+needs it. All architectural prerequisites are in place:
 
 - **P9.o.1 ✅** added a `UI_HOST` TLS slot holding `*mut dyn UiHost`
   alongside the existing concrete `APP` slot in
@@ -104,10 +102,11 @@ phases that already touch the relevant surfaces:
   `state::State::load()` call). Constructor takes `SessionCache` as
   a parameter; `main.rs` reads disk once via `startup::resolve` and
   threads it through. Story construction is no longer filesystem-coupled.
-
-A third prerequisite (`EngineHandle::for_test() -> (Self, Sender, Receiver)`,
-~10 LOC additive in `engine/lib.rs`) lands with L3 itself — no
-overlap with current phases, no rework risk.
+- **P10.2 ✅** added `EngineHandle::for_test() -> (Self,
+  Receiver<UiCommand>, Sender<EngineEvent>)` (~25 LOC additive in
+  `engine/lib.rs`). Returns a handle whose channels are owned by the
+  caller — no agent task spawned, no provider wiring. Drives L3-comp
+  stories without booting a real engine.
 
 ### Two sub-layers, one harness
 
@@ -122,70 +121,65 @@ runs unmodified; the Grid is whatever the user would see.
 
 ### Story shape
 
-Stories are flat Rust functions registered at link time. One file per
-group under `crates/tui/examples/stories/stories/`.
+Stories are flat Rust functions registered at compile time via a
+`macro_rules!` macro (no proc macro — keeps the dev-deps light). One
+file per group under `crates/tui/tests/storybook/stories/`.
 
 ```rust
-#[story("dialogs/confirm/with_diff")]
-fn confirm_with_diff(ctx: &mut StoryCtx) {
-    ctx.lua_eval(r#"
-        smelt.cell("confirm_requested"):set({
-            handle_id = 1, tool_name = "edit_file",
-            args = { path = "src/foo.rs", old_string = "...", new_string = "..." },
-            reason = "edit src/foo.rs",
-        })
-    "#);
-    ctx.tick();                      // drain Lua callback queue + render
-    ctx.assert_snapshot();           // insta::assert_snapshot!
-}
-
-#[story("vim/visual_across_wrap")]
-fn visual_across_wrap(ctx: &mut StoryCtx) {
-    ctx.set_viewport(40, 12);        // narrow → forces wrap
-    ctx.fill_buffer(VIM_BUF, LONG_LINE_WITH_CJK);
-    ctx.press_seq("v$");
-    ctx.tick();
+// crates/tui/tests/storybook/stories/layout.rs
+story!(vbox_three_panes, |ctx| {
+    ctx.set_viewport(40, 8);
+    let top = ctx.buf_with_lines(["top pane"]);
+    let bot = ctx.buf_with_lines(["bottom pane"]);
+    let w_top = ctx.open_split(top, pane_config("top"));
+    let w_bot = ctx.open_split(bot, pane_config("bot"));
+    ctx.set_layout(LayoutTree::vbox(vec![
+        (Constraint::Length(2), LayoutTree::leaf(w_top)),
+        (Constraint::Length(2), LayoutTree::leaf(w_bot)),
+    ]));
     ctx.assert_snapshot();
-}
+});
 ```
 
-`#[story]` is a small proc macro that:
-1. Registers the function in an `inventory::submit!` block (interactive runner).
-2. Emits a `#[test]` that constructs a fresh `StoryCtx`, runs the body,
-   and panics on snapshot drift (CI runner).
+`story!` emits a `#[test]` that constructs a fresh `StoryCtx`, runs
+the body, and panics on snapshot drift. The interactive
+"explore"/"sweep" runners are deferred — neither has a current
+consumer, both add a proc-macro + `inventory` dependency surface
+that isn't paying for itself yet.
 
 **Stories are tests.** No parallel sets.
 
-### `StoryCtx` API (sketch)
+### `StoryCtx` API (as landed)
+
+L3-prim shape — no Lua, no engine. Stories that need component
+composition will extend this.
 
 ```rust
-pub struct StoryCtx<'a> {
-    pub ui:       &'a mut Ui,
-    pub cells:    &'a mut Cells,
-    pub theme:    &'a mut Theme,
-    pub mock:     &'a mut MockEngine,
-    pub lua:      Option<&'a mut LuaRuntime>,   // None for L3-prim stories
-    pub viewport: (u16, u16),
-    pub theme_preset: ThemePreset,
+pub struct StoryCtx {
+    pub ui: Ui,
+    name: String,
+    snapshot_index: u32,
 }
 
-impl StoryCtx<'_> {
-    // Setup
-    pub fn buf(&mut self) -> BufId;
-    pub fn open_window(&mut self, buf: BufId, opts: WinOpts) -> WinId;
-    pub fn open_overlay(&mut self, layout: LayoutTree, anchor: Anchor, modal: Modal);
+impl StoryCtx {
+    pub fn new(name: &str) -> Self;
     pub fn set_viewport(&mut self, w: u16, h: u16);
 
-    // Drive
-    pub fn lua_eval(&mut self, code: &str);
-    pub fn press(&mut self, key: &str);
-    pub fn press_seq(&mut self, keys: &str);
-    pub fn type_text(&mut self, text: &str);
-    pub fn tick(&mut self);                       // one full event-loop iteration
+    // Setup
+    pub fn buf(&mut self) -> BufId;
+    pub fn buf_with_lines<I, S>(&mut self, lines: I) -> BufId;
+    pub fn open_split(&mut self, buf: BufId, config: SplitConfig) -> WinId;
+    pub fn set_layout(&mut self, tree: LayoutTree);
+    pub fn theme_mut(&mut self) -> &mut Theme;
 
-    // Assert
-    pub fn assert_snapshot(&mut self);            // implicit name = story id
-    pub fn assert_snapshot_at(&mut self, label: &str);  // multi-step stories
+    // Drive: stories reach into `ctx.ui` directly for `set_focus`,
+    // `dispatch_event`, `overlay_open`, etc. No prescribed wrappers
+    // until a flood of stories says otherwise.
+
+    // Assert: writes `<name>.snap` (text rows) and
+    // `<name>.styles.snap` (per-cell style sidecar). Multi-step
+    // stories get auto-suffixed `step-1`, `step-2`, ….
+    pub fn assert_snapshot(&mut self);
 }
 ```
 
@@ -205,23 +199,26 @@ mock.request_permission(req);                 // triggers confirm dialog
 mock.stream(LONG_TEXT, 4, Duration::from_millis(20));   // drip-feed
 ```
 
-### Two runners over one registry
+### Runners
 
 | Mode               | Command                                                | Purpose                                                                  |
 | ------------------ | ------------------------------------------------------ | ------------------------------------------------------------------------ |
-| **CI / drift gate** | `cargo nextest run --workspace`                        | Each story is a `#[test]`; insta fails the test on any unblessed change. |
-| **Bless**          | `cargo insta review`                                   | Walk drifted stories, accept (`a`) or reject (`r`) per snapshot.         |
-| **Explore**        | `cargo run --example stories`                          | 3-pane interactive TUI (groups / stories / preview) over the same registry. Theme cycle (Tab), width sweep (`+/-`), full-screen (Enter), per-story keymap layered above harness. Real terminal. |
-| **Sweep**          | `cargo run --example stories -- dump`                  | Render all stories × theme × width in-process, write one HTML page. Eyeball drift across the matrix when changing themes / wrap. |
+| **CI / drift gate** | `cargo nextest run --workspace`                        | Each story is a `#[test]`; insta fails on any unblessed snapshot. Runs alongside the rest of the suite. |
+| **Bless**          | `cargo insta review` or `INSTA_UPDATE=always cargo nextest run --workspace` | Walk drifted stories, accept (`a`) or reject (`r`) per snapshot, or auto-bless every story in one pass. |
+
+Interactive ("Explore") and matrix-sweep runners are deferred until
+a concrete consumer materializes (review the snapshot files
+directly until then).
 
 ### Snapshot serialization
 
-Each story's `Grid` serializes as plain text (one row per line) plus a
-sidecar styles table mapping `(row, col, len) → HlGroup`. Two files per
-story: `<story>.snap` (text) and `<story>.styles.snap` (table). Diffs
-stay surgical — a colour-only change touches only the styles file; a
-wrap regression touches only the text file. Both go through insta's
-review flow.
+Each story's `Grid` serializes as plain text (rows joined by `\n`,
+trailing whitespace stripped per row) plus a sidecar styles table
+mapping `(row, col, len) → resolved Style`. Two files per story:
+`<story>.snap` (text) and `<story>.styles.snap` (table); multi-step
+stories add `.step-N` suffixes. Diffs stay surgical — a colour-only
+change touches only the styles file; a wrap regression touches only
+the text file. Both go through insta's review flow.
 
 ### Coverage targets (initial story matrix)
 
@@ -264,9 +261,9 @@ review flow.
 | Phase                | What lands                                                                                               |
 | -------------------- | -------------------------------------------------------------------------------------------------------- |
 | **Pre-P0**           | L2 harness + 5–10 baseline scenarios on today's binary. Locked behaviour before demolition. ✅           |
-| **P1–P5**            | L1 imperative tests landed alongside the code they cover (958 across the workspace). ✅                  |
-| **P9 tail**          | L3 storybook crate skeleton + `StoryCtx` + `MockEngine` + initial L3-prim story matrix. Each subsequent UI bug-fix gets a story. |
-| **P10**              | L3 story matrix is the parity gate. The tmux walk row in `ARCHITECTURE.md § Testing TUI changes` covers what L3 can't (mouse, real terminal). |
+| **P1–P5**            | L1 imperative tests landed alongside the code they cover (956 across the workspace). ✅                  |
+| **P10**              | L3-prim storybook lands: `StoryCtx`, `Ui::snapshot`, `EngineHandle::for_test`, 8 stories under `crates/tui/tests/storybook/`. ✅ The tmux walk row in `ARCHITECTURE.md § Testing TUI changes` covers what L3 can't (mouse, real terminal). |
+| **post-P10**         | L3-comp lands when the first dialog / transcript / statusline story needs it. Adds `Cells` + `LuaRuntime` + `MockEngine` to `StoryCtx`. |
 
 L2 was the parity gate for the demolition. L1 grew with each phase. L3
 lands once: stories accumulate across phase boundaries, blessed once,
@@ -278,9 +275,11 @@ re-blessed only on intended changes.
   `TestHarness` style.
 - **L2** — add a `#[tokio::test]` in `tests/scenarios.rs`; extend
   `tests/common/harness.rs` for new SSE shapes. Run `cargo insta review`.
-- **L3** — add a `#[story("group/name")]` fn in
-  `crates/tui/examples/stories/stories/<group>.rs`. Run `cargo insta review`
-  to bless. `cargo run --example stories` to walk it interactively.
+- **L3** — add `story!(name, |ctx| { … })` in
+  `crates/tui/tests/storybook/stories/<group>.rs` (new groups need a
+  one-liner in `stories/mod.rs`). Run `cargo insta review` to bless;
+  or `INSTA_UPDATE=always cargo nextest run --workspace` to bless
+  everything in one pass.
 
 Run all: `cargo nextest run --workspace`. Review snapshot diffs:
 `cargo insta review`.

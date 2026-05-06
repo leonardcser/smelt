@@ -1,0 +1,11 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+top row 1
+top row 2
+top row 3
+top row 4
+
+
+bot row
