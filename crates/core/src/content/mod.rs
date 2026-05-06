@@ -1,14 +1,13 @@
-pub(crate) mod context;
-pub mod display;
-pub mod highlight;
 pub mod builder;
+pub(crate) mod context;
+pub mod highlight;
 pub mod selection;
 pub mod stream_parser;
 pub mod transcript;
 pub mod wrap;
 
+pub use crate::buffer::SpanMeta;
 pub use context::LayoutContext;
-pub use display::{SpanMeta, SpanStyle};
 
 use crate::theme::HlGroup;
 

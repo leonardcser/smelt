@@ -15,7 +15,6 @@
 //! pinning info) returned.
 
 use crate::buffer::{Buffer, LineDecoration, SpanMeta};
-use crate::content::display::SpanStyle;
 use crate::style::{Color, Style};
 use crate::theme::{intern_anonymous_style, HlGroup, Theme};
 use unicode_width::UnicodeWidthStr;
@@ -77,9 +76,12 @@ pub struct LineBuilder<'a> {
     has_pending_content: bool,
     overwrote_blank_seed: bool,
 
-    // Style state — renderer-facing template; resolved at print time.
-    cur_style: SpanStyle,
-    style_stack: Vec<SpanStyle>,
+    // Style state — group + axis mods tracked separately. Resolved
+    // at print time. Single-group spans with default mods flow the
+    // group id directly; compound spans intern anonymously.
+    cur_group: Option<HlGroup>,
+    cur_style: Style,
+    style_stack: Vec<(Option<HlGroup>, Style)>,
 
     // Source-text plumbing
     pending_source_text: Option<String>,
@@ -117,7 +119,8 @@ impl<'a> LineBuilder<'a> {
             lines_committed: 0,
             has_pending_content: false,
             overwrote_blank_seed: false,
-            cur_style: SpanStyle::default(),
+            cur_group: None,
+            cur_style: Style::default(),
             style_stack: Vec::new(),
             pending_source_text: None,
             auto_soft_wrap_continuation: false,
@@ -170,8 +173,7 @@ impl<'a> LineBuilder<'a> {
         }
         let w = display_width(text) as u16;
         self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
-        let style = self.cur_style.clone();
-        self.append_span_styled(text, &style, SpanMeta::default());
+        self.append_span_styled(text, SpanMeta::default());
     }
 
     pub fn print_string(&mut self, s: String) {
@@ -184,8 +186,7 @@ impl<'a> LineBuilder<'a> {
         }
         let w = display_width(text) as u16;
         self.cur_visible_cols = self.cur_visible_cols.saturating_add(w);
-        let style = self.cur_style.clone();
-        self.append_span_styled(text, &style, meta);
+        self.append_span_styled(text, meta);
     }
 
     pub fn print_gutter(&mut self, text: &str) {
@@ -285,39 +286,38 @@ impl<'a> LineBuilder<'a> {
 
     // ── Style state ─────────────────────────────────────────────────
 
-    pub fn snapshot_style(&self) -> SpanStyle {
-        self.cur_style.clone()
-    }
-
-    fn apply_style(&mut self, style: SpanStyle) {
+    /// Push the current (group, style) onto the stack and replace
+    /// with the supplied pair. Pair `pop_style` to restore.
+    pub fn push(&mut self, group: Option<HlGroup>, style: Style) {
+        self.style_stack.push((self.cur_group, self.cur_style));
+        self.cur_group = group;
         self.cur_style = style;
     }
 
-    pub fn push_style(&mut self, style: SpanStyle) {
-        self.style_stack.push(self.cur_style.clone());
-        self.cur_style = style;
+    /// Save current state on the stack without changing it. Following
+    /// `set_*` calls modify the new layer; `pop_style` restores.
+    fn push_clone(&mut self) {
+        self.style_stack.push((self.cur_group, self.cur_style));
     }
 
     pub fn pop_style(&mut self) {
-        if let Some(prev) = self.style_stack.pop() {
-            self.cur_style = prev;
+        if let Some((g, s)) = self.style_stack.pop() {
+            self.cur_group = g;
+            self.cur_style = s;
         }
     }
 
     pub fn reset_style(&mut self) {
-        self.apply_style(SpanStyle::default());
+        self.cur_group = None;
+        self.cur_style = Style::default();
     }
 
     pub fn set_fg(&mut self, c: Color) {
-        let mut s = self.snapshot_style();
-        s.fg = Some(c);
-        self.apply_style(s);
+        self.cur_style.fg = Some(c);
     }
 
     pub fn set_bg(&mut self, c: Color) {
-        let mut s = self.snapshot_style();
-        s.bg = Some(c);
-        self.apply_style(s);
+        self.cur_style.bg = Some(c);
     }
 
     /// Set the current span's theme group. The group's resolved
@@ -326,81 +326,76 @@ impl<'a> LineBuilder<'a> {
     /// directly so theme switches flip the rendered span without
     /// re-running the parser.
     pub fn set_hl(&mut self, group: HlGroup) {
-        let mut s = self.snapshot_style();
-        s.group = Some(group);
-        self.apply_style(s);
+        self.cur_group = Some(group);
     }
 
     pub fn set_bold(&mut self) {
-        let mut s = self.snapshot_style();
-        s.bold = true;
-        self.apply_style(s);
+        self.cur_style.bold = true;
     }
 
     pub fn set_dim(&mut self) {
-        let mut s = self.snapshot_style();
-        s.dim = true;
-        self.apply_style(s);
+        self.cur_style.dim = true;
+    }
+
+    pub fn set_italic(&mut self) {
+        self.cur_style.italic = true;
+    }
+
+    pub fn set_crossedout(&mut self) {
+        self.cur_style.crossedout = true;
     }
 
     pub fn set_dim_italic(&mut self) {
-        let mut s = self.snapshot_style();
-        s.dim = true;
-        s.italic = true;
-        self.apply_style(s);
+        self.cur_style.dim = true;
+        self.cur_style.italic = true;
     }
 
     pub fn push_fg(&mut self, c: Color) {
-        let mut s = self.snapshot_style();
-        s.fg = Some(c);
-        self.push_style(s);
+        self.push_clone();
+        self.cur_style.fg = Some(c);
     }
 
     pub fn push_hl(&mut self, group: HlGroup) {
-        let mut s = self.snapshot_style();
-        s.group = Some(group);
-        self.push_style(s);
+        self.push_clone();
+        self.cur_group = Some(group);
     }
 
     pub fn push_bold(&mut self) {
-        let mut s = self.snapshot_style();
-        s.bold = true;
-        self.push_style(s);
+        self.push_clone();
+        self.cur_style.bold = true;
     }
 
     pub fn push_dim(&mut self) {
-        let mut s = self.snapshot_style();
-        s.dim = true;
-        self.push_style(s);
+        self.push_clone();
+        self.cur_style.dim = true;
     }
 
     pub fn push_italic(&mut self) {
-        let mut s = self.snapshot_style();
-        s.italic = true;
-        self.push_style(s);
+        self.push_clone();
+        self.cur_style.italic = true;
     }
 
     pub fn push_crossedout(&mut self) {
-        let mut s = self.snapshot_style();
-        s.crossedout = true;
-        self.push_style(s);
+        self.push_clone();
+        self.cur_style.crossedout = true;
     }
 
     // ── Internals ───────────────────────────────────────────────────
 
-    /// Renderer-facing append: takes the role-typed [`SpanStyle`] so
-    /// single-role spans can intern by the role's theme group name.
-    /// Theme switches that mutate the named group's style flip these
-    /// spans live without re-running the parser.
-    fn append_span_styled(&mut self, text: &str, style: &SpanStyle, meta: SpanMeta) {
-        let resolved = self.resolve_style(style);
+    /// Renderer-facing append: resolves the active (group, style)
+    /// pair through the theme. Single-group spans with default mods
+    /// flow the group id directly so theme switches flip the rendered
+    /// span without re-running the parser; compound spans intern
+    /// anonymously at the resolved Style.
+    fn append_span_styled(&mut self, text: &str, meta: SpanMeta) {
+        let resolved = self.resolve_current();
         let style_default = style_is_default(&resolved);
         let meta_default = meta.selectable && meta.copy_as.is_none();
         if style_default && meta_default {
             self.append_text(text);
             return;
         }
-        let hl = self.hl_for_style(style, resolved);
+        let hl = self.current_hl(resolved);
         self.append_span_with_hl(text, hl, meta);
     }
 
@@ -448,16 +443,16 @@ impl<'a> LineBuilder<'a> {
             .push((chars_before, chars_after, hl, meta));
     }
 
-    /// Map a renderer-facing style to an interned [`HlGroup`]. Single
-    /// theme-group reference with no other axis modifications flows
-    /// the group id directly (theme switches mutate `Theme.styles[id]`
-    /// once and the rendered span tracks live). Anything more
-    /// complex — group plus axis mods, or concrete `fg`/`bg` — falls
-    /// back to content-hashed anonymous interning of the resolved
-    /// `Style`.
-    fn hl_for_style(&self, s: &SpanStyle, resolved: Style) -> HlGroup {
-        if let Some(group) = s.group {
-            if !s.has_axis_mods() && self.theme.contains(group) {
+    /// Map the active (group, style) to an interned [`HlGroup`].
+    /// Single theme-group reference with no other axis modifications
+    /// flows the group id directly (theme switches mutate
+    /// `Theme.styles[id]` once and the rendered span tracks live).
+    /// Anything more complex — group plus axis mods, or concrete
+    /// `fg`/`bg` — falls back to content-hashed anonymous interning of
+    /// the resolved `Style`.
+    fn current_hl(&self, resolved: Style) -> HlGroup {
+        if let Some(group) = self.cur_group {
+            if !style_has_axis_mods(&self.cur_style) && self.theme.contains(group) {
                 return group;
             }
         }
@@ -502,8 +497,8 @@ impl<'a> LineBuilder<'a> {
         has_decoration(&self.cur_decoration)
     }
 
-    fn resolve_style(&self, style: &SpanStyle) -> Style {
-        let (group_fg, group_bg) = match style.group {
+    fn resolve_current(&self) -> Style {
+        let (group_fg, group_bg) = match self.cur_group {
             Some(g) => {
                 let s = self.theme.resolve(g);
                 // Empty Theme entry ⇒ ensure the span still emits a
@@ -521,15 +516,19 @@ impl<'a> LineBuilder<'a> {
             None => (None, None),
         };
         Style {
-            fg: style.fg.or(group_fg),
-            bg: style.bg.or(group_bg),
-            bold: style.bold,
-            dim: style.dim,
-            italic: style.italic,
-            underline: style.underline,
-            crossedout: style.crossedout,
+            fg: self.cur_style.fg.or(group_fg),
+            bg: self.cur_style.bg.or(group_bg),
+            bold: self.cur_style.bold,
+            dim: self.cur_style.dim,
+            italic: self.cur_style.italic,
+            underline: self.cur_style.underline,
+            crossedout: self.cur_style.crossedout,
         }
     }
+}
+
+fn style_has_axis_mods(s: &Style) -> bool {
+    s.fg.is_some() || s.bg.is_some() || s.bold || s.dim || s.italic || s.underline || s.crossedout
 }
 
 fn has_decoration(dec: &LineDecoration) -> bool {

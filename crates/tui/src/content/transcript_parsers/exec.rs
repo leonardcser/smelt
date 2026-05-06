@@ -1,9 +1,8 @@
 //! `Block::Exec` renderer — one shell-escape command + (optional)
 //! captured output.
 
-use smelt_core::content::display::SpanStyle;
 use smelt_core::content::builder::LineBuilder;
-use smelt_core::style::Color;
+use smelt_core::style::{Color, Style};
 use smelt_core::theme::role_hl;
 
 use super::tools::render_wrapped_output;
@@ -22,12 +21,15 @@ pub(super) fn render(out: &mut LineBuilder, command: &str, output: &str, width: 
         .resolve(role_hl("Exec"))
         .fg
         .unwrap_or(Color::Reset);
-    out.push_style(SpanStyle {
-        bg: Some(user_bg),
-        fg: Some(exec_fg),
-        bold: true,
-        ..Default::default()
-    });
+    out.push(
+        None,
+        Style {
+            bg: Some(user_bg),
+            fg: Some(exec_fg),
+            bold: true,
+            ..Default::default()
+        },
+    );
     out.print("!");
     out.set_fg(Color::Reset);
     out.print_string(format!("{}{}", command, " ".repeat(trailing)));

@@ -18,8 +18,8 @@
 use crate::ui::{Buffer, BufferParser};
 use std::sync::Arc;
 
-use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 use crate::content::builder::LineBuilder;
+use crate::content::highlight::{print_inline_diff, print_syntax_file, BashHighlighter};
 use crate::content::to_buffer::render_into_buffer;
 
 /// Content kind a parser-backed buffer renders. Constructed from a

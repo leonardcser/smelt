@@ -9,8 +9,8 @@
 //!   `app::notebook` for plugins that want to introspect a
 //!   notebook's structure.
 
-use crate::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::content::builder::LineBuilder;
+use crate::content::highlight::{print_inline_diff, print_syntax_file};
 use crate::content::selection::wrap_line;
 use crate::ui::BufId;
 use mlua::prelude::*;
