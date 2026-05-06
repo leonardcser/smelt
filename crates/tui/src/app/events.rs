@@ -110,7 +110,7 @@ impl TuiApp {
         }
 
         // Ctrl+C while exec is running → kill it.
-        if self.exec_kill.is_some()
+        if self.exec.is_some()
             && matches!(
                 ev,
                 Event::Key(KeyEvent {
@@ -120,8 +120,8 @@ impl TuiApp {
                 })
             )
         {
-            if let Some(kill) = self.exec_kill.take() {
-                kill.notify_one();
+            if let Some(handle) = self.exec.take() {
+                handle.kill.notify_one();
             }
             return false;
         }
@@ -164,9 +164,8 @@ impl TuiApp {
                 self.queued_messages = remaining;
                 false
             }
-            EventOutcome::Exec(rx, kill) => {
-                self.exec_rx = Some(rx);
-                self.exec_kill = Some(kill);
+            EventOutcome::Exec(handle) => {
+                self.exec = Some(handle);
                 false
             }
             EventOutcome::Submit {
@@ -707,7 +706,7 @@ impl TuiApp {
         };
 
         match crate::commands::run_command(self, &dispatch_input) {
-            CommandAction::Exec(rx, kill) => return InputOutcome::Exec(rx, kill),
+            CommandAction::Exec(handle) => return InputOutcome::Exec(handle),
             CommandAction::Continue => {}
         }
         if dispatch_input.starts_with('/')

@@ -1,5 +1,5 @@
 use crate::app::{
-    DeferredDialog, LoopAction, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
+    DeferredDialog, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
 };
 use protocol::{Content, Decision, Message, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
@@ -658,13 +658,16 @@ impl TuiApp {
 
     // ── Control dispatch ─────────────────────────────────────────────────
 
+    /// Dispatch one engine-event control signal. Returns `true` to keep
+    /// draining the engine event loop, `false` to break (turn complete /
+    /// channel disconnected).
     pub(crate) fn dispatch_control(
         &mut self,
         ctrl: SessionControl,
         pending: &[PendingTool],
         pending_dialogs: &mut VecDeque<DeferredDialog>,
         last_keypress: Option<Instant>,
-    ) -> LoopAction {
+    ) -> bool {
         // Defer dialogs while the user is actively typing.
         // The queue is drained in the main loop via re-dispatch, so auto-approval
         // checks re-run (handles "always allow" → recheck).
@@ -673,8 +676,8 @@ impl TuiApp {
             && !self.input.win.text.is_empty();
 
         match ctrl {
-            SessionControl::Continue => LoopAction::Continue,
-            SessionControl::Done => LoopAction::Done,
+            SessionControl::Continue => true,
+            SessionControl::Done => false,
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
@@ -693,7 +696,7 @@ impl TuiApp {
                 };
                 if auto_approved {
                     self.send_permission_decision(req.request_id, true, None);
-                    return LoopAction::Continue;
+                    return true;
                 }
 
                 // Check mode-based permissions (e.g. Apply mode auto-allows writes).
@@ -705,7 +708,7 @@ impl TuiApp {
                 ) == Decision::Allow
                 {
                     self.send_permission_decision(req.request_id, true, None);
-                    return LoopAction::Continue;
+                    return true;
                 }
 
                 let outside_paths = self
@@ -718,7 +721,7 @@ impl TuiApp {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.pending_dialog = true;
                     pending_dialogs.push_back(DeferredDialog::Confirm(req));
-                    return LoopAction::Continue;
+                    return true;
                 }
 
                 // Prepare dialog options.
@@ -782,7 +785,7 @@ impl TuiApp {
                     }),
                 );
                 self.lua.fire_confirm_open(handle_id);
-                LoopAction::Continue
+                true
             }
         }
     }

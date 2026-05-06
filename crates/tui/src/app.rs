@@ -63,8 +63,7 @@ pub struct TuiApp {
     pub(crate) last_viewport_text: Vec<String>,
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
-    pub(crate) exec_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>>,
-    pub(crate) exec_kill: Option<std::sync::Arc<tokio::sync::Notify>>,
+    pub(crate) exec: Option<crate::commands::ExecHandle>,
     /// Wakeup signal from cross-thread tokio tasks (streaming
     /// subprocess spawn, future async work) that pushed a
     /// `TaskEvent::ExternalResolvedJson` to the Lua inbox. Drains
@@ -242,27 +241,18 @@ pub(crate) enum EventOutcome {
         content: Content,
         display: String,
     },
-    Exec(
-        tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>,
-        std::sync::Arc<tokio::sync::Notify>,
-    ),
+    Exec(crate::commands::ExecHandle),
 }
 
 pub(crate) enum CommandAction {
     Continue,
-    Exec(
-        tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>,
-        std::sync::Arc<tokio::sync::Notify>,
-    ),
+    Exec(crate::commands::ExecHandle),
 }
 
 pub(crate) enum InputOutcome {
     Continue,
     StartAgent,
-    Exec(
-        tokio::sync::mpsc::UnboundedReceiver<crate::commands::ExecEvent>,
-        std::sync::Arc<tokio::sync::Notify>,
-    ),
+    Exec(crate::commands::ExecHandle),
 }
 
 /// Mutable timer state shared across event handlers.
@@ -289,11 +279,6 @@ pub(crate) enum DeferredDialog {
 pub(crate) enum SessionControl {
     Continue,
     NeedsConfirm(Box<ConfirmRequest>),
-    Done,
-}
-
-pub(crate) enum LoopAction {
-    Continue,
     Done,
 }
 
@@ -462,8 +447,7 @@ impl TuiApp {
             last_viewport_text: Vec::new(),
             input_history: History::load(),
             input,
-            exec_rx: None,
-            exec_kill: None,
+            exec: None,
             lua_wakeup_rx,
             queued_messages: Vec::new(),
             cwd,
@@ -855,9 +839,8 @@ impl TuiApp {
         if let Some(msg) = initial_message {
             let trimmed = msg.trim();
             if let Some(cmd) = trimmed.strip_prefix('!') {
-                if let Some((rx, kill)) = self.start_shell_escape(cmd) {
-                    self.exec_rx = Some(rx);
-                    self.exec_kill = Some(kill);
+                if let Some(handle) = self.start_shell_escape(cmd) {
+                    self.exec = Some(handle);
                 }
             } else if trimmed.starts_with('/') && crate::completer::Completer::is_command(trimmed) {
                 // A registered slash command. If the plugin opted into
@@ -992,14 +975,11 @@ impl TuiApp {
                 } else {
                     // No active turn — handle out-of-band events.
                     self.handle_idle_engine_event(ev);
-                    LoopAction::Continue
+                    true
                 };
-                match action {
-                    LoopAction::Continue => {}
-                    LoopAction::Done => {
-                        self.discard_turn(false);
-                        break;
-                    }
+                if !action {
+                    self.discard_turn(false);
+                    break;
                 }
             }
 
@@ -1048,7 +1028,7 @@ impl TuiApp {
                         t.last_keypress,
                     );
                     self.agent = taken;
-                    if matches!(action, LoopAction::Done) {
+                    if !action {
                         self.discard_turn(false);
                     }
                 }
@@ -1168,7 +1148,7 @@ impl TuiApp {
                             t.last_keypress,
                         );
                         self.agent = Some(ag);
-                        if matches!(action, LoopAction::Done) {
+                        if !action {
                             self.discard_turn(false);
                         }
                     } else {
@@ -1193,8 +1173,8 @@ impl TuiApp {
                 }
 
                 Some(ev) = async {
-                    match self.exec_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
+                    match self.exec.as_mut() {
+                        Some(handle) => handle.rx.recv().await,
                         None => std::future::pending().await,
                     }
                 } => {
@@ -1205,8 +1185,7 @@ impl TuiApp {
                         crate::commands::ExecEvent::Done(code) => {
                             self.finish_exec(code);
                             self.finalize_exec();
-                            self.exec_rx = None;
-                            self.exec_kill = None;
+                            self.exec = None;
                         }
                     }
                 }
