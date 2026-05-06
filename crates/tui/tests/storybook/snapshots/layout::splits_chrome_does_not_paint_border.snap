@@ -1,6 +1,0 @@
----
-source: crates/tui/tests/storybook/mod.rs
-expression: frame.text()
----
-
- inside the (un-)bordered pan

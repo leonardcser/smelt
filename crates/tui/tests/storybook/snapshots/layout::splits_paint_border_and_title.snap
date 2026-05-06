@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/storybook/mod.rs
+expression: frame.text()
+---
+╭frame───────────────────────╮
+│inside the bordered pane    │
+│                            │
+│                            │
+│                            │
+╰────────────────────────────╯
