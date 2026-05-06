@@ -388,17 +388,30 @@ Status table + open sub-phase sketches + decisions + deferrals in
   / `smelt.keymap.set("visual", …)` so plugins can rebind motions
   and operators (P1.d.5f.2d). The state machine stays in Rust;
   recipes become Lua.
-- **P9.o** ⏸ — **Prompt is a Window.** `tui::input::PromptState`
-  (~1170 LOC) is the last interactive surface that isn't a
-  `Window` over a `Buffer` with a Lua keymap recipe. Collapse it
-  onto the same shape: prompt buffer + prompt Window + a
-  `widgets/prompt.lua` recipe. Aligns with everything else and
-  removes the bespoke completion / wrap / submit path.
-  **Bundled scope:** UiHost-tier TLS pointer flips from
-  `&mut TuiApp` to `&mut dyn UiHost` (mirroring the Host-tier
-  split P8.f landed). Same dispatch surface gets touched, so the
-  re-key rides this sub-phase rather than retrofitted later.
-  Unblocks the visual-test phase (see `TESTING.md` § L3).
+- **P9.o** ✅ partial — **UiHost TLS flip + Action enum cleanup.**
+  Two pieces landed; the prompt-rewrite body did not.
+  - **UiHost TLS flip (landed).** New `UI_HOST` slot in
+    `crates/tui/src/lua/app_ref.rs` holds `*mut dyn UiHost`
+    alongside the existing `APP` slot for the concrete `TuiApp`.
+    `install_app_ptr` populates both; `with_ui_host` /
+    `try_with_ui_host` reborrow through the trait object.
+    Mirrors the Host-tier split P8.f landed (`CORE_PTR`).
+    Decouples future frontends (StoryApp, alternative
+    compositor) from the concrete TuiApp struct.
+  - **Dead Action variants (landed).** `Action` enum returned
+    by `PromptState::handle_event` shed three unreachable
+    variants (`ToggleMode`, `CycleReasoning`, `Resize`) and the
+    `Event::Resize` branch. The first two are intercepted by
+    the global chord layer in `app/events.rs`; `Resize` was
+    already handled above. 7 variants, down from 10.
+  - **Full prompt-as-Window rewrite (declined).** Migrating
+    `PromptState` (~1170 LOC) to a Window+Buffer+Lua-recipe
+    shape moves complexity rather than reducing it: ~79
+    `KeyAction` Lua bindings + a widget recipe stand in for
+    the bespoke handler. Plugin extensibility is theoretical;
+    no concrete consumer present (deferral rule). Same logic
+    rejects the bundled `attachment.rs` and `prompt_wrap.rs`
+    moves. Revisit when a concrete consumer materializes.
 - **P9.x** 📝 — **Config binding fidelity.** Reject-unknown /
   fidelity bugs in config-time bindings (~100 LOC):
   `provider.register` accepts per-model fields (today drops
