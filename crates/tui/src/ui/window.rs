@@ -8,6 +8,7 @@ use super::Clipboard;
 use super::{BufId, WinId};
 use crate::ui::Theme;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use smelt_core::buffer::VirtTextPos;
 
 /// Per-frame paint context handed to `Window::render`. Carries terminal
 /// size + theme so renderers don't reach back into the host.
@@ -1030,6 +1031,8 @@ impl Window {
     /// by `Ui::render` and emitted as a `cursor::MoveTo` after the
     /// diff flush — `Window::render` itself does nothing for it.
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
+        use unicode_width::UnicodeWidthChar;
+
         let width = slice.width();
         let height = slice.height();
         let scroll = self.scroll_top as usize;
@@ -1039,54 +1042,94 @@ impl Window {
         } else {
             None
         };
+        let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
         for row in 0..height {
-            let row_style = if cursor_row == Some(row) {
+            let idx = scroll + row as usize;
+            let decoration = if idx < line_count {
+                Some(buf.decoration_at(idx))
+            } else {
+                None
+            };
+            let mut row_style = if cursor_row == Some(row) {
                 cursor_style
             } else {
-                Style::default()
+                normal_style
             };
-            // Paint the row background first so trailing space
-            // beyond the line content also picks up the cursor
-            // highlight.
-            if cursor_row == Some(row) {
+            if let Some(dec) = decoration {
+                if let Some(bg) = dec.fill_bg {
+                    row_style = Style {
+                        bg: Some(bg),
+                        ..row_style
+                    };
+                }
+            }
+            // Paint the row background first so trailing space beyond
+            // the line content also picks up `Normal` / `CursorLine` /
+            // `LineDecoration::fill_bg`.
+            if row_style != Style::default() {
                 for col in 0..width {
                     slice.set(col, row, ' ', row_style);
                 }
             }
-            let idx = scroll + row as usize;
             if idx >= line_count {
                 continue;
             }
             let Some(line) = buf.get_line(idx) else {
                 continue;
             };
-            for (col, ch) in line.chars().take(width as usize).enumerate() {
-                slice.set(col as u16, row, ch, row_style);
+            // Lay out the row's source characters in visual columns,
+            // honoring unicode width. `col_to_char` lets the highlight
+            // painter map a visual column back to its source char so
+            // wide glyphs pick up the right symbol when only one of
+            // their two cells overlaps a span.
+            let mut col_to_char: Vec<usize> = Vec::with_capacity(width as usize);
+            let line_chars: Vec<char> = line.chars().collect();
+            let mut col: u16 = 0;
+            for (ci, ch) in line_chars.iter().enumerate() {
+                let cw = UnicodeWidthChar::width(*ch).unwrap_or(0).max(1) as u16;
+                if col + cw > width {
+                    break;
+                }
+                slice.set(col, row, *ch, row_style);
+                col_to_char.push(ci);
+                for _ in 1..cw {
+                    col_to_char.push(ci);
+                }
+                col += cw;
             }
+            let content_end_col = col;
             // Layered highlight painting: walk highlight extmarks
             // anchored on this row and overlay each span's style on
             // top of `row_style`. Span styles carry resolved colors
             // (parsers/Lua have already looked up theme groups), so
             // no theme reads happen here. Cell symbols stay as the
             // already-painted line glyphs; only attributes change.
-            let line_chars: Vec<char> = line.chars().take(width as usize).collect();
+            // `hl_eol` extends the span's background past `col_end` to
+            // the right edge of the row.
             for span in buf.highlights_at(idx) {
                 let span_style = ctx.theme.resolve(span.hl);
                 let style = merge_span_style(row_style, &span_style);
                 let start = span.col_start.min(width);
                 let end = span.col_end.min(width);
-                for col in start..end {
-                    let ch = line_chars.get(col as usize).copied().unwrap_or(' ');
-                    slice.set(col, row, ch, style);
+                for c in start..end {
+                    let ch = col_to_char
+                        .get(c as usize)
+                        .and_then(|i| line_chars.get(*i))
+                        .copied()
+                        .unwrap_or(' ');
+                    slice.set(c, row, ch, style);
+                }
+                if span.hl_eol {
+                    for c in end..width {
+                        slice.set(c, row, ' ', style);
+                    }
                 }
             }
-            // Virtual text painting: walk virt_text extmarks anchored
-            // on this row and overwrite cells starting at the
-            // extmark's `col`. Style resolves the extmark's `hl_group`
-            // through the theme (missing → `Style::default()`) and
-            // layers on top of `row_style` so cursor-row highlight
-            // bg shows through when the virt_text style omits bg.
+            // Virtual text painting. `VirtTextPos::Eol` appends after
+            // the row's existing content; `Inline` / `Overlay` start at
+            // the extmark's column (overwriting real cells);
+            // `RightAlign` paints flush against the right edge.
             for vt in buf.virtual_text_at(idx) {
                 let base = vt
                     .hl_group
@@ -1094,11 +1137,24 @@ impl Window {
                     .map(|g| ctx.theme.get(g))
                     .unwrap_or_default();
                 let style = merge_styles(row_style, base);
-                for (col, ch) in (vt.col as u16..).zip(vt.text.chars()) {
-                    if col >= width {
+                let vt_width: u16 = vt
+                    .text
+                    .chars()
+                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0).max(1) as u16)
+                    .sum();
+                let start_col = match vt.pos {
+                    VirtTextPos::Eol => content_end_col,
+                    VirtTextPos::Inline | VirtTextPos::Overlay => vt.col as u16,
+                    VirtTextPos::RightAlign => width.saturating_sub(vt_width),
+                };
+                let mut c = start_col;
+                for ch in vt.text.chars() {
+                    let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
+                    if c + cw > width {
                         break;
                     }
-                    slice.set(col, row, ch, style);
+                    slice.set(c, row, ch, style);
+                    c += cw;
                 }
             }
         }

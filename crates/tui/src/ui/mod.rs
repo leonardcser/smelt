@@ -982,24 +982,29 @@ impl Ui {
         let wins = &self.wins;
         let bufs = &self.bufs;
         let term_size = self.terminal_size;
+        let splits_tree = self.splits.clone();
+        let term_w = self.terminal_size.0;
+        let term_h = self.terminal_size.1;
         self.compositor.render_with(&self.theme, w, |grid, theme| {
             // Paint splits first so overlays draw on top, matching the
             // prior order (status was a compositor layer at z=500;
             // overlays in the closure ran *after* every compositor
             // layer paint, so any overlap landed overlays-over-status).
-            for (win_id, rect) in &painted_splits {
-                paint_split(
-                    grid,
-                    theme,
-                    *win_id,
-                    *rect,
-                    wins,
-                    bufs,
-                    term_size,
-                    focus,
-                    cursor_shape,
-                );
-            }
+            // `paint_layout_node` walks containers (painting chrome at
+            // each level) and recurses into leaves, so a splits tree
+            // with `with_border` / `with_title` paints the same shape
+            // as an overlay tree would.
+            paint_layout_node(
+                grid,
+                theme,
+                &splits_tree,
+                Rect::new(0, 0, term_w, term_h),
+                wins,
+                bufs,
+                term_size,
+                focus,
+                cursor_shape,
+            );
             for (_id, rect, overlay) in &resolved {
                 paint_overlay(
                     grid,
@@ -1459,44 +1464,6 @@ impl UiHost for Ui {
         }
         Some((Vec::new(), hard))
     }
-}
-
-/// Paint one painted-split window into `grid` at `rect` via
-/// `Window::render`. Mirrors the leaf branch of `paint_layout_node` for
-/// split-shaped windows that paint outside the overlay layout system.
-/// Missing windows / buffers are silently skipped.
-#[allow(clippy::too_many_arguments)]
-fn paint_split(
-    grid: &mut Grid,
-    theme: &Theme,
-    win_id: WinId,
-    rect: Rect,
-    wins: &HashMap<WinId, Window>,
-    bufs: &HashMap<BufId, Buffer>,
-    term_size: (u16, u16),
-    focus: Option<WinId>,
-    cursor_shape: CursorShape,
-) {
-    let Some(win) = wins.get(&win_id) else {
-        return;
-    };
-    let Some(buf) = bufs.get(&win.buf) else {
-        return;
-    };
-    let mut slice = grid.slice_mut(rect);
-    let focused = focus == Some(win_id);
-    let ctx = DrawContext {
-        terminal_width: term_size.0,
-        terminal_height: term_size.1,
-        focused,
-        cursor_shape: if focused {
-            cursor_shape
-        } else {
-            CursorShape::Hidden
-        },
-        theme: theme.clone(),
-    };
-    win.render(buf, &mut slice, &ctx);
 }
 
 /// Paint one resolved overlay into `grid`. Walks the overlay's layout
