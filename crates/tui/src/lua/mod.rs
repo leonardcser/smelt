@@ -943,10 +943,20 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        assert!(rt.run_keymap("<C-g>", Some("Normal")));
+        use smelt_core::lua::runtime::KeymapResult;
+        assert_eq!(
+            rt.run_keymap("<C-g>", Some("Normal")),
+            KeymapResult::Consumed
+        );
         assert_eq!(drain_notifications(&rt), vec!["ctrl-g".to_string()]);
-        assert!(!rt.run_keymap("<C-g>", Some("Insert")));
-        assert!(!rt.run_keymap("<C-x>", Some("Normal")));
+        assert_eq!(
+            rt.run_keymap("<C-g>", Some("Insert")),
+            KeymapResult::NoBinding
+        );
+        assert_eq!(
+            rt.run_keymap("<C-x>", Some("Normal")),
+            KeymapResult::NoBinding
+        );
     }
 
     #[test]
@@ -963,10 +973,17 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        assert!(rt.run_keymap("<C-h>", Some("Normal")));
+        use smelt_core::lua::runtime::KeymapResult;
+        assert_eq!(
+            rt.run_keymap("<C-h>", Some("Normal")),
+            KeymapResult::Consumed
+        );
         assert_eq!(drain_notifications(&rt), vec!["any-mode".to_string()]);
-        assert!(rt.run_keymap("<C-h>", Some("Insert")));
-        assert!(rt.run_keymap("<C-h>", None));
+        assert_eq!(
+            rt.run_keymap("<C-h>", Some("Insert")),
+            KeymapResult::Consumed
+        );
+        assert_eq!(rt.run_keymap("<C-h>", None), KeymapResult::Consumed);
     }
 
     #[test]
@@ -1087,9 +1104,19 @@ mod tests {
             )
             .exec()
             .expect("exec");
-        assert!(rt.run_keymap("<C-r>", Some("Normal")));
-        assert!(rt.run_keymap("<C-r>", Some("Insert")));
-        assert!(rt.run_keymap("<C-r>", Some("Visual")));
+        use smelt_core::lua::runtime::KeymapResult;
+        assert_eq!(
+            rt.run_keymap("<C-r>", Some("Normal")),
+            KeymapResult::Consumed
+        );
+        assert_eq!(
+            rt.run_keymap("<C-r>", Some("Insert")),
+            KeymapResult::Consumed
+        );
+        assert_eq!(
+            rt.run_keymap("<C-r>", Some("Visual")),
+            KeymapResult::Consumed
+        );
         let msgs = drain_notifications(&rt);
         assert_eq!(msgs.len(), 3);
     }

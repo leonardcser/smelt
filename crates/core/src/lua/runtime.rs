@@ -54,6 +54,18 @@ const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "plugins", "dialogs"];
 /// Lifecycle context passed to a tool's `render(args, output, ctx)`
 /// hook. Mirrors the data the transcript composer would otherwise paint
 /// itself (status pill, elapsed pill, available width).
+/// Outcome of dispatching a key event to a Lua-registered chord
+/// handler. `Consumed` means the handler claimed the key; `PassThrough`
+/// means the handler ran but explicitly returned `false` so the key
+/// falls through to downstream dispatchers; `NoBinding` means no Lua
+/// handler is registered for the given `(mode, chord)` pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeymapResult {
+    Consumed,
+    PassThrough,
+    NoBinding,
+}
+
 pub struct ToolRenderCtx<'a> {
     /// Available column budget for the body (after the `⏺ name `
     /// prefix is reserved).
@@ -308,10 +320,14 @@ impl LuaRuntime {
     }
 
     /// Dispatch a keymap chord to any Lua-registered handler.
-    pub fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> bool {
+    /// Returns `Consumed` when a handler ran and returned truthy /
+    /// nothing; `PassThrough` when a handler ran and returned `false`
+    /// (the key falls through to downstream dispatch); `NoBinding`
+    /// when no handler is registered for `(mode, chord)`.
+    pub fn run_keymap(&self, chord: &str, current_mode: Option<&str>) -> KeymapResult {
         let func = {
             let Ok(map) = self.shared.keymaps.lock() else {
-                return false;
+                return KeymapResult::NoBinding;
             };
             let mode_char = current_mode.map(|m| match m {
                 "Normal" => "n",
@@ -323,17 +339,21 @@ impl LuaRuntime {
                 .and_then(|mc| map.get(&(mc.to_string(), chord.to_string())))
                 .or_else(|| map.get(&(String::new(), chord.to_string())));
             let Some(handle) = handle else {
-                return false;
+                return KeymapResult::NoBinding;
             };
             let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
-                return false;
+                return KeymapResult::NoBinding;
             };
             f
         };
-        if let Err(e) = func.call::<()>(()) {
-            self.record_error(format!("keymap `{chord}`: {e}"));
+        match func.call::<mlua::Value>(()) {
+            Ok(mlua::Value::Boolean(false)) => KeymapResult::PassThrough,
+            Ok(_) => KeymapResult::Consumed,
+            Err(e) => {
+                self.record_error(format!("keymap `{chord}`: {e}"));
+                KeymapResult::Consumed
+            }
         }
-        true
     }
 
     /// Fire `smelt.mode.cycle()`.
