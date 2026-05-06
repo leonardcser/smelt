@@ -153,6 +153,11 @@ pub struct Span {
     pub col_end: u16,
     pub hl: HlGroup,
     pub meta: SpanMeta,
+    /// Mirrors `nvim_buf_set_extmark`'s `hl_eol`. When true, the span's
+    /// background extends past `col_end` to the right edge of the
+    /// visible row. Used for diff add/delete bars and similar full-row
+    /// tinting.
+    pub hl_eol: bool,
 }
 
 /// One-line virtual text overlay. Derived on demand from extmarks in
@@ -729,7 +734,10 @@ impl Buffer {
                 if mark.start_row != line {
                     continue;
                 }
-                if let ExtmarkPayload::Highlight { hl, meta, .. } = &mark.payload {
+                if let ExtmarkPayload::Highlight {
+                    hl, meta, hl_eol, ..
+                } = &mark.payload
+                {
                     entries.push((
                         mark.priority,
                         ns.0,
@@ -739,6 +747,7 @@ impl Buffer {
                             col_end: mark.end_col as u16,
                             hl: *hl,
                             meta: meta.clone(),
+                            hl_eol: *hl_eol,
                         },
                     ));
                 }
