@@ -151,7 +151,7 @@ to invoke_ the feature.
 | Vim Visual anchor flip (`o`) | `ui/vim.rs` | P1.d | working |
 | Vim case toggle (`~` in Normal/Visual; `U`/`u` in Visual)         | `ui/vim.rs` | P1.d | working |
 | Emacs-style word case (Alt+U / Alt+L / Alt+C) | `keymap.rs::KeyAction::{UppercaseWord, LowercaseWord, CapitalizeWord}` | P1.d | working |
-| Vim dot-repeat (`.`) | `ui/vim.rs` (per-buffer history) | P1.a (moves to Buffer) | working |
+| Vim dot-repeat (`.`) | (not implemented) | P9.n (lands with per-buffer state move to Buffer) | offline-P9.n |
 | Vim toggle (`/vim` or config)                   | `plugins/toggles.lua`                   | P4.e                                             | working |
 | Select character (Shift+arrows)                 | `ui/window.rs` selection                | P1.d                                             | working |
 | Select word (Shift+Alt/Ctrl+arrows)             | `ui/window.rs`                          | P1.d                                             | working |
