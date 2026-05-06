@@ -24,7 +24,7 @@
 //! their `&mut TuiApp` borrow across the subsequent Lua call, but that
 //! borrow is *not accessed* while Lua runs — Rust is blocked on the
 //! FFI call and the only way to touch TuiApp is through [`with_app`]
-//! / [`with_ui_host`] / `with_host`, each of which reborrows the raw
+//! / [`with_ui_host`] / `with_core`, each of which reborrows the raw
 //! pointer as a fresh `&mut` for the duration of its closure. Because
 //! Lua is single-threaded inside the TUI event loop and never re-enters
 //! a Rust stack frame that is itself holding an active mutable borrow,
@@ -108,25 +108,22 @@ pub fn try_with_app<R>(f: impl FnOnce(&mut TuiApp) -> R) -> Option<R> {
     Some(unsafe { f(ptr.as_ptr().as_mut().expect("app ptr must be non-null")) })
 }
 
-/// Borrow the installed frontend as `&mut dyn smelt_core::Host` for
-/// the duration of `f`. Host-tier Lua bindings (cells, timers, engine,
-/// clipboard, session, confirms, lua, autocmds) reach through here so
-/// they compose without locking the whole frontend struct, and so
-/// they stay headless-safe — `HeadlessApp` installs into the same TLS
-/// slot inside `smelt_core::host`.
-///
-/// `pub(crate)` because `Host` itself is `pub(crate)` — neither leaks
-/// outside the crate.
+/// Borrow the installed `&mut Core` for the duration of `f`. Host-tier
+/// Lua bindings (cells, timers, engine, clipboard, session, confirms,
+/// lua, autocmds) reach through here so they compose without locking
+/// the whole frontend struct, and so they stay headless-safe —
+/// `HeadlessApp` installs into the same TLS slot inside
+/// `smelt_core::host`.
 #[allow(dead_code)]
-pub(crate) fn with_host<R>(f: impl FnOnce(&mut dyn smelt_core::Host) -> R) -> R {
-    smelt_core::host::with_host(f)
+pub(crate) fn with_core<R>(f: impl FnOnce(&mut smelt_core::Core) -> R) -> R {
+    smelt_core::host::with_core(f)
 }
 
-/// `try_` variant of `with_host` that returns `None` instead of
+/// `try_` variant of `with_core` that returns `None` instead of
 /// panicking when no frontend is installed.
 #[allow(dead_code)]
-pub(crate) fn try_with_host<R>(f: impl FnOnce(&mut dyn smelt_core::Host) -> R) -> Option<R> {
-    smelt_core::host::try_with_host(f)
+pub(crate) fn try_with_core<R>(f: impl FnOnce(&mut smelt_core::Core) -> R) -> Option<R> {
+    smelt_core::host::try_with_core(f)
 }
 
 /// Borrow the installed frontend as `&mut dyn UiHost` for the duration

@@ -102,6 +102,45 @@ pub struct Core {
 }
 
 impl Core {
+    /// Subsystem accessors — Host-tier Lua bindings reach for these
+    /// through `try_with_core(|core| core.cells())`. Returning a
+    /// `&mut` to the field keeps method-call call sites (rather than
+    /// raw field access) so that adding a side-effect at the accessor
+    /// boundary later is a one-line change.
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+    pub fn clipboard(&mut self) -> &mut crate::Clipboard {
+        &mut self.clipboard
+    }
+    pub fn cells(&mut self) -> &mut Cells {
+        &mut self.cells
+    }
+    pub fn timers(&mut self) -> &mut Timers {
+        &mut self.timers
+    }
+    pub fn engine(&mut self) -> &mut EngineClient {
+        &mut self.engine
+    }
+    pub fn session(&mut self) -> &mut Session {
+        &mut self.session
+    }
+    pub fn files(&mut self) -> &mut crate::fs::FileStateCache {
+        &mut self.files
+    }
+    pub fn processes(&mut self) -> &mut ProcessRegistry {
+        &mut self.processes
+    }
+    pub fn skills(&self) -> &Option<Arc<SkillLoader>> {
+        &self.skills
+    }
+    pub fn frontend(&self) -> FrontendKind {
+        self.frontend
+    }
+    pub fn confirms(&mut self) -> &mut Confirms {
+        &mut self.confirms
+    }
+
     /// Build the headless-safe core from a populated `AppConfig` and a
     /// fresh `EngineHandle`. Both `TuiApp::new` (TUI) and `HeadlessApp::new`
     /// (one-shot) call this — the only single source of

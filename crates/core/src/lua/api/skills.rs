@@ -14,8 +14,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     tbl.set(
         "content",
         lua.create_function(|_, name: String| {
-            let resolved = crate::host::try_with_host(|host| {
-                host.skills().as_ref().map(|loader| loader.content(&name))
+            let resolved = crate::host::try_with_core(|core| {
+                core.skills().as_ref().map(|loader| loader.content(&name))
             })
             .flatten();
             match resolved {
@@ -29,8 +29,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     tbl.set(
         "list",
         lua.create_function(|lua, ()| {
-            let names: Vec<String> = crate::host::try_with_host(|host| {
-                host.skills()
+            let names: Vec<String> = crate::host::try_with_core(|core| {
+                core.skills()
                     .as_ref()
                     .map(|loader| loader.names())
                     .unwrap_or_default()

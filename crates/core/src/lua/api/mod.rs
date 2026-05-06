@@ -11,7 +11,7 @@
 macro_rules! host_read {
     ($lua:expr, |$host:ident| $body:expr) => {{
         $lua.create_function(|_, ()| {
-            Ok($crate::host::try_with_host(|$host| $body).unwrap_or_default())
+            Ok($crate::host::try_with_core(|$host| $body).unwrap_or_default())
         })?
     }};
 }

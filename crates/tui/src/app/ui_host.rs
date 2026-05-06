@@ -1,47 +1,11 @@
 //! `UiHost` impl for `TuiApp` — delegates every method to the inner
-//! `crate::ui::Ui`. The trait itself lives in `crate::ui`; see its docs for
-//! the split between `Host` (Ui-agnostic) and `UiHost` (compositor-
-//! bearing). `HeadlessApp` deliberately does **not** impl `UiHost`;
-//! UiHost-only Lua bindings raise a runtime error when invoked from
-//! a headless context.
+//! `crate::ui::Ui`. The trait itself lives in `crate::ui`; see its docs.
+//! `HeadlessApp` deliberately does **not** impl `UiHost`; UiHost-only
+//! Lua bindings raise a runtime error when invoked from a headless
+//! context. Host-tier subsystems flow through `&mut Core` directly via
+//! the `try_with_core` TLS slot — no parallel trait impl on `TuiApp`.
 
 use crate::app::TuiApp;
-
-impl smelt_core::Host for TuiApp {
-    fn config(&self) -> &smelt_core::AppConfig {
-        &self.core.config
-    }
-    fn clipboard(&mut self) -> &mut smelt_core::Clipboard {
-        &mut self.core.clipboard
-    }
-    fn cells(&mut self) -> &mut smelt_core::Cells {
-        &mut self.core.cells
-    }
-    fn timers(&mut self) -> &mut smelt_core::Timers {
-        &mut self.core.timers
-    }
-    fn engine(&mut self) -> &mut smelt_core::EngineClient {
-        &mut self.core.engine
-    }
-    fn session(&mut self) -> &mut smelt_core::Session {
-        &mut self.core.session
-    }
-    fn files(&mut self) -> &mut smelt_core::fs::FileStateCache {
-        &mut self.core.files
-    }
-    fn processes(&mut self) -> &mut smelt_core::process::ProcessRegistry {
-        &mut self.core.processes
-    }
-    fn skills(&self) -> &Option<std::sync::Arc<engine::SkillLoader>> {
-        &self.core.skills
-    }
-    fn frontend(&self) -> smelt_core::runtime::FrontendKind {
-        self.core.frontend
-    }
-    fn confirms(&mut self) -> &mut smelt_core::confirms::Confirms {
-        &mut self.core.confirms
-    }
-}
 
 impl crate::ui::UiHost for TuiApp {
     fn ui(&mut self) -> &mut crate::ui::Ui {

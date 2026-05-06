@@ -109,7 +109,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "list",
         lua.create_function(|lua, ()| {
             let current_id =
-                crate::lua::try_with_host(|host| host.session().id.clone()).unwrap_or_default();
+                crate::lua::try_with_core(|core| core.session().id.clone()).unwrap_or_default();
             let sessions = smelt_core::session::list_sessions();
             let out = lua.create_table()?;
             let mut idx = 1;

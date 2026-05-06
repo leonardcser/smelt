@@ -11,8 +11,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "set",
         lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
             let key = lua.create_registry_value(handler)?;
-            Ok(crate::host::try_with_host(|host| {
-                host.timers()
+            Ok(crate::host::try_with_core(|core| {
+                core.timers()
                     .set(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
@@ -27,8 +27,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 ));
             }
             let key = lua.create_registry_value(handler)?;
-            Ok(crate::host::try_with_host(|host| {
-                host.timers()
+            Ok(crate::host::try_with_core(|core| {
+                core.timers()
                     .every(Duration::from_millis(ms), LuaHandle { key })
             })
             .unwrap_or(0))
@@ -37,7 +37,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     timer_tbl.set(
         "cancel",
         lua.create_function(|_, id: u64| {
-            Ok(crate::host::try_with_host(|host| host.timers().cancel(id)).unwrap_or(false))
+            Ok(crate::host::try_with_core(|core| core.timers().cancel(id)).unwrap_or(false))
         })?,
     )?;
     smelt.set("timer", timer_tbl)?;
@@ -49,8 +49,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "defer",
         lua.create_function(|lua, (ms, handler): (u64, mlua::Function)| {
             let key = lua.create_registry_value(handler)?;
-            crate::host::try_with_host(|host| {
-                host.timers()
+            crate::host::try_with_core(|core| {
+                core.timers()
                     .set(Duration::from_millis(ms), LuaHandle { key })
             });
             Ok(())

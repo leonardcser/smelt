@@ -20,7 +20,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "list",
         lua.create_function(|lua, ()| {
             let procs =
-                crate::host::try_with_host(|host| host.processes().list()).unwrap_or_default();
+                crate::host::try_with_core(|core| core.processes().list()).unwrap_or_default();
             let out = lua.create_table()?;
             for (i, p) in procs.into_iter().enumerate() {
                 let row = lua.create_table()?;
@@ -35,8 +35,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     process_tbl.set(
         "kill",
         lua.create_function(|_, id: String| {
-            crate::host::with_host(|host| {
-                let registry = host.processes().clone();
+            crate::host::with_core(|core| {
+                let registry = core.processes().clone();
                 tokio::spawn(async move {
                     let _ = registry.stop(&id).await;
                 });
@@ -47,7 +47,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     process_tbl.set(
         "read_output",
         lua.create_function(|lua, id: String| {
-            let read = crate::host::try_with_host(|host| host.processes().read(&id));
+            let read = crate::host::try_with_core(|core| core.processes().read(&id));
             match read {
                 Some(Ok((text, running, exit_code))) => {
                     let t = lua.create_table()?;
@@ -69,7 +69,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     process_tbl.set(
         "spawn_bg",
         lua.create_function(|_, command: String| -> LuaResult<String> {
-            let registry = crate::host::try_with_host(|host| host.processes().clone())
+            let registry = crate::host::try_with_core(|core| core.processes().clone())
                 .ok_or_else(|| mlua::Error::external("process.spawn_bg: app unavailable"))?;
             let mut cmd = tokio::process::Command::new("sh");
             cmd.arg("-c")
@@ -116,7 +116,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "run_streaming",
         lua.create_function(
             move |_, (task_id, call_id, command, timeout_ms): (u64, String, String, u64)| {
-                let injector = crate::host::try_with_host(|host| host.engine().injector())
+                let injector = crate::host::try_with_core(|core| core.engine().injector())
                     .ok_or_else(|| {
                         mlua::Error::external("process.run_streaming: app unavailable")
                     })?;

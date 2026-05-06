@@ -198,14 +198,14 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
     t.set(
         "has",
         lua.create_function(|_, p: String| {
-            Ok(crate::host::try_with_host(|host| host.files().has(&p)).unwrap_or(false))
+            Ok(crate::host::try_with_core(|core| core.files().has(&p)).unwrap_or(false))
         })?,
     )?;
 
     t.set(
         "get",
         lua.create_function(|lua, p: String| {
-            let Some(state) = crate::host::try_with_host(|host| host.files().get(&p)).flatten()
+            let Some(state) = crate::host::try_with_core(|core| core.files().get(&p)).flatten()
             else {
                 return Ok(LuaNil);
             };
@@ -229,8 +229,8 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
         "record_read",
         lua.create_function(
             |_, (p, content, offset, limit): (String, String, u64, u64)| {
-                crate::host::try_with_host(|host| {
-                    host.files()
+                crate::host::try_with_core(|core| {
+                    core.files()
                         .record_read(&p, content, (offset as usize, limit as usize));
                 });
                 Ok(())
@@ -241,8 +241,8 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
     t.set(
         "record_write",
         lua.create_function(|_, (p, content): (String, String)| {
-            crate::host::try_with_host(|host| {
-                host.files().record_write(&p, content);
+            crate::host::try_with_core(|core| {
+                core.files().record_write(&p, content);
             });
             Ok(())
         })?,
@@ -252,8 +252,8 @@ fn build_file_state(lua: &Lua) -> LuaResult<mlua::Table> {
         "staleness_error",
         lua.create_function(|_, (p, noun): (String, Option<String>)| {
             let noun = noun.unwrap_or_else(|| "file".into());
-            Ok(crate::host::try_with_host(|host| {
-                crate::fs::staleness_error(host.files(), &p, &noun)
+            Ok(crate::host::try_with_core(|core| {
+                crate::fs::staleness_error(core.files(), &p, &noun)
             })
             .flatten())
         })?,

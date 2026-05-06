@@ -22,7 +22,6 @@ use smelt_core::history::History;
 use smelt_core::session::Session;
 use smelt_core::ConfirmRequest;
 use smelt_core::FrontendKind;
-use smelt_core::Host;
 use std::sync::Arc;
 
 use crossterm::{
@@ -575,7 +574,7 @@ impl TuiApp {
     /// the per-`TypeId` projector registered on `Cells`; values with
     /// no registered projector surface as `nil`.
     pub(crate) fn drain_cells_pending(&mut self) {
-        if !self.cells().has_pending() {
+        if !self.core.cells.has_pending() {
             return;
         }
         let fires = self.core.cells.drain_pending();
@@ -943,7 +942,7 @@ impl TuiApp {
             // ── Drain engine events ──
             // Gate lives inside EngineClient (Confirms::is_clear).
             loop {
-                let ev = match self.engine().try_recv() {
+                let ev = match self.core.engine.try_recv() {
                     Ok(ev) => ev,
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
