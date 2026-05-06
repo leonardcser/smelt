@@ -48,6 +48,7 @@ smelt.tools.register({
   name = "edit_file",
   description = "Performs exact string replacements in files. The old_string must be unique in the file unless replace_all is true.",
   override = true,
+  permission_defaults = { apply = "allow" },
   parameters = {
     type = "object",
     properties = {
@@ -70,7 +71,7 @@ smelt.tools.register({
     },
     required = { "file_path", "old_string", "new_string" },
   },
-  needs_confirm = function(args)
+  confirm_text = function(args)
     return smelt.path.display(args.file_path or "")
   end,
   preflight = function(args)

@@ -128,8 +128,9 @@ impl RuntimeApprovals {
             // Check runtime approval patterns.
             all_pats.iter().any(|p| p.matches(sc))
             // Also consult the tool's config ruleset (e.g. bash's
-            // DEFAULT_BASH_ALLOW like "head *"); the full compound was Ask
-            // because of OTHER subcommands, not this one.
+            // tool-declared `default_allow` patterns like "head *");
+            // the full compound was Ask because of OTHER subcommands,
+            // not this one.
                 || config_subpatterns
                     .is_some_and(|rs| check_ruleset(rs, sc) == Decision::Allow)
         })

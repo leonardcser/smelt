@@ -45,7 +45,7 @@ pub trait Tool: Send + Sync {
     fn execute<'a>(&'a self, args: HashMap<String, Value>, ctx: &'a ToolContext) -> ToolFuture<'a>;
     /// Evaluate per-call permission hooks. Returns a `ToolHooks`
     /// carrying:
-    /// - `needs_confirm`: confirm-dialog message (None falls back to the
+    /// - `confirm_text`: confirm-dialog message (None falls back to the
     ///   tool name).
     /// - `approval_patterns`: glob patterns offered as session-level
     ///   "always allow" choices.

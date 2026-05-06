@@ -228,7 +228,7 @@ smelt.tools.register({
     },
     required = { "url", "prompt" },
   },
-  needs_confirm = function(args) return args.url or "" end,
+  confirm_text = function(args) return args.url or "" end,
   approval_patterns = function(args)
     local pat = domain_pattern(args.url or "")
     if pat then return { pat } end

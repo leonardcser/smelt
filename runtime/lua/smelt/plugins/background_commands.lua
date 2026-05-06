@@ -50,7 +50,7 @@ smelt.tools.register({
     },
     required = { "command" },
   },
-  needs_confirm = function(args) return args.command or "" end,
+  confirm_text = function(args) return args.command or "" end,
   approval_patterns = bash.approval_patterns,
   execute = execute,
 })

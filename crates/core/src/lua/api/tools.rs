@@ -16,10 +16,44 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let handler: mlua::Function = def.get("execute")?;
         let key = lua.create_registry_value(handler)?;
 
+        // Per-tool permission defaults declared at registration time.
+        // Decisions for each mode landing where the user config doesn't
+        // already speak; bash-style subpattern allow-lists landing as
+        // the bucket's allow fallback in non-Yolo modes.
+        if let Ok(perms_tbl) = def.get::<mlua::Table>("permission_defaults") {
+            let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = defaults.tool_decisions.entry(name.clone()).or_default();
+            for (mode, slot) in [
+                (
+                    "normal",
+                    &mut entry.normal as &mut Option<protocol::Decision>,
+                ),
+                ("plan", &mut entry.plan),
+                ("apply", &mut entry.apply),
+                ("yolo", &mut entry.yolo),
+            ] {
+                if let Ok(label) = perms_tbl.get::<String>(mode) {
+                    if let Some(d) = parse_decision_label(&label) {
+                        *slot = Some(d);
+                    }
+                }
+            }
+        }
+        if let Ok(allow_tbl) = def.get::<mlua::Table>("default_allow") {
+            let mut patterns: Vec<String> = Vec::new();
+            for v in allow_tbl.sequence_values::<String>().flatten() {
+                patterns.push(v);
+            }
+            if !patterns.is_empty() {
+                let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
+                defaults.subcommand_allow.insert(name.clone(), patterns);
+            }
+        }
+
         // Optional permission hooks. When present, the engine asks
         // the host to evaluate them before deciding Allow / Deny / Ask.
-        let needs_confirm_handle = def
-            .get::<mlua::Function>("needs_confirm")
+        let confirm_text_handle = def
+            .get::<mlua::Function>("confirm_text")
             .ok()
             .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
             .transpose()?;
@@ -72,7 +106,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         // Hook flag bits — let `tool_defs` build
         // `ToolHookFlags` without reaching back into the
         // handles map.
-        meta.set("hook_needs_confirm", needs_confirm_handle.is_some())?;
+        meta.set("hook_confirm_text", confirm_text_handle.is_some())?;
         meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
         meta.set("hook_preflight", preflight_handle.is_some())?;
         meta.set("hook_render", render_handle.is_some())?;
@@ -98,7 +132,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 name,
                 ToolHandles {
                     execute: LuaHandle { key },
-                    needs_confirm: needs_confirm_handle,
+                    confirm_text: confirm_text_handle,
                     approval_patterns: approval_patterns_handle,
                     preflight: preflight_handle,
                     render: render_handle,
@@ -169,4 +203,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     smelt.set("tools", tools_tbl)?;
     Ok(())
+}
+
+fn parse_decision_label(s: &str) -> Option<protocol::Decision> {
+    match s {
+        "allow" => Some(protocol::Decision::Allow),
+        "ask" => Some(protocol::Decision::Ask),
+        "deny" => Some(protocol::Decision::Deny),
+        _ => None,
+    }
 }

@@ -8,8 +8,8 @@
 //! - [`store`]: workspace JSON store
 //!
 //! The public surface is this module: `Permissions`, `Decision`,
-//! `RuntimeApprovals`, and two helpers consumed by tool implementations
-//! (`split_shell_commands`, `DEFAULT_BASH_ALLOW`).
+//! `RuntimeApprovals`, and one helper consumed by tool implementations
+//! (`split_shell_commands`).
 
 pub(crate) mod approvals;
 pub(crate) mod bash;
@@ -23,7 +23,7 @@ mod tests;
 pub use approvals::RuntimeApprovals;
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use protocol::Decision;
-pub use rules::DEFAULT_BASH_ALLOW;
+pub use rules::ToolDefaults;
 
 use bash::{has_output_redirection, is_cd_command};
 
@@ -86,29 +86,28 @@ impl std::fmt::Debug for Permissions {
 
 impl Permissions {
     pub fn load() -> Self {
-        let raw = RawConfig::default();
-        let def = &raw.permissions.default;
-        Self {
-            normal: build_mode(&merge_mode(def, &raw.permissions.normal), AgentMode::Normal),
-            plan: build_mode(&merge_mode(def, &raw.permissions.plan), AgentMode::Plan),
-            apply: build_mode(&merge_mode(def, &raw.permissions.apply), AgentMode::Apply),
-            yolo: build_mode(&merge_mode(def, &raw.permissions.yolo), AgentMode::Yolo),
-            restrict_to_workspace: true,
-            workspace: PathBuf::new(),
-            paths_fn: None,
-            decide_hook_fn: None,
-        }
+        Self::from_raw(&RawConfig::default().permissions, &ToolDefaults::default())
     }
 
-    /// Build from a Lua-populated `RawPerms`. Called by startup after
-    /// `init.lua` has run `smelt.permissions.set_rules`.
-    pub fn from_raw(raw: &RawPerms) -> Self {
+    /// Build from a Lua-populated `RawPerms` plus the tool-declared
+    /// defaults captured during registration. Called by startup after
+    /// autoloads (which register tools and seed `tool_defaults`) and
+    /// `init.lua` (which may call `smelt.permissions.set_rules`).
+    pub fn from_raw(raw: &RawPerms, tool_defaults: &ToolDefaults) -> Self {
         let def = &raw.default;
         Self {
-            normal: build_mode(&merge_mode(def, &raw.normal), AgentMode::Normal),
-            plan: build_mode(&merge_mode(def, &raw.plan), AgentMode::Plan),
-            apply: build_mode(&merge_mode(def, &raw.apply), AgentMode::Apply),
-            yolo: build_mode(&merge_mode(def, &raw.yolo), AgentMode::Yolo),
+            normal: build_mode(
+                &merge_mode(def, &raw.normal),
+                AgentMode::Normal,
+                tool_defaults,
+            ),
+            plan: build_mode(&merge_mode(def, &raw.plan), AgentMode::Plan, tool_defaults),
+            apply: build_mode(
+                &merge_mode(def, &raw.apply),
+                AgentMode::Apply,
+                tool_defaults,
+            ),
+            yolo: build_mode(&merge_mode(def, &raw.yolo), AgentMode::Yolo, tool_defaults),
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
             paths_fn: None,

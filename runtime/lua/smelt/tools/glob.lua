@@ -15,6 +15,7 @@ smelt.tools.register({
   name = "glob",
   description = "Fast file pattern matching tool that works with any codebase size. Returns matching file paths sorted by modification time.",
   override = true,
+  permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
   parameters = {
     type = "object",
     properties = {
@@ -29,7 +30,7 @@ smelt.tools.register({
     },
     required = { "pattern" },
   },
-  needs_confirm = function(args)
+  confirm_text = function(args)
     return confirm_message(args)
   end,
   render = function(args, output, ctx)

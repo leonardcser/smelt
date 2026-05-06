@@ -42,7 +42,7 @@ smelt.tools.register({
     },
     required = { "notebook_path" },
   },
-  needs_confirm = function(args)
+  confirm_text = function(args)
     return smelt.path.display(args.notebook_path or "")
   end,
   preflight = function(args)

@@ -1,15 +1,39 @@
 -- Built-in `bash` tool. Composes shell-validation helpers
--- (`smelt.shell.{check_interactive,check_background_op,split,
--- is_default_bash_allow}`) with the streaming subprocess primitive
--- `smelt.process.run_streaming` — the latter spawns `sh -c command`
--- on a tokio task, fires `EngineEvent::ToolOutput` per stdout/stderr
--- line as the child runs, and resumes this coroutine with the
--- aggregated result on exit.
+-- (`smelt.shell.{check_interactive,check_background_op,split}`) with
+-- the streaming subprocess primitive `smelt.process.run_streaming` —
+-- the latter spawns `sh -c command` on a tokio task, fires
+-- `EngineEvent::ToolOutput` per stdout/stderr line as the child
+-- runs, and resumes this coroutine with the aggregated result on
+-- exit.
 
 local M = {}
 
 local DEFAULT_TIMEOUT_MS = 120000
 local MAX_TIMEOUT_MS = 600000
+
+-- Safe read-only command prefixes that auto-approve in non-Yolo
+-- modes. Sourced into the Rust permission layer at registration time
+-- via the `default_allow` field below; consulted locally during
+-- approval-pattern suggestion so we don't propose patterns that are
+-- already permanently allowed.
+local DEFAULT_ALLOW = {
+  -- Directory listing & file search
+  "ls *", "find *", "tree *",
+  -- Text viewing
+  "cat *", "head *", "tail *", "less *",
+  -- Text search & processing (read-only)
+  "grep *", "sort *", "uniq *", "wc *", "diff *", "tr *", "cut *", "jq *",
+  -- Path & file info
+  "echo *", "pwd *", "which *", "dirname *", "basename *", "realpath *",
+  "stat *", "file *", "test *",
+  -- Disk & system info
+  "du *", "df *", "date *", "whoami *",
+  -- Binary inspection
+  "sha256sum *", "md5sum *", "xxd *", "hexdump *", "strings *",
+}
+
+local DEFAULT_ALLOW_SET = {}
+for _, p in ipairs(DEFAULT_ALLOW) do DEFAULT_ALLOW_SET[p] = true end
 
 local function basename(s)
   return s:match("([^/]+)$") or s
@@ -38,7 +62,7 @@ function M.approval_patterns(args)
     -- `cd` is a path permission, not a command permission.
     if base ~= "" and base ~= "cd" then
       local pat = base .. " *"
-      if not smelt.shell.is_default_bash_allow(pat) and not seen[pat] then
+      if not DEFAULT_ALLOW_SET[pat] and not seen[pat] then
         seen[pat] = true
         table.insert(patterns, pat)
       end
@@ -76,6 +100,7 @@ end
 smelt.tools.register({
   name = "bash",
   override = true,
+  default_allow = DEFAULT_ALLOW,
   description =
   "Execute a non-interactive bash command and return its output. The working directory persists between calls. Commands time out after 2 minutes by default (configurable up to 10 minutes). Do not use shell backgrounding (`&`) in the command string. Do not run interactive commands (editors, pagers, interactive rebases, etc.) — they will hang. If there is no non-interactive alternative, ask the user to run it themselves.",
   parameters = {
@@ -87,7 +112,7 @@ smelt.tools.register({
     },
     required = { "command" },
   },
-  needs_confirm = function(args) return args.command or "" end,
+  confirm_text = function(args) return args.command or "" end,
   approval_patterns = M.approval_patterns,
   summary = function(args)
     local d = args.description or ""

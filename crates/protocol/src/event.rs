@@ -75,7 +75,7 @@ pub struct ToolDef {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolHookFlags {
     #[serde(default)]
-    pub needs_confirm: bool,
+    pub confirm_text: bool,
     #[serde(default)]
     pub approval_patterns: bool,
     #[serde(default)]
@@ -86,7 +86,7 @@ impl ToolHookFlags {
     /// True when at least one hook is registered — i.e. the engine must
     /// round-trip through `ToolHooksRequest` before dispatch.
     pub fn any(&self) -> bool {
-        self.needs_confirm || self.approval_patterns || self.preflight
+        self.confirm_text || self.approval_patterns || self.preflight
     }
 }
 
@@ -251,7 +251,7 @@ pub enum EngineEvent {
     },
 
     /// Engine asks the TUI to evaluate a tool's permission
-    /// hooks (`needs_confirm`, `approval_patterns`, `preflight`) for a
+    /// hooks (`confirm_text`, `approval_patterns`, `preflight`) for a
     /// specific invocation. The TUI replies with
     /// `UiCommand::ToolHooksResponse`, after which the engine
     /// resumes the standard Allow / Deny / Ask flow.

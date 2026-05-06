@@ -271,6 +271,18 @@ impl LuaRuntime {
             .take()
     }
 
+    /// Snapshot per-tool permission defaults captured during tool
+    /// registration. Cloned (not taken) so re-registering a tool after
+    /// startup still updates the captured state, even though the
+    /// already-built `Permissions` won't observe it.
+    pub fn tool_defaults(&self) -> crate::permissions::rules::ToolDefaults {
+        self.shared
+            .tool_defaults
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Invoke a registered command by name.
     pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
         let func = {
@@ -585,7 +597,7 @@ impl LuaRuntime {
                     })
                     .unwrap_or_default();
                 let hooks = protocol::ToolHookFlags {
-                    needs_confirm: meta_table.get("hook_needs_confirm").unwrap_or(false),
+                    confirm_text: meta_table.get("hook_confirm_text").unwrap_or(false),
                     approval_patterns: meta_table.get("hook_approval_patterns").unwrap_or(false),
                     preflight: meta_table.get("hook_preflight").unwrap_or(false),
                 };
@@ -775,13 +787,13 @@ impl LuaRuntime {
     ) -> protocol::ToolHooks {
         let mut out = protocol::ToolHooks::default();
 
-        let (needs_confirm_fn, approval_patterns_fn, preflight_fn) = {
+        let (confirm_text_fn, approval_patterns_fn, preflight_fn) = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = handlers.get(tool_name) else {
                 return out;
             };
             let nc = h
-                .needs_confirm
+                .confirm_text
                 .as_ref()
                 .and_then(|h| self.lua.registry_value::<mlua::Function>(&h.key).ok());
             let ap = h
@@ -803,10 +815,10 @@ impl LuaRuntime {
             }
         };
 
-        if let Some(func) = needs_confirm_fn {
+        if let Some(func) = confirm_text_fn {
             match func.call::<Option<String>>(args_table.clone()) {
                 Ok(s) => out.confirm_message = s,
-                Err(e) => self.record_error(format!("tool hook needs_confirm: {e}")),
+                Err(e) => self.record_error(format!("tool hook confirm_text: {e}")),
             }
         }
         if let Some(func) = approval_patterns_fn {
