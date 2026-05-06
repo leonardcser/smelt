@@ -98,10 +98,10 @@ phases that already touch the relevant surfaces:
   L3-comp stories can't host UiHost-tier Lua bindings without
   booting a full TuiApp. P9.o touches the same dispatch surface
   anyway, so the re-key is bundled there rather than retrofitted.
-- **P10** makes `TuiApp::new` state-injectable (drops the internal
-  `state::State::load()` call). Without this, story construction
-  is filesystem-coupled. P10 already touches the constructor for
-  saved-state cleanup; the injectability change rides along.
+- **P10.1 ✅** made `TuiApp::new` state-injectable (drops the internal
+  `state::State::load()` call). Constructor takes `SessionCache` as
+  a parameter; `main.rs` reads disk once via `startup::resolve` and
+  threads it through. Story construction is no longer filesystem-coupled.
 
 A third prerequisite (`EngineHandle::for_test() -> (Self, Sender, Receiver)`,
 ~10 LOC additive in `engine/lib.rs`) lands with L3 itself — no
