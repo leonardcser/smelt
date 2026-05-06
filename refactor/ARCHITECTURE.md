@@ -415,6 +415,14 @@ callbacks registered via `ui::Callbacks` would collide with the `&mut Ui`
 borrow held during dispatch, so they're queued and drained after the borrow
 releases.
 
+**TLS pointers are type-erased over the trait, not the concrete struct.**
+Host tier is `*mut dyn Host` (set in P8.f via `CORE_PTR`); UiHost tier
+becomes `*mut dyn UiHost` (P9.o re-key, mirroring P8.f). Concrete frontend
+structs (`TuiApp`, `HeadlessApp`, future `StoryApp`) impl the trait pair
+and install through the same pointer slots. Bindings reborrow the
+trait object — never the concrete struct — so any UI-bearing frontend
+hosts UiHost-tier Lua without binding rewrites.
+
 ### Bindings layout
 
 Host-tier bindings live under `crates/core/src/lua/api/<name>.rs`:
@@ -582,26 +590,41 @@ callback's existence depends on the name. Required: `name`, `schema`,
 `needs_confirm(args)` / `approval_patterns(args)` for permissions,
 `summary(args)` for the one-line header label,
 `paths_for_workspace(args)` for workspace boundary checks,
-`render(args, output, ctx) -> LayoutTree<BufId>` for transcript
-display, `preview(args) -> LayoutTree<BufId>` for the confirm dialog.
+`render(args, output, ctx) -> BlockLayout` for transcript display,
+`preview(buf, args)` for the confirm dialog (paints into a single
+buffer; no composition needed).
 
 **Eternal rule:** no tool/command/dialog/mode name matching in Rust
 over a Lua-registered identifier.
 
-### Tool render returns a layout tree
+### Tool render returns a block layout
 
-A tool's `render` callback returns a `LayoutTree<BufId>` — same
-primitive `LayoutTree` dialogs and overlays use, with a `Leaf(BufId)`
-variant for "place this Buffer's content here." The tool composes its
-own block layout (header buffer, body buffer, side-by-side, nested,
-collapsible — whatever it wants). Rust composer walks the tree and
-replays leaves into the transcript display Buffer.
+A tool's `render` callback returns a
+`smelt_core::content::block_layout::BlockLayout` — a minimal enum
+(`Leaf(BufId) | Vbox(Vec<BlockLayout>)`) carrying buffer ids the tool
+has painted. Rust composer walks the tree depth-first and replays
+each leaf's lines into the surrounding `LineBuilder` with a `"  "`
+gutter prefix.
 
 Slot vocabulary lives in the tool, not in Rust. There is no fixed
 "summary slot" / "subhead slot" / "body slot" the composer
 dispatches to. Tools that want a summary line + body create two
-buffers and arrange them in a `vbox`; tools that want side-by-side
-output create an `hbox`; plugin tools can produce any shape.
+buffers and arrange them in a `vbox`; plugin tools can produce any
+vertical shape.
+
+`BlockLayout` is intentionally separate from `tui::ui::LayoutTree<L>`
+(splits / overlays). The two enums look superficially similar —
+both are "a tree of leaves" — but the consumers have nothing in
+common. `LayoutTree` carries chrome / borders / titles / constraints
+/ focus semantics and is consumed by the compositor at paint time;
+`BlockLayout` is a sequence of buffer leaves replayed into a
+`LineBuilder` with no chrome, no constraints, no focus. Forcing
+them to share a generic would couple two paint paths that benefit
+from staying independent. They are deliberately two enums.
+
+`Hbox` (side-by-side composition) is reserved but not implemented;
+add when the first plugin needs it (see `P9.md` deferrals for the
+design questions a real consumer would pin).
 
 Live updates (elapsed ticks, status changes) flow via cell
 subscriptions inside the tool's render coroutine. The tool subscribes
@@ -609,9 +632,10 @@ to a per-block cell (`tool_status:<call_id>`) and updates extmarks on
 the relevant Buffer when the cell fires. Standard cell pattern, no
 callback-per-frame.
 
-`preview` is a separate callback for the confirm dialog (different
-surface, different lifecycle) but returns the same shape:
-`LayoutTree<BufId>`.
+`preview` is a separate callback for the confirm dialog. It paints
+into a single buffer the dialog hands it (no `BlockLayout`
+composition) — different surface, different lifecycle, one
+consumer, one buffer.
 
 ### Drawing context is full, not partial
 
@@ -632,7 +656,8 @@ collapsible tool block, custom slash command dialog — all the same
 shape:
 
 1. `smelt.buf.create()` — make Buffers, populate with lines + extmarks.
-2. `smelt.layout.{vbox,hbox,leaf}` — compose into a tree.
+2. `smelt.layout.{vbox,leaf}` — compose into a tree (tool render);
+   for splits/overlays use `tui::ui::LayoutTree<WinId>` shapes.
 3. `smelt.win.open(buf, opts)` — display, focusable if interactive.
 4. `smelt.win.set_keymap(win, key, fn)` — input.
 5. `smelt.cell.subscribe(name, fn)` / `smelt.timer.every(ms, fn)` —

@@ -205,7 +205,6 @@ smelt.tools.register({
     .. "The page is fetched, converted to markdown, then an isolated LLM call "
     .. "extracts only what the prompt asks for.",
   override = true,
-  elapsed_visible = true,
   parameters = {
     type = "object",
     properties = {
@@ -235,13 +234,13 @@ smelt.tools.register({
     if pat then return { pat } end
     return {}
   end,
-  render = function(args, output, width, buf)
-    smelt.text.render(buf, output.content, { is_error = output.is_error })
-  end,
-  render_subhead = function(buf, args)
+  render = function(args, output, ctx)
+    local items = {}
     if args.prompt and args.prompt ~= "" then
-      smelt.text.render(buf, args.prompt)
+      table.insert(items, smelt.layout.text(args.prompt))
     end
+    table.insert(items, smelt.layout.text(output.content, { is_error = output.is_error }))
+    return smelt.layout.vbox(items)
   end,
   decide = function(args, mode)
     -- Compose the web_fetch decision: tool-level + per-URL pattern.

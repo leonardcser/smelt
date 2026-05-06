@@ -35,10 +35,7 @@ mod user;
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
 pub use thinking::{render_thinking_summary, thinking_summary};
-pub use tools::render_default_output;
 pub use user::UserBlockGeometry;
-
-pub use smelt_core::transcript_present::ToolBodyRenderer;
 
 /// Cap on the number of rows a single tool block contributes to the
 /// overlay or scrollback. Applied separately to:
@@ -52,10 +49,6 @@ pub use smelt_core::transcript_present::ToolBodyRenderer;
 /// terminals; the overlay tail-crop handles the rare case where two
 /// or more capped tools still don't fit.
 const MAX_TOOL_BLOCK_ROWS: usize = 20;
-
-/// Default number of lines shown in non-bash tool result previews
-/// (`render_default_output`). Joined with " | " separators.
-const DEFAULT_PREVIEW_LINES: usize = 3;
 
 /// Layout entry point: render `block` directly into `buf` at the
 /// given width. Drives the per-variant renderers against a fresh
@@ -72,13 +65,12 @@ pub fn layout_block_into(
     block: &Block,
     state: Option<&ToolState>,
     ctx: &LayoutContext,
-    renderer: Option<&dyn ToolBodyRenderer>,
 ) -> Outcome {
     let width = ctx.width as usize;
     let show_thinking = ctx.show_thinking;
     let outcome = {
         let mut col = LineBuilder::new(buf, theme, ctx.width);
-        render_block(&mut col, block, state, width, show_thinking, renderer);
+        render_block(&mut col, block, state, width, show_thinking);
         col.finish()
     };
     apply_view_state(buf, theme, ctx.width, ctx.view_state, outcome)
@@ -233,7 +225,6 @@ pub(super) fn render_block(
     state: Option<&ToolState>,
     width: usize,
     show_thinking: bool,
-    renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
     let _perf = smelt_core::perf::begin(match block {
         Block::User { .. } => "render:user",
@@ -266,7 +257,6 @@ pub(super) fn render_block(
                 state.elapsed,
                 state,
                 width,
-                renderer,
             )
         }
         Block::Compacted { summary } => compacted::render(out, summary, width),
@@ -281,7 +271,7 @@ mod tests {
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::builder::LineBuilder;
     use smelt_core::theme::Theme;
-    use smelt_core::transcript_model::{gap_between, ToolOutput, ToolStatus};
+    use smelt_core::transcript_model::{gap_between, ToolStatus};
     use std::collections::HashMap;
 
     const W: usize = 80;
@@ -297,49 +287,11 @@ mod tests {
         block: &Block,
         state: Option<&ToolState>,
         ctx: &LayoutContext,
-        renderer: Option<&dyn ToolBodyRenderer>,
     ) -> Vec<TestLine> {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-        let outcome = layout_block_into(&mut buf, &theme, block, state, ctx, renderer);
+        let outcome = layout_block_into(&mut buf, &theme, block, state, ctx);
         read_buffer(&buf, &theme, outcome.line_count)
-    }
-
-    /// Test renderer that mirrors the production tool registry well enough
-    /// to drive bash-flavored layout assertions.
-    struct TestToolRenderer;
-
-    impl ToolBodyRenderer for TestToolRenderer {
-        fn render(
-            &self,
-            _: &str,
-            _: &HashMap<String, serde_json::Value>,
-            _: Option<&ToolOutput>,
-            _: usize,
-            _: &mut LineBuilder,
-        ) -> u16 {
-            0
-        }
-        fn elapsed_visible(&self, name: &str) -> bool {
-            name == "bash"
-        }
-        fn render_summary_line(
-            &self,
-            name: &str,
-            line: &str,
-            _args: &HashMap<String, serde_json::Value>,
-            out: &mut LineBuilder,
-        ) -> bool {
-            if name == "bash" {
-                // Stand-in for the bash highlighter — preserve the shape
-                // (renderer says "yes I rendered it") without pulling
-                // syntect into core tests.
-                out.print(line);
-                true
-            } else {
-                false
-            }
-        }
     }
 
     fn text(s: &str) -> Block {
@@ -398,7 +350,7 @@ mod tests {
         let (mut buf, theme) = mk_collector_buf();
         let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let st = state_for(block);
-        render_block(&mut out, block, st.as_ref(), W, true, None)
+        render_block(&mut out, block, st.as_ref(), W, true)
     }
 
     /// Compute total gap rows between the last history block and an active tool.
@@ -424,7 +376,7 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
             };
             total += gap + rows;
         }
@@ -444,7 +396,7 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
             };
             block_rows_total += gap + rows;
         }
@@ -484,7 +436,7 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
+                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
             };
             cumulative += gap + rows;
         }
@@ -658,7 +610,7 @@ mod tests {
                 };
                 let rows = {
                     let st = state_for(&blocks[i]);
-                    render_block(&mut out, &blocks[i], st.as_ref(), W, true, None)
+                    render_block(&mut out, &blocks[i], st.as_ref(), W, true)
                 };
                 frame_block_rows += gap + rows;
             }
@@ -849,7 +801,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx, Some(&TestToolRenderer));
+        let display = layout_block_test(&block, Some(&state), &ctx);
 
         assert!(
             display.len() >= 2,
@@ -899,7 +851,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx, Some(&TestToolRenderer));
+        let display = layout_block_test(&block, Some(&state), &ctx);
 
         assert!(display.len() >= 2);
         assert!(!display[0].soft_wrapped);
@@ -930,7 +882,7 @@ mod tests {
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx, Some(&TestToolRenderer));
+        let display = layout_block_test(&block, Some(&state), &ctx);
         let first_line = &display[0];
 
         // The time suffix "  3s" should be in a non-selectable span

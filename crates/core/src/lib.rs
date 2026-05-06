@@ -34,7 +34,6 @@ pub mod theme;
 pub mod timers;
 pub mod tools;
 pub mod transcript_model;
-pub mod transcript_present;
 pub mod trust;
 pub mod undo;
 pub mod utils;

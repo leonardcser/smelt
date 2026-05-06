@@ -80,16 +80,17 @@ smelt.tools.register({
     end
     return smelt.fs.file_state.staleness_error(path, "file")
   end,
-  render = function(args, output, width, buf)
+  render = function(args, output, ctx)
     if output.is_error then
-      smelt.text.render(buf, output.content, { is_error = true })
-      return
+      return smelt.layout.text(output.content, { is_error = true })
     end
+    local buf = smelt.buf.create()
     smelt.diff.render(buf, {
       old = args.old_string or "",
       new = args.new_string or "",
       path = args.file_path or "",
     })
+    return smelt.layout.leaf(buf)
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""

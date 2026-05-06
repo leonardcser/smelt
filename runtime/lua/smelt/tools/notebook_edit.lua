@@ -55,12 +55,12 @@ smelt.tools.register({
   preview = function(buf, args)
     smelt.notebook.render(buf, args)
   end,
-  render = function(args, output, width, buf)
+  render = function(args, output, ctx)
     if output.is_error then
-      smelt.text.render(buf, output.content, { is_error = true })
-      return
+      return smelt.layout.text(output.content, { is_error = true })
     end
     local meta = output.metadata or {}
+    local buf = smelt.buf.create()
     if meta.edit_mode == "insert" then
       smelt.syntax.render(buf, {
         content = meta.new_source or "",
@@ -73,6 +73,7 @@ smelt.tools.register({
         path = meta.path or "",
       })
     end
+    return smelt.layout.leaf(buf)
   end,
   execute = function(args)
     local path = args.notebook_path or ""

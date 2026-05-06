@@ -51,7 +51,7 @@ pub struct TranscriptSnapshot {
     pub(crate) row_of_block: HashMap<BlockId, Range<u16>>,
     /// Generation counter at build time — compared against
     /// `BlockHistory`'s counter to detect staleness.
-    generation: u64,
+    pub(crate) generation: u64,
 }
 
 impl TranscriptSnapshot {
@@ -192,13 +192,14 @@ impl TranscriptSnapshot {
     }
 }
 
-/// Build a fresh `TranscriptSnapshot` from `history` at the given
-/// width. Renders each block into a per-block scratch Buffer via a
-/// fresh [`BlockBufferCache`]; the snapshot reads back text + cell
+/// Build a `TranscriptSnapshot` from `history` at the given width,
+/// using `cache` (shared with [`crate::content::transcript_buf::TranscriptProjection`])
+/// to cache per-block layouts. The snapshot reads back text + cell
 /// metadata + decorations from those buffers. Theme is required
 /// because [`crate::content::builder::LineBuilder`] resolves
 /// theme-role colours at write time.
-pub fn build_snapshot(
+pub(crate) fn build_snapshot(
+    cache: &mut BlockBufferCache,
     history: &mut BlockHistory,
     width: u16,
     show_thinking: bool,
@@ -218,14 +219,10 @@ pub fn build_snapshot(
     let mut block_of_row: Vec<Option<BlockId>> = Vec::new();
     let mut row_of_block: HashMap<BlockId, Range<u16>> = HashMap::new();
 
-    let mut cache = BlockBufferCache::new();
-    let renderer_arc = history.body_renderer.clone();
-    let renderer = renderer_arc.as_deref();
-
     for i in 0..history.order.len() {
         let id = history.order[i];
         let bkey = history.resolve_key(id, base_key);
-        let (block_buf, outcome) = cache.ensure(history, id, bkey, theme, renderer);
+        let (block_buf, outcome) = cache.ensure(history, id, bkey, theme);
         let block_buf = block_buf.clone();
         let block_rows = outcome.line_count;
         if block_rows > 0 {

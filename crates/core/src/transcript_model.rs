@@ -5,7 +5,6 @@
 //! owned by `TuiApp`. Held inside `app::transcript::Transcript`, which
 //! adds projection / streaming / paint orchestration on top.
 
-use crate::transcript_present::ToolBodyRenderer;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -280,9 +279,6 @@ pub struct BlockHistory {
     /// (push, rewrite, status change, view state change, truncate,
     /// clear). Used by `TranscriptSnapshot` to detect staleness.
     generation: u64,
-    /// Optional renderer for tool output bodies. Injected by `tui` so
-    /// Lua-registered tools can supply custom rendering.
-    pub body_renderer: Option<std::sync::Arc<dyn ToolBodyRenderer>>,
 }
 
 impl BlockHistory {
@@ -297,7 +293,6 @@ impl BlockHistory {
             statuses: HashMap::new(),
             finished_blocks: Vec::new(),
             generation: 0,
-            body_renderer: None,
         }
     }
 

@@ -38,21 +38,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             .ok()
             .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
             .transpose()?;
-        let render_summary_handle = def
-            .get::<mlua::Function>("render_summary")
-            .ok()
-            .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
-            .transpose()?;
-        let render_subhead_handle = def
-            .get::<mlua::Function>("render_subhead")
-            .ok()
-            .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
-            .transpose()?;
-        let header_suffix_handle = def
-            .get::<mlua::Function>("header_suffix")
-            .ok()
-            .map(|f| lua.create_registry_value(f).map(|key| LuaHandle { key }))
-            .transpose()?;
         let paths_for_workspace_handle = def
             .get::<mlua::Function>("paths_for_workspace")
             .ok()
@@ -91,9 +76,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
         meta.set("hook_preflight", preflight_handle.is_some())?;
         meta.set("hook_render", render_handle.is_some())?;
-        meta.set("hook_render_summary", render_summary_handle.is_some())?;
-        meta.set("hook_render_subhead", render_subhead_handle.is_some())?;
-        meta.set("hook_header_suffix", header_suffix_handle.is_some())?;
         meta.set(
             "hook_paths_for_workspace",
             paths_for_workspace_handle.is_some(),
@@ -106,8 +88,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         // dispatch to the plugin.
         let override_core: bool = def.get::<bool>("override").unwrap_or(false);
         meta.set("override_core", override_core)?;
-        let elapsed_visible: bool = def.get::<bool>("elapsed_visible").unwrap_or(false);
-        meta.set("elapsed_visible", elapsed_visible)?;
         if let Some(summary) = summary_fn {
             meta.set("summary", summary)?;
         }
@@ -122,9 +102,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     approval_patterns: approval_patterns_handle,
                     preflight: preflight_handle,
                     render: render_handle,
-                    render_summary: render_summary_handle,
-                    render_subhead: render_subhead_handle,
-                    header_suffix: header_suffix_handle,
                     paths_for_workspace: paths_for_workspace_handle,
                     preview: preview_handle,
                     decide: decide_handle,

@@ -91,6 +91,15 @@ do
   end
 end
 
+-- Sugar: build a leaf layout from a string. Mints a fresh buffer, paints
+-- via `smelt.text.render`, returns it wrapped as `smelt.layout.leaf`.
+-- The common shape for a tool's `render(args, output, ctx)` callback.
+function smelt.layout.text(content, opts)
+  local buf = smelt.buf.create()
+  smelt.text.render(buf, content or "", opts)
+  return smelt.layout.leaf(buf)
+end
+
 -- Apply a colorscheme by name. `smelt.theme.use("default")` requires
 -- `smelt.colorschemes.<name>` and lets the loaded chunk run its
 -- `smelt.theme.set` / `smelt.theme.link` calls. Plugin authors install

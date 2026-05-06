@@ -7,7 +7,6 @@ use smelt_core::content::builder::LineBuilder;
 use smelt_core::transcript_model::{ToolState, ToolStatus};
 
 use super::tools::render_tool;
-use super::ToolBodyRenderer;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -22,7 +21,6 @@ pub(super) fn render(
     elapsed: Option<Duration>,
     state: &ToolState,
     width: usize,
-    renderer: Option<&dyn ToolBodyRenderer>,
 ) -> u16 {
     render_tool(
         out,
@@ -35,6 +33,5 @@ pub(super) fn render(
         state.output.as_deref(),
         state.user_message.as_deref(),
         width,
-        renderer,
     )
 }

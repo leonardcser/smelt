@@ -32,7 +32,7 @@ smelt.tools.register({
   needs_confirm = function(args)
     return confirm_message(args)
   end,
-  render = function(args, output, width, buf)
+  render = function(args, output, ctx)
     local content = output.content or ""
     local n = 0
     if content ~= "" then
@@ -42,7 +42,7 @@ smelt.tools.register({
         n = n + 1
       end
     end
-    smelt.text.render(buf, n .. " files")
+    return smelt.layout.text(n .. " files")
   end,
   paths_for_workspace = function(args)
     local p = args.path or ""

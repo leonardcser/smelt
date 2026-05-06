@@ -478,7 +478,7 @@ impl TuiApp {
         let core = smelt_core::Core::new(app_config, engine, FrontendKind::Tui);
         let (lua_wakeup_tx, lua_wakeup_rx) = tokio::sync::mpsc::unbounded_channel();
         let _ = lua.shared().wakeup_tx.set(lua_wakeup_tx);
-        let mut app = Self {
+        Self {
             core,
             lua,
             transcript: smelt_core::content::transcript::Transcript::new(),
@@ -544,10 +544,7 @@ impl TuiApp {
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
-        };
-        app.transcript.history.body_renderer =
-            Some(Arc::new(crate::app::transcript::LuaRenderRenderer));
-        app
+        }
     }
 
     /// Rebuild prompt sections from current app state (mode, instructions, etc.)

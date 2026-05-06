@@ -394,6 +394,11 @@ Status table + open sub-phase sketches + decisions + deferrals in
   onto the same shape: prompt buffer + prompt Window + a
   `widgets/prompt.lua` recipe. Aligns with everything else and
   removes the bespoke completion / wrap / submit path.
+  **Bundled scope:** UiHost-tier TLS pointer flips from
+  `&mut TuiApp` to `&mut dyn UiHost` (mirroring the Host-tier
+  split P8.f landed). Same dispatch surface gets touched, so the
+  re-key rides this sub-phase rather than retrofitted later.
+  Unblocks the visual-test phase (see `TESTING.md` § L3).
 - **P9.x** 📝 — **Config binding fidelity.** Reject-unknown /
   fidelity bugs in config-time bindings (~100 LOC):
   `provider.register` accepts per-model fields (today drops
@@ -402,15 +407,27 @@ Status table + open sub-phase sketches + decisions + deferrals in
   collapses to field access via metatable
   (`smelt.settings.vim = true` reads/writes/iterates; unknown keys
   error at the access site).
-- **P9.r** 📝 — **Tool render returns `LayoutTree<BufId>`.** Single
-  render callback per tool returning a layout tree of Buffers; tool
-  composes its own block layout. Drops `render_summary` /
-  `render_subhead` / `header_suffix` / `elapsed_visible` callbacks.
-  Same primitive (`LayoutTree`) dialogs and overlays already use.
-  `LayoutTree` gains a `Leaf(BufId)` variant; `BlockBufferCache`
-  extends to per-leaf caching; live updates flow via cells, not
-  callbacks. `preview` stays separate (different surface). ~250 LOC.
-  See `P9.md` § P9.r.
+- **P9.r** ✅ — **Tool render returns `BlockLayout`.** Single
+  `render(args, output, ctx) -> BlockLayout` callback per tool;
+  drops `render_summary` / `render_subhead` / `header_suffix` /
+  `elapsed_visible`. New `core::content::block_layout::BlockLayout`
+  enum (`Leaf(BufId) | Vbox`); `smelt.layout.{leaf,vbox}`
+  + `smelt.layout.text` Lua surface. Composer walks the returned
+  tree and replays leaves into the surrounding `LineBuilder`.
+  `ToolBodyRenderer` trait + `core/transcript_present.rs` retire.
+  Per-leaf cache extension and projection-layer fold deferred (no
+  perf signal). See `P9.md` § P9.r.
+- **P9.y** 📝 — **Permission defaults to Lua.** Surfaced in the
+  2026-05-06 audit. `core/permissions/rules.rs::install_tool_defaults`
+  hardcodes 11 tool names with per-mode `Allow` / `Ask` defaults;
+  `DEFAULT_BASH_ALLOW` (P9.d's "accepted single special case") is
+  data not shell logic. Both move to Lua: each tool's `.lua`
+  declares its mode-defaults, `bash.lua` carries its own
+  default-allow list, Rust permission layer reads via
+  `smelt.permissions.set_rules` at registration. `rules.rs`
+  shrinks ~80 LOC; the `if name == "bash"` arm in
+  `build_subcommand_ruleset` retires; verification grep returns
+  zero hardcoded tool names. See `P9.md` § P9.y.
 
 ---
 
