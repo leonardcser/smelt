@@ -5,9 +5,7 @@
 //! owned by `TuiApp`. Held inside `app::transcript::Transcript`, which
 //! adds projection / streaming / paint orchestration on top.
 
-use crate::transcript_present::{gap_between, Element, ToolBodyRenderer};
-// Re-uses helpers from the slim core-side `transcript_present` module.
-// Heavy per-block rendering lives in `tui::content::transcript_parsers`.
+use crate::transcript_present::ToolBodyRenderer;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -462,10 +460,7 @@ impl BlockHistory {
     /// is a style distinction, not a layout one.
     pub fn block_gap(&self, i: usize) -> u16 {
         if i > 0 {
-            gap_between(
-                &Element::Block(self.block_at(i - 1)),
-                &Element::Block(self.block_at(i)),
-            )
+            gap_between(self.block_at(i - 1), self.block_at(i))
         } else {
             0
         }
@@ -548,6 +543,66 @@ pub struct ActiveText {
     /// Streaming block id for the in-flight code line (if any).
     /// Rewritten as characters flow; set to `Done` on newline.
     pub(crate) code_line_streaming_id: Option<BlockId>,
+}
+
+/// Number of blank lines to insert between two adjacent blocks, based
+/// on adjacency rules (CodeLine→CodeLine: 0; transitions across user
+/// / exec / thinking / compacted: 1; etc.).
+pub fn gap_between(above: &Block, below: &Block) -> u16 {
+    match (above, below) {
+        // CodeLine→CodeLine: no gap (consecutive lines in same block).
+        (Block::CodeLine { .. }, Block::CodeLine { .. }) => return 0,
+        // Transitions into/out of code lines need a blank line,
+        // except after headings (headings have no trailing gap).
+        (Block::CodeLine { .. }, _) => return 1,
+        (Block::Text { content }, Block::CodeLine { .. }) => {
+            let last_line = content.lines().last().unwrap_or("");
+            if last_line.trim_start().starts_with('#') {
+                return 0;
+            }
+            return 1;
+        }
+        (_, Block::CodeLine { .. }) => return 1,
+        _ => {}
+    }
+    match (above, below) {
+        (Block::User { .. }, _) => 1,
+        (_, Block::User { .. }) => 1,
+        (Block::Exec { .. }, _) => 1,
+        (_, Block::Exec { .. }) => 1,
+        (Block::ToolCall { .. }, Block::ToolCall { .. }) => 1,
+        (Block::Text { .. }, Block::ToolCall { .. }) => 1,
+        (Block::Thinking { .. }, Block::Thinking { .. }) => 0,
+        (_, Block::Thinking { .. }) => 1,
+        (Block::Thinking { .. }, _) => 1,
+        (Block::ToolCall { .. }, Block::Text { .. }) => 1,
+        (_, Block::Compacted { .. }) => 1,
+        (Block::Compacted { .. }, _) => 1,
+
+        // Text→Text: 1 gap (paragraph spacing), except when the previous
+        // text block ends with a markdown heading — headings do not get a
+        // trailing blank line.
+        (Block::Text { content }, Block::Text { .. }) => {
+            let last_line = content.lines().last().unwrap_or("");
+            if last_line.trim_start().starts_with('#') {
+                0
+            } else {
+                1
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Heuristic: does this look like a `/command` line? Used by the
+/// headless prompt path before the Lua command registry is reachable
+/// and by the user-block renderer to accent-color the whole line.
+pub fn is_command_like(text: &str) -> bool {
+    let name = text
+        .strip_prefix('/')
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or("");
+    !name.is_empty()
 }
 
 #[cfg(test)]

@@ -281,8 +281,7 @@ mod tests {
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::builder::LineBuilder;
     use smelt_core::theme::Theme;
-    use smelt_core::transcript_model::{ToolOutput, ToolStatus};
-    use smelt_core::transcript_present::{gap_between, Element};
+    use smelt_core::transcript_model::{gap_between, ToolOutput, ToolStatus};
     use std::collections::HashMap;
 
     const W: usize = 80;
@@ -406,7 +405,7 @@ mod tests {
     fn tool_gap_for(blocks: &[Block]) -> u16 {
         blocks
             .last()
-            .map(|b| gap_between(&Element::Block(b), &Element::Block(&empty_tool_call())))
+            .map(|b| gap_between(b, &empty_tool_call()))
             .unwrap_or(0)
     }
 
@@ -419,7 +418,7 @@ mod tests {
         let mut total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
-                gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))
+                gap_between(&blocks[i - 1], &blocks[i])
             } else {
                 0
             };
@@ -439,7 +438,7 @@ mod tests {
         let mut block_rows_total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
-                gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))
+                gap_between(&blocks[i - 1], &blocks[i])
             } else {
                 0
             };
@@ -479,7 +478,7 @@ mod tests {
         let mut cumulative = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
-                gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))
+                gap_between(&blocks[i - 1], &blocks[i])
             } else {
                 0
             };
@@ -551,14 +550,8 @@ mod tests {
         // But gap_between still counts gaps around it:
         // User→Thinking = 1, Thinking→Text = 1
         // So there are 2 blank lines between User and Text.
-        let user_thinking_gap = gap_between(
-            &Element::Block(&user("fix it")),
-            &Element::Block(&thinking("")),
-        );
-        let thinking_text_gap = gap_between(
-            &Element::Block(&thinking("")),
-            &Element::Block(&text("Here's the fix.")),
-        );
+        let user_thinking_gap = gap_between(&user("fix it"), &thinking(""));
+        let thinking_text_gap = gap_between(&thinking(""), &text("Here's the fix."));
         assert_eq!(user_thinking_gap, 1);
         assert_eq!(thinking_text_gap, 1);
 
@@ -602,10 +595,7 @@ mod tests {
         let rows = block_rows(&text(""));
         assert_eq!(rows, 0, "empty text renders 0 rows");
 
-        let gap = gap_between(
-            &Element::Block(&text("")),
-            &Element::Block(&empty_tool_call()),
-        );
+        let gap = gap_between(&text(""), &empty_tool_call());
         assert_eq!(gap, 1, "gap is still 1 for empty text block");
 
         // This means: User(1 row) + gap(1) + Text(0 rows) + gap(1) = tool at offset 3
@@ -619,16 +609,12 @@ mod tests {
         let blocks_no_empty = vec![user("hello")];
         let c = render_all_at_once(&blocks_no_empty);
         // User→ActiveTool gap:
-        let gap_user_tool = gap_between(
-            &Element::Block(&user("hello")),
-            &Element::Block(&empty_tool_call()),
-        );
+        let gap_user_tool = gap_between(&user("hello"), &empty_tool_call());
         assert_eq!(gap_user_tool, 1, "User→ActiveTool = 1");
 
         // With empty text:  total = user_rows + 1(User→Text gap=0, Text→Text=0? no, User→Text)
         // Let me compute manually:
-        let user_text_gap =
-            gap_between(&Element::Block(&user("hello")), &Element::Block(&text("")));
+        let user_text_gap = gap_between(&user("hello"), &text(""));
         // User→anything = 1
         assert_eq!(user_text_gap, 1, "User→Text = 1");
         // text("")→ActiveTool = 1
@@ -644,7 +630,7 @@ mod tests {
     #[test]
     fn adjacent_text_blocks_gap() {
         // Two consecutive text blocks — gap should be 1 (paragraph spacing).
-        let gap = gap_between(&Element::Block(&text("a")), &Element::Block(&text("b")));
+        let gap = gap_between(&text("a"), &text("b"));
         assert_eq!(gap, 1, "Text→Text gap = 1");
     }
 
@@ -666,7 +652,7 @@ mod tests {
             let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
             for i in flushed..end {
                 let gap = if i > 0 {
-                    gap_between(&Element::Block(&blocks[i - 1]), &Element::Block(&blocks[i]))
+                    gap_between(&blocks[i - 1], &blocks[i])
                 } else {
                     0
                 };

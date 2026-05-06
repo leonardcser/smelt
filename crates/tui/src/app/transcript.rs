@@ -10,9 +10,9 @@ use crate::ui::{BufCreateOpts, BufId, Buffer, Theme};
 use crate::content::transcript_parsers as blocks;
 use crate::content::transcript_parsers::{render_thinking_summary, thinking_summary};
 use smelt_core::transcript_model::{
-    Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
+    gap_between, Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus, ViewState,
 };
-use smelt_core::transcript_present::{gap_between, Element, ToolBodyRenderer};
+use smelt_core::transcript_present::ToolBodyRenderer;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -188,10 +188,10 @@ impl TuiApp {
             .find(|b| !matches!(b, Block::Thinking { .. }))
         {
             gap_between(
-                &Element::Block(last),
-                &Element::Block(&Block::Thinking {
+                last,
+                &Block::Thinking {
                     content: String::new(),
-                }),
+                },
             )
         } else if self.transcript.history.is_empty() {
             0

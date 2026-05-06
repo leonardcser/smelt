@@ -1,15 +1,14 @@
-//! Transcript-presentation helpers that have to live in `core`.
+//! Tool-body renderer trait: the seam between transcript layout
+//! (core) and the Lua-driven render hook that paints the body of
+//! each tool block (tui).
 //!
 //! The actual per-block rendering (markdown / tools / view-state
-//! collapse) lives in `tui::content::transcript_parsers`. Core only
-//! holds the pieces that `transcript_model.rs` (a core type) and
-//! `headless_app.rs` (a core entry point) reach for — the trait that
-//! lets tui inject a Lua-backed tool renderer, the gap-between rule
-//! that drives `BlockHistory::block_gap`, and the simple
-//! `/<word>` heuristic used in headless command dispatch.
+//! collapse) lives in `tui::content::transcript_parsers`. The trait
+//! survives here so `transcript_model.rs` can hold an
+//! `Arc<dyn ToolBodyRenderer>` without depending on tui.
 
 use crate::content::builder::LineBuilder;
-use crate::transcript_model::{Block, ToolOutput};
+use crate::transcript_model::ToolOutput;
 use std::collections::HashMap;
 
 /// Callback trait for tool-specific body rendering. Implemented in `tui`
@@ -73,67 +72,3 @@ pub trait ToolBodyRenderer: Send + Sync {
     }
 }
 
-/// Simple heuristic: does this look like a `/command` line?
-/// Used by the headless prompt path before the Lua command registry
-/// is reachable.
-pub fn is_command_like(text: &str) -> bool {
-    let name = text
-        .strip_prefix('/')
-        .and_then(|s| s.split_whitespace().next())
-        .unwrap_or("");
-    !name.is_empty()
-}
-
-/// Element types for spacing calculation.
-pub enum Element<'a> {
-    Block(&'a Block),
-}
-
-/// Number of blank lines to insert between two adjacent elements.
-pub fn gap_between(above: &Element, below: &Element) -> u16 {
-    match (above, below) {
-        // CodeLine→CodeLine: no gap (consecutive lines in same block).
-        (Element::Block(Block::CodeLine { .. }), Element::Block(Block::CodeLine { .. })) => {
-            return 0
-        }
-        // Transitions into/out of code lines need a blank line,
-        // except after headings (headings have no trailing gap).
-        (Element::Block(Block::CodeLine { .. }), _) => return 1,
-        (Element::Block(Block::Text { content }), Element::Block(Block::CodeLine { .. })) => {
-            let last_line = content.lines().last().unwrap_or("");
-            if last_line.trim_start().starts_with('#') {
-                return 0;
-            }
-            return 1;
-        }
-        (_, Element::Block(Block::CodeLine { .. })) => return 1,
-        _ => {}
-    }
-    match (above, below) {
-        (Element::Block(Block::User { .. }), _) => 1,
-        (_, Element::Block(Block::User { .. })) => 1,
-        (Element::Block(Block::Exec { .. }), _) => 1,
-        (_, Element::Block(Block::Exec { .. })) => 1,
-        (Element::Block(Block::ToolCall { .. }), Element::Block(Block::ToolCall { .. })) => 1,
-        (Element::Block(Block::Text { .. }), Element::Block(Block::ToolCall { .. })) => 1,
-        (Element::Block(Block::Thinking { .. }), Element::Block(Block::Thinking { .. })) => 0,
-        (_, Element::Block(Block::Thinking { .. })) => 1,
-        (Element::Block(Block::Thinking { .. }), _) => 1,
-        (Element::Block(Block::ToolCall { .. }), Element::Block(Block::Text { .. })) => 1,
-        (_, Element::Block(Block::Compacted { .. })) => 1,
-        (Element::Block(Block::Compacted { .. }), _) => 1,
-
-        // Text→Text: 1 gap (paragraph spacing), except when the previous
-        // text block ends with a markdown heading — headings do not get a
-        // trailing blank line.
-        (Element::Block(Block::Text { content }), Element::Block(Block::Text { .. })) => {
-            let last_line = content.lines().last().unwrap_or("");
-            if last_line.trim_start().starts_with('#') {
-                0
-            } else {
-                1
-            }
-        }
-        _ => 0,
-    }
-}
