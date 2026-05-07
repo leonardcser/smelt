@@ -131,7 +131,10 @@ local function register_exit_plan_mode()
       local summary = args.plan_summary or ""
 
       local result = smelt.ui.dialog.open({
-        title  = "plan",
+        title  = {
+          { text = " plan ", fg = "yellow", bold = true },
+          { text = "(review and approve) ", fg = "grey", dim = true },
+        },
         blocks_agent = true,
         panels = {
           { kind = "markdown", text = summary },

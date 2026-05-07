@@ -127,7 +127,10 @@ local function open()
   local buf = smelt.buf.create()
   local win = smelt.win.open(buf, { focusable = false })
   smelt.ui.overlay.open({
-    title = " perf ",
+    title = {
+      { text = " perf ", bold = true },
+      { text = "(F12 to close) ", fg = "grey", dim = true },
+    },
     placement = "screen_at",
     corner = "ne",
     row = 0,
